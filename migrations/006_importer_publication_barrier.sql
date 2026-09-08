@@ -28,6 +28,11 @@ update public.importer_chapter_mappings
 set chapter_sort_key = chapter_number
 where chapter_sort_key is null;
 
+-- 3.1 Backfill chapter_sort_key on existing importer_queue items if missing
+update public.importer_queue
+set chapter_sort_key = (payload->>'chapterNumber')::numeric
+where chapter_sort_key is null and task_type = 'IMPORT_CHAPTER' and payload->>'chapterNumber' is not null;
+
 -- 4. Create performance indexes for barrier lookups
 create index if not exists importer_chapter_mappings_barrier_idx
   on public.importer_chapter_mappings(work_id, chapter_sort_key asc, status);
@@ -35,6 +40,10 @@ create index if not exists importer_chapter_mappings_barrier_idx
 create index if not exists importer_chapter_mappings_staged_idx
   on public.importer_chapter_mappings(work_id, status)
   where status = 'STAGED';
+
+create index if not exists importer_queue_barrier_lookup_idx
+  on public.importer_queue(task_type, status, ((payload->>'workId')::text), chapter_sort_key)
+  where task_type = 'IMPORT_CHAPTER';
 
 -- 5. Stored function for atomic publication barrier verification
 create or replace function public.importer_check_publication_barrier(
@@ -73,15 +82,29 @@ begin
     return;
   end if;
 
-  -- Step 2: Check for any preceding discovered chapters that are NOT published and NOT marked as gap
-  select array_agg(distinct m.chapter_sort_key order by m.chapter_sort_key asc)
+  -- Step 2: Check for any preceding chapters in mappings or active queue that are NOT published
+  select array_agg(distinct k order by k asc)
   into v_blocking_keys
-  from public.importer_chapter_mappings m
-  left join public.chapters c on c.id = m.chapter_id
-  where m.work_id = p_work_id
-    and m.chapter_sort_key < p_target_sort_key
-    and m.is_gap = false
-    and (c.published_at is null or c.id is null);
+  from (
+    -- Preceding chapters in mappings
+    select m.chapter_sort_key as k
+    from public.importer_chapter_mappings m
+    left join public.chapters c on c.id = m.chapter_id
+    where m.work_id = p_work_id
+      and m.chapter_sort_key < p_target_sort_key
+      and m.is_gap = false
+      and (c.published_at is null or c.id is null)
+
+    union
+
+    -- Preceding chapters active in queue
+    select coalesce(q.chapter_sort_key, (q.payload->>'chapterNumber')::numeric) as k
+    from public.importer_queue q
+    where q.task_type = 'IMPORT_CHAPTER'
+      and q.status in ('QUEUED', 'RETRY', 'IMPORTING')
+      and (q.payload->>'workId')::text = p_work_id::text
+      and coalesce(q.chapter_sort_key, (q.payload->>'chapterNumber')::numeric) < p_target_sort_key
+  ) sub;
 
   if v_blocking_keys is not null and array_length(v_blocking_keys, 1) > 0 then
     return query select false, 'PRECEDING_CHAPTERS_UNPUBLISHED'::text, array_length(v_blocking_keys, 1), v_blocking_keys;
