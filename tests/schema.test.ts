@@ -59,13 +59,14 @@ describe('Importer Database Schema & Atomic Lease Locks', () => {
       await db.exec(sql);
     }
 
-    // Now apply importer migrations
-    const importerSql = readFileSync(resolve('migrations/001_importer_schema.sql'), 'utf8');
-    await db.exec(importerSql);
-    const importerSql002 = readFileSync(resolve('migrations/002_importer_sources_status.sql'), 'utf8');
-    await db.exec(importerSql002);
-    const importerSql003 = readFileSync(resolve('migrations/003_importer_sort_key_and_concurrency.sql'), 'utf8');
-    await db.exec(importerSql003);
+    // Now apply all importer migrations in order
+    const importerMigrationFiles = readdirSync(resolve('migrations'))
+      .filter(f => f.endsWith('.sql'))
+      .sort();
+    for (const file of importerMigrationFiles) {
+      const sql = readFileSync(resolve('migrations', file), 'utf8');
+      await db.exec(sql);
+    }
   });
 
   afterAll(async () => {
@@ -78,11 +79,11 @@ describe('Importer Database Schema & Atomic Lease Locks', () => {
     expect((res.rows[0] as any).name).toBe('Nexus Mangas');
     expect((res.rows[0] as any).status).toBe('ACTIVE');
 
-    // Check newly seeded sources are PAUSED
+    // Check reactivated source Kuro is ACTIVE and enabled
     const kuro = await db.query('select * from public.importer_sources where id = $1', ['kuro']);
     expect(kuro.rows.length).toBe(1);
-    expect((kuro.rows[0] as any).status).toBe('PAUSED');
-    expect((kuro.rows[0] as any).enabled).toBe(false);
+    expect((kuro.rows[0] as any).status).toBe('ACTIVE');
+    expect((kuro.rows[0] as any).enabled).toBe(true);
   });
 
   it('enforces atomic job lease acquisition with locked_by and lease_expires_at', async () => {

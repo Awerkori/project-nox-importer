@@ -1199,6 +1199,7 @@ export class ImporterEngine {
           work_id: workId,
           number: chapterNumber,
           title: (chapterTitle || '').slice(0, 200),
+          origin: 'IMPORTER',
         });
         if (chErr) throw chErr;
       }
