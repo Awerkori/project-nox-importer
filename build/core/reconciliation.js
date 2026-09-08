@@ -35,16 +35,21 @@ export class ExistingWorksReconciler {
             duplicatesAvoided: 0,
         };
         // 1. Busca mapeamentos de obras ativas em lotes ordenados por atualização
-        const { data: mappings, error: mapErr } = await this.supabase
+        let query = this.supabase
             .from('importer_work_mappings')
             .select('id, work_id, source, source_work_id, updated_at, works!inner(id, title, slug, published, updated_at)')
-            .eq('status', 'ACTIVE')
+            .eq('sync_status', 'SYNCED');
+        if (typeof query.not === 'function') {
+            query = query.not('work_id', 'is', null);
+        }
+        const { data: rawMappings, error: mapErr } = await query
             .order('updated_at', { ascending: false })
             .limit(batchSize * 3);
         if (mapErr) {
             this.logger.error('Failed to query work mappings for reconciliation', { error: mapErr.message });
             return stats;
         }
+        const mappings = (rawMappings || []).filter((m) => m.work_id != null);
         if (!mappings || mappings.length === 0) {
             return stats;
         }
