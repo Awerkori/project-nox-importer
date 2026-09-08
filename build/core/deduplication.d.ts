@@ -31,5 +31,15 @@ export declare class DeduplicationEngine {
      * Never blindly overwrite or perform destructive merges on fuzzy matches.
      */
     resolveWork(candidate: CandidateWork): Promise<DeduplicationResult>;
+    /**
+     * Applies field-level metadata precedence:
+     * Priority: MANUAL (Admin/Editor) > KURO > OTHER SOURCES
+     * Rules:
+     * 1. Manual edit provenance is strictly immutable.
+     * 2. Kuro upgrades non-manual fields if candidate has valid data.
+     * 3. Other sources only fill empty/null fields.
+     * 4. Never overwrite valid data with empty/null.
+     */
+    applyMetadataPrecedence(workId: string, candidate: CandidateWork, source: string): Promise<void>;
     private sanitizeSlug;
 }

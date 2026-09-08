@@ -5,6 +5,34 @@ import { processAndStoreMedia } from '../storage/media.js';
 import { Logger } from './logger.js';
 import { diagnostics } from './diagnostics.js';
 import { AdaptiveAutotuner, AsyncSemaphore } from './concurrency.js';
+export function computeCanonicalChapterKey(chapterNumber, chapterTitle) {
+    const num = typeof chapterNumber === 'number' ? chapterNumber : parseFloat(String(chapterNumber));
+    const normalizedNumber = isNaN(num) || num < 0 ? 0 : Number(num.toFixed(4));
+    const titleLower = (chapterTitle || '').toLowerCase();
+    const hasSpecialKeywords = /especial|special|extra|omake|side|spin-off/i.test(titleLower);
+    const hasPrologueKeywords = /pr[oó]logo|prologue/i.test(titleLower);
+    const isPrologue = hasPrologueKeywords || (normalizedNumber === 0 && !hasSpecialKeywords);
+    const isSpecial = hasSpecialKeywords || isPrologue;
+    let specialCategory;
+    if (isPrologue)
+        specialCategory = 'prologue';
+    else if (/extra/i.test(titleLower))
+        specialCategory = 'extra';
+    else if (/side/i.test(titleLower))
+        specialCategory = 'side';
+    else if (hasSpecialKeywords)
+        specialCategory = 'special';
+    let sortKey = normalizedNumber;
+    if (hasSpecialKeywords && normalizedNumber === 0) {
+        sortKey = 0.0001;
+    }
+    return {
+        normalizedNumber,
+        sortKey: Number(sortKey.toFixed(4)),
+        isSpecial,
+        specialCategory,
+    };
+}
 export class ImporterEngine {
     supabase;
     storage;
@@ -113,6 +141,7 @@ export class ImporterEngine {
             await this.sleep(30_000);
         }
     }
+    autotunerCycleCount = 0;
     /**
      * Periodic autotuner telemetry & evaluation loop (every 30s)
      */
@@ -122,10 +151,30 @@ export class ImporterEngine {
             if (this.stopSignal)
                 break;
             try {
+                this.autotunerCycleCount++;
                 const mem = diagnostics.getMemorySnapshot();
                 const evaluation = this.autotuner.evaluateCycle();
                 const activeJobs = diagnostics.getActiveJobsCount();
+                const lagMetrics = diagnostics.lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
                 this.logger.info(`[Autotuner Telemetry] Action: ${evaluation.action} | Concurrency: ${evaluation.concurrency} | Active Jobs: ${activeJobs} | Mem: ${mem.heapUsedMb}MB heap / ${mem.rssMb}MB rss (512MB RAM) | Reason: ${evaluation.reason}`);
+                // Record async telemetry snapshot without blocking the loop
+                void this.recordTelemetrySnapshot({
+                    workerId: this.config.WORKER_ID,
+                    rssMb: mem.rssMb,
+                    heapUsedMb: mem.heapUsedMb,
+                    heapTotalMb: mem.heapTotalMb,
+                    externalMb: mem.externalMb,
+                    arrayBuffersMb: mem.arrayBuffersMb,
+                    eventLoopLagMs: lagMetrics.avgLagMs,
+                    concurrency: evaluation.concurrency,
+                    activeJobs,
+                    cycleAction: evaluation.action,
+                    cycleReason: evaluation.reason,
+                });
+                // Periodic pruning of old telemetry every 120 cycles (~1 hour)
+                if (this.autotunerCycleCount % 120 === 0) {
+                    void this.pruneTelemetry();
+                }
             }
             catch (err) {
                 this.logger.error('Error during autotuner evaluation loop', { error: err?.message });
@@ -492,23 +541,85 @@ export class ImporterEngine {
         // Also check published chapters in public.chapters for this work
         const { data: publishedChapters } = await this.supabase
             .from('chapters')
-            .select('number')
+            .select('id, number, title')
             .eq('work_id', result.workId)
             .not('published_at', 'is', null);
-        const publishedNumbers = new Set((publishedChapters || []).map((c) => c.number));
-        // Filter out already imported chapters
-        const missingChapters = chapters.filter((ch) => !completedIds.has(ch.sourceChapterId) && !publishedNumbers.has(ch.number));
-        // Sort strictly ASCENDING by chapter number: 1 -> 2 -> 3 ... -> 100
-        missingChapters.sort((a, b) => a.number - b.number);
-        this.logger.info(`Enqueuing ${missingChapters.length} missing chapters in strict ascending order`, {
+        // Match each candidate chapter against published chapters
+        const missingChapters = [];
+        for (const ch of chapters) {
+            if (completedIds.has(ch.sourceChapterId)) {
+                continue;
+            }
+            const chKey = this.computeCanonicalChapterKey(ch.number, ch.title);
+            // Find if an existing published chapter matches canonical key
+            const matchedPublished = (publishedChapters || []).find((pub) => {
+                const pubKey = this.computeCanonicalChapterKey(pub.number, pub.title);
+                if (pubKey.normalizedNumber !== chKey.normalizedNumber)
+                    return false;
+                // Do not merge specials with regular chapters
+                if (pubKey.isSpecial !== chKey.isSpecial)
+                    return false;
+                if (chKey.specialCategory && pubKey.specialCategory && chKey.specialCategory !== pubKey.specialCategory)
+                    return false;
+                return true;
+            });
+            if (matchedPublished) {
+                // Chapter is ALREADY published: link mapping to canonical chapter, zero re-download!
+                await this.supabase.from('importer_chapter_mappings').upsert({
+                    source: job.source,
+                    source_chapter_id: ch.sourceChapterId,
+                    chapter_id: matchedPublished.id,
+                    work_mapping_id: result.mappingId,
+                    chapter_number: ch.number,
+                    page_count: ch.pageCount || 0,
+                    status: 'COMPLETED',
+                    last_error: null,
+                }, { onConflict: 'source,source_chapter_id' });
+                continue;
+            }
+            missingChapters.push(ch);
+        }
+        // For missing chapters, check if another source already has an active job in queue
+        const { data: activeJobs } = await this.supabase
+            .from('importer_queue')
+            .select('payload, source, status')
+            .eq('task_type', 'IMPORT_CHAPTER')
+            .in('status', ['QUEUED', 'IMPORTING', 'RETRY']);
+        const activeJobsForWork = (activeJobs || []).filter((j) => j.payload?.workId === result.workId);
+        const chaptersToEnqueue = missingChapters.filter((ch) => {
+            const chKey = this.computeCanonicalChapterKey(ch.number, ch.title);
+            const activeJob = activeJobsForWork.find((j) => {
+                const jobNum = Number(j.payload?.chapterNumber);
+                return Number(jobNum.toFixed(4)) === chKey.normalizedNumber;
+            });
+            if (activeJob) {
+                // If Kuro already has active job, secondary source defers
+                if (activeJob.source === 'kuro' && job.source !== 'kuro') {
+                    return false;
+                }
+                // If current source already has active job, do not duplicate
+                if (activeJob.source === job.source) {
+                    return false;
+                }
+            }
+            return true;
+        });
+        // Sort strictly ASCENDING by canonical sort key: 0 -> 1 -> 1.5 -> 2 ...
+        chaptersToEnqueue.sort((a, b) => {
+            const keyA = this.computeCanonicalChapterKey(a.number, a.title).sortKey;
+            const keyB = this.computeCanonicalChapterKey(b.number, b.title).sortKey;
+            return keyA - keyB;
+        });
+        this.logger.info(`Enqueuing ${chaptersToEnqueue.length} missing chapters in strict canonical ascending order`, {
             source: job.source,
             workId: result.workId,
             totalChapters: chapters.length,
-            missingChapters: missingChapters.length,
+            alreadyPublished: chapters.length - missingChapters.length,
+            enqueued: chaptersToEnqueue.length,
         });
-        for (const ch of missingChapters) {
+        for (const ch of chaptersToEnqueue) {
             const dedupeKey = `${job.source}:chapter:${ch.sourceChapterId}`;
-            const sortKey = this.computeChapterSortKey(ch.number);
+            const chKey = this.computeCanonicalChapterKey(ch.number, ch.title);
             await this.queue.enqueue('IMPORT_CHAPTER', job.source, dedupeKey, {
                 sourceWorkId,
                 sourceChapterId: ch.sourceChapterId,
@@ -517,19 +628,45 @@ export class ImporterEngine {
                 chapterNumber: ch.number,
                 chapterTitle: ch.title || '',
                 expectedPageCount: ch.pageCount,
-            }, 30, sortKey);
+            }, 30, chKey.sortKey);
         }
     }
-    computeChapterSortKey(chapterNumber) {
-        const num = typeof chapterNumber === 'number' ? chapterNumber : parseFloat(String(chapterNumber));
-        if (isNaN(num) || num < 0)
-            return 999999;
-        return Number(num.toFixed(4));
+    computeCanonicalChapterKey(chapterNumber, chapterTitle) {
+        return computeCanonicalChapterKey(chapterNumber, chapterTitle);
+    }
+    computeChapterSortKey(chapterNumber, chapterTitle) {
+        return this.computeCanonicalChapterKey(chapterNumber, chapterTitle).sortKey;
     }
     async handleImportChapter(job) {
         const { sourceWorkId, sourceChapterId, workId, workMappingId, chapterNumber, chapterTitle, } = job.payload;
         if (!sourceChapterId || !workId || chapterNumber === undefined) {
             throw new Error('Incomplete chapter import payload');
+        }
+        // Pre-flight check: if already published by concurrent worker, skip download
+        const { data: alreadyPub } = await this.supabase
+            .from('chapters')
+            .select('id, number, title')
+            .eq('work_id', workId)
+            .eq('number', chapterNumber)
+            .not('published_at', 'is', null)
+            .maybeSingle();
+        if (alreadyPub) {
+            this.logger.info('Chapter already published by concurrent source, linking mapping and skipping duplicate download', {
+                workId,
+                chapterNumber,
+                source: job.source,
+                canonicalChapterId: alreadyPub.id,
+            });
+            await this.supabase.from('importer_chapter_mappings').upsert({
+                source: job.source,
+                source_chapter_id: sourceChapterId,
+                chapter_id: alreadyPub.id,
+                work_mapping_id: workMappingId,
+                chapter_number: chapterNumber,
+                status: 'COMPLETED',
+                last_error: null,
+            }, { onConflict: 'source,source_chapter_id' });
+            return;
         }
         const adapter = this.registry.get(job.source);
         if (!adapter)
@@ -543,6 +680,11 @@ export class ImporterEngine {
             chapterNumber,
             completedPages: 0,
         });
+        const tStart = Date.now();
+        let tDownload = 0;
+        let tUpload = 0;
+        let tDb = 0;
+        let totalBytes = 0;
         try {
             const pageUrls = await adapter.fetchChapterPages(sourceChapterId, chapterNumber);
             if (!pageUrls || pageUrls.length === 0) {
@@ -574,8 +716,13 @@ export class ImporterEngine {
                     while (attempts < 3 && !this.stopSignal) {
                         attempts++;
                         try {
+                            const d0 = Date.now();
                             const pageBytes = await this.fetchImageBytes(pageUrl);
+                            tDownload += Date.now() - d0;
+                            totalBytes += pageBytes.length;
+                            const u0 = Date.now();
                             const res = await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial');
+                            tUpload += Date.now() - u0;
                             storedPages[idx] = {
                                 mediaId: res.mediaId,
                                 width: res.width,
@@ -618,6 +765,7 @@ export class ImporterEngine {
                 }, { onConflict: 'source,source_chapter_id' });
                 throw new Error(err);
             }
+            const db0 = Date.now();
             // Ensure work has a valid cover with storage_ready = true before publishing chapter
             const { data: workRecord } = await this.supabase
                 .from('works')
@@ -686,7 +834,7 @@ export class ImporterEngine {
                 .update({ published: true, updated_at: new Date().toISOString() })
                 .eq('id', workId)
                 .eq('published', false);
-            // Record chapter mapping as COMPLETED
+            // Record chapter mapping as COMPLETED with is_page_provider: true
             await this.supabase.from('importer_chapter_mappings').upsert({
                 source: job.source,
                 source_chapter_id: sourceChapterId,
@@ -697,15 +845,115 @@ export class ImporterEngine {
                 status: 'COMPLETED',
                 last_error: null,
             }, { onConflict: 'source,source_chapter_id' });
+            tDb = Date.now() - db0;
+            // Record fine-grained chapter job metric asynchronously
+            void this.recordJobMetric({
+                workerId: this.config.WORKER_ID,
+                source: job.source,
+                workId,
+                chapterId,
+                chapterNumber,
+                pageCount: validPages.length,
+                totalBytes,
+                durationMs: Date.now() - tStart,
+                downloadMs: tDownload,
+                uploadMs: tUpload,
+                dbMs: tDb,
+                status: 'COMPLETED',
+            });
             this.logger.info('Successfully imported and published chapter', {
                 workId,
                 chapterNumber,
                 pageCount: validPages.length,
             });
         }
+        catch (err) {
+            // Record failed chapter metric asynchronously with sanitized error message
+            void this.recordJobMetric({
+                workerId: this.config.WORKER_ID,
+                source: job.source,
+                workId,
+                chapterId: null,
+                chapterNumber,
+                pageCount: 0,
+                totalBytes,
+                durationMs: Date.now() - tStart,
+                downloadMs: tDownload,
+                uploadMs: tUpload,
+                dbMs: tDb,
+                status: 'FAILED',
+                errorMessage: this.sanitizeErrorMessage(err?.message || String(err)),
+            });
+            throw err;
+        }
         finally {
             diagnostics.unregisterJob(job.id);
         }
+    }
+    async recordJobMetric(metric) {
+        try {
+            await this.supabase.from('importer_job_metrics').insert({
+                worker_id: metric.workerId,
+                source: metric.source,
+                work_id: metric.workId,
+                chapter_id: metric.chapterId,
+                chapter_number: metric.chapterNumber,
+                page_count: metric.pageCount,
+                total_bytes: metric.totalBytes,
+                duration_ms: metric.durationMs,
+                download_ms: metric.downloadMs,
+                upload_ms: metric.uploadMs,
+                db_ms: metric.dbMs,
+                status: metric.status,
+                error_message: metric.errorMessage ? this.sanitizeErrorMessage(metric.errorMessage) : null,
+            });
+        }
+        catch (err) {
+            this.logger.warn('Failed to record job metric to Supabase (non-fatal)', { error: err?.message });
+        }
+    }
+    async recordTelemetrySnapshot(snapshot) {
+        try {
+            await this.supabase.from('importer_telemetry').insert({
+                worker_id: snapshot.workerId,
+                rss_mb: snapshot.rssMb,
+                heap_used_mb: snapshot.heapUsedMb,
+                heap_total_mb: snapshot.heapTotalMb,
+                external_mb: snapshot.externalMb,
+                array_buffers_mb: snapshot.arrayBuffersMb,
+                event_loop_lag_ms: snapshot.eventLoopLagMs,
+                concurrency: snapshot.concurrency,
+                active_jobs: snapshot.activeJobs,
+                cycle_action: snapshot.cycleAction,
+                cycle_reason: snapshot.cycleReason,
+            });
+        }
+        catch (err) {
+            this.logger.warn('Failed to record telemetry snapshot to Supabase (non-fatal)', { error: err?.message });
+        }
+    }
+    async pruneTelemetry() {
+        try {
+            await this.supabase.rpc('importer_prune_telemetry', {
+                p_telemetry_hours: 24,
+                p_job_metrics_days: 7,
+            });
+            this.logger.info('Pruned old importer telemetry and job metrics');
+        }
+        catch (err) {
+            this.logger.warn('Failed to prune telemetry (non-fatal)', { error: err?.message });
+        }
+    }
+    sanitizeErrorMessage(raw) {
+        if (!raw)
+            return '';
+        return raw
+            .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [REDACTED]')
+            .replace(/(token|access_token|refresh_token|secret|password|key)=([^\s&]+)/gi, '$1=[REDACTED]')
+            .replace(/https?:\/\/[^:\/\s]+:[^@\/\s]+@/gi, 'https://[CREDENTIALS_REDACTED]@')
+            .replace(/Cookie:\s*[^\r\n]+/gi, 'Cookie: [REDACTED]')
+            .replace(/eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}/g, '[JWT_REDACTED]')
+            .slice(0, 1000);
     }
     async downloadAndRegisterImage(url, userId, purpose = 'editorial') {
         const parsedUrl = new URL(url);
