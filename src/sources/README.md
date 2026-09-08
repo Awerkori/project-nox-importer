@@ -16,5 +16,4 @@ This directory contains the source adapters for the Project Nox Importer.
 - `nexus`: Nexus Mangas (`ACTIVE`, Supabase REST + Edge Function reader)
 - `mangaflix`: MangaFlix (`PAUSED` initially, REST v1 API + static CDN)
 - `manhastro`: Manhastro (`PAUSED` initially, REST api2 + albums CDN)
-- `toonlivre`: Toon Livre (`PAUSED` initially, REST catalog + Turnstile protection awareness)
 - `kuro`: Kuro Mangas (`PAUSED` initially, REST API + Rabbit cipher decryptor + safe env authentication)

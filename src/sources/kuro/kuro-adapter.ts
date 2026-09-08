@@ -47,6 +47,73 @@ export class KuroAdapter implements SourceAdapter {
     }
   }
 
+  hasValidSession(): boolean {
+    return Boolean(this.sessionCookie && this.clientToken);
+  }
+
+  clearSession(): void {
+    this.sessionCookie = null;
+    this.clientToken = null;
+  }
+
+  async login(force = false): Promise<boolean> {
+    if (!force && this.hasValidSession()) {
+      return true;
+    }
+
+    const email = process.env.KURO_EMAIL;
+    const password = process.env.KURO_PASSWORD;
+
+    if (!email || !password) {
+      return false;
+    }
+
+    try {
+      const loginUrl = `${this.apiUrl}/auth/login`;
+      const res = await this.transport(loginUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Referer: `${this.baseUrl}/login`,
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+        },
+        body: JSON.stringify({ email, password, rememberMe: true }),
+      });
+
+      if (res.ok) {
+        // Collect cookies supporting both getSetCookie array and standard header string
+        let cookieHeaders: string[] = [];
+        if (typeof (res.headers as any).getSetCookie === 'function') {
+          cookieHeaders = (res.headers as any).getSetCookie();
+        } else {
+          const raw = res.headers.get('set-cookie');
+          if (raw) cookieHeaders = [raw];
+        }
+
+        const combinedCookies = cookieHeaders.join('; ');
+        const matchSession = combinedCookies.match(/kuro_session=([^;]+)/);
+        const matchKn = combinedCookies.match(/_kn=([^;]+)/);
+
+        if (matchSession && matchKn) {
+          this.sessionCookie = matchSession[1];
+          this.clientToken = matchKn[1];
+          this.logger.info('Kuro authentication successful (session established in memory)');
+          return true;
+        }
+      } else {
+        this.logger.warn(`Kuro login failed: HTTP ${res.status}`);
+      }
+    } catch (err: any) {
+      this.logger.warn('Failed to login with Kuro credentials from environment', {
+        error: err?.message,
+      });
+    }
+
+    return false;
+  }
+
   private async getAuthHeaders(): Promise<Record<string, string>> {
     // If already have session, return cookies
     if (this.sessionCookie && this.clientToken) {
@@ -56,42 +123,13 @@ export class KuroAdapter implements SourceAdapter {
       };
     }
 
-    // Try authenticating with email/password if configured in environment
-    const email = process.env.KURO_EMAIL;
-    const password = process.env.KURO_PASSWORD;
-    if (email && password && !this.sessionCookie) {
-      try {
-        const loginUrl = `${this.apiUrl}/auth/login`;
-        const res = await this.transport(loginUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Referer: `${this.baseUrl}/login`,
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-          },
-          body: JSON.stringify({ email, password, rememberMe: true }),
-        });
-
-        if (res.ok) {
-          const rawCookies = res.headers.get('set-cookie') || '';
-          const matchSession = rawCookies.match(/kuro_session=([^;]+)/);
-          const matchKn = rawCookies.match(/_kn=([^;]+)/);
-          if (matchSession && matchKn) {
-            this.sessionCookie = matchSession[1];
-            this.clientToken = matchKn[1];
-            return {
-              Cookie: `kuro_session=${this.sessionCookie}; _kn=${this.clientToken}`,
-              'X-Client-Token': this.clientToken,
-            };
-          }
-        }
-      } catch (err: any) {
-        this.logger.warn('Failed to login with Kuro credentials from environment', {
-          error: err?.message,
-        });
-      }
+    // Try authenticating with email/password if available
+    const loggedIn = await this.login();
+    if (loggedIn && this.sessionCookie && this.clientToken) {
+      return {
+        Cookie: `kuro_session=${this.sessionCookie}; _kn=${this.clientToken}`,
+        'X-Client-Token': this.clientToken,
+      };
     }
 
     return {};
@@ -123,8 +161,16 @@ export class KuroAdapter implements SourceAdapter {
         });
 
         if (response.status === 401 || response.status === 403) {
+          this.clearSession();
+          if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
+            this.logger.info('Kuro session expired or unauthorized. Auto-renewing session...');
+            const renewed = await this.login(true);
+            if (renewed) {
+              continue;
+            }
+          }
           throw new Error(
-            'Kuro requires authentication: configure KURO_SESSION and KURO_CLIENT_TOKEN (or KURO_EMAIL and KURO_PASSWORD) in environment variables'
+            'Kuro requires authentication: session expired or invalid credentials'
           );
         }
 
