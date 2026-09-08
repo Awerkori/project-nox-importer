@@ -1,0 +1,282 @@
+import { HostRateLimiter } from '../../core/rate-limiter.js';
+import { Logger } from '../../core/logger.js';
+import { decryptVSecure, DEFAULT_ENC_KEY } from './kuro-decryptor.js';
+function slugify(text) {
+    return text
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
+function buildThumbnailUrl(cdnUrl, path) {
+    const cleanPath = path.replace(/^\//, '').replace(/^uploads\//, '');
+    return `${cdnUrl}/${cleanPath}`;
+}
+export class KuroAdapter {
+    rateLimiter;
+    transport;
+    id = 'kuro';
+    name = 'Kuro Mangas';
+    baseUrl = 'https://kuromangas.com';
+    apiUrl = 'https://kuromangas.com/api';
+    cdnUrl = 'https://cdn.kuromangas.com';
+    logger = new Logger('KuroAdapter');
+    encKey = DEFAULT_ENC_KEY;
+    // In-memory session cached during process lifetime (never stored in database or printed)
+    sessionCookie = null;
+    clientToken = null;
+    constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
+        this.rateLimiter = rateLimiter;
+        this.transport = transport;
+        this.rateLimiter.setHostRate('kuromangas.com', 2.0);
+        this.rateLimiter.setHostRate('cdn.kuromangas.com', 4.0);
+        // Initialize from safe environment variables if present
+        if (process.env.KURO_SESSION) {
+            this.sessionCookie = process.env.KURO_SESSION;
+        }
+        if (process.env.KURO_CLIENT_TOKEN) {
+            this.clientToken = process.env.KURO_CLIENT_TOKEN;
+        }
+    }
+    hasValidSession() {
+        return Boolean(this.sessionCookie && this.clientToken);
+    }
+    clearSession() {
+        this.sessionCookie = null;
+        this.clientToken = null;
+    }
+    async login(force = false) {
+        if (!force && this.hasValidSession()) {
+            return true;
+        }
+        const email = process.env.KURO_EMAIL;
+        const password = process.env.KURO_PASSWORD;
+        if (!email || !password) {
+            return false;
+        }
+        try {
+            const loginUrl = `${this.apiUrl}/auth/login`;
+            const res = await this.transport(loginUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Accept: 'application/json',
+                    Referer: `${this.baseUrl}/login`,
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                },
+                body: JSON.stringify({ email, password, rememberMe: true }),
+            });
+            if (res.ok) {
+                // Collect cookies supporting both getSetCookie array and standard header string
+                let cookieHeaders = [];
+                if (typeof res.headers.getSetCookie === 'function') {
+                    cookieHeaders = res.headers.getSetCookie();
+                }
+                else {
+                    const raw = res.headers.get('set-cookie');
+                    if (raw)
+                        cookieHeaders = [raw];
+                }
+                const combinedCookies = cookieHeaders.join('; ');
+                const matchSession = combinedCookies.match(/kuro_session=([^;]+)/);
+                const matchKn = combinedCookies.match(/_kn=([^;]+)/);
+                if (matchSession && matchKn) {
+                    this.sessionCookie = matchSession[1];
+                    this.clientToken = matchKn[1];
+                    this.logger.info('Kuro authentication successful (session established in memory)');
+                    return true;
+                }
+            }
+            else {
+                this.logger.warn(`Kuro login failed: HTTP ${res.status}`);
+            }
+        }
+        catch (err) {
+            this.logger.warn('Failed to login with Kuro credentials from environment', {
+                error: err?.message,
+            });
+        }
+        return false;
+    }
+    async getAuthHeaders() {
+        // If already have session, return cookies
+        if (this.sessionCookie && this.clientToken) {
+            return {
+                Cookie: `kuro_session=${this.sessionCookie}; _kn=${this.clientToken}`,
+                'X-Client-Token': this.clientToken,
+            };
+        }
+        // Try authenticating with email/password if available
+        const loggedIn = await this.login();
+        if (loggedIn && this.sessionCookie && this.clientToken) {
+            return {
+                Cookie: `kuro_session=${this.sessionCookie}; _kn=${this.clientToken}`,
+                'X-Client-Token': this.clientToken,
+            };
+        }
+        return {};
+    }
+    async request(url, options = {}) {
+        const parsedUrl = new URL(url);
+        await this.rateLimiter.acquire(parsedUrl.host);
+        let attempts = 0;
+        const maxAttempts = 3;
+        while (attempts < maxAttempts) {
+            attempts++;
+            try {
+                const authHeaders = await this.getAuthHeaders();
+                const response = await this.transport(url, {
+                    ...options,
+                    headers: {
+                        Accept: 'application/json, text/plain, */*',
+                        Referer: `${this.baseUrl}/catalogo`,
+                        Origin: this.baseUrl,
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                        ...authHeaders,
+                        ...(options.headers || {}),
+                    },
+                    signal: AbortSignal.timeout(30_000),
+                });
+                if (response.status === 401 || response.status === 403) {
+                    this.clearSession();
+                    if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
+                        this.logger.info('Kuro session expired or unauthorized. Auto-renewing session...');
+                        const renewed = await this.login(true);
+                        if (renewed) {
+                            continue;
+                        }
+                    }
+                    throw new Error('Kuro requires authentication: session expired or invalid credentials');
+                }
+                if (response.status === 429) {
+                    const retryAfter = response.headers.get('Retry-After');
+                    this.rateLimiter.handle429(parsedUrl.host, retryAfter, attempts);
+                    const error = new Error(`Rate limit reached (HTTP 429) for ${parsedUrl.host}`);
+                    error.status = 429;
+                    error.retryAfter = retryAfter;
+                    if (attempts >= maxAttempts)
+                        throw error;
+                    continue;
+                }
+                if (!response.ok) {
+                    const errText = await response.text().catch(() => '');
+                    throw new Error(`Kuro request failed: HTTP ${response.status} - ${errText.slice(0, 200)}`);
+                }
+                const dataKey = response.headers.get('x-kuro-datakey');
+                const json = await response.json();
+                // Check if payload is encrypted with _v_secure
+                if (dataKey && json && typeof json === 'object' && '_v_secure' in json) {
+                    return decryptVSecure(json._v_secure, dataKey, this.encKey);
+                }
+                return json;
+            }
+            catch (err) {
+                if (err.message.includes('requires authentication') || attempts >= maxAttempts) {
+                    throw err;
+                }
+                await new Promise((r) => setTimeout(r, 1000 * attempts));
+            }
+        }
+        throw new Error(`Kuro request failed after ${maxAttempts} attempts`);
+    }
+    async fetchUpdatedWorks(cursor, options) {
+        const mode = options?.mode || 'maintenance';
+        const page = cursor ? parseInt(cursor, 10) : 1;
+        const limit = 24;
+        if (mode === 'bootstrap') {
+            const url = `${this.apiUrl}/mangas?page=${page}&limit=${limit}&sort=view_count&order=DESC`;
+            const response = await this.request(url);
+            const items = response.data || [];
+            const works = items.map((item) => ({
+                sourceWorkId: String(item.id),
+                title: item.title,
+                slug: slugify(item.title),
+                coverUrl: item.cover_image ? buildThumbnailUrl(this.cdnUrl, item.cover_image) : null,
+                updatedAt: new Date().toISOString(),
+            }));
+            const hasNext = response.pagination?.hasNext ?? (items.length >= limit);
+            return {
+                works,
+                nextCursor: hasNext ? String(page + 1) : null,
+            };
+        }
+        else {
+            // Maintenance: fetch recently updated chapters
+            const url = `${this.apiUrl}/chapters/recent?page=${page}&limit=${limit}&days=30`;
+            const response = await this.request(url);
+            const items = response.data || [];
+            const works = items.map((item) => ({
+                sourceWorkId: String(item.manga_id),
+                title: item.manga_title,
+                slug: slugify(item.manga_title),
+                coverUrl: item.manga_cover ? buildThumbnailUrl(this.cdnUrl, item.manga_cover) : null,
+                updatedAt: new Date().toISOString(),
+            }));
+            return {
+                works,
+                nextCursor: items.length > 0 ? String(page + 1) : null,
+            };
+        }
+    }
+    async fetchWorkDetails(sourceWorkId) {
+        const url = `${this.apiUrl}/mangas/${sourceWorkId}`;
+        const response = await this.request(url);
+        const manga = response.manga;
+        if (!manga)
+            throw new Error(`Work not found on Kuro: ${sourceWorkId}`);
+        let status = 'ONGOING';
+        const s = (manga.status || '').toLowerCase();
+        if (s.includes('complet'))
+            status = 'COMPLETED';
+        else if (s.includes('hiat'))
+            status = 'HIATUS';
+        else if (s.includes('cancel'))
+            status = 'CANCELLED';
+        return {
+            sourceWorkId: String(manga.id),
+            title: manga.title,
+            slug: slugify(manga.title),
+            coverUrl: manga.cover_image ? buildThumbnailUrl(this.cdnUrl, manga.cover_image) : null,
+            synopsis: manga.description?.trim() || '',
+            author: manga.author || undefined,
+            artist: manga.artist || undefined,
+            kind: 'MANGA',
+            status,
+            genres: manga.genres || [],
+            alternativeTitles: manga.alternative_titles || [],
+            raw: manga,
+        };
+    }
+    async fetchChapters(sourceWorkId) {
+        const url = `${this.apiUrl}/mangas/${sourceWorkId}`;
+        const response = await this.request(url);
+        const rawChapters = response.chapters || [];
+        const chapters = rawChapters.map((ch) => {
+            const num = ch.chapter_number ? parseFloat(ch.chapter_number) : 0;
+            const title = ch.title
+                ? `Capítulo ${ch.chapter_number} - ${ch.title}`
+                : `Capítulo ${ch.chapter_number || ch.id}`;
+            return {
+                sourceChapterId: String(ch.id),
+                number: isNaN(num) ? 0 : num,
+                title,
+                createdAt: ch.upload_date || new Date().toISOString(),
+                pageCount: 0,
+            };
+        });
+        return chapters.sort((a, b) => a.number - b.number);
+    }
+    async fetchChapterPages(sourceChapterId, _chapterNumber) {
+        const url = `${this.apiUrl}/chapters/${sourceChapterId}`;
+        const response = await this.request(url);
+        const pages = response.pages || [];
+        if (pages.length === 0) {
+            throw new Error(`Kuro returned 0 pages for chapter ${sourceChapterId}`);
+        }
+        return pages.map((pageUrl) => {
+            const clean = pageUrl.replace(/^\/uploads\//, '/');
+            return clean.startsWith('http') ? clean : `${this.cdnUrl}${clean}`;
+        });
+    }
+}
