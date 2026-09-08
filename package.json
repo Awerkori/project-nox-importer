@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node build/index.js",
+    "start": "node --max-old-space-size=288 build/index.js",
     "package:discloud": "python3 scripts/package-discloud.py",
     "test": "vitest run",
     "test:watch": "vitest"

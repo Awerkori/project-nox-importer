@@ -52,37 +52,56 @@ export class NoxWorkerStorageProvider {
     }
     async upload(bytes, mime, id) {
         const url = `${this.workerBaseUrl.replace(/\/$/, '')}/api/internal/storage/upload?id=${encodeURIComponent(id)}`;
-        try {
-            const blobPart = bytes;
-            const res = await this.transport(url, {
-                method: 'POST',
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 ProjectNox-Importer/1.0',
-                    Authorization: `Bearer ${this.bridgeToken}`,
-                    'Content-Type': mime || 'application/octet-stream',
-                    'Content-Length': String(bytes.byteLength),
-                },
-                body: new Blob([blobPart], { type: mime || 'application/octet-stream' }),
-                signal: AbortSignal.timeout(60_000),
-            });
-            if (res.status === 401 || res.status === 403) {
-                throw new NoxWorkerStorageError('auth', res.status, 'Authentication failed on internal storage endpoint');
+        let lastError;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const blobPart = bytes;
+                const res = await this.transport(url, {
+                    method: 'POST',
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 ProjectNox-Importer/1.0',
+                        Authorization: `Bearer ${this.bridgeToken}`,
+                        'Content-Type': mime || 'application/octet-stream',
+                        'Content-Length': String(bytes.byteLength),
+                    },
+                    body: new Blob([blobPart], { type: mime || 'application/octet-stream' }),
+                    signal: AbortSignal.timeout(60_000),
+                });
+                if (res.status === 401 || res.status === 403) {
+                    throw new NoxWorkerStorageError('auth', res.status, 'Authentication failed on internal storage endpoint');
+                }
+                if (!res.ok) {
+                    const errText = await res.text().catch(() => '');
+                    const error = new NoxWorkerStorageError('http', res.status, `Internal storage upload failed: HTTP ${res.status} - ${errText.slice(0, 200)}`);
+                    if ((res.status >= 500 || res.status === 429) && attempt < 3) {
+                        this.logger.warn(`Storage upload transient error HTTP ${res.status}, retrying attempt ${attempt + 1}/3...`, { id });
+                        await new Promise((r) => setTimeout(r, 2000 * attempt));
+                        continue;
+                    }
+                    throw error;
+                }
+                const data = (await res.json().catch(() => null));
+                if (!data || typeof data.providerKey !== 'string' || !data.providerKey) {
+                    throw new NoxWorkerStorageError('payload', res.status, 'Invalid response payload from internal storage endpoint');
+                }
+                return data.providerKey;
             }
-            if (!res.ok) {
-                const errText = await res.text().catch(() => '');
-                throw new NoxWorkerStorageError('http', res.status, `Internal storage upload failed: HTTP ${res.status} - ${errText.slice(0, 200)}`);
+            catch (err) {
+                lastError = err;
+                if (err instanceof NoxWorkerStorageError &&
+                    (err.stage === 'auth' || (err.status && err.status < 500 && err.status !== 429))) {
+                    throw err;
+                }
+                if (attempt < 3) {
+                    this.logger.warn(`Storage upload attempt ${attempt}/3 failed (${err?.message}), retrying...`, { id });
+                    await new Promise((r) => setTimeout(r, 2000 * attempt));
+                    continue;
+                }
             }
-            const data = (await res.json().catch(() => null));
-            if (!data || typeof data.providerKey !== 'string' || !data.providerKey) {
-                throw new NoxWorkerStorageError('payload', res.status, 'Invalid response payload from internal storage endpoint');
-            }
-            return data.providerKey;
         }
-        catch (err) {
-            if (err instanceof NoxWorkerStorageError)
-                throw err;
-            this.logger.error('Network error during internal storage upload', { id, error: err?.message });
-            throw new NoxWorkerStorageError('network', undefined, err?.message);
-        }
+        if (lastError instanceof NoxWorkerStorageError)
+            throw lastError;
+        this.logger.error('Network error during internal storage upload after retries', { id, error: lastError?.message });
+        throw new NoxWorkerStorageError('network', undefined, lastError?.message);
     }
 }

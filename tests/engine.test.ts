@@ -63,6 +63,7 @@ describe('ImporterEngine End-to-End Execution', () => {
     }
     await db.exec(readFileSync(resolve('migrations/001_importer_schema.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/002_importer_sources_status.sql'), 'utf8'));
+    await db.exec(readFileSync(resolve('migrations/003_importer_sort_key_and_concurrency.sql'), 'utf8'));
 
     // Create bot admin member via auth.users trigger
     await db.query(`insert into auth.users (id, email, email_confirmed_at) values ($1, 'bot@projectnox.com', now())`, [botUserId]);
@@ -171,6 +172,15 @@ describe('ImporterEngine End-to-End Execution', () => {
                 }),
               };
             },
+            in: (col2: string, vals: any[]) => ({
+              then: (resolve: any) => {
+                if (vals.length === 0) return resolve({ data: [], error: null });
+                const placeholders = vals.map((_, i) => `$${i + 2}`).join(',');
+                db.query(`select * from public.${table} where ${col} = $1 and ${col2} in (${placeholders})`, [val, ...vals])
+                  .then(r => resolve({ data: r.rows, error: null }))
+                  .catch(err => resolve({ data: null, error: err }));
+              }
+            }),
             maybeSingle: async () => {
               const res = await db.query(`select * from public.${table} where ${col} = $1 limit 1`, [val]);
               return { data: res.rows[0] || null, error: null };
@@ -239,45 +249,59 @@ describe('ImporterEngine End-to-End Execution', () => {
             }
           })
         }),
-        upsert: (row: any, opts?: any) => ({
-          select: () => ({
-            single: async () => {
-              const keys = Object.keys(row);
-              const vals = Object.values(row);
-              const conflictCols = (opts?.onConflict || 'id').split(',');
-              const updateCols = keys.filter(k => !conflictCols.includes(k));
-              const setClause = updateCols.map(k => `${k} = excluded.${k}`).join(', ');
-              const res = await db.query(`
-                insert into public.${table} (${keys.join(', ')})
-                values (${keys.map((_, i) => `$${i + 1}`).join(', ')})
-                on conflict (${conflictCols.join(', ')}) do update set ${setClause}
-                returning *
-              `, vals);
-              return { data: res.rows[0], error: null };
+        upsert: (rowsOrRow: any, opts?: any) => {
+          const rows = Array.isArray(rowsOrRow) ? rowsOrRow : [rowsOrRow];
+          return {
+            select: () => ({
+              single: async () => {
+                const row = rows[0];
+                const keys = Object.keys(row);
+                const vals = Object.values(row);
+                const conflictCols = (opts?.onConflict || 'id').split(',');
+                const updateCols = keys.filter(k => !conflictCols.includes(k));
+                const setClause = updateCols.length > 0 ? updateCols.map(k => `${k} = excluded.${k}`).join(', ') : 'nothing';
+                const conflictAction = updateCols.length > 0 ? `do update set ${setClause}` : 'do nothing';
+                const res = await db.query(`
+                  insert into public.${table} (${keys.join(', ')})
+                  values (${keys.map((_, i) => `$${i + 1}`).join(', ')})
+                  on conflict (${conflictCols.join(', ')}) ${conflictAction}
+                  returning *
+                `, vals);
+                return { data: res.rows[0], error: null };
+              }
+            }),
+            then: async (resolve: any) => {
+              if (rows.length === 0) return resolve({ data: [], error: null });
+              const results: any[] = [];
+              for (const row of rows) {
+                const keys = Object.keys(row);
+                const vals = Object.values(row);
+                const conflictCols = (opts?.onConflict || 'id').split(',');
+                const updateCols = keys.filter(k => !conflictCols.includes(k));
+                const setClause = updateCols.length > 0 ? updateCols.map(k => `${k} = excluded.${k}`).join(', ') : 'nothing';
+                const conflictAction = updateCols.length > 0 ? `do update set ${setClause}` : 'do nothing';
+                try {
+                  const res = await db.query(`
+                    insert into public.${table} (${keys.join(', ')})
+                    values (${keys.map((_, i) => `$${i + 1}`).join(', ')})
+                    on conflict (${conflictCols.join(', ')}) ${conflictAction}
+                    returning *
+                  `, vals);
+                  if (res.rows[0]) results.push(res.rows[0]);
+                } catch (err: any) {
+                  return resolve({ data: null, error: err });
+                }
+              }
+              resolve({ data: results, error: null });
             }
-          }),
-          then: (resolve: any) => {
-            const keys = Object.keys(row);
-            const vals = Object.values(row);
-            const conflictCols = (opts?.onConflict || 'id').split(',');
-            const updateCols = keys.filter(k => !conflictCols.includes(k));
-            const setClause = updateCols.map(k => `${k} = excluded.${k}`).join(', ');
-            db.query(`
-              insert into public.${table} (${keys.join(', ')})
-              values (${keys.map((_, i) => `$${i + 1}`).join(', ')})
-              on conflict (${conflictCols.join(', ')}) do update set ${setClause}
-              returning *
-            `, vals)
-              .then(r => resolve({ data: r.rows[0], error: null }))
-              .catch(err => resolve({ data: null, error: err }));
-          }
-        })
+          };
+        }
       }),
       rpc: async (funcName: string, args: any) => {
         if (funcName === 'importer_acquire_job') {
           const res = await db.query(
-            `select * from public.importer_acquire_job($1, $2::interval)`,
-            [args.p_worker_id, args.p_lease_duration || '5 minutes']
+            `select * from public.importer_acquire_job($1, $2::interval, $3)`,
+            [args.p_worker_id, args.p_lease_duration || '5 minutes', args.p_source || null]
           );
           return { data: res.rows, error: null };
         }

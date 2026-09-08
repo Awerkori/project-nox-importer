@@ -64,6 +64,8 @@ describe('Importer Database Schema & Atomic Lease Locks', () => {
     await db.exec(importerSql);
     const importerSql002 = readFileSync(resolve('migrations/002_importer_sources_status.sql'), 'utf8');
     await db.exec(importerSql002);
+    const importerSql003 = readFileSync(resolve('migrations/003_importer_sort_key_and_concurrency.sql'), 'utf8');
+    await db.exec(importerSql003);
   });
 
   afterAll(async () => {
