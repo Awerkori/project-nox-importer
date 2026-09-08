@@ -4,6 +4,7 @@ import { rootLogger } from './core/logger.js';
 import { HostRateLimiter } from './core/rate-limiter.js';
 import { SourceRegistry } from './sources/registry.js';
 import { StorageProvider } from './storage/provider.js';
+import { NoxWorkerStorageProvider } from './storage/worker.js';
 import { TelegramStorageProvider } from './storage/telegram.js';
 import { MockStorageProvider } from './storage/mock.js';
 import { ImporterEngine } from './core/engine.js';
@@ -21,7 +22,14 @@ async function main() {
 
   // 2. Initialize Storage Provider
   let storage: StorageProvider;
-  if (config.STORAGE_PROVIDER === 'telegram') {
+  if (config.STORAGE_PROVIDER === 'worker') {
+    if (!config.NOX_STORAGE_BRIDGE_TOKEN) {
+      rootLogger.warn('Bridge token not provided, falling back to mock storage for safety');
+      storage = new MockStorageProvider();
+    } else {
+      storage = new NoxWorkerStorageProvider(config.NOX_MANGA_URL, config.NOX_STORAGE_BRIDGE_TOKEN);
+    }
+  } else if (config.STORAGE_PROVIDER === 'telegram') {
     if (!config.TELEGRAM_BOT_TOKEN || !config.TELEGRAM_CHAT_ID) {
       rootLogger.warn('Telegram credentials not provided, falling back to mock storage for safety');
       storage = new MockStorageProvider();
