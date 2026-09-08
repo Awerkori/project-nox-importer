@@ -8,11 +8,11 @@ Serviço autônomo 24/7 responsável por rastrear, extrair metadados, baixar, va
 
 | Camada | Tecnologia / Serviço | Responsabilidade |
 | :--- | :--- | :--- |
-| **Execução 24/7** | DIScloud (Node.js daemon) | Ciclo autônomo, polling, rate limiting, gerenciamento de leases |
+| **Execução 24/7** | DIScloud (Node.js daemon) | Ciclo autônomo, polling, rate limiting, gerenciamento de leases (ONLINE @ TITAN 512MB) |
 | **Banco & Fila** | Supabase PostgreSQL | Fila com locking atômico (`FOR UPDATE SKIP LOCKED`), mapeamentos, RLS estrito |
 | **Storage de Mídia** | `StorageProvider` (Telegram / Mock) | Storage de documentos binários via bot Telegram (R$ 0,00) |
 | **Consumo & Leitura**| Project Nox Manga (Cloudflare Worker) | Plataforma de leitura pública com streaming seguro |
-| **Adapters** | Extensões / REST APIs | Adapters modulares para fontes de catálogo (Piloto: Nexus Mangas) |
+| **Adapters** | Extensões / REST APIs | Adapters modulares para fontes de catálogo (Nexus, MangaFlix, Manhastro, Kuro) |
 
 > [!NOTE]
 > Este repositório é 100% isolado do front-end do Project Nox Manga e **não possui qualquer interação com a Central PROJECT NOX SCAN STAFF**.
