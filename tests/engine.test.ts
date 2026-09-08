@@ -62,6 +62,7 @@ describe('ImporterEngine End-to-End Execution', () => {
       await db.exec(sql);
     }
     await db.exec(readFileSync(resolve('migrations/001_importer_schema.sql'), 'utf8'));
+    await db.exec(readFileSync(resolve('migrations/002_importer_sources_status.sql'), 'utf8'));
 
     // Create bot admin member via auth.users trigger
     await db.query(`insert into auth.users (id, email, email_confirmed_at) values ($1, 'bot@projectnox.com', now())`, [botUserId]);

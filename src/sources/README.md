@@ -12,9 +12,9 @@ This directory contains the source adapters for the Project Nox Importer.
    - `fetchChapters(sourceWorkId)`: Returns chapter list with chapter numbers, titles, and IDs.
    - `fetchChapterPages(sourceChapterId, chapterNumber)`: Returns array of direct image URLs.
 
-## Upcoming Adapters Pipeline
-- `nexus`: Nexus Mangas (Implemented & in production)
-- `kuro`: KuroMangas (`fonte-extensoes/src/pt/kuromangas`)
-- `toonlivre`: Toon Livre (`fonte-extensoes/src/pt/mangalivre` / `toonbr`)
-- `mangaflix`: MangaFlix (`fonte-extensoes/src/pt/mangaflix`)
-- `manhastro`: Manhastro (`fonte-extensoes/src/pt/manhastro`)
+## Implemented Adapters
+- `nexus`: Nexus Mangas (`ACTIVE`, Supabase REST + Edge Function reader)
+- `mangaflix`: MangaFlix (`PAUSED` initially, REST v1 API + static CDN)
+- `manhastro`: Manhastro (`PAUSED` initially, REST api2 + albums CDN)
+- `toonlivre`: Toon Livre (`PAUSED` initially, REST catalog + Turnstile protection awareness)
+- `kuro`: Kuro Mangas (`PAUSED` initially, REST API + Rabbit cipher decryptor + safe env authentication)

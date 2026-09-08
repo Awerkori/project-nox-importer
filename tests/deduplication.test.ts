@@ -37,6 +37,7 @@ describe('DeduplicationEngine', () => {
       await db.exec(sql);
     }
     await db.exec(readFileSync(resolve('migrations/001_importer_schema.sql'), 'utf8'));
+    await db.exec(readFileSync(resolve('migrations/002_importer_sources_status.sql'), 'utf8'));
 
     // Minimal mock wrapping PGlite to emulate Supabase client for DeduplicationEngine
     supabaseMock = {

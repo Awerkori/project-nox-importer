@@ -126,12 +126,40 @@ export class ImporterEngine {
   private async scheduleSources(): Promise<void> {
     const { data: sources, error } = await this.supabase
       .from('importer_sources')
-      .select('*')
-      .eq('enabled', true);
+      .select('*');
 
     if (error || !sources) return;
 
+    const now = Date.now();
+
     for (const src of sources) {
+      // 1. Skip disabled or paused sources
+      if (src.enabled === false || src.status === 'DISABLED' || src.status === 'PAUSED') {
+        continue;
+      }
+
+      // 2. Handle COOLDOWN status
+      if (src.status === 'COOLDOWN') {
+        const cooldownUntil = src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0;
+        if (now < cooldownUntil) {
+          this.logger.debug(`Source ${src.id} is in COOLDOWN until ${src.cooldown_until}, skipping scheduling`);
+          continue;
+        }
+
+        // Cooldown expired: automatically transition back to ACTIVE
+        this.logger.info(`Source ${src.id} cooldown expired. Transitioning back to ACTIVE`, { source: src.id });
+        src.status = 'ACTIVE';
+        src.cooldown_until = null;
+        await this.supabase
+          .from('importer_sources')
+          .update({ status: 'ACTIVE', cooldown_until: null, updated_at: new Date().toISOString() })
+          .eq('id', src.id);
+      }
+
+      if (src.status !== 'ACTIVE') {
+        continue;
+      }
+
       // Dynamically apply host rate limit from database if configured
       if (src.base_url && src.rate_limit_per_second) {
         try {
@@ -142,7 +170,6 @@ export class ImporterEngine {
 
       const lastSync = src.last_sync_at ? new Date(src.last_sync_at).getTime() : 0;
       const intervalMs = (src.sync_interval_minutes || 30) * 60 * 1000;
-      const now = Date.now();
 
       if (now - lastSync >= intervalMs) {
         const dedupeKey = `${src.id}:discover:${Math.floor(now / intervalMs)}`;
@@ -163,6 +190,47 @@ export class ImporterEngine {
     );
 
     try {
+      // Check if the source is PAUSED, DISABLED, or actively in COOLDOWN
+      const { data: sourceRec } = await this.supabase
+        .from('importer_sources')
+        .select('id, status, cooldown_until, enabled')
+        .eq('id', job.source)
+        .maybeSingle();
+
+      if (sourceRec) {
+        if (sourceRec.status === 'PAUSED' || sourceRec.status === 'DISABLED' || !sourceRec.enabled) {
+          this.logger.info(`Postponing job ${job.id}: source ${job.source} is ${sourceRec.status}`, {
+            jobId: job.id,
+            source: job.source,
+            status: sourceRec.status,
+          });
+          heartbeat.stop();
+          await this.queue.releaseJob(job.id, 'RETRY', `Source ${job.source} is ${sourceRec.status}`, 15);
+          return;
+        }
+
+        if (sourceRec.status === 'COOLDOWN') {
+          const cooldownUntil = sourceRec.cooldown_until ? new Date(sourceRec.cooldown_until).getTime() : 0;
+          if (Date.now() < cooldownUntil) {
+            const waitMinutes = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 60000));
+            this.logger.info(`Postponing job ${job.id}: source ${job.source} is in COOLDOWN for ${waitMinutes}m`, {
+              jobId: job.id,
+              source: job.source,
+              cooldownUntil: sourceRec.cooldown_until,
+            });
+            heartbeat.stop();
+            await this.queue.releaseJob(job.id, 'RETRY', `Source in COOLDOWN until ${sourceRec.cooldown_until}`, waitMinutes);
+            return;
+          } else {
+            // Expired cooldown -> flip to ACTIVE
+            await this.supabase
+              .from('importer_sources')
+              .update({ status: 'ACTIVE', cooldown_until: null, updated_at: new Date().toISOString() })
+              .eq('id', job.source);
+          }
+        }
+      }
+
       this.logger.info('Processing job', {
         jobId: job.id,
         taskType: job.task_type,
@@ -194,6 +262,35 @@ export class ImporterEngine {
         error: errorMessage,
         attempts: job.attempts,
       });
+
+      // Handle 429 / Rate Limit detection
+      const is429 = err?.status === 429 || err?.statusCode === 429 || /429|rate\s*limit/i.test(errorMessage);
+      if (is429) {
+        let waitSeconds = 60;
+        const retryAfter = err?.retryAfter || err?.headers?.get?.('retry-after');
+        if (retryAfter) {
+          const parsed = parseInt(retryAfter, 10);
+          if (!isNaN(parsed) && parsed > 0) waitSeconds = Math.min(3600, parsed);
+        }
+        const cooldownUntil = new Date(Date.now() + waitSeconds * 1000).toISOString();
+        this.logger.warn(`Source ${job.source} entered COOLDOWN due to rate limit for ${waitSeconds}s`, {
+          source: job.source,
+          cooldownUntil,
+        });
+
+        await this.supabase
+          .from('importer_sources')
+          .update({
+            status: 'COOLDOWN',
+            cooldown_until: cooldownUntil,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', job.source);
+
+        const backoffMinutes = Math.max(1, Math.ceil(waitSeconds / 60));
+        await this.queue.releaseJob(job.id, 'RETRY', `Rate limit triggered: COOLDOWN until ${cooldownUntil}`, backoffMinutes);
+        return;
+      }
 
       const nextStatus = job.attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
       const backoffMinutes = Math.min(60, Math.pow(2, job.attempts) * 2);
