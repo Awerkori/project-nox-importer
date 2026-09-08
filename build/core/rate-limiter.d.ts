@@ -36,6 +36,7 @@ export declare class GlobalStorageRateLimiter {
     private currentRatePerMinute;
     private baseRatePerMinute;
     private recentUploadTimestamps;
+    private recentTransientErrors;
     constructor(config?: StorageRateLimiterConfig);
     /**
      * Acquire an upload token before sending an image to the Storage Bridge.
@@ -51,6 +52,14 @@ export declare class GlobalStorageRateLimiter {
      * Gradually restore rate back towards baseRatePerMinute when operating stably
      */
     restoreRate(): void;
+    /**
+     * Track transient upstream errors (502/503/network) from the Storage Bridge.
+     * Isolated failures (1 or 2) do NOT block or pause the global rate limiter.
+     * Only repeated transient failures in a concentrated window (>= 3 in 30s) trigger
+     * a mild global pacing pause of 15 seconds.
+     */
+    recordTransientError(): void;
+    getRecentTransientErrorCount(): number;
     getCurrentRatePerMinute(): number;
     getRecentUploadCount(): number;
     isBlocked(): boolean;

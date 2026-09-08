@@ -253,6 +253,22 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
                       then: (resolve: any) => execWithNot().then(resolve),
                     };
                   },
+                  order: (ordCol: string, opts?: any) => ({
+                    limit: (n: number) => ({
+                      then: (resolve: any) => {
+                        const dir = opts?.ascending ? 'asc' : 'desc';
+                        db.query(`select * from public.${table} where ${col} = $1 and ${col2} = $2 order by ${ordCol} ${dir} limit ${n}`, [val, val2])
+                          .then((r: any) => resolve({ data: r.rows, error: null }))
+                          .catch((err: any) => resolve({ data: null, error: err }));
+                      },
+                    }),
+                    then: (resolve: any) => {
+                      const dir = opts?.ascending ? 'asc' : 'desc';
+                      db.query(`select * from public.${table} where ${col} = $1 and ${col2} = $2 order by ${ordCol} ${dir}`, [val, val2])
+                        .then((r: any) => resolve({ data: r.rows, error: null }))
+                        .catch((err: any) => resolve({ data: null, error: err }));
+                    },
+                  }),
                   limit: (n: number) => ({
                     maybeSingle: async () => {
                       const res = await execQuery2();

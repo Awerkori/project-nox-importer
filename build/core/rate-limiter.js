@@ -115,6 +115,7 @@ export class GlobalStorageRateLimiter {
     currentRatePerMinute;
     baseRatePerMinute;
     recentUploadTimestamps = [];
+    recentTransientErrors = [];
     constructor(config = {}) {
         this.baseRatePerMinute = config.maxRequestsPerMinute ?? 105;
         this.currentRatePerMinute = this.baseRatePerMinute;
@@ -191,6 +192,32 @@ export class GlobalStorageRateLimiter {
             this.capacity = this.currentRatePerMinute;
             this.logger.info(`Storage upload rate gradually restored to ${this.currentRatePerMinute} req/min`);
         }
+    }
+    /**
+     * Track transient upstream errors (502/503/network) from the Storage Bridge.
+     * Isolated failures (1 or 2) do NOT block or pause the global rate limiter.
+     * Only repeated transient failures in a concentrated window (>= 3 in 30s) trigger
+     * a mild global pacing pause of 15 seconds.
+     */
+    recordTransientError() {
+        const now = Date.now();
+        this.recentTransientErrors = this.recentTransientErrors.filter((t) => now - t < 30_000);
+        this.recentTransientErrors.push(now);
+        if (this.recentTransientErrors.length >= 3) {
+            const pacingMs = 15_000;
+            if (this.blockedUntil < now + pacingMs) {
+                this.blockedUntil = now + pacingMs;
+                this.logger.warn(`Repeated transient errors detected (${this.recentTransientErrors.length} in 30s). Applying mild global pacing of 15s.`);
+            }
+        }
+        else {
+            this.logger.debug(`Recorded isolated transient error (${this.recentTransientErrors.length}/3 in 30s). No global pacing applied.`);
+        }
+    }
+    getRecentTransientErrorCount() {
+        const now = Date.now();
+        this.recentTransientErrors = this.recentTransientErrors.filter((t) => now - t < 30_000);
+        return this.recentTransientErrors.length;
     }
     getCurrentRatePerMinute() {
         return this.currentRatePerMinute;
