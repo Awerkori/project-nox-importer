@@ -1,5 +1,11 @@
+import WebSocket from 'ws';
 import { createClient } from '@supabase/supabase-js';
 import { getConfig } from './config.js';
+
+// Polyfill native WebSocket for Node environments (e.g. Node 20 on DIScloud) where native WebSocket is missing
+if (typeof (globalThis as any).WebSocket === 'undefined') {
+  (globalThis as any).WebSocket = WebSocket;
+}
 import { rootLogger } from './core/logger.js';
 import { HostRateLimiter } from './core/rate-limiter.js';
 import { SourceRegistry } from './sources/registry.js';
