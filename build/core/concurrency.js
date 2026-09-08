@@ -71,9 +71,9 @@ export class AsyncSemaphore {
 const DEFAULT_AUTOTUNER_CONFIG = {
     minConcurrency: 1,
     maxConcurrency: 5,
-    initialConcurrency: 1,
-    requiredStableCycles: 4, // 4 cycles * 30s = 2 minutes of continuous stability
-    cooldownPeriodMs: 2 * 60 * 1000, // 2 minutes cooldown after any stress/scale-down
+    initialConcurrency: 2,
+    requiredStableCycles: 2, // 2 cycles * 30s = 1 minute of continuous stability to scale up (was 4 cycles)
+    cooldownPeriodMs: 35 * 1000, // 35s cooldown after stress/scale-down (was 120s)
     maxRssMb: 360, // Container is 512MB: keep RSS comfortably below 360MB (152MB margin)
     maxHeapMb: 240, // Heap threshold
     maxExternalAndBuffersMb: 120, // Native buffers + external (accommodates heavy Mango Toons webtoons)
@@ -132,7 +132,7 @@ export class AdaptiveAutotuner {
         this.cycleRateLimits = 0;
         this.cycleTimeouts = 0;
         const now = Date.now();
-        // Check for ANY stress condition
+        // Check for stress condition (requiring scale-down)
         let stressReason = null;
         if (mem.rssMb >= this.config.maxRssMb) {
             stressReason = `High RSS: ${mem.rssMb}MB >= limit ${this.config.maxRssMb}MB`;
@@ -149,14 +149,17 @@ export class AdaptiveAutotuner {
         else if (rateLimits > 0) {
             stressReason = `Detected ${rateLimits} HTTP 429 Rate Limits in cycle`;
         }
-        else if (errors > 0) {
-            stressReason = `Detected ${errors} unexpected errors in cycle`;
+        else if (errors >= 2) {
+            stressReason = `Detected error pattern: ${errors} errors in cycle`;
         }
-        else if (timeouts > 0) {
-            stressReason = `Detected ${timeouts} network timeouts in cycle`;
+        else if (timeouts >= 2) {
+            stressReason = `Detected timeout pattern: ${timeouts} network timeouts in cycle`;
+        }
+        else if (errors + timeouts >= 2) {
+            stressReason = `Detected repeated failures: ${errors} errors, ${timeouts} timeouts in cycle`;
         }
         if (stressReason) {
-            // Immediate scale-down
+            // Scale-down on real pattern or resource stress
             this.stableCycleCount = 0;
             this.cooldownUntil = now + this.config.cooldownPeriodMs;
             const previous = this.currentConcurrency;
@@ -167,11 +170,22 @@ export class AdaptiveAutotuner {
                 previous,
                 target,
                 stressReason,
-                cooldownMinutes: Math.round(this.config.cooldownPeriodMs / 60000),
+                cooldownSeconds: Math.round(this.config.cooldownPeriodMs / 1000),
                 memory: mem,
                 lag,
             });
             return { concurrency: target, action: 'SCALED_DOWN', reason: stressReason };
+        }
+        // Isolated error handling: cycleErrors === 1 or cycleTimeouts === 1
+        // Do NOT scale down; do NOT enter cooldown; maintain concurrency and pause ramp-up
+        if (errors === 1 || timeouts === 1) {
+            this.stableCycleCount = 0;
+            this.logger.info(`[Autotuner ISOLATED] Single error/timeout in cycle (errors: ${errors}, timeouts: ${timeouts}). Maintaining concurrency at ${this.currentConcurrency} without cooldown.`);
+            return {
+                concurrency: this.currentConcurrency,
+                action: 'STABLE',
+                reason: `Isolated failure handled: concurrency ${this.currentConcurrency} preserved`,
+            };
         }
         // No stress: check if in cooldown
         if (now < this.cooldownUntil) {

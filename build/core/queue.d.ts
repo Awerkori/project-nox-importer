@@ -47,4 +47,15 @@ export declare class ImporterQueue {
     startHeartbeat(jobId: string, intervalSeconds?: number): {
         stop: () => void;
     };
+    /**
+     * Generic crash-safe lease recovery for any stalled job across the entire system.
+     * Scans for jobs stuck in 'IMPORTING' with expired lease (lease_expires_at < now()).
+     * - Jobs reaching or exceeding max_attempts are marked as 'FAILED'.
+     * - Jobs with remaining attempts are atomically reset back to 'QUEUED' with next_run_at = now().
+     * - Clears locked_by, locked_at, and lease_expires_at, while strictly preserving attempts.
+     */
+    recoverExpiredLeases(): Promise<{
+        recovered: number;
+        failed: number;
+    }>;
 }

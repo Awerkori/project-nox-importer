@@ -38,6 +38,10 @@ export declare class ImporterEngine {
      * Periodic publication sweep loop (every 10s) to unblock STAGED chapters
      */
     private runPublicationSweepLoop;
+    /**
+     * Periodic lease recovery loop (every 60s) to rescue stalled jobs from crashed instances
+     */
+    private runLeaseRecoveryLoop;
     private autotunerCycleCount;
     /**
      * Periodic autotuner telemetry & evaluation loop (every 30s)

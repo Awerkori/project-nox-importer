@@ -170,4 +170,119 @@ export class ImporterQueue {
       },
     };
   }
+
+  /**
+   * Generic crash-safe lease recovery for any stalled job across the entire system.
+   * Scans for jobs stuck in 'IMPORTING' with expired lease (lease_expires_at < now()).
+   * - Jobs reaching or exceeding max_attempts are marked as 'FAILED'.
+   * - Jobs with remaining attempts are atomically reset back to 'QUEUED' with next_run_at = now().
+   * - Clears locked_by, locked_at, and lease_expires_at, while strictly preserving attempts.
+   */
+  async recoverExpiredLeases(): Promise<{ recovered: number; failed: number }> {
+    const nowIso = new Date().toISOString();
+
+    // 1. First attempt atomic RPC if available in database
+    try {
+      const { data: rpcRes, error: rpcErr } = await this.supabase.rpc('importer_recover_stalled_leases');
+      if (!rpcErr && rpcRes && rpcRes.length > 0) {
+        const rec = Number(rpcRes[0].recovered_count ?? 0);
+        const fld = Number(rpcRes[0].failed_count ?? 0);
+        if (rec > 0 || fld > 0) {
+          this.logger.info(`Atomic lease recovery via RPC: ${rec} requeued to QUEUED, ${fld} marked as FAILED`, {
+            recovered: rec,
+            failed: fld,
+          });
+        }
+        return { recovered: rec, failed: fld };
+      }
+    } catch {
+      // RPC may not exist yet; proceed with atomic query fallback below
+    }
+
+    // 2. Direct atomic query fallback
+    try {
+      const { data: stalled, error: fetchErr } = await this.supabase
+        .from('importer_queue')
+        .select('id, attempts, max_attempts')
+        .eq('status', 'IMPORTING')
+        .lt('lease_expires_at', nowIso);
+
+      if (fetchErr) {
+        this.logger.warn('Failed to query stalled jobs during lease recovery', { error: fetchErr.message });
+        return { recovered: 0, failed: 0 };
+      }
+
+      if (!stalled || stalled.length === 0) {
+        return { recovered: 0, failed: 0 };
+      }
+
+      const toFailIds: string[] = [];
+      const toRequeueIds: string[] = [];
+
+      for (const job of stalled) {
+        if (job.attempts >= job.max_attempts) {
+          toFailIds.push(job.id);
+        } else {
+          toRequeueIds.push(job.id);
+        }
+      }
+
+      let failedCount = 0;
+      let recoveredCount = 0;
+
+      if (toFailIds.length > 0) {
+        const { error: failErr } = await this.supabase
+          .from('importer_queue')
+          .update({
+            status: 'FAILED',
+            locked_by: null,
+            locked_at: null,
+            lease_expires_at: null,
+            last_error: 'Lease expired after max attempts',
+            updated_at: nowIso,
+          })
+          .in('id', toFailIds)
+          .eq('status', 'IMPORTING');
+
+        if (!failErr) {
+          failedCount = toFailIds.length;
+        } else {
+          this.logger.error('Failed to mark expired jobs as FAILED', { error: failErr.message });
+        }
+      }
+
+      if (toRequeueIds.length > 0) {
+        const { error: requeueErr } = await this.supabase
+          .from('importer_queue')
+          .update({
+            status: 'QUEUED',
+            locked_by: null,
+            locked_at: null,
+            lease_expires_at: null,
+            next_run_at: nowIso,
+            updated_at: nowIso,
+          })
+          .in('id', toRequeueIds)
+          .eq('status', 'IMPORTING');
+
+        if (!requeueErr) {
+          recoveredCount = toRequeueIds.length;
+        } else {
+          this.logger.error('Failed to requeue expired jobs to QUEUED', { error: requeueErr.message });
+        }
+      }
+
+      if (recoveredCount > 0 || failedCount > 0) {
+        this.logger.info(`Lease recovery completed: ${recoveredCount} requeued to QUEUED, ${failedCount} marked as FAILED`, {
+          recovered: recoveredCount,
+          failed: failedCount,
+        });
+      }
+
+      return { recovered: recoveredCount, failed: failedCount };
+    } catch (err: any) {
+      this.logger.error('Unexpected error during generic lease recovery', { error: err?.message });
+      return { recovered: 0, failed: 0 };
+    }
+  }
 }

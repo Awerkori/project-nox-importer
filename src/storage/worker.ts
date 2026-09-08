@@ -68,7 +68,9 @@ export class NoxWorkerStorageProvider implements StorageProvider {
     const url = `${this.workerBaseUrl.replace(/\/$/, '')}/api/internal/storage/upload?id=${encodeURIComponent(id)}`;
 
     let lastError: any;
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    const maxAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         // Enforce global rate limit across all sources (Token Bucket + Sliding Window cap at 105 req/min)
         await this.rateLimiter.acquire();
@@ -92,15 +94,26 @@ export class NoxWorkerStorageProvider implements StorageProvider {
         }
 
         if (res.status === 429) {
+          let waitSec = 15;
           const retryHeader = res.headers?.get ? res.headers.get('retry-after') : null;
-          const retrySec = retryHeader ? parseInt(retryHeader, 10) : 60;
-          const waitSec = isNaN(retrySec) || retrySec <= 0 ? 60 : retrySec;
+          if (retryHeader) {
+            const parsed = parseInt(retryHeader, 10);
+            if (!isNaN(parsed) && parsed > 0) waitSec = parsed;
+          } else {
+            try {
+              const bodyJson = await res.clone().json().catch(() => null);
+              if (bodyJson?.retryAfter && typeof bodyJson.retryAfter === 'number' && bodyJson.retryAfter > 0) {
+                waitSec = bodyJson.retryAfter;
+              }
+            } catch {}
+          }
+
           this.rateLimiter.recordRateLimit(waitSec);
           this.logger.warn(
-            `Storage Bridge returned HTTP 429 (Rate Limit)! Cooldown ${waitSec}s, retrying attempt ${attempt + 1}/3...`,
-            { id }
+            `Storage Bridge returned HTTP 429 (Rate Limit)! Cooldown ${waitSec}s, retrying attempt ${attempt + 1}/${maxAttempts}...`,
+            { id, waitSec }
           );
-          if (attempt < 3) {
+          if (attempt < maxAttempts) {
             await new Promise((r) => setTimeout(r, waitSec * 1000));
             continue;
           }
@@ -114,9 +127,22 @@ export class NoxWorkerStorageProvider implements StorageProvider {
             res.status,
             `Internal storage upload failed: HTTP ${res.status} - ${errText.slice(0, 200)}`
           );
-          if (res.status >= 500 && attempt < 3) {
-            this.logger.warn(`Storage upload transient error HTTP ${res.status}, retrying attempt ${attempt + 1}/3...`, { id });
-            await new Promise((r) => setTimeout(r, 2000 * attempt));
+
+          if (res.status >= 500 && attempt < maxAttempts) {
+            // Record transient error: only triggers global pacing if concentrated (>= 3 in 30s)
+            this.rateLimiter.recordTransientError();
+
+            // Progressive retry with jitter: 4s -> 10s -> 20s + jitter
+            const baseDelays = [4000, 10000, 20000];
+            const baseMs = baseDelays[attempt - 1] ?? 20000;
+            const jitterMs = Math.floor(Math.random() * (baseMs * 0.25));
+            const delayMs = baseMs + jitterMs;
+
+            this.logger.warn(
+              `Storage upload transient error HTTP ${res.status}, local backoff ${Math.round(delayMs / 1000)}s with jitter before attempt ${attempt + 1}/${maxAttempts}...`,
+              { id, status: res.status, delayMs }
+            );
+            await new Promise((r) => setTimeout(r, delayMs));
             continue;
           }
           throw error;
@@ -137,7 +163,6 @@ export class NoxWorkerStorageProvider implements StorageProvider {
         // Gradually restore rate if currently throttled
         this.rateLimiter.restoreRate();
 
-
         return data.providerKey;
       } catch (err: any) {
         lastError = err;
@@ -147,9 +172,19 @@ export class NoxWorkerStorageProvider implements StorageProvider {
         ) {
           throw err;
         }
-        if (attempt < 3) {
-          this.logger.warn(`Storage upload attempt ${attempt}/3 failed (${err?.message}), retrying...`, { id });
-          await new Promise((r) => setTimeout(r, 2000 * attempt));
+        if (attempt < maxAttempts) {
+          this.rateLimiter.recordTransientError();
+
+          const baseDelays = [4000, 10000, 20000];
+          const baseMs = baseDelays[attempt - 1] ?? 20000;
+          const jitterMs = Math.floor(Math.random() * (baseMs * 0.25));
+          const delayMs = baseMs + jitterMs;
+
+          this.logger.warn(
+            `Storage upload attempt ${attempt}/${maxAttempts} network failure (${err?.message}), waiting ${Math.round(delayMs / 1000)}s before retrying...`,
+            { id, delayMs }
+          );
+          await new Promise((r) => setTimeout(r, delayMs));
           continue;
         }
       }

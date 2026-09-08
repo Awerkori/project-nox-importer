@@ -6,6 +6,7 @@ import { Logger } from './logger.js';
 import { diagnostics } from './diagnostics.js';
 import { AdaptiveAutotuner, AsyncSemaphore } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
+import { NoxWorkerStorageError } from '../storage/worker.js';
 export function computeCanonicalChapterKey(chapterNumber, chapterTitle) {
     const num = typeof chapterNumber === 'number' ? chapterNumber : parseFloat(String(chapterNumber));
     const normalizedNumber = isNaN(num) || num < 0 ? 0 : Number(num.toFixed(4));
@@ -84,7 +85,9 @@ export class ImporterEngine {
         this.runDiscoveryLoop();
         // 4. Launch background publication sweep loop (every 10s)
         this.runPublicationSweepLoop();
-        // 5. Launch independent concurrent worker loops for each registered source
+        // 5. Launch background lease recovery loop (every 60s)
+        this.runLeaseRecoveryLoop();
+        // 6. Launch independent concurrent worker loops for each registered source
         const activeWorkers = [];
         for (const adapter of this.registry.getAll()) {
             activeWorkers.push(this.runSourceWorker(adapter.id));
@@ -98,26 +101,10 @@ export class ImporterEngine {
     }
     async runStartupRecovery() {
         try {
-            const { data: stalled, error } = await this.supabase
-                .from('importer_queue')
-                .select('id, task_type, source, attempts, locked_by, lease_expires_at')
-                .eq('status', 'IMPORTING')
-                .lt('lease_expires_at', new Date().toISOString());
-            if (error) {
-                this.logger.warn('Failed to query stalled jobs during startup recovery', { error: error.message });
-                return;
-            }
-            if (stalled && stalled.length > 0) {
-                this.logger.warn(`Startup recovery detected ${stalled.length} interrupted job(s) from previous worker crash`, {
-                    count: stalled.length,
-                    stalledJobs: stalled.map((j) => ({
-                        id: j.id,
-                        taskType: j.task_type,
-                        source: j.source,
-                        attempts: j.attempts,
-                        previousWorker: j.locked_by,
-                    })),
-                });
+            this.logger.info('Starting generic lease recovery for stalled jobs...');
+            const { recovered, failed } = await this.queue.recoverExpiredLeases();
+            if (recovered > 0 || failed > 0) {
+                this.logger.warn(`Startup recovery processed stalled jobs: ${recovered} requeued to QUEUED, ${failed} marked as FAILED`, { recovered, failed });
             }
             else {
                 this.logger.info('Startup recovery check passed: no stalled jobs detected');
@@ -161,6 +148,22 @@ export class ImporterEngine {
             }
             catch (err) {
                 this.logger.error('Error during publication sweep loop', { error: err?.message });
+            }
+        }
+    }
+    /**
+     * Periodic lease recovery loop (every 60s) to rescue stalled jobs from crashed instances
+     */
+    async runLeaseRecoveryLoop() {
+        while (!this.stopSignal) {
+            await this.sleep(60_000);
+            if (this.stopSignal)
+                break;
+            try {
+                await this.queue.recoverExpiredLeases();
+            }
+            catch (err) {
+                this.logger.warn('Error during periodic lease recovery loop', { error: err?.message });
             }
         }
     }
@@ -407,8 +410,17 @@ export class ImporterEngine {
                 error: errorMessage,
                 attempts: job.attempts,
             });
+            const isStorageBridgeError = err instanceof NoxWorkerStorageError;
+            const isStorageBridge429 = isStorageBridgeError && err.status === 429;
             const is429 = err?.status === 429 || err?.statusCode === 429 || /429|rate\s*limit/i.test(errorMessage);
             const isTimeout = /timeout|aborted|ETIMEDOUT/i.test(errorMessage);
+            if (isStorageBridge429) {
+                this.autotuner.recordError('ratelimit');
+                this.logger.warn(`Storage Bridge rate limit (429) encountered for job ${job.id}. Releasing for retry.`);
+                const nextStatus = job.attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
+                await this.queue.releaseJob(job.id, nextStatus, errorMessage, 1);
+                return;
+            }
             if (is429) {
                 this.autotuner.recordError('ratelimit');
                 let waitSeconds = 60;
