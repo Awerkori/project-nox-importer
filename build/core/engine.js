@@ -572,6 +572,7 @@ export class ImporterEngine {
                     work_mapping_id: result.mappingId,
                     chapter_number: ch.number,
                     page_count: ch.pageCount || 0,
+                    is_page_provider: false,
                     status: 'COMPLETED',
                     last_error: null,
                 }, { onConflict: 'source,source_chapter_id' });
@@ -842,6 +843,7 @@ export class ImporterEngine {
                 work_mapping_id: workMappingId,
                 chapter_number: chapterNumber,
                 page_count: validPages.length,
+                is_page_provider: true,
                 status: 'COMPLETED',
                 last_error: null,
             }, { onConflict: 'source,source_chapter_id' });

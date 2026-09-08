@@ -42,6 +42,7 @@ describe('Metadata Precedence & Field-Level Provenance', () => {
     await db.exec(readFileSync(resolve('migrations/002_importer_sources_status.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/003_importer_sort_key_and_concurrency.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/004_importer_telemetry_and_provenance.sql'), 'utf8'));
+    await db.exec(readFileSync(resolve('migrations/005_importer_page_provider_column.sql'), 'utf8'));
 
     // Create users with distinct roles
     await db.query(`insert into auth.users (id, email, email_confirmed_at) values ($1, 'admin@projectnox.com', now())`, [adminUserId]);

@@ -1,5 +1,6 @@
 import { StorageProvider } from './provider.js';
 import { Logger } from '../core/logger.js';
+import { GlobalStorageRateLimiter } from '../core/rate-limiter.js';
 
 export class NoxWorkerStorageError extends Error {
   constructor(
@@ -14,15 +15,22 @@ export class NoxWorkerStorageError extends Error {
 
 export class NoxWorkerStorageProvider implements StorageProvider {
   private logger = new Logger('NoxWorkerStorage');
+  private rateLimiter: GlobalStorageRateLimiter;
 
   constructor(
     private workerBaseUrl: string,
     private bridgeToken: string,
-    private transport: typeof fetch = fetch
+    private transport: typeof fetch = fetch,
+    rateLimiter?: GlobalStorageRateLimiter
   ) {
     if (!bridgeToken) {
       throw new Error('NoxWorkerStorageProvider requires valid NOX_STORAGE_BRIDGE_TOKEN');
     }
+    this.rateLimiter = rateLimiter || new GlobalStorageRateLimiter({ maxRequestsPerMinute: 105, minIntervalMs: 350 });
+  }
+
+  getRateLimiter(): GlobalStorageRateLimiter {
+    return this.rateLimiter;
   }
 
   getProviderKey(): string {
@@ -62,6 +70,9 @@ export class NoxWorkerStorageProvider implements StorageProvider {
     let lastError: any;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
+        // Enforce global rate limit across all sources (Token Bucket + Sliding Window cap at 105 req/min)
+        await this.rateLimiter.acquire();
+
         const blobPart = bytes as unknown as BlobPart;
         const res = await this.transport(url, {
           method: 'POST',
@@ -80,6 +91,22 @@ export class NoxWorkerStorageProvider implements StorageProvider {
           throw new NoxWorkerStorageError('auth', res.status, 'Authentication failed on internal storage endpoint');
         }
 
+        if (res.status === 429) {
+          const retryHeader = res.headers?.get ? res.headers.get('retry-after') : null;
+          const retrySec = retryHeader ? parseInt(retryHeader, 10) : 60;
+          const waitSec = isNaN(retrySec) || retrySec <= 0 ? 60 : retrySec;
+          this.rateLimiter.recordRateLimit(waitSec);
+          this.logger.warn(
+            `Storage Bridge returned HTTP 429 (Rate Limit)! Cooldown ${waitSec}s, retrying attempt ${attempt + 1}/3...`,
+            { id }
+          );
+          if (attempt < 3) {
+            await new Promise((r) => setTimeout(r, waitSec * 1000));
+            continue;
+          }
+          throw new NoxWorkerStorageError('http', 429, `Storage Bridge rate limit exceeded (Retry-After: ${waitSec}s)`);
+        }
+
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
           const error = new NoxWorkerStorageError(
@@ -87,7 +114,7 @@ export class NoxWorkerStorageProvider implements StorageProvider {
             res.status,
             `Internal storage upload failed: HTTP ${res.status} - ${errText.slice(0, 200)}`
           );
-          if ((res.status >= 500 || res.status === 429) && attempt < 3) {
+          if (res.status >= 500 && attempt < 3) {
             this.logger.warn(`Storage upload transient error HTTP ${res.status}, retrying attempt ${attempt + 1}/3...`, { id });
             await new Promise((r) => setTimeout(r, 2000 * attempt));
             continue;
@@ -106,6 +133,10 @@ export class NoxWorkerStorageProvider implements StorageProvider {
         if (!data || typeof data.providerKey !== 'string' || !data.providerKey) {
           throw new NoxWorkerStorageError('payload', res.status, 'Invalid response payload from internal storage endpoint');
         }
+
+        // Gradually restore rate if currently throttled
+        this.rateLimiter.restoreRate();
+
 
         return data.providerKey;
       } catch (err: any) {

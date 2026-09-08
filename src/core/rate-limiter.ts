@@ -115,3 +115,139 @@ export class HostRateLimiter {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
+
+export interface StorageRateLimiterConfig {
+  maxRequestsPerMinute?: number;
+  minIntervalMs?: number;
+}
+
+/**
+ * Centralized global rate limiter for Storage Bridge uploads across all sources.
+ * Enforces a strict Token Bucket + Sliding Window rate limit (default 105 req/min)
+ * with dynamic backoff upon receiving HTTP 429 or Retry-After headers.
+ */
+export class GlobalStorageRateLimiter {
+  private logger = new Logger('GlobalStorageRateLimiter');
+  private tokens: number;
+  private lastRefill: number;
+  private capacity: number;
+  private ratePerSecond: number;
+  private blockedUntil: number = 0;
+  private minIntervalMs: number;
+  private lastAcquiredTime: number = 0;
+  private currentRatePerMinute: number;
+  private baseRatePerMinute: number;
+  private recentUploadTimestamps: number[] = [];
+
+  constructor(config: StorageRateLimiterConfig = {}) {
+    this.baseRatePerMinute = config.maxRequestsPerMinute ?? 105;
+    this.currentRatePerMinute = this.baseRatePerMinute;
+    this.capacity = this.currentRatePerMinute;
+    this.ratePerSecond = this.currentRatePerMinute / 60;
+    this.tokens = this.capacity;
+    this.lastRefill = Date.now();
+    this.minIntervalMs = config.minIntervalMs ?? 350;
+  }
+
+  /**
+   * Acquire an upload token before sending an image to the Storage Bridge.
+   * Blocks if the rate limit or pacing threshold is reached.
+   */
+  async acquire(): Promise<void> {
+    while (true) {
+      const now = Date.now();
+
+      // 1. Check if blocked due to 429 / cooldown
+      if (this.blockedUntil > now) {
+        const waitMs = this.blockedUntil - now;
+        this.logger.warn(`Storage Bridge is rate-blocked, waiting ${waitMs}ms before retry`);
+        await new Promise((r) => setTimeout(r, Math.min(waitMs, 5000)));
+        continue;
+      }
+
+      // 2. Sliding window check over the last 60 seconds
+      this.recentUploadTimestamps = this.recentUploadTimestamps.filter((t) => now - t < 60_000);
+      if (this.recentUploadTimestamps.length >= this.currentRatePerMinute) {
+        const oldest = this.recentUploadTimestamps[0];
+        const waitMs = Math.max(100, 60_000 - (now - oldest) + 50);
+        this.logger.debug(
+          `Sliding window limit reached (${this.recentUploadTimestamps.length}/${this.currentRatePerMinute} req/min), pacing for ${waitMs}ms`
+        );
+        await new Promise((r) => setTimeout(r, Math.min(waitMs, 2000)));
+        continue;
+      }
+
+      // 3. Token bucket refill
+      const elapsedSec = (now - this.lastRefill) / 1000;
+      this.tokens = Math.min(this.capacity, this.tokens + elapsedSec * this.ratePerSecond);
+      this.lastRefill = now;
+
+      // 4. Minimum spacing pacing between releases
+      const sinceLast = now - this.lastAcquiredTime;
+      if (sinceLast < this.minIntervalMs) {
+        await new Promise((r) => setTimeout(r, this.minIntervalMs - sinceLast));
+        continue;
+      }
+
+      if (this.tokens >= 1) {
+        this.tokens -= 1;
+        this.lastAcquiredTime = Date.now();
+        this.recentUploadTimestamps.push(this.lastAcquiredTime);
+        return;
+      }
+
+      // Wait until next token is generated
+      const waitMs = Math.ceil(((1 - this.tokens) / this.ratePerSecond) * 1000);
+      await new Promise((r) => setTimeout(r, Math.max(50, Math.min(waitMs, 1000))));
+    }
+  }
+
+  /**
+   * Handle rate limits (HTTP 429, FloodWait, Retry-After) reported by the Storage Bridge.
+   * Immediately blocks subsequent uploads and backs off by reducing rate by 20%.
+   */
+  recordRateLimit(retryAfterSeconds?: number): void {
+    const cooldownMs = retryAfterSeconds && retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 60_000;
+    this.blockedUntil = Date.now() + cooldownMs;
+    // Step down currentRatePerMinute by 20% to avoid immediate re-triggering (floor at 60 req/min)
+    this.currentRatePerMinute = Math.max(60, Math.floor(this.currentRatePerMinute * 0.8));
+    this.ratePerSecond = this.currentRatePerMinute / 60;
+    this.tokens = 0; // Empty bucket during cooldown
+    this.logger.warn(
+      `Rate limit recorded from Storage Bridge! Cooldown for ${Math.round(
+        cooldownMs / 1000
+      )}s. Upload rate throttled to ${this.currentRatePerMinute} req/min`
+    );
+  }
+
+  /**
+   * Gradually restore rate back towards baseRatePerMinute when operating stably
+   */
+  restoreRate(): void {
+    if (this.currentRatePerMinute < this.baseRatePerMinute) {
+      this.currentRatePerMinute = Math.min(this.baseRatePerMinute, this.currentRatePerMinute + 5);
+      this.ratePerSecond = this.currentRatePerMinute / 60;
+      this.capacity = this.currentRatePerMinute;
+      this.logger.info(`Storage upload rate gradually restored to ${this.currentRatePerMinute} req/min`);
+    }
+  }
+
+  getCurrentRatePerMinute(): number {
+    return this.currentRatePerMinute;
+  }
+
+  getRecentUploadCount(): number {
+    const now = Date.now();
+    this.recentUploadTimestamps = this.recentUploadTimestamps.filter((t) => now - t < 60_000);
+    return this.recentUploadTimestamps.length;
+  }
+
+  isBlocked(): boolean {
+    return this.blockedUntil > Date.now();
+  }
+
+  getBlockedRemainingMs(): number {
+    return Math.max(0, this.blockedUntil - Date.now());
+  }
+}
+

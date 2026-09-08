@@ -103,7 +103,7 @@ describe('Concurrency & Autotuner', () => {
 
       const res = autotuner.evaluateCycle();
       expect(res.action).toBe('SCALED_DOWN');
-      expect(res.concurrency).toBeLessThanOrEqual(2);
+      expect(res.concurrency).toBe(3); // Reduced by 1 level: 4 -> 3
       expect(res.reason).toContain('High RSS');
 
       // Subsequent cycle even if memory recovers should be in COOLDOWN

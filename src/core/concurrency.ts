@@ -89,13 +89,13 @@ export interface AutotunerConfig {
 
 const DEFAULT_AUTOTUNER_CONFIG: AutotunerConfig = {
   minConcurrency: 1,
-  maxConcurrency: 6,
-  initialConcurrency: 3,
+  maxConcurrency: 5,
+  initialConcurrency: 1,
   requiredStableCycles: 4, // 4 cycles * 30s = 2 minutes of continuous stability
-  cooldownPeriodMs: 5 * 60 * 1000, // 5 minutes cooldown after any stress/scale-down
-  maxRssMb: 360, // Container is 512MB: keep RSS comfortably below 360MB
+  cooldownPeriodMs: 2 * 60 * 1000, // 2 minutes cooldown after any stress/scale-down
+  maxRssMb: 360, // Container is 512MB: keep RSS comfortably below 360MB (152MB margin)
   maxHeapMb: 240, // Heap threshold
-  maxExternalAndBuffersMb: 60, // Native buffers + external
+  maxExternalAndBuffersMb: 120, // Native buffers + external (accommodates heavy Mango Toons webtoons)
   maxEventLoopLagMs: 100, // Maximum tolerated event loop lag
 };
 
@@ -118,7 +118,7 @@ export class AdaptiveAutotuner {
     this.config = { ...DEFAULT_AUTOTUNER_CONFIG, ...config };
     this.currentConcurrency = this.config.initialConcurrency;
     this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency);
-    this.globalMediaSemaphore = new AsyncSemaphore(10); // Global cap on concurrent image downloads/uploads
+    this.globalMediaSemaphore = new AsyncSemaphore(6); // Concurrent image upload limit to Telegram
   }
 
   getGlobalChapterSemaphore(): AsyncSemaphore {
@@ -188,7 +188,7 @@ export class AdaptiveAutotuner {
       this.cooldownUntil = now + this.config.cooldownPeriodMs;
 
       const previous = this.currentConcurrency;
-      const target = Math.max(this.config.minConcurrency, Math.min(previous - 1, 2));
+      const target = Math.max(this.config.minConcurrency, previous - 1);
       this.currentConcurrency = target;
       this.globalChapterSemaphore.setCapacity(target);
 
