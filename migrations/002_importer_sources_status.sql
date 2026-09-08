@@ -41,18 +41,6 @@ values
     )
   ),
   (
-    'toonlivre',
-    'Toon Livre',
-    'https://toonlivre.net',
-    false,
-    'PAUSED',
-    2.00,
-    30,
-    jsonb_build_object(
-      'api_url', 'https://toonlivre.net/api'
-    )
-  ),
-  (
     'kuro',
     'Kuro Mangas',
     'https://kuromangas.com',

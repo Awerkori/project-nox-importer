@@ -71,6 +71,10 @@ def main():
                     errors.append(f"POTENTIAL SERVICE_ROLE JWT LEAK in {filename}")
                 if "NOX_STORAGE_BRIDGE_TOKEN=" in content:
                     errors.append(f"POTENTIAL BRIDGE TOKEN LEAK in {filename}")
+                if "KURO_PASSWORD=" in content or "[REDACTED]" in content:
+                    errors.append(f"POTENTIAL KURO PASSWORD LEAK in {filename}")
+                if "TELEGRAM_BOT_TOKEN=" in content and not filename.endswith("discloud.py"):
+                    errors.append(f"POTENTIAL TELEGRAM BOT TOKEN LEAK in {filename}")
 
     if errors:
         print("❌ SECURITY AUDIT FAILED:")

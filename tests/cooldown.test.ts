@@ -191,14 +191,13 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
   });
 
   it('does not schedule jobs for sources with status = PAUSED or DISABLED', async () => {
-    // kuro, mangaflix, manhastro, toonlivre are seeded as PAUSED and enabled=false
+    // kuro, mangaflix, manhastro are seeded as PAUSED and enabled=false
     await (engine as any).scheduleSources();
 
     const queuedJobs = await db.query(`select * from public.importer_queue where status = 'QUEUED'`);
     // Only 'nexus' (ACTIVE) could be scheduled, none of the PAUSED ones
     const sourcesInQueue = queuedJobs.rows.map((r: any) => r.source);
     expect(sourcesInQueue).not.toContain('kuro');
-    expect(sourcesInQueue).not.toContain('toonlivre');
     expect(sourcesInQueue).not.toContain('mangaflix');
     expect(sourcesInQueue).not.toContain('manhastro');
   });
