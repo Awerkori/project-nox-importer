@@ -3,6 +3,7 @@ import { SourceRegistry } from '../sources/registry.js';
 import { StorageProvider } from '../storage/provider.js';
 import { HostRateLimiter } from './rate-limiter.js';
 import { Config } from '../config.js';
+import { AdaptiveAutotuner } from './concurrency.js';
 export declare class ImporterEngine {
     private supabase;
     private storage;
@@ -13,20 +14,44 @@ export declare class ImporterEngine {
     private queue;
     private deduplication;
     private checkpoints;
+    private autotuner;
     private isRunning;
     private stopSignal;
+    private abortController;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
+    getAutotuner(): AdaptiveAutotuner;
     start(): Promise<void>;
     runStartupRecovery(): Promise<void>;
     stop(): void;
     /**
-     * Run a single discrete engine iteration (also used in tests)
+     * Periodic discovery scheduler running in the background
      */
-    step(): Promise<boolean>;
+    private runDiscoveryLoop;
+    /**
+     * Periodic autotuner telemetry & evaluation loop (every 30s)
+     */
+    private runAutotunerLoop;
+    /**
+     * Dedicated worker loop for a specific source
+     */
+    private runSourceWorker;
+    /**
+     * General worker loop to process jobs with no source filter
+     */
+    private runGeneralWorker;
+    /**
+     * Executes a job respecting global and per-source concurrency semaphores
+     */
+    private executeJobWithLimits;
+    /**
+     * Discrete step method preserved for unit tests & single iterations
+     */
+    step(source?: string): Promise<boolean>;
     private scheduleSources;
     private processJob;
     private handleDiscoverWorks;
     private handleSyncWork;
+    private computeChapterSortKey;
     private handleImportChapter;
     private downloadAndRegisterImage;
     private fetchImageBytes;

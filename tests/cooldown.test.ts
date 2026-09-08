@@ -70,6 +70,7 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
     }
     await db.exec(readFileSync(resolve('migrations/001_importer_schema.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/002_importer_sources_status.sql'), 'utf8'));
+    await db.exec(readFileSync(resolve('migrations/003_importer_sort_key_and_concurrency.sql'), 'utf8'));
 
     await db.query(`insert into auth.users (id, email, email_confirmed_at) values ($1, 'bot@projectnox.com', now())`, [botUserId]);
     await db.query(`update public.access_roles set role = 'ADMIN' where user_id = $1`, [botUserId]);

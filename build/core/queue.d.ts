@@ -16,6 +16,7 @@ export interface QueueJob {
     lease_expires_at: string | null;
     next_run_at: string;
     last_error: string | null;
+    chapter_sort_key?: number | null;
 }
 export declare class ImporterQueue {
     private supabase;
@@ -23,13 +24,14 @@ export declare class ImporterQueue {
     private logger;
     constructor(supabase: SupabaseClient, workerId: string);
     /**
-     * Enqueue a new task safely with deduplication key
+     * Enqueue a new task safely with deduplication key and optional deterministic sort key
      */
-    enqueue(taskType: TaskType, source: string, dedupeKey: string, payload?: Record<string, any>, priority?: number): Promise<boolean>;
+    enqueue(taskType: TaskType, source: string, dedupeKey: string, payload?: Record<string, any>, priority?: number, chapterSortKey?: number | null): Promise<boolean>;
     /**
-     * Acquire the next job atomically using SKIP LOCKED stored procedure
+     * Acquire the next job atomically using SKIP LOCKED stored procedure,
+     * optionally filtered by source for concurrent source runners.
      */
-    acquireNextJob(leaseDurationMinutes?: number): Promise<QueueJob | null>;
+    acquireNextJob(leaseDurationMinutes?: number, source?: string): Promise<QueueJob | null>;
     /**
      * Heartbeat renewal of an active lease
      */
@@ -40,7 +42,7 @@ export declare class ImporterQueue {
     releaseJob(jobId: string, status: JobStatus, lastError?: string, retryDelayMinutes?: number): Promise<boolean>;
     /**
      * Create a lease heartbeat handle that periodically renews the lease
-     * until stopped.
+     * until stopped. Uses .unref() to avoid blocking graceful shutdown.
      */
     startHeartbeat(jobId: string, intervalSeconds?: number): {
         stop: () => void;

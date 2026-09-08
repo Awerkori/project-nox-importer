@@ -3,6 +3,8 @@ import { DeduplicationEngine } from './deduplication.js';
 import { CheckpointManager } from './checkpoint.js';
 import { processAndStoreMedia } from '../storage/media.js';
 import { Logger } from './logger.js';
+import { diagnostics } from './diagnostics.js';
+import { AdaptiveAutotuner, AsyncSemaphore } from './concurrency.js';
 export class ImporterEngine {
     supabase;
     storage;
@@ -13,8 +15,10 @@ export class ImporterEngine {
     queue;
     deduplication;
     checkpoints;
+    autotuner;
     isRunning = false;
     stopSignal = false;
+    abortController = new AbortController();
     constructor(supabase, storage, registry, rateLimiter, config) {
         this.supabase = supabase;
         this.storage = storage;
@@ -24,36 +28,38 @@ export class ImporterEngine {
         this.queue = new ImporterQueue(supabase, config.WORKER_ID);
         this.deduplication = new DeduplicationEngine(supabase);
         this.checkpoints = new CheckpointManager(supabase);
+        this.autotuner = new AdaptiveAutotuner({
+            initialConcurrency: Math.min(3, config.MAX_CONCURRENT_CHAPTERS || 3),
+            maxConcurrency: Math.max(3, config.MAX_CONCURRENT_CHAPTERS || 6),
+        });
+    }
+    getAutotuner() {
+        return this.autotuner;
     }
     async start() {
         this.isRunning = true;
         this.stopSignal = false;
-        this.logger.info('Importer Engine daemon started', {
+        this.abortController = new AbortController();
+        this.logger.info('Importer Engine daemon started with multi-source concurrent runners', {
             workerId: this.config.WORKER_ID,
-            pollInterval: this.config.POLL_INTERVAL_SECONDS,
             storageProvider: this.storage.getProviderKey(),
+            initialConcurrency: this.autotuner.getCurrentConcurrency(),
         });
         // 1. Run startup recovery for stalled jobs from crashed instances
         await this.runStartupRecovery();
-        let lastTelemetryTime = 0;
-        const telemetryIntervalMs = 5 * 60 * 1000; // 5 minutes
-        while (!this.stopSignal) {
-            try {
-                const now = Date.now();
-                if (now - lastTelemetryTime >= telemetryIntervalMs) {
-                    lastTelemetryTime = now;
-                    const mem = process.memoryUsage();
-                    this.logger.info(`[Daemon Telemetry] Memory: ${Math.round(mem.heapUsed / 1024 / 1024)}MB heap / ${Math.round(mem.rss / 1024 / 1024)}MB rss (512MB RAM) | Worker: ${this.config.WORKER_ID}`);
-                }
-                await this.step();
-            }
-            catch (err) {
-                this.logger.error('Unexpected error in engine step', { error: err?.message, stack: err?.stack });
-            }
-            if (!this.stopSignal) {
-                await this.sleep(this.config.POLL_INTERVAL_SECONDS * 1000);
-            }
+        // 2. Launch background autotuner telemetry loop (every 30s)
+        this.runAutotunerLoop();
+        // 3. Launch background discovery scheduler loop
+        this.runDiscoveryLoop();
+        // 4. Launch independent concurrent worker loops for each registered source
+        const activeWorkers = [];
+        for (const adapter of this.registry.getAll()) {
+            activeWorkers.push(this.runSourceWorker(adapter.id));
         }
+        // General worker to process any unassigned or balancing jobs
+        activeWorkers.push(this.runGeneralWorker());
+        // Wait until all workers finish upon stop signal
+        await Promise.all(activeWorkers);
         this.isRunning = false;
         this.logger.info('Importer Engine stopped gracefully');
     }
@@ -90,17 +96,132 @@ export class ImporterEngine {
     }
     stop() {
         this.stopSignal = true;
+        this.abortController.abort();
     }
     /**
-     * Run a single discrete engine iteration (also used in tests)
+     * Periodic discovery scheduler running in the background
      */
-    async step() {
-        // 1. Check sources scheduling
+    async runDiscoveryLoop() {
+        while (!this.stopSignal) {
+            try {
+                await this.scheduleSources();
+            }
+            catch (err) {
+                this.logger.error('Error during source discovery scheduling', { error: err?.message });
+            }
+            // Check discovery every 30 seconds
+            await this.sleep(30_000);
+        }
+    }
+    /**
+     * Periodic autotuner telemetry & evaluation loop (every 30s)
+     */
+    async runAutotunerLoop() {
+        while (!this.stopSignal) {
+            await this.sleep(30_000);
+            if (this.stopSignal)
+                break;
+            try {
+                const mem = diagnostics.getMemorySnapshot();
+                const evaluation = this.autotuner.evaluateCycle();
+                const activeJobs = diagnostics.getActiveJobsCount();
+                this.logger.info(`[Autotuner Telemetry] Action: ${evaluation.action} | Concurrency: ${evaluation.concurrency} | Active Jobs: ${activeJobs} | Mem: ${mem.heapUsedMb}MB heap / ${mem.rssMb}MB rss (512MB RAM) | Reason: ${evaluation.reason}`);
+            }
+            catch (err) {
+                this.logger.error('Error during autotuner evaluation loop', { error: err?.message });
+            }
+        }
+    }
+    /**
+     * Dedicated worker loop for a specific source
+     */
+    async runSourceWorker(source) {
+        this.logger.info(`Starting dedicated runner for source: ${source}`);
+        while (!this.stopSignal) {
+            try {
+                // Verify source status before attempting to acquire
+                const { data: src } = await this.supabase
+                    .from('importer_sources')
+                    .select('status, enabled, cooldown_until')
+                    .eq('id', source)
+                    .maybeSingle();
+                if (src) {
+                    if (!src.enabled || src.status === 'PAUSED' || src.status === 'DISABLED') {
+                        await this.sleep(10_000);
+                        continue;
+                    }
+                    if (src.status === 'COOLDOWN') {
+                        const cooldownUntil = src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0;
+                        if (Date.now() < cooldownUntil) {
+                            await this.sleep(10_000);
+                            continue;
+                        }
+                    }
+                }
+                // Acquire job for this source
+                const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), source);
+                if (!job) {
+                    // Queue empty for this source: idle sleep 5 seconds
+                    await this.sleep(5_000);
+                    continue;
+                }
+                // Process job with concurrency semaphores
+                await this.executeJobWithLimits(job);
+                // Continuous drain: immediately check for next job without delay
+                await this.sleep(50);
+            }
+            catch (err) {
+                this.logger.error(`Error in worker loop for source ${source}`, { error: err?.message });
+                await this.sleep(5_000);
+            }
+        }
+    }
+    /**
+     * General worker loop to process jobs with no source filter
+     */
+    async runGeneralWorker() {
+        this.logger.info('Starting general fallback runner');
+        while (!this.stopSignal) {
+            try {
+                const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60));
+                if (!job) {
+                    await this.sleep(10_000);
+                    continue;
+                }
+                await this.executeJobWithLimits(job);
+                await this.sleep(50);
+            }
+            catch (err) {
+                this.logger.error('Error in general worker loop', { error: err?.message });
+                await this.sleep(5_000);
+            }
+        }
+    }
+    /**
+     * Executes a job respecting global and per-source concurrency semaphores
+     */
+    async executeJobWithLimits(job) {
+        if (job.task_type === 'IMPORT_CHAPTER') {
+            const globalSem = this.autotuner.getGlobalChapterSemaphore();
+            const sourceSem = this.autotuner.getSourceSemaphore(job.source, 2);
+            await globalSem.runExclusive(async () => {
+                await sourceSem.runExclusive(async () => {
+                    await this.processJob(job);
+                });
+            });
+        }
+        else {
+            await this.processJob(job);
+        }
+    }
+    /**
+     * Discrete step method preserved for unit tests & single iterations
+     */
+    async step(source) {
         await this.scheduleSources();
-        // 2. Acquire and execute next job from queue
-        const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60));
+        const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), source);
         if (!job) {
-            this.logger.debug('No pending jobs in queue');
+            this.logger.debug('No pending jobs in queue', { source });
             return false;
         }
         await this.processJob(job);
@@ -114,18 +235,14 @@ export class ImporterEngine {
             return;
         const now = Date.now();
         for (const src of sources) {
-            // 1. Skip disabled or paused sources
             if (src.enabled === false || src.status === 'DISABLED' || src.status === 'PAUSED') {
                 continue;
             }
-            // 2. Handle COOLDOWN status
             if (src.status === 'COOLDOWN') {
                 const cooldownUntil = src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0;
                 if (now < cooldownUntil) {
-                    this.logger.debug(`Source ${src.id} is in COOLDOWN until ${src.cooldown_until}, skipping scheduling`);
                     continue;
                 }
-                // Cooldown expired: automatically transition back to ACTIVE
                 this.logger.info(`Source ${src.id} cooldown expired. Transitioning back to ACTIVE`, { source: src.id });
                 src.status = 'ACTIVE';
                 src.cooldown_until = null;
@@ -137,7 +254,6 @@ export class ImporterEngine {
             if (src.status !== 'ACTIVE') {
                 continue;
             }
-            // Dynamically apply host rate limit from database if configured
             if (src.base_url && src.rate_limit_per_second) {
                 try {
                     const host = new URL(src.base_url).host;
@@ -160,7 +276,6 @@ export class ImporterEngine {
     async processJob(job) {
         const heartbeat = this.queue.startHeartbeat(job.id, this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS);
         try {
-            // Check if the source is PAUSED, DISABLED, or actively in COOLDOWN
             const { data: sourceRec } = await this.supabase
                 .from('importer_sources')
                 .select('id, status, cooldown_until, enabled')
@@ -168,11 +283,7 @@ export class ImporterEngine {
                 .maybeSingle();
             if (sourceRec) {
                 if (sourceRec.status === 'PAUSED' || sourceRec.status === 'DISABLED' || !sourceRec.enabled) {
-                    this.logger.info(`Postponing job ${job.id}: source ${job.source} is ${sourceRec.status}`, {
-                        jobId: job.id,
-                        source: job.source,
-                        status: sourceRec.status,
-                    });
+                    this.logger.info(`Postponing job ${job.id}: source ${job.source} is ${sourceRec.status}`);
                     heartbeat.stop();
                     await this.queue.releaseJob(job.id, 'RETRY', `Source ${job.source} is ${sourceRec.status}`, 15);
                     return;
@@ -181,17 +292,11 @@ export class ImporterEngine {
                     const cooldownUntil = sourceRec.cooldown_until ? new Date(sourceRec.cooldown_until).getTime() : 0;
                     if (Date.now() < cooldownUntil) {
                         const waitMinutes = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 60000));
-                        this.logger.info(`Postponing job ${job.id}: source ${job.source} is in COOLDOWN for ${waitMinutes}m`, {
-                            jobId: job.id,
-                            source: job.source,
-                            cooldownUntil: sourceRec.cooldown_until,
-                        });
                         heartbeat.stop();
                         await this.queue.releaseJob(job.id, 'RETRY', `Source in COOLDOWN until ${sourceRec.cooldown_until}`, waitMinutes);
                         return;
                     }
                     else {
-                        // Expired cooldown -> flip to ACTIVE
                         await this.supabase
                             .from('importer_sources')
                             .update({ status: 'ACTIVE', cooldown_until: null, updated_at: new Date().toISOString() })
@@ -203,6 +308,7 @@ export class ImporterEngine {
                 jobId: job.id,
                 taskType: job.task_type,
                 source: job.source,
+                chapterSortKey: job.chapter_sort_key,
             });
             switch (job.task_type) {
                 case 'DISCOVER_WORKS':
@@ -229,9 +335,10 @@ export class ImporterEngine {
                 error: errorMessage,
                 attempts: job.attempts,
             });
-            // Handle 429 / Rate Limit detection
             const is429 = err?.status === 429 || err?.statusCode === 429 || /429|rate\s*limit/i.test(errorMessage);
+            const isTimeout = /timeout|aborted|ETIMEDOUT/i.test(errorMessage);
             if (is429) {
+                this.autotuner.recordError('ratelimit');
                 let waitSeconds = 60;
                 const retryAfter = err?.retryAfter || err?.headers?.get?.('retry-after');
                 if (retryAfter) {
@@ -240,10 +347,7 @@ export class ImporterEngine {
                         waitSeconds = Math.min(3600, parsed);
                 }
                 const cooldownUntil = new Date(Date.now() + waitSeconds * 1000).toISOString();
-                this.logger.warn(`Source ${job.source} entered COOLDOWN due to rate limit for ${waitSeconds}s`, {
-                    source: job.source,
-                    cooldownUntil,
-                });
+                this.logger.warn(`Source ${job.source} entered COOLDOWN due to rate limit for ${waitSeconds}s`);
                 await this.supabase
                     .from('importer_sources')
                     .update({
@@ -255,6 +359,12 @@ export class ImporterEngine {
                 const backoffMinutes = Math.max(1, Math.ceil(waitSeconds / 60));
                 await this.queue.releaseJob(job.id, 'RETRY', `Rate limit triggered: COOLDOWN until ${cooldownUntil}`, backoffMinutes);
                 return;
+            }
+            if (isTimeout) {
+                this.autotuner.recordError('timeout');
+            }
+            else {
+                this.autotuner.recordError('error');
             }
             const nextStatus = job.attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
             const backoffMinutes = Math.min(60, Math.pow(2, job.attempts) * 2);
@@ -290,7 +400,6 @@ export class ImporterEngine {
         }
         if (mode === 'bootstrap') {
             if (!nextCursor || works.length === 0) {
-                // Historical backlog completely traversed -> mark catalog as completed!
                 await this.checkpoints.markCatalogCompleted(job.source, null, {
                     lastDiscoveredCount: works.length,
                     lastBootstrapCursor: checkpoint?.cursor_value,
@@ -305,7 +414,6 @@ export class ImporterEngine {
             }
         }
         else {
-            // Maintenance mode: preserve completed status and update newest release cursor
             const updatedCursor = (nextCursor ?? checkpoint?.cursor_value) ?? null;
             await this.checkpoints.saveCheckpoint(job.source, updatedCursor, {
                 ...(checkpoint?.metadata || {}),
@@ -323,9 +431,7 @@ export class ImporterEngine {
         if (!adapter)
             throw new Error(`Source adapter not registered: ${job.source}`);
         const details = await adapter.fetchWorkDetails(sourceWorkId);
-        // Bot user ID in members table for media uploads
         const botUserId = await this.resolveBotUserId();
-        // Process cover if present
         let coverMediaId = null;
         if (details.coverUrl) {
             try {
@@ -366,24 +472,43 @@ export class ImporterEngine {
         if (!result.workId) {
             throw new Error(`Failed to obtain valid workId for ${details.title}`);
         }
-        // Fetch chapters from source
         const chapters = await adapter.fetchChapters(sourceWorkId);
         this.logger.info('Found chapters for work', {
             title: details.title,
             chapterCount: chapters.length,
         });
-        for (const ch of chapters) {
-            // Check if already completed in importer_chapter_mappings
-            const { data: existingMap } = await this.supabase
-                .from('importer_chapter_mappings')
-                .select('id, status')
-                .eq('source', job.source)
-                .eq('source_chapter_id', ch.sourceChapterId)
-                .maybeSingle();
-            if (existingMap && existingMap.status === 'COMPLETED') {
-                continue; // Already successfully imported and verified
-            }
+        if (chapters.length === 0)
+            return;
+        // Batch query to find already COMPLETED chapter mappings in ONE query instead of N queries
+        const allSourceChapterIds = chapters.map((ch) => ch.sourceChapterId);
+        const { data: existingMappings } = await this.supabase
+            .from('importer_chapter_mappings')
+            .select('source_chapter_id, status')
+            .eq('source', job.source)
+            .in('source_chapter_id', allSourceChapterIds);
+        const completedIds = new Set((existingMappings || [])
+            .filter((m) => m.status === 'COMPLETED')
+            .map((m) => m.source_chapter_id));
+        // Also check published chapters in public.chapters for this work
+        const { data: publishedChapters } = await this.supabase
+            .from('chapters')
+            .select('number')
+            .eq('work_id', result.workId)
+            .not('published_at', 'is', null);
+        const publishedNumbers = new Set((publishedChapters || []).map((c) => c.number));
+        // Filter out already imported chapters
+        const missingChapters = chapters.filter((ch) => !completedIds.has(ch.sourceChapterId) && !publishedNumbers.has(ch.number));
+        // Sort strictly ASCENDING by chapter number: 1 -> 2 -> 3 ... -> 100
+        missingChapters.sort((a, b) => a.number - b.number);
+        this.logger.info(`Enqueuing ${missingChapters.length} missing chapters in strict ascending order`, {
+            source: job.source,
+            workId: result.workId,
+            totalChapters: chapters.length,
+            missingChapters: missingChapters.length,
+        });
+        for (const ch of missingChapters) {
             const dedupeKey = `${job.source}:chapter:${ch.sourceChapterId}`;
+            const sortKey = this.computeChapterSortKey(ch.number);
             await this.queue.enqueue('IMPORT_CHAPTER', job.source, dedupeKey, {
                 sourceWorkId,
                 sourceChapterId: ch.sourceChapterId,
@@ -392,8 +517,14 @@ export class ImporterEngine {
                 chapterNumber: ch.number,
                 chapterTitle: ch.title || '',
                 expectedPageCount: ch.pageCount,
-            }, 30);
+            }, 30, sortKey);
         }
+    }
+    computeChapterSortKey(chapterNumber) {
+        const num = typeof chapterNumber === 'number' ? chapterNumber : parseFloat(String(chapterNumber));
+        if (isNaN(num) || num < 0)
+            return 999999;
+        return Number(num.toFixed(4));
     }
     async handleImportChapter(job) {
         const { sourceWorkId, sourceChapterId, workId, workMappingId, chapterNumber, chapterTitle, } = job.payload;
@@ -403,135 +534,178 @@ export class ImporterEngine {
         const adapter = this.registry.get(job.source);
         if (!adapter)
             throw new Error(`Source adapter not registered: ${job.source}`);
-        // Fetch page URLs
-        const pageUrls = await adapter.fetchChapterPages(sourceChapterId, chapterNumber);
-        if (!pageUrls || pageUrls.length === 0) {
-            throw new Error(`Source returned 0 pages for chapter ${chapterNumber} (${sourceChapterId})`);
-        }
-        const expectedCount = pageUrls.length;
-        this.logger.info('Importing chapter pages', {
+        // Register active job in forensics tracker
+        diagnostics.registerJob({
+            jobId: job.id,
+            taskType: job.task_type,
+            source: job.source,
             workId,
             chapterNumber,
-            pageCount: expectedCount,
+            completedPages: 0,
         });
-        const botUserId = await this.resolveBotUserId();
-        const storedPages = [];
-        // Download, validate, and store each page in sequence with concurrency bounds
-        for (let i = 0; i < pageUrls.length; i++) {
-            const pageUrl = pageUrls[i];
-            const parsedUrl = new URL(pageUrl);
-            await this.rateLimiter.acquire(parsedUrl.host);
-            const pageBytes = await this.fetchImageBytes(pageUrl);
-            const res = await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial');
-            storedPages.push({
-                mediaId: res.mediaId,
-                width: res.width,
-                height: res.height,
-            });
-        }
-        // MANDATORY INTEGRITY VERIFICATION:
-        // validPages == expectedPages strictly enforced
-        if (storedPages.length !== expectedCount) {
-            const err = `Verification failed: expected ${expectedCount} pages, but successfully processed ${storedPages.length}`;
-            await this.supabase.from('importer_chapter_mappings').upsert({
-                source: job.source,
-                source_chapter_id: sourceChapterId,
-                work_mapping_id: workMappingId,
-                chapter_number: chapterNumber,
-                page_count: storedPages.length,
-                status: 'VERIFICATION_FAILED',
-                last_error: err,
-            }, { onConflict: 'source,source_chapter_id' });
-            throw new Error(err);
-        }
-        // Ensure work has a valid cover with storage_ready = true before publishing chapter
-        // (Required by public.verify_publication_media database trigger!)
-        const { data: workRecord } = await this.supabase
-            .from('works')
-            .select('cover_id')
-            .eq('id', workId)
-            .single();
-        if (!workRecord?.cover_id && storedPages.length > 0) {
-            // Use page 1 as cover if work has no cover
-            await this.supabase
-                .from('works')
-                .update({ cover_id: storedPages[0].mediaId })
-                .eq('id', workId);
-        }
-        // Find or create chapter record in public.chapters
-        let chapterId;
-        const { data: existingChapter } = await this.supabase
-            .from('chapters')
-            .select('id, published_at')
-            .eq('work_id', workId)
-            .eq('number', chapterNumber)
-            .maybeSingle();
-        if (existingChapter) {
-            chapterId = existingChapter.id;
-            // Update title if empty
-            if (chapterTitle) {
-                await this.supabase
-                    .from('chapters')
-                    .update({ title: chapterTitle.slice(0, 200) })
-                    .eq('id', chapterId);
+        try {
+            const pageUrls = await adapter.fetchChapterPages(sourceChapterId, chapterNumber);
+            if (!pageUrls || pageUrls.length === 0) {
+                throw new Error(`Source returned 0 pages for chapter ${chapterNumber} (${sourceChapterId})`);
             }
-        }
-        else {
-            chapterId = crypto.randomUUID();
-            const { error: chErr } = await this.supabase.from('chapters').insert({
-                id: chapterId,
-                work_id: workId,
-                number: chapterNumber,
-                title: (chapterTitle || '').slice(0, 200),
+            const expectedCount = pageUrls.length;
+            this.logger.info('Importing chapter pages with bounded pipeline', {
+                workId,
+                chapterNumber,
+                pageCount: expectedCount,
             });
-            if (chErr)
-                throw chErr;
-        }
-        // Insert or update public.pages
-        for (let idx = 0; idx < storedPages.length; idx++) {
-            const pos = idx + 1;
-            const p = storedPages[idx];
-            const { error: pageErr } = await this.supabase.from('pages').upsert({
+            const botUserId = await this.resolveBotUserId();
+            const storedPages = new Array(expectedCount).fill(null);
+            // Bounded parallel page pipeline
+            const pageConcurrency = this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY || 3;
+            const pageSemaphore = new AsyncSemaphore(pageConcurrency);
+            const globalMediaSemaphore = this.autotuner.getGlobalMediaSemaphore();
+            let completedPagesCount = 0;
+            const pageTasks = pageUrls.map((pageUrl, idx) => pageSemaphore.runExclusive(async () => {
+                if (this.stopSignal) {
+                    throw new Error('Process shutdown requested during chapter page download');
+                }
+                return globalMediaSemaphore.runExclusive(async () => {
+                    const parsedUrl = new URL(pageUrl);
+                    await this.rateLimiter.acquire(parsedUrl.host);
+                    // Retry page download up to 3 times before failing
+                    let attempts = 0;
+                    let lastErr;
+                    while (attempts < 3 && !this.stopSignal) {
+                        attempts++;
+                        try {
+                            const pageBytes = await this.fetchImageBytes(pageUrl);
+                            const res = await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial');
+                            storedPages[idx] = {
+                                mediaId: res.mediaId,
+                                width: res.width,
+                                height: res.height,
+                            };
+                            completedPagesCount++;
+                            diagnostics.updateJobProgress(job.id, completedPagesCount);
+                            return;
+                        }
+                        catch (err) {
+                            lastErr = err;
+                            if (attempts < 3 && !this.stopSignal) {
+                                await this.sleep(1000 * attempts);
+                            }
+                        }
+                    }
+                    throw new Error(`Failed to process page ${idx + 1}/${expectedCount} after 3 attempts: ${lastErr?.message}`);
+                });
+            }));
+            await Promise.all(pageTasks);
+            // SAFEGUARD 1: Strict integrity check (expectedPages === validUploadedPages)
+            const validPages = [];
+            for (let i = 0; i < expectedCount; i++) {
+                const p = storedPages[i];
+                if (!p || !p.mediaId) {
+                    throw new Error(`Page ${i + 1} failed or has missing mediaId`);
+                }
+                validPages.push(p);
+            }
+            if (validPages.length !== expectedCount) {
+                const err = `Verification failed: expected ${expectedCount} pages, but successfully processed ${validPages.length}`;
+                await this.supabase.from('importer_chapter_mappings').upsert({
+                    source: job.source,
+                    source_chapter_id: sourceChapterId,
+                    work_mapping_id: workMappingId,
+                    chapter_number: chapterNumber,
+                    page_count: validPages.length,
+                    status: 'VERIFICATION_FAILED',
+                    last_error: err,
+                }, { onConflict: 'source,source_chapter_id' });
+                throw new Error(err);
+            }
+            // Ensure work has a valid cover with storage_ready = true before publishing chapter
+            const { data: workRecord } = await this.supabase
+                .from('works')
+                .select('cover_id')
+                .eq('id', workId)
+                .single();
+            if (!workRecord?.cover_id && validPages.length > 0) {
+                await this.supabase
+                    .from('works')
+                    .update({ cover_id: validPages[0].mediaId })
+                    .eq('id', workId);
+            }
+            // Find or create chapter record in public.chapters
+            let chapterId;
+            const { data: existingChapter } = await this.supabase
+                .from('chapters')
+                .select('id, published_at')
+                .eq('work_id', workId)
+                .eq('number', chapterNumber)
+                .maybeSingle();
+            if (existingChapter) {
+                chapterId = existingChapter.id;
+                if (chapterTitle) {
+                    await this.supabase
+                        .from('chapters')
+                        .update({ title: chapterTitle.slice(0, 200) })
+                        .eq('id', chapterId);
+                }
+            }
+            else {
+                chapterId = crypto.randomUUID();
+                const { error: chErr } = await this.supabase.from('chapters').insert({
+                    id: chapterId,
+                    work_id: workId,
+                    number: chapterNumber,
+                    title: (chapterTitle || '').slice(0, 200),
+                });
+                if (chErr)
+                    throw chErr;
+            }
+            // SAFEGUARD 1: Batch upsert into public.pages ONLY after ALL pages are verified
+            const pagesToUpsert = validPages.map((p, idx) => ({
                 chapter_id: chapterId,
-                position: pos,
+                position: idx + 1,
                 media_id: p.mediaId,
                 width: p.width,
                 height: p.height,
-            }, { onConflict: 'chapter_id,position' });
+            }));
+            const { error: pageErr } = await this.supabase
+                .from('pages')
+                .upsert(pagesToUpsert, { onConflict: 'chapter_id,position' });
             if (pageErr)
                 throw pageErr;
+            // Publish chapter now that all pages are confirmed stored
+            const { error: pubErr } = await this.supabase
+                .from('chapters')
+                .update({ published_at: new Date().toISOString() })
+                .eq('id', chapterId);
+            if (pubErr) {
+                this.logger.error('Failed to mark chapter as published', { error: pubErr.message, chapterId });
+                throw pubErr;
+            }
+            // Mark work as published if it was in draft
+            await this.supabase
+                .from('works')
+                .update({ published: true, updated_at: new Date().toISOString() })
+                .eq('id', workId)
+                .eq('published', false);
+            // Record chapter mapping as COMPLETED
+            await this.supabase.from('importer_chapter_mappings').upsert({
+                source: job.source,
+                source_chapter_id: sourceChapterId,
+                chapter_id: chapterId,
+                work_mapping_id: workMappingId,
+                chapter_number: chapterNumber,
+                page_count: validPages.length,
+                status: 'COMPLETED',
+                last_error: null,
+            }, { onConflict: 'source,source_chapter_id' });
+            this.logger.info('Successfully imported and published chapter', {
+                workId,
+                chapterNumber,
+                pageCount: validPages.length,
+            });
         }
-        // Publish chapter now that all pages are confirmed stored
-        const { error: pubErr } = await this.supabase
-            .from('chapters')
-            .update({ published_at: new Date().toISOString() })
-            .eq('id', chapterId);
-        if (pubErr) {
-            this.logger.error('Failed to mark chapter as published', { error: pubErr.message, chapterId });
-            throw pubErr;
+        finally {
+            diagnostics.unregisterJob(job.id);
         }
-        // Mark work as published if it was in draft
-        await this.supabase
-            .from('works')
-            .update({ published: true, updated_at: new Date().toISOString() })
-            .eq('id', workId)
-            .eq('published', false);
-        // Record chapter mapping as COMPLETED
-        await this.supabase.from('importer_chapter_mappings').upsert({
-            source: job.source,
-            source_chapter_id: sourceChapterId,
-            chapter_id: chapterId,
-            work_mapping_id: workMappingId,
-            chapter_number: chapterNumber,
-            page_count: storedPages.length,
-            status: 'COMPLETED',
-            last_error: null,
-        }, { onConflict: 'source,source_chapter_id' });
-        this.logger.info('Successfully imported and published chapter', {
-            workId,
-            chapterNumber,
-            pageCount: storedPages.length,
-        });
     }
     async downloadAndRegisterImage(url, userId, purpose = 'editorial') {
         const parsedUrl = new URL(url);
@@ -562,7 +736,6 @@ export class ImporterEngine {
         if (this.cachedBotUserId) {
             return this.cachedBotUserId;
         }
-        // Lookup first ADMIN member in access_roles
         const { data: adminRole } = await this.supabase
             .from('access_roles')
             .select('user_id')
@@ -573,7 +746,6 @@ export class ImporterEngine {
             this.cachedBotUserId = adminRole.user_id;
             return adminRole.user_id;
         }
-        // Fallback: look in members
         const { data: anyMember } = await this.supabase
             .from('members')
             .select('id')

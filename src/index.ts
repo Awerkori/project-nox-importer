@@ -15,6 +15,7 @@ import { TelegramStorageProvider } from './storage/telegram.js';
 import { MockStorageProvider } from './storage/mock.js';
 import { ImporterEngine } from './core/engine.js';
 import { HealthMonitor } from './core/health.js';
+import { diagnostics } from './core/diagnostics.js';
 
 async function main() {
   rootLogger.info('Starting Project Nox Importer daemon...');
@@ -58,34 +59,14 @@ async function main() {
   // 5. Initialize Importer Engine
   const engine = new ImporterEngine(supabase, storage, registry, rateLimiter, config);
 
-  // 6. Graceful Shutdown Handlers
-  let isShuttingDown = false;
-  const shutdown = (signal: string) => {
-    if (isShuttingDown) return;
-    isShuttingDown = true;
+  // 6. Graceful Shutdown & Forensics Handlers
+  diagnostics.initProcessHandlers(async (signal: string) => {
     rootLogger.info(`Received ${signal}, initiating graceful shutdown...`);
     engine.stop();
     setTimeout(() => {
-      rootLogger.warn('Forced shutdown after timeout (15s limit reached)');
+      diagnostics.dumpForensics(`Forced shutdown after timeout (15s limit reached during ${signal})`);
       process.exit(1);
     }, 15_000).unref();
-  };
-
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-
-  process.on('unhandledRejection', (reason: any) => {
-    rootLogger.error('Unhandled Promise Rejection caught in daemon', {
-      error: reason?.message || String(reason),
-      stack: reason?.stack,
-    });
-  });
-
-  process.on('uncaughtException', (err: Error) => {
-    rootLogger.error('Uncaught Exception caught in daemon', {
-      error: err?.message,
-      stack: err?.stack,
-    });
   });
 
   // 7. Start Engine

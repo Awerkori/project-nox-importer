@@ -8,17 +8,21 @@ export class ImporterQueue {
         this.workerId = workerId;
     }
     /**
-     * Enqueue a new task safely with deduplication key
+     * Enqueue a new task safely with deduplication key and optional deterministic sort key
      */
-    async enqueue(taskType, source, dedupeKey, payload = {}, priority = 10) {
-        const { error } = await this.supabase.from('importer_queue').insert({
+    async enqueue(taskType, source, dedupeKey, payload = {}, priority = 10, chapterSortKey) {
+        const insertRow = {
             task_type: taskType,
             source,
             dedupe_key: dedupeKey,
             payload,
             priority,
             status: 'QUEUED',
-        });
+        };
+        if (chapterSortKey !== undefined && chapterSortKey !== null) {
+            insertRow.chapter_sort_key = chapterSortKey;
+        }
+        const { error } = await this.supabase.from('importer_queue').insert(insertRow);
         if (error) {
             // Conflict on dedupe_key is normal and ignored
             if (error.code === '23505') {
@@ -28,19 +32,24 @@ export class ImporterQueue {
             this.logger.error('Failed to enqueue job', { error: error.message, dedupeKey });
             throw error;
         }
-        this.logger.info('Enqueued job', { taskType, source, dedupeKey, priority });
+        this.logger.info('Enqueued job', { taskType, source, dedupeKey, priority, chapterSortKey });
         return true;
     }
     /**
-     * Acquire the next job atomically using SKIP LOCKED stored procedure
+     * Acquire the next job atomically using SKIP LOCKED stored procedure,
+     * optionally filtered by source for concurrent source runners.
      */
-    async acquireNextJob(leaseDurationMinutes = 5) {
-        const { data, error } = await this.supabase.rpc('importer_acquire_job', {
+    async acquireNextJob(leaseDurationMinutes = 5, source) {
+        const params = {
             p_worker_id: this.workerId,
             p_lease_duration: `${leaseDurationMinutes} minutes`,
-        });
+        };
+        if (source) {
+            params.p_source = source;
+        }
+        const { data, error } = await this.supabase.rpc('importer_acquire_job', params);
         if (error) {
-            this.logger.error('Error acquiring queue job', { error: error.message });
+            this.logger.error('Error acquiring queue job', { error: error.message, source });
             throw error;
         }
         if (!data || data.length === 0) {
@@ -52,6 +61,7 @@ export class ImporterQueue {
             taskType: job.task_type,
             source: job.source,
             attempts: job.attempts,
+            chapterSortKey: job.chapter_sort_key,
         });
         return job;
     }
@@ -91,7 +101,7 @@ export class ImporterQueue {
     }
     /**
      * Create a lease heartbeat handle that periodically renews the lease
-     * until stopped.
+     * until stopped. Uses .unref() to avoid blocking graceful shutdown.
      */
     startHeartbeat(jobId, intervalSeconds = 60) {
         let stopped = false;
@@ -108,6 +118,7 @@ export class ImporterQueue {
                 this.logger.error('Heartbeat interval error', { jobId, message: err?.message });
             }
         }, intervalSeconds * 1000);
+        timer.unref();
         return {
             stop: () => {
                 stopped = true;
