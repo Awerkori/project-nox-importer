@@ -37,26 +37,53 @@ begin
   -- Respecting: dynamic operational priority desc, deterministic chapter_sort_key asc, next_run_at asc
   select q.id into v_job_id
   from public.importer_queue q
-  left join public.importer_sources s on s.id = q.source
   where (
     (q.status in ('QUEUED', 'RETRY') and q.next_run_at <= now())
     or
     (q.status = 'IMPORTING' and q.lease_expires_at < now())
   )
   and (p_source is null or q.source = p_source)
-  and (s.id is null or (s.enabled = true and s.status != 'PAUSED' and (s.cooldown_until is null or s.cooldown_until <= now())))
+  and not exists (
+    select 1 from public.importer_sources s
+    where s.id = q.source
+      and (s.enabled = false or s.status = 'PAUSED' or (s.cooldown_until is not null and s.cooldown_until > now()))
+  )
   order by
     case
-      -- Se for um predecessor bloqueando capítulos STAGED para a mesma obra: prioridade MÁXIMA 90 dinâmica
+      -- PRIORIDADE 90 PROGRESSIVE BLOCKER:
+      -- Concedida para a CABEÇA da cadeia de blockers de um capítulo STAGED.
+      -- Requer que:
+      -- 1. Exista pelo menos um capítulo STAGED posterior para a mesma obra.
+      -- 2. Este job seja o menor predecessor pendente (sem nenhum outro job ativo antes dele).
+      -- 3. Não haja nenhum outro mapping pendente anterior a ele.
       when q.task_type = 'IMPORT_CHAPTER'
        and q.payload->>'workId' is not null
        and q.chapter_sort_key is not null
        and exists (
          select 1
-         from public.importer_chapter_mappings m
-         where m.status = 'STAGED'
-           and m.work_id = (q.payload->>'workId')::uuid
-           and m.chapter_sort_key > q.chapter_sort_key
+         from public.importer_chapter_mappings staged
+         where staged.work_id = (q.payload->>'workId')::uuid
+           and staged.status = 'STAGED'
+           and staged.chapter_sort_key > q.chapter_sort_key
+       )
+       and not exists (
+         select 1
+         from public.importer_queue q2
+         where q2.task_type = 'IMPORT_CHAPTER'
+           and (q2.payload->>'workId')::text = q.payload->>'workId'
+           and q2.status in ('QUEUED', 'RETRY', 'IMPORTING')
+           and q2.id != q.id
+           and q2.chapter_sort_key < q.chapter_sort_key
+       )
+       and not exists (
+         select 1
+         from public.importer_chapter_mappings m2
+         left join public.chapters c2 on c2.id = m2.chapter_id
+         where m2.work_id = (q.payload->>'workId')::uuid
+           and m2.chapter_sort_key < q.chapter_sort_key
+           and m2.status not in ('STAGED', 'COMPLETED')
+           and m2.is_gap = false
+           and (c2.published_at is null or c2.id is null)
        ) then 90
       else q.priority
     end desc,

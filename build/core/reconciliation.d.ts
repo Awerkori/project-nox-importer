@@ -17,6 +17,7 @@ export declare class ExistingWorksReconciler {
     private logger;
     private lastReconciliationAt;
     constructor(supabase: SupabaseClient, queue: ImporterQueue, registry: SourceRegistry);
+    private isSourceOperationallyAvailable;
     /**
      * Reconcilia obras existentes de forma paginada e com baixo custo de rede.
      * Utiliza deduplicação estritamente canônica (workId:sortKey) e protege capítulos STAGED.

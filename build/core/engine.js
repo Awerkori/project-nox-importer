@@ -902,6 +902,25 @@ export class ImporterEngine {
                     });
                     for (const fb of fallbacks) {
                         try {
+                            // Revalidação operacional em runtime antes de executar fallback
+                            const { data: srcCheck } = await this.supabase
+                                .from('importer_sources')
+                                .select('status, enabled, cooldown_until')
+                                .eq('id', fb.source)
+                                .maybeSingle();
+                            if (srcCheck) {
+                                if (!srcCheck.enabled || srcCheck.status === 'PAUSED' || srcCheck.status === 'DISABLED') {
+                                    this.logger.debug(`Skipping fallback ${fb.source}: source is ${srcCheck.status}`);
+                                    continue;
+                                }
+                                if (srcCheck.status === 'COOLDOWN') {
+                                    const cd = srcCheck.cooldown_until ? new Date(srcCheck.cooldown_until).getTime() : 0;
+                                    if (Date.now() < cd) {
+                                        this.logger.debug(`Skipping fallback ${fb.source}: in COOLDOWN until ${srcCheck.cooldown_until}`);
+                                        continue;
+                                    }
+                                }
+                            }
                             const fbAdapter = this.registry.get(fb.source);
                             if (!fbAdapter)
                                 continue;

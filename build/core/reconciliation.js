@@ -18,6 +18,18 @@ export class ExistingWorksReconciler {
         this.queue = queue;
         this.registry = registry;
     }
+    isSourceOperationallyAvailable(sourceId, sourcesState) {
+        const state = sourcesState.get(sourceId);
+        if (!state)
+            return true;
+        if (!state.enabled)
+            return false;
+        if (state.status !== 'ACTIVE')
+            return false;
+        if (state.cooldownUntil && state.cooldownUntil > Date.now())
+            return false;
+        return true;
+    }
     /**
      * Reconcilia obras existentes de forma paginada e com baixo custo de rede.
      * Utiliza deduplicação estritamente canônica (workId:sortKey) e protege capítulos STAGED.
@@ -34,6 +46,19 @@ export class ExistingWorksReconciler {
             stagedSkipped: 0,
             duplicatesAvoided: 0,
         };
+        // 0. Consulta status de saúde das fontes cadastradas para filtragem operacional
+        const sourcesQuery = this.supabase.from('importer_sources');
+        const { data: dbSources } = typeof sourcesQuery?.select === 'function'
+            ? await sourcesQuery.select('id, status, enabled, cooldown_until')
+            : { data: [] };
+        const sourcesState = new Map();
+        for (const s of dbSources || []) {
+            sourcesState.set(s.id, {
+                status: s.status,
+                enabled: s.enabled !== false,
+                cooldownUntil: s.cooldown_until ? new Date(s.cooldown_until).getTime() : null,
+            });
+        }
         // 1. Busca mapeamentos de obras ativas em lotes ordenados por atualização
         let query = this.supabase
             .from('importer_work_mappings')
@@ -181,10 +206,44 @@ export class ExistingWorksReconciler {
             newChapters.sort((a, b) => a.sortKey - b.sortKey);
             // 8. Enfileira GAPS CONFIRMADOS com PRIORIDADE 70 (Backfill ordenado ASC)
             for (const cand of confirmedGaps) {
-                cand.sources.sort((a, b) => b.priorityScore - a.priorityScore);
-                const primary = cand.sources[0];
+                // Separação rigorosa:
+                // 1. allSourceMappings: Todas as fontes conhecidas (inclusive PAUSED)
+                // 2. operationalSources: Apenas fontes ACTIVE + enabled + sem cooldown ativo
+                // 3. primary: Fonte operacional de maior prioridade
+                // 4. operationalFallbackSources: Apenas fontes operacionais alternativas (excluindo PAUSED)
+                const operationalSources = cand.sources.filter((s) => this.isSourceOperationallyAvailable(s.source, sourcesState));
+                // Se nenhuma fonte estiver operacional no momento, preserva mappings como PENDING e não enfileira
+                if (operationalSources.length === 0) {
+                    for (const s of cand.sources) {
+                        await this.supabase.from('importer_chapter_mappings').upsert({
+                            source: s.source,
+                            source_chapter_id: s.sourceChapterId,
+                            work_id: workId,
+                            work_mapping_id: s.mappingId,
+                            chapter_number: cand.chapterNumber,
+                            chapter_sort_key: cand.sortKey,
+                            page_count: cand.expectedPages,
+                            is_page_provider: false,
+                            status: 'PENDING',
+                            is_gap: true,
+                            last_error: null,
+                        }, { onConflict: 'source,source_chapter_id' });
+                    }
+                    continue;
+                }
+                operationalSources.sort((a, b) => b.priorityScore - a.priorityScore);
+                const primary = operationalSources[0];
+                const operationalFallbackSources = operationalSources
+                    .filter((s) => s.source !== primary.source)
+                    .map((s) => ({
+                    source: s.source,
+                    sourceChapterId: s.sourceChapterId,
+                    sourceWorkId: s.sourceWorkId,
+                    mappingId: s.mappingId,
+                }));
                 // Deduplicação estritamente canônica
                 const canonicalDedupeKey = `work:${workId}:chapter:${cand.sortKey}`;
+                // Salva todos os mappings candidatos no banco (inclusive Kuro PAUSED com is_page_provider = false)
                 for (const s of cand.sources) {
                     await this.supabase.from('importer_chapter_mappings').upsert({
                         source: s.source,
@@ -209,12 +268,7 @@ export class ExistingWorksReconciler {
                     chapterTitle: cand.chapterTitle,
                     expectedPageCount: cand.expectedPages,
                     isGapBackfill: true,
-                    fallbackSources: cand.sources.slice(1).map((s) => ({
-                        source: s.source,
-                        sourceChapterId: s.sourceChapterId,
-                        sourceWorkId: s.sourceWorkId,
-                        mappingId: s.mappingId,
-                    })),
+                    fallbackSources: operationalFallbackSources, // APENAS fontes operacionais!
                 }, 70, // PRIORIDADE 70: Gap confirmado de obra existente!
                 cand.sortKey);
                 if (enqueued) {
@@ -224,9 +278,36 @@ export class ExistingWorksReconciler {
             }
             // 9. Enfileira CAPÍTULOS NOVOS com PRIORIDADE 80 (Fresh releases rápidas!)
             for (const cand of newChapters) {
-                // Escolhe o provedor de maior prioridade (Kuro > Nexus > Manhastro...)
-                cand.sources.sort((a, b) => b.priorityScore - a.priorityScore);
-                const primary = cand.sources[0];
+                const operationalSources = cand.sources.filter((s) => this.isSourceOperationallyAvailable(s.source, sourcesState));
+                // Se nenhuma fonte estiver operacional no momento, preserva mappings como PENDING e não enfileira
+                if (operationalSources.length === 0) {
+                    for (const s of cand.sources) {
+                        await this.supabase.from('importer_chapter_mappings').upsert({
+                            source: s.source,
+                            source_chapter_id: s.sourceChapterId,
+                            work_id: workId,
+                            work_mapping_id: s.mappingId,
+                            chapter_number: cand.chapterNumber,
+                            chapter_sort_key: cand.sortKey,
+                            page_count: cand.expectedPages,
+                            is_page_provider: false,
+                            status: 'PENDING',
+                            is_gap: false,
+                            last_error: null,
+                        }, { onConflict: 'source,source_chapter_id' });
+                    }
+                    continue;
+                }
+                operationalSources.sort((a, b) => b.priorityScore - a.priorityScore);
+                const primary = operationalSources[0];
+                const operationalFallbackSources = operationalSources
+                    .filter((s) => s.source !== primary.source)
+                    .map((s) => ({
+                    source: s.source,
+                    sourceChapterId: s.sourceChapterId,
+                    sourceWorkId: s.sourceWorkId,
+                    mappingId: s.mappingId,
+                }));
                 // Deduplicação estritamente canônica: chave baseada em workId + sortKey
                 const canonicalDedupeKey = `work:${workId}:chapter:${cand.sortKey}`;
                 // Registra mappings de todas as fontes disponíveis
@@ -254,12 +335,7 @@ export class ExistingWorksReconciler {
                     chapterTitle: cand.chapterTitle,
                     expectedPageCount: cand.expectedPages,
                     isNewRelease: true,
-                    fallbackSources: cand.sources.slice(1).map((s) => ({
-                        source: s.source,
-                        sourceChapterId: s.sourceChapterId,
-                        sourceWorkId: s.sourceWorkId,
-                        mappingId: s.mappingId,
-                    })),
+                    fallbackSources: operationalFallbackSources, // APENAS fontes operacionais!
                 }, 80, // PRIORIDADE 80: Atualização recente de obra existente!
                 cand.sortKey);
                 if (enqueued) {

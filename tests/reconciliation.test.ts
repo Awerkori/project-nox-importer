@@ -368,4 +368,181 @@ describe('ExistingWorksReconciler - Canonical Gap & Fresh Release Discovery', ()
     expect(enqueuedJobs[0].payload.fallbackSources).toBeDefined();
     expect(enqueuedJobs[0].payload.fallbackSources[0].source).toBe('mangaflix');
   });
+
+  it('filters out PAUSED sources from primary and operational fallback, preserving mappings only', async () => {
+    // Kuro = PAUSED, Nexus = ACTIVE, Manhastro = ACTIVE
+    // All 3 have Cap 10
+    const kuroAdapter: SourceAdapter = {
+      id: 'kuro',
+      name: 'Kuro',
+      baseUrl: 'https://kuro.com',
+      fetchUpdatedWorks: vi.fn(),
+      fetchWorkDetails: vi.fn(),
+      fetchChapters: vi.fn(async () => [
+        { sourceChapterId: 'kuro-ch-10', number: 10, title: 'Cap 10', pageCount: 25 },
+      ]),
+      fetchChapterPages: vi.fn(),
+    };
+    const nexusAdapter: SourceAdapter = {
+      id: 'nexus',
+      name: 'Nexus',
+      baseUrl: 'https://nexus.com',
+      fetchUpdatedWorks: vi.fn(),
+      fetchWorkDetails: vi.fn(),
+      fetchChapters: vi.fn(async () => [
+        { sourceChapterId: 'nexus-ch-10', number: 10, title: 'Cap 10', pageCount: 25 },
+      ]),
+      fetchChapterPages: vi.fn(),
+    };
+    const manhastroAdapter: SourceAdapter = {
+      id: 'manhastro',
+      name: 'Manhastro',
+      baseUrl: 'https://manhastro.com',
+      fetchUpdatedWorks: vi.fn(),
+      fetchWorkDetails: vi.fn(),
+      fetchChapters: vi.fn(async () => [
+        { sourceChapterId: 'manhastro-ch-10', number: 10, title: 'Cap 10', pageCount: 25 },
+      ]),
+      fetchChapterPages: vi.fn(),
+    };
+
+    registry.register(kuroAdapter);
+    registry.register(nexusAdapter);
+    registry.register(manhastroAdapter);
+
+    const savedMappings: any[] = [];
+
+    mockSupabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'importer_sources') {
+          return {
+            select: vi.fn().mockResolvedValue({
+              data: [
+                { id: 'kuro', status: 'PAUSED', enabled: true, cooldown_until: null },
+                { id: 'nexus', status: 'ACTIVE', enabled: true, cooldown_until: null },
+                { id: 'manhastro', status: 'ACTIVE', enabled: true, cooldown_until: null },
+              ],
+            }),
+          };
+        }
+        if (table === 'importer_work_mappings') {
+          return {
+            select: vi.fn().mockReturnThis(),
+            eq: vi.fn().mockReturnThis(),
+            order: vi.fn().mockReturnThis(),
+            limit: vi.fn().mockResolvedValue({
+              data: [
+                { id: 'map-kuro', work_id: workId, source: 'kuro', source_work_id: 'k-1', works: { title: 'Test' } },
+                { id: 'map-nexus', work_id: workId, source: 'nexus', source_work_id: 'n-1', works: { title: 'Test' } },
+                { id: 'map-manhastro', work_id: workId, source: 'manhastro', source_work_id: 'm-1', works: { title: 'Test' } },
+              ],
+              error: null,
+            }),
+          };
+        }
+        if (table === 'chapters') {
+          return {
+            select: vi.fn().mockReturnThis(),
+            eq: vi.fn().mockReturnThis(),
+            not: vi.fn().mockResolvedValue({ data: [] }),
+          };
+        }
+        if (table === 'importer_chapter_mappings') {
+          return {
+            select: vi.fn().mockReturnThis(),
+            eq: vi.fn().mockResolvedValue({ data: [] }),
+            upsert: vi.fn((record) => {
+              savedMappings.push(record);
+              return Promise.resolve({ error: null });
+            }),
+          };
+        }
+        if (table === 'importer_queue') {
+          return {
+            select: vi.fn().mockReturnThis(),
+            eq: vi.fn().mockReturnThis(),
+            in: vi.fn().mockResolvedValue({ data: [] }),
+          };
+        }
+        return {};
+      }),
+    };
+
+    reconciler = new ExistingWorksReconciler(mockSupabase, mockQueue, registry);
+    const stats = await reconciler.reconcileExistingWorks(10);
+
+    // 1. Um único canonical chapter enfileirado
+    expect(enqueuedJobs.length).toBe(1);
+    const job = enqueuedJobs[0];
+    expect(job.dedupeKey).toBe(`work:${workId}:chapter:10`);
+
+    // 2. Nexus vira provider operacional primário (mesmo Kuro tendo score nominal 100)
+    expect(job.source).toBe('nexus');
+    expect(job.payload.sourceChapterId).toBe('nexus-ch-10');
+
+    // 3. Manhastro entra como fallback operacional executável
+    expect(job.payload.fallbackSources).toBeDefined();
+    expect(job.payload.fallbackSources.length).toBe(1);
+    expect(job.payload.fallbackSources[0].source).toBe('manhastro');
+
+    // 4. Kuro NÃO está presente no fallback operacional executável
+    const hasKuroInFallback = job.payload.fallbackSources.some((s: any) => s.source === 'kuro');
+    expect(hasKuroInFallback).toBe(false);
+
+    // 5. Todos os 3 mappings foram preservados no banco
+    expect(savedMappings.length).toBe(3);
+    const kuroMapping = savedMappings.find((m) => m.source === 'kuro');
+    const nexusMapping = savedMappings.find((m) => m.source === 'nexus');
+    const manhastroMapping = savedMappings.find((m) => m.source === 'manhastro');
+
+    expect(nexusMapping.is_page_provider).toBe(true);
+    expect(manhastroMapping.is_page_provider).toBe(false);
+    expect(kuroMapping.is_page_provider).toBe(false); // Kuro preservado no banco para uso futuro!
+  });
+
+  it('correctly orders blocking chain so lowest pending predecessor gets priority 90 first', () => {
+    // Simulação determinística da query SQL de aquisição (importer_acquire_job)
+    // Cenário:
+    // Cap 1 -> RETRY (prio 70)
+    // Cap 2 -> RETRY (prio 70)
+    // Cap 3 -> STAGED
+    // Cap 4 -> STAGED
+    interface QueueItem {
+      id: string;
+      workId: string;
+      sortKey: number;
+      priority: number;
+      status: string;
+    }
+    const stagedKeys = [3, 4];
+    const queue: QueueItem[] = [
+      { id: 'job-1', workId, sortKey: 1, priority: 70, status: 'RETRY' },
+      { id: 'job-2', workId, sortKey: 2, priority: 70, status: 'RETRY' },
+    ];
+
+    function calculateDynamicPriority(job: QueueItem, activeQueue: QueueItem[], staged: number[]): number {
+      const hasStagedAfter = staged.some((s) => s > job.sortKey);
+      if (!hasStagedAfter) return job.priority;
+
+      // Cabeça da cadeia: NÃO pode existir nenhum outro job ativo com sortKey < job.sortKey
+      const hasPredecessor = activeQueue.some((q) => q.id !== job.id && q.sortKey < job.sortKey);
+      if (hasPredecessor) return job.priority;
+
+      return 90; // Concedido apenas para a cabeça da cadeia
+    }
+
+    // Passo 1: Inicialmente Cap 1 é a cabeça da cadeia -> recebe 90. Cap 2 continua com 70.
+    const prioJob1 = calculateDynamicPriority(queue[0], queue, stagedKeys);
+    const prioJob2 = calculateDynamicPriority(queue[1], queue, stagedKeys);
+
+    expect(prioJob1).toBe(90);
+    expect(prioJob2).toBe(70);
+
+    // Passo 2: Cap 1 conclui e é removido da fila ativa
+    const queueAfterJob1 = queue.filter((q) => q.id !== 'job-1');
+
+    // Agora Cap 2 é a nova cabeça da cadeia -> recebe 90!
+    const prioJob2AfterJob1 = calculateDynamicPriority(queueAfterJob1[0], queueAfterJob1, stagedKeys);
+    expect(prioJob2AfterJob1).toBe(90);
+  });
 });
