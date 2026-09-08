@@ -1,0 +1,70 @@
+import { createClient } from '@supabase/supabase-js';
+import { getConfig } from './config.js';
+import { rootLogger } from './core/logger.js';
+import { HostRateLimiter } from './core/rate-limiter.js';
+import { SourceRegistry } from './sources/registry.js';
+import { StorageProvider } from './storage/provider.js';
+import { TelegramStorageProvider } from './storage/telegram.js';
+import { MockStorageProvider } from './storage/mock.js';
+import { ImporterEngine } from './core/engine.js';
+import { HealthMonitor } from './core/health.js';
+
+async function main() {
+  rootLogger.info('Starting Project Nox Importer daemon...');
+
+  const config = getConfig();
+
+  // 1. Initialize Supabase Client with service_role
+  const supabase = createClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  // 2. Initialize Storage Provider
+  let storage: StorageProvider;
+  if (config.STORAGE_PROVIDER === 'telegram') {
+    if (!config.TELEGRAM_BOT_TOKEN || !config.TELEGRAM_CHAT_ID) {
+      rootLogger.warn('Telegram credentials not provided, falling back to mock storage for safety');
+      storage = new MockStorageProvider();
+    } else {
+      storage = new TelegramStorageProvider(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID);
+    }
+  } else {
+    storage = new MockStorageProvider();
+  }
+
+  // 3. Health & Readiness check
+  const health = new HealthMonitor(supabase, storage);
+  const initialHealth = await health.checkHealth();
+  rootLogger.info('Initial health check completed', initialHealth);
+
+  // 4. Initialize Rate Limiter & Source Registry
+  const rateLimiter = new HostRateLimiter(2.0);
+  const registry = new SourceRegistry(rateLimiter);
+
+  // 5. Initialize Importer Engine
+  const engine = new ImporterEngine(supabase, storage, registry, rateLimiter, config);
+
+  // 6. Graceful Shutdown Handlers
+  const shutdown = (signal: string) => {
+    rootLogger.info(`Received ${signal}, initiating graceful shutdown...`);
+    engine.stop();
+    setTimeout(() => {
+      rootLogger.warn('Forced shutdown after timeout');
+      process.exit(1);
+    }, 15_000).unref();
+  };
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // 7. Start Engine
+  await engine.start();
+}
+
+main().catch((err) => {
+  rootLogger.error('Fatal initialization error in importer daemon', {
+    error: err?.message,
+    stack: err?.stack,
+  });
+  process.exit(1);
+});
