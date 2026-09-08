@@ -42,8 +42,8 @@ async function main() {
 
   // 3. Health & Readiness check
   const health = new HealthMonitor(supabase, storage);
-  const initialHealth = await health.checkHealth();
-  rootLogger.info('Initial health check completed', initialHealth);
+  const telemetry = await health.getCompactTelemetry();
+  rootLogger.info(`Initial boot status: ${telemetry}`);
 
   // 4. Initialize Rate Limiter & Source Registry
   const rateLimiter = new HostRateLimiter(2.0);
@@ -53,17 +53,34 @@ async function main() {
   const engine = new ImporterEngine(supabase, storage, registry, rateLimiter, config);
 
   // 6. Graceful Shutdown Handlers
+  let isShuttingDown = false;
   const shutdown = (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
     rootLogger.info(`Received ${signal}, initiating graceful shutdown...`);
     engine.stop();
     setTimeout(() => {
-      rootLogger.warn('Forced shutdown after timeout');
+      rootLogger.warn('Forced shutdown after timeout (15s limit reached)');
       process.exit(1);
     }, 15_000).unref();
   };
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  process.on('unhandledRejection', (reason: any) => {
+    rootLogger.error('Unhandled Promise Rejection caught in daemon', {
+      error: reason?.message || String(reason),
+      stack: reason?.stack,
+    });
+  });
+
+  process.on('uncaughtException', (err: Error) => {
+    rootLogger.error('Uncaught Exception caught in daemon', {
+      error: err?.message,
+      stack: err?.stack,
+    });
+  });
 
   // 7. Start Engine
   await engine.start();

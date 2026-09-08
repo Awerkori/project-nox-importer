@@ -73,23 +73,32 @@ export class NexusAdapter implements SourceAdapter {
     throw new Error(`Nexus request failed after ${maxAttempts} attempts`);
   }
 
-  async fetchUpdatedWorks(cursor?: string | null): Promise<{
+  async fetchUpdatedWorks(
+    cursor?: string | null,
+    options?: { mode?: 'bootstrap' | 'maintenance' }
+  ): Promise<{
     works: SourceWorkSummary[];
     nextCursor: string | null;
   }> {
+    const mode = options?.mode || (cursor ? 'bootstrap' : 'maintenance');
     const limit = 24;
     let url = `${this.apiUrl}/chapters?select=work_id,created_at&order=created_at.desc&limit=${limit}`;
 
-    if (cursor) {
+    if (mode === 'bootstrap' && cursor) {
       url += `&created_at=lt.${encodeURIComponent(cursor)}`;
+    } else if (mode === 'maintenance' && cursor) {
+      url += `&created_at=gt.${encodeURIComponent(cursor)}`;
     }
 
     const latest = await this.request<Array<{ work_id: string; created_at: string }>>(url);
     if (!latest || latest.length === 0) {
-      return { works: [], nextCursor: null };
+      return { works: [], nextCursor: mode === 'maintenance' ? cursor ?? null : null };
     }
 
-    const nextCursor = latest[latest.length - 1].created_at;
+    const nextCursor = mode === 'bootstrap'
+      ? latest[latest.length - 1].created_at
+      : latest[0].created_at;
+
     const workIds = Array.from(new Set(latest.map((item) => item.work_id))).filter(Boolean);
 
     if (workIds.length === 0) {

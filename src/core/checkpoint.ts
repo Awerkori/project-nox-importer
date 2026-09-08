@@ -52,4 +52,28 @@ export class CheckpointManager {
     }
     this.logger.debug('Checkpoint updated', { source, cursorValue });
   }
+
+  async isCatalogCompleted(source: string): Promise<boolean> {
+    const cp = await this.getCheckpoint(source);
+    return Boolean(cp?.metadata?.catalog_completed);
+  }
+
+  async markCatalogCompleted(
+    source: string,
+    lastCursor: string | null,
+    additionalMetadata: Record<string, any> = {}
+  ): Promise<void> {
+    const existing = await this.getCheckpoint(source);
+    const metadata = {
+      ...(existing?.metadata || {}),
+      ...additionalMetadata,
+      catalog_completed: true,
+      catalog_completed_at: new Date().toISOString(),
+    };
+    await this.saveCheckpoint(source, lastCursor, metadata);
+    this.logger.info(`Source ${source} completed catalog bootstrap. Transitioned to maintenance mode.`, {
+      source,
+      completedAt: metadata.catalog_completed_at,
+    });
+  }
 }

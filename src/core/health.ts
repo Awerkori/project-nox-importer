@@ -104,4 +104,14 @@ export class HealthMonitor {
 
     return report;
   }
+
+  async getCompactTelemetry(): Promise<string> {
+    const report = await this.checkHealth();
+    const mem = `${report.memoryUsageMb.heapUsed}MB heap / ${report.memoryUsageMb.rss}MB rss`;
+    const q = `Q:[${report.queue.queued} queued, ${report.queue.importing} running, ${report.queue.retry} retry, ${report.queue.failed} fail]`;
+    const upHours = Math.floor(report.uptimeSeconds / 3600);
+    const upMins = Math.floor((report.uptimeSeconds % 3600) / 60);
+    const uptime = `${upHours}h ${upMins}m`;
+    return `[Health ${report.status}] Mem: ${mem} (512MB RAM) | ${q} | Storage: ${report.storage.provider} (${report.storage.healthy ? 'OK' : 'ERR'}) | Uptime: ${uptime}`;
+  }
 }

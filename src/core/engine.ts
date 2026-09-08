@@ -38,8 +38,23 @@ export class ImporterEngine {
       storageProvider: this.storage.getProviderKey(),
     });
 
+    // 1. Run startup recovery for stalled jobs from crashed instances
+    await this.runStartupRecovery();
+
+    let lastTelemetryTime = 0;
+    const telemetryIntervalMs = 5 * 60 * 1000; // 5 minutes
+
     while (!this.stopSignal) {
       try {
+        const now = Date.now();
+        if (now - lastTelemetryTime >= telemetryIntervalMs) {
+          lastTelemetryTime = now;
+          const mem = process.memoryUsage();
+          this.logger.info(
+            `[Daemon Telemetry] Memory: ${Math.round(mem.heapUsed / 1024 / 1024)}MB heap / ${Math.round(mem.rss / 1024 / 1024)}MB rss (512MB RAM) | Worker: ${this.config.WORKER_ID}`
+          );
+        }
+
         await this.step();
       } catch (err: any) {
         this.logger.error('Unexpected error in engine step', { error: err?.message, stack: err?.stack });
@@ -52,6 +67,38 @@ export class ImporterEngine {
 
     this.isRunning = false;
     this.logger.info('Importer Engine stopped gracefully');
+  }
+
+  async runStartupRecovery(): Promise<void> {
+    try {
+      const { data: stalled, error } = await this.supabase
+        .from('importer_queue')
+        .select('id, task_type, source, attempts, locked_by, lease_expires_at')
+        .eq('status', 'IMPORTING')
+        .lt('lease_expires_at', new Date().toISOString());
+
+      if (error) {
+        this.logger.warn('Failed to query stalled jobs during startup recovery', { error: error.message });
+        return;
+      }
+
+      if (stalled && stalled.length > 0) {
+        this.logger.warn(`Startup recovery detected ${stalled.length} interrupted job(s) from previous worker crash`, {
+          count: stalled.length,
+          stalledJobs: stalled.map((j) => ({
+            id: j.id,
+            taskType: j.task_type,
+            source: j.source,
+            attempts: j.attempts,
+            previousWorker: j.locked_by,
+          })),
+        });
+      } else {
+        this.logger.info('Startup recovery check passed: no stalled jobs detected');
+      }
+    } catch (err: any) {
+      this.logger.warn('Error during startup recovery check', { error: err?.message });
+    }
   }
 
   stop(): void {
@@ -85,6 +132,14 @@ export class ImporterEngine {
     if (error || !sources) return;
 
     for (const src of sources) {
+      // Dynamically apply host rate limit from database if configured
+      if (src.base_url && src.rate_limit_per_second) {
+        try {
+          const host = new URL(src.base_url).host;
+          this.rateLimiter.setHostRate(host, Number(src.rate_limit_per_second) || 2.0);
+        } catch {}
+      }
+
       const lastSync = src.last_sync_at ? new Date(src.last_sync_at).getTime() : 0;
       const intervalMs = (src.sync_interval_minutes || 30) * 60 * 1000;
       const now = Date.now();
@@ -151,25 +206,60 @@ export class ImporterEngine {
     if (!adapter) throw new Error(`Source adapter not registered: ${job.source}`);
 
     const checkpoint = await this.checkpoints.getCheckpoint(job.source);
-    const { works, nextCursor } = await adapter.fetchUpdatedWorks(checkpoint?.cursor_value);
+    const isCompleted = Boolean(checkpoint?.metadata?.catalog_completed);
+    const mode: 'bootstrap' | 'maintenance' = isCompleted ? 'maintenance' : 'bootstrap';
+
+    this.logger.info(`Running ${mode} discovery for source ${job.source}`, {
+      source: job.source,
+      mode,
+      cursor: checkpoint?.cursor_value,
+    });
+
+    const { works, nextCursor } = await adapter.fetchUpdatedWorks(checkpoint?.cursor_value, { mode });
 
     this.logger.info('Discovered updated works', {
       source: job.source,
+      mode,
       count: works.length,
       nextCursor,
     });
 
     for (const work of works) {
       const dedupeKey = `${job.source}:work:${work.sourceWorkId}`;
-      await this.queue.enqueue('SYNC_WORK', job.source, dedupeKey, {
-        sourceWorkId: work.sourceWorkId,
-        slug: work.slug,
-        title: work.title,
-      }, 20);
+      await this.queue.enqueue(
+        'SYNC_WORK',
+        job.source,
+        dedupeKey,
+        {
+          sourceWorkId: work.sourceWorkId,
+          slug: work.slug,
+          title: work.title,
+        },
+        20
+      );
     }
 
-    if (nextCursor) {
-      await this.checkpoints.saveCheckpoint(job.source, nextCursor, {
+    if (mode === 'bootstrap') {
+      if (!nextCursor || works.length === 0) {
+        // Historical backlog completely traversed -> mark catalog as completed!
+        await this.checkpoints.markCatalogCompleted(job.source, null, {
+          lastDiscoveredCount: works.length,
+          lastBootstrapCursor: checkpoint?.cursor_value,
+        });
+      } else {
+        await this.checkpoints.saveCheckpoint(job.source, nextCursor, {
+          ...(checkpoint?.metadata || {}),
+          catalog_completed: false,
+          lastDiscoveredCount: works.length,
+        });
+      }
+    } else {
+      // Maintenance mode: preserve completed status and update newest release cursor
+      const updatedCursor = (nextCursor ?? checkpoint?.cursor_value) ?? null;
+      await this.checkpoints.saveCheckpoint(job.source, updatedCursor, {
+        ...(checkpoint?.metadata || {}),
+        catalog_completed: true,
+        lastMaintenanceCheckAt: new Date().toISOString(),
         lastDiscoveredCount: works.length,
       });
     }

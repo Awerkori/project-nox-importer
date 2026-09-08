@@ -39,7 +39,10 @@ export interface SourceAdapter {
   /**
    * Discover recently updated works from this source
    */
-  fetchUpdatedWorks(cursor?: string | null): Promise<{
+  fetchUpdatedWorks(
+    cursor?: string | null,
+    options?: { mode?: 'bootstrap' | 'maintenance' }
+  ): Promise<{
     works: SourceWorkSummary[];
     nextCursor: string | null;
   }>;
