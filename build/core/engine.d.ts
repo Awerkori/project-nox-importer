@@ -21,6 +21,7 @@ export declare class ImporterEngine {
     private deduplication;
     private checkpoints;
     private autotuner;
+    private publicationBarrier;
     private isRunning;
     private stopSignal;
     private abortController;
@@ -33,6 +34,10 @@ export declare class ImporterEngine {
      * Periodic discovery scheduler running in the background
      */
     private runDiscoveryLoop;
+    /**
+     * Periodic publication sweep loop (every 10s) to unblock STAGED chapters
+     */
+    private runPublicationSweepLoop;
     private autotunerCycleCount;
     /**
      * Periodic autotuner telemetry & evaluation loop (every 30s)
