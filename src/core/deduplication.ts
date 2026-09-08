@@ -26,6 +26,41 @@ export interface CandidateWork {
   rawMetadata?: Record<string, any>;
 }
 
+export function computeCanonicalChapterKey(chapterNumber: number | string, chapterTitle?: string): {
+  normalizedNumber: number;
+  sortKey: number;
+  isSpecial: boolean;
+  specialCategory?: 'prologue' | 'extra' | 'special' | 'side';
+} {
+  const num = typeof chapterNumber === 'number' ? chapterNumber : parseFloat(String(chapterNumber));
+  const normalizedNumber = isNaN(num) || num < 0 ? 0 : Number(num.toFixed(4));
+  const titleLower = (chapterTitle || '').toLowerCase();
+
+  const hasSpecialKeywords = /especial|special|extra|omake|side|spin-off/i.test(titleLower);
+  const hasPrologueKeywords = /pr[oó]logo|prologue/i.test(titleLower);
+
+  const isPrologue = hasPrologueKeywords || (normalizedNumber === 0 && !hasSpecialKeywords);
+  const isSpecial = hasSpecialKeywords || isPrologue;
+
+  let specialCategory: 'prologue' | 'extra' | 'special' | 'side' | undefined;
+  if (isPrologue) specialCategory = 'prologue';
+  else if (/extra/i.test(titleLower)) specialCategory = 'extra';
+  else if (/side/i.test(titleLower)) specialCategory = 'side';
+  else if (hasSpecialKeywords) specialCategory = 'special';
+
+  let sortKey = normalizedNumber;
+  if (hasSpecialKeywords && normalizedNumber === 0) {
+    sortKey = 0.0001;
+  }
+
+  return {
+    normalizedNumber,
+    sortKey: Number(sortKey.toFixed(4)),
+    isSpecial,
+    specialCategory,
+  };
+}
+
 export class DeduplicationEngine {
   private logger = new Logger('Deduplication');
 

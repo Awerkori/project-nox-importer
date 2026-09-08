@@ -81,22 +81,25 @@ export class ImporterQueue {
         return data === true;
     }
     /**
-     * Release an acquired job as completed, failed, or queued for retry
+     * Release an acquired job as completed, failed, or queued for retry with second-level precision
      */
-    async releaseJob(jobId, status, lastError, retryDelayMinutes) {
-        const retryDelay = retryDelayMinutes ? `${retryDelayMinutes} minutes` : null;
+    async releaseJob(jobId, status, lastError, retryDelaySeconds, retryClass) {
+        const retryDelay = retryDelaySeconds !== undefined && retryDelaySeconds !== null
+            ? `${Math.max(1, Math.round(retryDelaySeconds))} seconds`
+            : null;
         const { data, error } = await this.supabase.rpc('importer_release_job', {
             p_job_id: jobId,
             p_worker_id: this.workerId,
             p_status: status,
             p_error: lastError ?? null,
             p_retry_delay: retryDelay,
+            p_retry_delay_minutes: retryDelaySeconds ? Math.ceil(retryDelaySeconds / 60) : null,
         });
         if (error) {
             this.logger.error('Failed to release job', { jobId, status, error: error.message });
             return false;
         }
-        this.logger.info('Released job', { jobId, status, hasError: !!lastError });
+        this.logger.info('Released job', { jobId, status, retryClass, retryDelaySeconds, hasError: !!lastError });
         return data === true;
     }
     /**

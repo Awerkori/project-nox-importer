@@ -37,9 +37,9 @@ export declare class ImporterQueue {
      */
     renewLease(jobId: string, leaseDurationMinutes?: number): Promise<boolean>;
     /**
-     * Release an acquired job as completed, failed, or queued for retry
+     * Release an acquired job as completed, failed, or queued for retry with second-level precision
      */
-    releaseJob(jobId: string, status: JobStatus, lastError?: string, retryDelayMinutes?: number): Promise<boolean>;
+    releaseJob(jobId: string, status: JobStatus, lastError?: string, retryDelaySeconds?: number, retryClass?: string): Promise<boolean>;
     /**
      * Create a lease heartbeat handle that periodically renews the lease
      * until stopped. Uses .unref() to avoid blocking graceful shutdown.

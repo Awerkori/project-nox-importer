@@ -17,12 +17,28 @@ export declare class HostRateLimiter {
 }
 export interface StorageRateLimiterConfig {
     maxRequestsPerMinute?: number;
+    minRequestsPerMinute?: number;
+    safetyCeilingRate?: number;
     minIntervalMs?: number;
+}
+export interface StorageMetricsSummary {
+    currentRate: number;
+    peakTestedRate: number;
+    successfulPagesLastMinute: number;
+    mbPerMinute: number;
+    avgUploadLatencyMs: number;
+    recent429Count: number;
+    recent502Count: number;
+    isBlocked: boolean;
+    blockedRemainingSeconds: number;
 }
 /**
  * Centralized global rate limiter for Storage Bridge uploads across all sources.
- * Enforces a strict Token Bucket + Sliding Window rate limit (default 105 req/min)
- * with dynamic backoff upon receiving HTTP 429 or Retry-After headers.
+ * Enforces an Adaptive AIMD (Additive Increase, Multiplicative Decrease) control loop:
+ * - Increases rate gradually (+2 req/min) ONLY when real throughput (pages/min) increases.
+ * - Detects throughput plateau with hysteresis to avoid ratcheting into rate limits.
+ * - Enforces immediate Multiplicative Decrease (-20%) and cooldown upon receiving HTTP 429.
+ * - Configurable operational safety ceiling against runaway telemetry.
  */
 export declare class GlobalStorageRateLimiter {
     private logger;
@@ -35,8 +51,20 @@ export declare class GlobalStorageRateLimiter {
     private lastAcquiredTime;
     private currentRatePerMinute;
     private baseRatePerMinute;
+    private minRatePerMinute;
+    private safetyCeilingRate;
+    private peakTestedRate;
+    private inCooldownUntil;
+    private consecutiveSuccessfulUploads;
+    private windowStartTime;
+    private windowUploadCount;
+    private windowBytesSum;
+    private windowDurationSumMs;
+    private previousWindowRate;
     private recentUploadTimestamps;
     private recentTransientErrors;
+    private total429Count;
+    private total502Count;
     constructor(config?: StorageRateLimiterConfig);
     /**
      * Acquire an upload token before sending an image to the Storage Bridge.
@@ -44,23 +72,34 @@ export declare class GlobalStorageRateLimiter {
      */
     acquire(): Promise<void>;
     /**
+     * Record a successful upload with page size and latency metrics.
+     * Evaluates real throughput (pages/min) over 30s windows with plateau detection:
+     * - If real throughput increased: scales up rate (+2 req/min).
+     * - If real throughput plateaued: stops increasing to avoid inducing 429.
+     * - If safety ceiling reached: emits SAFETY_CEILING_REACHED.
+     */
+    recordSuccess(bytes?: number, durationMs?: number): void;
+    /**
      * Handle rate limits (HTTP 429, FloodWait, Retry-After) reported by the Storage Bridge.
-     * Immediately blocks subsequent uploads and backs off by reducing rate by 20%.
+     * Multiplicative decrease (-20%) and cooldown.
+     * Pauses ONLY the Storage Bridge; the rest of the Importer remains fully active.
      */
     recordRateLimit(retryAfterSeconds?: number): void;
     /**
-     * Gradually restore rate back towards baseRatePerMinute when operating stably
-     */
-    restoreRate(): void;
-    /**
      * Track transient upstream errors (502/503/network) from the Storage Bridge.
      * Isolated failures (1 or 2) do NOT block or pause the global rate limiter.
-     * Only repeated transient failures in a concentrated window (>= 3 in 30s) trigger
-     * a mild global pacing pause of 15 seconds.
+     * Repeated transient failures in a concentrated window (>= 3 in 30s) trigger
+     * a mild global pacing pause of 15 seconds and slight rate adjustment.
      */
     recordTransientError(): void;
     getRecentTransientErrorCount(): number;
+    /**
+     * Gradually restore rate towards baseRatePerMinute when recovering from throttling
+     */
+    restoreRate(): void;
+    getMetricsSummary(): StorageMetricsSummary;
     getCurrentRatePerMinute(): number;
+    getPeakTestedRate(): number;
     getRecentUploadCount(): number;
     isBlocked(): boolean;
     getBlockedRemainingMs(): number;
