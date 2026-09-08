@@ -4,6 +4,12 @@ import { StorageProvider } from '../storage/provider.js';
 import { HostRateLimiter } from './rate-limiter.js';
 import { Config } from '../config.js';
 import { AdaptiveAutotuner } from './concurrency.js';
+export declare function computeCanonicalChapterKey(chapterNumber: number | string, chapterTitle?: string): {
+    normalizedNumber: number;
+    sortKey: number;
+    isSpecial: boolean;
+    specialCategory?: 'prologue' | 'extra' | 'special' | 'side';
+};
 export declare class ImporterEngine {
     private supabase;
     private storage;
@@ -27,6 +33,7 @@ export declare class ImporterEngine {
      * Periodic discovery scheduler running in the background
      */
     private runDiscoveryLoop;
+    private autotunerCycleCount;
     /**
      * Periodic autotuner telemetry & evaluation loop (every 30s)
      */
@@ -51,8 +58,18 @@ export declare class ImporterEngine {
     private processJob;
     private handleDiscoverWorks;
     private handleSyncWork;
+    computeCanonicalChapterKey(chapterNumber: number | string, chapterTitle?: string): {
+        normalizedNumber: number;
+        sortKey: number;
+        isSpecial: boolean;
+        specialCategory?: "prologue" | "extra" | "special" | "side";
+    };
     private computeChapterSortKey;
     private handleImportChapter;
+    private recordJobMetric;
+    private recordTelemetrySnapshot;
+    private pruneTelemetry;
+    private sanitizeErrorMessage;
     private downloadAndRegisterImage;
     private fetchImageBytes;
     private cachedBotUserId;

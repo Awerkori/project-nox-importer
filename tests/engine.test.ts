@@ -166,10 +166,43 @@ describe('ImporterEngine End-to-End Execution', () => {
               return {
                 maybeSingle: execQuery,
                 single: execQuery,
+                not: (notCol: string, op: string, notVal: any) => {
+                  const execQueryWithNot = async () => {
+                    let sql = `select * from public.${table} where ${col} = $1 and ${col2} = $2`;
+                    if (op === 'is' && notVal === null) {
+                      sql += ` and ${notCol} is not null`;
+                    }
+                    sql += ` limit 1`;
+                    const res = await db.query(sql, [val, val2]);
+                    return { data: res.rows[0] || null, error: null };
+                  };
+                  return {
+                    maybeSingle: execQueryWithNot,
+                    single: execQueryWithNot,
+                    then: (resolve: any) => execQueryWithNot().then(resolve),
+                  };
+                },
                 limit: (n: number) => ({
                   maybeSingle: execQuery,
                   single: execQuery,
                 }),
+              };
+            },
+            not: (notCol: string, op: string, notVal: any) => {
+              const execQuery = async () => {
+                let sql = `select * from public.${table} where ${col} = $1`;
+                if (op === 'is' && notVal === null) {
+                  sql += ` and ${notCol} is not null`;
+                }
+                const res = await db.query(sql, [val]);
+                return { data: res.rows, error: null };
+              };
+              return {
+                maybeSingle: async () => {
+                  const res = await execQuery();
+                  return { data: res.data[0] || null, error: null };
+                },
+                then: (resolve: any) => execQuery().then(resolve),
               };
             },
             in: (col2: string, vals: any[]) => ({
