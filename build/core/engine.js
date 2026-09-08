@@ -1,40 +1,14 @@
 import { ImporterQueue } from './queue.js';
-import { DeduplicationEngine } from './deduplication.js';
+import { DeduplicationEngine, computeCanonicalChapterKey } from './deduplication.js';
 import { CheckpointManager } from './checkpoint.js';
 import { processAndStoreMedia } from '../storage/media.js';
 import { Logger } from './logger.js';
 import { diagnostics } from './diagnostics.js';
 import { AdaptiveAutotuner, AsyncSemaphore } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
-import { NoxWorkerStorageError } from '../storage/worker.js';
-export function computeCanonicalChapterKey(chapterNumber, chapterTitle) {
-    const num = typeof chapterNumber === 'number' ? chapterNumber : parseFloat(String(chapterNumber));
-    const normalizedNumber = isNaN(num) || num < 0 ? 0 : Number(num.toFixed(4));
-    const titleLower = (chapterTitle || '').toLowerCase();
-    const hasSpecialKeywords = /especial|special|extra|omake|side|spin-off/i.test(titleLower);
-    const hasPrologueKeywords = /pr[oó]logo|prologue/i.test(titleLower);
-    const isPrologue = hasPrologueKeywords || (normalizedNumber === 0 && !hasSpecialKeywords);
-    const isSpecial = hasSpecialKeywords || isPrologue;
-    let specialCategory;
-    if (isPrologue)
-        specialCategory = 'prologue';
-    else if (/extra/i.test(titleLower))
-        specialCategory = 'extra';
-    else if (/side/i.test(titleLower))
-        specialCategory = 'side';
-    else if (hasSpecialKeywords)
-        specialCategory = 'special';
-    let sortKey = normalizedNumber;
-    if (hasSpecialKeywords && normalizedNumber === 0) {
-        sortKey = 0.0001;
-    }
-    return {
-        normalizedNumber,
-        sortKey: Number(sortKey.toFixed(4)),
-        isSpecial,
-        specialCategory,
-    };
-}
+import { RetryPolicy, ProviderDownloadError } from './retry-policy.js';
+import { ExistingWorksReconciler } from './reconciliation.js';
+export { computeCanonicalChapterKey };
 export class ImporterEngine {
     supabase;
     storage;
@@ -47,9 +21,13 @@ export class ImporterEngine {
     checkpoints;
     autotuner;
     publicationBarrier;
+    reconciler;
     isRunning = false;
     stopSignal = false;
     abortController = new AbortController();
+    // Ready Queue bounded buffer control in RAM (< 40MB max)
+    static activeBufferedBytes = 0;
+    static MAX_BUFFERED_BYTES = 40 * 1024 * 1024;
     constructor(supabase, storage, registry, rateLimiter, config) {
         this.supabase = supabase;
         this.storage = storage;
@@ -60,6 +38,7 @@ export class ImporterEngine {
         this.deduplication = new DeduplicationEngine(supabase);
         this.checkpoints = new CheckpointManager(supabase);
         this.publicationBarrier = new PublicationBarrier(supabase);
+        this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
         this.autotuner = new AdaptiveAutotuner({
             initialConcurrency: Math.min(3, config.MAX_CONCURRENT_CHAPTERS || 3),
             maxConcurrency: Math.max(3, config.MAX_CONCURRENT_CHAPTERS || 6),
@@ -87,7 +66,9 @@ export class ImporterEngine {
         this.runPublicationSweepLoop();
         // 5. Launch background lease recovery loop (every 60s)
         this.runLeaseRecoveryLoop();
-        // 6. Launch independent concurrent worker loops for each registered source
+        // 6. Launch periodic existing works reconciliation loop (every 15 min)
+        this.runReconciliationLoop();
+        // 7. Launch independent concurrent worker loops for each registered source
         const activeWorkers = [];
         for (const adapter of this.registry.getAll()) {
             activeWorkers.push(this.runSourceWorker(adapter.id));
@@ -111,9 +92,59 @@ export class ImporterEngine {
             }
             // 2. Sweep any staged publications left over from previous instance
             await this.publicationBarrier.sweepStagedPublications();
+            // 3. Recover stalled 502 retries with long delays from previous exponential backoff policy
+            await this.recoverStalled502Retries();
         }
         catch (err) {
             this.logger.warn('Error during startup recovery check', { error: err?.message });
+        }
+    }
+    /**
+     * Recalculates next_run_at for legacy retry jobs that were given long exponential backoffs (16-32 min)
+     * due to transient 502/503 errors, rescheduling them for quick execution (10-35s).
+     */
+    async recoverStalled502Retries() {
+        try {
+            const now = new Date();
+            let query = this.supabase
+                .from('importer_queue')
+                .select('id, attempts, next_run_at, last_error, source')
+                .eq('status', 'RETRY');
+            if (typeof query.is === 'function') {
+                query = query.is('locked_by', null);
+            }
+            const { data: retries, error } = await query;
+            if (error || !retries || retries.length === 0)
+                return 0;
+            let count = 0;
+            for (const job of retries) {
+                const err = job.last_error || '';
+                // Only recover jobs that are demonstrably 502/503/timeout and scheduled into the future
+                const isStorageErr = /502|503|timeout|aborted|ETIMEDOUT|Internal storage upload failed/i.test(err);
+                const isPausedKuro = job.source === 'kuro' && /PAUSED/i.test(err);
+                const isFuture = job.next_run_at && new Date(job.next_run_at) > now;
+                if (isStorageErr && !isPausedKuro && isFuture) {
+                    // Reschedule for quick execution (10 to 35 seconds with jitter)
+                    const delaySec = 10 + Math.floor(Math.random() * 25);
+                    const newNextRun = new Date(Date.now() + delaySec * 1000).toISOString();
+                    await this.supabase
+                        .from('importer_queue')
+                        .update({
+                        next_run_at: newNextRun,
+                        updated_at: new Date().toISOString(),
+                    })
+                        .eq('id', job.id);
+                    count++;
+                }
+            }
+            if (count > 0) {
+                this.logger.info(`Startup recovery rescheduled ${count} stalled 502/503 retry job(s) for immediate execution.`);
+            }
+            return count;
+        }
+        catch (err) {
+            this.logger.warn('Error during recoverStalled502Retries', { error: err?.message });
+            return 0;
         }
     }
     stop() {
@@ -164,6 +195,25 @@ export class ImporterEngine {
             }
             catch (err) {
                 this.logger.warn('Error during periodic lease recovery loop', { error: err?.message });
+            }
+        }
+    }
+    /**
+     * Periodic existing works reconciliation loop (every 15 min)
+     * Scans batches of existing works to detect gaps confirmed by sources and fresh releases.
+     */
+    async runReconciliationLoop() {
+        while (!this.stopSignal) {
+            // Run every 15 minutes
+            await this.sleep(15 * 60 * 1000);
+            if (this.stopSignal)
+                break;
+            try {
+                this.logger.info('Starting periodic existing works reconciliation batch...');
+                await this.reconciler.reconcileExistingWorks(20);
+            }
+            catch (err) {
+                this.logger.error('Error during periodic reconciliation loop', { error: err?.message });
             }
         }
     }
@@ -410,28 +460,41 @@ export class ImporterEngine {
                 error: errorMessage,
                 attempts: job.attempts,
             });
-            const isStorageBridgeError = err instanceof NoxWorkerStorageError;
-            const isStorageBridge429 = isStorageBridgeError && err.status === 429;
-            const is429 = err?.status === 429 || err?.statusCode === 429 || /429|rate\s*limit/i.test(errorMessage);
-            const isTimeout = /timeout|aborted|ETIMEDOUT/i.test(errorMessage);
-            if (isStorageBridge429) {
-                this.autotuner.recordError('ratelimit');
-                this.logger.warn(`Storage Bridge rate limit (429) encountered for job ${job.id}. Releasing for retry.`);
-                const nextStatus = job.attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
-                await this.queue.releaseJob(job.id, nextStatus, errorMessage, 1);
-                return;
-            }
-            if (is429) {
-                this.autotuner.recordError('ratelimit');
-                let waitSeconds = 60;
-                const retryAfter = err?.retryAfter || err?.headers?.get?.('retry-after');
-                if (retryAfter) {
-                    const parsed = parseInt(retryAfter, 10);
-                    if (!isNaN(parsed) && parsed > 0)
-                        waitSeconds = Math.min(3600, parsed);
+            const classification = RetryPolicy.classify(err);
+            const decision = RetryPolicy.decide(classification, job.attempts, job.max_attempts);
+            if (classification.retryClass === 'QUEUE_RETRY_429') {
+                if (classification.sourceStage === 'storage') {
+                    // Storage rate limit (Telegram / Storage Bridge):
+                    // Throttles ONLY the Storage rate limiter; DO NOT scale down general job concurrency!
+                    if (typeof this.storage.getRateLimiter === 'function') {
+                        this.storage.getRateLimiter().recordRateLimit(classification.retryAfterSeconds);
+                    }
                 }
+                else {
+                    // Source provider rate limit: place the source in COOLDOWN
+                    const waitSeconds = classification.retryAfterSeconds || 60;
+                    const cooldownUntil = new Date(Date.now() + waitSeconds * 1000).toISOString();
+                    this.logger.warn(`Source ${job.source} entered COOLDOWN due to provider rate limit for ${waitSeconds}s`);
+                    await this.supabase
+                        .from('importer_sources')
+                        .update({
+                        status: 'COOLDOWN',
+                        cooldown_until: cooldownUntil,
+                        updated_at: new Date().toISOString(),
+                    })
+                        .eq('id', job.source);
+                }
+            }
+            else if (classification.retryClass === 'QUEUE_RETRY_STORAGE_502' || classification.retryClass === 'QUEUE_RETRY_STORAGE_503') {
+                if (typeof this.storage.getRateLimiter === 'function') {
+                    this.storage.getRateLimiter().recordTransientError();
+                }
+            }
+            else if (classification.sourceStage === 'provider' && /rate\s*limit/i.test(errorMessage)) {
+                // Source provider rate limit fallback: place the source in COOLDOWN
+                const waitSeconds = classification.retryAfterSeconds || 60;
                 const cooldownUntil = new Date(Date.now() + waitSeconds * 1000).toISOString();
-                this.logger.warn(`Source ${job.source} entered COOLDOWN due to rate limit for ${waitSeconds}s`);
+                this.logger.warn(`Source ${job.source} entered COOLDOWN due to provider rate limit for ${waitSeconds}s`);
                 await this.supabase
                     .from('importer_sources')
                     .update({
@@ -440,19 +503,24 @@ export class ImporterEngine {
                     updated_at: new Date().toISOString(),
                 })
                     .eq('id', job.source);
-                const backoffMinutes = Math.max(1, Math.ceil(waitSeconds / 60));
-                await this.queue.releaseJob(job.id, 'RETRY', `Rate limit triggered: COOLDOWN until ${cooldownUntil}`, backoffMinutes);
-                return;
             }
-            if (isTimeout) {
+            else if (classification.retryClass === 'QUEUE_RETRY_TIMEOUT') {
                 this.autotuner.recordError('timeout');
             }
-            else {
+            else if (classification.sourceStage === 'system') {
                 this.autotuner.recordError('error');
             }
-            const nextStatus = job.attempts >= job.max_attempts ? 'FAILED' : 'RETRY';
-            const backoffMinutes = Math.min(60, Math.pow(2, job.attempts) * 2);
-            await this.queue.releaseJob(job.id, nextStatus, errorMessage, backoffMinutes);
+            this.logger.warn(`Job ${job.id} retry decision: ${decision.status} (delay: ${decision.delaySeconds}s, class: ${classification.retryClass})`, {
+                jobId: job.id,
+                source: job.source,
+                workId: job.payload?.workId,
+                chapterSortKey: job.chapter_sort_key,
+                retryClass: classification.retryClass,
+                attempt: job.attempts,
+                delaySeconds: decision.delaySeconds,
+                reason: decision.reason,
+            });
+            await this.queue.releaseJob(job.id, decision.status, this.sanitizeErrorMessage(errorMessage), decision.delaySeconds, classification.retryClass);
         }
     }
     async handleDiscoverWorks(job) {
@@ -768,40 +836,94 @@ export class ImporterEngine {
                 if (this.stopSignal) {
                     throw new Error('Process shutdown requested during chapter page download');
                 }
-                return globalMediaSemaphore.runExclusive(async () => {
-                    const parsedUrl = new URL(pageUrl);
-                    await this.rateLimiter.acquire(parsedUrl.host);
-                    // Retry page download up to 3 times before failing
-                    let attempts = 0;
-                    let lastErr;
-                    while (attempts < 3 && !this.stopSignal) {
-                        attempts++;
-                        try {
-                            const d0 = Date.now();
-                            const pageBytes = await this.fetchImageBytes(pageUrl);
-                            tDownload += Date.now() - d0;
-                            totalBytes += pageBytes.length;
-                            const u0 = Date.now();
-                            const res = await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial');
-                            tUpload += Date.now() - u0;
-                            storedPages[idx] = {
-                                mediaId: res.mediaId,
-                                width: res.width,
-                                height: res.height,
-                            };
-                            completedPagesCount++;
-                            diagnostics.updateJobProgress(job.id, completedPagesCount);
-                            return;
-                        }
-                        catch (err) {
-                            lastErr = err;
-                            if (attempts < 3 && !this.stopSignal) {
-                                await this.sleep(1000 * attempts);
+                // Backpressure: wait if in-flight buffered image bytes exceed budget (40MB)
+                while (ImporterEngine.activeBufferedBytes >= ImporterEngine.MAX_BUFFERED_BYTES && !this.stopSignal) {
+                    await this.sleep(100);
+                }
+                const parsedUrl = new URL(pageUrl);
+                await this.rateLimiter.acquire(parsedUrl.host);
+                // Retry page download and upload up to 3 times before failing
+                let attempts = 0;
+                let lastErr;
+                while (attempts < 3 && !this.stopSignal) {
+                    attempts++;
+                    let pageBytes = null;
+                    try {
+                        // 1. Download page from external provider (outside of globalMediaSemaphore!)
+                        const d0 = Date.now();
+                        pageBytes = await this.fetchImageBytes(pageUrl, job.source);
+                        tDownload += Date.now() - d0;
+                        totalBytes += pageBytes.length;
+                        ImporterEngine.activeBufferedBytes += pageBytes.length;
+                        // 2. Upload to Storage Bridge / Telegram (inside globalMediaSemaphore and rate limiter)
+                        const u0 = Date.now();
+                        const res = await globalMediaSemaphore.runExclusive(async () => {
+                            return await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial');
+                        });
+                        const uploadDuration = Date.now() - u0;
+                        tUpload += uploadDuration;
+                        // Inform AIMD rate limiter of successful upload
+                        if (typeof this.storage.getRateLimiter === 'function') {
+                            const limiter = this.storage.getRateLimiter();
+                            if (typeof limiter.recordSuccess === 'function') {
+                                limiter.recordSuccess(pageBytes.length, uploadDuration);
                             }
                         }
+                        storedPages[idx] = {
+                            mediaId: res.mediaId,
+                            width: res.width,
+                            height: res.height,
+                        };
+                        completedPagesCount++;
+                        diagnostics.updateJobProgress(job.id, completedPagesCount);
+                        return;
                     }
-                    throw new Error(`Failed to process page ${idx + 1}/${expectedCount} after 3 attempts: ${lastErr?.message}`);
-                });
+                    catch (err) {
+                        lastErr = err;
+                        if (attempts < 3 && !this.stopSignal) {
+                            await this.sleep(1000 * attempts);
+                        }
+                    }
+                    finally {
+                        // Immediately release RAM buffer
+                        if (pageBytes) {
+                            ImporterEngine.activeBufferedBytes = Math.max(0, ImporterEngine.activeBufferedBytes - pageBytes.length);
+                            pageBytes = null;
+                        }
+                    }
+                }
+                // Fallback attempt: if primary provider failed (e.g. 404), check if fallbackSources are present
+                const fallbacks = job.payload?.fallbackSources;
+                if (fallbacks && fallbacks.length > 0) {
+                    this.logger.warn(`Primary source ${job.source} failed on page ${idx + 1}. Attempting multi-source fallback...`, {
+                        workId,
+                        chapterNumber,
+                        fallbackCount: fallbacks.length,
+                    });
+                    for (const fb of fallbacks) {
+                        try {
+                            const fbAdapter = this.registry.get(fb.source);
+                            if (!fbAdapter)
+                                continue;
+                            const fbPages = await fbAdapter.fetchChapterPages(fb.sourceChapterId, chapterNumber);
+                            if (fbPages && fbPages[idx]) {
+                                const fbBytes = await this.fetchImageBytes(fbPages[idx], fb.source);
+                                const res = await globalMediaSemaphore.runExclusive(async () => {
+                                    return await processAndStoreMedia(this.supabase, this.storage, fbBytes, botUserId, 'editorial');
+                                });
+                                storedPages[idx] = { mediaId: res.mediaId, width: res.width, height: res.height };
+                                completedPagesCount++;
+                                diagnostics.updateJobProgress(job.id, completedPagesCount);
+                                this.logger.info(`Successfully rescued page ${idx + 1} using fallback source ${fb.source}`);
+                                return;
+                            }
+                        }
+                        catch (fbErr) {
+                            this.logger.warn(`Fallback source ${fb.source} also failed for page ${idx + 1}`, { error: fbErr?.message });
+                        }
+                    }
+                }
+                throw new Error(`Failed to process page ${idx + 1}/${expectedCount} after 3 attempts: ${lastErr?.message}`);
             }));
             await Promise.all(pageTasks);
             // SAFEGUARD 1: Strict integrity check (expectedPages === validUploadedPages)
@@ -1029,7 +1151,7 @@ export class ImporterEngine {
         const res = await processAndStoreMedia(this.supabase, this.storage, bytes, userId, purpose);
         return res.mediaId;
     }
-    async fetchImageBytes(url) {
+    async fetchImageBytes(url, source = 'unknown') {
         const res = await fetch(url, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
@@ -1038,7 +1160,7 @@ export class ImporterEngine {
             signal: AbortSignal.timeout(45_000),
         });
         if (!res.ok) {
-            throw new Error(`Failed to download image from ${url}: HTTP ${res.status}`);
+            throw new ProviderDownloadError(res.status, url, source, `Failed to download image from ${url}: HTTP ${res.status}`);
         }
         const arrayBuf = await res.arrayBuffer();
         return new Uint8Array(arrayBuf);

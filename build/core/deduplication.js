@@ -1,4 +1,32 @@
 import { Logger } from './logger.js';
+export function computeCanonicalChapterKey(chapterNumber, chapterTitle) {
+    const num = typeof chapterNumber === 'number' ? chapterNumber : parseFloat(String(chapterNumber));
+    const normalizedNumber = isNaN(num) || num < 0 ? 0 : Number(num.toFixed(4));
+    const titleLower = (chapterTitle || '').toLowerCase();
+    const hasSpecialKeywords = /especial|special|extra|omake|side|spin-off/i.test(titleLower);
+    const hasPrologueKeywords = /pr[oó]logo|prologue/i.test(titleLower);
+    const isPrologue = hasPrologueKeywords || (normalizedNumber === 0 && !hasSpecialKeywords);
+    const isSpecial = hasSpecialKeywords || isPrologue;
+    let specialCategory;
+    if (isPrologue)
+        specialCategory = 'prologue';
+    else if (/extra/i.test(titleLower))
+        specialCategory = 'extra';
+    else if (/side/i.test(titleLower))
+        specialCategory = 'side';
+    else if (hasSpecialKeywords)
+        specialCategory = 'special';
+    let sortKey = normalizedNumber;
+    if (hasSpecialKeywords && normalizedNumber === 0) {
+        sortKey = 0.0001;
+    }
+    return {
+        normalizedNumber,
+        sortKey: Number(sortKey.toFixed(4)),
+        isSpecial,
+        specialCategory,
+    };
+}
 export class DeduplicationEngine {
     supabase;
     logger = new Logger('Deduplication');

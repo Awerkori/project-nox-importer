@@ -1,15 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SourceRegistry } from '../sources/registry.js';
 import { StorageProvider } from '../storage/provider.js';
+import { computeCanonicalChapterKey } from './deduplication.js';
 import { HostRateLimiter } from './rate-limiter.js';
 import { Config } from '../config.js';
 import { AdaptiveAutotuner } from './concurrency.js';
-export declare function computeCanonicalChapterKey(chapterNumber: number | string, chapterTitle?: string): {
-    normalizedNumber: number;
-    sortKey: number;
-    isSpecial: boolean;
-    specialCategory?: 'prologue' | 'extra' | 'special' | 'side';
-};
+export { computeCanonicalChapterKey };
 export declare class ImporterEngine {
     private supabase;
     private storage;
@@ -22,13 +18,21 @@ export declare class ImporterEngine {
     private checkpoints;
     private autotuner;
     private publicationBarrier;
+    private reconciler;
     private isRunning;
     private stopSignal;
     private abortController;
+    static activeBufferedBytes: number;
+    static readonly MAX_BUFFERED_BYTES: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
     getAutotuner(): AdaptiveAutotuner;
     start(): Promise<void>;
     runStartupRecovery(): Promise<void>;
+    /**
+     * Recalculates next_run_at for legacy retry jobs that were given long exponential backoffs (16-32 min)
+     * due to transient 502/503 errors, rescheduling them for quick execution (10-35s).
+     */
+    recoverStalled502Retries(): Promise<number>;
     stop(): void;
     /**
      * Periodic discovery scheduler running in the background
@@ -42,6 +46,11 @@ export declare class ImporterEngine {
      * Periodic lease recovery loop (every 60s) to rescue stalled jobs from crashed instances
      */
     private runLeaseRecoveryLoop;
+    /**
+     * Periodic existing works reconciliation loop (every 15 min)
+     * Scans batches of existing works to detect gaps confirmed by sources and fresh releases.
+     */
+    private runReconciliationLoop;
     private autotunerCycleCount;
     /**
      * Periodic autotuner telemetry & evaluation loop (every 30s)
