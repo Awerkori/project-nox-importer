@@ -5,6 +5,7 @@ import { processAndStoreMedia } from '../storage/media.js';
 import { Logger } from './logger.js';
 import { diagnostics } from './diagnostics.js';
 import { AdaptiveAutotuner, AsyncSemaphore } from './concurrency.js';
+import { PublicationBarrier } from './publication.js';
 export function computeCanonicalChapterKey(chapterNumber, chapterTitle) {
     const num = typeof chapterNumber === 'number' ? chapterNumber : parseFloat(String(chapterNumber));
     const normalizedNumber = isNaN(num) || num < 0 ? 0 : Number(num.toFixed(4));
@@ -44,6 +45,7 @@ export class ImporterEngine {
     deduplication;
     checkpoints;
     autotuner;
+    publicationBarrier;
     isRunning = false;
     stopSignal = false;
     abortController = new AbortController();
@@ -56,6 +58,7 @@ export class ImporterEngine {
         this.queue = new ImporterQueue(supabase, config.WORKER_ID);
         this.deduplication = new DeduplicationEngine(supabase);
         this.checkpoints = new CheckpointManager(supabase);
+        this.publicationBarrier = new PublicationBarrier(supabase);
         this.autotuner = new AdaptiveAutotuner({
             initialConcurrency: Math.min(3, config.MAX_CONCURRENT_CHAPTERS || 3),
             maxConcurrency: Math.max(3, config.MAX_CONCURRENT_CHAPTERS || 6),
@@ -79,7 +82,9 @@ export class ImporterEngine {
         this.runAutotunerLoop();
         // 3. Launch background discovery scheduler loop
         this.runDiscoveryLoop();
-        // 4. Launch independent concurrent worker loops for each registered source
+        // 4. Launch background publication sweep loop (every 10s)
+        this.runPublicationSweepLoop();
+        // 5. Launch independent concurrent worker loops for each registered source
         const activeWorkers = [];
         for (const adapter of this.registry.getAll()) {
             activeWorkers.push(this.runSourceWorker(adapter.id));
@@ -117,6 +122,8 @@ export class ImporterEngine {
             else {
                 this.logger.info('Startup recovery check passed: no stalled jobs detected');
             }
+            // 2. Sweep any staged publications left over from previous instance
+            await this.publicationBarrier.sweepStagedPublications();
         }
         catch (err) {
             this.logger.warn('Error during startup recovery check', { error: err?.message });
@@ -139,6 +146,22 @@ export class ImporterEngine {
             }
             // Check discovery every 30 seconds
             await this.sleep(30_000);
+        }
+    }
+    /**
+     * Periodic publication sweep loop (every 10s) to unblock STAGED chapters
+     */
+    async runPublicationSweepLoop() {
+        while (!this.stopSignal) {
+            await this.sleep(10_000);
+            if (this.stopSignal)
+                break;
+            try {
+                await this.publicationBarrier.sweepStagedPublications();
+            }
+            catch (err) {
+                this.logger.error('Error during publication sweep loop', { error: err?.message });
+            }
         }
     }
     autotunerCycleCount = 0;
@@ -621,6 +644,19 @@ export class ImporterEngine {
         for (const ch of chaptersToEnqueue) {
             const dedupeKey = `${job.source}:chapter:${ch.sourceChapterId}`;
             const chKey = this.computeCanonicalChapterKey(ch.number, ch.title);
+            // Pre-register in importer_chapter_mappings so publication barrier has full universe of discovered chapters
+            await this.supabase.from('importer_chapter_mappings').upsert({
+                source: job.source,
+                source_chapter_id: ch.sourceChapterId,
+                work_id: result.workId,
+                work_mapping_id: result.mappingId,
+                chapter_number: ch.number,
+                chapter_sort_key: chKey.sortKey,
+                page_count: ch.pageCount || 0,
+                status: 'PENDING',
+                is_gap: false,
+                last_error: null,
+            }, { onConflict: 'source,source_chapter_id' });
             await this.queue.enqueue('IMPORT_CHAPTER', job.source, dedupeKey, {
                 sourceWorkId,
                 sourceChapterId: ch.sourceChapterId,
@@ -631,6 +667,8 @@ export class ImporterEngine {
                 expectedPageCount: ch.pageCount,
             }, 30, chKey.sortKey);
         }
+        // Discovery complete for this work sync cycle: sweep any STAGED chapters that were waiting on discovery
+        await this.publicationBarrier.sweepStagedPublications();
     }
     computeCanonicalChapterKey(chapterNumber, chapterTitle) {
         return computeCanonicalChapterKey(chapterNumber, chapterTitle);
@@ -658,12 +696,16 @@ export class ImporterEngine {
                 source: job.source,
                 canonicalChapterId: alreadyPub.id,
             });
+            const sortKey = this.computeChapterSortKey(chapterNumber, chapterTitle);
             await this.supabase.from('importer_chapter_mappings').upsert({
                 source: job.source,
                 source_chapter_id: sourceChapterId,
                 chapter_id: alreadyPub.id,
+                work_id: workId,
                 work_mapping_id: workMappingId,
                 chapter_number: chapterNumber,
+                chapter_sort_key: sortKey,
+                is_page_provider: false,
                 status: 'COMPLETED',
                 last_error: null,
             }, { onConflict: 'source,source_chapter_id' });
@@ -672,6 +714,12 @@ export class ImporterEngine {
         const adapter = this.registry.get(job.source);
         if (!adapter)
             throw new Error(`Source adapter not registered: ${job.source}`);
+        // Mark chapter mapping as IMPORTING
+        await this.supabase
+            .from('importer_chapter_mappings')
+            .update({ status: 'IMPORTING', updated_at: new Date().toISOString() })
+            .eq('source', job.source)
+            .eq('source_chapter_id', sourceChapterId);
         // Register active job in forensics tracker
         diagnostics.registerJob({
             jobId: job.id,
@@ -820,33 +868,21 @@ export class ImporterEngine {
                 .upsert(pagesToUpsert, { onConflict: 'chapter_id,position' });
             if (pageErr)
                 throw pageErr;
-            // Publish chapter now that all pages are confirmed stored
-            const { error: pubErr } = await this.supabase
-                .from('chapters')
-                .update({ published_at: new Date().toISOString() })
-                .eq('id', chapterId);
-            if (pubErr) {
-                this.logger.error('Failed to mark chapter as published', { error: pubErr.message, chapterId });
-                throw pubErr;
-            }
-            // Mark work as published if it was in draft
-            await this.supabase
-                .from('works')
-                .update({ published: true, updated_at: new Date().toISOString() })
-                .eq('id', workId)
-                .eq('published', false);
-            // Record chapter mapping as COMPLETED with is_page_provider: true
-            await this.supabase.from('importer_chapter_mappings').upsert({
+            // SAFEGUARD 2: Stage chapter with published_at = NULL in public.chapters
+            const chKey = this.computeCanonicalChapterKey(chapterNumber, chapterTitle);
+            await this.publicationBarrier.stageChapter({
+                workId,
+                chapterId,
+                chapterNumber,
+                sortKey: chKey.sortKey,
                 source: job.source,
-                source_chapter_id: sourceChapterId,
-                chapter_id: chapterId,
-                work_mapping_id: workMappingId,
-                chapter_number: chapterNumber,
-                page_count: validPages.length,
-                is_page_provider: true,
-                status: 'COMPLETED',
-                last_error: null,
-            }, { onConflict: 'source,source_chapter_id' });
+                sourceChapterId,
+                workMappingId,
+                pageCount: validPages.length,
+                isPageProvider: true,
+            });
+            // SAFEGUARD 3: Try to publish immediately 1x via barrier. If blocked, release worker slot immediately!
+            const pubResult = await this.publicationBarrier.tryPublish(workId, chKey.sortKey, chapterId);
             tDb = Date.now() - db0;
             // Record fine-grained chapter job metric asynchronously
             void this.recordJobMetric({
@@ -861,15 +897,32 @@ export class ImporterEngine {
                 downloadMs: tDownload,
                 uploadMs: tUpload,
                 dbMs: tDb,
-                status: 'COMPLETED',
+                status: pubResult.published ? 'COMPLETED' : 'STAGED',
             });
-            this.logger.info('Successfully imported and published chapter', {
-                workId,
-                chapterNumber,
-                pageCount: validPages.length,
-            });
+            if (pubResult.published) {
+                this.logger.info('Successfully imported and published chapter in canonical order', {
+                    workId,
+                    chapterNumber,
+                    sortKey: chKey.sortKey,
+                    pageCount: validPages.length,
+                });
+            }
+            else {
+                this.logger.info('Successfully imported and staged chapter. Waiting for preceding chapter(s) to publish', {
+                    workId,
+                    chapterNumber,
+                    sortKey: chKey.sortKey,
+                    reason: pubResult.reason,
+                    pageCount: validPages.length,
+                });
+            }
         }
         catch (err) {
+            // If chapter failed definitively after exhausting all attempts, handle fallback / register gap
+            if (job.attempts + 1 >= job.max_attempts) {
+                const chKey = this.computeCanonicalChapterKey(chapterNumber, chapterTitle);
+                await this.publicationBarrier.handleDefiniteFailure(workId, chapterNumber, chKey.sortKey, job.source);
+            }
             // Record failed chapter metric asynchronously with sanitized error message
             void this.recordJobMetric({
                 workerId: this.config.WORKER_ID,

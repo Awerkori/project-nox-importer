@@ -64,6 +64,9 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
     await db.exec(readFileSync(resolve('migrations/001_importer_schema.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/002_importer_sources_status.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/003_importer_sort_key_and_concurrency.sql'), 'utf8'));
+    await db.exec(readFileSync(resolve('migrations/004_importer_telemetry_and_provenance.sql'), 'utf8'));
+    await db.exec(readFileSync(resolve('migrations/005_importer_page_provider_column.sql'), 'utf8'));
+    await db.exec(readFileSync(resolve('migrations/006_importer_publication_barrier.sql'), 'utf8'));
 
     await db.query(`insert into auth.users (id, email, email_confirmed_at) values ($1, 'bot@projectnox.com', now())`, [botUserId]);
     await db.query(`update public.access_roles set role = 'ADMIN' where user_id = $1`, [botUserId]);
@@ -164,6 +167,24 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
                     maybeSingle: execQueryWithNot,
                     single: execQueryWithNot,
                     then: (resolve: any) => execQueryWithNot().then(resolve),
+                  };
+                },
+                order: (orderCol: string, opts?: { ascending?: boolean }) => {
+                  const dir = opts?.ascending === false ? 'desc' : 'asc';
+                  const orderSql = `order by ${orderCol} ${dir}`;
+                  return {
+                    limit: (n: number) => ({
+                      then: (resolve: any) => {
+                        db.query(`select * from public.${table} where ${col} = $1 and ${col2} = $2 ${orderSql} limit ${n}`, [val, val2])
+                          .then(r => resolve({ data: r.rows, error: null }))
+                          .catch(err => resolve({ data: null, error: err }));
+                      }
+                    }),
+                    then: (resolve: any) => {
+                      db.query(`select * from public.${table} where ${col} = $1 and ${col2} = $2 ${orderSql}`, [val, val2])
+                        .then(r => resolve({ data: r.rows, error: null }))
+                        .catch(err => resolve({ data: null, error: err }));
+                    }
                   };
                 },
                 limit: (n: number) => ({ maybeSingle: execQuery, single: execQuery }),
@@ -338,6 +359,13 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
             [args.p_job_id, args.p_worker_id, args.p_status, args.p_error, args.p_retry_delay]
           );
           return { data: (res.rows[0] as any)?.ok, error: null };
+        }
+        if (funcName === 'importer_check_publication_barrier') {
+          const res = await db.query(
+            `select * from public.importer_check_publication_barrier($1, $2)`,
+            [args.p_work_id, args.p_target_sort_key]
+          );
+          return { data: res.rows, error: null };
         }
         throw new Error(`Unmocked RPC: ${funcName}`);
       }
