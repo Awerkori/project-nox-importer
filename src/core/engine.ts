@@ -1158,22 +1158,27 @@ export class ImporterEngine {
         });
       }
 
-      // Candidate fallbacks resolution
+      // Candidate fallbacks resolution: union payload fallbacks with DB alternative mappings
       let candidateFallbacks = (job.payload?.fallbackSources as Array<{ source: string; sourceChapterId: string }>) || [];
-      if (candidateFallbacks.length === 0) {
-        try {
-          const { data: altMappings } = await this.supabase
-            .from('importer_chapter_mappings')
-            .select('source, source_chapter_id')
-            .eq('work_id', workId)
-            .eq('chapter_number', chapterNumber)
-            .neq('source', job.source);
+      try {
+        const { data: altMappings } = await this.supabase
+          .from('importer_chapter_mappings')
+          .select('source, source_chapter_id')
+          .eq('work_id', workId)
+          .eq('chapter_number', chapterNumber)
+          .neq('source', effectiveSource);
 
-          if (altMappings && altMappings.length > 0) {
-            candidateFallbacks = altMappings.map((m) => ({ source: m.source, sourceChapterId: m.source_chapter_id }));
+        if (altMappings && altMappings.length > 0) {
+          const existingKeys = new Set(candidateFallbacks.map((f) => `${f.source}:${f.sourceChapterId}`));
+          for (const m of altMappings) {
+            const key = `${m.source}:${m.source_chapter_id}`;
+            if (!existingKeys.has(key)) {
+              candidateFallbacks.push({ source: m.source, sourceChapterId: m.source_chapter_id });
+              existingKeys.add(key);
+            }
           }
-        } catch {}
-      }
+        }
+      } catch {}
 
       if (!pageUrls || pageUrls.length === 0) {
         this.logger.warn(`Primary source ${job.source} returned 0 pages for ch ${chapterNumber}. Attempting cross-provider rescue...`, {
@@ -1293,6 +1298,8 @@ export class ImporterEngine {
           });
         };
 
+        let failed404Count = 0;
+
         // Producer: downloads raw page bytes from source CDN into memory
         const producer = async () => {
           while (!this.stopSignal && !pipelineError) {
@@ -1314,11 +1321,11 @@ export class ImporterEngine {
             const parsedUrl = new URL(pageUrl);
             await this.rateLimiter.acquire(parsedUrl.host);
 
-            let attempts = 0;
             let pageBytes: Uint8Array | null = null;
+            let attempts = 0;
             let lastErr: any = null;
-            const d0 = Date.now();
 
+            const d0 = Date.now();
             while (attempts < 3 && !this.stopSignal && !pipelineError) {
               attempts++;
               try {
@@ -1383,6 +1390,21 @@ export class ImporterEngine {
 
             if (!pageBytes) {
               const errMsg = lastErr instanceof Error ? lastErr.message : (lastErr ? String(lastErr) : 'Unknown download error');
+              const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
+              const currentUrl = pageUrls[idx] || '';
+              const isPromoOrCredit = /credit|credito|fanservice|parceria|recrut|apoie|doacao|discord|aviso/i.test(currentUrl);
+
+              if (is404 && (isPromoOrCredit || (expectedCount >= 10 && failed404Count < 2))) {
+                failed404Count++;
+                this.logger.warn(`Skipping dead 404 page ${idx + 1}/${expectedCount} (${currentUrl})`, {
+                  workId,
+                  chapterNumber,
+                  isPromoOrCredit,
+                  failed404Count,
+                });
+                continue;
+              }
+
               pipelineError = new Error(
                 `Failed to process page ${idx + 1}/${expectedCount} after 3 attempts: ${errMsg}`
               );
@@ -1532,7 +1554,23 @@ export class ImporterEngine {
           title: (chapterTitle || '').slice(0, 200),
           origin: 'IMPORTER',
         });
-        if (chErr) throw chErr;
+        if (chErr) {
+          if (chErr.code === '23505' || chErr.message?.includes('violates unique constraint')) {
+            const { data: raceCh } = await this.supabase
+              .from('chapters')
+              .select('id')
+              .eq('work_id', workId)
+              .eq('number', chapterNumber)
+              .maybeSingle();
+            if (raceCh) {
+              chapterId = raceCh.id;
+            } else {
+              throw chErr;
+            }
+          } else {
+            throw chErr;
+          }
+        }
       }
 
       // SAFEGUARD 1: Batch upsert into public.pages ONLY after ALL pages are verified
