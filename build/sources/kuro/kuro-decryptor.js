@@ -177,5 +177,5 @@ export function decryptVSecure(vSecure, dataKey, encKey = DEFAULT_ENC_KEY) {
     const plaintext = cipher.crypt(ciphertext);
     const jsonStr = plaintext.toString('utf8');
     const parsed = JSON.parse(jsonStr);
-    return parsed[dataKey] !== undefined ? parsed[dataKey] : parsed;
+    return dataKey && parsed[dataKey] !== undefined ? parsed[dataKey] : parsed;
 }

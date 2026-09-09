@@ -173,6 +173,9 @@ export class NexusAdapter {
             body: JSON.stringify({ chapterId: sourceChapterId }),
         });
         if (!res.success || !res.chapter?.pages || res.chapter.pages.length === 0) {
+            if (res.access && res.access.allowed === false) {
+                throw new Error(`Nexus chapter ${sourceChapterId} access denied (${res.access.reason || 'LICENSED'})`);
+            }
             throw new Error(`Failed to fetch pages from Nexus for chapter ${sourceChapterId}`);
         }
         return res.chapter.pages;

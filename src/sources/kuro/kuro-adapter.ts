@@ -27,6 +27,10 @@ export class KuroAdapter implements SourceAdapter {
   private logger = new Logger('KuroAdapter');
   private encKey = DEFAULT_ENC_KEY;
 
+  // Cloudflare Workers internal bridge for zero-403 bypass
+  private bridgeUrl: string | null = null;
+  private bridgeToken: string | null = null;
+
   // In-memory session cached during process lifetime (never stored in database or printed)
   private sessionCookie: string | null = null;
   private clientToken: string | null = null;
@@ -38,6 +42,12 @@ export class KuroAdapter implements SourceAdapter {
   ) {
     this.rateLimiter.setHostRate('kuromangas.com', 2.0, 4, 4.0);
     this.rateLimiter.setHostRate('cdn.kuromangas.com', 8.0, 16, 16.0);
+
+    const baseUrl = process.env.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev';
+    this.bridgeToken = process.env.NOX_STORAGE_BRIDGE_TOKEN || null;
+    if (this.bridgeToken) {
+      this.bridgeUrl = `${baseUrl.replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
+    }
 
     // Initialize from safe environment variables if present
     if (process.env.KURO_COOKIE) {
@@ -80,6 +90,59 @@ export class KuroAdapter implements SourceAdapter {
       return false;
     }
 
+    // 1. Try login via internal Cloudflare Workers bridge first
+    if (this.bridgeUrl && this.bridgeToken) {
+      try {
+        const res = await this.transport(this.bridgeUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.bridgeToken}`,
+          },
+          body: JSON.stringify({
+            url: `${this.apiUrl}/auth/login`,
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Origin: this.baseUrl,
+              Referer: `${this.baseUrl}/login`,
+            },
+            body: { email, password, rememberMe: true },
+          }),
+          signal: AbortSignal.timeout(30_000),
+        });
+
+        if (res.ok) {
+          const bridgeData = (await res.json()) as {
+            status: number;
+            cookies?: string[];
+            data?: any;
+          };
+
+          if (bridgeData.status === 200 && Array.isArray(bridgeData.cookies)) {
+            const combinedCookies = bridgeData.cookies.join('; ');
+            const matchSession = combinedCookies.match(/kuro_session=([^;]+)/);
+            const matchKn = combinedCookies.match(/_kn=([^;]+)/);
+            const matchCf = combinedCookies.match(/cf_clearance=([^;]+)/);
+
+            if (matchSession && matchKn) {
+              this.sessionCookie = matchSession[1];
+              this.clientToken = matchKn[1];
+              if (matchCf) this.cfClearance = matchCf[1];
+              this.logger.info('Kuro authentication successful (via Cloudflare Workers bridge)');
+              return true;
+            }
+          }
+        }
+      } catch (bridgeErr: any) {
+        this.logger.warn('Kuro bridge login encountered error, falling back to direct login', {
+          error: bridgeErr?.message,
+        });
+      }
+    }
+
+    // 2. Direct login fallback
     try {
       const loginUrl = `${this.apiUrl}/auth/login`;
       const headers: Record<string, string> = {
@@ -101,7 +164,6 @@ export class KuroAdapter implements SourceAdapter {
       });
 
       if (res.ok) {
-        // Collect cookies supporting both getSetCookie array and standard header string
         let cookieHeaders: string[] = [];
         if (typeof (res.headers as any).getSetCookie === 'function') {
           cookieHeaders = (res.headers as any).getSetCookie();
@@ -119,12 +181,12 @@ export class KuroAdapter implements SourceAdapter {
           this.sessionCookie = matchSession[1];
           this.clientToken = matchKn[1];
           if (matchCf) this.cfClearance = matchCf[1];
-          this.logger.info('Kuro authentication successful (session established in memory)');
+          this.logger.info('Kuro authentication successful (direct session established in memory)');
           return true;
         }
       } else {
         const bodySnippet = await res.text().catch(() => '');
-        this.logger.warn(`Kuro login failed: HTTP ${res.status} - ${bodySnippet.slice(0, 150)}`);
+        this.logger.warn(`Kuro direct login failed: HTTP ${res.status} - ${bodySnippet.slice(0, 150)}`);
       }
     } catch (err: any) {
       this.logger.warn('Failed to login with Kuro credentials from environment', {
@@ -178,6 +240,89 @@ export class KuroAdapter implements SourceAdapter {
       attempts++;
       try {
         const authHeaders = await this.getAuthHeaders();
+
+        // If Cloudflare Workers internal bridge is configured, route API requests through it
+        if (this.bridgeUrl && this.bridgeToken) {
+          try {
+            const bridgeRes = await this.transport(this.bridgeUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${this.bridgeToken}`,
+              },
+              body: JSON.stringify({
+                url,
+                method: options.method || 'GET',
+                headers: {
+                  Accept: 'application/json, text/plain, */*',
+                  Origin: this.baseUrl,
+                  Referer: `${this.baseUrl}/catalogo`,
+                  'User-Agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                  ...authHeaders,
+                  ...(options.headers || {}),
+                },
+                body: options.body,
+              }),
+              signal: AbortSignal.timeout(30_000),
+            });
+
+            if (bridgeRes.ok) {
+              const bridgePayload = (await bridgeRes.json()) as {
+                status: number;
+                headers?: Record<string, string>;
+                data?: any;
+                text?: string;
+              };
+
+              if (bridgePayload.status === 401 || bridgePayload.status === 403) {
+                this.clearSession();
+                if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
+                  this.logger.info('Kuro session expired via bridge. Auto-renewing session...');
+                  const renewed = await this.login(true);
+                  if (renewed) continue;
+                }
+                throw new Error('Kuro requires authentication: session expired or invalid credentials');
+              }
+
+              if (bridgePayload.status === 429) {
+                const retryAfter = bridgePayload.headers?.['retry-after'];
+                this.rateLimiter.handle429(parsedUrl.host, retryAfter, attempts);
+                if (attempts >= maxAttempts) throw new Error(`Rate limit reached (HTTP 429) for ${parsedUrl.host}`);
+                continue;
+              }
+
+              if (bridgePayload.status >= 400) {
+                throw new Error(`Kuro bridge upstream failed: HTTP ${bridgePayload.status}`);
+              }
+
+              this.rateLimiter.recordSuccess(parsedUrl.host);
+
+              const dataKey = bridgePayload.headers?.['x-kuro-datakey'];
+              let json = bridgePayload.data;
+              if (!json && bridgePayload.text) {
+                try {
+                  json = JSON.parse(bridgePayload.text);
+                } catch {}
+              }
+
+              if (json && typeof json === 'object' && '_v_secure' in json) {
+                return decryptVSecure(json._v_secure, dataKey || undefined, this.encKey) as T;
+              }
+
+              return (json || bridgePayload.text) as T;
+            }
+          } catch (bridgeErr: any) {
+            if (bridgeErr.message?.includes('requires authentication') || bridgeErr.message?.includes('429')) {
+              throw bridgeErr;
+            }
+            this.logger.warn('Kuro bridge request encountered transient error, falling back to direct request', {
+              error: bridgeErr?.message,
+            });
+          }
+        }
+
+        // Direct request fallback
         const response = await this.transport(url, {
           ...options,
           headers: {
@@ -238,13 +383,13 @@ export class KuroAdapter implements SourceAdapter {
         const json = await response.json();
 
         // Check if payload is encrypted with _v_secure
-        if (dataKey && json && typeof json === 'object' && '_v_secure' in json) {
-          return decryptVSecure(json._v_secure, dataKey, this.encKey) as T;
+        if (json && typeof json === 'object' && '_v_secure' in json) {
+          return decryptVSecure(json._v_secure, dataKey || undefined, this.encKey) as T;
         }
 
         return json as T;
       } catch (err: any) {
-        if (err.message.includes('requires authentication') || attempts >= maxAttempts) {
+        if (err.message?.includes('requires authentication') || attempts >= maxAttempts) {
           throw err;
         }
         await new Promise((r) => setTimeout(r, 1000 * attempts));

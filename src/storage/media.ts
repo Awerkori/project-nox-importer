@@ -6,13 +6,50 @@ import { Logger } from '../core/logger.js';
 const logger = new Logger('MediaPipeline');
 
 export interface ImageInfo {
-  mime: 'image/png' | 'image/jpeg' | 'image/webp';
+  mime: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif' | 'image/avif';
   width: number;
   height: number;
 }
 
 const text = (a: Uint8Array, start: number, length: number): string =>
   String.fromCharCode(...a.slice(start, start + length));
+
+function parseAvifDimensions(a: Uint8Array, d: DataView): { width: number; height: number } {
+  function findBox(start: number, end: number, targetType: string): { offset: number; size: number } | null {
+    let offset = start;
+    while (offset + 8 <= end) {
+      let size = d.getUint32(offset);
+      const type = text(a, offset + 4, 4);
+      if (size === 1) {
+        if (offset + 16 > end) break;
+        size = Number(d.getBigUint64(offset + 8));
+        offset += 8;
+      } else if (size === 0) {
+        size = end - offset;
+      }
+      if (size < 8 || offset + size > end) break;
+      if (type === targetType) {
+        return { offset, size };
+      }
+      if (['meta', 'iprp', 'ipco'].includes(type)) {
+        const headerSize = type === 'meta' ? 12 : 8;
+        const found = findBox(offset + headerSize, offset + size, targetType);
+        if (found) return found;
+      }
+      offset += size;
+    }
+    return null;
+  }
+
+  const ispe = findBox(0, a.length, 'ispe');
+  if (!ispe || ispe.offset + 20 > a.length) {
+    throw new Error('AVIF inválido: dimensões não encontradas.');
+  }
+  return {
+    width: d.getUint32(ispe.offset + 12),
+    height: d.getUint32(ispe.offset + 16),
+  };
+}
 
 /**
  * Inspect image bytes directly in binary with bounds and integrity checks.
@@ -80,8 +117,34 @@ export function inspectImage(a: Uint8Array): ImageInfo {
       width = (bits & 0x3fff) + 1;
       height = ((bits >> 14) & 0x3fff) + 1;
     }
+  } else if (text(a, 0, 3) === 'GIF' && (text(a, 3, 3) === '89a' || text(a, 3, 3) === '87a')) {
+    mime = 'image/gif';
+    width = d.getUint16(6, true);
+    height = d.getUint16(8, true);
+  } else if (a.length >= 16 && text(a, 4, 4) === 'ftyp') {
+    const ftypLen = d.getUint32(0);
+    const majorBrand = text(a, 8, 4);
+    let isAvif = majorBrand === 'avif' || majorBrand === 'avis';
+    if (!isAvif) {
+      const maxCheck = Math.min(ftypLen, a.length, 64);
+      for (let offset = 16; offset + 4 <= maxCheck; offset += 4) {
+        const brand = text(a, offset, 4);
+        if (brand === 'avif' || brand === 'avis') {
+          isAvif = true;
+          break;
+        }
+      }
+    }
+    if (isAvif) {
+      mime = 'image/avif';
+      const dims = parseAvifDimensions(a, d);
+      width = dims.width;
+      height = dims.height;
+    } else {
+      throw new Error('Formato não permitido. Use PNG, JPEG, WebP, GIF ou AVIF.');
+    }
   } else {
-    throw new Error('Formato não permitido. Use PNG, JPEG ou WebP.');
+    throw new Error('Formato não permitido. Use PNG, JPEG, WebP, GIF ou AVIF.');
   }
 
   if (!width || !height || width > 10000 || height > 40000 || width * height > 40_000_000) {

@@ -194,7 +194,7 @@ export function derivePassword(dateStr?: string, encKey: string = DEFAULT_ENC_KE
   return encKey + md5Part;
 }
 
-export function decryptVSecure(vSecure: string, dataKey: string, encKey: string = DEFAULT_ENC_KEY): any {
+export function decryptVSecure(vSecure: string, dataKey?: string, encKey: string = DEFAULT_ENC_KEY): any {
   const password = derivePassword(undefined, encKey);
   const encrypted = Buffer.from(vSecure, 'base64');
   if (encrypted.length < 16) {
@@ -212,5 +212,5 @@ export function decryptVSecure(vSecure: string, dataKey: string, encKey: string 
   const jsonStr = plaintext.toString('utf8');
   const parsed = JSON.parse(jsonStr);
 
-  return parsed[dataKey] !== undefined ? parsed[dataKey] : parsed;
+  return dataKey && parsed[dataKey] !== undefined ? parsed[dataKey] : parsed;
 }

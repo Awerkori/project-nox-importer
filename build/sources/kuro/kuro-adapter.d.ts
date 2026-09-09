@@ -10,6 +10,8 @@ export declare class KuroAdapter implements SourceAdapter {
     private cdnUrl;
     private logger;
     private encKey;
+    private bridgeUrl;
+    private bridgeToken;
     private sessionCookie;
     private clientToken;
     private cfClearance;
