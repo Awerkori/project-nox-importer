@@ -35,6 +35,8 @@ export class KuroAdapter implements SourceAdapter {
   private sessionCookie: string | null = null;
   private clientToken: string | null = null;
   private cfClearance: string | null = null;
+  private loginPromise: Promise<boolean> | null = null;
+  private lastLoginAttempt = 0;
 
   constructor(
     private rateLimiter: HostRateLimiter = new HostRateLimiter(2.0),
@@ -83,6 +85,10 @@ export class KuroAdapter implements SourceAdapter {
       return true;
     }
 
+    if (this.loginPromise) {
+      return this.loginPromise;
+    }
+
     const email = process.env.KURO_EMAIL;
     const password = process.env.KURO_PASSWORD;
 
@@ -90,8 +96,16 @@ export class KuroAdapter implements SourceAdapter {
       return false;
     }
 
-    // 1. Try login via internal Cloudflare Workers bridge first
-    if (this.bridgeUrl && this.bridgeToken) {
+    this.loginPromise = (async () => {
+      try {
+        const now = Date.now();
+        if (now - this.lastLoginAttempt < 3000) {
+          await new Promise((r) => setTimeout(r, 3000 - (now - this.lastLoginAttempt)));
+        }
+        this.lastLoginAttempt = Date.now();
+
+        // 1. Try login via internal Cloudflare Workers bridge first
+        if (this.bridgeUrl && this.bridgeToken) {
       try {
         const res = await this.transport(this.bridgeUrl, {
           method: 'POST',
@@ -201,7 +215,13 @@ export class KuroAdapter implements SourceAdapter {
       });
     }
 
-    return false;
+        return false;
+      } finally {
+        this.loginPromise = null;
+      }
+    })();
+
+    return this.loginPromise;
   }
 
   private async getAuthHeaders(): Promise<Record<string, string>> {

@@ -15,6 +15,8 @@ export declare class KuroAdapter implements SourceAdapter {
     private sessionCookie;
     private clientToken;
     private cfClearance;
+    private loginPromise;
+    private lastLoginAttempt;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     hasValidSession(): boolean;
     clearSession(): void;
