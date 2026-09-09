@@ -1166,6 +1166,8 @@ export class ImporterEngine {
                                 fallbackCount: fallbacks.length,
                             });
                             for (const fb of fallbacks) {
+                                if (fb.source === effectiveSource)
+                                    continue;
                                 try {
                                     const { data: srcCheck } = await this.supabase
                                         .from('importer_sources')
