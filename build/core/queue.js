@@ -205,8 +205,9 @@ export class ImporterQueue {
     /**
      * Create a lease heartbeat handle that periodically renews the lease
      * until stopped. Uses .unref() to avoid blocking graceful shutdown.
+     * Also polls for staff cancellation requests (cancel_requested = true).
      */
-    startHeartbeat(jobId, intervalSeconds = 60) {
+    startHeartbeat(jobId, intervalSeconds = 60, onCancelRequested) {
         let stopped = false;
         const timer = setInterval(async () => {
             if (stopped)
@@ -215,6 +216,13 @@ export class ImporterQueue {
                 const renewed = await this.renewLease(jobId);
                 if (!renewed && !stopped) {
                     this.logger.warn('Heartbeat lease renewal failed or lost ownership', { jobId });
+                }
+                if (!stopped && onCancelRequested) {
+                    const isCancelled = await this.isCancelRequested(jobId);
+                    if (isCancelled && !stopped) {
+                        this.logger.warn('Staff requested cancellation detected during heartbeat', { jobId });
+                        onCancelRequested();
+                    }
                 }
             }
             catch (err) {
@@ -228,6 +236,24 @@ export class ImporterQueue {
                 clearInterval(timer);
             },
         };
+    }
+    /**
+     * Checks if staff requested cancellation for this job in real-time
+     */
+    async isCancelRequested(jobId) {
+        try {
+            const { data, error } = await this.supabase
+                .from('importer_queue')
+                .select('cancel_requested, status')
+                .eq('id', jobId)
+                .maybeSingle();
+            if (error || !data)
+                return false;
+            return Boolean(data.cancel_requested || data.status === 'CANCELLED_BY_STAFF');
+        }
+        catch {
+            return false;
+        }
     }
     /**
      * Generic crash-safe lease recovery for any stalled job across the entire system.

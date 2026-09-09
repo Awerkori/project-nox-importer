@@ -2,7 +2,14 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { Logger } from './logger.js';
 
 export type TaskType = 'DISCOVER_WORKS' | 'SYNC_WORK' | 'IMPORT_CHAPTER';
-export type JobStatus = 'QUEUED' | 'IMPORTING' | 'COMPLETED' | 'FAILED' | 'RETRY';
+export type JobStatus =
+  | 'QUEUED'
+  | 'IMPORTING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'RETRY'
+  | 'PAUSED_BY_STAFF'
+  | 'CANCELLED_BY_STAFF';
 
 export interface QueueJob {
   id: string;
@@ -23,6 +30,13 @@ export interface QueueJob {
   recovered_at?: string | null;
   last_error_at?: string | null;
   retry_reason?: string | null;
+  cancel_requested?: boolean;
+  cancelled_by?: string | null;
+  cancelled_at?: string | null;
+  cancel_reason?: string | null;
+  paused_by?: string | null;
+  paused_at?: string | null;
+  pause_reason?: string | null;
   progress_current?: number | null;
   progress_total?: number | null;
   progress_stage?: string | null;
@@ -279,8 +293,13 @@ export class ImporterQueue {
   /**
    * Create a lease heartbeat handle that periodically renews the lease
    * until stopped. Uses .unref() to avoid blocking graceful shutdown.
+   * Also polls for staff cancellation requests (cancel_requested = true).
    */
-  startHeartbeat(jobId: string, intervalSeconds: number = 60): { stop: () => void } {
+  startHeartbeat(
+    jobId: string,
+    intervalSeconds: number = 60,
+    onCancelRequested?: () => void
+  ): { stop: () => void } {
     let stopped = false;
     const timer = setInterval(async () => {
       if (stopped) return;
@@ -288,6 +307,14 @@ export class ImporterQueue {
         const renewed = await this.renewLease(jobId);
         if (!renewed && !stopped) {
           this.logger.warn('Heartbeat lease renewal failed or lost ownership', { jobId });
+        }
+
+        if (!stopped && onCancelRequested) {
+          const isCancelled = await this.isCancelRequested(jobId);
+          if (isCancelled && !stopped) {
+            this.logger.warn('Staff requested cancellation detected during heartbeat', { jobId });
+            onCancelRequested();
+          }
         }
       } catch (err: any) {
         this.logger.error('Heartbeat interval error', { jobId, message: err?.message });
@@ -302,6 +329,24 @@ export class ImporterQueue {
         clearInterval(timer);
       },
     };
+  }
+
+  /**
+   * Checks if staff requested cancellation for this job in real-time
+   */
+  async isCancelRequested(jobId: string): Promise<boolean> {
+    try {
+      const { data, error } = await this.supabase
+        .from('importer_queue')
+        .select('cancel_requested, status')
+        .eq('id', jobId)
+        .maybeSingle();
+
+      if (error || !data) return false;
+      return Boolean(data.cancel_requested || data.status === 'CANCELLED_BY_STAFF');
+    } catch {
+      return false;
+    }
   }
 
   /**

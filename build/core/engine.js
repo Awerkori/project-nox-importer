@@ -9,6 +9,26 @@ import { PublicationBarrier } from './publication.js';
 import { RetryPolicy, ProviderDownloadError } from './retry-policy.js';
 import { ExistingWorksReconciler } from './reconciliation.js';
 export { computeCanonicalChapterKey };
+export class JobCancelledByStaffError extends Error {
+    jobId;
+    constructor(jobId, message = 'Job cancelado pela Staff no checkpoint seguro') {
+        super(message);
+        this.jobId = jobId;
+        this.name = 'JobCancelledByStaffError';
+    }
+}
+export function classifyPageUrl(url, index, total) {
+    const clean = decodeURIComponent(url).toLowerCase();
+    if (/credito|crédito|credit|credits/i.test(clean))
+        return 'CREDIT_PAGE';
+    if (/recrut|recrutamento|recruit/i.test(clean))
+        return 'RECRUITMENT_PAGE';
+    if (/aviso|warning|notice/i.test(clean))
+        return 'WARNING_PAGE';
+    if (/fanservice|apoie|doacao|doação|donate|discord|parceria/i.test(clean))
+        return 'PROMO_PAGE';
+    return 'CONTENT_PAGE';
+}
 export class ImporterEngine {
     supabase;
     storage;
@@ -440,8 +460,18 @@ export class ImporterEngine {
         }
     }
     async processJob(job) {
-        const heartbeat = this.queue.startHeartbeat(job.id, this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS);
+        let cancelSignalTriggered = false;
+        const heartbeat = this.queue.startHeartbeat(job.id, this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS, () => {
+            cancelSignalTriggered = true;
+        });
         try {
+            // Checkpoint 0: Staff cancellation pre-flight check
+            if (job.cancel_requested || (await this.queue.isCancelRequested(job.id))) {
+                heartbeat.stop();
+                this.logger.info(`Job ${job.id} cancelled by staff prior to execution.`);
+                await this.queue.releaseJob(job.id, 'CANCELLED_BY_STAFF');
+                return;
+            }
             const { data: sourceRec } = await this.supabase
                 .from('importer_sources')
                 .select('id, status, cooldown_until, enabled')
@@ -525,7 +555,7 @@ export class ImporterEngine {
                     await this.handleSyncWork(job);
                     break;
                 case 'IMPORT_CHAPTER':
-                    await this.handleImportChapter(job);
+                    await this.handleImportChapter(job, () => cancelSignalTriggered);
                     break;
                 default:
                     throw new Error(`Unknown task type: ${job.task_type}`);
@@ -535,6 +565,22 @@ export class ImporterEngine {
         }
         catch (err) {
             heartbeat.stop();
+            // Check if job was cancelled by staff at safe checkpoint
+            if (err instanceof JobCancelledByStaffError || cancelSignalTriggered) {
+                this.logger.info(`Job ${job.id} safely cancelled by staff at checkpoint`);
+                if (job.payload?.sourceChapterId && job.source) {
+                    try {
+                        await this.supabase
+                            .from('importer_chapter_mappings')
+                            .update({ status: 'QUEUED', updated_at: new Date().toISOString() })
+                            .eq('source', job.source)
+                            .eq('source_chapter_id', job.payload.sourceChapterId);
+                    }
+                    catch { }
+                }
+                await this.queue.releaseJob(job.id, 'CANCELLED_BY_STAFF');
+                return;
+            }
             const errorMessage = err?.message || String(err);
             this.logger.error('Job execution failed', {
                 jobId: job.id,
@@ -925,10 +971,14 @@ export class ImporterEngine {
     computeChapterSortKey(chapterNumber, chapterTitle) {
         return this.computeCanonicalChapterKey(chapterNumber, chapterTitle).sortKey;
     }
-    async handleImportChapter(job) {
+    async handleImportChapter(job, isCancelled) {
         const { sourceWorkId, sourceChapterId, workId, workMappingId, chapterNumber, chapterTitle, } = job.payload;
         if (!sourceChapterId || !workId || chapterNumber === undefined) {
             throw new Error('Incomplete chapter import payload');
+        }
+        // Checkpoint 1: Pre-flight check for staff cancellation
+        if (isCancelled?.() || (await this.queue.isCancelRequested(job.id))) {
+            throw new JobCancelledByStaffError(job.id);
         }
         // Pre-flight check: if already published by concurrent worker, skip download
         const { data: alreadyPub } = await this.supabase
@@ -1055,6 +1105,11 @@ export class ImporterEngine {
                 throw new Error(`Source returned 0 pages for chapter ${chapterNumber} (${sourceChapterId}) across primary and fallback sources`);
             }
             const expectedCount = pageUrls.length;
+            this.supabase.from('importer_queue').update({
+                progress_total: expectedCount,
+                progress_stage: 'DOWNLOADING',
+                progress_current: 0,
+            }).eq('id', job.id).then(() => { }, () => { });
             this.logger.info('Importing chapter pages with high-performance decoupled pipeline', {
                 workId,
                 chapterNumber,
@@ -1129,7 +1184,18 @@ export class ImporterEngine {
                         while (ImporterEngine.activeBufferedBytes >= ImporterEngine.MAX_BUFFERED_BYTES &&
                             !this.stopSignal &&
                             !pipelineError) {
+                            if (isCancelled?.()) {
+                                pipelineError = new JobCancelledByStaffError(job.id);
+                                notifyConsumer();
+                                break;
+                            }
                             await this.sleep(30);
+                        }
+                        // Safe Checkpoint: cancellation check
+                        if (isCancelled?.() || (nextDownloadIndex % 3 === 0 && (await this.queue.isCancelRequested(job.id)))) {
+                            pipelineError = new JobCancelledByStaffError(job.id);
+                            notifyConsumer();
+                            break;
                         }
                         const idx = nextDownloadIndex++;
                         if (idx >= expectedCount) {
@@ -1206,18 +1272,23 @@ export class ImporterEngine {
                             break;
                         }
                         if (!pageBytes) {
-                            const errMsg = lastErr instanceof Error ? lastErr.message : (lastErr ? String(lastErr) : 'Unknown download error');
+                            const errMsg = (lastErr instanceof Error && lastErr.message) ? lastErr.message : (lastErr ? String(lastErr) : 'Erro desconhecido');
                             const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
                             const currentUrl = pageUrls[idx] || '';
-                            const isPromoOrCredit = /credit|credito|fanservice|parceria|recrut|apoie|doacao|discord|aviso/i.test(currentUrl);
-                            if (is404 && (isPromoOrCredit || (expectedCount >= 10 && failed404Count < 2))) {
+                            const pageSemantic = classifyPageUrl(currentUrl, idx, expectedCount);
+                            // Strict semantic rule for 404:
+                            // Non-content pages (credits, recruitment, promo, warning) can be skipped with telemetry.
+                            // Content pages (narrative story pages) CANNOT be skipped blindly!
+                            if (is404 && pageSemantic !== 'CONTENT_PAGE') {
                                 failed404Count++;
-                                this.logger.warn(`Skipping dead 404 page ${idx + 1}/${expectedCount} (${currentUrl})`, {
+                                this.logger.warn(`Skipping non-content 404 page ${idx + 1}/${expectedCount} (${pageSemantic}): ${currentUrl}`, {
                                     workId,
                                     chapterNumber,
-                                    isPromoOrCredit,
+                                    pageSemantic,
+                                    currentUrl,
                                     failed404Count,
                                 });
+                                storedPages[idx] = { mediaId: '__SKIPPED_NON_CONTENT_PAGE__', width: 0, height: 0 };
                                 continue;
                             }
                             pipelineError = new Error(`Failed to process page ${idx + 1}/${expectedCount} after 3 attempts: ${errMsg}`);
@@ -1232,11 +1303,19 @@ export class ImporterEngine {
                 // Consumer: uploads downloaded pages to Storage Bridge / Telegram concurrently
                 const consumer = async () => {
                     while (!this.stopSignal && !pipelineError) {
+                        if (isCancelled?.()) {
+                            pipelineError = new JobCancelledByStaffError(job.id);
+                            break;
+                        }
                         while (readyQueue.length === 0) {
                             if (allDownloadsFinished || pipelineError || this.stopSignal) {
                                 return;
                             }
                             await waitForPage();
+                        }
+                        if (isCancelled?.()) {
+                            pipelineError = new JobCancelledByStaffError(job.id);
+                            break;
                         }
                         const item = readyQueue.shift();
                         if (!item)
@@ -1262,6 +1341,13 @@ export class ImporterEngine {
                             };
                             completedUploadsCount++;
                             diagnostics.updateJobProgress(job.id, completedUploadsCount);
+                            if (completedUploadsCount % 2 === 0 || completedUploadsCount === expectedCount) {
+                                this.supabase.from('importer_queue').update({
+                                    progress_current: completedUploadsCount,
+                                    progress_total: expectedCount,
+                                    progress_stage: 'UPLOADING',
+                                }).eq('id', job.id).then(() => { }, () => { });
+                            }
                         }
                         catch (err) {
                             pipelineError = err;
@@ -1286,27 +1372,39 @@ export class ImporterEngine {
                 if (pipelineError) {
                     throw pipelineError;
                 }
+                this.supabase.from('importer_queue').update({
+                    progress_current: expectedCount,
+                    progress_total: expectedCount,
+                    progress_stage: 'VALIDATING',
+                }).eq('id', job.id).then(() => { }, () => { });
                 // SAFEGUARD 1: Strict integrity check
                 for (let i = 0; i < expectedCount; i++) {
                     const p = storedPages[i];
+                    if (p?.mediaId === '__SKIPPED_NON_CONTENT_PAGE__') {
+                        continue;
+                    }
                     if (!p || !p.mediaId) {
                         throw new Error(`Page ${i + 1} failed or has missing mediaId`);
                     }
                     validPages.push(p);
                 }
-                if (validPages.length !== expectedCount) {
-                    const err = `Verification failed: expected ${expectedCount} pages, but successfully processed ${validPages.length}`;
+                if (validPages.length === 0) {
+                    const err = `Verification failed: expected pages, but successfully processed 0 valid pages`;
                     await this.supabase.from('importer_chapter_mappings').upsert({
                         source: job.source,
                         source_chapter_id: sourceChapterId,
                         work_mapping_id: workMappingId,
                         chapter_number: chapterNumber,
-                        page_count: validPages.length,
+                        page_count: 0,
                         status: 'VERIFICATION_FAILED',
                         last_error: err,
                     }, { onConflict: 'source,source_chapter_id' });
                     throw new Error(err);
                 }
+            }
+            // Checkpoint 3: Pre-publication cancellation check
+            if (isCancelled?.() || (await this.queue.isCancelRequested(job.id))) {
+                throw new JobCancelledByStaffError(job.id);
             }
             const db0 = Date.now();
             // Ensure work has a valid cover with storage_ready = true before publishing chapter
@@ -1389,6 +1487,11 @@ export class ImporterEngine {
                 pageCount: validPages.length,
                 isPageProvider: true,
             });
+            this.supabase.from('importer_queue').update({
+                progress_current: validPages.length,
+                progress_total: validPages.length,
+                progress_stage: 'STAGED',
+            }).eq('id', job.id).then(() => { }, () => { });
             // SAFEGUARD 3: Try to publish immediately 1x via barrier. If blocked, release worker slot immediately!
             const pubResult = await this.publicationBarrier.tryPublish(workId, chKey.sortKey, chapterId);
             tDb = Date.now() - db0;
@@ -1542,7 +1645,7 @@ export class ImporterEngine {
         }
     }
     sanitizeErrorMessage(raw) {
-        if (!raw)
+        if (!raw || raw.trim() === '' || raw === 'undefined')
             return '';
         return raw
             .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [REDACTED]')
@@ -1550,6 +1653,8 @@ export class ImporterEngine {
             .replace(/https?:\/\/[^:\/\s]+:[^@\/\s]+@/gi, 'https://[CREDENTIALS_REDACTED]@')
             .replace(/Cookie:\s*[^\r\n]+/gi, 'Cookie: [REDACTED]')
             .replace(/eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}/g, '[JWT_REDACTED]')
+            .replace(/:\s*undefined\b/gi, ': erro desconhecido')
+            .replace(/\bundefined\b/gi, 'erro desconhecido')
             .slice(0, 1000);
     }
     async downloadAndRegisterImage(url, userId, purpose = 'editorial') {

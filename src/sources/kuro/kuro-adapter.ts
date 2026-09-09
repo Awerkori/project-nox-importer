@@ -309,19 +309,19 @@ export class KuroAdapter implements SourceAdapter {
               };
 
               const isCf =
-                bridgePayload.status === 403 &&
+                bridgePayload.status === 403 ||
                 (bridgePayload.text?.includes('Just a moment') ||
                   bridgePayload.text?.includes('Attention Required') ||
                   bridgePayload.text?.includes('Cloudflare') ||
                   bridgePayload.text?.includes('error code: 1020') ||
-                  bridgePayload.text?.includes('error code: 1010'));
+                  bridgePayload.text?.includes('error code: 1010') ||
+                  bridgePayload.text?.includes('error code: 1033'));
 
-              if (bridgePayload.status === 401 || (bridgePayload.status === 403 && !isCf)) {
-                this.clearSession();
+              if (bridgePayload.status === 401) {
                 if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
                   const title = bridgePayload.text?.match(/<title>([^<]+)<\/title>/i)?.[1];
                   const heading = bridgePayload.text?.match(/<h1[^>]*>([^<]+)<\/h1>/i)?.[1];
-                  this.logger.info('Kuro session expired via bridge. Auto-renewing session...', {
+                  this.logger.info('Kuro session expired via bridge (401). Auto-renewing session...', {
                     upstreamStatus: bridgePayload.status,
                     upstreamTitle: title,
                     upstreamHeading: heading,
@@ -330,6 +330,7 @@ export class KuroAdapter implements SourceAdapter {
                   const renewed = await this.login(true);
                   if (renewed) continue;
                 }
+                this.clearSession();
                 throw new Error('Kuro requires authentication: session expired or invalid credentials');
               }
 
@@ -401,26 +402,20 @@ export class KuroAdapter implements SourceAdapter {
           signal: AbortSignal.timeout(30_000),
         });
 
-        if (response.status === 401 || response.status === 403) {
+        if (response.status === 403) {
           const errText = await response.text().catch(() => '');
-          const isCloudflare =
-            errText.includes('Just a moment') ||
-            errText.includes('Attention Required') ||
-            errText.includes('Cloudflare') ||
-            errText.includes('error code: 1033');
+          throw new Error(`Kuro blocked by Cloudflare (HTTP 403): ${errText.slice(0, 150)}`);
+        }
 
-          if (isCloudflare) {
-            throw new Error(`Kuro blocked by Cloudflare (HTTP ${response.status}): ${errText.slice(0, 150)}`);
-          }
-
-          this.clearSession();
+        if (response.status === 401) {
           if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
-            this.logger.info('Kuro session expired or unauthorized. Auto-renewing session...');
+            this.logger.info('Kuro session expired (401). Auto-renewing session...');
             const renewed = await this.login(true);
             if (renewed) {
               continue;
             }
           }
+          this.clearSession();
           throw new Error(
             'Kuro requires authentication: session expired or invalid credentials'
           );

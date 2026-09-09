@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 export type TaskType = 'DISCOVER_WORKS' | 'SYNC_WORK' | 'IMPORT_CHAPTER';
-export type JobStatus = 'QUEUED' | 'IMPORTING' | 'COMPLETED' | 'FAILED' | 'RETRY';
+export type JobStatus = 'QUEUED' | 'IMPORTING' | 'COMPLETED' | 'FAILED' | 'RETRY' | 'PAUSED_BY_STAFF' | 'CANCELLED_BY_STAFF';
 export interface QueueJob {
     id: string;
     task_type: TaskType;
@@ -20,6 +20,16 @@ export interface QueueJob {
     recovered_at?: string | null;
     last_error_at?: string | null;
     retry_reason?: string | null;
+    cancel_requested?: boolean;
+    cancelled_by?: string | null;
+    cancelled_at?: string | null;
+    cancel_reason?: string | null;
+    paused_by?: string | null;
+    paused_at?: string | null;
+    pause_reason?: string | null;
+    progress_current?: number | null;
+    progress_total?: number | null;
+    progress_stage?: string | null;
     chapter_sort_key?: number | null;
 }
 export declare class ImporterQueue {
@@ -58,10 +68,15 @@ export declare class ImporterQueue {
     /**
      * Create a lease heartbeat handle that periodically renews the lease
      * until stopped. Uses .unref() to avoid blocking graceful shutdown.
+     * Also polls for staff cancellation requests (cancel_requested = true).
      */
-    startHeartbeat(jobId: string, intervalSeconds?: number): {
+    startHeartbeat(jobId: string, intervalSeconds?: number, onCancelRequested?: () => void): {
         stop: () => void;
     };
+    /**
+     * Checks if staff requested cancellation for this job in real-time
+     */
+    isCancelRequested(jobId: string): Promise<boolean>;
     /**
      * Generic crash-safe lease recovery for any stalled job across the entire system.
      * Scans for jobs stuck in 'IMPORTING' with expired lease (lease_expires_at < now()).
