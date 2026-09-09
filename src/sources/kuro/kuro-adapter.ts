@@ -193,6 +193,17 @@ export class KuroAdapter implements SourceAdapter {
         });
 
         if (response.status === 401 || response.status === 403) {
+          const errText = await response.text().catch(() => '');
+          const isCloudflare =
+            errText.includes('Just a moment') ||
+            errText.includes('Attention Required') ||
+            errText.includes('Cloudflare') ||
+            errText.includes('error code: 1033');
+
+          if (isCloudflare) {
+            throw new Error(`Kuro blocked by Cloudflare (HTTP ${response.status}): ${errText.slice(0, 150)}`);
+          }
+
           this.clearSession();
           if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
             this.logger.info('Kuro session expired or unauthorized. Auto-renewing session...');
