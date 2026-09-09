@@ -177,5 +177,15 @@ export function decryptVSecure(vSecure, dataKey, encKey = DEFAULT_ENC_KEY) {
     const plaintext = cipher.crypt(ciphertext);
     const jsonStr = plaintext.toString('utf8');
     const parsed = JSON.parse(jsonStr);
-    return dataKey && parsed[dataKey] !== undefined ? parsed[dataKey] : parsed;
+    if (dataKey && parsed[dataKey] !== undefined) {
+        return parsed[dataKey];
+    }
+    // Auto-unwrap dynamic obfuscated key when dataKey header is absent or renamed
+    if (parsed && typeof parsed === 'object') {
+        const payloadKeys = Object.keys(parsed).filter((k) => k !== '_v_secure');
+        if (payloadKeys.length === 1 && parsed[payloadKeys[0]] && typeof parsed[payloadKeys[0]] === 'object') {
+            return parsed[payloadKeys[0]];
+        }
+    }
+    return parsed;
 }
