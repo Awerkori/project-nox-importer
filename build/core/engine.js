@@ -991,15 +991,70 @@ export class ImporterEngine {
         let tDb = 0;
         let totalBytes = 0;
         try {
-            const pageUrls = await adapter.fetchChapterPages(sourceChapterId, chapterNumber);
+            // Dynamic fallback resolution if primary source returns 0 pages or throws
+            let pageUrls = [];
+            let effectiveSource = job.source;
+            let effectiveSourceChapterId = sourceChapterId;
+            try {
+                pageUrls = await adapter.fetchChapterPages(sourceChapterId, chapterNumber);
+            }
+            catch (adapterErr) {
+                this.logger.warn(`Primary source ${job.source} failed fetchChapterPages for ch ${chapterNumber}`, {
+                    error: adapterErr?.message,
+                });
+            }
+            // Candidate fallbacks resolution
+            let candidateFallbacks = job.payload?.fallbackSources || [];
+            if (candidateFallbacks.length === 0) {
+                try {
+                    const { data: altMappings } = await this.supabase
+                        .from('importer_chapter_mappings')
+                        .select('source, source_chapter_id')
+                        .eq('work_id', workId)
+                        .eq('chapter_number', chapterNumber)
+                        .neq('source', job.source);
+                    if (altMappings && altMappings.length > 0) {
+                        candidateFallbacks = altMappings.map((m) => ({ source: m.source, sourceChapterId: m.source_chapter_id }));
+                    }
+                }
+                catch { }
+            }
             if (!pageUrls || pageUrls.length === 0) {
-                throw new Error(`Source returned 0 pages for chapter ${chapterNumber} (${sourceChapterId})`);
+                this.logger.warn(`Primary source ${job.source} returned 0 pages for ch ${chapterNumber}. Attempting cross-provider rescue...`, {
+                    workId,
+                    chapterNumber,
+                    candidateCount: candidateFallbacks.length,
+                });
+                for (const candidate of candidateFallbacks) {
+                    try {
+                        const candidateAdapter = this.registry.get(candidate.source);
+                        if (!candidateAdapter)
+                            continue;
+                        const candidatePages = await candidateAdapter.fetchChapterPages(candidate.sourceChapterId, chapterNumber);
+                        if (candidatePages && candidatePages.length > 0) {
+                            this.logger.info(`Rescued chapter pages for ch ${chapterNumber} using fallback source ${candidate.source} (${candidatePages.length} pages)`);
+                            pageUrls = candidatePages;
+                            effectiveSource = candidate.source;
+                            effectiveSourceChapterId = candidate.sourceChapterId;
+                            break;
+                        }
+                    }
+                    catch (candErr) {
+                        this.logger.warn(`Fallback source ${candidate.source} failed fetchChapterPages for ch ${chapterNumber}`, {
+                            error: candErr?.message,
+                        });
+                    }
+                }
+            }
+            if (!pageUrls || pageUrls.length === 0) {
+                throw new Error(`Source returned 0 pages for chapter ${chapterNumber} (${sourceChapterId}) across primary and fallback sources`);
             }
             const expectedCount = pageUrls.length;
             this.logger.info('Importing chapter pages with high-performance decoupled pipeline', {
                 workId,
                 chapterNumber,
                 pageCount: expectedCount,
+                source: effectiveSource,
             });
             const botUserId = await this.resolveBotUserId();
             let validPages = [];
@@ -1040,7 +1095,7 @@ export class ImporterEngine {
                 // Upload pool concurrency: up to 4, bounded by autotuner and globalMediaSemaphore
                 const uploadConcurrency = Math.min(4, Math.max(2, this.autotuner.getCurrentConcurrency()));
                 const globalMediaSemaphore = this.autotuner.getGlobalMediaSemaphore();
-                const fallbacks = job.payload?.fallbackSources;
+                const fallbacks = candidateFallbacks;
                 const readyQueue = [];
                 let nextDownloadIndex = 0;
                 let allDownloadsFinished = false;
@@ -1061,7 +1116,7 @@ export class ImporterEngine {
                         consumerResolvers.push(resolve);
                     });
                 };
-                // Producer: downloads pages from provider CDN concurrently into bounded buffer
+                // Producer: downloads raw page bytes from source CDN into memory
                 const producer = async () => {
                     while (!this.stopSignal && !pipelineError) {
                         // Memory backpressure check: wait if in-flight active buffer >= MAX_BUFFERED_BYTES (40MB)
@@ -1084,7 +1139,7 @@ export class ImporterEngine {
                         while (attempts < 3 && !this.stopSignal && !pipelineError) {
                             attempts++;
                             try {
-                                pageBytes = await this.fetchImageBytes(pageUrl, job.source);
+                                pageBytes = await this.fetchImageBytes(pageUrl, effectiveSource);
                                 tDownload += Date.now() - d0;
                                 totalBytes += pageBytes.length;
                                 ImporterEngine.activeBufferedBytes += pageBytes.length;
@@ -1099,7 +1154,7 @@ export class ImporterEngine {
                         }
                         // Multi-source fallback support if primary source fails
                         if (!pageBytes && fallbacks && fallbacks.length > 0) {
-                            this.logger.warn(`Primary source ${job.source} failed on page ${idx + 1}. Attempting multi-source fallback...`, {
+                            this.logger.warn(`Source ${effectiveSource} failed on page ${idx + 1}. Attempting multi-source fallback...`, {
                                 workId,
                                 chapterNumber,
                                 fallbackCount: fallbacks.length,
@@ -1139,8 +1194,12 @@ export class ImporterEngine {
                                 }
                             }
                         }
+                        if (pipelineError) {
+                            break;
+                        }
                         if (!pageBytes) {
-                            pipelineError = new Error(`Failed to process page ${idx + 1}/${expectedCount} after 3 attempts: ${lastErr?.message}`);
+                            const errMsg = lastErr instanceof Error ? lastErr.message : (lastErr ? String(lastErr) : 'Unknown download error');
+                            pipelineError = new Error(`Failed to process page ${idx + 1}/${expectedCount} after 3 attempts: ${errMsg}`);
                             notifyConsumer();
                             break;
                         }

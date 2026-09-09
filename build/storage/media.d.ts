@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { StorageProvider } from './provider.js';
 export interface ImageInfo {
-    mime: 'image/png' | 'image/jpeg' | 'image/webp';
+    mime: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif' | 'image/avif';
     width: number;
     height: number;
 }

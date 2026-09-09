@@ -18,4 +18,4 @@ export declare function evpBytesToKey(password: Buffer, salt: Buffer, keyLen?: n
     iv: Buffer;
 };
 export declare function derivePassword(dateStr?: string, encKey?: string): string;
-export declare function decryptVSecure(vSecure: string, dataKey: string, encKey?: string): any;
+export declare function decryptVSecure(vSecure: string, dataKey?: string, encKey?: string): any;

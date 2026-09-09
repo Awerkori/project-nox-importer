@@ -200,6 +200,7 @@ export class NexusAdapter implements SourceAdapter {
     const url = `${this.functionsUrl}/read-chapter`;
     const res = await this.request<{
       success?: boolean;
+      access?: { allowed?: boolean; reason?: string };
       chapter?: { pages?: string[] };
     }>(url, {
       method: 'POST',
@@ -211,6 +212,9 @@ export class NexusAdapter implements SourceAdapter {
     });
 
     if (!res.success || !res.chapter?.pages || res.chapter.pages.length === 0) {
+      if (res.access && res.access.allowed === false) {
+        throw new Error(`Nexus chapter ${sourceChapterId} access denied (${res.access.reason || 'LICENSED'})`);
+      }
       throw new Error(`Failed to fetch pages from Nexus for chapter ${sourceChapterId}`);
     }
 
