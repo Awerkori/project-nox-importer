@@ -96,6 +96,8 @@ export class KuroAdapter implements SourceAdapter {
         const res = await this.transport(this.bridgeUrl, {
           method: 'POST',
           headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 ProjectNox-Importer/1.0',
             'Content-Type': 'application/json',
             Authorization: `Bearer ${this.bridgeToken}`,
           },
@@ -107,13 +109,17 @@ export class KuroAdapter implements SourceAdapter {
               Accept: 'application/json',
               Origin: this.baseUrl,
               Referer: `${this.baseUrl}/login`,
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
             },
             body: { email, password, rememberMe: true },
           }),
           signal: AbortSignal.timeout(30_000),
         });
 
-        if (res.ok) {
+        if (!res.ok) {
+          this.logger.warn(`Kuro bridge login HTTP error: ${res.status}`);
+        } else {
           const bridgeData = (await res.json()) as {
             status: number;
             cookies?: string[];
@@ -134,6 +140,7 @@ export class KuroAdapter implements SourceAdapter {
               return true;
             }
           }
+          this.logger.warn(`Kuro bridge login returned upstream status: ${bridgeData?.status}`);
         }
       } catch (bridgeErr: any) {
         this.logger.warn('Kuro bridge login encountered error, falling back to direct login', {
@@ -247,6 +254,8 @@ export class KuroAdapter implements SourceAdapter {
             const bridgeRes = await this.transport(this.bridgeUrl, {
               method: 'POST',
               headers: {
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 ProjectNox-Importer/1.0',
                 'Content-Type': 'application/json',
                 Authorization: `Bearer ${this.bridgeToken}`,
               },
@@ -311,6 +320,8 @@ export class KuroAdapter implements SourceAdapter {
               }
 
               return (json || bridgePayload.text) as T;
+            } else {
+              this.logger.warn(`Kuro bridge HTTP non-OK: ${bridgeRes.status}`);
             }
           } catch (bridgeErr: any) {
             if (bridgeErr.message?.includes('requires authentication') || bridgeErr.message?.includes('429')) {

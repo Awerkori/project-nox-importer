@@ -84,6 +84,7 @@ export class KuroAdapter {
                 const res = await this.transport(this.bridgeUrl, {
                     method: 'POST',
                     headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 ProjectNox-Importer/1.0',
                         'Content-Type': 'application/json',
                         Authorization: `Bearer ${this.bridgeToken}`,
                     },
@@ -95,12 +96,16 @@ export class KuroAdapter {
                             Accept: 'application/json',
                             Origin: this.baseUrl,
                             Referer: `${this.baseUrl}/login`,
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
                         },
                         body: { email, password, rememberMe: true },
                     }),
                     signal: AbortSignal.timeout(30_000),
                 });
-                if (res.ok) {
+                if (!res.ok) {
+                    this.logger.warn(`Kuro bridge login HTTP error: ${res.status}`);
+                }
+                else {
                     const bridgeData = (await res.json());
                     if (bridgeData.status === 200 && Array.isArray(bridgeData.cookies)) {
                         const combinedCookies = bridgeData.cookies.join('; ');
@@ -116,6 +121,7 @@ export class KuroAdapter {
                             return true;
                         }
                     }
+                    this.logger.warn(`Kuro bridge login returned upstream status: ${bridgeData?.status}`);
                 }
             }
             catch (bridgeErr) {
@@ -220,6 +226,7 @@ export class KuroAdapter {
                         const bridgeRes = await this.transport(this.bridgeUrl, {
                             method: 'POST',
                             headers: {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 ProjectNox-Importer/1.0',
                                 'Content-Type': 'application/json',
                                 Authorization: `Bearer ${this.bridgeToken}`,
                             },
@@ -273,6 +280,9 @@ export class KuroAdapter {
                                 return decryptVSecure(json._v_secure, dataKey || undefined, this.encKey);
                             }
                             return (json || bridgePayload.text);
+                        }
+                        else {
+                            this.logger.warn(`Kuro bridge HTTP non-OK: ${bridgeRes.status}`);
                         }
                     }
                     catch (bridgeErr) {
