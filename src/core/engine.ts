@@ -1212,6 +1212,12 @@ export class ImporterEngine {
       }
 
       const expectedCount = pageUrls.length;
+      this.supabase.from('importer_queue').update({
+        progress_total: expectedCount,
+        progress_stage: 'DOWNLOADING',
+        progress_current: 0,
+      }).eq('id', job.id).then(() => {}, () => {});
+
       this.logger.info('Importing chapter pages with high-performance decoupled pipeline', {
         workId,
         chapterNumber,
@@ -1463,6 +1469,13 @@ export class ImporterEngine {
 
               completedUploadsCount++;
               diagnostics.updateJobProgress(job.id, completedUploadsCount);
+              if (completedUploadsCount % 2 === 0 || completedUploadsCount === expectedCount) {
+                this.supabase.from('importer_queue').update({
+                  progress_current: completedUploadsCount,
+                  progress_total: expectedCount,
+                  progress_stage: 'UPLOADING',
+                }).eq('id', job.id).then(() => {}, () => {});
+              }
             } catch (err: any) {
               pipelineError = err;
               this.logger.error(`Failed to upload page ${item.index + 1}/${expectedCount}`, { error: err?.message });
@@ -1492,6 +1505,12 @@ export class ImporterEngine {
         if (pipelineError) {
           throw pipelineError;
         }
+
+        this.supabase.from('importer_queue').update({
+          progress_current: expectedCount,
+          progress_total: expectedCount,
+          progress_stage: 'VALIDATING',
+        }).eq('id', job.id).then(() => {}, () => {});
 
         // SAFEGUARD 1: Strict integrity check
         for (let i = 0; i < expectedCount; i++) {
@@ -1604,6 +1623,12 @@ export class ImporterEngine {
         pageCount: validPages.length,
         isPageProvider: true,
       });
+
+      this.supabase.from('importer_queue').update({
+        progress_current: validPages.length,
+        progress_total: validPages.length,
+        progress_stage: 'STAGED',
+      }).eq('id', job.id).then(() => {}, () => {});
 
       // SAFEGUARD 3: Try to publish immediately 1x via barrier. If blocked, release worker slot immediately!
       const pubResult = await this.publicationBarrier.tryPublish(workId, chKey.sortKey, chapterId);

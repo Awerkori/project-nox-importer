@@ -23,6 +23,9 @@ export interface QueueJob {
   recovered_at?: string | null;
   last_error_at?: string | null;
   retry_reason?: string | null;
+  progress_current?: number | null;
+  progress_total?: number | null;
+  progress_stage?: string | null;
   chapter_sort_key?: number | null;
 }
 
