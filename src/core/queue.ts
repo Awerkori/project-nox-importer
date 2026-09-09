@@ -19,6 +19,10 @@ export interface QueueJob {
   lease_expires_at: string | null;
   next_run_at: string;
   last_error: string | null;
+  last_recovered_error?: string | null;
+  recovered_at?: string | null;
+  last_error_at?: string | null;
+  retry_reason?: string | null;
   chapter_sort_key?: number | null;
 }
 
