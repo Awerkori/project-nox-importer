@@ -30,6 +30,8 @@ export class KuroAdapter {
     sessionCookie = null;
     clientToken = null;
     cfClearance = null;
+    loginPromise = null;
+    lastLoginAttempt = 0;
     constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
@@ -73,42 +75,102 @@ export class KuroAdapter {
         if (!force && this.hasValidSession()) {
             return true;
         }
+        if (this.loginPromise) {
+            return this.loginPromise;
+        }
         const email = process.env.KURO_EMAIL;
         const password = process.env.KURO_PASSWORD;
         if (!email || !password) {
             return false;
         }
-        // 1. Try login via internal Cloudflare Workers bridge first
-        if (this.bridgeUrl && this.bridgeToken) {
+        this.loginPromise = (async () => {
             try {
-                const res = await this.transport(this.bridgeUrl, {
-                    method: 'POST',
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 ProjectNox-Importer/1.0',
-                        'Content-Type': 'application/json',
-                        Authorization: `Bearer ${this.bridgeToken}`,
-                    },
-                    body: JSON.stringify({
-                        url: `${this.apiUrl}/auth/login`,
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            Accept: 'application/json',
-                            Origin: this.baseUrl,
-                            Referer: `${this.baseUrl}/login`,
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-                        },
-                        body: { email, password, rememberMe: true },
-                    }),
-                    signal: AbortSignal.timeout(30_000),
-                });
-                if (!res.ok) {
-                    this.logger.warn(`Kuro bridge login HTTP error: ${res.status}`);
+                const now = Date.now();
+                if (now - this.lastLoginAttempt < 3000) {
+                    await new Promise((r) => setTimeout(r, 3000 - (now - this.lastLoginAttempt)));
                 }
-                else {
-                    const bridgeData = (await res.json());
-                    if (bridgeData.status === 200 && Array.isArray(bridgeData.cookies)) {
-                        const combinedCookies = bridgeData.cookies.join('; ');
+                this.lastLoginAttempt = Date.now();
+                // 1. Try login via internal Cloudflare Workers bridge first
+                if (this.bridgeUrl && this.bridgeToken) {
+                    try {
+                        const res = await this.transport(this.bridgeUrl, {
+                            method: 'POST',
+                            headers: {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 ProjectNox-Importer/1.0',
+                                'Content-Type': 'application/json',
+                                Authorization: `Bearer ${this.bridgeToken}`,
+                            },
+                            body: JSON.stringify({
+                                url: `${this.apiUrl}/auth/login`,
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    Accept: 'application/json',
+                                    Origin: this.baseUrl,
+                                    Referer: `${this.baseUrl}/login`,
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                                },
+                                body: { email, password, rememberMe: true },
+                            }),
+                            signal: AbortSignal.timeout(30_000),
+                        });
+                        if (!res.ok) {
+                            this.logger.warn(`Kuro bridge login HTTP error: ${res.status}`);
+                        }
+                        else {
+                            const bridgeData = (await res.json());
+                            if (bridgeData.status === 200 && Array.isArray(bridgeData.cookies)) {
+                                const combinedCookies = bridgeData.cookies.join('; ');
+                                const matchSession = combinedCookies.match(/kuro_session=([^;]+)/);
+                                const matchKn = combinedCookies.match(/_kn=([^;]+)/);
+                                const matchCf = combinedCookies.match(/cf_clearance=([^;]+)/);
+                                if (matchSession && matchKn) {
+                                    this.sessionCookie = matchSession[1];
+                                    this.clientToken = matchKn[1];
+                                    if (matchCf)
+                                        this.cfClearance = matchCf[1];
+                                    this.logger.info('Kuro authentication successful (via Cloudflare Workers bridge)');
+                                    return true;
+                                }
+                            }
+                            this.logger.warn(`Kuro bridge login returned upstream status: ${bridgeData?.status}`);
+                        }
+                    }
+                    catch (bridgeErr) {
+                        this.logger.warn('Kuro bridge login encountered error, falling back to direct login', {
+                            error: bridgeErr?.message,
+                        });
+                    }
+                }
+                // 2. Direct login fallback
+                try {
+                    const loginUrl = `${this.apiUrl}/auth/login`;
+                    const headers = {
+                        'Content-Type': 'application/json',
+                        Accept: 'application/json',
+                        Referer: `${this.baseUrl}/login`,
+                        Origin: this.baseUrl,
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                    };
+                    if (this.cfClearance) {
+                        headers['Cookie'] = `cf_clearance=${this.cfClearance}`;
+                    }
+                    const res = await this.transport(loginUrl, {
+                        method: 'POST',
+                        headers,
+                        body: JSON.stringify({ email, password, rememberMe: true }),
+                    });
+                    if (res.ok) {
+                        let cookieHeaders = [];
+                        if (typeof res.headers.getSetCookie === 'function') {
+                            cookieHeaders = res.headers.getSetCookie();
+                        }
+                        else {
+                            const raw = res.headers.get('set-cookie');
+                            if (raw)
+                                cookieHeaders = [raw];
+                        }
+                        const combinedCookies = cookieHeaders.join('; ');
                         const matchSession = combinedCookies.match(/kuro_session=([^;]+)/);
                         const matchKn = combinedCookies.match(/_kn=([^;]+)/);
                         const matchCf = combinedCookies.match(/cf_clearance=([^;]+)/);
@@ -117,71 +179,27 @@ export class KuroAdapter {
                             this.clientToken = matchKn[1];
                             if (matchCf)
                                 this.cfClearance = matchCf[1];
-                            this.logger.info('Kuro authentication successful (via Cloudflare Workers bridge)');
+                            this.logger.info('Kuro authentication successful (direct session established in memory)');
                             return true;
                         }
                     }
-                    this.logger.warn(`Kuro bridge login returned upstream status: ${bridgeData?.status}`);
+                    else {
+                        const bodySnippet = await res.text().catch(() => '');
+                        this.logger.warn(`Kuro direct login failed: HTTP ${res.status} - ${bodySnippet.slice(0, 150)}`);
+                    }
                 }
-            }
-            catch (bridgeErr) {
-                this.logger.warn('Kuro bridge login encountered error, falling back to direct login', {
-                    error: bridgeErr?.message,
-                });
-            }
-        }
-        // 2. Direct login fallback
-        try {
-            const loginUrl = `${this.apiUrl}/auth/login`;
-            const headers = {
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-                Referer: `${this.baseUrl}/login`,
-                Origin: this.baseUrl,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-            };
-            if (this.cfClearance) {
-                headers['Cookie'] = `cf_clearance=${this.cfClearance}`;
-            }
-            const res = await this.transport(loginUrl, {
-                method: 'POST',
-                headers,
-                body: JSON.stringify({ email, password, rememberMe: true }),
-            });
-            if (res.ok) {
-                let cookieHeaders = [];
-                if (typeof res.headers.getSetCookie === 'function') {
-                    cookieHeaders = res.headers.getSetCookie();
+                catch (err) {
+                    this.logger.warn('Failed to login with Kuro credentials from environment', {
+                        error: err?.message,
+                    });
                 }
-                else {
-                    const raw = res.headers.get('set-cookie');
-                    if (raw)
-                        cookieHeaders = [raw];
-                }
-                const combinedCookies = cookieHeaders.join('; ');
-                const matchSession = combinedCookies.match(/kuro_session=([^;]+)/);
-                const matchKn = combinedCookies.match(/_kn=([^;]+)/);
-                const matchCf = combinedCookies.match(/cf_clearance=([^;]+)/);
-                if (matchSession && matchKn) {
-                    this.sessionCookie = matchSession[1];
-                    this.clientToken = matchKn[1];
-                    if (matchCf)
-                        this.cfClearance = matchCf[1];
-                    this.logger.info('Kuro authentication successful (direct session established in memory)');
-                    return true;
-                }
+                return false;
             }
-            else {
-                const bodySnippet = await res.text().catch(() => '');
-                this.logger.warn(`Kuro direct login failed: HTTP ${res.status} - ${bodySnippet.slice(0, 150)}`);
+            finally {
+                this.loginPromise = null;
             }
-        }
-        catch (err) {
-            this.logger.warn('Failed to login with Kuro credentials from environment', {
-                error: err?.message,
-            });
-        }
-        return false;
+        })();
+        return this.loginPromise;
     }
     async getAuthHeaders() {
         const buildCookieHeader = () => {
