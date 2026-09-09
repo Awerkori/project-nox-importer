@@ -38,8 +38,14 @@ export class ExistingWorksReconciler {
     async discoverCrossProviderMappings(work) {
         let newMappingsCount = 0;
         const mapQuery = this.supabase.from('importer_work_mappings');
-        if (!mapQuery || typeof mapQuery.select !== 'function')
+        // 0. Skip discovery if work is frozen by staff
+        const { data: frozenCheck } = await mapQuery
+            .select('id, sync_status')
+            .eq('work_id', work.id)
+            .eq('sync_status', 'FROZEN_BY_STAFF');
+        if (frozenCheck?.some((m) => m.sync_status === 'FROZEN_BY_STAFF')) {
             return 0;
+        }
         // 1. Get already mapped sources for this work
         const { data: existingMappings } = await mapQuery
             .select('source, source_work_id')
@@ -146,6 +152,29 @@ export class ExistingWorksReconciler {
      * 7. Updates `importer_work_health` and `importer_chapter_manifest`.
      */
     async reconcileWorkManifest(workId, options) {
+        // 0. Pre-flight check: If work is FROZEN_BY_STAFF, skip reconciliation completely
+        const { data: frozenMaps } = await this.supabase
+            .from('importer_work_mappings')
+            .select('id, sync_status, freeze_reason')
+            .eq('work_id', workId)
+            .eq('sync_status', 'FROZEN_BY_STAFF');
+        if (frozenMaps?.some((m) => m.sync_status === 'FROZEN_BY_STAFF')) {
+            this.logger.info(`Work ${workId} is FROZEN_BY_STAFF. Skipping reconciliation.`);
+            return {
+                workId,
+                title: '',
+                totalKnownChapters: 0,
+                totalImportedChapters: 0,
+                missingStart: false,
+                firstChapterNumber: null,
+                latestChapterNumber: null,
+                gaps: [],
+                unresolvedGaps: [],
+                providersSummary: [],
+                enqueuedCount: 0,
+                healthStatus: 'BLOCKED',
+            };
+        }
         // 1. Fetch work details (with fallback if works table query is simple or mapped)
         let workTitle = workId;
         let workSlug = '';

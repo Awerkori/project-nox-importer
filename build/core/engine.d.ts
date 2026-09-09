@@ -6,6 +6,12 @@ import { HostRateLimiter } from './rate-limiter.js';
 import { Config } from '../config.js';
 import { AdaptiveAutotuner } from './concurrency.js';
 export { computeCanonicalChapterKey };
+export declare class JobCancelledByStaffError extends Error {
+    readonly jobId: string;
+    constructor(jobId: string, message?: string);
+}
+export type PageSemanticType = 'CONTENT_PAGE' | 'CREDIT_PAGE' | 'PROMO_PAGE' | 'RECRUITMENT_PAGE' | 'WARNING_PAGE';
+export declare function classifyPageUrl(url: string, index: number, total: number): PageSemanticType;
 export declare class ImporterEngine {
     private supabase;
     private storage;
