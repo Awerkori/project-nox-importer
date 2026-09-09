@@ -270,7 +270,13 @@ export class KuroAdapter {
                         });
                         if (bridgeRes.ok) {
                             const bridgePayload = (await bridgeRes.json());
-                            if (bridgePayload.status === 401 || bridgePayload.status === 403) {
+                            const isCf = bridgePayload.status === 403 &&
+                                (bridgePayload.text?.includes('Just a moment') ||
+                                    bridgePayload.text?.includes('Attention Required') ||
+                                    bridgePayload.text?.includes('Cloudflare') ||
+                                    bridgePayload.text?.includes('error code: 1020') ||
+                                    bridgePayload.text?.includes('error code: 1010'));
+                            if (bridgePayload.status === 401 || (bridgePayload.status === 403 && !isCf)) {
                                 this.clearSession();
                                 if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
                                     const title = bridgePayload.text?.match(/<title>([^<]+)<\/title>/i)?.[1];
@@ -286,6 +292,13 @@ export class KuroAdapter {
                                         continue;
                                 }
                                 throw new Error('Kuro requires authentication: session expired or invalid credentials');
+                            }
+                            if (isCf) {
+                                const title = bridgePayload.text?.match(/<title>([^<]+)<\/title>/i)?.[1];
+                                throw new Error(`Kuro bridge blocked by Cloudflare (HTTP 403): ${title || 'WAF challenge'}`);
+                            }
+                            if (bridgePayload.status === 404) {
+                                throw new Error(`Kuro upstream returned 404 for ${url}`);
                             }
                             if (bridgePayload.status === 429) {
                                 const retryAfter = bridgePayload.headers?.['retry-after'];
@@ -316,7 +329,10 @@ export class KuroAdapter {
                         }
                     }
                     catch (bridgeErr) {
-                        if (bridgeErr.message?.includes('requires authentication') || bridgeErr.message?.includes('429')) {
+                        if (bridgeErr.message?.includes('requires authentication') ||
+                            bridgeErr.message?.includes('429') ||
+                            bridgeErr.message?.includes('blocked by Cloudflare') ||
+                            bridgeErr.message?.includes('returned 404')) {
                             throw bridgeErr;
                         }
                         this.logger.warn('Kuro bridge request encountered transient error, falling back to direct request', {

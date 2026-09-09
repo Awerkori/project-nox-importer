@@ -29,11 +29,15 @@ export class ImporterQueue {
                 try {
                     const { data: existing } = await this.supabase
                         .from('importer_queue')
-                        .select('id, status, priority')
+                        .select('id, status, priority, source')
                         .eq('dedupe_key', dedupeKey)
                         .maybeSingle();
-                    if (existing && (existing.status === 'FAILED' || existing.status === 'CANCELLED')) {
+                    if (existing &&
+                        (existing.status === 'FAILED' ||
+                            existing.status === 'CANCELLED' ||
+                            (existing.status === 'RETRY' && existing.source !== source))) {
                         const updateData = {
+                            source,
                             status: 'QUEUED',
                             attempts: 0,
                             last_error: null,
