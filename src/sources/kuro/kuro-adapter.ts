@@ -154,7 +154,10 @@ export class KuroAdapter implements SourceAdapter {
               return true;
             }
           }
-          this.logger.warn(`Kuro bridge login returned upstream status: ${bridgeData?.status}`);
+          this.logger.warn(`Kuro bridge login returned upstream status: ${bridgeData?.status}`, {
+            error: bridgeData?.data,
+            snippet: (bridgeData as any)?.text?.slice(0, 200),
+          });
         }
       } catch (bridgeErr: any) {
         this.logger.warn('Kuro bridge login encountered error, falling back to direct login', {
@@ -307,7 +310,10 @@ export class KuroAdapter implements SourceAdapter {
               if (bridgePayload.status === 401 || bridgePayload.status === 403) {
                 this.clearSession();
                 if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
-                  this.logger.info('Kuro session expired via bridge. Auto-renewing session...');
+                  this.logger.info('Kuro session expired via bridge. Auto-renewing session...', {
+                    upstreamStatus: bridgePayload.status,
+                    upstreamError: bridgePayload.data,
+                  });
                   const renewed = await this.login(true);
                   if (renewed) continue;
                 }
