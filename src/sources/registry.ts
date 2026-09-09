@@ -9,17 +9,23 @@ import { HostRateLimiter } from '../core/rate-limiter.js';
 export class SourceRegistry {
   private adapters = new Map<string, SourceAdapter>();
 
-  constructor(rateLimiter: HostRateLimiter) {
-    // Register all supported adapters
-    this.register(new NexusAdapter(rateLimiter));
-    this.register(new MangaFlixAdapter(rateLimiter));
-    this.register(new ManhastroAdapter(rateLimiter));
-    this.register(new KuroAdapter(rateLimiter));
-    this.register(new MangoToonsAdapter(rateLimiter));
+  constructor(rateLimiter?: HostRateLimiter) {
+    if (rateLimiter) {
+      // Register all supported adapters
+      this.register(new NexusAdapter(rateLimiter));
+      this.register(new MangaFlixAdapter(rateLimiter));
+      this.register(new ManhastroAdapter(rateLimiter));
+      this.register(new KuroAdapter(rateLimiter));
+      this.register(new MangoToonsAdapter(rateLimiter));
+    }
   }
 
   register(adapter: SourceAdapter): void {
     this.adapters.set(adapter.id, adapter);
+  }
+
+  clear(): void {
+    this.adapters.clear();
   }
 
   get(id: string): SourceAdapter | undefined {

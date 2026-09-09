@@ -177,4 +177,25 @@ export class NexusAdapter {
         }
         return res.chapter.pages;
     }
+    async searchWorks(query) {
+        const clean = query.trim();
+        if (!clean)
+            return [];
+        const enc = encodeURIComponent(clean);
+        const url = `${this.apiUrl}/works?or=(title.ilike.*${enc}*,slug.ilike.*${enc}*,alternative_title.ilike.*${enc}*)&select=id,title,slug,cover_url,updated_at&limit=20`;
+        try {
+            const rows = await this.request(url);
+            return (rows || []).map((w) => ({
+                sourceWorkId: w.id,
+                title: w.title,
+                slug: w.slug,
+                coverUrl: w.cover_url || null,
+                updatedAt: w.updated_at,
+            }));
+        }
+        catch (err) {
+            this.logger.warn(`Search failed on Nexus for query "${query}"`, { error: err?.message });
+            return [];
+        }
+    }
 }

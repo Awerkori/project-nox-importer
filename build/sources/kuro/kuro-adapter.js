@@ -26,17 +26,32 @@ export class KuroAdapter {
     // In-memory session cached during process lifetime (never stored in database or printed)
     sessionCookie = null;
     clientToken = null;
+    cfClearance = null;
     constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
         this.rateLimiter.setHostRate('kuromangas.com', 2.0, 4, 4.0);
         this.rateLimiter.setHostRate('cdn.kuromangas.com', 8.0, 16, 16.0);
         // Initialize from safe environment variables if present
+        if (process.env.KURO_COOKIE) {
+            const matchSession = process.env.KURO_COOKIE.match(/kuro_session=([^;]+)/);
+            const matchKn = process.env.KURO_COOKIE.match(/_kn=([^;]+)/);
+            const matchCf = process.env.KURO_COOKIE.match(/cf_clearance=([^;]+)/);
+            if (matchSession)
+                this.sessionCookie = matchSession[1];
+            if (matchKn)
+                this.clientToken = matchKn[1];
+            if (matchCf)
+                this.cfClearance = matchCf[1];
+        }
         if (process.env.KURO_SESSION) {
             this.sessionCookie = process.env.KURO_SESSION;
         }
         if (process.env.KURO_CLIENT_TOKEN) {
             this.clientToken = process.env.KURO_CLIENT_TOKEN;
+        }
+        if (process.env.KURO_CF_CLEARANCE) {
+            this.cfClearance = process.env.KURO_CF_CLEARANCE;
         }
     }
     hasValidSession() {
@@ -57,14 +72,19 @@ export class KuroAdapter {
         }
         try {
             const loginUrl = `${this.apiUrl}/auth/login`;
+            const headers = {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                Referer: `${this.baseUrl}/login`,
+                Origin: this.baseUrl,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+            };
+            if (this.cfClearance) {
+                headers['Cookie'] = `cf_clearance=${this.cfClearance}`;
+            }
             const res = await this.transport(loginUrl, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Accept: 'application/json',
-                    Referer: `${this.baseUrl}/login`,
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-                },
+                headers,
                 body: JSON.stringify({ email, password, rememberMe: true }),
             });
             if (res.ok) {
@@ -81,15 +101,19 @@ export class KuroAdapter {
                 const combinedCookies = cookieHeaders.join('; ');
                 const matchSession = combinedCookies.match(/kuro_session=([^;]+)/);
                 const matchKn = combinedCookies.match(/_kn=([^;]+)/);
+                const matchCf = combinedCookies.match(/cf_clearance=([^;]+)/);
                 if (matchSession && matchKn) {
                     this.sessionCookie = matchSession[1];
                     this.clientToken = matchKn[1];
+                    if (matchCf)
+                        this.cfClearance = matchCf[1];
                     this.logger.info('Kuro authentication successful (session established in memory)');
                     return true;
                 }
             }
             else {
-                this.logger.warn(`Kuro login failed: HTTP ${res.status}`);
+                const bodySnippet = await res.text().catch(() => '');
+                this.logger.warn(`Kuro login failed: HTTP ${res.status} - ${bodySnippet.slice(0, 150)}`);
             }
         }
         catch (err) {
@@ -100,10 +124,20 @@ export class KuroAdapter {
         return false;
     }
     async getAuthHeaders() {
+        const buildCookieHeader = () => {
+            const cookieParts = [
+                `kuro_session=${this.sessionCookie}`,
+                `_kn=${this.clientToken}`,
+            ];
+            if (this.cfClearance) {
+                cookieParts.push(`cf_clearance=${this.cfClearance}`);
+            }
+            return cookieParts.join('; ');
+        };
         // If already have session, return cookies
         if (this.sessionCookie && this.clientToken) {
             return {
-                Cookie: `kuro_session=${this.sessionCookie}; _kn=${this.clientToken}`,
+                Cookie: buildCookieHeader(),
                 'X-Client-Token': this.clientToken,
             };
         }
@@ -111,7 +145,7 @@ export class KuroAdapter {
         const loggedIn = await this.login();
         if (loggedIn && this.sessionCookie && this.clientToken) {
             return {
-                Cookie: `kuro_session=${this.sessionCookie}; _kn=${this.clientToken}`,
+                Cookie: buildCookieHeader(),
                 'X-Client-Token': this.clientToken,
             };
         }
@@ -279,5 +313,28 @@ export class KuroAdapter {
             const clean = pageUrl.replace(/^\/uploads\//, '/');
             return clean.startsWith('http') ? clean : `${this.cdnUrl}${clean}`;
         });
+    }
+    async searchWorks(query) {
+        const clean = query.trim();
+        if (!clean)
+            return [];
+        const url = `${this.apiUrl}/mangas?search=${encodeURIComponent(clean)}&page=1&limit=20`;
+        try {
+            const response = await this.request(url);
+            const items = response.data || [];
+            return items.map((item) => ({
+                sourceWorkId: String(item.id),
+                title: item.title,
+                slug: slugify(item.title),
+                coverUrl: item.cover_image ? buildThumbnailUrl(this.cdnUrl, item.cover_image) : null,
+                updatedAt: new Date().toISOString(),
+            }));
+        }
+        catch (err) {
+            this.logger.warn(`Search failed or unauthorized on Kuro for query "${query}"`, {
+                error: err?.message,
+            });
+            return [];
+        }
     }
 }

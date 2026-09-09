@@ -254,4 +254,25 @@ export class MangoToonsAdapter implements SourceAdapter {
     if (url.startsWith('http')) return url;
     return `${this.cdnUrl}/${url.replace(/^\//, '')}`;
   }
+
+  async searchWorks(query: string): Promise<SourceWorkSummary[]> {
+    const clean = query.trim();
+    if (!clean) return [];
+
+    try {
+      const data = await this.requestApi(`/obras?pesquisa=${encodeURIComponent(clean)}&limite=20`);
+      const rawWorks = data.obras || data.dados || data.items || [];
+
+      return rawWorks.map((w: any) => ({
+        sourceWorkId: String(w.id),
+        title: w.nome || w.title,
+        slug: w.slug || w.nome_url || slugify(w.nome || w.title || String(w.id)),
+        coverUrl: this.resolveCoverUrl(w.imagem || w.coverImage || w.banner_imagem),
+        updatedAt: w.atualizada_em || w.criada_em || undefined,
+      }));
+    } catch (err: any) {
+      this.logger.warn(`Search failed on MangoToons for query "${query}"`, { error: err?.message });
+      return [];
+    }
+  }
 }

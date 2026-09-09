@@ -209,4 +209,33 @@ export class ManhastroAdapter {
             .map((filename) => `${cleanBase}/${hash}/${filename}`)
             .filter((u) => u.startsWith('http://') || u.startsWith('https://'));
     }
+    async searchWorks(query) {
+        const clean = query.trim();
+        if (!clean)
+            return [];
+        const url = `${this.apiUrl}/dados?nome=${encodeURIComponent(clean)}`;
+        try {
+            const response = await this.request(url);
+            const items = response.data || [];
+            return items.map((item) => {
+                const title = item.titulo_brasil?.trim() || item.titulo.trim();
+                const cover = item.imagem
+                    ? item.imagem.startsWith('http')
+                        ? item.imagem
+                        : `https://${item.imagem}`
+                    : null;
+                return {
+                    sourceWorkId: String(item.manga_id),
+                    title,
+                    slug: slugify(title),
+                    coverUrl: cover,
+                    updatedAt: item.ultimo_capitulo || new Date().toISOString(),
+                };
+            });
+        }
+        catch (err) {
+            this.logger.warn(`Search failed on Manhastro for query "${query}"`, { error: err?.message });
+            return [];
+        }
+    }
 }

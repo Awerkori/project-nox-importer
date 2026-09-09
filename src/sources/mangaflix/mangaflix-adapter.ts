@@ -254,4 +254,36 @@ export class MangaFlixAdapter implements SourceAdapter {
       .map((img) => img.default_url)
       .filter((u) => Boolean(u) && (u.startsWith('http://') || u.startsWith('https://')));
   }
+
+  async searchWorks(query: string): Promise<SourceWorkSummary[]> {
+    const clean = query.trim();
+    if (!clean) return [];
+
+    const url = `${this.apiUrl}/search/mangas?query=${encodeURIComponent(clean)}&selected_language=pt-br`;
+
+    try {
+      const response = await this.request<{
+        data:
+          | Array<{ _id: string; name: string; poster?: { default_url?: string } }>
+          | {
+              works?: Array<{ _id: string; name: string; poster?: { default_url?: string } }>;
+            };
+      }>(url);
+
+      const items = Array.isArray(response.data)
+        ? response.data
+        : response.data?.works || [];
+
+      return items.map((item) => ({
+        sourceWorkId: item._id,
+        title: item.name,
+        slug: slugify(item.name),
+        coverUrl: item.poster?.default_url || null,
+        updatedAt: new Date().toISOString(),
+      }));
+    } catch (err: any) {
+      this.logger.warn(`Search failed on MangaFlix for query "${query}"`, { error: err?.message });
+      return [];
+    }
+  }
 }

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { Logger } from './logger.js';
 import { AsyncSemaphore } from './concurrency.js';
+import { computeCanonicalChapterKey } from './deduplication.js';
 
 export interface StageChapterParams {
   workId: string;
@@ -173,6 +174,31 @@ export class PublicationBarrier {
       .update({ published: true, updated_at: new Date().toISOString() })
       .eq('id', workId)
       .eq('published', false);
+
+    // 4. Update importer_chapter_manifest status to PUBLISHED if available
+    try {
+      const manQuery = this.supabase.from('importer_chapter_manifest');
+      if (manQuery && typeof manQuery.update === 'function') {
+        const { data: chInfo } = await this.supabase
+          .from('chapters')
+          .select('number')
+          .eq('id', chapterId)
+          .maybeSingle();
+
+        if (chInfo?.number !== undefined) {
+          const sKey = computeCanonicalChapterKey(chInfo.number).sortKey;
+          await manQuery
+            .update({
+              status: 'PUBLISHED',
+              last_checked_at: new Date().toISOString(),
+            })
+            .eq('work_id', workId)
+            .eq('chapter_sort_key', sKey);
+        }
+      }
+    } catch {
+      // Non-blocking telemetry
+    }
   }
 
   /**

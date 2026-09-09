@@ -25,4 +25,5 @@ export declare class MangoToonsAdapter implements SourceAdapter {
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string, chapterNumber?: number): Promise<string[]>;
     private resolveCoverUrl;
+    searchWorks(query: string): Promise<SourceWorkSummary[]>;
 }

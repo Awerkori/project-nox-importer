@@ -20,4 +20,5 @@ export declare class MangaFlixAdapter implements SourceAdapter {
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
+    searchWorks(query: string): Promise<SourceWorkSummary[]>;
 }
