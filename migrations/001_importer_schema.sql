@@ -192,6 +192,7 @@ end;
 $$;
 
 -- Release job (completion, retry with backoff, or permanent failure)
+drop function if exists public.importer_release_job(uuid, text, text, text, interval, numeric);
 create or replace function public.importer_release_job(
   p_job_id uuid,
   p_worker_id text,

@@ -5,22 +5,40 @@ interface Bucket {
   lastRefill: number;
   capacity: number;
   ratePerSecond: number;
+  baseRatePerSecond: number;
+  maxRatePerSecond: number;
+  minRatePerSecond: number;
+  consecutiveSuccesses: number;
   blockedUntil: number;
 }
 
 export class HostRateLimiter {
   private buckets = new Map<string, Bucket>();
   private logger = new Logger('RateLimiter');
+  private turboMode = false;
 
   constructor(private defaultRatePerSecond: number = 2.0) {}
 
-  public setHostRate(host: string, ratePerSecond: number, capacity?: number): void {
-    const cap = capacity ?? Math.max(2, Math.ceil(ratePerSecond * 2));
+  public setHostRate(
+    host: string,
+    ratePerSecond: number,
+    capacity?: number,
+    maxRatePerSecond?: number,
+    minRatePerSecond?: number
+  ): void {
+    const minRate = minRatePerSecond ?? Math.max(1.0, ratePerSecond * 0.5);
+    const maxRate = maxRatePerSecond ?? Math.max(ratePerSecond * 2.5, 16.0);
+    const effectiveRate = this.turboMode ? Math.min(maxRate, ratePerSecond * 1.5) : ratePerSecond;
+    const cap = capacity ?? Math.max(2, Math.ceil(effectiveRate * 2));
     this.buckets.set(host, {
       tokens: cap,
       lastRefill: Date.now(),
       capacity: cap,
-      ratePerSecond,
+      ratePerSecond: effectiveRate,
+      baseRatePerSecond: ratePerSecond,
+      maxRatePerSecond: maxRate,
+      minRatePerSecond: minRate,
+      consecutiveSuccesses: 0,
       blockedUntil: 0,
     });
   }
@@ -34,11 +52,54 @@ export class HostRateLimiter {
         lastRefill: Date.now(),
         capacity: cap,
         ratePerSecond: this.defaultRatePerSecond,
+        baseRatePerSecond: this.defaultRatePerSecond,
+        maxRatePerSecond: Math.max(this.defaultRatePerSecond * 2.5, 16.0),
+        minRatePerSecond: Math.max(1.0, this.defaultRatePerSecond * 0.5),
+        consecutiveSuccesses: 0,
         blockedUntil: 0,
       };
       this.buckets.set(host, bucket);
     }
     return bucket;
+  }
+
+  public recordSuccess(host: string): void {
+    const bucket = this.getBucket(host);
+    bucket.consecutiveSuccesses++;
+
+    // Additive Increase: every 8 consecutive successes (or 4 in turbo mode), ramp rate up
+    const rampThreshold = this.turboMode ? 4 : 8;
+    if (bucket.consecutiveSuccesses >= rampThreshold) {
+      bucket.consecutiveSuccesses = 0;
+      const step = this.turboMode ? 1.0 : 0.5;
+      if (bucket.ratePerSecond < bucket.maxRatePerSecond) {
+        const oldRate = bucket.ratePerSecond;
+        bucket.ratePerSecond = Math.min(bucket.maxRatePerSecond, bucket.ratePerSecond + step);
+        bucket.capacity = Math.max(2, Math.ceil(bucket.ratePerSecond * 2));
+        this.logger.debug(`HostRateLimiter AIMD scale-up for ${host}: ${oldRate.toFixed(1)} -> ${bucket.ratePerSecond.toFixed(1)} req/s`);
+      }
+    }
+  }
+
+  public setTurboMode(enabled: boolean): void {
+    this.turboMode = enabled;
+    for (const [host, bucket] of this.buckets.entries()) {
+      if (enabled) {
+        bucket.ratePerSecond = Math.min(bucket.maxRatePerSecond, Math.max(bucket.ratePerSecond, bucket.baseRatePerSecond * 1.5));
+      } else {
+        bucket.ratePerSecond = bucket.baseRatePerSecond;
+      }
+      bucket.capacity = Math.max(2, Math.ceil(bucket.ratePerSecond * 2));
+    }
+    this.logger.info(`HostRateLimiter turbo mode: ${enabled ? 'ENABLED' : 'DISABLED'}`);
+  }
+
+  public isTurboMode(): boolean {
+    return this.turboMode;
+  }
+
+  public getHostRate(host: string): number {
+    return this.getBucket(host).ratePerSecond;
   }
 
   /**
@@ -65,15 +126,15 @@ export class HostRateLimiter {
 
       if (bucket.tokens >= 1) {
         bucket.tokens -= 1;
-        // Apply micro-jitter (15-30ms) to avoid perfectly periodic bursts
-        const jitter = Math.floor(Math.random() * 15) + 15;
+        // Apply micro-jitter (5-15ms) to avoid perfectly periodic bursts
+        const jitter = Math.floor(Math.random() * 10) + 5;
         await this.sleep(jitter);
         return;
       }
 
       // Wait until at least 1 token is available + random jitter
       const timeForTokenMs = Math.ceil(((1 - bucket.tokens) / bucket.ratePerSecond) * 1000);
-      const jitter = Math.floor(Math.random() * 50) + 10;
+      const jitter = Math.floor(Math.random() * 30) + 5;
       await this.sleep(timeForTokenMs + jitter);
     }
   }
@@ -84,6 +145,13 @@ export class HostRateLimiter {
   handle429(host: string, retryAfterHeader?: string | null, attemptNumber: number = 1): number {
     const bucket = this.getBucket(host);
     let waitSeconds = 5;
+
+    // AIMD Multiplicative Decrease (-30%) on rate limiter
+    const oldRate = bucket.ratePerSecond;
+    bucket.ratePerSecond = Math.max(bucket.minRatePerSecond, bucket.ratePerSecond * 0.7);
+    bucket.capacity = Math.max(2, Math.ceil(bucket.ratePerSecond * 2));
+    bucket.consecutiveSuccesses = 0;
+    this.logger.warn(`HostRateLimiter AIMD backoff for ${host}: ${oldRate.toFixed(1)} -> ${bucket.ratePerSecond.toFixed(1)} req/s`);
 
     if (retryAfterHeader) {
       const parsedSeconds = parseInt(retryAfterHeader, 10);

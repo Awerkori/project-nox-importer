@@ -16,8 +16,8 @@ const ConfigSchema = z.object({
   POLL_INTERVAL_SECONDS: z.coerce.number().int().min(5).default(60),
   QUEUE_LEASE_DURATION_SECONDS: z.coerce.number().int().min(30).default(300),
   QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
-  MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(5).default(1),
-  BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(10).default(3),
+  MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(10).default(3),
+  BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(6),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 

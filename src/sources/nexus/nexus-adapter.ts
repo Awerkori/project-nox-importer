@@ -18,8 +18,8 @@ export class NexusAdapter implements SourceAdapter {
     private rateLimiter: HostRateLimiter = new HostRateLimiter(2.0),
     private transport: typeof fetch = fetch
   ) {
-    this.rateLimiter.setHostRate('supabase.nexusmangas.com', 2.0);
-    this.rateLimiter.setHostRate('cdn.nexusmangas.com', 4.0);
+    this.rateLimiter.setHostRate('supabase.nexusmangas.com', 2.0, 4, 4.0);
+    this.rateLimiter.setHostRate('cdn.nexusmangas.com', 8.0, 16, 16.0);
   }
 
   private get headers(): HeadersInit {
@@ -63,6 +63,8 @@ export class NexusAdapter implements SourceAdapter {
           const errText = await response.text().catch(() => '');
           throw new Error(`Nexus request failed: HTTP ${response.status} - ${errText.slice(0, 200)}`);
         }
+
+        this.rateLimiter.recordSuccess(parsedUrl.host);
 
         return (await response.json()) as T;
       } catch (err: any) {

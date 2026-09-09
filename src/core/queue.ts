@@ -66,6 +66,73 @@ export class ImporterQueue {
   }
 
   /**
+   * Batch enqueue multiple tasks safely with deduplication
+   */
+  async enqueueBatch(
+    jobs: Array<{
+      taskType: TaskType;
+      source: string;
+      dedupeKey: string;
+      payload?: Record<string, any>;
+      priority?: number;
+      chapterSortKey?: number | null;
+    }>
+  ): Promise<number> {
+    if (jobs.length === 0) return 0;
+
+    const rows = jobs.map((j) => {
+      const row: Record<string, any> = {
+        task_type: j.taskType,
+        source: j.source,
+        dedupe_key: j.dedupeKey,
+        payload: j.payload || {},
+        priority: j.priority ?? 10,
+        status: 'QUEUED',
+      };
+      if (j.chapterSortKey !== undefined && j.chapterSortKey !== null) {
+        row.chapter_sort_key = j.chapterSortKey;
+      }
+      return row;
+    });
+
+    const CHUNK_SIZE = 50;
+    let enqueuedCount = 0;
+
+    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + CHUNK_SIZE);
+      const { error } = await this.supabase
+        .from('importer_queue')
+        .upsert(chunk, { onConflict: 'dedupe_key', ignoreDuplicates: true });
+
+      if (error) {
+        this.logger.warn('Batch insert encountered error, falling back to individual inserts', {
+          error: error.message,
+        });
+        for (const job of chunk) {
+          try {
+            const ok = await this.enqueue(
+              job.task_type,
+              job.source,
+              job.dedupe_key,
+              job.payload,
+              job.priority,
+              job.chapter_sort_key
+            );
+            if (ok) enqueuedCount++;
+          } catch {
+            // dedupe or transient ignore
+          }
+        }
+      } else {
+        enqueuedCount += chunk.length;
+      }
+    }
+
+    this.logger.info(`Batch enqueued ${enqueuedCount}/${jobs.length} jobs`);
+    return enqueuedCount;
+  }
+
+  /**
    * Acquire the next job atomically using SKIP LOCKED stored procedure,
    * optionally filtered by source for concurrent source runners.
    */
@@ -137,7 +204,6 @@ export class ImporterQueue {
       p_status: status,
       p_error: lastError ?? null,
       p_retry_delay: retryDelay,
-      p_retry_delay_minutes: retryDelaySeconds ? Math.ceil(retryDelaySeconds / 60) : null,
     });
 
     if (error) {

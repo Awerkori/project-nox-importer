@@ -28,6 +28,17 @@ export declare class ImporterQueue {
      */
     enqueue(taskType: TaskType, source: string, dedupeKey: string, payload?: Record<string, any>, priority?: number, chapterSortKey?: number | null): Promise<boolean>;
     /**
+     * Batch enqueue multiple tasks safely with deduplication
+     */
+    enqueueBatch(jobs: Array<{
+        taskType: TaskType;
+        source: string;
+        dedupeKey: string;
+        payload?: Record<string, any>;
+        priority?: number;
+        chapterSortKey?: number | null;
+    }>): Promise<number>;
+    /**
      * Acquire the next job atomically using SKIP LOCKED stored procedure,
      * optionally filtered by source for concurrent source runners.
      */
