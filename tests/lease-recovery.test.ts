@@ -40,6 +40,8 @@ describe('Generic Lease Recovery System', () => {
     await db.exec(readFileSync(resolve('migrations/005_importer_page_provider_column.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/006_importer_publication_barrier.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/007_importer_lease_recovery.sql'), 'utf8'));
+    await db.exec(readFileSync(resolve('migrations/010_importer_absolute_priority.sql'), 'utf8'));
+    await db.exec(readFileSync(resolve('migrations/011_persistent_jobs_and_staff_priority.sql'), 'utf8'));
 
     // Create a mock Supabase client that routes to PGlite
     supabaseMock = {
@@ -133,7 +135,7 @@ describe('Generic Lease Recovery System', () => {
     const checkRes = await db.query(`select * from public.importer_queue where id = $1`, [expiredJobId]);
     const job = checkRes.rows[0] as any;
 
-    expect(job.status).toBe('QUEUED');
+    expect(['QUEUED', 'RETRY']).toContain(job.status);
     expect(job.locked_by).toBeNull();
     expect(job.locked_at).toBeNull();
     expect(job.lease_expires_at).toBeNull();
@@ -141,8 +143,8 @@ describe('Generic Lease Recovery System', () => {
     expect(new Date(job.next_run_at).getTime()).toBeLessThanOrEqual(Date.now() + 1000);
   });
 
-  it('marks expired IMPORTING jobs at or exceeding max_attempts as FAILED', async () => {
-    // Insert an expired job that has exhausted all attempts (attempts: 5, max: 5)
+  it('requeues expired IMPORTING jobs even when reaching or exceeding max_attempts without marking as FAILED', async () => {
+    // Insert an expired job that has reached max attempts (attempts: 5, max: 5)
     const deadJobRes = await db.query(`
       insert into public.importer_queue (
         task_type, source, priority, dedupe_key, status,
@@ -155,16 +157,17 @@ describe('Generic Lease Recovery System', () => {
     const deadJobId = (deadJobRes.rows[0] as any).id;
 
     const result = await queue.recoverExpiredLeases();
-    expect(result.failed).toBeGreaterThanOrEqual(1);
+    expect(result.recovered).toBeGreaterThanOrEqual(1);
+    expect(result.failed).toBe(0);
 
     const checkRes = await db.query(`select * from public.importer_queue where id = $1`, [deadJobId]);
     const job = checkRes.rows[0] as any;
 
-    expect(job.status).toBe('FAILED');
+    expect(job.status).toBe('RETRY');
     expect(job.locked_by).toBeNull();
     expect(job.lease_expires_at).toBeNull();
     expect(job.attempts).toBe(5);
-    expect(job.last_error).toContain('max attempts');
+    expect(job.last_error).toContain('Lease expirado');
   });
 
   it('does NOT touch active jobs with valid unexpired leases', async () => {

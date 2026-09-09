@@ -161,26 +161,29 @@ export class RetryPolicy {
         };
     }
     /**
-     * Determina o atraso exato em segundos sem penalidades duplas e com teto máximo de 5 minutos.
+     * Determina o atraso exato em segundos sem penalidades duplas e com teto máximo sustentável.
+     * REGRA DE OURO: Erros técnicos (502, 503, 429, timeout, network, provider, auth, lease)
+     * NUNCA terminam em FAILED por atingir max_attempts. Eles permanecem em RETRY com backoff.
      */
-    static decide(classification, attempts, maxAttempts) {
-        if (attempts >= maxAttempts || classification.isPermanent) {
+    static decide(classification, attempts, _maxAttempts, options) {
+        // Falha fatal irrecuperável somente se classificada explicitamente como FAILED (dados corrompidos)
+        if (classification.retryClass === 'FAILED') {
             return {
                 status: 'FAILED',
                 delaySeconds: 0,
-                reason: 'Max attempts reached or permanent failure',
+                reason: classification.message || 'Fatal permanent failure',
             };
         }
         switch (classification.retryClass) {
             case 'QUEUE_RETRY_STORAGE_502':
             case 'QUEUE_RETRY_STORAGE_503':
             case 'QUEUE_RETRY_TIMEOUT': {
-                // Nível 2 - Fila curta para erros transitórios de Storage:
+                // Nível 2 - Fila curta para erros transitórios de Storage / Rede:
                 // Attempt 1: 30s + jitter (30-35s)
                 // Attempt 2: 60s + jitter (60-70s)
                 // Attempt 3: 120s + jitter (120-135s)
                 // Attempt 4: 240s + jitter (240-270s)
-                // Teto absoluto: 300 segundos (5 minutos), NUNCA 16-32 minutos!
+                // Teto sustentável: 300 segundos (5 minutos), retry perpétuo até restabelecer
                 const baseDelays = [30, 60, 120, 240];
                 const base = baseDelays[attempts - 1] ?? 300;
                 const jitter = Math.floor(Math.random() * (base * 0.15));
@@ -188,7 +191,7 @@ export class RetryPolicy {
                 return {
                     status: 'RETRY',
                     delaySeconds: delay,
-                    reason: `${classification.retryClass} short queue backoff (${delay}s)`,
+                    reason: `${classification.retryClass} persistent backoff (${delay}s, attempt ${attempts})`,
                 };
             }
             case 'QUEUE_RETRY_429': {
@@ -198,26 +201,36 @@ export class RetryPolicy {
                 return {
                     status: 'RETRY',
                     delaySeconds: wait + jitter,
-                    reason: `Storage 429 Retry-After authority (${wait + jitter}s)`,
+                    reason: `Storage/Provider 429 Retry-After authority (${wait + jitter}s)`,
                 };
             }
             case 'QUEUE_RETRY_PROVIDER': {
-                // Falha transitória de provider externo: 45s -> 90s -> 180s -> 300s
+                // Falha transitória de provider externo: 45s -> 90s -> 180s -> 300s (persistente)
                 const baseDelays = [45, 90, 180, 300];
                 const base = baseDelays[attempts - 1] ?? 300;
                 const jitter = Math.floor(Math.random() * 10);
                 return {
                     status: 'RETRY',
                     delaySeconds: Math.min(300, base + jitter),
-                    reason: `Provider retry backoff (${base + jitter}s)`,
+                    reason: `Provider persistent retry backoff (${base + jitter}s, attempt ${attempts})`,
+                };
+            }
+            case 'QUEUE_RETRY_PERMANENT': {
+                // Problemas de credencial/auth expirada ou 404 em provider externo:
+                // NÃO mata o job. Aguarda em intervalo maior (300s a 600s) para intervenção humana ou restabelecimento
+                const delay = Math.min(600, Math.max(300, attempts * 60));
+                return {
+                    status: 'RETRY',
+                    delaySeconds: delay,
+                    reason: `Provider auth/not-found persistent retry (${delay}s, attempt ${attempts})`,
                 };
             }
             default: {
-                const base = Math.min(300, Math.pow(2, attempts) * 15);
+                const base = Math.min(300, Math.pow(2, Math.min(attempts, 6)) * 15);
                 return {
                     status: 'RETRY',
                     delaySeconds: base,
-                    reason: `Generic retry backoff (${base}s)`,
+                    reason: `Generic persistent retry backoff (${base}s, attempt ${attempts})`,
                 };
             }
         }

@@ -141,22 +141,38 @@ describe('RetryPolicy - Classification & Adaptive Backoff', () => {
       expect(decision.delaySeconds).toBeLessThanOrEqual(19);
     });
 
-    it('immediately marks permanent errors as FAILED with 0 delay', () => {
+    it('enters persistent retry for provider 404/auth errors with clamped delay instead of terminating', () => {
       const classification = RetryPolicy.classify({
         status: 404,
         message: 'Manga chapter not found (HTTP 404)',
       });
       const decision = RetryPolicy.decide(classification, 1, 6);
 
-      expect(decision.status).toBe('FAILED');
-      expect(decision.delaySeconds).toBe(0);
+      expect(decision.status).toBe('RETRY');
+      expect(decision.delaySeconds).toBeGreaterThanOrEqual(45);
+      expect(decision.delaySeconds).toBeLessThanOrEqual(300);
     });
 
-    it('marks jobs as FAILED when max_attempts is reached', () => {
+    it('NEVER marks technical errors as FAILED when max_attempts is reached, keeping them in RETRY', () => {
       const classification = RetryPolicy.classify(new NoxWorkerStorageError('http', 502, 'Storage 502'));
       const decision = RetryPolicy.decide(classification, 6, 6);
 
+      expect(decision.status).toBe('RETRY');
+      expect(decision.delaySeconds).toBe(300);
+    });
+
+    it('marks fatal unrecoverable data corruption as FAILED with 0 delay', () => {
+      const fatalClassification = {
+        retryClass: 'FAILED' as const,
+        isTransient: false,
+        isPermanent: true,
+        message: 'Fatal payload schema corruption',
+        sourceStage: 'system' as const,
+      };
+      const decision = RetryPolicy.decide(fatalClassification, 1, 6);
+
       expect(decision.status).toBe('FAILED');
+      expect(decision.delaySeconds).toBe(0);
     });
   });
 });
