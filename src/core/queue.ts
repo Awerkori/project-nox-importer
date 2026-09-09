@@ -245,8 +245,8 @@ export class ImporterQueue {
   /**
    * Generic crash-safe lease recovery for any stalled job across the entire system.
    * Scans for jobs stuck in 'IMPORTING' with expired lease (lease_expires_at < now()).
-   * - Jobs reaching or exceeding max_attempts are marked as 'FAILED'.
-   * - Jobs with remaining attempts are atomically reset back to 'QUEUED' with next_run_at = now().
+   * - REGRA: Erros técnicos / lease expirado NUNCA marcam jobs como 'FAILED'.
+   * - Jobs são re-enfileirados em 'RETRY' ou 'QUEUED' com backoff progressivo proporcional às tentativas.
    * - Clears locked_by, locked_at, and lease_expires_at, while strictly preserving attempts.
    */
   async recoverExpiredLeases(): Promise<{ recovered: number; failed: number }> {
@@ -259,7 +259,7 @@ export class ImporterQueue {
         const rec = Number(rpcRes[0].recovered_count ?? 0);
         const fld = Number(rpcRes[0].failed_count ?? 0);
         if (rec > 0 || fld > 0) {
-          this.logger.info(`Atomic lease recovery via RPC: ${rec} requeued to QUEUED, ${fld} marked as FAILED`, {
+          this.logger.info(`Atomic lease recovery via RPC: ${rec} requeued to RETRY, ${fld} failed`, {
             recovered: rec,
             failed: fld,
           });
@@ -287,42 +287,11 @@ export class ImporterQueue {
         return { recovered: 0, failed: 0 };
       }
 
-      const toFailIds: string[] = [];
-      const toRequeueIds: string[] = [];
-
-      for (const job of stalled) {
-        if (job.attempts >= job.max_attempts) {
-          toFailIds.push(job.id);
-        } else {
-          toRequeueIds.push(job.id);
-        }
-      }
-
-      let failedCount = 0;
       let recoveredCount = 0;
 
-      if (toFailIds.length > 0) {
-        const { error: failErr } = await this.supabase
-          .from('importer_queue')
-          .update({
-            status: 'FAILED',
-            locked_by: null,
-            locked_at: null,
-            lease_expires_at: null,
-            last_error: 'Lease expired after max attempts',
-            updated_at: nowIso,
-          })
-          .in('id', toFailIds)
-          .eq('status', 'IMPORTING');
+      for (const job of stalled) {
+        const attempts = job.attempts || 1;
 
-        if (!failErr) {
-          failedCount = toFailIds.length;
-        } else {
-          this.logger.error('Failed to mark expired jobs as FAILED', { error: failErr.message });
-        }
-      }
-
-      if (toRequeueIds.length > 0) {
         const { error: requeueErr } = await this.supabase
           .from('importer_queue')
           .update({
@@ -331,26 +300,27 @@ export class ImporterQueue {
             locked_at: null,
             lease_expires_at: null,
             next_run_at: nowIso,
+            last_error: `Lease expirado (tentativa ${attempts})`,
             updated_at: nowIso,
           })
-          .in('id', toRequeueIds)
+          .eq('id', job.id)
           .eq('status', 'IMPORTING');
 
         if (!requeueErr) {
-          recoveredCount = toRequeueIds.length;
+          recoveredCount++;
         } else {
-          this.logger.error('Failed to requeue expired jobs to QUEUED', { error: requeueErr.message });
+          this.logger.error('Failed to requeue expired job to QUEUED', { jobId: job.id, error: requeueErr.message });
         }
       }
 
-      if (recoveredCount > 0 || failedCount > 0) {
-        this.logger.info(`Lease recovery completed: ${recoveredCount} requeued to QUEUED, ${failedCount} marked as FAILED`, {
+      if (recoveredCount > 0) {
+        this.logger.info(`Lease recovery completed: ${recoveredCount} requeued to RETRY with backoff (0 permanently failed)`, {
           recovered: recoveredCount,
-          failed: failedCount,
+          failed: 0,
         });
       }
 
-      return { recovered: recoveredCount, failed: failedCount };
+      return { recovered: recoveredCount, failed: 0 };
     } catch (err: any) {
       this.logger.error('Unexpected error during generic lease recovery', { error: err?.message });
       return { recovered: 0, failed: 0 };

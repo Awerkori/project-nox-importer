@@ -25,7 +25,11 @@ export declare class RetryPolicy {
      */
     static classify(err: any): RetryClassification;
     /**
-     * Determina o atraso exato em segundos sem penalidades duplas e com teto máximo de 5 minutos.
+     * Determina o atraso exato em segundos sem penalidades duplas e com teto máximo sustentável.
+     * REGRA DE OURO: Erros técnicos (502, 503, 429, timeout, network, provider, auth, lease)
+     * NUNCA terminam em FAILED por atingir max_attempts. Eles permanecem em RETRY com backoff.
      */
-    static decide(classification: RetryClassification, attempts: number, maxAttempts: number): RetryDecision;
+    static decide(classification: RetryClassification, attempts: number, _maxAttempts: number, options?: {
+        isStaffPriority?: boolean;
+    }): RetryDecision;
 }

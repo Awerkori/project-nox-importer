@@ -511,7 +511,7 @@ export class ImporterEngine {
           .from('importer_staff_requests')
           .select('id, work_id');
         if (typeof reqQuery?.in === 'function') {
-          reqQuery = reqQuery.in('status', ['QUEUED', 'IMPORTING']);
+          reqQuery = reqQuery.in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
         }
         if (typeof reqQuery?.maybeSingle === 'function') {
           const { data: activeFocus } = await reqQuery.maybeSingle();
@@ -528,6 +528,22 @@ export class ImporterEngine {
         }
       } catch {
         // Safe fallback in test harnesses where importer_staff_requests is unmocked
+      }
+
+      if (job.payload?.workId) {
+        try {
+          await this.supabase
+            .from('importer_staff_requests')
+            .update({
+              status: 'IMPORTING',
+              last_attempt_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            })
+            .eq('work_id', job.payload.workId)
+            .in('status', ['QUEUED', 'RETRYING']);
+        } catch {
+          // Non-blocking telemetry
+        }
       }
 
       this.logger.info('Processing job', {
@@ -564,7 +580,8 @@ export class ImporterEngine {
       });
 
       const classification = RetryPolicy.classify(err);
-      const decision = RetryPolicy.decide(classification, job.attempts, job.max_attempts);
+      const isStaffPriority = Boolean(job.payload?.staffRequested) || (job.priority >= 100);
+      const decision = RetryPolicy.decide(classification, job.attempts, job.max_attempts, { isStaffPriority });
 
       if (classification.retryClass === 'QUEUE_RETRY_429') {
         if (classification.sourceStage === 'storage') {
@@ -633,6 +650,26 @@ export class ImporterEngine {
         decision.delaySeconds,
         classification.retryClass
       );
+
+      if (job.payload?.workId && decision.status === 'RETRY') {
+        const nextAttemptIso = new Date(Date.now() + decision.delaySeconds * 1000).toISOString();
+        try {
+          await this.supabase
+            .from('importer_staff_requests')
+            .update({
+              status: 'RETRYING',
+              last_error: this.sanitizeErrorMessage(errorMessage),
+              last_attempt_at: new Date().toISOString(),
+              next_attempt_at: nextAttemptIso,
+              attempt_count: job.attempts,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('work_id', job.payload.workId)
+            .in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
+        } catch {
+          // Non-blocking telemetry
+        }
+      }
     }
   }
 
@@ -903,7 +940,7 @@ export class ImporterEngine {
             .select('id')
             .eq('work_id', result.workId);
           if (typeof reqQuery?.in === 'function') {
-            reqQuery = reqQuery.in('status', ['QUEUED', 'IMPORTING']);
+            reqQuery = reqQuery.in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
           }
           if (typeof reqQuery?.maybeSingle === 'function') {
             const { data: staffReq } = await reqQuery.maybeSingle();
