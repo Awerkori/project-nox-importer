@@ -61,4 +61,9 @@ export interface SourceAdapter {
    * Fetch image page URLs for a specific chapter
    */
   fetchChapterPages(sourceChapterId: string, chapterNumber?: number): Promise<string[]>;
+
+  /**
+   * Search for works matching a query string (title, slug, or alias)
+   */
+  searchWorks(query: string): Promise<SourceWorkSummary[]>;
 }

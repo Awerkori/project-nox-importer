@@ -21,4 +21,5 @@ export declare class NexusAdapter implements SourceAdapter {
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string): Promise<string[]>;
+    searchWorks(query: string): Promise<SourceWorkSummary[]>;
 }

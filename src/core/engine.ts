@@ -231,21 +231,66 @@ export class ImporterEngine {
   }
 
   /**
-   * Periodic existing works reconciliation loop (every 15 min)
-   * Scans batches of existing works to detect gaps confirmed by sources and fresh releases.
+   * Periodic existing works reconciliation loop
+   * Handles high-priority staff requests, on-demand admin reconciliations, and periodic catalog health batches.
    */
   private async runReconciliationLoop(): Promise<void> {
+    await this.sleep(3000); // Quick startup delay
+
+    let lastFullBatch = 0;
+
     while (!this.stopSignal) {
-      // Run every 15 minutes
-      await this.sleep(15 * 60 * 1000);
-      if (this.stopSignal) break;
+      const now = Date.now();
 
       try {
-        this.logger.info('Starting periodic existing works reconciliation batch...');
-        await this.reconciler.reconcileExistingWorks(20);
+        // 1. Process active Prioridade Absoluta staff requests immediately
+        const staffQuery = this.supabase.from('importer_staff_requests');
+        if (staffQuery && typeof staffQuery.select === 'function') {
+          const { data: activeStaff } = await staffQuery
+            .select('work_id')
+            .in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
+
+          for (const req of activeStaff || []) {
+            if (this.stopSignal) break;
+            try {
+              this.logger.info(`Running cross-provider reconciliation for Prioridade Absoluta work ${req.work_id}`);
+              await this.reconciler.reconcileWorkManifest(req.work_id, { priority: 100 });
+            } catch (err: any) {
+              this.logger.warn(`Failed reconciling Prioridade Absoluta work ${req.work_id}`, { error: err?.message });
+            }
+          }
+        }
+
+        // 2. Process works explicitly requested for reconciliation from Admin UI
+        const healthQuery = this.supabase.from('importer_work_health');
+        if (healthQuery && typeof healthQuery.select === 'function') {
+          const { data: requestedWorks } = await healthQuery
+            .select('work_id')
+            .eq('health_status', 'RECONCILING')
+            .limit(5);
+
+          for (const req of requestedWorks || []) {
+            if (this.stopSignal) break;
+            try {
+              this.logger.info(`Running requested reconciliation for work ${req.work_id}`);
+              await this.reconciler.reconcileWorkManifest(req.work_id);
+            } catch (err: any) {
+              this.logger.warn(`Failed reconciling requested work ${req.work_id}`, { error: err?.message });
+            }
+          }
+        }
+
+        // 3. Periodic full catalog batch every 15 minutes
+        if (now - lastFullBatch >= 15 * 60 * 1000) {
+          lastFullBatch = now;
+          this.logger.info('Starting periodic existing works reconciliation batch...');
+          await this.reconciler.reconcileExistingWorks(20);
+        }
       } catch (err: any) {
         this.logger.error('Error during periodic reconciliation loop', { error: err?.message });
       }
+
+      await this.sleep(30_000);
     }
   }
 
@@ -1487,6 +1532,23 @@ export class ImporterEngine {
           sortKey: chKey.sortKey,
           pageCount: validPages.length,
         });
+
+        try {
+          const manQuery = this.supabase.from('importer_chapter_manifest');
+          if (manQuery && typeof manQuery.update === 'function') {
+            await manQuery
+              .update({
+                status: 'PUBLISHED',
+                last_checked_at: new Date().toISOString(),
+              })
+              .eq('work_id', workId)
+              .eq('chapter_sort_key', chKey.sortKey);
+          }
+        } catch {
+          // Non-blocking
+        }
+
+        await this.checkStaffRequestCompletion(workId);
       } else {
         this.logger.info('Successfully imported and staged chapter. Waiting for preceding chapter(s) to publish', {
           workId,
@@ -1495,6 +1557,21 @@ export class ImporterEngine {
           reason: pubResult.reason,
           pageCount: validPages.length,
         });
+
+        try {
+          const manQuery = this.supabase.from('importer_chapter_manifest');
+          if (manQuery && typeof manQuery.update === 'function') {
+            await manQuery
+              .update({
+                status: 'STAGED',
+                last_checked_at: new Date().toISOString(),
+              })
+              .eq('work_id', workId)
+              .eq('chapter_sort_key', chKey.sortKey);
+          }
+        } catch {
+          // Non-blocking
+        }
       }
     } catch (err: any) {
       // If chapter failed definitively after exhausting all attempts, handle fallback / register gap
@@ -1690,6 +1767,61 @@ export class ImporterEngine {
     }
 
     throw new Error('No valid member found in public.members to attribute imported media.');
+  }
+
+  /**
+   * Verifies if all chapters in the canonical manifest for a prioritized work are accounted for
+   * (either PUBLISHED or marked as UNRESOLVED_GAP). If no chapters remain in QUEUED or STAGED,
+   * marks the staff request as COMPLETED.
+   */
+  async checkStaffRequestCompletion(workId: string): Promise<void> {
+    try {
+      const staffQuery = this.supabase.from('importer_staff_requests');
+      if (!staffQuery || typeof staffQuery.select !== 'function') return;
+
+      const { data: activeRequests } = await staffQuery
+        .select('id, status')
+        .eq('work_id', workId)
+        .in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
+
+      if (!activeRequests || activeRequests.length === 0) return;
+
+      // 1. Check if active jobs remain in importer_queue
+      const qQuery = this.supabase.from('importer_queue');
+      if (qQuery && typeof qQuery.select === 'function') {
+        const { count } = await qQuery
+          .select('id', { count: 'exact', head: true })
+          .eq('payload->>workId', workId)
+          .in('status', ['QUEUED', 'IMPORTING', 'RETRY']);
+
+        if (count && count > 0) return;
+      }
+
+      // 2. Check if chapters remain uncompleted in importer_chapter_manifest
+      const manQuery = this.supabase.from('importer_chapter_manifest');
+      if (manQuery && typeof manQuery.select === 'function') {
+        const { data: pendingChapters } = await manQuery
+          .select('chapter_sort_key, status')
+          .eq('work_id', workId)
+          .in('status', ['QUEUED', 'STAGED']);
+
+        if (pendingChapters && pendingChapters.length > 0) return;
+      }
+
+      // 3. Complete staff request
+      await staffQuery
+        .update({
+          status: 'COMPLETED',
+          completed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('work_id', workId)
+        .in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
+
+      this.logger.info(`Prioridade Absoluta completed for work ${workId}: all manifest chapters resolved!`);
+    } catch (err: any) {
+      this.logger.warn(`Failed to check staff request completion for work ${workId}`, { error: err?.message });
+    }
   }
 
   private sleep(ms: number): Promise<void> {

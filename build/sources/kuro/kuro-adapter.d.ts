@@ -12,6 +12,7 @@ export declare class KuroAdapter implements SourceAdapter {
     private encKey;
     private sessionCookie;
     private clientToken;
+    private cfClearance;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     hasValidSession(): boolean;
     clearSession(): void;
@@ -27,4 +28,5 @@ export declare class KuroAdapter implements SourceAdapter {
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
+    searchWorks(query: string): Promise<SourceWorkSummary[]>;
 }

@@ -53,8 +53,57 @@ export class ImporterQueue {
     const { error } = await this.supabase.from('importer_queue').insert(insertRow);
 
     if (error) {
-      // Conflict on dedupe_key is normal and ignored
+      // Conflict on dedupe_key: check if job failed/cancelled and needs revival
       if (error.code === '23505') {
+        try {
+          const { data: existing } = await this.supabase
+            .from('importer_queue')
+            .select('id, status, priority')
+            .eq('dedupe_key', dedupeKey)
+            .maybeSingle();
+
+          if (existing && (existing.status === 'FAILED' || existing.status === 'CANCELLED')) {
+            const updateData: Record<string, any> = {
+              status: 'QUEUED',
+              attempts: 0,
+              last_error: null,
+              locked_by: null,
+              locked_at: null,
+              lease_expires_at: null,
+              priority: Math.max(existing.priority || 10, priority),
+              payload,
+              next_run_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            };
+            if (chapterSortKey !== undefined && chapterSortKey !== null) {
+              updateData.chapter_sort_key = chapterSortKey;
+            }
+            const { error: revErr } = await this.supabase
+              .from('importer_queue')
+              .update(updateData)
+              .eq('id', existing.id);
+
+            if (!revErr) {
+              this.logger.info('Revived failed/cancelled job back to QUEUED', {
+                dedupeKey,
+                jobId: existing.id,
+                priority: updateData.priority,
+              });
+              return true;
+            } else {
+              this.logger.warn('Failed to update revived job in queue', {
+                dedupeKey,
+                error: revErr.message,
+              });
+            }
+          }
+        } catch (revErr: any) {
+          this.logger.warn('Failed to check/revive existing queue item on dedupe hit', {
+            dedupeKey,
+            error: revErr?.message,
+          });
+        }
+
         this.logger.debug('Job already queued (dedupe hit)', { dedupeKey });
         return false;
       }

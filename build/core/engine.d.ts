@@ -47,8 +47,8 @@ export declare class ImporterEngine {
      */
     private runLeaseRecoveryLoop;
     /**
-     * Periodic existing works reconciliation loop (every 15 min)
-     * Scans batches of existing works to detect gaps confirmed by sources and fresh releases.
+     * Periodic existing works reconciliation loop
+     * Handles high-priority staff requests, on-demand admin reconciliations, and periodic catalog health batches.
      */
     private runReconciliationLoop;
     private autotunerCycleCount;
@@ -92,5 +92,11 @@ export declare class ImporterEngine {
     private fetchImageBytes;
     private cachedBotUserId;
     private resolveBotUserId;
+    /**
+     * Verifies if all chapters in the canonical manifest for a prioritized work are accounted for
+     * (either PUBLISHED or marked as UNRESOLVED_GAP). If no chapters remain in QUEUED or STAGED,
+     * marks the staff request as COMPLETED.
+     */
+    checkStaffRequestCompletion(workId: string): Promise<void>;
     private sleep;
 }

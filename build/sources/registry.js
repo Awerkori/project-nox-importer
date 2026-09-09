@@ -6,15 +6,20 @@ import { MangoToonsAdapter } from './mangotoons/mangotoons-adapter.js';
 export class SourceRegistry {
     adapters = new Map();
     constructor(rateLimiter) {
-        // Register all supported adapters
-        this.register(new NexusAdapter(rateLimiter));
-        this.register(new MangaFlixAdapter(rateLimiter));
-        this.register(new ManhastroAdapter(rateLimiter));
-        this.register(new KuroAdapter(rateLimiter));
-        this.register(new MangoToonsAdapter(rateLimiter));
+        if (rateLimiter) {
+            // Register all supported adapters
+            this.register(new NexusAdapter(rateLimiter));
+            this.register(new MangaFlixAdapter(rateLimiter));
+            this.register(new ManhastroAdapter(rateLimiter));
+            this.register(new KuroAdapter(rateLimiter));
+            this.register(new MangoToonsAdapter(rateLimiter));
+        }
     }
     register(adapter) {
         this.adapters.set(adapter.id, adapter);
+    }
+    clear() {
+        this.adapters.clear();
     }
     get(id) {
         return this.adapters.get(id);
