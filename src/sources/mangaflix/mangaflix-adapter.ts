@@ -23,8 +23,8 @@ export class MangaFlixAdapter implements SourceAdapter {
     private rateLimiter: HostRateLimiter = new HostRateLimiter(2.0),
     private transport: typeof fetch = fetch
   ) {
-    this.rateLimiter.setHostRate('api.mangaflix.net', 2.0);
-    this.rateLimiter.setHostRate('static.mangaflix.net', 4.0);
+    this.rateLimiter.setHostRate('api.mangaflix.net', 2.0, 4, 4.0);
+    this.rateLimiter.setHostRate('static.mangaflix.net', 8.0, 16, 16.0);
   }
 
   private get headers(): HeadersInit {
@@ -70,6 +70,8 @@ export class MangaFlixAdapter implements SourceAdapter {
           const errText = await response.text().catch(() => '');
           throw new Error(`MangaFlix request failed: HTTP ${response.status} - ${errText.slice(0, 200)}`);
         }
+
+        this.rateLimiter.recordSuccess(parsedUrl.host);
 
         return (await response.json()) as T;
       } catch (err: any) {

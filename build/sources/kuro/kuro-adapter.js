@@ -29,8 +29,8 @@ export class KuroAdapter {
     constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
-        this.rateLimiter.setHostRate('kuromangas.com', 2.0);
-        this.rateLimiter.setHostRate('cdn.kuromangas.com', 4.0);
+        this.rateLimiter.setHostRate('kuromangas.com', 2.0, 4, 4.0);
+        this.rateLimiter.setHostRate('cdn.kuromangas.com', 8.0, 16, 16.0);
         // Initialize from safe environment variables if present
         if (process.env.KURO_SESSION) {
             this.sessionCookie = process.env.KURO_SESSION;
@@ -163,6 +163,7 @@ export class KuroAdapter {
                     const errText = await response.text().catch(() => '');
                     throw new Error(`Kuro request failed: HTTP ${response.status} - ${errText.slice(0, 200)}`);
                 }
+                this.rateLimiter.recordSuccess(parsedUrl.host);
                 const dataKey = response.headers.get('x-kuro-datakey');
                 const json = await response.json();
                 // Check if payload is encrypted with _v_secure

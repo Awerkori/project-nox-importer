@@ -28,8 +28,8 @@ export class MangoToonsAdapter implements SourceAdapter {
     private rateLimiter: HostRateLimiter = new HostRateLimiter(2.0),
     private transport: typeof fetch = fetch
   ) {
-    this.rateLimiter.setHostRate('api.mangotoons.com', 2.0);
-    this.rateLimiter.setHostRate('cdn.mangotoons.com', 4.0);
+    this.rateLimiter.setHostRate('api.mangotoons.com', 2.0, 4, 4.0);
+    this.rateLimiter.setHostRate('cdn.mangotoons.com', 8.0, 16, 16.0);
 
     if (process.env.MANGOTOONS_TOKEN) {
       this.token = process.env.MANGOTOONS_TOKEN;
@@ -110,6 +110,8 @@ export class MangoToonsAdapter implements SourceAdapter {
       err.headers = res.headers;
       throw err;
     }
+
+    this.rateLimiter.recordSuccess(parsed.host);
 
     const isEncrypted = res.headers.get('x-encrypted') === 'true';
     const text = await res.text();

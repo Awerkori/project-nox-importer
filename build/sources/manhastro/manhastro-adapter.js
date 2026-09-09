@@ -31,8 +31,8 @@ export class ManhastroAdapter {
     constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
-        this.rateLimiter.setHostRate('api2.manhastro.net', 2.0);
-        this.rateLimiter.setHostRate('albums.manhastro.net', 4.0);
+        this.rateLimiter.setHostRate('api2.manhastro.net', 2.0, 4, 4.0);
+        this.rateLimiter.setHostRate('albums.manhastro.net', 8.0, 16, 16.0);
     }
     get headers() {
         return {
@@ -72,6 +72,7 @@ export class ManhastroAdapter {
                     const errText = await response.text().catch(() => '');
                     throw new Error(`Manhastro request failed: HTTP ${response.status} - ${errText.slice(0, 200)}`);
                 }
+                this.rateLimiter.recordSuccess(parsedUrl.host);
                 const rawText = await response.text();
                 const cleaned = cleanJsonResponse(rawText);
                 return JSON.parse(cleaned);

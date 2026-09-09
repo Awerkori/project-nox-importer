@@ -38,4 +38,44 @@ describe('HostRateLimiter', () => {
     expect(wait3).toBeGreaterThanOrEqual(10);
     expect(wait3).toBeLessThanOrEqual(22);
   });
+
+  it('implements AIMD scale-up on consecutive successes', () => {
+    limiter.setHostRate('cdn.test.com', 8.0, 16, 16.0);
+    expect(limiter.getHostRate('cdn.test.com')).toBe(8.0);
+
+    // 8 consecutive successes triggers +0.5 req/s increase
+    for (let i = 0; i < 8; i++) {
+      limiter.recordSuccess('cdn.test.com');
+    }
+    expect(limiter.getHostRate('cdn.test.com')).toBe(8.5);
+
+    // another 8 successes triggers another +0.5 req/s
+    for (let i = 0; i < 8; i++) {
+      limiter.recordSuccess('cdn.test.com');
+    }
+    expect(limiter.getHostRate('cdn.test.com')).toBe(9.0);
+  });
+
+  it('implements AIMD multiplicative decrease on 429 response', () => {
+    limiter.setHostRate('cdn.test.com', 10.0, 20, 20.0, 2.0);
+    expect(limiter.getHostRate('cdn.test.com')).toBe(10.0);
+
+    limiter.handle429('cdn.test.com', '5', 1);
+    // 10.0 * 0.7 = 7.0
+    expect(limiter.getHostRate('cdn.test.com')).toBeCloseTo(7.0, 1);
+  });
+
+  it('enables turbo mode boosting host capacity for priority works', () => {
+    limiter.setHostRate('cdn.turbo.com', 8.0, 16, 16.0);
+    expect(limiter.getHostRate('cdn.turbo.com')).toBe(8.0);
+
+    limiter.setTurboMode(true);
+    expect(limiter.isTurboMode()).toBe(true);
+    // 8.0 * 1.5 = 12.0
+    expect(limiter.getHostRate('cdn.turbo.com')).toBe(12.0);
+
+    limiter.setTurboMode(false);
+    expect(limiter.isTurboMode()).toBe(false);
+    expect(limiter.getHostRate('cdn.turbo.com')).toBe(8.0);
+  });
 });
