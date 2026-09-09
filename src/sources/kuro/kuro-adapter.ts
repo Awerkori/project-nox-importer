@@ -290,10 +290,8 @@ export class KuroAdapter implements SourceAdapter {
                 method: options.method || 'GET',
                 headers: {
                   Accept: 'application/json, text/plain, */*',
-                  Origin: this.baseUrl,
+                  ...(options.method && options.method !== 'GET' ? { Origin: this.baseUrl } : {}),
                   Referer: `${this.baseUrl}/catalogo`,
-                  'User-Agent':
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
                   ...authHeaders,
                   ...(options.headers || {}),
                 },
