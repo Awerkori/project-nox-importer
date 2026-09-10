@@ -8,18 +8,54 @@ export class TiaManhwaAdapter {
     name = 'Tia Manhwa';
     baseUrl = 'https://tiamanhwa.com';
     logger = new Logger('TiaManhwaAdapter');
+    cookies = new Map();
     constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
         this.rateLimiter.setHostRate('tiamanhwa.com', 2.0, 4, 4.0);
     }
     get headers() {
-        return {
-            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        const cookieHeader = Array.from(this.cookies.entries())
+            .map(([k, v]) => `${k}=${v}`)
+            .join('; ');
+        const h = {
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
             Referer: `${this.baseUrl}/`,
+            'Sec-Ch-Ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
         };
+        if (cookieHeader)
+            h.Cookie = cookieHeader;
+        return h;
+    }
+    storeCookies(res) {
+        let rawCookies = [];
+        if (typeof res.headers.getSetCookie === 'function') {
+            rawCookies = res.headers.getSetCookie();
+        }
+        else {
+            const single = res.headers.get('set-cookie');
+            if (single)
+                rawCookies = [single];
+        }
+        for (const c of rawCookies) {
+            const pair = c.split(';')[0];
+            const eqIdx = pair.indexOf('=');
+            if (eqIdx !== -1) {
+                const k = pair.slice(0, eqIdx).trim();
+                const v = pair.slice(eqIdx + 1).trim();
+                if (k && v)
+                    this.cookies.set(k, v);
+            }
+        }
     }
     async fetchHtml(url, options = {}) {
         const parsed = new URL(url);
@@ -37,6 +73,7 @@ export class TiaManhwaAdapter {
                     },
                     signal: AbortSignal.timeout(30_000),
                 });
+                this.storeCookies(res);
                 if (res.status === 429) {
                     const retryAfter = res.headers.get('Retry-After');
                     this.rateLimiter.handle429(parsed.host, retryAfter, attempts);
@@ -192,30 +229,36 @@ export class TiaManhwaAdapter {
         return urls;
     }
     async searchWorks(query) {
-        const url = `${this.baseUrl}/page/1/?s=${encodeURIComponent(query)}&post_type=wp-manga`;
-        const html = await this.fetchHtml(url);
-        const works = [];
-        const linkMatches = [...html.matchAll(/href="(https:\/\/tiamanhwa\.com\/manhwa\/([^"/]+)\/?)"/g)];
-        const seenSlugs = new Set();
-        for (const m of linkMatches) {
-            const slug = m[2];
-            if (seenSlugs.has(slug) || slug === 'feed' || slug === 'page')
-                continue;
-            seenSlugs.add(slug);
-            const idx = m.index || 0;
-            const snippet = html.slice(Math.max(0, idx - 100), idx + 500);
-            const titleMatch = snippet.match(/<h[3-5][^>]*>\s*<a[^>]*>([\s\S]*?)<\/a>/i) ||
-                snippet.match(/title="([^"]+)"/i);
-            const title = titleMatch ? decodeHtmlEntities(stripHtml(titleMatch[1])) : slug.replace(/[-_]+/g, ' ');
-            const imgMatch = snippet.match(/<img[^>]+(?:src|data-src)="([^"]+)"/i);
-            const coverUrl = imgMatch ? imgMatch[1].trim() : null;
-            works.push({
-                sourceWorkId: slug,
-                title,
-                slug,
-                coverUrl,
-            });
+        try {
+            const url = `${this.baseUrl}/page/1/?s=${encodeURIComponent(query)}&post_type=wp-manga`;
+            const html = await this.fetchHtml(url);
+            const works = [];
+            const linkMatches = [...html.matchAll(/href="(https:\/\/tiamanhwa\.com\/manhwa\/([^"/]+)\/?)"/g)];
+            const seenSlugs = new Set();
+            for (const m of linkMatches) {
+                const slug = m[2];
+                if (seenSlugs.has(slug) || slug === 'feed' || slug === 'page')
+                    continue;
+                seenSlugs.add(slug);
+                const idx = m.index || 0;
+                const snippet = html.slice(Math.max(0, idx - 100), idx + 500);
+                const titleMatch = snippet.match(/<h[3-5][^>]*>\s*<a[^>]*>([\s\S]*?)<\/a>/i) ||
+                    snippet.match(/title="([^"]+)"/i);
+                const title = titleMatch ? decodeHtmlEntities(stripHtml(titleMatch[1])) : slug.replace(/[-_]+/g, ' ');
+                const imgMatch = snippet.match(/<img[^>]+(?:src|data-src)="([^"]+)"/i);
+                const coverUrl = imgMatch ? imgMatch[1].trim() : null;
+                works.push({
+                    sourceWorkId: slug,
+                    title,
+                    slug,
+                    coverUrl,
+                });
+            }
+            return works;
         }
-        return works;
+        catch (err) {
+            this.logger.debug(`Tia Manhwa search not available for "${query}": ${err?.message}`);
+            return [];
+        }
     }
 }
