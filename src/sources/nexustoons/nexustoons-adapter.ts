@@ -29,6 +29,7 @@ export class NexusToonsAdapter implements SourceAdapter {
     this.bridgeToken = process.env.NOX_STORAGE_BRIDGE_TOKEN || null;
     if (this.bridgeToken) {
       this.bridgeUrl = `${baseUrl.replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
+      this.directBlocked = true;
     }
   }
 
@@ -123,7 +124,7 @@ export class NexusToonsAdapter implements SourceAdapter {
             return rawData as T;
           }
           if (!bridgeResult.ok) {
-            throw new Error(`Nexus Toons bridge request failed: HTTP ${bridgeResult.status} - ${(bridgeResult.text || '').slice(0, 200)}`);
+            this.logger.warn(`Nexus Toons bridge request returned HTTP ${bridgeResult.status}, falling back to direct fetch`);
           }
         }
 

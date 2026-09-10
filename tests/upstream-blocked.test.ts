@@ -165,6 +165,20 @@ describe('UPSTREAM_BLOCKED Isolation, Job Parking & Cross-Provider Fallback', ()
       }),
     };
 
+    const failingAdapter: SourceAdapter = {
+      id: 'nexus_toons',
+      name: 'Nexus Toons',
+      baseUrl: 'https://nx-toons.xyz',
+      fetchUpdatedWorks: vi.fn(),
+      fetchWorkDetails: vi.fn(),
+      fetchChapters: vi.fn(),
+      fetchChapterPages: vi.fn(),
+      searchWorks: vi.fn(async () => {
+        throw new Error('Cloudflare 403 WAF');
+      }),
+    };
+    registry.register(failingAdapter);
+
     engine = new ImporterEngine(mockSupabase, storage, registry, rateLimiter, config);
 
     // Mock global fetch to simulate Cloudflare 403 on DIScloud
@@ -206,6 +220,15 @@ describe('UPSTREAM_BLOCKED Isolation, Job Parking & Cross-Provider Fallback', ()
                 eq: vi.fn().mockResolvedValue({ error: null }),
               };
             }),
+          };
+        }
+        if (table === 'importer_queue') {
+          return {
+            update: vi.fn(() => ({
+              eq: vi.fn(() => ({
+                eq: vi.fn().mockResolvedValue({ error: null }),
+              })),
+            })),
           };
         }
         return {};

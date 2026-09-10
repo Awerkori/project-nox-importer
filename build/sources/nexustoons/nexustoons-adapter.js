@@ -24,6 +24,7 @@ export class NexusToonsAdapter {
         this.bridgeToken = process.env.NOX_STORAGE_BRIDGE_TOKEN || null;
         if (this.bridgeToken) {
             this.bridgeUrl = `${baseUrl.replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
+            this.directBlocked = true;
         }
     }
     get headers() {
@@ -99,7 +100,7 @@ export class NexusToonsAdapter {
                         return rawData;
                     }
                     if (!bridgeResult.ok) {
-                        throw new Error(`Nexus Toons bridge request failed: HTTP ${bridgeResult.status} - ${(bridgeResult.text || '').slice(0, 200)}`);
+                        this.logger.warn(`Nexus Toons bridge request returned HTTP ${bridgeResult.status}, falling back to direct fetch`);
                     }
                 }
                 const response = await this.transport(url, {
