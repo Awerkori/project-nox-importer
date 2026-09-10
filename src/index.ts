@@ -54,7 +54,7 @@ async function main() {
 
   // 4. Initialize Rate Limiter & Source Registry
   const rateLimiter = new HostRateLimiter(2.0);
-  const registry = new SourceRegistry(rateLimiter);
+  const registry = new SourceRegistry(rateLimiter, config.NOX_STORAGE_BRIDGE_TOKEN, config.NOX_MANGA_URL);
 
   // 5. Initialize Importer Engine
   const engine = new ImporterEngine(supabase, storage, registry, rateLimiter, config);

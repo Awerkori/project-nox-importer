@@ -179,6 +179,16 @@ export class RetryPolicy {
       };
     }
 
+    if (/PERMANENT_404_UNRESOLVED/i.test(message)) {
+      return {
+        retryClass: 'FAILED',
+        isTransient: false,
+        isPermanent: true,
+        message,
+        sourceStage: 'provider',
+      };
+    }
+
     if (/Failed to download image|404|Not Found/i.test(message)) {
       return {
         retryClass: 'QUEUE_RETRY_PROVIDER',

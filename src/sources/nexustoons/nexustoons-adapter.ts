@@ -19,16 +19,18 @@ export class NexusToonsAdapter implements SourceAdapter {
 
   constructor(
     private rateLimiter: HostRateLimiter = new HostRateLimiter(2.0),
-    private transport: typeof fetch = fetch
+    private transport: typeof fetch = fetch,
+    bridgeToken?: string | null,
+    bridgeUrl?: string | null
   ) {
     this.rateLimiter.setHostRate('nexustoons.com', 2.0, 4, 4.0);
     this.rateLimiter.setHostRate('nx-toons.xyz', 2.0, 4, 4.0);
     this.rateLimiter.setHostRate('img.nx-toons.xyz', 8.0, 16, 16.0);
 
     const baseUrl = process.env.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev';
-    this.bridgeToken = process.env.NOX_STORAGE_BRIDGE_TOKEN || null;
+    this.bridgeToken = bridgeToken || process.env.NOX_STORAGE_BRIDGE_TOKEN || null;
     if (this.bridgeToken) {
-      this.bridgeUrl = `${baseUrl.replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
+      this.bridgeUrl = bridgeUrl || `${baseUrl.replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
       this.directBlocked = true;
     }
   }
@@ -56,6 +58,8 @@ export class NexusToonsAdapter implements SourceAdapter {
       const res = await this.transport(this.bridgeUrl, {
         method: 'POST',
         headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 ProjectNox-Importer/1.0',
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.bridgeToken}`,
         },
@@ -82,11 +86,25 @@ export class NexusToonsAdapter implements SourceAdapter {
         text?: string;
       };
 
+      let extractedData = bridgePayload.data;
+      if (extractedData === undefined && bridgePayload.text !== undefined) {
+        const trimmed = bridgePayload.text.trim();
+        if (isEncryptedNexusToons(trimmed)) {
+          extractedData = trimmed;
+        } else {
+          try {
+            extractedData = JSON.parse(trimmed);
+          } catch {
+            extractedData = trimmed;
+          }
+        }
+      }
+
       return {
         ok: bridgePayload.status >= 200 && bridgePayload.status < 300,
         status: bridgePayload.status,
         headers: bridgePayload.headers,
-        data: bridgePayload.data,
+        data: extractedData,
         text: bridgePayload.text,
       };
     } catch (err: any) {
@@ -124,7 +142,8 @@ export class NexusToonsAdapter implements SourceAdapter {
             return rawData as T;
           }
           if (!bridgeResult.ok) {
-            this.logger.warn(`Nexus Toons bridge request returned HTTP ${bridgeResult.status}, falling back to direct fetch`);
+            this.logger.warn(`Nexus Toons bridge request failed with HTTP ${bridgeResult.status}`);
+            throw new Error(`Nexus Toons bridge request failed: HTTP ${bridgeResult.status}`);
           }
         }
 
@@ -162,6 +181,7 @@ export class NexusToonsAdapter implements SourceAdapter {
               }
               return rawData as T;
             }
+            throw new Error(`Nexus Toons bridge request failed: HTTP ${bridgeResult.status}`);
           }
           const errText = await response.text().catch(() => '');
           throw new Error(`Nexus Toons request failed: HTTP ${response.status} - ${errText.slice(0, 200)}`);

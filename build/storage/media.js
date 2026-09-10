@@ -150,7 +150,7 @@ export function inspectImage(a) {
     else {
         throw new Error('Formato não permitido. Use PNG, JPEG, WebP, GIF ou AVIF.');
     }
-    if (!width || !height || width > 10000 || height > 40000 || width * height > 40_000_000) {
+    if (!width || !height || width > 10000 || height > 60000 || width * height > 80_000_000) {
         throw new Error(`Dimensões inválidas ou imagem muito grande (${width}x${height}).`);
     }
     return { mime, width, height };

@@ -12,7 +12,7 @@ export declare class NexusToonsAdapter implements SourceAdapter {
     private bridgeUrl;
     private bridgeToken;
     private directBlocked;
-    constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
+    constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch, bridgeToken?: string | null, bridgeUrl?: string | null);
     private get headers();
     private requestViaBridge;
     private request;

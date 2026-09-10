@@ -37,7 +37,21 @@ export class ExistingWorksReconciler {
      * Discovers alternative provider mappings for a given work by searching across
      * all registered source adapters and matching candidate titles.
      */
-    async discoverCrossProviderMappings(work, sourcesState) {
+    async discoverCrossProviderMappings(workOrId, sourcesState) {
+        let work;
+        if (typeof workOrId === 'string') {
+            const { data } = await this.supabase
+                .from('works')
+                .select('id, title, slug, aliases, kind')
+                .eq('id', workOrId)
+                .maybeSingle();
+            if (!data)
+                return 0;
+            work = data;
+        }
+        else {
+            work = workOrId;
+        }
         let newMappingsCount = 0;
         const mapQuery = this.supabase.from('importer_work_mappings');
         // 0. Skip discovery if work is frozen by staff
@@ -382,6 +396,21 @@ export class ExistingWorksReconciler {
                 });
             }
         }
+        // Load existing chapter mappings to detect known permanent gaps
+        const { data: existingChapterMappings } = await this.supabase
+            .from('importer_chapter_mappings')
+            .select('chapter_sort_key, status, is_gap, last_error')
+            .eq('work_id', workId);
+        const permanentGapSortKeys = new Set();
+        if (existingChapterMappings) {
+            for (const ecm of existingChapterMappings) {
+                if (ecm.status === 'FAILED' &&
+                    ecm.is_gap &&
+                    (ecm.last_error?.includes('404') || ecm.last_error?.includes('sem fallback'))) {
+                    permanentGapSortKeys.add(Number(ecm.chapter_sort_key));
+                }
+            }
+        }
         // 12. Enqueue missing chapters
         let enqueuedCount = 0;
         const manifestUpserts = [];
@@ -394,6 +423,7 @@ export class ExistingWorksReconciler {
             operationalSources.sort((a, b) => b.priorityScore - a.priorityScore);
             const primary = operationalSources[0] || null;
             let status = 'QUEUED';
+            const isKnownPermanentGap = permanentGapSortKeys.has(sortKey);
             if (isPublished) {
                 status = 'PUBLISHED';
             }
@@ -404,6 +434,11 @@ export class ExistingWorksReconciler {
                 status = 'QUEUED';
             }
             else if (!primary) {
+                status = 'UNRESOLVED_GAP';
+                unresolvedGaps.push(candidate.chapterNumber);
+            }
+            else if (isKnownPermanentGap && operationalSources.length <= 1) {
+                // Known permanent 404 gap and no alternative fallback source appeared
                 status = 'UNRESOLVED_GAP';
                 unresolvedGaps.push(candidate.chapterNumber);
             }
@@ -468,6 +503,8 @@ export class ExistingWorksReconciler {
                     page_count: s.pageCount,
                 })),
                 page_count: candidate.pageCount,
+                is_gap: status === 'UNRESOLVED_GAP',
+                ...(isKnownPermanentGap ? { gap_reason: 'PERMANENT_404_UNRESOLVED' } : {}),
                 last_checked_at: new Date().toISOString(),
             });
         }
