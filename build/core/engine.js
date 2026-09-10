@@ -102,7 +102,9 @@ export class ImporterEngine {
         this.runLeaseRecoveryLoop();
         // 6. Launch periodic existing works reconciliation loop (every 15 min)
         this.runReconciliationLoop();
-        // 7. Launch independent concurrent worker loops for each registered source
+        // 7. Launch background upstream provider health check loop (every 5 min)
+        this.runUpstreamHealthLoop();
+        // 8. Launch independent concurrent worker loops for each registered source
         const activeWorkers = [];
         for (const adapter of this.registry.getAll()) {
             activeWorkers.push(this.runSourceWorker(adapter.id));
@@ -292,6 +294,156 @@ export class ImporterEngine {
             await this.sleep(30_000);
         }
     }
+    /**
+     * Periodic upstream provider health check loop (every 5 min)
+     * Evaluates UPSTREAM_BLOCKED, RECOVERING, and DEGRADED sources.
+     * If Cloudflare lifts 403 on datacenter egress, stages safe recovery:
+     * UPSTREAM_BLOCKED -> RECOVERING -> ACTIVE (only after validating Search, Chapters, Pages, and Download)
+     */
+    async runUpstreamHealthLoop() {
+        await this.sleep(15_000);
+        while (!this.stopSignal) {
+            try {
+                await this.checkBlockedSourcesHealth();
+            }
+            catch (err) {
+                this.logger.error('Error during upstream sources health check loop', { error: err?.message });
+            }
+            await this.sleep(5 * 60_000);
+        }
+    }
+    async checkBlockedSourcesHealth() {
+        const { data: blockedSources, error } = await this.supabase
+            .from('importer_sources')
+            .select('id, name, status, base_url, blocked_reason, blocked_details')
+            .in('status', ['UPSTREAM_BLOCKED', 'RECOVERING', 'DEGRADED']);
+        if (error || !blockedSources || blockedSources.length === 0)
+            return;
+        for (const src of blockedSources) {
+            if (this.stopSignal)
+                break;
+            await this.probeSourceHealth(src);
+        }
+    }
+    async probeSourceHealth(src) {
+        const nowIso = new Date().toISOString();
+        const adapter = this.registry.get(src.id);
+        if (src.id === 'nexus_toons') {
+            try {
+                const testUrl = 'https://nexustoons.com/api/mangas?page=1&limit=1';
+                let directStatus = null;
+                try {
+                    const res = await fetch(testUrl, {
+                        headers: {
+                            Accept: 'application/json',
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                        },
+                        signal: AbortSignal.timeout(10_000),
+                    });
+                    directStatus = res.status;
+                }
+                catch (fetchErr) {
+                    this.logger.debug(`Direct health probe network error for ${src.id}`, { error: fetchErr?.message });
+                }
+                if (directStatus === 403) {
+                    this.logger.info(`Source ${src.id} still blocked upstream (HTTP 403 Cloudflare WAF). Retaining UPSTREAM_BLOCKED.`);
+                    await this.supabase
+                        .from('importer_sources')
+                        .update({
+                        status: 'UPSTREAM_BLOCKED',
+                        blocked_reason: 'CLOUDFLARE_DATACENTER_BLOCK',
+                        blocked_details: {
+                            message: 'Cloudflare bloqueia o ambiente atual do Importer (DIScloud / OVH ASN 16276). Local/Mihon: funcional; DIScloud: HTTP 403.',
+                            local_status: 200,
+                            discloud_status: 403,
+                            last_checked_at: nowIso,
+                        },
+                        last_health_check_at: nowIso,
+                        updated_at: nowIso,
+                    })
+                        .eq('id', src.id);
+                    return;
+                }
+                if (directStatus === 200) {
+                    this.logger.info(`Source ${src.id} direct probe succeeded with HTTP 200. Transitioning to RECOVERING.`);
+                    await this.supabase
+                        .from('importer_sources')
+                        .update({
+                        status: 'RECOVERING',
+                        last_health_check_at: nowIso,
+                        updated_at: nowIso,
+                    })
+                        .eq('id', src.id);
+                    if (!adapter)
+                        return;
+                    // 4-stage validation: Search -> Chapters -> Pages -> Image Download
+                    try {
+                        // Stage 1: Search
+                        const searchResults = await adapter.searchWorks('Solo');
+                        if (!searchResults || searchResults.length === 0) {
+                            throw new Error('Health check stage 1 failed: search returned 0 results');
+                        }
+                        const testWork = searchResults[0];
+                        // Stage 2: Chapters
+                        const chapters = await adapter.fetchChapters(testWork.sourceWorkId);
+                        if (!chapters || chapters.length === 0) {
+                            throw new Error('Health check stage 2 failed: 0 chapters returned');
+                        }
+                        const testChapter = chapters[0];
+                        // Stage 3: Pages
+                        const pages = await adapter.fetchChapterPages(testChapter.sourceChapterId);
+                        if (!pages || pages.length === 0) {
+                            throw new Error('Health check stage 3 failed: 0 pages returned');
+                        }
+                        // Stage 4: Download 1 image
+                        const firstPageUrl = typeof pages[0] === 'string' ? pages[0] : pages[0]?.imageUrl;
+                        const imgRes = await fetch(firstPageUrl, {
+                            headers: {
+                                Referer: 'https://nx-toons.xyz/',
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                            },
+                            signal: AbortSignal.timeout(10_000),
+                        });
+                        if (!imgRes.ok) {
+                            throw new Error(`Health check stage 4 failed: image download returned HTTP ${imgRes.status}`);
+                        }
+                        // Passed all 4 stages! Transition to ACTIVE
+                        this.logger.info(`Source ${src.id} passed all 4 validation stages! Transitioning to ACTIVE.`);
+                        await this.supabase
+                            .from('importer_sources')
+                            .update({
+                            status: 'ACTIVE',
+                            enabled: true,
+                            blocked_reason: null,
+                            blocked_details: null,
+                            last_health_check_at: nowIso,
+                            updated_at: nowIso,
+                        })
+                            .eq('id', src.id);
+                    }
+                    catch (valErr) {
+                        this.logger.warn(`Source ${src.id} recovery validation failed`, { error: valErr?.message });
+                        await this.supabase
+                            .from('importer_sources')
+                            .update({
+                            status: 'UPSTREAM_BLOCKED',
+                            blocked_reason: 'RECOVERY_VALIDATION_FAILED',
+                            blocked_details: {
+                                error: valErr?.message,
+                                last_checked_at: nowIso,
+                            },
+                            last_health_check_at: nowIso,
+                            updated_at: nowIso,
+                        })
+                            .eq('id', src.id);
+                    }
+                }
+            }
+            catch (err) {
+                this.logger.error(`Error probing health for source ${src.id}`, { error: err?.message });
+            }
+        }
+    }
     autotunerCycleCount = 0;
     /**
      * Periodic autotuner telemetry & evaluation loop (every 30s)
@@ -346,7 +498,7 @@ export class ImporterEngine {
                     .eq('id', source)
                     .maybeSingle();
                 if (src) {
-                    if (!src.enabled || src.status === 'PAUSED' || src.status === 'DISABLED') {
+                    if (!src.enabled || src.status === 'PAUSED' || src.status === 'DISABLED' || src.status === 'UPSTREAM_BLOCKED') {
                         await this.sleep(10_000);
                         continue;
                     }
@@ -435,7 +587,7 @@ export class ImporterEngine {
             return;
         const now = Date.now();
         for (const src of sources) {
-            if (src.enabled === false || src.status === 'DISABLED' || src.status === 'PAUSED') {
+            if (src.enabled === false || src.status === 'DISABLED' || src.status === 'PAUSED' || src.status === 'UPSTREAM_BLOCKED') {
                 continue;
             }
             if (src.status === 'COOLDOWN') {
@@ -492,6 +644,22 @@ export class ImporterEngine {
                 .eq('id', job.source)
                 .maybeSingle();
             if (sourceRec) {
+                if (sourceRec.status === 'UPSTREAM_BLOCKED') {
+                    // If this is a chapter import job, check if other healthy sources exist for the work
+                    let hasHealthyFallback = false;
+                    if (job.task_type === 'IMPORT_CHAPTER' && job.payload?.workId && job.payload?.chapterNumber) {
+                        const candidateFallbacks = await this.resolveDynamicCandidateFallbacks(job.payload.workId, job.payload.chapterNumber, job.source, job.payload?.fallbackSources || []);
+                        if (candidateFallbacks.length > 0) {
+                            hasHealthyFallback = true;
+                        }
+                    }
+                    if (!hasHealthyFallback) {
+                        this.logger.warn(`Parking job ${job.id}: source ${job.source} is UPSTREAM_BLOCKED (retaining safely in BLOCKED_BY_UPSTREAM)`);
+                        heartbeat.stop();
+                        await this.queue.releaseJob(job.id, 'BLOCKED_BY_UPSTREAM', `Bloqueado a montante: upstream_blocked (${sourceRec.status})`);
+                        return;
+                    }
+                }
                 if (sourceRec.status === 'PAUSED' || sourceRec.status === 'DISABLED' || !sourceRec.enabled) {
                     this.logger.info(`Postponing job ${job.id}: source ${job.source} is ${sourceRec.status}`);
                     heartbeat.stop();
@@ -1086,10 +1254,24 @@ export class ImporterEngine {
         let skipDownloadDueToExistingPages = false;
         // Dynamic candidate fallbacks resolution across payload, mappings, manifest, and work sources
         const candidateFallbacks = await this.resolveDynamicCandidateFallbacks(workId, chapterNumber, effectiveSource, job.payload?.fallbackSources || []);
-        const allSourceCandidates = [
+        let allSourceCandidates = [
             { source: effectiveSource, sourceChapterId: effectiveSourceChapterId, mappingId: effectiveWorkMappingId },
             ...candidateFallbacks,
         ];
+        // If primary source is UPSTREAM_BLOCKED, skip directly to first healthy fallback
+        const { data: primarySrc } = await this.supabase
+            .from('importer_sources')
+            .select('status')
+            .eq('id', effectiveSource)
+            .maybeSingle();
+        if (primarySrc?.status === 'UPSTREAM_BLOCKED' && candidateFallbacks.length > 0) {
+            this.logger.info(`CROSS_PROVIDER_RESCUE: Primary source ${effectiveSource} is UPSTREAM_BLOCKED. Routing directly to fallback source ${candidateFallbacks[0].source}`, {
+                workId,
+                chapterNumber,
+                fallbackSource: candidateFallbacks[0].source,
+            });
+            allSourceCandidates = candidateFallbacks;
+        }
         try {
             for (let candidateIdx = 0; candidateIdx < allSourceCandidates.length; candidateIdx++) {
                 const candidate = allSourceCandidates[candidateIdx];
@@ -1852,6 +2034,14 @@ export class ImporterEngine {
                 for (const wm of workMappings) {
                     if (candidates.some((c) => c.source === wm.source))
                         continue;
+                    const { data: altSrcCheck } = await this.supabase
+                        .from('importer_sources')
+                        .select('status, enabled')
+                        .eq('id', wm.source)
+                        .maybeSingle();
+                    if (altSrcCheck && (!altSrcCheck.enabled || altSrcCheck.status === 'UPSTREAM_BLOCKED' || altSrcCheck.status === 'DISABLED' || altSrcCheck.status === 'PAUSED')) {
+                        continue;
+                    }
                     const altAdapter = this.registry.get(wm.source);
                     if (altAdapter && typeof altAdapter.fetchChapters === 'function') {
                         try {
@@ -1877,7 +2067,7 @@ export class ImporterEngine {
                     .eq('id', c.source)
                     .maybeSingle();
                 if (srcCheck) {
-                    if (!srcCheck.enabled || srcCheck.status === 'PAUSED' || srcCheck.status === 'DISABLED') {
+                    if (!srcCheck.enabled || srcCheck.status === 'PAUSED' || srcCheck.status === 'DISABLED' || srcCheck.status === 'UPSTREAM_BLOCKED') {
                         continue;
                     }
                     if (srcCheck.status === 'COOLDOWN') {

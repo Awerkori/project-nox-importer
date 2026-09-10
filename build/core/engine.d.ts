@@ -64,6 +64,22 @@ export declare class ImporterEngine {
      * Handles high-priority staff requests, on-demand admin reconciliations, and periodic catalog health batches.
      */
     private runReconciliationLoop;
+    /**
+     * Periodic upstream provider health check loop (every 5 min)
+     * Evaluates UPSTREAM_BLOCKED, RECOVERING, and DEGRADED sources.
+     * If Cloudflare lifts 403 on datacenter egress, stages safe recovery:
+     * UPSTREAM_BLOCKED -> RECOVERING -> ACTIVE (only after validating Search, Chapters, Pages, and Download)
+     */
+    private runUpstreamHealthLoop;
+    checkBlockedSourcesHealth(): Promise<void>;
+    probeSourceHealth(src: {
+        id: string;
+        name: string;
+        status: string;
+        base_url?: string;
+        blocked_reason?: string | null;
+        blocked_details?: any;
+    }): Promise<void>;
     private autotunerCycleCount;
     /**
      * Periodic autotuner telemetry & evaluation loop (every 30s)

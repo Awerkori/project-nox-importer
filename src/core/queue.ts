@@ -9,7 +9,8 @@ export type JobStatus =
   | 'FAILED'
   | 'RETRY'
   | 'PAUSED_BY_STAFF'
-  | 'CANCELLED_BY_STAFF';
+  | 'CANCELLED_BY_STAFF'
+  | 'BLOCKED_BY_UPSTREAM';
 
 export interface QueueJob {
   id: string;
