@@ -253,6 +253,10 @@ $$;
 revoke all on function public.importer_renew_lease(uuid, text, interval) from public, anon, authenticated;
 grant execute on function public.importer_renew_lease(uuid, text, interval) to service_role;
 
+-- Drop obsolete overloads to prevent PostgREST ambiguous candidate error
+drop function if exists public.importer_release_job(uuid, text, text, text, interval, numeric);
+drop function if exists public.importer_prioritize_work(uuid, text);
+
 -- 4. UPDATE IMPORTER_RELEASE_JOB TO CLEAR last_error ON COMPLETED
 create or replace function public.importer_release_job(
   p_job_id uuid,
