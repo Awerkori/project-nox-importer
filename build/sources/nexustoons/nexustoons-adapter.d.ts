@@ -5,11 +5,16 @@ export declare class NexusToonsAdapter implements SourceAdapter {
     private transport;
     readonly id = "nexus_toons";
     readonly name = "Nexus Toons";
-    readonly baseUrl = "https://nexustoons.com";
-    private apiUrl;
+    readonly baseUrl = "https://nx-toons.xyz";
+    private directApiUrl;
+    private fallbackApiUrl;
     private logger;
+    private bridgeUrl;
+    private bridgeToken;
+    private directBlocked;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     private get headers();
+    private requestViaBridge;
     private request;
     fetchUpdatedWorks(cursor?: string | null, options?: {
         mode?: 'bootstrap' | 'maintenance';

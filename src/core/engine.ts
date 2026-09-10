@@ -1996,21 +1996,75 @@ export class ImporterEngine {
 
   private async fetchImageBytes(url: string, source: string = 'unknown'): Promise<Uint8Array> {
     const parsedUrl = new URL(url);
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-        Referer: parsedUrl.host.includes('kuromangas.com') ? 'https://kuromangas.com/' : `${parsedUrl.origin}/`,
-      },
-      signal: AbortSignal.timeout(45_000),
-    });
+    const isKuro = parsedUrl.host.includes('kuromangas.com');
+    const isNexusToons =
+      parsedUrl.host.includes('nx-toons.xyz') ||
+      parsedUrl.host.includes('nexustoons.com') ||
+      source === 'nexus_toons' ||
+      source === 'nexustoons';
 
-    if (!res.ok) {
-      if (res.status === 429) {
-        const retryAfter = res.headers.get('Retry-After');
+    const referer = isKuro
+      ? 'https://kuromangas.com/'
+      : isNexusToons
+      ? 'https://nx-toons.xyz/'
+      : `${parsedUrl.origin}/`;
+
+    let res: Response | null = null;
+    let fetchError: any = null;
+
+    try {
+      res = await fetch(url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+          Referer: referer,
+        },
+        signal: AbortSignal.timeout(45_000),
+      });
+    } catch (err: any) {
+      fetchError = err;
+    }
+
+    // If Cloudflare 403 or network error occurred and internal bridge is configured, fallback to bridge
+    if ((fetchError || res?.status === 403) && this.config.NOX_STORAGE_BRIDGE_TOKEN && (isKuro || isNexusToons)) {
+      try {
+        const bridgeUrl = `${(this.config.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev').replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
+        const bridgeRes = await fetch(bridgeUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.config.NOX_STORAGE_BRIDGE_TOKEN}`,
+          },
+          body: JSON.stringify({
+            url,
+            headers: {
+              Referer: referer,
+            },
+          }),
+          signal: AbortSignal.timeout(45_000),
+        });
+
+        if (bridgeRes.ok) {
+          this.rateLimiter.recordSuccess(parsedUrl.host);
+          const arrayBuf = await bridgeRes.arrayBuffer();
+          return new Uint8Array(arrayBuf);
+        }
+      } catch (bridgeErr: any) {
+        this.logger.warn(`Failed image download via bridge for ${url}`, { error: bridgeErr?.message });
+      }
+    }
+
+    if (fetchError) {
+      throw fetchError;
+    }
+
+    if (!res || !res.ok) {
+      const status = res?.status || 500;
+      if (status === 429) {
+        const retryAfter = res?.headers?.get('Retry-After');
         this.rateLimiter.handle429(parsedUrl.host, retryAfter);
       }
-      throw new ProviderDownloadError(res.status, url, source, `Failed to download image from ${url}: HTTP ${res.status}`);
+      throw new ProviderDownloadError(status, url, source, `Failed to download image from ${url}: HTTP ${status}`);
     }
 
     this.rateLimiter.recordSuccess(parsedUrl.host);
