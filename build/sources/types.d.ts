@@ -57,4 +57,8 @@ export interface SourceAdapter {
      * Search for works matching a query string (title, slug, or alias)
      */
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
+    /**
+     * Optional custom headers for downloading chapter images (e.g. cookies, referer)
+     */
+    getImageHeaders?(url: string): Promise<Record<string, string>> | Record<string, string>;
 }

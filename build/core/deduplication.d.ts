@@ -6,6 +6,7 @@ export interface DeduplicationResult {
     slug: string;
     reason?: string;
 }
+export declare const ADULT_SOURCES: Set<string>;
 export interface CandidateWork {
     source: string;
     sourceWorkId: string;
@@ -18,8 +19,10 @@ export interface CandidateWork {
     status?: 'ONGOING' | 'COMPLETED' | 'HIATUS' | 'CANCELLED';
     year?: number;
     ageRating?: number;
+    contentRating?: 'GENERAL' | 'ADULT_18';
     coverId?: string | null;
     aliases?: string[];
+    genres?: string[];
     rawMetadata?: Record<string, any>;
 }
 export declare function computeCanonicalChapterKey(chapterNumber: number | string, chapterTitle?: string): {
@@ -47,5 +50,9 @@ export declare class DeduplicationEngine {
      * 4. Never overwrite valid data with empty/null.
      */
     applyMetadataPrecedence(workId: string, candidate: CandidateWork, source: string): Promise<void>;
+    /**
+     * Synchronize canonical adult tags and upstream genres to public.work_tags
+     */
+    syncWorkTags(workId: string, candidate: CandidateWork, isAdult: boolean, kind?: string): Promise<void>;
     private sanitizeSlug;
 }

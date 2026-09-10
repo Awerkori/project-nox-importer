@@ -1,5 +1,5 @@
 import { ImporterQueue } from './queue.js';
-import { DeduplicationEngine, computeCanonicalChapterKey } from './deduplication.js';
+import { DeduplicationEngine, computeCanonicalChapterKey, ADULT_SOURCES } from './deduplication.js';
 import { CheckpointManager } from './checkpoint.js';
 import { processAndStoreMedia } from '../storage/media.js';
 import { Logger } from './logger.js';
@@ -1010,6 +1010,10 @@ export class ImporterEngine {
             ageRating: details.ageRating,
             coverId: coverMediaId,
             aliases: details.alternativeTitles,
+            genres: details.genres,
+            contentRating: ADULT_SOURCES.has(job.source)
+                ? 'ADULT_18'
+                : (details.ageRating && details.ageRating >= 18 ? 'ADULT_18' : 'GENERAL'),
             rawMetadata: details.raw,
         };
         const result = await this.deduplication.resolveWork(candidate);
@@ -1997,6 +2001,20 @@ export class ImporterEngine {
         const referer = isKuro
             ? 'https://kuromangas.com/'
             : `${parsedUrl.origin}/`;
+        let customHeaders = {};
+        if (source && source !== 'unknown') {
+            try {
+                const adapter = this.registry.get(source);
+                if (adapter && typeof adapter.getImageHeaders === 'function') {
+                    const resH = await adapter.getImageHeaders(url);
+                    if (resH)
+                        customHeaders = resH;
+                }
+            }
+            catch {
+                // Non-blocking
+            }
+        }
         let res = null;
         let fetchError = null;
         try {
@@ -2004,6 +2022,7 @@ export class ImporterEngine {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
                     Referer: referer,
+                    ...customHeaders,
                 },
                 signal: AbortSignal.timeout(45_000),
             });

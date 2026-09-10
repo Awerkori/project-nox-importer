@@ -4,6 +4,14 @@ import { MangaFlixAdapter } from './mangaflix/mangaflix-adapter.js';
 import { ManhastroAdapter } from './manhastro/manhastro-adapter.js';
 import { KuroAdapter } from './kuro/kuro-adapter.js';
 import { MangoToonsAdapter } from './mangotoons/mangotoons-adapter.js';
+import { AcervoHentaiAdapter } from './acervohentai/acervohentai-adapter.js';
+import { BlackoutComicsAdapter } from './blackoutcomics/blackoutcomics-adapter.js';
+import { HanamiHeavenAdapter } from './hanamiheaven/hanamiheaven-adapter.js';
+import { HipercoolAdapter } from './hipercool/hipercool-adapter.js';
+import { InkapkAdapter } from './inkapk/inkapk-adapter.js';
+import { InstaHentaiAdapter } from './instahentai/instahentai-adapter.js';
+import { MegaHentaiAdapter } from './megahentai/megahentai-adapter.js';
+import { TiaManhwaAdapter } from './tiamanhwa/tiamanhwa-adapter.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 
 export class SourceRegistry {
@@ -18,6 +26,16 @@ export class SourceRegistry {
       this.register(new ManhastroAdapter(rateLimiter));
       this.register(new KuroAdapter(rateLimiter));
       this.register(new MangoToonsAdapter(rateLimiter));
+
+      // Register adult sources (+18 / Adulto / Pornhwa)
+      this.register(new AcervoHentaiAdapter(rateLimiter));
+      this.register(new BlackoutComicsAdapter(rateLimiter));
+      this.register(new HanamiHeavenAdapter(rateLimiter));
+      this.register(new HipercoolAdapter(rateLimiter));
+      this.register(new InkapkAdapter(rateLimiter));
+      this.register(new InstaHentaiAdapter(rateLimiter));
+      this.register(new MegaHentaiAdapter(rateLimiter));
+      this.register(new TiaManhwaAdapter(rateLimiter));
     }
   }
 
