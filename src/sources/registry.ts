@@ -1,5 +1,6 @@
 import { SourceAdapter } from './types.js';
 import { NexusAdapter } from './nexus/nexus-adapter.js';
+import { NexusToonsAdapter } from './nexustoons/nexustoons-adapter.js';
 import { MangaFlixAdapter } from './mangaflix/mangaflix-adapter.js';
 import { ManhastroAdapter } from './manhastro/manhastro-adapter.js';
 import { KuroAdapter } from './kuro/kuro-adapter.js';
@@ -13,6 +14,7 @@ export class SourceRegistry {
     if (rateLimiter) {
       // Register all supported adapters
       this.register(new NexusAdapter(rateLimiter));
+      this.register(new NexusToonsAdapter(rateLimiter));
       this.register(new MangaFlixAdapter(rateLimiter));
       this.register(new ManhastroAdapter(rateLimiter));
       this.register(new KuroAdapter(rateLimiter));
@@ -22,6 +24,14 @@ export class SourceRegistry {
 
   register(adapter: SourceAdapter): void {
     this.adapters.set(adapter.id, adapter);
+
+    // Register helpful canonical aliases
+    if (adapter.id === 'nexus') {
+      this.adapters.set('nexus_mangas', adapter);
+      this.adapters.set('nexusmangas', adapter);
+    } else if (adapter.id === 'nexus_toons') {
+      this.adapters.set('nexustoons', adapter);
+    }
   }
 
   clear(): void {
@@ -33,6 +43,6 @@ export class SourceRegistry {
   }
 
   getAll(): SourceAdapter[] {
-    return Array.from(this.adapters.values());
+    return Array.from(new Set(this.adapters.values()));
   }
 }
