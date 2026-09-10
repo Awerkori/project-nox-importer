@@ -27,6 +27,14 @@ export class BlackoutComicsAdapter implements SourceAdapter {
       Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
       'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
       Referer: `${this.baseUrl}/`,
+      'Sec-Ch-Ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+      'Sec-Ch-Ua-Mobile': '?0',
+      'Sec-Ch-Ua-Platform': '"Windows"',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'same-origin',
+      'Sec-Fetch-User': '?1',
+      'Upgrade-Insecure-Requests': '1',
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     };
@@ -98,19 +106,49 @@ export class BlackoutComicsAdapter implements SourceAdapter {
         await this.rateLimiter.acquire('blackoutcomics.com');
         // 1. Fetch homepage to get fresh CSRF token and initial cookies
         const homeRes = await this.transport(this.baseUrl, {
-          headers: this.baseHeaders,
+          headers: {
+            ...this.baseHeaders,
+            Cookie: this.getCookieHeader(),
+          },
           signal: AbortSignal.timeout(20_000),
         });
 
         this.storeCookiesFromResponse(homeRes);
         const homeHtml = await homeRes.text();
 
-        const tokenMatch = homeHtml.match(/name="csrf-token"\s+content="([^"]+)"/i) ||
-                           homeHtml.match(/content="([^"]+)"\s+name="csrf-token"/i);
-        const csrfToken = tokenMatch ? tokenMatch[1] : '';
+        let tokenMatch = homeHtml.match(/name="csrf-token"\s+content="([^"]+)"/i) ||
+                         homeHtml.match(/content="([^"]+)"\s+name="csrf-token"/i) ||
+                         homeHtml.match(/<input[^>]*name="_token"[^>]*value="([^"]+)"/i);
+        let csrfToken = tokenMatch ? tokenMatch[1] : '';
+
+        if (!csrfToken && this.sessionCookies.has('XSRF-TOKEN')) {
+          csrfToken = decodeURIComponent(this.sessionCookies.get('XSRF-TOKEN')!);
+        }
+
+        // Fallback: try /entrar if not found on home
+        if (!csrfToken) {
+          const entrarRes = await this.transport(`${this.baseUrl}/entrar`, {
+            headers: {
+              ...this.baseHeaders,
+              Cookie: this.getCookieHeader(),
+            },
+            signal: AbortSignal.timeout(20_000),
+          });
+          this.storeCookiesFromResponse(entrarRes);
+          const entrarHtml = await entrarRes.text();
+          tokenMatch = entrarHtml.match(/name="csrf-token"\s+content="([^"]+)"/i) ||
+                       entrarHtml.match(/content="([^"]+)"\s+name="csrf-token"/i) ||
+                       entrarHtml.match(/<input[^>]*name="_token"[^>]*value="([^"]+)"/i);
+          if (tokenMatch) csrfToken = tokenMatch[1];
+          else if (this.sessionCookies.has('XSRF-TOKEN')) {
+            csrfToken = decodeURIComponent(this.sessionCookies.get('XSRF-TOKEN')!);
+          }
+        }
 
         if (!csrfToken) {
-          this.logger.warn('Blackout Comics: CSRF token not found on homepage');
+          this.logger.warn(`Blackout Comics: CSRF token not found (home HTTP ${homeRes.status})`, {
+            homeSnippet: homeHtml.slice(0, 200).replace(/\s+/g, ' '),
+          });
           return false;
         }
 

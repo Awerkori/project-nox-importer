@@ -7,8 +7,10 @@ export declare class InkapkAdapter implements SourceAdapter {
     readonly name = "Inkapk";
     readonly baseUrl = "https://inkapk.net";
     private logger;
+    private cookies;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     private get headers();
+    private storeCookies;
     private fetchHtml;
     fetchUpdatedWorks(cursor?: string | null, _options?: {
         mode?: 'bootstrap' | 'maintenance';

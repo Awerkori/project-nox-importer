@@ -7,8 +7,10 @@ export declare class TiaManhwaAdapter implements SourceAdapter {
     readonly name = "Tia Manhwa";
     readonly baseUrl = "https://tiamanhwa.com";
     private logger;
+    private cookies;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     private get headers();
+    private storeCookies;
     private fetchHtml;
     fetchUpdatedWorks(cursor?: string | null, _options?: {
         mode?: 'bootstrap' | 'maintenance';

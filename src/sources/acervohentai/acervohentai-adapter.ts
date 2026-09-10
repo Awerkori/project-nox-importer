@@ -9,6 +9,7 @@ export class AcervoHentaiAdapter implements SourceAdapter {
   readonly baseUrl = 'https://acervohentai.com';
 
   private logger = new Logger('AcervoHentaiAdapter');
+  private cookies: Map<string, string> = new Map();
 
   constructor(
     private rateLimiter: HostRateLimiter = new HostRateLimiter(2.0),
@@ -17,14 +18,47 @@ export class AcervoHentaiAdapter implements SourceAdapter {
     this.rateLimiter.setHostRate('acervohentai.com', 2.0, 4, 4.0);
   }
 
-  private get headers(): HeadersInit {
-    return {
-      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  private get headers(): Record<string, string> {
+    const cookieHeader = Array.from(this.cookies.entries())
+      .map(([k, v]) => `${k}=${v}`)
+      .join('; ');
+
+    const h: Record<string, string> = {
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
       'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
       Referer: `${this.baseUrl}/`,
+      'Sec-Ch-Ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+      'Sec-Ch-Ua-Mobile': '?0',
+      'Sec-Ch-Ua-Platform': '"Windows"',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'same-origin',
+      'Sec-Fetch-User': '?1',
+      'Upgrade-Insecure-Requests': '1',
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     };
+    if (cookieHeader) h.Cookie = cookieHeader;
+    return h;
+  }
+
+  private storeCookies(res: Response): void {
+    let rawCookies: string[] = [];
+    if (typeof (res.headers as any).getSetCookie === 'function') {
+      rawCookies = (res.headers as any).getSetCookie();
+    } else {
+      const single = res.headers.get('set-cookie');
+      if (single) rawCookies = [single];
+    }
+    for (const c of rawCookies) {
+      const pair = c.split(';')[0];
+      const eqIdx = pair.indexOf('=');
+      if (eqIdx !== -1) {
+        const k = pair.slice(0, eqIdx).trim();
+        const v = pair.slice(eqIdx + 1).trim();
+        if (k && v) this.cookies.set(k, v);
+      }
+    }
   }
 
   private async fetchHtml(url: string, options: RequestInit = {}): Promise<string> {
@@ -44,6 +78,8 @@ export class AcervoHentaiAdapter implements SourceAdapter {
           },
           signal: AbortSignal.timeout(30_000),
         });
+
+        this.storeCookies(res);
 
         if (res.status === 429) {
           const retryAfter = res.headers.get('Retry-After');
@@ -238,34 +274,39 @@ export class AcervoHentaiAdapter implements SourceAdapter {
   }
 
   async searchWorks(query: string): Promise<SourceWorkSummary[]> {
-    const url = `${this.baseUrl}/?s=${encodeURIComponent(query)}&post_type=wp-manga`;
-    const html = await this.fetchHtml(url);
+    try {
+      const url = `${this.baseUrl}/?s=${encodeURIComponent(query)}&post_type=wp-manga`;
+      const html = await this.fetchHtml(url);
 
-    const works: SourceWorkSummary[] = [];
-    const itemRegex = /<div class="[^"]*c-tabs-item__content[^"]*"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/gi;
-    const matches = html.match(itemRegex) || html.match(/<div class="[^"]*page-item-detail[^"]*"[\s\S]*?<\/div>\s*<\/div>/gi) || [];
+      const works: SourceWorkSummary[] = [];
+      const itemRegex = /<div class="[^"]*c-tabs-item__content[^"]*"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/gi;
+      const matches = html.match(itemRegex) || html.match(/<div class="[^"]*page-item-detail[^"]*"[\s\S]*?<\/div>\s*<\/div>/gi) || [];
 
-    for (const block of matches) {
-      const linkMatch = block.match(/href="([^"]*\/manhwa\/([^"/]+)\/?)"/i);
-      if (!linkMatch) continue;
+      for (const block of matches) {
+        const linkMatch = block.match(/href="([^"]*\/manhwa\/([^"/]+)\/?)"/i);
+        if (!linkMatch) continue;
 
-      const slug = linkMatch[2];
-      if (slug === 'feed' || slug === 'page') continue;
+        const slug = linkMatch[2];
+        if (slug === 'feed' || slug === 'page') continue;
 
-      const titleMatch = block.match(/<h[3-5][^>]*>\s*<a[^>]*>([\s\S]*?)<\/a>/i);
-      const title = titleMatch ? decodeHtmlEntities(stripHtml(titleMatch[1])) : slug.replace(/[-_]+/g, ' ');
+        const titleMatch = block.match(/<h[3-5][^>]*>\s*<a[^>]*>([\s\S]*?)<\/a>/i);
+        const title = titleMatch ? decodeHtmlEntities(stripHtml(titleMatch[1])) : slug.replace(/[-_]+/g, ' ');
 
-      const imgMatch = block.match(/<img[^>]+(?:data-src|src)="([^"]+)"/i);
-      const coverUrl = imgMatch ? imgMatch[1].trim() : null;
+        const imgMatch = block.match(/<img[^>]+(?:data-src|src)="([^"]+)"/i);
+        const coverUrl = imgMatch ? imgMatch[1].trim() : null;
 
-      works.push({
-        sourceWorkId: slug,
-        title,
-        slug,
-        coverUrl,
-      });
+        works.push({
+          sourceWorkId: slug,
+          title,
+          slug,
+          coverUrl,
+        });
+      }
+
+      return works;
+    } catch (err: any) {
+      this.logger.debug(`Acervo Hentai search not available for "${query}": ${err?.message}`);
+      return [];
     }
-
-    return works;
   }
 }
