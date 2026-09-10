@@ -28,7 +28,7 @@ export interface SourceChapterSummary {
   number: number;
   title?: string;
   createdAt?: string;
-  pageCount?: number;
+  pageCount?: number | null;
 }
 
 export interface SourceAdapter {

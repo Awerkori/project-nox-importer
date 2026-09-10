@@ -437,7 +437,7 @@ export class ExistingWorksReconciler {
                     workMappingId: primary.mappingId,
                     chapterNumber: candidate.chapterNumber,
                     chapterTitle: candidate.chapterTitle,
-                    expectedPageCount: candidate.pageCount,
+                    expectedPageCount: candidate.pageCount || null,
                     isGapBackfill: isGap,
                     fallbackSources: fallbacks,
                 }, assignedPriority, candidate.sortKey);
@@ -775,7 +775,7 @@ export class ExistingWorksReconciler {
                     workMappingId: primary.mappingId,
                     chapterNumber: cand.chapterNumber,
                     chapterTitle: cand.chapterTitle,
-                    expectedPageCount: cand.expectedPages,
+                    expectedPageCount: cand.expectedPages || null,
                     isGapBackfill: true,
                     fallbackSources: operationalFallbackSources,
                 }, 70, cand.sortKey);
@@ -844,7 +844,7 @@ export class ExistingWorksReconciler {
                     workMappingId: primary.mappingId,
                     chapterNumber: cand.chapterNumber,
                     chapterTitle: cand.chapterTitle,
-                    expectedPageCount: cand.expectedPages,
+                    expectedPageCount: cand.expectedPages || null,
                     isNewRelease: true,
                     fallbackSources: operationalFallbackSources,
                 }, 80, cand.sortKey);

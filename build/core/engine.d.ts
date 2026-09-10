@@ -12,6 +12,13 @@ export declare class JobCancelledByStaffError extends Error {
 }
 export type PageSemanticType = 'CONTENT_PAGE' | 'CREDIT_PAGE' | 'PROMO_PAGE' | 'RECRUITMENT_PAGE' | 'WARNING_PAGE';
 export declare function classifyPageUrl(url: string, index: number, total: number): PageSemanticType;
+export declare class NarrativePageUnavailableError extends Error {
+    source: string;
+    pageIndex: number;
+    totalPages: number;
+    originalError: string;
+    constructor(source: string, pageIndex: number, totalPages: number, originalError: string);
+}
 export declare class ImporterEngine {
     private supabase;
     private storage;
@@ -96,6 +103,7 @@ export declare class ImporterEngine {
     private sanitizeErrorMessage;
     private downloadAndRegisterImage;
     private fetchImageBytes;
+    private resolveDynamicCandidateFallbacks;
     private cachedBotUserId;
     private resolveBotUserId;
     /**
