@@ -382,7 +382,7 @@ export class ImporterQueue {
     try {
       const { data: stalled, error: fetchErr } = await this.supabase
         .from('importer_queue')
-        .select('id, attempts, max_attempts')
+        .select('id, attempts, max_attempts, last_error')
         .eq('status', 'IMPORTING')
         .lt('lease_expires_at', nowIso);
 
@@ -408,7 +408,10 @@ export class ImporterQueue {
             locked_at: null,
             lease_expires_at: null,
             next_run_at: nowIso,
-            last_error: `Lease expirado (tentativa ${attempts})`,
+            last_recovered_error: job.last_error || `Lease expirado (recuperado automaticamente na tentativa ${attempts})`,
+            recovered_at: nowIso,
+            retry_reason: 'LEASE_EXPIRED_RECOVERED',
+            last_error: null,
             updated_at: nowIso,
           })
           .eq('id', job.id)

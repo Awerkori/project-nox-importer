@@ -89,6 +89,9 @@ export class AcervoHentaiAdapter implements SourceAdapter {
         }
 
         if (!res.ok) {
+          if (res.status === 403) {
+            throw new Error(`Acervo Hentai bloqueado por Cloudflare (HTTP 403): Just a moment... / Datacenter WAF`);
+          }
           throw new Error(`Acervo Hentai request failed: HTTP ${res.status}`);
         }
 
@@ -107,7 +110,7 @@ export class AcervoHentaiAdapter implements SourceAdapter {
     _options?: { mode?: 'bootstrap' | 'maintenance' }
   ): Promise<{ works: SourceWorkSummary[]; nextCursor: string | null }> {
     const page = cursor ? parseInt(cursor, 10) : 1;
-    const url = page === 1 ? `${this.baseUrl}/manhwa/?m_orderby=latest` : `${this.baseUrl}/manhwa/page/${page}/?m_orderby=latest`;
+    const url = page === 1 ? `${this.baseUrl}/manhwa/` : `${this.baseUrl}/manhwa/page/${page}/`;
 
     const html = await this.fetchHtml(url);
     const works: SourceWorkSummary[] = [];

@@ -146,6 +146,9 @@ export class BlackoutComicsAdapter implements SourceAdapter {
         }
 
         if (!csrfToken) {
+          if (homeRes.status === 403 || homeHtml.includes('Just a moment...') || homeHtml.includes('Cloudflare')) {
+            throw new Error('Blackout Comics bloqueado por Cloudflare (HTTP 403): Just a moment... / Turnstile Challenge');
+          }
           this.logger.warn(`Blackout Comics: CSRF token not found (home HTTP ${homeRes.status})`, {
             homeSnippet: homeHtml.slice(0, 200).replace(/\s+/g, ' '),
           });
@@ -216,6 +219,10 @@ export class BlackoutComicsAdapter implements SourceAdapter {
         this.storeCookiesFromResponse(res);
 
         if (res.status === 401 || res.status === 403) {
+          const bodyText = await res.text().catch(() => '');
+          if (res.status === 403 && (bodyText.includes('Just a moment...') || bodyText.includes('Cloudflare') || bodyText.includes('turnstile'))) {
+            throw new Error('Blackout Comics bloqueado por Cloudflare (HTTP 403): Just a moment... / Turnstile Challenge');
+          }
           // Re-authenticate and retry
           this.logger.warn(`Blackout Comics HTTP ${res.status}, re-authenticating...`);
           await this.ensureAuthenticated(true);

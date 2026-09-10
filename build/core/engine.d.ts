@@ -94,7 +94,9 @@ export declare class ImporterEngine {
      */
     private runGeneralWorker;
     /**
-     * Executes a job respecting global and per-source concurrency semaphores
+     * Executes a job respecting global and per-source concurrency semaphores.
+     * Starts atomic lease heartbeat immediately upon acquisition so that the lease
+     * is continuously renewed even while waiting for concurrency semaphore permits.
      */
     private executeJobWithLimits;
     /**
