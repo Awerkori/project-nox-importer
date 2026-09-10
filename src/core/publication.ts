@@ -270,11 +270,23 @@ export class PublicationBarrier {
         .neq('source', failedSource);
 
       const hasViableAlternative = (otherMappings || []).some(
-        (m) => m.status === 'QUEUED' || m.status === 'IMPORTING' || m.status === 'STAGED' || m.status === 'COMPLETED'
+        (m) => m.status === 'PENDING' || m.status === 'QUEUED' || m.status === 'IMPORTING' || m.status === 'STAGED' || m.status === 'COMPLETED'
       );
 
       if (hasViableAlternative) {
-        this.logger.info(`Alternative source already in progress for chapter ${chapterNumber}`, { workId, sortKey });
+        this.logger.info(`Alternative source available/in progress for chapter ${chapterNumber}`, { workId, sortKey });
+        // Mark only the failed source as failed, without declaring a gap for the whole chapter
+        await this.supabase
+          .from('importer_chapter_mappings')
+          .update({
+            status: 'FAILED',
+            is_page_provider: false,
+            last_error: `Definite failure on ${failedSource}. Alternative source available.`,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('work_id', workId)
+          .eq('chapter_sort_key', sortKey)
+          .eq('source', failedSource);
         return;
       }
 
@@ -294,7 +306,8 @@ export class PublicationBarrier {
           updated_at: new Date().toISOString(),
         })
         .eq('work_id', workId)
-        .eq('chapter_sort_key', sortKey);
+        .eq('chapter_sort_key', sortKey)
+        .eq('source', failedSource);
 
       // Trigger cascade to unblock waiting STAGED chapters
       await this.runCascadeUnderLock(workId);

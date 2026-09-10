@@ -225,7 +225,7 @@ export class MangaFlixAdapter implements SourceAdapter {
         number: num,
         title: ch.name?.trim() || `Capítulo ${ch.number}`,
         createdAt: ch.iso_date || ch.created_at || new Date().toISOString(),
-        pageCount: ch.number_of_complete_pages || ch.number_of_pages || 0,
+        pageCount: ch.number_of_complete_pages || ch.number_of_pages || null,
       };
     });
 

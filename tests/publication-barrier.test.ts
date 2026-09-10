@@ -131,37 +131,29 @@ describe('Publication Barrier & Canonical Ordering', () => {
             }
             return { data: items, error: null };
           },
-          update: (fields: any) => ({
-            eq: (filterCol: string, filterVal: any) => ({
-              eq: async (secondCol: string, secondVal: any) => {
-                const keys = Object.keys(fields);
-                const vals = Object.values(fields);
-                const setClauses = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
-                vals.push(filterVal);
-                vals.push(secondVal);
-                await db.query(
-                  `update public.${table} set ${setClauses} where ${filterCol} = $${keys.length + 1} and ${secondCol} = $${keys.length + 2}`,
-                  vals
-                );
-                return { error: null };
+          update: (fields: any) => {
+            const updateFilters: Array<{ col: string; val: any }> = [];
+            const executeUpdate = async () => {
+              const keys = Object.keys(fields);
+              const vals = Object.values(fields);
+              const setClauses = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+              const whereClauses = updateFilters.map((f, i) => `${f.col} = $${keys.length + i + 1}`).join(' and ');
+              for (const f of updateFilters) {
+                vals.push(f.val);
+              }
+              const where = whereClauses.length > 0 ? `where ${whereClauses}` : '';
+              await db.query(`update public.${table} set ${setClauses} ${where}`, vals);
+              return { error: null };
+            };
+            const updateBuilder: any = {
+              eq: (col: string, val: any) => {
+                updateFilters.push({ col, val });
+                return updateBuilder;
               },
-              then: async (resolveFn: any, rejectFn?: any) => {
-                try {
-                  const keys = Object.keys(fields);
-                  const vals = Object.values(fields);
-                  const setClauses = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
-                  vals.push(filterVal);
-                  await db.query(
-                    `update public.${table} set ${setClauses} where ${filterCol} = $${keys.length + 1}`,
-                    vals
-                  );
-                  resolveFn({ error: null });
-                } catch (err: any) {
-                  resolveFn({ error: err });
-                }
-              },
-            }),
-          }),
+              then: (resolveFn: any, rejectFn?: any) => executeUpdate().then(resolveFn, rejectFn),
+            };
+            return updateBuilder;
+          },
           then: async (resolveFn: any, rejectFn?: any) => {
             const allVals: any[] = [];
             let whereClause = '';

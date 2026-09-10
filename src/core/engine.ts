@@ -35,6 +35,19 @@ export function classifyPageUrl(url: string, index: number, total: number): Page
   return 'CONTENT_PAGE';
 }
 
+export class NarrativePageUnavailableError extends Error {
+  constructor(
+    public source: string,
+    public pageIndex: number,
+    public totalPages: number,
+    public originalError: string
+  ) {
+    super(`Narrative story page ${pageIndex + 1}/${totalPages} unavailable on source ${source}: ${originalError}`);
+    this.name = 'NarrativePageUnavailableError';
+  }
+}
+
+
 export class ImporterEngine {
   private logger = new Logger('Engine');
   private queue: ImporterQueue;
@@ -1084,7 +1097,7 @@ export class ImporterEngine {
             workMappingId: result.mappingId,
             chapterNumber: ch.number,
             chapterTitle: ch.title || '',
-            expectedPageCount: ch.pageCount,
+            expectedPageCount: ch.pageCount || null,
             staffRequested: isStaffPriority,
           },
           priority: chapterPriority,
@@ -1162,8 +1175,37 @@ export class ImporterEngine {
       return;
     }
 
-    const adapter = this.registry.get(job.source);
-    if (!adapter) throw new Error(`Source adapter not registered: ${job.source}`);
+    let effectiveSource = job.source;
+    let effectiveSourceChapterId = sourceChapterId;
+    let effectiveWorkMappingId = workMappingId;
+    const initialSource = job.source;
+
+    // Detect Source / ID format mismatch
+    // (e.g. MangaFlix job with numeric Manhastro/Kuro chapter ID)
+    if (effectiveSource === 'mangaflix' && /^\d+$/.test(effectiveSourceChapterId)) {
+      const { data: realMapping } = await this.supabase
+        .from('importer_chapter_mappings')
+        .select('source, source_chapter_id, work_mapping_id')
+        .eq('work_id', workId)
+        .eq('source_chapter_id', effectiveSourceChapterId)
+        .maybeSingle();
+
+      if (realMapping?.source) {
+        this.logger.warn(`Source mismatch detected for job ${job.id}: job.source is ${job.source} but chapter ID ${effectiveSourceChapterId} belongs to ${realMapping.source}. Auto-correcting source.`, {
+          originalSource: job.source,
+          correctedSource: realMapping.source,
+          chapterNumber,
+        });
+        effectiveSource = realMapping.source;
+        if (realMapping.work_mapping_id) {
+          effectiveWorkMappingId = realMapping.work_mapping_id;
+        }
+        await this.supabase
+          .from('importer_queue')
+          .update({ source: effectiveSource, updated_at: new Date().toISOString() })
+          .eq('id', job.id);
+      }
+    }
 
     // Pre-flight check 2: Check if chapter record already exists in database
     const { data: existingChapter } = await this.supabase
@@ -1177,14 +1219,14 @@ export class ImporterEngine {
     await this.supabase
       .from('importer_chapter_mappings')
       .update({ status: 'IMPORTING', updated_at: new Date().toISOString() })
-      .eq('source', job.source)
-      .eq('source_chapter_id', sourceChapterId);
+      .eq('source', effectiveSource)
+      .eq('source_chapter_id', effectiveSourceChapterId);
 
     // Register active job in forensics tracker
     diagnostics.registerJob({
       jobId: job.id,
       taskType: job.task_type,
-      source: job.source,
+      source: effectiveSource,
       workId,
       chapterNumber,
       completedPages: 0,
@@ -1196,119 +1238,120 @@ export class ImporterEngine {
     let tDb = 0;
     let totalBytes = 0;
 
+    let successfulExecution = false;
+    let lastRescuedError: string | null = null;
+    let validPages: Array<{ mediaId: string; width: number; height: number }> = [];
+    let skipDownloadDueToExistingPages = false;
+
+    // Dynamic candidate fallbacks resolution across payload, mappings, manifest, and work sources
+    const candidateFallbacks = await this.resolveDynamicCandidateFallbacks(
+      workId,
+      chapterNumber,
+      effectiveSource,
+      (job.payload?.fallbackSources as any) || []
+    );
+
+    const allSourceCandidates = [
+      { source: effectiveSource, sourceChapterId: effectiveSourceChapterId, mappingId: effectiveWorkMappingId },
+      ...candidateFallbacks,
+    ];
+
     try {
-      // Dynamic fallback resolution if primary source returns 0 pages or throws
-      let pageUrls: string[] = [];
-      let effectiveSource = job.source;
-      let effectiveSourceChapterId = sourceChapterId;
-
-      try {
-        pageUrls = await adapter.fetchChapterPages(sourceChapterId, chapterNumber);
-      } catch (adapterErr: any) {
-        this.logger.warn(`Primary source ${job.source} failed fetchChapterPages for ch ${chapterNumber}`, {
-          error: adapterErr?.message,
-        });
-      }
-
-      // Candidate fallbacks resolution: union payload fallbacks with DB alternative mappings
-      let candidateFallbacks = (job.payload?.fallbackSources as Array<{ source: string; sourceChapterId: string }>) || [];
-      try {
-        const { data: altMappings } = await this.supabase
-          .from('importer_chapter_mappings')
-          .select('source, source_chapter_id')
-          .eq('work_id', workId)
-          .eq('chapter_number', chapterNumber)
-          .neq('source', effectiveSource);
-
-        if (altMappings && altMappings.length > 0) {
-          const existingKeys = new Set(candidateFallbacks.map((f) => `${f.source}:${f.sourceChapterId}`));
-          for (const m of altMappings) {
-            const key = `${m.source}:${m.source_chapter_id}`;
-            if (!existingKeys.has(key)) {
-              candidateFallbacks.push({ source: m.source, sourceChapterId: m.source_chapter_id });
-              existingKeys.add(key);
-            }
-          }
+      for (let candidateIdx = 0; candidateIdx < allSourceCandidates.length; candidateIdx++) {
+        const candidate = allSourceCandidates[candidateIdx];
+        effectiveSource = candidate.source;
+        effectiveSourceChapterId = candidate.sourceChapterId;
+        if (candidate.mappingId) {
+          effectiveWorkMappingId = candidate.mappingId;
         }
-      } catch {}
 
-      if (!pageUrls || pageUrls.length === 0) {
-        this.logger.warn(`Primary source ${job.source} returned 0 pages for ch ${chapterNumber}. Attempting cross-provider rescue...`, {
-          workId,
-          chapterNumber,
-          candidateCount: candidateFallbacks.length,
-        });
-
-        for (const candidate of candidateFallbacks) {
-          try {
-            const candidateAdapter = this.registry.get(candidate.source);
-            if (!candidateAdapter) continue;
-            const candidatePages = await candidateAdapter.fetchChapterPages(candidate.sourceChapterId, chapterNumber);
-            if (candidatePages && candidatePages.length > 0) {
-              this.logger.info(`Rescued chapter pages for ch ${chapterNumber} using fallback source ${candidate.source} (${candidatePages.length} pages)`);
-              pageUrls = candidatePages;
-              effectiveSource = candidate.source;
-              effectiveSourceChapterId = candidate.sourceChapterId;
-              break;
-            }
-          } catch (candErr: any) {
-            this.logger.warn(`Fallback source ${candidate.source} failed fetchChapterPages for ch ${chapterNumber}`, {
-              error: candErr?.message,
-            });
-          }
+        const adapter = this.registry.get(effectiveSource);
+        if (!adapter) {
+          this.logger.warn(`Source adapter not registered: ${effectiveSource}, skipping candidate`);
+          continue;
         }
-      }
 
-      if (!pageUrls || pageUrls.length === 0) {
-        throw new Error(`Source returned 0 pages for chapter ${chapterNumber} (${sourceChapterId}) across primary and fallback sources`);
-      }
-
-      const expectedCount = pageUrls.length;
-      this.supabase.from('importer_queue').update({
-        progress_total: expectedCount,
-        progress_stage: 'DOWNLOADING',
-        progress_current: 0,
-      }).eq('id', job.id).then(() => {}, () => {});
-
-      this.logger.info('Importing chapter pages with high-performance decoupled pipeline', {
-        workId,
-        chapterNumber,
-        pageCount: expectedCount,
-        source: effectiveSource,
-      });
-
-      const botUserId = await this.resolveBotUserId();
-      let validPages: Array<{ mediaId: string; width: number; height: number }> = [];
-      let skipDownloadDueToExistingPages = false;
-
-      // Pre-download deduplication: check if existing chapter already has all pages stored
-      if (existingChapter) {
-        const { data: existingPages } = await this.supabase
-          .from('pages')
-          .select('position, media_id, width, height')
-          .eq('chapter_id', existingChapter.id)
-          .order('position', { ascending: true });
-
-        if (
-          existingPages &&
-          existingPages.length === expectedCount &&
-          existingPages.every((p) => Boolean(p.media_id))
-        ) {
-          this.logger.info('Deduplication: chapter already has all pages in storage/db, skipping download', {
+        if (candidateIdx > 0) {
+          this.logger.info(`CROSS_PROVIDER_RESCUE: Rescuing chapter ${chapterNumber} using fallback source ${effectiveSource} (${effectiveSourceChapterId}) instead of ${initialSource}`, {
             workId,
             chapterNumber,
-            pageCount: expectedCount,
+            rescueSource: effectiveSource,
+            previousError: lastRescuedError,
           });
-          validPages = existingPages.map((p) => ({
-            mediaId: p.media_id,
-            width: p.width || 800,
-            height: p.height || 1200,
-          }));
-          skipDownloadDueToExistingPages = true;
         }
-      }
 
-      if (!skipDownloadDueToExistingPages) {
+        let pageUrls: string[] = [];
+        let primaryError: Error | null = null;
+        try {
+          pageUrls = await adapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber);
+        } catch (adapterErr: any) {
+          primaryError = adapterErr instanceof Error ? adapterErr : new Error(String(adapterErr));
+          this.logger.warn(`Source ${effectiveSource} failed fetchChapterPages for ch ${chapterNumber}`, {
+            error: primaryError.message,
+          });
+        }
+
+        if (!pageUrls || pageUrls.length === 0) {
+          lastRescuedError = primaryError?.message || `Source ${effectiveSource} returned 0 pages`;
+          if (candidateIdx === allSourceCandidates.length - 1) {
+            if (allSourceCandidates.length === 1) {
+              const detail = primaryError?.message ? `: ${primaryError.message}` : '';
+              throw new Error(`Source ${effectiveSource} failed to return pages for chapter ${chapterNumber} (${effectiveSourceChapterId})${detail}`);
+            } else {
+              const detail = primaryError?.message ? ` (Primary error: ${primaryError.message})` : '';
+              throw new Error(`Failed to obtain pages for chapter ${chapterNumber} (${effectiveSourceChapterId}) across primary and fallback sources [${allSourceCandidates.map(c => c.source).join(', ')}]${detail}`);
+            }
+          }
+          continue;
+        }
+
+        const expectedCount = pageUrls.length;
+        this.supabase.from('importer_queue').update({
+          progress_total: expectedCount,
+          progress_stage: 'DOWNLOADING',
+          progress_current: 0,
+        }).eq('id', job.id).then(() => {}, () => {});
+
+        this.logger.info('Importing chapter pages with high-performance decoupled pipeline', {
+          workId,
+          chapterNumber,
+          pageCount: expectedCount,
+          source: effectiveSource,
+        });
+
+        const botUserId = await this.resolveBotUserId();
+        validPages = [];
+        skipDownloadDueToExistingPages = false;
+
+        // Pre-download deduplication: check if existing chapter already has all pages stored
+        if (existingChapter) {
+          const { data: existingPages } = await this.supabase
+            .from('pages')
+            .select('position, media_id, width, height')
+            .eq('chapter_id', existingChapter.id)
+            .order('position', { ascending: true });
+
+          if (
+            existingPages &&
+            existingPages.length === expectedCount &&
+            existingPages.every((p) => Boolean(p.media_id))
+          ) {
+            this.logger.info('Deduplication: chapter already has all pages in storage/db, skipping download', {
+              workId,
+              chapterNumber,
+              pageCount: expectedCount,
+            });
+            validPages = existingPages.map((p) => ({
+              mediaId: p.media_id,
+              width: p.width || 800,
+              height: p.height || 1200,
+            }));
+            skipDownloadDueToExistingPages = true;
+            successfulExecution = true;
+            break;
+          }
+        }
+
         const isPriority = Boolean(job.payload?.staffRequested);
         if (isPriority) {
           this.rateLimiter.setTurboMode(true);
@@ -1327,8 +1370,6 @@ export class ImporterEngine {
         const uploadConcurrency = Math.min(4, Math.max(2, this.autotuner.getCurrentConcurrency()));
         const globalMediaSemaphore = this.autotuner.getGlobalMediaSemaphore();
 
-        const fallbacks = candidateFallbacks;
-
         interface DownloadedPage {
           index: number;
           pageBytes: Uint8Array;
@@ -1338,6 +1379,8 @@ export class ImporterEngine {
         let nextDownloadIndex = 0;
         let allDownloadsFinished = false;
         let pipelineError: Error | null = null;
+        let manifestRefreshed = false;
+        let failed404Count = 0;
         const consumerResolvers: Array<() => void> = [];
 
         const notifyConsumer = () => {
@@ -1355,8 +1398,6 @@ export class ImporterEngine {
             consumerResolvers.push(resolve);
           });
         };
-
-        let failed404Count = 0;
 
         // Producer: downloads raw page bytes from source CDN into memory
         const producer = async () => {
@@ -1387,7 +1428,7 @@ export class ImporterEngine {
               break;
             }
 
-            const pageUrl = pageUrls[idx];
+            let pageUrl = pageUrls[idx];
             const parsedUrl = new URL(pageUrl);
             await this.rateLimiter.acquire(parsedUrl.host);
 
@@ -1412,65 +1453,62 @@ export class ImporterEngine {
               }
             }
 
-            // Multi-source fallback support if primary source fails
-            if (!pageBytes && fallbacks && fallbacks.length > 0) {
-              this.logger.warn(`Source ${effectiveSource} failed on page ${idx + 1}. Attempting multi-source fallback...`, {
-                workId,
-                chapterNumber,
-                fallbackCount: fallbacks.length,
-              });
-              for (const fb of fallbacks) {
-                if (fb.source === effectiveSource) continue;
-                try {
-                  const { data: srcCheck } = await this.supabase
-                    .from('importer_sources')
-                    .select('status, enabled, cooldown_until')
-                    .eq('id', fb.source)
-                    .maybeSingle();
-
-                  if (srcCheck) {
-                    if (!srcCheck.enabled || srcCheck.status === 'PAUSED' || srcCheck.status === 'DISABLED') {
-                      continue;
-                    }
-                    if (srcCheck.status === 'COOLDOWN') {
-                      const cd = srcCheck.cooldown_until ? new Date(srcCheck.cooldown_until).getTime() : 0;
-                      if (Date.now() < cd) continue;
-                    }
-                  }
-
-                  const fbAdapter = this.registry.get(fb.source);
-                  if (!fbAdapter) continue;
-                  const fbPages = await fbAdapter.fetchChapterPages(fb.sourceChapterId, chapterNumber);
-                  if (fbPages && fbPages[idx]) {
-                    pageBytes = await this.fetchImageBytes(fbPages[idx], fb.source);
-                    tDownload += Date.now() - d0;
-                    totalBytes += pageBytes.length;
-                    ImporterEngine.activeBufferedBytes += pageBytes.length;
-                    this.logger.info(`Successfully rescued page ${idx + 1} using fallback source ${fb.source}`);
-                    break;
-                  }
-                } catch (fbErr: any) {
-                  this.logger.warn(`Fallback source ${fb.source} failed for page ${idx + 1}`, { error: fbErr?.message });
-                }
-              }
-            }
-
-            if (pipelineError) {
-              break;
-            }
-
             if (!pageBytes) {
               const errMsg = (lastErr instanceof Error && lastErr.message) ? lastErr.message : (lastErr ? String(lastErr) : 'Erro desconhecido');
               const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
-              const currentUrl = pageUrls[idx] || '';
+              let currentUrl = pageUrls[idx] || '';
+
+              // MANIFEST REFRESH: Before blind failure, query upstream to see if URLs were updated
+              if (is404 && !manifestRefreshed) {
+                manifestRefreshed = true;
+                try {
+                  const refreshAdapter = this.registry.get(effectiveSource);
+                  if (refreshAdapter) {
+                    const refreshedUrls = await refreshAdapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber);
+                    if (refreshedUrls && refreshedUrls.length === expectedCount) {
+                      const isDifferent = refreshedUrls.some((u, i) => u !== pageUrls[i]);
+                      if (isDifferent) {
+                        this.logger.info(`MANIFEST_REFRESH: Upstream manifest refreshed with updated URLs for chapter ${chapterNumber} on ${effectiveSource}`, {
+                          workId,
+                          chapterNumber,
+                          oldUrl: currentUrl,
+                          newUrl: refreshedUrls[idx],
+                        });
+                        pageUrls = refreshedUrls;
+                        currentUrl = pageUrls[idx] || '';
+                        // Retry downloading with the fresh URL
+                        try {
+                          pageBytes = await this.fetchImageBytes(currentUrl, effectiveSource);
+                          tDownload += Date.now() - d0;
+                          totalBytes += pageBytes.length;
+                          ImporterEngine.activeBufferedBytes += pageBytes.length;
+                        } catch (freshErr: any) {
+                          lastErr = freshErr;
+                        }
+                      } else {
+                        this.logger.info(`MANIFEST_REFRESH: Upstream manifest verified, URLs unchanged for chapter ${chapterNumber} on ${effectiveSource}`);
+                      }
+                    }
+                  }
+                } catch (refreshErr: any) {
+                  this.logger.warn(`MANIFEST_REFRESH failed for ${effectiveSource} ch ${chapterNumber}`, { error: refreshErr?.message });
+                }
+              }
+
+              // If recovered by manifest refresh, proceed!
+              if (pageBytes) {
+                readyQueue.push({ index: idx, pageBytes });
+                notifyConsumer();
+                continue;
+              }
+
+              // Page Classification
               const pageSemantic = classifyPageUrl(currentUrl, idx, expectedCount);
 
-              // Strict semantic rule for 404:
-              // Non-content pages (credits, recruitment, promo, warning) can be skipped with telemetry.
-              // Content pages (narrative story pages) CANNOT be skipped blindly!
+              // Non-content pages (credits, recruitment, promo, warning) can be skipped with telemetry
               if (is404 && pageSemantic !== 'CONTENT_PAGE') {
                 failed404Count++;
-                this.logger.warn(`Skipping non-content 404 page ${idx + 1}/${expectedCount} (${pageSemantic}): ${currentUrl}`, {
+                this.logger.warn(`SKIPPED_NON_CONTENT_PAGE: Skipping non-content 404 page ${idx + 1}/${expectedCount} (${pageSemantic}): ${currentUrl}`, {
                   workId,
                   chapterNumber,
                   pageSemantic,
@@ -1481,8 +1519,12 @@ export class ImporterEngine {
                 continue;
               }
 
-              pipelineError = new Error(
-                `Failed to process page ${idx + 1}/${expectedCount} after 3 attempts: ${errMsg}`
+              // Narrative story page or persistent error: CANNOT be skipped!
+              pipelineError = new NarrativePageUnavailableError(
+                effectiveSource,
+                idx,
+                expectedCount,
+                errMsg
               );
               notifyConsumer();
               break;
@@ -1582,7 +1624,21 @@ export class ImporterEngine {
         await Promise.all(consumerPromises);
 
         if (pipelineError) {
-          throw pipelineError;
+          // Type assertion: TS can't track mutations from async closures (producer/consumer)
+          const resolvedError = pipelineError as Error;
+          // If narrative page was unavailable and we have remaining candidate sources, rescue entire chapter!
+          if (resolvedError instanceof NarrativePageUnavailableError) {
+            if (candidateIdx < allSourceCandidates.length - 1) {
+              lastRescuedError = resolvedError.message;
+              this.logger.warn(`CROSS_PROVIDER_RESCUE: Narrative page failed on ${effectiveSource} for ch ${chapterNumber}. Rescuing entire chapter cleanly from ${allSourceCandidates[candidateIdx + 1].source}.`, {
+                failedPage: resolvedError.pageIndex + 1,
+                reason: resolvedError.message,
+                nextCandidateSource: allSourceCandidates[candidateIdx + 1].source,
+              });
+              continue;
+            }
+          }
+          throw resolvedError;
         }
 
         this.supabase.from('importer_queue').update({
@@ -1598,32 +1654,25 @@ export class ImporterEngine {
             continue;
           }
           if (!p || !p.mediaId) {
-            throw new Error(`Page ${i + 1} failed or has missing mediaId`);
+            throw new Error(`Incomplete chapter import: page ${i + 1}/${expectedCount} failed storage`);
           }
-          validPages.push(p);
         }
+
+        validPages = storedPages.filter(
+          (p): p is { mediaId: string; width: number; height: number } =>
+            Boolean(p && p.mediaId && p.mediaId !== '__SKIPPED_NON_CONTENT_PAGE__')
+        );
 
         if (validPages.length === 0) {
-          const err = `Verification failed: expected pages, but successfully processed 0 valid pages`;
-          await this.supabase.from('importer_chapter_mappings').upsert(
-            {
-              source: job.source,
-              source_chapter_id: sourceChapterId,
-              work_mapping_id: workMappingId,
-              chapter_number: chapterNumber,
-              page_count: 0,
-              status: 'VERIFICATION_FAILED',
-              last_error: err,
-            },
-            { onConflict: 'source,source_chapter_id' }
-          );
-          throw new Error(err);
+          throw new Error(`Chapter ${chapterNumber} contains 0 valid content pages`);
         }
+
+        successfulExecution = true;
+        break;
       }
 
-      // Checkpoint 3: Pre-publication cancellation check
-      if (isCancelled?.() || (await this.queue.isCancelRequested(job.id))) {
-        throw new JobCancelledByStaffError(job.id);
+      if (!successfulExecution) {
+        throw new Error(`Failed to import chapter ${chapterNumber} across all candidates${lastRescuedError ? ': ' + lastRescuedError : ''}`);
       }
 
       const db0 = Date.now();
@@ -1704,18 +1753,40 @@ export class ImporterEngine {
         chapterId,
         chapterNumber,
         sortKey: chKey.sortKey,
-        source: job.source,
-        sourceChapterId,
-        workMappingId,
+        source: effectiveSource,
+        sourceChapterId: effectiveSourceChapterId,
+        workMappingId: effectiveWorkMappingId,
         pageCount: validPages.length,
         isPageProvider: true,
       });
 
-      this.supabase.from('importer_queue').update({
+      // Update queue row with progress and recovery info
+      const queueProgressUpdate: Record<string, any> = {
         progress_current: validPages.length,
         progress_total: validPages.length,
         progress_stage: 'STAGED',
-      }).eq('id', job.id).then(() => {}, () => {});
+        source: effectiveSource,
+      };
+      if (lastRescuedError) {
+        queueProgressUpdate.last_recovered_error = `CROSS_PROVIDER_RESCUE: Rescued cleanly via ${effectiveSource} (${lastRescuedError})`;
+        queueProgressUpdate.recovered_at = new Date().toISOString();
+        queueProgressUpdate.last_error = null;
+      }
+      await this.supabase.from('importer_queue').update(queueProgressUpdate).eq('id', job.id);
+
+      // If source was switched via rescue, update the failed source chapter mapping
+      if (effectiveSource !== initialSource) {
+        await this.supabase
+          .from('importer_chapter_mappings')
+          .update({
+            is_page_provider: false,
+            last_error: `Replaced by ${effectiveSource} via CROSS_PROVIDER_RESCUE`,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('source', initialSource)
+          .eq('work_id', workId)
+          .eq('chapter_number', chapterNumber);
+      }
 
       // SAFEGUARD 3: Try to publish immediately 1x via barrier. If blocked, release worker slot immediately!
       const pubResult = await this.publicationBarrier.tryPublish(workId, chKey.sortKey, chapterId);
@@ -1725,7 +1796,7 @@ export class ImporterEngine {
       // Record fine-grained chapter job metric asynchronously
       void this.recordJobMetric({
         workerId: this.config.WORKER_ID,
-        source: job.source,
+        source: effectiveSource,
         workId,
         chapterId,
         chapterNumber,
@@ -1790,13 +1861,13 @@ export class ImporterEngine {
       // If chapter failed definitively after exhausting all attempts, handle fallback / register gap
       if (job.attempts + 1 >= job.max_attempts) {
         const chKey = this.computeCanonicalChapterKey(chapterNumber, chapterTitle);
-        await this.publicationBarrier.handleDefiniteFailure(workId, chapterNumber, chKey.sortKey, job.source);
+        await this.publicationBarrier.handleDefiniteFailure(workId, chapterNumber, chKey.sortKey, effectiveSource);
       }
 
       // Record failed chapter metric asynchronously with sanitized error message
       void this.recordJobMetric({
         workerId: this.config.WORKER_ID,
-        source: job.source,
+        source: effectiveSource,
         workId,
         chapterId: null,
         chapterNumber,
@@ -1946,6 +2017,119 @@ export class ImporterEngine {
 
     const arrayBuf = await res.arrayBuffer();
     return new Uint8Array(arrayBuf);
+  }
+
+  private async resolveDynamicCandidateFallbacks(
+    workId: string,
+    chapterNumber: number,
+    excludeSource: string,
+    payloadFallbacks: Array<{ source: string; sourceChapterId: string; mappingId?: string }> = []
+  ): Promise<Array<{ source: string; sourceChapterId: string; mappingId?: string }>> {
+    const candidates: Array<{ source: string; sourceChapterId: string; mappingId?: string }> = [];
+    const seen = new Set<string>();
+
+    const addCandidate = (s: string, id: string, mapId?: string) => {
+      if (!s || !id || s === excludeSource) return;
+      const key = `${s}:${id}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        candidates.push({ source: s, sourceChapterId: id, mappingId: mapId });
+      }
+    };
+
+    // 1. Initial payload fallbacks
+    for (const fb of payloadFallbacks) {
+      if (fb?.source && fb?.sourceChapterId) {
+        addCandidate(fb.source, fb.sourceChapterId, fb.mappingId);
+      }
+    }
+
+    // 2. Alternative mappings in importer_chapter_mappings
+    try {
+      const { data: chMappings } = await this.supabase
+        .from('importer_chapter_mappings')
+        .select('source, source_chapter_id, work_mapping_id')
+        .eq('work_id', workId)
+        .eq('chapter_number', chapterNumber)
+        .neq('source', excludeSource);
+
+      if (chMappings) {
+        for (const m of chMappings) {
+          addCandidate(m.source, m.source_chapter_id, m.work_mapping_id);
+        }
+      }
+    } catch {}
+
+    // 3. Alternative available sources in importer_chapter_manifest
+    try {
+      const { data: manifestCh } = await this.supabase
+        .from('importer_chapter_manifest')
+        .select('available_sources')
+        .eq('work_id', workId)
+        .eq('chapter_number', chapterNumber)
+        .maybeSingle();
+
+      if (manifestCh?.available_sources && Array.isArray(manifestCh.available_sources)) {
+        for (const s of manifestCh.available_sources) {
+          if (s?.source && s?.source_chapter_id) {
+            addCandidate(s.source, s.source_chapter_id);
+          }
+        }
+      }
+    } catch {}
+
+    // 4. Discover active sources in importer_work_mappings not yet in candidates
+    try {
+      const { data: workMappings } = await this.supabase
+        .from('importer_work_mappings')
+        .select('id, source, source_work_id')
+        .eq('work_id', workId)
+        .neq('source', excludeSource)
+        .neq('sync_status', 'UNMATCHED');
+
+      if (workMappings) {
+        for (const wm of workMappings) {
+          if (candidates.some((c) => c.source === wm.source)) continue;
+          const altAdapter = this.registry.get(wm.source);
+          if (altAdapter && typeof altAdapter.fetchChapters === 'function') {
+            try {
+              const altChapters = await altAdapter.fetchChapters(wm.source_work_id);
+              const matched = altChapters.find((c) => c.number === chapterNumber);
+              if (matched && matched.sourceChapterId) {
+                addCandidate(wm.source, matched.sourceChapterId, wm.id);
+              }
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+
+    // 5. Filter candidates against operational sources (exclude disabled, paused, or cooling down)
+    const healthyCandidates: Array<{ source: string; sourceChapterId: string; mappingId?: string }> = [];
+    for (const c of candidates) {
+      try {
+        const { data: srcCheck } = await this.supabase
+          .from('importer_sources')
+          .select('status, enabled, cooldown_until')
+          .eq('id', c.source)
+          .maybeSingle();
+
+        if (srcCheck) {
+          if (!srcCheck.enabled || srcCheck.status === 'PAUSED' || srcCheck.status === 'DISABLED') {
+            continue;
+          }
+          if (srcCheck.status === 'COOLDOWN') {
+            const cd = srcCheck.cooldown_until ? new Date(srcCheck.cooldown_until).getTime() : 0;
+            if (Date.now() < cd) continue;
+          }
+        }
+        healthyCandidates.push(c);
+      } catch {
+        healthyCandidates.push(c);
+      }
+    }
+
+    return healthyCandidates;
   }
 
   private cachedBotUserId: string | null = null;

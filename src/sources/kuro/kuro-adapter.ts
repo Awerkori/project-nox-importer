@@ -587,7 +587,7 @@ export class KuroAdapter implements SourceAdapter {
         number: isNaN(num) ? 0 : num,
         title,
         createdAt: ch.upload_date || new Date().toISOString(),
-        pageCount: 0,
+        pageCount: null,
       };
     });
 

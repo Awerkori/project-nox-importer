@@ -191,7 +191,7 @@ export class ManhastroAdapter {
                 number: num,
                 title: ch.capitulo_nome?.trim() || `Capítulo ${num}`,
                 createdAt: ch.capitulo_data || new Date().toISOString(),
-                pageCount: 0,
+                pageCount: null,
             };
         });
         return chapters.sort((a, b) => a.number - b.number);

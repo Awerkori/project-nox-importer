@@ -483,7 +483,7 @@ export class KuroAdapter {
                 number: isNaN(num) ? 0 : num,
                 title,
                 createdAt: ch.upload_date || new Date().toISOString(),
-                pageCount: 0,
+                pageCount: null,
             };
         });
         return chapters.sort((a, b) => a.number - b.number);
