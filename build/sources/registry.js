@@ -6,11 +6,12 @@ import { KuroAdapter } from './kuro/kuro-adapter.js';
 import { MangoToonsAdapter } from './mangotoons/mangotoons-adapter.js';
 export class SourceRegistry {
     adapters = new Map();
-    constructor(rateLimiter) {
+    constructor(rateLimiter, bridgeToken, mangaUrl) {
         if (rateLimiter) {
+            const bridgeUrl = bridgeToken && mangaUrl ? `${mangaUrl.replace(/\/$/, '')}/api/internal/importer/kuro-bridge` : undefined;
             // Register all supported adapters
             this.register(new NexusAdapter(rateLimiter));
-            this.register(new NexusToonsAdapter(rateLimiter));
+            this.register(new NexusToonsAdapter(rateLimiter, fetch, bridgeToken, bridgeUrl));
             this.register(new MangaFlixAdapter(rateLimiter));
             this.register(new ManhastroAdapter(rateLimiter));
             this.register(new KuroAdapter(rateLimiter));

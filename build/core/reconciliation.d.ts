@@ -46,13 +46,13 @@ export declare class ExistingWorksReconciler {
      * Discovers alternative provider mappings for a given work by searching across
      * all registered source adapters and matching candidate titles.
      */
-    discoverCrossProviderMappings(work: {
+    discoverCrossProviderMappings(workOrId: {
         id: string;
         title: string;
         slug: string;
         aliases?: string[];
         kind?: string;
-    }, sourcesState?: Map<string, {
+    } | string, sourcesState?: Map<string, {
         status: string;
         enabled: boolean;
         cooldownUntil: number | null;

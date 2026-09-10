@@ -10,11 +10,12 @@ import { HostRateLimiter } from '../core/rate-limiter.js';
 export class SourceRegistry {
   private adapters = new Map<string, SourceAdapter>();
 
-  constructor(rateLimiter?: HostRateLimiter) {
+  constructor(rateLimiter?: HostRateLimiter, bridgeToken?: string | null, mangaUrl?: string | null) {
     if (rateLimiter) {
+      const bridgeUrl = bridgeToken && mangaUrl ? `${mangaUrl.replace(/\/$/, '')}/api/internal/importer/kuro-bridge` : undefined;
       // Register all supported adapters
       this.register(new NexusAdapter(rateLimiter));
-      this.register(new NexusToonsAdapter(rateLimiter));
+      this.register(new NexusToonsAdapter(rateLimiter, fetch, bridgeToken, bridgeUrl));
       this.register(new MangaFlixAdapter(rateLimiter));
       this.register(new ManhastroAdapter(rateLimiter));
       this.register(new KuroAdapter(rateLimiter));

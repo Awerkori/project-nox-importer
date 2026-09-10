@@ -32,6 +32,12 @@ export function classifyPageUrl(url: string, index: number, total: number): Page
   if (/recrut|recrutamento|recruit/i.test(clean)) return 'RECRUITMENT_PAGE';
   if (/aviso|warning|notice/i.test(clean)) return 'WARNING_PAGE';
   if (/fanservice|apoie|doacao|doação|donate|discord|parceria/i.test(clean)) return 'PROMO_PAGE';
+  if (index === 0 && (/capa|cover|front|\(0+\)|\b000?\b|_00\./i.test(clean) || /\[.+\]\s*.+\(0\)/i.test(clean))) {
+    return 'CREDIT_PAGE';
+  }
+  if ((index === 0 || index === total - 1) && /scan|staff|discord|padrim|apoia/i.test(clean)) {
+    return 'PROMO_PAGE';
+  }
   return 'CONTENT_PAGE';
 }
 
@@ -702,8 +708,38 @@ export class ImporterEngine {
       const intervalMs = (src.sync_interval_minutes || 30) * 60 * 1000;
 
       if (now - lastSync >= intervalMs) {
+        // Prevent duplicate DISCOVER_WORKS jobs from piling up if one is already active or in retry
+        let hasActive = false;
+        try {
+          const q = this.supabase
+            .from('importer_queue')
+            .select('id, status')
+            .eq('task_type', 'DISCOVER_WORKS')
+            .eq('source', src.id);
+
+          const { data: existingActive } = typeof (q as any).in === 'function'
+            ? await (q as any).in('status', ['QUEUED', 'IMPORTING', 'RETRY']).limit(1)
+            : await q.limit(10);
+
+          if (existingActive && Array.isArray(existingActive)) {
+            hasActive = existingActive.some((j: any) => ['QUEUED', 'IMPORTING', 'RETRY'].includes(j.status));
+          }
+        } catch {}
+
+        if (hasActive) {
+          continue;
+        }
+
         const dedupeKey = `${src.id}:discover:${Math.floor(now / intervalMs)}`;
-        await this.queue.enqueue('DISCOVER_WORKS', src.id, dedupeKey, {}, 10);
+        await this.queue.enqueue(
+          'DISCOVER_WORKS',
+          src.id,
+          dedupeKey,
+          {
+            workTitle: `Varredura de Catálogo (${src.name || src.id})`,
+          },
+          10
+        );
 
         await this.supabase
           .from('importer_sources')
@@ -1848,6 +1884,48 @@ export class ImporterEngine {
                 nextCandidateSource: allSourceCandidates[candidateIdx + 1].source,
               });
               continue;
+            } else {
+              // No candidate left to rescue! If permanent 404 or multiple attempts, mark as permanent gap
+              if (/404|not found/i.test(resolvedError.message) || job.attempts >= 2) {
+                const gapReason = '404 em imagem narrativa da fonte sem fallback disponível';
+                this.logger.error(`PERMANENT_NARRATIVE_GAP: Chapter ${chapterNumber} of work ${workId} has permanent 404 on story pages with no viable fallback. Marking as terminal gap.`, {
+                  workId,
+                  chapterNumber,
+                  source: effectiveSource,
+                  failedPage: resolvedError.pageIndex + 1,
+                });
+
+                // Update chapter mapping
+                try {
+                  await this.supabase
+                    .from('importer_chapter_mappings')
+                    .update({
+                      status: 'FAILED',
+                      is_gap: true,
+                      last_error: gapReason,
+                      updated_at: new Date().toISOString(),
+                    })
+                    .eq('work_id', workId)
+                    .eq('chapter_number', chapterNumber);
+                } catch {}
+
+                // Update chapter manifest
+                try {
+                  await this.supabase
+                    .from('importer_chapter_manifest')
+                    .update({
+                      status: 'UNRESOLVED_GAP',
+                      is_gap: true,
+                      gap_reason: 'PERMANENT_404_UNRESOLVED',
+                      last_error: gapReason,
+                      last_checked_at: new Date().toISOString(),
+                    })
+                    .eq('work_id', workId)
+                    .eq('chapter_number', chapterNumber);
+                } catch {}
+
+                throw new Error(`[PERMANENT_404_UNRESOLVED] ${gapReason}: ${resolvedError.message}`);
+              }
             }
           }
           throw resolvedError;
