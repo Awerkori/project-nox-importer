@@ -7,6 +7,7 @@ const SOURCE_PRIORITY_ORDER = {
     manhastro: 60,
     mangaflix: 40,
     mangotoons: 20,
+    nexus_toons: 10,
 };
 export class ExistingWorksReconciler {
     supabase;
@@ -21,8 +22,9 @@ export class ExistingWorksReconciler {
     }
     isSourceOperationallyAvailable(sourceId, sourcesState) {
         const state = sourcesState.get(sourceId);
-        if (!state)
-            return true;
+        if (!state) {
+            return sourcesState.size === 0;
+        }
         if (!state.enabled)
             return false;
         if (state.status !== 'ACTIVE')
@@ -35,7 +37,7 @@ export class ExistingWorksReconciler {
      * Discovers alternative provider mappings for a given work by searching across
      * all registered source adapters and matching candidate titles.
      */
-    async discoverCrossProviderMappings(work) {
+    async discoverCrossProviderMappings(work, sourcesState) {
         let newMappingsCount = 0;
         const mapQuery = this.supabase.from('importer_work_mappings');
         // 0. Skip discovery if work is frozen by staff
@@ -65,6 +67,9 @@ export class ExistingWorksReconciler {
         // 2. Query unmapped registered adapters
         for (const adapter of this.registry.getAll()) {
             if (mappedSources.has(adapter.id)) {
+                continue;
+            }
+            if (sourcesState && !this.isSourceOperationallyAvailable(adapter.id, sourcesState)) {
                 continue;
             }
             try {
@@ -193,15 +198,7 @@ export class ExistingWorksReconciler {
                 workAliases = w.aliases || [];
             }
         }
-        // 2. Discover new cross-provider mappings dynamically
-        await this.discoverCrossProviderMappings({
-            id: workId,
-            title: workTitle,
-            slug: workSlug,
-            aliases: workAliases,
-            kind: workKind,
-        });
-        // 3. Fetch sources health state
+        // 2. Fetch sources health state
         const sourcesQuery = this.supabase.from('importer_sources');
         const { data: dbSources } = sourcesQuery && typeof sourcesQuery.select === 'function'
             ? await sourcesQuery.select('id, status, enabled, cooldown_until')
@@ -214,6 +211,14 @@ export class ExistingWorksReconciler {
                 cooldownUntil: s.cooldown_until ? new Date(s.cooldown_until).getTime() : null,
             });
         }
+        // 3. Discover new cross-provider mappings dynamically (skipping unoperational providers)
+        await this.discoverCrossProviderMappings({
+            id: workId,
+            title: workTitle,
+            slug: workSlug,
+            aliases: workAliases,
+            kind: workKind,
+        }, sourcesState);
         // 4. Fetch all active work mappings
         const mapQuery = this.supabase.from('importer_work_mappings');
         const { data: rawMappings } = mapQuery && typeof mapQuery.select === 'function'
@@ -223,9 +228,13 @@ export class ExistingWorksReconciler {
                 .eq('sync_status', 'SYNCED')
             : { data: [] };
         const mappings = rawMappings || [];
-        // 5. Concurrently fetch chapter lists from all mapped sources
+        // 5. Concurrently fetch chapter lists from operational mapped sources
         const sourceChaptersMap = new Map();
         await Promise.all(mappings.map(async (m) => {
+            if (!this.isSourceOperationallyAvailable(m.source, sourcesState)) {
+                this.logger.debug(`Skipping chapter fetch from ${m.source}: source is not operationally available`);
+                return;
+            }
             const adapter = this.registry.get(m.source);
             if (!adapter)
                 return;

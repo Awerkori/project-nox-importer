@@ -52,7 +52,11 @@ export declare class ExistingWorksReconciler {
         slug: string;
         aliases?: string[];
         kind?: string;
-    }): Promise<number>;
+    }, sourcesState?: Map<string, {
+        status: string;
+        enabled: boolean;
+        cooldownUntil: number | null;
+    }>): Promise<number>;
     /**
      * Reconciles a single work end-to-end:
      * 1. Discovers cross-provider mappings across all sources.

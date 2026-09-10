@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 export type TaskType = 'DISCOVER_WORKS' | 'SYNC_WORK' | 'IMPORT_CHAPTER';
-export type JobStatus = 'QUEUED' | 'IMPORTING' | 'COMPLETED' | 'FAILED' | 'RETRY' | 'PAUSED_BY_STAFF' | 'CANCELLED_BY_STAFF';
+export type JobStatus = 'QUEUED' | 'IMPORTING' | 'COMPLETED' | 'FAILED' | 'RETRY' | 'PAUSED_BY_STAFF' | 'CANCELLED_BY_STAFF' | 'BLOCKED_BY_UPSTREAM';
 export interface QueueJob {
     id: string;
     task_type: TaskType;
