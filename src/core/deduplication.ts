@@ -9,6 +9,17 @@ export interface DeduplicationResult {
   reason?: string;
 }
 
+export const ADULT_SOURCES = new Set([
+  'acervohentai',
+  'blackoutcomics',
+  'hanamiheaven',
+  'hipercool',
+  'inkapk',
+  'instahentai',
+  'megahentai',
+  'tiamanhwa',
+]);
+
 export interface CandidateWork {
   source: string;
   sourceWorkId: string;
@@ -21,10 +32,13 @@ export interface CandidateWork {
   status?: 'ONGOING' | 'COMPLETED' | 'HIATUS' | 'CANCELLED';
   year?: number;
   ageRating?: number;
+  contentRating?: 'GENERAL' | 'ADULT_18';
   coverId?: string | null;
   aliases?: string[];
+  genres?: string[];
   rawMetadata?: Record<string, any>;
 }
+
 
 export function computeCanonicalChapterKey(chapterNumber: number | string, chapterTitle?: string): {
   normalizedNumber: number;
@@ -232,6 +246,10 @@ export class DeduplicationEngine {
     }
 
     const now = new Date().toISOString();
+    const isAdultSource = ADULT_SOURCES.has(source) || candidate.contentRating === 'ADULT_18';
+    const contentRating = isAdultSource ? 'ADULT_18' : (candidate.contentRating || 'GENERAL');
+    const ageRating = isAdultSource ? Math.max(18, candidate.ageRating ?? 18) : (candidate.ageRating ?? 12);
+
     const initialProv: Record<string, { source: string; updated_at: string }> = {};
     if (title) initialProv.title = { source, updated_at: now };
     if (candidate.synopsis) {
@@ -243,7 +261,11 @@ export class DeduplicationEngine {
     if (candidate.kind) initialProv.kind = { source, updated_at: now };
     if (candidate.status) initialProv.status = { source, updated_at: now };
     if (candidate.year) initialProv.year = { source, updated_at: now };
-    if (candidate.ageRating !== undefined) initialProv.age_rating = { source, updated_at: now };
+    initialProv.age_rating = { source, updated_at: now };
+    initialProv.content_rating = { source, updated_at: now };
+    if (isAdultSource) {
+      initialProv.adult_source = { source, updated_at: now };
+    }
     if (candidate.coverId) initialProv.cover = { source, updated_at: now };
     if (candidate.aliases && candidate.aliases.length > 0) initialProv.aliases = { source, updated_at: now };
 
@@ -260,7 +282,8 @@ export class DeduplicationEngine {
       kind: candidate.kind || 'MANGA',
       status: candidate.status || 'ONGOING',
       year: candidate.year && candidate.year >= 1900 && candidate.year <= 2200 ? candidate.year : null,
-      age_rating: candidate.ageRating ?? 12,
+      age_rating: ageRating,
+      content_rating: contentRating,
       published: false,
       featured: false,
       cover_id: candidate.coverId || null,
@@ -272,6 +295,12 @@ export class DeduplicationEngine {
       throw insertWorkErr;
     }
 
+    const mappingMetadata: Record<string, any> = { ...(candidate.rawMetadata || {}) };
+    if (isAdultSource) {
+      mappingMetadata.adult_source = true;
+      mappingMetadata.adult_source_id = source;
+    }
+
     const { data: insertedMapping, error: mapInsertErr } = await this.supabase
       .from('importer_work_mappings')
       .upsert({
@@ -281,7 +310,7 @@ export class DeduplicationEngine {
         source_slug: uniqueSlug,
         source_title: title,
         sync_status: 'SYNCED',
-        metadata: candidate.rawMetadata || {},
+        metadata: mappingMetadata,
         last_synced_at: now,
       }, { onConflict: 'source,source_work_id' })
       .select()
@@ -289,12 +318,17 @@ export class DeduplicationEngine {
 
     if (mapInsertErr) throw mapInsertErr;
 
+    // Attach canonical adult tags and upstream genres safely
+    await this.syncWorkTags(newWorkId, candidate, isAdultSource, candidate.kind);
+
     this.logger.info('Created new work & mapping', {
       workId: newWorkId,
       slug: uniqueSlug,
       title,
       source,
+      contentRating,
     });
+
 
     return {
       workId: newWorkId,
@@ -316,7 +350,7 @@ export class DeduplicationEngine {
   async applyMetadataPrecedence(workId: string, candidate: CandidateWork, source: string): Promise<void> {
     const { data: work, error } = await this.supabase
       .from('works')
-      .select('id, title, aliases, synopsis, description, author, artist, kind, status, year, age_rating, cover_id, metadata_provenance')
+      .select('id, title, aliases, synopsis, description, author, artist, kind, status, year, age_rating, cover_id, metadata_provenance, content_rating')
       .eq('id', workId)
       .maybeSingle();
 
@@ -332,6 +366,9 @@ export class DeduplicationEngine {
     const updates: Record<string, any> = {};
     const now = new Date().toISOString();
 
+    const isAdultCandidate = ADULT_SOURCES.has(source) || candidate.contentRating === 'ADULT_18';
+    const isCurrentlyAdult = work.content_rating === 'ADULT_18';
+
     const canUpdateField = (fieldName: string, candidateValue: any): boolean => {
       // 1. Never replace valid data with null/undefined/empty
       if (candidateValue === null || candidateValue === undefined || candidateValue === '') return false;
@@ -340,17 +377,34 @@ export class DeduplicationEngine {
       // 2. Manual edit is strictly immutable
       if (prov[fieldName]?.source === 'manual') return false;
 
-      // 3. If field is empty in DB, any source can fill it
+      // 3. Monotonic adult protection: once ADULT_18, never downgrade content_rating or age_rating
+      if (fieldName === 'content_rating' && isCurrentlyAdult && candidateValue !== 'ADULT_18') return false;
+      if (fieldName === 'age_rating' && isCurrentlyAdult && candidateValue < 18) return false;
+
+      // 4. If field is empty in DB, any source can fill it
       const currentVal = (work as any)[fieldName];
       const isCurrentEmpty = currentVal === null || currentVal === undefined || currentVal === '' || (Array.isArray(currentVal) && currentVal.length === 0);
       if (isCurrentEmpty) return true;
 
-      // 4. Kuro can upgrade any non-manual field
+      // 5. Kuro can upgrade any non-manual field
       if (source === 'kuro') return true;
 
       // Other sources cannot overwrite populated fields
       return false;
     };
+
+    // Adult rating promotion & monotonicity
+    if (isAdultCandidate) {
+      if (!isCurrentlyAdult) {
+        updates.content_rating = 'ADULT_18';
+        prov.content_rating = { source, updated_at: now };
+      }
+      if ((work.age_rating || 0) < 18) {
+        updates.age_rating = 18;
+        prov.age_rating = { source, updated_at: now };
+      }
+      prov.adult_source = { source, updated_at: now };
+    }
 
     // Title
     if (candidate.title && canUpdateField('title', candidate.title.trim())) {
@@ -415,7 +469,8 @@ export class DeduplicationEngine {
 
     // Age Rating
     if (candidate.ageRating !== undefined && candidate.ageRating !== null && canUpdateField('age_rating', candidate.ageRating)) {
-      updates.age_rating = candidate.ageRating;
+      const targetAge = (isCurrentlyAdult || isAdultCandidate) ? Math.max(18, candidate.ageRating) : candidate.ageRating;
+      updates.age_rating = targetAge;
       prov.age_rating = { source, updated_at: now };
     }
 
@@ -446,6 +501,73 @@ export class DeduplicationEngine {
         });
       }
     }
+
+    // Always sync canonical tags and upstream genres safely
+    await this.syncWorkTags(workId, candidate, isCurrentlyAdult || isAdultCandidate, updates.kind || work.kind);
+  }
+
+  /**
+   * Synchronize canonical adult tags and upstream genres to public.work_tags
+   */
+  async syncWorkTags(
+    workId: string,
+    candidate: CandidateWork,
+    isAdult: boolean,
+    kind?: string
+  ): Promise<void> {
+    try {
+      const tagRes = await this.supabase.from('tags').select('id, name, slug');
+      const allTags = tagRes?.data;
+      if (!Array.isArray(allTags) || allTags.length === 0) return;
+
+      const tagLookup = new Map<string, string>();
+      for (const t of allTags) {
+        if (t.name) tagLookup.set(t.name.trim().toLowerCase(), t.id);
+        if (t.slug) tagLookup.set(t.slug.trim().toLowerCase(), t.id);
+      }
+
+      const targetTagIds = new Set<string>();
+
+      if (isAdult) {
+        // Canonical tags: +18, Adulto, Adulto (+18)
+        const adultTag18 = tagLookup.get('18') || tagLookup.get('+18');
+        const adultTag = tagLookup.get('adulto');
+        const adultTagGen = tagLookup.get('adulto-18') || tagLookup.get('adulto (+18)');
+        if (adultTag18) targetTagIds.add(adultTag18);
+        if (adultTag) targetTagIds.add(adultTag);
+        if (adultTagGen) targetTagIds.add(adultTagGen);
+
+        // Canonical Pornhwa tag for adult Manhwa
+        const effectiveKind = (kind || candidate.kind || '').toUpperCase();
+        const hasManhwaGenre = (candidate.genres || []).some((g) => /manhwa|pornhwa/i.test(g));
+        if (effectiveKind === 'MANHWA' || hasManhwaGenre) {
+          const pornhwaTag = tagLookup.get('pornhwa');
+          if (pornhwaTag) targetTagIds.add(pornhwaTag);
+        }
+      }
+
+      // Upstream genres/tags
+      if (Array.isArray(candidate.genres)) {
+        for (const genre of candidate.genres) {
+          const normalized = genre.trim().toLowerCase();
+          const tagId = tagLookup.get(normalized) || tagLookup.get(this.sanitizeSlug(normalized));
+          if (tagId) {
+            targetTagIds.add(tagId);
+          }
+        }
+      }
+
+      if (targetTagIds.size > 0) {
+        const rows = Array.from(targetTagIds).map((tagId) => ({
+          work_id: workId,
+          tag_id: tagId,
+          system_generated: true,
+        }));
+        await this.supabase.from('work_tags').upsert(rows, { onConflict: 'work_id,tag_id' });
+      }
+    } catch {
+      // Safe non-blocking
+    }
   }
 
   private sanitizeSlug(raw: string): string {
@@ -458,3 +580,4 @@ export class DeduplicationEngine {
     return slug || 'obra';
   }
 }
+
