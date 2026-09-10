@@ -330,23 +330,18 @@ export class ImporterEngine {
         const adapter = this.registry.get(src.id);
         if (src.id === 'nexus_toons') {
             try {
-                const testUrl = 'https://nexustoons.com/api/mangas?page=1&limit=1';
-                let directStatus = null;
+                if (!adapter)
+                    return;
+                this.logger.info(`Probing health for ${src.id} (validating anti-Cloudflare bypass)...`);
+                let searchResults = [];
                 try {
-                    const res = await fetch(testUrl, {
-                        headers: {
-                            Accept: 'application/json',
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-                        },
-                        signal: AbortSignal.timeout(10_000),
-                    });
-                    directStatus = res.status;
+                    searchResults = await adapter.searchWorks('Solo');
                 }
-                catch (fetchErr) {
-                    this.logger.debug(`Direct health probe network error for ${src.id}`, { error: fetchErr?.message });
+                catch (sErr) {
+                    this.logger.warn(`Search probe failed for ${src.id}`, { error: sErr?.message });
                 }
-                if (directStatus === 403) {
-                    this.logger.info(`Source ${src.id} still blocked upstream (HTTP 403 Cloudflare WAF). Retaining UPSTREAM_BLOCKED.`);
+                if (!searchResults || searchResults.length === 0) {
+                    this.logger.info(`Source ${src.id} search probe failed. Retaining UPSTREAM_BLOCKED.`);
                     await this.supabase
                         .from('importer_sources')
                         .update({
@@ -364,79 +359,83 @@ export class ImporterEngine {
                         .eq('id', src.id);
                     return;
                 }
-                if (directStatus === 200) {
-                    this.logger.info(`Source ${src.id} direct probe succeeded with HTTP 200. Transitioning to RECOVERING.`);
+                this.logger.info(`Source ${src.id} Search probe succeeded (${searchResults.length} works). Transitioning to RECOVERING to validate full pipeline.`);
+                await this.supabase
+                    .from('importer_sources')
+                    .update({
+                    status: 'RECOVERING',
+                    last_health_check_at: nowIso,
+                    updated_at: nowIso,
+                })
+                    .eq('id', src.id);
+                try {
+                    // Stage 2: Chapters
+                    let chapters = await adapter.fetchChapters(searchResults[0].sourceWorkId).catch(() => []);
+                    if (!chapters || chapters.length === 0) {
+                        chapters = await adapter.fetchChapters('superstar-desde-os-0-anos').catch(() => []);
+                    }
+                    if (!chapters || chapters.length === 0) {
+                        throw new Error('Health check stage 2 failed: 0 chapters returned');
+                    }
+                    const testChapter = chapters[0];
+                    // Stage 3: Pages
+                    const pages = await adapter.fetchChapterPages(testChapter.sourceChapterId);
+                    if (!pages || pages.length === 0) {
+                        throw new Error('Health check stage 3 failed: 0 pages returned');
+                    }
+                    // Stage 4: Download 1 image
+                    const firstPageUrl = typeof pages[0] === 'string' ? pages[0] : pages[0]?.imageUrl;
+                    const imgBytes = await this.fetchImageBytes(firstPageUrl, src.id);
+                    if (!imgBytes || imgBytes.byteLength === 0) {
+                        throw new Error('Health check stage 4 failed: image download returned 0 bytes');
+                    }
+                    // Passed all 4 stages! Transition to ACTIVE
+                    this.logger.info(`Source ${src.id} passed all 4 validation stages! Cloudflare datacenter block defeated. Transitioning to ACTIVE.`);
                     await this.supabase
                         .from('importer_sources')
                         .update({
-                        status: 'RECOVERING',
+                        status: 'ACTIVE',
+                        enabled: true,
+                        blocked_reason: null,
+                        blocked_details: {},
                         last_health_check_at: nowIso,
                         updated_at: nowIso,
                     })
                         .eq('id', src.id);
-                    if (!adapter)
-                        return;
-                    // 4-stage validation: Search -> Chapters -> Pages -> Image Download
+                    // Unpark held jobs for this source back to QUEUED
                     try {
-                        // Stage 1: Search
-                        const searchResults = await adapter.searchWorks('Solo');
-                        if (!searchResults || searchResults.length === 0) {
-                            throw new Error('Health check stage 1 failed: search returned 0 results');
-                        }
-                        const testWork = searchResults[0];
-                        // Stage 2: Chapters
-                        const chapters = await adapter.fetchChapters(testWork.sourceWorkId);
-                        if (!chapters || chapters.length === 0) {
-                            throw new Error('Health check stage 2 failed: 0 chapters returned');
-                        }
-                        const testChapter = chapters[0];
-                        // Stage 3: Pages
-                        const pages = await adapter.fetchChapterPages(testChapter.sourceChapterId);
-                        if (!pages || pages.length === 0) {
-                            throw new Error('Health check stage 3 failed: 0 pages returned');
-                        }
-                        // Stage 4: Download 1 image
-                        const firstPageUrl = typeof pages[0] === 'string' ? pages[0] : pages[0]?.imageUrl;
-                        const imgRes = await fetch(firstPageUrl, {
-                            headers: {
-                                Referer: 'https://nx-toons.xyz/',
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-                            },
-                            signal: AbortSignal.timeout(10_000),
-                        });
-                        if (!imgRes.ok) {
-                            throw new Error(`Health check stage 4 failed: image download returned HTTP ${imgRes.status}`);
-                        }
-                        // Passed all 4 stages! Transition to ACTIVE
-                        this.logger.info(`Source ${src.id} passed all 4 validation stages! Transitioning to ACTIVE.`);
-                        await this.supabase
-                            .from('importer_sources')
+                        const { error: unparkErr } = await this.supabase
+                            .from('importer_queue')
                             .update({
-                            status: 'ACTIVE',
-                            enabled: true,
-                            blocked_reason: null,
-                            blocked_details: null,
-                            last_health_check_at: nowIso,
+                            status: 'QUEUED',
+                            last_error: null,
                             updated_at: nowIso,
                         })
-                            .eq('id', src.id);
+                            .eq('source', src.id)
+                            .eq('status', 'BLOCKED_BY_UPSTREAM');
+                        if (!unparkErr) {
+                            this.logger.info(`Unparked held jobs for ${src.id} back to QUEUED now that source is ACTIVE`);
+                        }
                     }
-                    catch (valErr) {
-                        this.logger.warn(`Source ${src.id} recovery validation failed`, { error: valErr?.message });
-                        await this.supabase
-                            .from('importer_sources')
-                            .update({
-                            status: 'UPSTREAM_BLOCKED',
-                            blocked_reason: 'RECOVERY_VALIDATION_FAILED',
-                            blocked_details: {
-                                error: valErr?.message,
-                                last_checked_at: nowIso,
-                            },
-                            last_health_check_at: nowIso,
-                            updated_at: nowIso,
-                        })
-                            .eq('id', src.id);
+                    catch (unparkErr) {
+                        this.logger.warn(`Failed to unpark jobs for ${src.id}`, { error: unparkErr?.message });
                     }
+                }
+                catch (valErr) {
+                    this.logger.warn(`Source ${src.id} recovery validation failed`, { error: valErr?.message });
+                    await this.supabase
+                        .from('importer_sources')
+                        .update({
+                        status: 'UPSTREAM_BLOCKED',
+                        blocked_reason: 'RECOVERY_VALIDATION_FAILED',
+                        blocked_details: {
+                            error: valErr?.message,
+                            last_checked_at: nowIso,
+                        },
+                        last_health_check_at: nowIso,
+                        updated_at: nowIso,
+                    })
+                        .eq('id', src.id);
                 }
             }
             catch (err) {
