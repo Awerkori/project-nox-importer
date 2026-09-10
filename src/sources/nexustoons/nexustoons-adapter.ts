@@ -6,10 +6,16 @@ import { decryptNexusToonsPayload, isEncryptedNexusToons } from './nexustoons-de
 export class NexusToonsAdapter implements SourceAdapter {
   readonly id = 'nexus_toons';
   readonly name = 'Nexus Toons';
-  readonly baseUrl = 'https://nexustoons.com';
+  readonly baseUrl = 'https://nx-toons.xyz';
 
-  private apiUrl = 'https://nexustoons.com/api';
+  private directApiUrl = 'https://nexustoons.com/api';
+  private fallbackApiUrl = 'https://nx-toons.xyz/api';
   private logger = new Logger('NexusToonsAdapter');
+
+  // Cloudflare Workers internal bridge for zero-403 datacenter bypass
+  private bridgeUrl: string | null = null;
+  private bridgeToken: string | null = null;
+  private directBlocked = false;
 
   constructor(
     private rateLimiter: HostRateLimiter = new HostRateLimiter(2.0),
@@ -18,6 +24,12 @@ export class NexusToonsAdapter implements SourceAdapter {
     this.rateLimiter.setHostRate('nexustoons.com', 2.0, 4, 4.0);
     this.rateLimiter.setHostRate('nx-toons.xyz', 2.0, 4, 4.0);
     this.rateLimiter.setHostRate('img.nx-toons.xyz', 8.0, 16, 16.0);
+
+    const baseUrl = process.env.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev';
+    this.bridgeToken = process.env.NOX_STORAGE_BRIDGE_TOKEN || null;
+    if (this.bridgeToken) {
+      this.bridgeUrl = `${baseUrl.replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
+    }
   }
 
   private get headers(): HeadersInit {
@@ -29,8 +41,61 @@ export class NexusToonsAdapter implements SourceAdapter {
     };
   }
 
+  private async requestViaBridge<T>(url: string, options: RequestInit = {}): Promise<{
+    ok: boolean;
+    status: number;
+    headers?: Record<string, string>;
+    data?: any;
+    text?: string;
+  }> {
+    if (!this.bridgeUrl || !this.bridgeToken) {
+      return { ok: false, status: 500 };
+    }
+    try {
+      const res = await this.transport(this.bridgeUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.bridgeToken}`,
+        },
+        body: JSON.stringify({
+          url,
+          method: options.method || 'GET',
+          headers: {
+            ...this.headers,
+            ...(options.headers || {}),
+          },
+          body: options.body,
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      if (!res.ok) {
+        return { ok: false, status: res.status };
+      }
+
+      const bridgePayload = (await res.json()) as {
+        status: number;
+        headers?: Record<string, string>;
+        data?: any;
+        text?: string;
+      };
+
+      return {
+        ok: bridgePayload.status >= 200 && bridgePayload.status < 300,
+        status: bridgePayload.status,
+        headers: bridgePayload.headers,
+        data: bridgePayload.data,
+        text: bridgePayload.text,
+      };
+    } catch (err: any) {
+      this.logger.warn('Nexus Toons bridge request failed', { error: err?.message });
+      return { ok: false, status: 500 };
+    }
+  }
+
   private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
-    const url = path.startsWith('http') ? path : `${this.apiUrl}${path}`;
+    const url = path.startsWith('http') ? path : `${this.directApiUrl}${path}`;
     const parsedUrl = new URL(url);
     await this.rateLimiter.acquire(parsedUrl.host);
 
@@ -40,6 +105,28 @@ export class NexusToonsAdapter implements SourceAdapter {
     while (attempts < maxAttempts) {
       attempts++;
       try {
+        // If direct egress is known to be challenged/blocked by Cloudflare on datacenter IPs (like DIScloud)
+        // and internal bridge is configured, route via bridge
+        if (this.directBlocked && this.bridgeUrl && this.bridgeToken) {
+          const bridgeResult = await this.requestViaBridge<T>(url, options);
+          if (bridgeResult.status === 429) {
+            const retryAfter = bridgeResult.headers?.['retry-after'];
+            this.rateLimiter.handle429(parsedUrl.host, retryAfter, attempts);
+            continue;
+          }
+          if (bridgeResult.ok && bridgeResult.data !== undefined) {
+            this.rateLimiter.recordSuccess(parsedUrl.host);
+            let rawData = bridgeResult.data;
+            if (isEncryptedNexusToons(rawData)) {
+              return decryptNexusToonsPayload<T>(rawData);
+            }
+            return rawData as T;
+          }
+          if (!bridgeResult.ok) {
+            throw new Error(`Nexus Toons bridge request failed: HTTP ${bridgeResult.status} - ${(bridgeResult.text || '').slice(0, 200)}`);
+          }
+        }
+
         const response = await this.transport(url, {
           ...options,
           headers: {
@@ -53,6 +140,30 @@ export class NexusToonsAdapter implements SourceAdapter {
           const retryAfter = response.headers.get('Retry-After');
           this.rateLimiter.handle429(parsedUrl.host, retryAfter, attempts);
           continue;
+        }
+
+        if (response.status === 403) {
+          // If 403 received and bridge is configured, failover seamlessly to Cloudflare Workers bridge
+          if (this.bridgeUrl && this.bridgeToken) {
+            this.directBlocked = true;
+            this.logger.info('Nexus Toons direct request returned HTTP 403 (Cloudflare WAF). Routing via Cloudflare Workers bridge...');
+            const bridgeResult = await this.requestViaBridge<T>(url, options);
+            if (bridgeResult.status === 429) {
+              const retryAfter = bridgeResult.headers?.['retry-after'];
+              this.rateLimiter.handle429(parsedUrl.host, retryAfter, attempts);
+              continue;
+            }
+            if (bridgeResult.ok && bridgeResult.data !== undefined) {
+              this.rateLimiter.recordSuccess(parsedUrl.host);
+              let rawData = bridgeResult.data;
+              if (isEncryptedNexusToons(rawData)) {
+                return decryptNexusToonsPayload<T>(rawData);
+              }
+              return rawData as T;
+            }
+          }
+          const errText = await response.text().catch(() => '');
+          throw new Error(`Nexus Toons request failed: HTTP ${response.status} - ${errText.slice(0, 200)}`);
         }
 
         if (!response.ok) {

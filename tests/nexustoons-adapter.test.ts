@@ -173,9 +173,55 @@ describe('NexusToonsAdapter', () => {
     const pages = await adapter.fetchChapterPages('202');
 
     expect(pages).toEqual([
-      'https://nexustoons.com/api/p/token_abc123/0',
-      'https://nexustoons.com/api/p/token_abc123/1',
+      'https://nx-toons.xyz/api/p/token_abc123/0',
+      'https://nx-toons.xyz/api/p/token_abc123/1',
     ]);
+  });
+
+  it('routes via internal Cloudflare Workers bridge when direct request receives HTTP 403', async () => {
+    process.env.NOX_STORAGE_BRIDGE_TOKEN = 'test-token';
+    process.env.NOX_MANGA_URL = 'https://test-manga.workers.dev';
+
+    const mockTransport: typeof fetch = async (url, init) => {
+      const u = url.toString();
+      if (u.includes('kuro-bridge')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 200,
+            data: {
+              page: 1,
+              pages: 1,
+              data: [
+                {
+                  id: 999,
+                  slug: 'bridge-manga',
+                  title: 'Bridge Manga',
+                  coverImage: 'https://img.nx-toons.xyz/covers/bm.webp',
+                },
+              ],
+            },
+          }),
+        } as any;
+      }
+      // Direct request simulates Cloudflare 403 challenge
+      return {
+        ok: false,
+        status: 403,
+        text: async () => '<!DOCTYPE html>Cloudflare WAF Challenge',
+      } as any;
+    };
+
+    const adapter = new NexusToonsAdapter(new HostRateLimiter(100), mockTransport);
+    const res = await adapter.fetchUpdatedWorks('1');
+
+    expect(res.works.length).toBe(1);
+    expect(res.works[0].sourceWorkId).toBe('bridge-manga');
+    expect(res.works[0].title).toBe('Bridge Manga');
+
+    delete process.env.NOX_STORAGE_BRIDGE_TOKEN;
+    delete process.env.NOX_MANGA_URL;
   });
 
   it('proves clear differentiation between Nexus Mangas and Nexus Toons in SourceRegistry', () => {
@@ -194,7 +240,7 @@ describe('NexusToonsAdapter', () => {
 
     expect(nexusToons!.id).toBe('nexus_toons');
     expect(nexusToons!.name).toBe('Nexus Toons');
-    expect(nexusToons!.baseUrl).toBe('https://nexustoons.com');
+    expect(nexusToons!.baseUrl).toBe('https://nx-toons.xyz');
 
     // Aliases
     expect(registry.get('nexus_mangas')).toBe(nexusMangas);

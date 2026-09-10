@@ -6,15 +6,25 @@ export class NexusToonsAdapter {
     transport;
     id = 'nexus_toons';
     name = 'Nexus Toons';
-    baseUrl = 'https://nexustoons.com';
-    apiUrl = 'https://nexustoons.com/api';
+    baseUrl = 'https://nx-toons.xyz';
+    directApiUrl = 'https://nexustoons.com/api';
+    fallbackApiUrl = 'https://nx-toons.xyz/api';
     logger = new Logger('NexusToonsAdapter');
+    // Cloudflare Workers internal bridge for zero-403 datacenter bypass
+    bridgeUrl = null;
+    bridgeToken = null;
+    directBlocked = false;
     constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
         this.rateLimiter.setHostRate('nexustoons.com', 2.0, 4, 4.0);
         this.rateLimiter.setHostRate('nx-toons.xyz', 2.0, 4, 4.0);
         this.rateLimiter.setHostRate('img.nx-toons.xyz', 8.0, 16, 16.0);
+        const baseUrl = process.env.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev';
+        this.bridgeToken = process.env.NOX_STORAGE_BRIDGE_TOKEN || null;
+        if (this.bridgeToken) {
+            this.bridgeUrl = `${baseUrl.replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
+        }
     }
     get headers() {
         return {
@@ -23,8 +33,47 @@ export class NexusToonsAdapter {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
         };
     }
+    async requestViaBridge(url, options = {}) {
+        if (!this.bridgeUrl || !this.bridgeToken) {
+            return { ok: false, status: 500 };
+        }
+        try {
+            const res = await this.transport(this.bridgeUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${this.bridgeToken}`,
+                },
+                body: JSON.stringify({
+                    url,
+                    method: options.method || 'GET',
+                    headers: {
+                        ...this.headers,
+                        ...(options.headers || {}),
+                    },
+                    body: options.body,
+                }),
+                signal: AbortSignal.timeout(30_000),
+            });
+            if (!res.ok) {
+                return { ok: false, status: res.status };
+            }
+            const bridgePayload = (await res.json());
+            return {
+                ok: bridgePayload.status >= 200 && bridgePayload.status < 300,
+                status: bridgePayload.status,
+                headers: bridgePayload.headers,
+                data: bridgePayload.data,
+                text: bridgePayload.text,
+            };
+        }
+        catch (err) {
+            this.logger.warn('Nexus Toons bridge request failed', { error: err?.message });
+            return { ok: false, status: 500 };
+        }
+    }
     async request(path, options = {}) {
-        const url = path.startsWith('http') ? path : `${this.apiUrl}${path}`;
+        const url = path.startsWith('http') ? path : `${this.directApiUrl}${path}`;
         const parsedUrl = new URL(url);
         await this.rateLimiter.acquire(parsedUrl.host);
         let attempts = 0;
@@ -32,6 +81,27 @@ export class NexusToonsAdapter {
         while (attempts < maxAttempts) {
             attempts++;
             try {
+                // If direct egress is known to be challenged/blocked by Cloudflare on datacenter IPs (like DIScloud)
+                // and internal bridge is configured, route via bridge
+                if (this.directBlocked && this.bridgeUrl && this.bridgeToken) {
+                    const bridgeResult = await this.requestViaBridge(url, options);
+                    if (bridgeResult.status === 429) {
+                        const retryAfter = bridgeResult.headers?.['retry-after'];
+                        this.rateLimiter.handle429(parsedUrl.host, retryAfter, attempts);
+                        continue;
+                    }
+                    if (bridgeResult.ok && bridgeResult.data !== undefined) {
+                        this.rateLimiter.recordSuccess(parsedUrl.host);
+                        let rawData = bridgeResult.data;
+                        if (isEncryptedNexusToons(rawData)) {
+                            return decryptNexusToonsPayload(rawData);
+                        }
+                        return rawData;
+                    }
+                    if (!bridgeResult.ok) {
+                        throw new Error(`Nexus Toons bridge request failed: HTTP ${bridgeResult.status} - ${(bridgeResult.text || '').slice(0, 200)}`);
+                    }
+                }
                 const response = await this.transport(url, {
                     ...options,
                     headers: {
@@ -44,6 +114,29 @@ export class NexusToonsAdapter {
                     const retryAfter = response.headers.get('Retry-After');
                     this.rateLimiter.handle429(parsedUrl.host, retryAfter, attempts);
                     continue;
+                }
+                if (response.status === 403) {
+                    // If 403 received and bridge is configured, failover seamlessly to Cloudflare Workers bridge
+                    if (this.bridgeUrl && this.bridgeToken) {
+                        this.directBlocked = true;
+                        this.logger.info('Nexus Toons direct request returned HTTP 403 (Cloudflare WAF). Routing via Cloudflare Workers bridge...');
+                        const bridgeResult = await this.requestViaBridge(url, options);
+                        if (bridgeResult.status === 429) {
+                            const retryAfter = bridgeResult.headers?.['retry-after'];
+                            this.rateLimiter.handle429(parsedUrl.host, retryAfter, attempts);
+                            continue;
+                        }
+                        if (bridgeResult.ok && bridgeResult.data !== undefined) {
+                            this.rateLimiter.recordSuccess(parsedUrl.host);
+                            let rawData = bridgeResult.data;
+                            if (isEncryptedNexusToons(rawData)) {
+                                return decryptNexusToonsPayload(rawData);
+                            }
+                            return rawData;
+                        }
+                    }
+                    const errText = await response.text().catch(() => '');
+                    throw new Error(`Nexus Toons request failed: HTTP ${response.status} - ${errText.slice(0, 200)}`);
                 }
                 if (!response.ok) {
                     const errText = await response.text().catch(() => '');
