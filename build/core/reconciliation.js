@@ -7,7 +7,6 @@ const SOURCE_PRIORITY_ORDER = {
     manhastro: 60,
     mangaflix: 40,
     mangotoons: 20,
-    nexus_toons: 10,
 };
 export class ExistingWorksReconciler {
     supabase;

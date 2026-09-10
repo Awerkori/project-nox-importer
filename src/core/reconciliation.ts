@@ -43,7 +43,6 @@ const SOURCE_PRIORITY_ORDER: Record<string, number> = {
   manhastro: 60,
   mangaflix: 40,
   mangotoons: 20,
-  nexus_toons: 10,
 };
 
 export class ExistingWorksReconciler {
