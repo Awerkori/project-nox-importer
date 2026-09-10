@@ -82,6 +82,9 @@ export class InkapkAdapter {
                     continue;
                 }
                 if (!res.ok) {
+                    if (res.status === 403) {
+                        throw new Error(`Inkapk bloqueado por Cloudflare (HTTP 403): Just a moment... / Datacenter WAF`);
+                    }
                     throw new Error(`Inkapk request failed: HTTP ${res.status}`);
                 }
                 this.rateLimiter.recordSuccess(parsed.host);

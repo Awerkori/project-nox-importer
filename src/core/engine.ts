@@ -621,20 +621,35 @@ export class ImporterEngine {
   }
 
   /**
-   * Executes a job respecting global and per-source concurrency semaphores
+   * Executes a job respecting global and per-source concurrency semaphores.
+   * Starts atomic lease heartbeat immediately upon acquisition so that the lease
+   * is continuously renewed even while waiting for concurrency semaphore permits.
    */
   private async executeJobWithLimits(job: QueueJob): Promise<void> {
-    if (job.task_type === 'IMPORT_CHAPTER') {
-      const globalSem = this.autotuner.getGlobalChapterSemaphore();
-      const sourceSem = this.autotuner.getSourceSemaphore(job.source, 2);
+    let cancelSignalTriggered = false;
+    const heartbeat = this.queue.startHeartbeat(
+      job.id,
+      this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS,
+      () => {
+        cancelSignalTriggered = true;
+      }
+    );
 
-      await globalSem.runExclusive(async () => {
-        await sourceSem.runExclusive(async () => {
-          await this.processJob(job);
+    try {
+      if (job.task_type === 'IMPORT_CHAPTER') {
+        const globalSem = this.autotuner.getGlobalChapterSemaphore();
+        const sourceSem = this.autotuner.getSourceSemaphore(job.source, 2);
+
+        await globalSem.runExclusive(async () => {
+          await sourceSem.runExclusive(async () => {
+            await this.processJob(job, () => cancelSignalTriggered);
+          });
         });
-      });
-    } else {
-      await this.processJob(job);
+      } else {
+        await this.processJob(job, () => cancelSignalTriggered);
+      }
+    } finally {
+      heartbeat.stop();
     }
   }
 
@@ -654,7 +669,7 @@ export class ImporterEngine {
       return false;
     }
 
-    await this.processJob(job);
+    await this.executeJobWithLimits(job);
     return true;
   }
 
@@ -743,20 +758,10 @@ export class ImporterEngine {
     }
   }
 
-  private async processJob(job: QueueJob): Promise<void> {
-    let cancelSignalTriggered = false;
-    const heartbeat = this.queue.startHeartbeat(
-      job.id,
-      this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS,
-      () => {
-        cancelSignalTriggered = true;
-      }
-    );
-
+  private async processJob(job: QueueJob, isCancelled?: () => boolean): Promise<void> {
     try {
       // Checkpoint 0: Staff cancellation pre-flight check
-      if (job.cancel_requested || (await this.queue.isCancelRequested(job.id))) {
-        heartbeat.stop();
+      if (job.cancel_requested || isCancelled?.() || (await this.queue.isCancelRequested(job.id))) {
         this.logger.info(`Job ${job.id} cancelled by staff prior to execution.`);
         await this.queue.releaseJob(job.id, 'CANCELLED_BY_STAFF');
         return;
@@ -786,7 +791,6 @@ export class ImporterEngine {
 
           if (!hasHealthyFallback) {
             this.logger.warn(`Parking job ${job.id}: source ${job.source} is UPSTREAM_BLOCKED (retaining safely in BLOCKED_BY_UPSTREAM)`);
-            heartbeat.stop();
             await this.queue.releaseJob(
               job.id,
               'BLOCKED_BY_UPSTREAM',
@@ -798,7 +802,6 @@ export class ImporterEngine {
 
         if (sourceRec.status === 'PAUSED' || sourceRec.status === 'DISABLED' || !sourceRec.enabled) {
           this.logger.info(`Postponing job ${job.id}: source ${job.source} is ${sourceRec.status}`);
-          heartbeat.stop();
           await this.queue.releaseJob(job.id, 'RETRY', `Source ${job.source} is ${sourceRec.status}`, 15);
           return;
         }
@@ -807,7 +810,6 @@ export class ImporterEngine {
           const cooldownUntil = sourceRec.cooldown_until ? new Date(sourceRec.cooldown_until).getTime() : 0;
           if (Date.now() < cooldownUntil) {
             const waitMinutes = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 60000));
-            heartbeat.stop();
             await this.queue.releaseJob(job.id, 'RETRY', `Source in COOLDOWN until ${sourceRec.cooldown_until}`, waitMinutes);
             return;
           } else {
@@ -835,7 +837,6 @@ export class ImporterEngine {
               focusWorkId: activeFocus.work_id,
               jobWorkId: job.payload?.workId,
             });
-            heartbeat.stop();
             await this.queue.releaseJob(job.id, 'RETRY', `Focus mode active for work ${activeFocus.work_id}`, 15);
             return;
           }
@@ -875,19 +876,16 @@ export class ImporterEngine {
           await this.handleSyncWork(job);
           break;
         case 'IMPORT_CHAPTER':
-          await this.handleImportChapter(job, () => cancelSignalTriggered);
+          await this.handleImportChapter(job, isCancelled);
           break;
         default:
           throw new Error(`Unknown task type: ${job.task_type}`);
       }
 
-      heartbeat.stop();
       await this.queue.releaseJob(job.id, 'COMPLETED');
     } catch (err: any) {
-      heartbeat.stop();
-
       // Check if job was cancelled by staff at safe checkpoint
-      if (err instanceof JobCancelledByStaffError || cancelSignalTriggered) {
+      if (err instanceof JobCancelledByStaffError || isCancelled?.()) {
         this.logger.info(`Job ${job.id} safely cancelled by staff at checkpoint`);
         if (job.payload?.sourceChapterId && job.source) {
           try {
@@ -912,8 +910,15 @@ export class ImporterEngine {
 
       // If error is from an upstream provider blocked by Cloudflare (HTTP 403 / Cloudflare Challenge on datacenter),
       // transition source to UPSTREAM_BLOCKED and park the job safely in BLOCKED_BY_UPSTREAM instead of retry loop
-      if (/403.*cloudflare|cloudflare.*403|upstream_blocked/i.test(errorMessage) && job.attempts >= 3) {
-        this.logger.warn(`Source ${job.source} detected upstream block (HTTP 403 / Cloudflare). Transitioning source to UPSTREAM_BLOCKED and parking job.`);
+      const isUpstreamBlocked =
+        /403|cloudflare|just a moment|turnstile|challenge|upstream_blocked/i.test(errorMessage) ||
+        /bloqueado por cloudflare/i.test(errorMessage);
+
+      if (isUpstreamBlocked) {
+        this.logger.warn(`Source ${job.source} detected upstream block (HTTP 403 / Cloudflare). Transitioning source to UPSTREAM_BLOCKED and parking job.`, {
+          jobId: job.id,
+          error: errorMessage,
+        });
         const nowIso = new Date().toISOString();
         try {
           await this.supabase
@@ -936,7 +941,7 @@ export class ImporterEngine {
         await this.queue.releaseJob(
           job.id,
           'BLOCKED_BY_UPSTREAM',
-          `Bloqueado a montante: upstream_blocked (CLOUDFLARE_DATACENTER_BLOCK)`
+          `Bloqueado a montante: Cloudflare bloqueia o ambiente atual do Importer (DIScloud / OVH) (HTTP 403)`
         );
         return;
       }

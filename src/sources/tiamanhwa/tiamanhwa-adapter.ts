@@ -89,6 +89,9 @@ export class TiaManhwaAdapter implements SourceAdapter {
         }
 
         if (!res.ok) {
+          if (res.status === 403) {
+            throw new Error(`Tia Manhwa bloqueado por Cloudflare (HTTP 403): Just a moment... / Datacenter WAF`);
+          }
           throw new Error(`Tia Manhwa request failed: HTTP ${res.status}`);
         }
 
