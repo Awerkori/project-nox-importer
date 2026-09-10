@@ -916,6 +916,37 @@ export class ImporterEngine {
         attempts: job.attempts,
       });
 
+      // If error is from an upstream provider blocked by Cloudflare (e.g. nexus_toons 403 on DIScloud),
+      // transition source to UPSTREAM_BLOCKED and park the job safely in BLOCKED_BY_UPSTREAM instead of retry loop
+      if (job.source === 'nexus_toons' && /403|cloudflare|upstream_blocked/i.test(errorMessage)) {
+        this.logger.warn(`Source ${job.source} detected upstream block (HTTP 403 / Cloudflare). Transitioning source to UPSTREAM_BLOCKED and parking job.`);
+        const nowIso = new Date().toISOString();
+        try {
+          await this.supabase
+            .from('importer_sources')
+            .update({
+              status: 'UPSTREAM_BLOCKED',
+              blocked_reason: 'CLOUDFLARE_DATACENTER_BLOCK',
+              blocked_details: {
+                message:
+                  'Cloudflare bloqueia o ambiente atual do Importer (DIScloud / OVH). Local/Mihon: funcional; DIScloud: HTTP 403.',
+                local_status: 200,
+                discloud_status: 403,
+                last_checked_at: nowIso,
+              },
+              updated_at: nowIso,
+            })
+            .eq('id', job.source);
+        } catch {}
+
+        await this.queue.releaseJob(
+          job.id,
+          'BLOCKED_BY_UPSTREAM',
+          `Bloqueado a montante: upstream_blocked (CLOUDFLARE_DATACENTER_BLOCK)`
+        );
+        return;
+      }
+
       const classification = RetryPolicy.classify(err);
       const isStaffPriority = Boolean(job.payload?.staffRequested) || (job.priority >= 100);
       const decision = RetryPolicy.decide(classification, job.attempts, job.max_attempts, { isStaffPriority });
