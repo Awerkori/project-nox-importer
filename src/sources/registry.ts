@@ -1,6 +1,5 @@
 import { SourceAdapter } from './types.js';
 import { NexusAdapter } from './nexus/nexus-adapter.js';
-import { NexusToonsAdapter } from './nexustoons/nexustoons-adapter.js';
 import { MangaFlixAdapter } from './mangaflix/mangaflix-adapter.js';
 import { ManhastroAdapter } from './manhastro/manhastro-adapter.js';
 import { KuroAdapter } from './kuro/kuro-adapter.js';
@@ -15,7 +14,6 @@ export class SourceRegistry {
       const bridgeUrl = bridgeToken && mangaUrl ? `${mangaUrl.replace(/\/$/, '')}/api/internal/importer/kuro-bridge` : undefined;
       // Register all supported adapters
       this.register(new NexusAdapter(rateLimiter));
-      this.register(new NexusToonsAdapter(rateLimiter, fetch, bridgeToken, bridgeUrl));
       this.register(new MangaFlixAdapter(rateLimiter));
       this.register(new ManhastroAdapter(rateLimiter));
       this.register(new KuroAdapter(rateLimiter));
@@ -30,8 +28,6 @@ export class SourceRegistry {
     if (adapter.id === 'nexus') {
       this.adapters.set('nexus_mangas', adapter);
       this.adapters.set('nexusmangas', adapter);
-    } else if (adapter.id === 'nexus_toons') {
-      this.adapters.set('nexustoons', adapter);
     }
   }
 

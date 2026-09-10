@@ -334,119 +334,114 @@ export class ImporterEngine {
     async probeSourceHealth(src) {
         const nowIso = new Date().toISOString();
         const adapter = this.registry.get(src.id);
-        if (src.id === 'nexus_toons') {
+        if (!adapter)
+            return;
+        try {
+            this.logger.info(`Probing health for ${src.id}...`);
+            let searchResults = [];
             try {
-                if (!adapter)
-                    return;
-                this.logger.info(`Probing health for ${src.id} (validating anti-Cloudflare bypass)...`);
-                let searchResults = [];
-                try {
-                    searchResults = await adapter.searchWorks('Solo');
-                }
-                catch (sErr) {
-                    this.logger.warn(`Search probe failed for ${src.id}`, { error: sErr?.message });
-                }
-                if (!searchResults || searchResults.length === 0) {
-                    this.logger.info(`Source ${src.id} search probe failed. Retaining UPSTREAM_BLOCKED.`);
-                    await this.supabase
-                        .from('importer_sources')
-                        .update({
-                        status: 'UPSTREAM_BLOCKED',
-                        blocked_reason: 'CLOUDFLARE_DATACENTER_BLOCK',
-                        blocked_details: {
-                            message: 'Cloudflare bloqueia o ambiente atual do Importer (DIScloud / OVH ASN 16276). Local/Mihon: funcional; DIScloud: HTTP 403.',
-                            local_status: 200,
-                            discloud_status: 403,
-                            last_checked_at: nowIso,
-                        },
-                        last_health_check_at: nowIso,
-                        updated_at: nowIso,
-                    })
-                        .eq('id', src.id);
-                    return;
-                }
-                this.logger.info(`Source ${src.id} Search probe succeeded (${searchResults.length} works). Transitioning to RECOVERING to validate full pipeline.`);
+                searchResults = await adapter.searchWorks('Solo');
+            }
+            catch (sErr) {
+                this.logger.warn(`Search probe failed for ${src.id}`, { error: sErr?.message });
+            }
+            if (!searchResults || searchResults.length === 0) {
+                this.logger.info(`Source ${src.id} search probe returned no results. Retaining UPSTREAM_BLOCKED.`);
                 await this.supabase
                     .from('importer_sources')
                     .update({
-                    status: 'RECOVERING',
+                    status: 'UPSTREAM_BLOCKED',
+                    blocked_reason: 'CLOUDFLARE_DATACENTER_BLOCK',
+                    blocked_details: {
+                        message: 'Cloudflare bloqueia o ambiente atual do Importer (DIScloud / OVH). Local/Mihon: funcional; DIScloud: HTTP 403.',
+                        local_status: 200,
+                        discloud_status: 403,
+                        last_checked_at: nowIso,
+                    },
                     last_health_check_at: nowIso,
                     updated_at: nowIso,
                 })
                     .eq('id', src.id);
+                return;
+            }
+            this.logger.info(`Source ${src.id} Search probe succeeded (${searchResults.length} works). Transitioning to RECOVERING to validate full pipeline.`);
+            await this.supabase
+                .from('importer_sources')
+                .update({
+                status: 'RECOVERING',
+                last_health_check_at: nowIso,
+                updated_at: nowIso,
+            })
+                .eq('id', src.id);
+            try {
+                // Stage 2: Chapters
+                const chapters = await adapter.fetchChapters(searchResults[0].sourceWorkId).catch(() => []);
+                if (!chapters || chapters.length === 0) {
+                    throw new Error('Health check stage 2 failed: 0 chapters returned');
+                }
+                const testChapter = chapters[0];
+                // Stage 3: Pages
+                const pages = await adapter.fetchChapterPages(testChapter.sourceChapterId);
+                if (!pages || pages.length === 0) {
+                    throw new Error('Health check stage 3 failed: 0 pages returned');
+                }
+                // Stage 4: Download 1 image
+                const firstPageUrl = typeof pages[0] === 'string' ? pages[0] : pages[0]?.imageUrl;
+                const imgBytes = await this.fetchImageBytes(firstPageUrl, src.id);
+                if (!imgBytes || imgBytes.byteLength === 0) {
+                    throw new Error('Health check stage 4 failed: image download returned 0 bytes');
+                }
+                // Passed all 4 stages! Transition to ACTIVE
+                this.logger.info(`Source ${src.id} passed all 4 validation stages! Transitioning to ACTIVE.`);
+                await this.supabase
+                    .from('importer_sources')
+                    .update({
+                    status: 'ACTIVE',
+                    enabled: true,
+                    blocked_reason: null,
+                    blocked_details: {},
+                    last_health_check_at: nowIso,
+                    updated_at: nowIso,
+                })
+                    .eq('id', src.id);
+                // Unpark held jobs for this source back to QUEUED
                 try {
-                    // Stage 2: Chapters
-                    let chapters = await adapter.fetchChapters(searchResults[0].sourceWorkId).catch(() => []);
-                    if (!chapters || chapters.length === 0) {
-                        chapters = await adapter.fetchChapters('superstar-desde-os-0-anos').catch(() => []);
-                    }
-                    if (!chapters || chapters.length === 0) {
-                        throw new Error('Health check stage 2 failed: 0 chapters returned');
-                    }
-                    const testChapter = chapters[0];
-                    // Stage 3: Pages
-                    const pages = await adapter.fetchChapterPages(testChapter.sourceChapterId);
-                    if (!pages || pages.length === 0) {
-                        throw new Error('Health check stage 3 failed: 0 pages returned');
-                    }
-                    // Stage 4: Download 1 image
-                    const firstPageUrl = typeof pages[0] === 'string' ? pages[0] : pages[0]?.imageUrl;
-                    const imgBytes = await this.fetchImageBytes(firstPageUrl, src.id);
-                    if (!imgBytes || imgBytes.byteLength === 0) {
-                        throw new Error('Health check stage 4 failed: image download returned 0 bytes');
-                    }
-                    // Passed all 4 stages! Transition to ACTIVE
-                    this.logger.info(`Source ${src.id} passed all 4 validation stages! Cloudflare datacenter block defeated. Transitioning to ACTIVE.`);
-                    await this.supabase
-                        .from('importer_sources')
+                    const { error: unparkErr } = await this.supabase
+                        .from('importer_queue')
                         .update({
-                        status: 'ACTIVE',
-                        enabled: true,
-                        blocked_reason: null,
-                        blocked_details: {},
-                        last_health_check_at: nowIso,
+                        status: 'QUEUED',
+                        last_error: null,
                         updated_at: nowIso,
                     })
-                        .eq('id', src.id);
-                    // Unpark held jobs for this source back to QUEUED
-                    try {
-                        const { error: unparkErr } = await this.supabase
-                            .from('importer_queue')
-                            .update({
-                            status: 'QUEUED',
-                            last_error: null,
-                            updated_at: nowIso,
-                        })
-                            .eq('source', src.id)
-                            .eq('status', 'BLOCKED_BY_UPSTREAM');
-                        if (!unparkErr) {
-                            this.logger.info(`Unparked held jobs for ${src.id} back to QUEUED now that source is ACTIVE`);
-                        }
-                    }
-                    catch (unparkErr) {
-                        this.logger.warn(`Failed to unpark jobs for ${src.id}`, { error: unparkErr?.message });
+                        .eq('source', src.id)
+                        .eq('status', 'BLOCKED_BY_UPSTREAM');
+                    if (!unparkErr) {
+                        this.logger.info(`Unparked held jobs for ${src.id} back to QUEUED now that source is ACTIVE`);
                     }
                 }
-                catch (valErr) {
-                    this.logger.warn(`Source ${src.id} recovery validation failed`, { error: valErr?.message });
-                    await this.supabase
-                        .from('importer_sources')
-                        .update({
-                        status: 'UPSTREAM_BLOCKED',
-                        blocked_reason: 'RECOVERY_VALIDATION_FAILED',
-                        blocked_details: {
-                            error: valErr?.message,
-                            last_checked_at: nowIso,
-                        },
-                        last_health_check_at: nowIso,
-                        updated_at: nowIso,
-                    })
-                        .eq('id', src.id);
+                catch (unparkErr) {
+                    this.logger.warn(`Failed to unpark jobs for ${src.id}`, { error: unparkErr?.message });
                 }
             }
-            catch (err) {
-                this.logger.error(`Error probing health for source ${src.id}`, { error: err?.message });
+            catch (valErr) {
+                this.logger.warn(`Source ${src.id} recovery validation failed`, { error: valErr?.message });
+                await this.supabase
+                    .from('importer_sources')
+                    .update({
+                    status: 'UPSTREAM_BLOCKED',
+                    blocked_reason: 'RECOVERY_VALIDATION_FAILED',
+                    blocked_details: {
+                        error: valErr?.message,
+                        last_checked_at: nowIso,
+                    },
+                    last_health_check_at: nowIso,
+                    updated_at: nowIso,
+                })
+                    .eq('id', src.id);
             }
+        }
+        catch (err) {
+            this.logger.error(`Error probing health for source ${src.id}`, { error: err?.message });
         }
     }
     autotunerCycleCount = 0;
@@ -796,9 +791,9 @@ export class ImporterEngine {
                 error: errorMessage,
                 attempts: job.attempts,
             });
-            // If error is from an upstream provider blocked by Cloudflare (e.g. nexus_toons 403 on DIScloud),
+            // If error is from an upstream provider blocked by Cloudflare (HTTP 403 / Cloudflare Challenge on datacenter),
             // transition source to UPSTREAM_BLOCKED and park the job safely in BLOCKED_BY_UPSTREAM instead of retry loop
-            if (job.source === 'nexus_toons' && /403|cloudflare|upstream_blocked/i.test(errorMessage)) {
+            if (/403.*cloudflare|cloudflare.*403|upstream_blocked/i.test(errorMessage) && job.attempts >= 3) {
                 this.logger.warn(`Source ${job.source} detected upstream block (HTTP 403 / Cloudflare). Transitioning source to UPSTREAM_BLOCKED and parking job.`);
                 const nowIso = new Date().toISOString();
                 try {
@@ -1999,15 +1994,9 @@ export class ImporterEngine {
     async fetchImageBytes(url, source = 'unknown') {
         const parsedUrl = new URL(url);
         const isKuro = parsedUrl.host.includes('kuromangas.com');
-        const isNexusToons = parsedUrl.host.includes('nx-toons.xyz') ||
-            parsedUrl.host.includes('nexustoons.com') ||
-            source === 'nexus_toons' ||
-            source === 'nexustoons';
         const referer = isKuro
             ? 'https://kuromangas.com/'
-            : isNexusToons
-                ? 'https://nx-toons.xyz/'
-                : `${parsedUrl.origin}/`;
+            : `${parsedUrl.origin}/`;
         let res = null;
         let fetchError = null;
         try {
@@ -2023,7 +2012,7 @@ export class ImporterEngine {
             fetchError = err;
         }
         // If Cloudflare 403 or network error occurred and internal bridge is configured, fallback to bridge
-        if ((fetchError || res?.status === 403) && this.config.NOX_STORAGE_BRIDGE_TOKEN && (isKuro || isNexusToons)) {
+        if ((fetchError || res?.status === 403) && this.config.NOX_STORAGE_BRIDGE_TOKEN && isKuro) {
             try {
                 const bridgeUrl = `${(this.config.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev').replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
                 const bridgeRes = await fetch(bridgeUrl, {
