@@ -44,14 +44,10 @@ describe('Adult Classification & Monotonicity Guarantee', () => {
       insert into public.importer_sources (id, name, base_url, enabled, status) values
         ('mangaflix', 'MangaFlix', 'https://mangaflix.org', true, 'ACTIVE'),
         ('kuro', 'Kuro', 'https://kuro.moe', true, 'ACTIVE'),
-        ('acervohentai', 'Acervo Hentai', 'https://acervohentai.com', true, 'ACTIVE'),
-        ('blackoutcomics', 'Blackout Comics', 'https://blackoutcomics.com', true, 'ACTIVE'),
         ('hanamiheaven', 'Hanami Heaven', 'https://hanamiheaven.com', true, 'ACTIVE'),
         ('hipercool', 'HipercooL', 'https://lerhentais.com', true, 'ACTIVE'),
-        ('inkapk', 'Inkapk', 'https://inkapk.com', true, 'ACTIVE'),
         ('instahentai', 'InstaHentai', 'https://instahentai.com', true, 'ACTIVE'),
-        ('megahentai', 'MegaHentai', 'https://megahentai.com', true, 'ACTIVE'),
-        ('tiamanhwa', 'Tia Manhwa', 'https://tiamanhwa.com', true, 'ACTIVE')
+        ('megahentai', 'MegaHentai', 'https://megahentai.com', true, 'ACTIVE')
       on conflict (id) do nothing;
     `);
 
@@ -163,26 +159,23 @@ describe('Adult Classification & Monotonicity Guarantee', () => {
     await db.close();
   });
 
-  it('recognizes all 8 adult source identifiers in ADULT_SOURCES', () => {
+  it('recognizes all 4 remaining adult source identifiers in ADULT_SOURCES', () => {
     const required = [
-      'acervohentai',
-      'blackoutcomics',
       'hanamiheaven',
       'hipercool',
-      'inkapk',
       'instahentai',
       'megahentai',
-      'tiamanhwa',
     ];
     for (const src of required) {
       expect(ADULT_SOURCES.has(src)).toBe(true);
     }
+    expect(ADULT_SOURCES.size).toBe(4);
   });
 
   it('automatically classifies works from adult sources as ADULT_18 with age_rating >= 18 and provenance', async () => {
     const res = await engine.resolveWork({
-      source: 'blackoutcomics',
-      sourceWorkId: 'bc-101',
+      source: 'hanamiheaven',
+      sourceWorkId: 'hh-101',
       title: 'Secret Stepmother Story',
       slug: 'secret-stepmother-story',
       synopsis: 'A spicy drama',
@@ -199,12 +192,12 @@ describe('Adult Classification & Monotonicity Guarantee', () => {
     expect(work.age_rating).toBe(18);
     expect(work.kind).toBe('MANHWA');
     expect(work.metadata_provenance.adult_source).toBeDefined();
-    expect(work.metadata_provenance.adult_source.source).toBe('blackoutcomics');
+    expect(work.metadata_provenance.adult_source.source).toBe('hanamiheaven');
 
     const dbMapping = await db.query('select * from public.importer_work_mappings where work_id = $1', [res.workId]);
     const mapping = dbMapping.rows[0] as any;
     expect(mapping.metadata.adult_source).toBe(true);
-    expect(mapping.metadata.adult_source_id).toBe('blackoutcomics');
+    expect(mapping.metadata.adult_source_id).toBe('hanamiheaven');
 
     // Confirm canonical tags attached
     const dbWorkTags = await db.query(`
@@ -220,10 +213,10 @@ describe('Adult Classification & Monotonicity Guarantee', () => {
   });
 
   it('monotonically preserves ADULT_18 when a non-adult source later updates or matches the work', async () => {
-    // 1. Create an adult work from tiamanhwa
+    // 1. Create an adult work from hipercool
     const res = await engine.resolveWork({
-      source: 'tiamanhwa',
-      sourceWorkId: 'tia-200',
+      source: 'hipercool',
+      sourceWorkId: 'hc-200',
       title: 'Campus Queen Adult Affair',
       slug: 'campus-queen-adult-affair',
       synopsis: 'Adult drama on campus',
@@ -264,20 +257,20 @@ describe('Adult Classification & Monotonicity Guarantee', () => {
     const initialDb = await db.query('select * from public.works where id = $1', [workId]);
     expect((initialDb.rows[0] as any).content_rating).toBe('GENERAL');
 
-    // 2. Adult source (Acervo Hentai) matches it
+    // 2. Adult source (InstaHentai) matches it
     await engine.applyMetadataPrecedence(workId, {
-      source: 'acervohentai',
-      sourceWorkId: 'ah-300',
+      source: 'instahentai',
+      sourceWorkId: 'ih-300',
       title: 'Hidden Romance',
       slug: 'hidden-romance',
-    }, 'acervohentai');
+    }, 'instahentai');
 
     // 3. Confirm promoted to ADULT_18
     const updatedDb = await db.query('select * from public.works where id = $1', [workId]);
     const updated = updatedDb.rows[0] as any;
     expect(updated.content_rating).toBe('ADULT_18');
     expect(updated.age_rating).toBe(18);
-    expect(updated.metadata_provenance.adult_source.source).toBe('acervohentai');
+    expect(updated.metadata_provenance.adult_source.source).toBe('instahentai');
   });
 
   it('preserves kind (MANGA, WEBTOON, MANHWA) correctly', async () => {

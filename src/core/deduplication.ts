@@ -10,14 +10,10 @@ export interface DeduplicationResult {
 }
 
 export const ADULT_SOURCES = new Set([
-  'acervohentai',
-  'blackoutcomics',
   'hanamiheaven',
   'hipercool',
-  'inkapk',
   'instahentai',
   'megahentai',
-  'tiamanhwa',
 ]);
 
 export interface CandidateWork {

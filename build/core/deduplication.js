@@ -1,13 +1,9 @@
 import { Logger } from './logger.js';
 export const ADULT_SOURCES = new Set([
-    'acervohentai',
-    'blackoutcomics',
     'hanamiheaven',
     'hipercool',
-    'inkapk',
     'instahentai',
     'megahentai',
-    'tiamanhwa',
 ]);
 export function computeCanonicalChapterKey(chapterNumber, chapterTitle) {
     const num = typeof chapterNumber === 'number' ? chapterNumber : parseFloat(String(chapterNumber));
