@@ -16,6 +16,8 @@ export class NoxWorkerStorageProvider {
     transport;
     logger = new Logger('NoxWorkerStorage');
     rateLimiter;
+    lastBotReference = 'MANGA_STORAGE_01';
+    lastShardId = null;
     constructor(workerBaseUrl, bridgeToken, transport = fetch, rateLimiter) {
         this.workerBaseUrl = workerBaseUrl;
         this.bridgeToken = bridgeToken;
@@ -27,6 +29,12 @@ export class NoxWorkerStorageProvider {
     }
     getRateLimiter() {
         return this.rateLimiter;
+    }
+    getLastBotReference() {
+        return this.lastBotReference;
+    }
+    getLastShardId() {
+        return this.lastShardId;
     }
     getProviderKey() {
         // Media provider key in database is 'telegram' so manga reader streams it correctly
@@ -56,8 +64,12 @@ export class NoxWorkerStorageProvider {
             return false;
         }
     }
-    async upload(bytes, mime, id) {
-        const url = `${this.workerBaseUrl.replace(/\/$/, '')}/api/internal/storage/upload?id=${encodeURIComponent(id)}`;
+    async upload(bytes, mime, id, chapterId) {
+        const queryParts = [`id=${encodeURIComponent(id)}`];
+        if (chapterId) {
+            queryParts.push(`chapter_id=${encodeURIComponent(chapterId)}`);
+        }
+        const url = `${this.workerBaseUrl.replace(/\/$/, '')}/api/internal/storage/upload?${queryParts.join('&')}`;
         let lastError;
         const maxAttempts = 3;
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -124,6 +136,12 @@ export class NoxWorkerStorageProvider {
                 const data = (await res.json().catch(() => null));
                 if (!data || typeof data.providerKey !== 'string' || !data.providerKey) {
                     throw new NoxWorkerStorageError('payload', res.status, 'Invalid response payload from internal storage endpoint');
+                }
+                if (data.botReference) {
+                    this.lastBotReference = data.botReference;
+                }
+                if (data.shardId) {
+                    this.lastShardId = data.shardId;
                 }
                 // Gradually restore rate if currently throttled
                 this.rateLimiter.restoreRate();

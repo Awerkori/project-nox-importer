@@ -11,9 +11,13 @@ export declare class NoxWorkerStorageProvider implements StorageProvider {
     private transport;
     private logger;
     private rateLimiter;
+    private lastBotReference;
+    private lastShardId;
     constructor(workerBaseUrl: string, bridgeToken: string, transport?: typeof fetch, rateLimiter?: GlobalStorageRateLimiter);
     getRateLimiter(): GlobalStorageRateLimiter;
+    getLastBotReference(): string;
+    getLastShardId(): string | null;
     getProviderKey(): string;
     healthCheck(): Promise<boolean>;
-    upload(bytes: Uint8Array, mime: string, id: string): Promise<string>;
+    upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string): Promise<string>;
 }

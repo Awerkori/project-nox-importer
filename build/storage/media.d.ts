@@ -26,4 +26,4 @@ export interface StoredMediaResult {
  * 3. Check public.media for existing hash (deduplication).
  * 4. If not found, upload via StorageProvider and insert into public.media.
  */
-export declare function processAndStoreMedia(supabase: SupabaseClient, storage: StorageProvider, bytes: Uint8Array, userId: string, purpose?: string): Promise<StoredMediaResult>;
+export declare function processAndStoreMedia(supabase: SupabaseClient, storage: StorageProvider, bytes: Uint8Array, userId: string, purpose?: string, chapterId?: string): Promise<StoredMediaResult>;

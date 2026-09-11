@@ -165,7 +165,7 @@ export function calculateSha256(bytes) {
  * 3. Check public.media for existing hash (deduplication).
  * 4. If not found, upload via StorageProvider and insert into public.media.
  */
-export async function processAndStoreMedia(supabase, storage, bytes, userId, purpose = 'editorial') {
+export async function processAndStoreMedia(supabase, storage, bytes, userId, purpose = 'editorial', chapterId) {
     const info = inspectImage(bytes);
     const sha256 = calculateSha256(bytes);
     // 1. Deduplication lookup
@@ -192,12 +192,16 @@ export async function processAndStoreMedia(supabase, storage, bytes, userId, pur
     }
     // 2. Upload to storage provider
     const mediaId = crypto.randomUUID();
-    const providerKey = await storage.upload(bytes, info.mime, mediaId);
+    const providerKey = await storage.upload(bytes, info.mime, mediaId, chapterId);
     // 3. Insert record into public.media
+    const botRef = storage.getLastBotReference?.() || 'MANGA_STORAGE_01';
+    const shardId = storage.getLastShardId?.() || null;
     const { error: insertErr } = await supabase.from('media').insert({
         id: mediaId,
         provider: storage.getProviderKey() === 'mock' ? 'telegram' : storage.getProviderKey(),
         provider_key: providerKey,
+        bot_reference: botRef,
+        storage_shard_id: shardId,
         mime: info.mime,
         width: info.width,
         height: info.height,

@@ -179,7 +179,8 @@ export async function processAndStoreMedia(
   storage: StorageProvider,
   bytes: Uint8Array,
   userId: string,
-  purpose: string = 'editorial'
+  purpose: string = 'editorial',
+  chapterId?: string
 ): Promise<StoredMediaResult> {
   const info = inspectImage(bytes);
   const sha256 = calculateSha256(bytes);
@@ -211,13 +212,17 @@ export async function processAndStoreMedia(
 
   // 2. Upload to storage provider
   const mediaId = crypto.randomUUID();
-  const providerKey = await storage.upload(bytes, info.mime, mediaId);
+  const providerKey = await storage.upload(bytes, info.mime, mediaId, chapterId);
 
   // 3. Insert record into public.media
+  const botRef = storage.getLastBotReference?.() || 'MANGA_STORAGE_01';
+  const shardId = storage.getLastShardId?.() || null;
   const { error: insertErr } = await supabase.from('media').insert({
     id: mediaId,
     provider: storage.getProviderKey() === 'mock' ? 'telegram' : storage.getProviderKey(),
     provider_key: providerKey,
+    bot_reference: botRef,
+    storage_shard_id: shardId,
     mime: info.mime,
     width: info.width,
     height: info.height,

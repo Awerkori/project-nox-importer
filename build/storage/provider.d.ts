@@ -13,7 +13,7 @@ export interface StorageProvider {
      * @param id Unique media ID (UUID)
      * @returns provider_key string (e.g. Telegram file_id)
      */
-    upload(bytes: Uint8Array, mime: string, id: string): Promise<string>;
+    upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string): Promise<string>;
     /**
      * Check if storage service is operational and accessible
      */
@@ -22,4 +22,6 @@ export interface StorageProvider {
      * Return canonical provider identifier for public.media ('telegram', 'supabase', etc.)
      */
     getProviderKey(): string;
+    getLastBotReference?(): string;
+    getLastShardId?(): string | null;
 }
