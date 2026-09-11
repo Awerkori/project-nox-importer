@@ -1307,6 +1307,7 @@ export class ImporterEngine {
         let lastRescuedError = null;
         let validPages = [];
         let skipDownloadDueToExistingPages = false;
+        const targetChapterId = existingChapter?.id || crypto.randomUUID();
         // Dynamic candidate fallbacks resolution across payload, mappings, manifest, and work sources
         const candidateFallbacks = await this.resolveDynamicCandidateFallbacks(workId, chapterNumber, effectiveSource, job.payload?.fallbackSources || []);
         let allSourceCandidates = [
@@ -1592,7 +1593,7 @@ export class ImporterEngine {
                         try {
                             const u0 = Date.now();
                             const res = await globalMediaSemaphore.runExclusive(async () => {
-                                return await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial');
+                                return await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial', targetChapterId);
                             });
                             const uploadDuration = Date.now() - u0;
                             tUpload += uploadDuration;
@@ -1746,7 +1747,7 @@ export class ImporterEngine {
                 }
             }
             else {
-                chapterId = crypto.randomUUID();
+                chapterId = targetChapterId;
                 const { error: chErr } = await this.supabase.from('chapters').insert({
                     id: chapterId,
                     work_id: workId,

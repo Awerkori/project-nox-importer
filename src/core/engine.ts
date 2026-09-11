@@ -1508,6 +1508,7 @@ export class ImporterEngine {
     let lastRescuedError: string | null = null;
     let validPages: Array<{ mediaId: string; width: number; height: number }> = [];
     let skipDownloadDueToExistingPages = false;
+    const targetChapterId = existingChapter?.id || crypto.randomUUID();
 
     // Dynamic candidate fallbacks resolution across payload, mappings, manifest, and work sources
     const candidateFallbacks = await this.resolveDynamicCandidateFallbacks(
@@ -1851,7 +1852,8 @@ export class ImporterEngine {
                   this.storage,
                   pageBytes!,
                   botUserId,
-                  'editorial'
+                  'editorial',
+                  targetChapterId
                 );
               });
               const uploadDuration = Date.now() - u0;
@@ -2026,7 +2028,7 @@ export class ImporterEngine {
             .eq('id', chapterId);
         }
       } else {
-        chapterId = crypto.randomUUID();
+        chapterId = targetChapterId;
         const { error: chErr } = await this.supabase.from('chapters').insert({
           id: chapterId,
           work_id: workId,

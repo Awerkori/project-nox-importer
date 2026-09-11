@@ -16,6 +16,8 @@ export class NoxWorkerStorageError extends Error {
 export class NoxWorkerStorageProvider implements StorageProvider {
   private logger = new Logger('NoxWorkerStorage');
   private rateLimiter: GlobalStorageRateLimiter;
+  private lastBotReference: string = 'MANGA_STORAGE_01';
+  private lastShardId: string | null = null;
 
   constructor(
     private workerBaseUrl: string,
@@ -31,6 +33,14 @@ export class NoxWorkerStorageProvider implements StorageProvider {
 
   getRateLimiter(): GlobalStorageRateLimiter {
     return this.rateLimiter;
+  }
+
+  getLastBotReference(): string {
+    return this.lastBotReference;
+  }
+
+  getLastShardId(): string | null {
+    return this.lastShardId;
   }
 
   getProviderKey(): string {
@@ -64,8 +74,12 @@ export class NoxWorkerStorageProvider implements StorageProvider {
     }
   }
 
-  async upload(bytes: Uint8Array, mime: string, id: string): Promise<string> {
-    const url = `${this.workerBaseUrl.replace(/\/$/, '')}/api/internal/storage/upload?id=${encodeURIComponent(id)}`;
+  async upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string): Promise<string> {
+    const queryParts = [`id=${encodeURIComponent(id)}`];
+    if (chapterId) {
+      queryParts.push(`chapter_id=${encodeURIComponent(chapterId)}`);
+    }
+    const url = `${this.workerBaseUrl.replace(/\/$/, '')}/api/internal/storage/upload?${queryParts.join('&')}`;
 
     let lastError: any;
     const maxAttempts = 3;
@@ -150,6 +164,10 @@ export class NoxWorkerStorageProvider implements StorageProvider {
 
         const data = (await res.json().catch(() => null)) as {
           providerKey?: string;
+          botReference?: string;
+          shardId?: string;
+          channelId?: string;
+          displayName?: string;
           mime?: string;
           width?: number;
           height?: number;
@@ -158,6 +176,13 @@ export class NoxWorkerStorageProvider implements StorageProvider {
 
         if (!data || typeof data.providerKey !== 'string' || !data.providerKey) {
           throw new NoxWorkerStorageError('payload', res.status, 'Invalid response payload from internal storage endpoint');
+        }
+
+        if (data.botReference) {
+          this.lastBotReference = data.botReference;
+        }
+        if (data.shardId) {
+          this.lastShardId = data.shardId;
         }
 
         // Gradually restore rate if currently throttled
