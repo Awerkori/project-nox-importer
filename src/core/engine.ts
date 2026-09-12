@@ -635,20 +635,39 @@ export class ImporterEngine {
       }
     );
 
-    try {
-      if (job.task_type === 'IMPORT_CHAPTER') {
-        const globalSem = this.autotuner.getGlobalChapterSemaphore();
-        const sourceSem = this.autotuner.getSourceSemaphore(job.source, 2);
+    // Hard safety timeout: prevents any single job from hogging semaphores/leases indefinitely
+    const maxJobDurationMs = job.task_type === 'IMPORT_CHAPTER' ? 12 * 60 * 1000 : 5 * 60 * 1000;
+    let jobTimeoutTimer: NodeJS.Timeout | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      jobTimeoutTimer = setTimeout(() => {
+        cancelSignalTriggered = true;
+        reject(
+          new Error(
+            `JobExecutionTimeout: Job ${job.id} (${job.task_type}) exceeded safety limit of ${maxJobDurationMs / 60000} minutes`
+          )
+        );
+      }, maxJobDurationMs);
+    });
 
-        await globalSem.runExclusive(async () => {
-          await sourceSem.runExclusive(async () => {
-            await this.processJob(job, () => cancelSignalTriggered);
+    try {
+      const executionPromise = (async () => {
+        if (job.task_type === 'IMPORT_CHAPTER') {
+          const globalSem = this.autotuner.getGlobalChapterSemaphore();
+          const sourceSem = this.autotuner.getSourceSemaphore(job.source, 2);
+
+          await globalSem.runExclusive(async () => {
+            await sourceSem.runExclusive(async () => {
+              await this.processJob(job, () => cancelSignalTriggered);
+            });
           });
-        });
-      } else {
-        await this.processJob(job, () => cancelSignalTriggered);
-      }
+        } else {
+          await this.processJob(job, () => cancelSignalTriggered);
+        }
+      })();
+
+      await Promise.race([executionPromise, timeoutPromise]);
     } finally {
+      if (jobTimeoutTimer) clearTimeout(jobTimeoutTimer);
       heartbeat.stop();
     }
   }
@@ -1674,17 +1693,27 @@ export class ImporterEngine {
         };
 
         const waitForPage = (): Promise<void> => {
-          if (readyQueue.length > 0 || allDownloadsFinished || pipelineError || this.stopSignal) {
+          if (readyQueue.length > 0 || allDownloadsFinished || pipelineError || this.stopSignal || isCancelled?.()) {
             return Promise.resolve();
           }
           return new Promise<void>((resolve) => {
-            consumerResolvers.push(resolve);
+            const timer = setTimeout(() => {
+              const idx = consumerResolvers.indexOf(onResolve);
+              if (idx !== -1) consumerResolvers.splice(idx, 1);
+              resolve();
+            }, 3000);
+            const onResolve = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+            consumerResolvers.push(onResolve);
           });
         };
 
         // Producer: downloads raw page bytes from source CDN into memory
         const producer = async () => {
-          while (!this.stopSignal && !pipelineError) {
+          try {
+            while (!this.stopSignal && !pipelineError && !isCancelled?.()) {
             // Memory backpressure check: wait if in-flight active buffer >= MAX_BUFFERED_BYTES (40MB)
             while (
               ImporterEngine.activeBufferedBytes >= ImporterEngine.MAX_BUFFERED_BYTES &&
@@ -1816,20 +1845,25 @@ export class ImporterEngine {
             readyQueue.push({ index: idx, pageBytes });
             notifyConsumer();
           }
-        };
+        } catch (err: any) {
+          pipelineError = err;
+          notifyConsumer();
+        }
+      };
 
-        let completedUploadsCount = 0;
+      let completedUploadsCount = 0;
 
-        // Consumer: uploads downloaded pages to Storage Bridge / Telegram concurrently
-        const consumer = async () => {
-          while (!this.stopSignal && !pipelineError) {
+      // Consumer: uploads downloaded pages to Storage Bridge / Telegram concurrently
+      const consumer = async () => {
+        try {
+          while (!this.stopSignal && !pipelineError && !isCancelled?.()) {
             if (isCancelled?.()) {
               pipelineError = new JobCancelledByStaffError(job.id);
               break;
             }
 
             while (readyQueue.length === 0) {
-              if (allDownloadsFinished || pipelineError || this.stopSignal) {
+              if (allDownloadsFinished || pipelineError || this.stopSignal || isCancelled?.()) {
                 return;
               }
               await waitForPage();
@@ -1896,7 +1930,11 @@ export class ImporterEngine {
               }
             }
           }
-        };
+        } catch (err: any) {
+          pipelineError = err;
+          notifyConsumer();
+        }
+      };
 
         const producerPromises = Array.from({ length: downloadConcurrency }, () => producer());
         const consumerPromises = Array.from({ length: uploadConcurrency }, () => consumer());
