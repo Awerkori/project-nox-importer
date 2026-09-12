@@ -559,21 +559,35 @@ export class ImporterEngine {
         const heartbeat = this.queue.startHeartbeat(job.id, this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS, () => {
             cancelSignalTriggered = true;
         });
+        // Hard safety timeout: prevents any single job from hogging semaphores/leases indefinitely
+        const maxJobDurationMs = job.task_type === 'IMPORT_CHAPTER' ? 12 * 60 * 1000 : 5 * 60 * 1000;
+        let jobTimeoutTimer = null;
+        const timeoutPromise = new Promise((_, reject) => {
+            jobTimeoutTimer = setTimeout(() => {
+                cancelSignalTriggered = true;
+                reject(new Error(`JobExecutionTimeout: Job ${job.id} (${job.task_type}) exceeded safety limit of ${maxJobDurationMs / 60000} minutes`));
+            }, maxJobDurationMs);
+        });
         try {
-            if (job.task_type === 'IMPORT_CHAPTER') {
-                const globalSem = this.autotuner.getGlobalChapterSemaphore();
-                const sourceSem = this.autotuner.getSourceSemaphore(job.source, 2);
-                await globalSem.runExclusive(async () => {
-                    await sourceSem.runExclusive(async () => {
-                        await this.processJob(job, () => cancelSignalTriggered);
+            const executionPromise = (async () => {
+                if (job.task_type === 'IMPORT_CHAPTER') {
+                    const globalSem = this.autotuner.getGlobalChapterSemaphore();
+                    const sourceSem = this.autotuner.getSourceSemaphore(job.source, 2);
+                    await globalSem.runExclusive(async () => {
+                        await sourceSem.runExclusive(async () => {
+                            await this.processJob(job, () => cancelSignalTriggered);
+                        });
                     });
-                });
-            }
-            else {
-                await this.processJob(job, () => cancelSignalTriggered);
-            }
+                }
+                else {
+                    await this.processJob(job, () => cancelSignalTriggered);
+                }
+            })();
+            await Promise.race([executionPromise, timeoutPromise]);
         }
         finally {
+            if (jobTimeoutTimer)
+                clearTimeout(jobTimeoutTimer);
             heartbeat.stop();
         }
     }
@@ -1441,195 +1455,217 @@ export class ImporterEngine {
                     }
                 };
                 const waitForPage = () => {
-                    if (readyQueue.length > 0 || allDownloadsFinished || pipelineError || this.stopSignal) {
+                    if (readyQueue.length > 0 || allDownloadsFinished || pipelineError || this.stopSignal || isCancelled?.()) {
                         return Promise.resolve();
                     }
                     return new Promise((resolve) => {
-                        consumerResolvers.push(resolve);
+                        const timer = setTimeout(() => {
+                            const idx = consumerResolvers.indexOf(onResolve);
+                            if (idx !== -1)
+                                consumerResolvers.splice(idx, 1);
+                            resolve();
+                        }, 3000);
+                        const onResolve = () => {
+                            clearTimeout(timer);
+                            resolve();
+                        };
+                        consumerResolvers.push(onResolve);
                     });
                 };
                 // Producer: downloads raw page bytes from source CDN into memory
                 const producer = async () => {
-                    while (!this.stopSignal && !pipelineError) {
-                        // Memory backpressure check: wait if in-flight active buffer >= MAX_BUFFERED_BYTES (40MB)
-                        while (ImporterEngine.activeBufferedBytes >= ImporterEngine.MAX_BUFFERED_BYTES &&
-                            !this.stopSignal &&
-                            !pipelineError) {
-                            if (isCancelled?.()) {
+                    try {
+                        while (!this.stopSignal && !pipelineError && !isCancelled?.()) {
+                            // Memory backpressure check: wait if in-flight active buffer >= MAX_BUFFERED_BYTES (40MB)
+                            while (ImporterEngine.activeBufferedBytes >= ImporterEngine.MAX_BUFFERED_BYTES &&
+                                !this.stopSignal &&
+                                !pipelineError) {
+                                if (isCancelled?.()) {
+                                    pipelineError = new JobCancelledByStaffError(job.id);
+                                    notifyConsumer();
+                                    break;
+                                }
+                                await this.sleep(30);
+                            }
+                            // Safe Checkpoint: cancellation check
+                            if (isCancelled?.() || (nextDownloadIndex % 3 === 0 && (await this.queue.isCancelRequested(job.id)))) {
                                 pipelineError = new JobCancelledByStaffError(job.id);
                                 notifyConsumer();
                                 break;
                             }
-                            await this.sleep(30);
-                        }
-                        // Safe Checkpoint: cancellation check
-                        if (isCancelled?.() || (nextDownloadIndex % 3 === 0 && (await this.queue.isCancelRequested(job.id)))) {
-                            pipelineError = new JobCancelledByStaffError(job.id);
-                            notifyConsumer();
-                            break;
-                        }
-                        const idx = nextDownloadIndex++;
-                        if (idx >= expectedCount) {
-                            break;
-                        }
-                        let pageUrl = pageUrls[idx];
-                        const parsedUrl = new URL(pageUrl);
-                        await this.rateLimiter.acquire(parsedUrl.host);
-                        let pageBytes = null;
-                        let attempts = 0;
-                        let lastErr = null;
-                        const d0 = Date.now();
-                        while (attempts < 3 && !this.stopSignal && !pipelineError) {
-                            attempts++;
-                            try {
-                                pageBytes = await this.fetchImageBytes(pageUrl, effectiveSource);
-                                tDownload += Date.now() - d0;
-                                totalBytes += pageBytes.length;
-                                ImporterEngine.activeBufferedBytes += pageBytes.length;
+                            const idx = nextDownloadIndex++;
+                            if (idx >= expectedCount) {
                                 break;
                             }
-                            catch (err) {
-                                lastErr = err;
-                                if (attempts < 3 && !this.stopSignal && !pipelineError) {
-                                    await this.sleep(500 * attempts);
+                            let pageUrl = pageUrls[idx];
+                            const parsedUrl = new URL(pageUrl);
+                            await this.rateLimiter.acquire(parsedUrl.host);
+                            let pageBytes = null;
+                            let attempts = 0;
+                            let lastErr = null;
+                            const d0 = Date.now();
+                            while (attempts < 3 && !this.stopSignal && !pipelineError) {
+                                attempts++;
+                                try {
+                                    pageBytes = await this.fetchImageBytes(pageUrl, effectiveSource);
+                                    tDownload += Date.now() - d0;
+                                    totalBytes += pageBytes.length;
+                                    ImporterEngine.activeBufferedBytes += pageBytes.length;
+                                    break;
+                                }
+                                catch (err) {
+                                    lastErr = err;
+                                    if (attempts < 3 && !this.stopSignal && !pipelineError) {
+                                        await this.sleep(500 * attempts);
+                                    }
                                 }
                             }
-                        }
-                        if (!pageBytes) {
-                            const errMsg = (lastErr instanceof Error && lastErr.message) ? lastErr.message : (lastErr ? String(lastErr) : 'Erro desconhecido');
-                            const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
-                            let currentUrl = pageUrls[idx] || '';
-                            // MANIFEST REFRESH: Before blind failure, query upstream to see if URLs were updated
-                            if (is404 && !manifestRefreshed) {
-                                manifestRefreshed = true;
-                                try {
-                                    const refreshAdapter = this.registry.get(effectiveSource);
-                                    if (refreshAdapter) {
-                                        const refreshedUrls = await refreshAdapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber);
-                                        if (refreshedUrls && refreshedUrls.length === expectedCount) {
-                                            const isDifferent = refreshedUrls.some((u, i) => u !== pageUrls[i]);
-                                            if (isDifferent) {
-                                                this.logger.info(`MANIFEST_REFRESH: Upstream manifest refreshed with updated URLs for chapter ${chapterNumber} on ${effectiveSource}`, {
-                                                    workId,
-                                                    chapterNumber,
-                                                    oldUrl: currentUrl,
-                                                    newUrl: refreshedUrls[idx],
-                                                });
-                                                pageUrls = refreshedUrls;
-                                                currentUrl = pageUrls[idx] || '';
-                                                // Retry downloading with the fresh URL
-                                                try {
-                                                    pageBytes = await this.fetchImageBytes(currentUrl, effectiveSource);
-                                                    tDownload += Date.now() - d0;
-                                                    totalBytes += pageBytes.length;
-                                                    ImporterEngine.activeBufferedBytes += pageBytes.length;
+                            if (!pageBytes) {
+                                const errMsg = (lastErr instanceof Error && lastErr.message) ? lastErr.message : (lastErr ? String(lastErr) : 'Erro desconhecido');
+                                const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
+                                let currentUrl = pageUrls[idx] || '';
+                                // MANIFEST REFRESH: Before blind failure, query upstream to see if URLs were updated
+                                if (is404 && !manifestRefreshed) {
+                                    manifestRefreshed = true;
+                                    try {
+                                        const refreshAdapter = this.registry.get(effectiveSource);
+                                        if (refreshAdapter) {
+                                            const refreshedUrls = await refreshAdapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber);
+                                            if (refreshedUrls && refreshedUrls.length === expectedCount) {
+                                                const isDifferent = refreshedUrls.some((u, i) => u !== pageUrls[i]);
+                                                if (isDifferent) {
+                                                    this.logger.info(`MANIFEST_REFRESH: Upstream manifest refreshed with updated URLs for chapter ${chapterNumber} on ${effectiveSource}`, {
+                                                        workId,
+                                                        chapterNumber,
+                                                        oldUrl: currentUrl,
+                                                        newUrl: refreshedUrls[idx],
+                                                    });
+                                                    pageUrls = refreshedUrls;
+                                                    currentUrl = pageUrls[idx] || '';
+                                                    // Retry downloading with the fresh URL
+                                                    try {
+                                                        pageBytes = await this.fetchImageBytes(currentUrl, effectiveSource);
+                                                        tDownload += Date.now() - d0;
+                                                        totalBytes += pageBytes.length;
+                                                        ImporterEngine.activeBufferedBytes += pageBytes.length;
+                                                    }
+                                                    catch (freshErr) {
+                                                        lastErr = freshErr;
+                                                    }
                                                 }
-                                                catch (freshErr) {
-                                                    lastErr = freshErr;
+                                                else {
+                                                    this.logger.info(`MANIFEST_REFRESH: Upstream manifest verified, URLs unchanged for chapter ${chapterNumber} on ${effectiveSource}`);
                                                 }
-                                            }
-                                            else {
-                                                this.logger.info(`MANIFEST_REFRESH: Upstream manifest verified, URLs unchanged for chapter ${chapterNumber} on ${effectiveSource}`);
                                             }
                                         }
                                     }
+                                    catch (refreshErr) {
+                                        this.logger.warn(`MANIFEST_REFRESH failed for ${effectiveSource} ch ${chapterNumber}`, { error: refreshErr?.message });
+                                    }
                                 }
-                                catch (refreshErr) {
-                                    this.logger.warn(`MANIFEST_REFRESH failed for ${effectiveSource} ch ${chapterNumber}`, { error: refreshErr?.message });
+                                // If recovered by manifest refresh, proceed!
+                                if (pageBytes) {
+                                    readyQueue.push({ index: idx, pageBytes });
+                                    notifyConsumer();
+                                    continue;
                                 }
-                            }
-                            // If recovered by manifest refresh, proceed!
-                            if (pageBytes) {
-                                readyQueue.push({ index: idx, pageBytes });
+                                // Page Classification
+                                const pageSemantic = classifyPageUrl(currentUrl, idx, expectedCount);
+                                // Non-content pages (credits, recruitment, promo, warning) can be skipped with telemetry
+                                if (is404 && pageSemantic !== 'CONTENT_PAGE') {
+                                    failed404Count++;
+                                    this.logger.warn(`SKIPPED_NON_CONTENT_PAGE: Skipping non-content 404 page ${idx + 1}/${expectedCount} (${pageSemantic}): ${currentUrl}`, {
+                                        workId,
+                                        chapterNumber,
+                                        pageSemantic,
+                                        currentUrl,
+                                        failed404Count,
+                                    });
+                                    storedPages[idx] = { mediaId: '__SKIPPED_NON_CONTENT_PAGE__', width: 0, height: 0 };
+                                    continue;
+                                }
+                                // Narrative story page or persistent error: CANNOT be skipped!
+                                pipelineError = new NarrativePageUnavailableError(effectiveSource, idx, expectedCount, errMsg);
                                 notifyConsumer();
-                                continue;
+                                break;
                             }
-                            // Page Classification
-                            const pageSemantic = classifyPageUrl(currentUrl, idx, expectedCount);
-                            // Non-content pages (credits, recruitment, promo, warning) can be skipped with telemetry
-                            if (is404 && pageSemantic !== 'CONTENT_PAGE') {
-                                failed404Count++;
-                                this.logger.warn(`SKIPPED_NON_CONTENT_PAGE: Skipping non-content 404 page ${idx + 1}/${expectedCount} (${pageSemantic}): ${currentUrl}`, {
-                                    workId,
-                                    chapterNumber,
-                                    pageSemantic,
-                                    currentUrl,
-                                    failed404Count,
-                                });
-                                storedPages[idx] = { mediaId: '__SKIPPED_NON_CONTENT_PAGE__', width: 0, height: 0 };
-                                continue;
-                            }
-                            // Narrative story page or persistent error: CANNOT be skipped!
-                            pipelineError = new NarrativePageUnavailableError(effectiveSource, idx, expectedCount, errMsg);
+                            readyQueue.push({ index: idx, pageBytes });
                             notifyConsumer();
-                            break;
                         }
-                        readyQueue.push({ index: idx, pageBytes });
+                    }
+                    catch (err) {
+                        pipelineError = err;
                         notifyConsumer();
                     }
                 };
                 let completedUploadsCount = 0;
                 // Consumer: uploads downloaded pages to Storage Bridge / Telegram concurrently
                 const consumer = async () => {
-                    while (!this.stopSignal && !pipelineError) {
-                        if (isCancelled?.()) {
-                            pipelineError = new JobCancelledByStaffError(job.id);
-                            break;
-                        }
-                        while (readyQueue.length === 0) {
-                            if (allDownloadsFinished || pipelineError || this.stopSignal) {
-                                return;
+                    try {
+                        while (!this.stopSignal && !pipelineError && !isCancelled?.()) {
+                            if (isCancelled?.()) {
+                                pipelineError = new JobCancelledByStaffError(job.id);
+                                break;
                             }
-                            await waitForPage();
-                        }
-                        if (isCancelled?.()) {
-                            pipelineError = new JobCancelledByStaffError(job.id);
-                            break;
-                        }
-                        const item = readyQueue.shift();
-                        if (!item)
-                            continue;
-                        let pageBytes = item.pageBytes;
-                        try {
-                            const u0 = Date.now();
-                            const res = await globalMediaSemaphore.runExclusive(async () => {
-                                return await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial', targetChapterId);
-                            });
-                            const uploadDuration = Date.now() - u0;
-                            tUpload += uploadDuration;
-                            if (typeof this.storage.getRateLimiter === 'function') {
-                                const limiter = this.storage.getRateLimiter();
-                                if (typeof limiter.recordSuccess === 'function') {
-                                    limiter.recordSuccess(pageBytes.length, uploadDuration);
+                            while (readyQueue.length === 0) {
+                                if (allDownloadsFinished || pipelineError || this.stopSignal || isCancelled?.()) {
+                                    return;
+                                }
+                                await waitForPage();
+                            }
+                            if (isCancelled?.()) {
+                                pipelineError = new JobCancelledByStaffError(job.id);
+                                break;
+                            }
+                            const item = readyQueue.shift();
+                            if (!item)
+                                continue;
+                            let pageBytes = item.pageBytes;
+                            try {
+                                const u0 = Date.now();
+                                const res = await globalMediaSemaphore.runExclusive(async () => {
+                                    return await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial', targetChapterId);
+                                });
+                                const uploadDuration = Date.now() - u0;
+                                tUpload += uploadDuration;
+                                if (typeof this.storage.getRateLimiter === 'function') {
+                                    const limiter = this.storage.getRateLimiter();
+                                    if (typeof limiter.recordSuccess === 'function') {
+                                        limiter.recordSuccess(pageBytes.length, uploadDuration);
+                                    }
+                                }
+                                storedPages[item.index] = {
+                                    mediaId: res.mediaId,
+                                    width: res.width,
+                                    height: res.height,
+                                };
+                                completedUploadsCount++;
+                                diagnostics.updateJobProgress(job.id, completedUploadsCount);
+                                if (completedUploadsCount % 2 === 0 || completedUploadsCount === expectedCount) {
+                                    this.supabase.from('importer_queue').update({
+                                        progress_current: completedUploadsCount,
+                                        progress_total: expectedCount,
+                                        progress_stage: 'UPLOADING',
+                                    }).eq('id', job.id).then(() => { }, () => { });
                                 }
                             }
-                            storedPages[item.index] = {
-                                mediaId: res.mediaId,
-                                width: res.width,
-                                height: res.height,
-                            };
-                            completedUploadsCount++;
-                            diagnostics.updateJobProgress(job.id, completedUploadsCount);
-                            if (completedUploadsCount % 2 === 0 || completedUploadsCount === expectedCount) {
-                                this.supabase.from('importer_queue').update({
-                                    progress_current: completedUploadsCount,
-                                    progress_total: expectedCount,
-                                    progress_stage: 'UPLOADING',
-                                }).eq('id', job.id).then(() => { }, () => { });
+                            catch (err) {
+                                pipelineError = err;
+                                this.logger.error(`Failed to upload page ${item.index + 1}/${expectedCount}`, { error: err?.message });
+                                notifyConsumer();
+                                break;
+                            }
+                            finally {
+                                if (pageBytes) {
+                                    ImporterEngine.activeBufferedBytes = Math.max(0, ImporterEngine.activeBufferedBytes - pageBytes.length);
+                                    pageBytes = null;
+                                }
                             }
                         }
-                        catch (err) {
-                            pipelineError = err;
-                            this.logger.error(`Failed to upload page ${item.index + 1}/${expectedCount}`, { error: err?.message });
-                            notifyConsumer();
-                            break;
-                        }
-                        finally {
-                            if (pageBytes) {
-                                ImporterEngine.activeBufferedBytes = Math.max(0, ImporterEngine.activeBufferedBytes - pageBytes.length);
-                                pageBytes = null;
-                            }
-                        }
+                    }
+                    catch (err) {
+                        pipelineError = err;
+                        notifyConsumer();
                     }
                 };
                 const producerPromises = Array.from({ length: downloadConcurrency }, () => producer());
