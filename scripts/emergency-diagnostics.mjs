@@ -223,8 +223,10 @@ async function main() {
   console.log('\n====================================================');
   console.log('DIAGNOSTIC RUN COMPLETE');
   console.log('====================================================');
+  process.exit(0);
 }
 
 main().catch(err => {
   console.error('Fatal diagnostic failure:', err);
+  process.exit(1);
 });
