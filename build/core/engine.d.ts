@@ -5,6 +5,7 @@ import { computeCanonicalChapterKey } from './deduplication.js';
 import { HostRateLimiter } from './rate-limiter.js';
 import { Config } from '../config.js';
 import { AdaptiveAutotuner } from './concurrency.js';
+import { PublicationSafetyBarrier } from './publication-safety-barrier.js';
 export { computeCanonicalChapterKey };
 export declare class JobCancelledByStaffError extends Error {
     readonly jobId: string;
@@ -31,6 +32,7 @@ export declare class ImporterEngine {
     private checkpoints;
     private autotuner;
     private publicationBarrier;
+    private safetyBarrier;
     private reconciler;
     private circuitBreaker;
     private sharedNetworkDetector;
@@ -42,6 +44,7 @@ export declare class ImporterEngine {
     static readonly MAX_BUFFERED_BYTES: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
     getAutotuner(): AdaptiveAutotuner;
+    getSafetyBarrier(): PublicationSafetyBarrier;
     start(): Promise<void>;
     runStartupRecovery(): Promise<void>;
     /**
