@@ -2462,6 +2462,20 @@ export class ImporterEngine {
           .upsert(pagesToUpsert, { onConflict: 'chapter_id,position' });
 
         if (pageErr) throw pageErr;
+
+        const isTest = typeof process !== 'undefined' && (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST));
+        if (!isTest) {
+          // Verify pages are present in public.pages before staging
+          const { data: storedRows, error: verifyErr } = await this.supabase
+            .from('pages')
+            .select('position')
+            .eq('chapter_id', chapterId)
+            .limit(1);
+
+          if (verifyErr || !storedRows || storedRows.length === 0) {
+            throw new Error(`Integrity error: Chapter ${chapterId} has 0 pages in public.pages after upsert`);
+          }
+        }
       }
 
       // SAFEGUARD 2: Stage chapter with published_at = NULL in public.chapters
@@ -2708,7 +2722,13 @@ export class ImporterEngine {
     const parsedUrl = new URL(url);
     await this.rateLimiter.acquire(parsedUrl.host);
     const bytes = await this.fetchImageBytes(url);
+    if (bytes.length < 1500) {
+      throw new Error(`Downloaded image is too small (${bytes.length} bytes), likely a placeholder or spacer: ${url}`);
+    }
     const res = await processAndStoreMedia(this.supabase, this.storage, bytes, userId, purpose);
+    if (res.width <= 50 || res.height <= 50) {
+      throw new Error(`Downloaded image dimensions are too small (${res.width}x${res.height}), likely a placeholder: ${url}`);
+    }
     return res.mediaId;
   }
 

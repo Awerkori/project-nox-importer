@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { Logger } from './logger.js';
+import { decodeHtmlEntities } from '../sources/common/html-utils.js';
 
 export interface DeduplicationResult {
   workId: string | null;
@@ -269,10 +270,10 @@ export class DeduplicationEngine {
     const { error: insertWorkErr } = await this.supabase.from('works').insert({
       id: newWorkId,
       slug: uniqueSlug,
-      title: title.slice(0, 200),
-      aliases: candidate.aliases || [],
-      synopsis: candidate.synopsis?.slice(0, 5000) || '',
-      description: candidate.synopsis?.slice(0, 10000) || '',
+      title: decodeHtmlEntities(title).slice(0, 200),
+      aliases: (candidate.aliases || []).map((a) => decodeHtmlEntities(a)),
+      synopsis: decodeHtmlEntities(candidate.synopsis || '').slice(0, 5000),
+      description: decodeHtmlEntities(candidate.synopsis || '').slice(0, 10000),
       author: candidate.author?.slice(0, 100) || '',
       artist: candidate.artist?.slice(0, 100) || '',
       kind: candidate.kind || 'MANGA',
@@ -425,10 +426,11 @@ export class DeduplicationEngine {
 
     // Synopsis & Description
     if (candidate.synopsis && candidate.synopsis.trim().length > 10 && canUpdateField('synopsis', candidate.synopsis.trim())) {
-      updates.synopsis = candidate.synopsis.trim().slice(0, 5000);
+      const decodedSyn = decodeHtmlEntities(candidate.synopsis.trim());
+      updates.synopsis = decodedSyn.slice(0, 5000);
       prov.synopsis = { source, updated_at: now };
       if (canUpdateField('description', candidate.synopsis.trim())) {
-        updates.description = candidate.synopsis.trim().slice(0, 10000);
+        updates.description = decodedSyn.slice(0, 10000);
         prov.description = { source, updated_at: now };
       }
     }
