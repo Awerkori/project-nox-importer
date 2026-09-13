@@ -102,6 +102,19 @@ export const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig> 
   hanamiheaven: { maxChapters: 2, maxPagesPerChapter: 4 },
   hotcabaretscan: { maxChapters: 4, maxPagesPerChapter: 6 },
   amuy: { maxChapters: 4, maxPagesPerChapter: 6 },
+  arthurscan: { maxChapters: 4, maxPagesPerChapter: 6 },
+  borutoexplorer: { maxChapters: 4, maxPagesPerChapter: 6 },
+  covenscan: { maxChapters: 4, maxPagesPerChapter: 6 },
+  kamisamaexplorer: { maxChapters: 4, maxPagesPerChapter: 6 },
+  mrtenzus: { maxChapters: 4, maxPagesPerChapter: 6 },
+  ninjascan: { maxChapters: 4, maxPagesPerChapter: 6 },
+  yuriverso: { maxChapters: 4, maxPagesPerChapter: 6 },
+  tiamanhwa: { maxChapters: 4, maxPagesPerChapter: 6 },
+  pointzerotoons: { maxChapters: 4, maxPagesPerChapter: 6 },
+  apecomics: { maxChapters: 4, maxPagesPerChapter: 6 },
+  pizzariascan: { maxChapters: 4, maxPagesPerChapter: 6 },
+  acervohentai: { maxChapters: 4, maxPagesPerChapter: 6 },
+  inkapk: { maxChapters: 4, maxPagesPerChapter: 6 },
 };
 
 export const DEFAULT_SOURCE_LIMIT: SourceConcurrencyConfig = {

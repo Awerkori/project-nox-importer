@@ -19,6 +19,19 @@ import { TankouHentaiAdapter } from './tankouhentai/tankouhentai-adapter.js';
 import { CafeComYaoiAdapter } from './cafecomyaoi/cafecomyaoi-adapter.js';
 import { HotCabaretScanAdapter } from './hotcabaretscan/hotcabaretscan-adapter.js';
 import { AmuyAdapter } from './amuy/amuy-adapter.js';
+import { ArthurScanAdapter } from './arthurscan/arthurscan-adapter.js';
+import { BorutoExplorerAdapter } from './borutoexplorer/borutoexplorer-adapter.js';
+import { CovenScanAdapter } from './covenscan/covenscan-adapter.js';
+import { KamiSamaExplorerAdapter } from './kamisamaexplorer/kamisamaexplorer-adapter.js';
+import { MrTenzusAdapter } from './mrtenzus/mrtenzus-adapter.js';
+import { NinjaScanAdapter } from './ninjascan/ninjascan-adapter.js';
+import { YuriVersoAdapter } from './yuriverso/yuriverso-adapter.js';
+import { AcervoHentaiAdapter } from './acervohentai/acervohentai-adapter.js';
+import { InkapkAdapter } from './inkapk/inkapk-adapter.js';
+import { TiaManhwaAdapter } from './tiamanhwa/tiamanhwa-adapter.js';
+import { PointZeroToonsAdapter } from './pointzerotoons/pointzerotoons-adapter.js';
+import { ApeComicsAdapter } from './apecomics/apecomics-adapter.js';
+import { PizzariaScanAdapter } from './pizzariascan/pizzariascan-adapter.js';
 export class SourceRegistry {
     adapters = new Map();
     constructor(rateLimiter, bridgeToken, mangaUrl) {
@@ -30,7 +43,7 @@ export class SourceRegistry {
             this.register(new ManhastroAdapter(rateLimiter));
             this.register(new KuroAdapter(rateLimiter));
             this.register(new MangoToonsAdapter(rateLimiter));
-            // Register newly certified general PT-BR sources
+            // Register general PT-BR sources
             this.register(new TaimuMangasAdapter(rateLimiter));
             this.register(new EuphoriaScanAdapter(rateLimiter));
             this.register(new FleurBlancheAdapter(rateLimiter));
@@ -39,6 +52,17 @@ export class SourceRegistry {
             this.register(new MonteTaiAdapter(rateLimiter));
             this.register(new NebulosaScanAdapter(rateLimiter));
             this.register(new NocturneSummerAdapter(rateLimiter));
+            this.register(new ArthurScanAdapter(rateLimiter));
+            this.register(new BorutoExplorerAdapter(rateLimiter));
+            this.register(new CovenScanAdapter(rateLimiter));
+            this.register(new KamiSamaExplorerAdapter(rateLimiter));
+            this.register(new MrTenzusAdapter(rateLimiter));
+            this.register(new NinjaScanAdapter(rateLimiter));
+            this.register(new YuriVersoAdapter(rateLimiter));
+            this.register(new TiaManhwaAdapter(rateLimiter));
+            this.register(new PointZeroToonsAdapter(rateLimiter));
+            this.register(new ApeComicsAdapter(rateLimiter));
+            this.register(new PizzariaScanAdapter(rateLimiter));
             // Register adult sources (+18 / Adulto / Yaoi / Hentai)
             this.register(new HanamiHeavenAdapter(rateLimiter));
             this.register(new HipercoolAdapter(rateLimiter));
@@ -48,6 +72,8 @@ export class SourceRegistry {
             this.register(new CafeComYaoiAdapter(rateLimiter));
             this.register(new HotCabaretScanAdapter(rateLimiter));
             this.register(new AmuyAdapter(rateLimiter));
+            this.register(new AcervoHentaiAdapter(rateLimiter));
+            this.register(new InkapkAdapter(rateLimiter));
         }
     }
     register(adapter) {
