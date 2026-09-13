@@ -409,9 +409,9 @@ export class GlobalStorageRateLimiter {
 
   /**
    * Track transient upstream errors (502/503/network) from the Storage Bridge.
-   * Isolated failures (1 or 2) do NOT block or pause the global rate limiter.
-   * Repeated transient failures in a concentrated window (>= 3 in 30s) trigger
-   * a mild global pacing pause of 15 seconds and slight rate adjustment.
+   * Isolated failures do NOT block or pause the global rate limiter.
+   * Transient errors adjust rate target slightly if repeated, but NEVER place
+   * the global rate limiter into a hard blockedUntil lock (which is reserved for 429).
    */
   recordTransientError(): void {
     this.total502Count++;
@@ -419,21 +419,17 @@ export class GlobalStorageRateLimiter {
     this.recentTransientErrors = this.recentTransientErrors.filter((t) => now - t < 30_000);
     this.recentTransientErrors.push(now);
 
-    if (this.recentTransientErrors.length >= 3) {
-      const pacingMs = 15_000;
-      if (this.blockedUntil < now + pacingMs) {
-        this.blockedUntil = now + pacingMs;
-        this.currentRatePerMinute = Math.max(this.minRatePerMinute, this.currentRatePerMinute - 5);
-        this.ratePerSecond = this.currentRatePerMinute / 60;
-        this.capacity = this.currentRatePerMinute;
-        this.consecutiveSuccessfulUploads = 0;
-        this.logger.warn(
-          `[Storage AIMD 502] Concentrated 502/503s detected (${this.recentTransientErrors.length} in 30s). Applying 15s pacing, rate adjusted to ${this.currentRatePerMinute} req/min.`
-        );
-      }
+    if (this.recentTransientErrors.length >= 8) {
+      this.currentRatePerMinute = Math.max(this.minRatePerMinute, this.currentRatePerMinute - 2);
+      this.ratePerSecond = this.currentRatePerMinute / 60;
+      this.capacity = this.currentRatePerMinute;
+      this.consecutiveSuccessfulUploads = 0;
+      this.logger.warn(
+        `[Storage AIMD 502] Concentrated transient errors (${this.recentTransientErrors.length} in 30s). Adjusting rate to ${this.currentRatePerMinute} req/min without global blocking.`
+      );
     } else {
       this.logger.debug(
-        `Recorded isolated transient error (${this.recentTransientErrors.length}/3 in 30s). No global pacing applied.`
+        `Recorded isolated transient error (${this.recentTransientErrors.length}/8 in 30s). No rate adjustment applied.`
       );
     }
   }

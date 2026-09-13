@@ -1,6 +1,6 @@
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
-import { decryptVSecure, DEFAULT_ENC_KEY } from './kuro-decryptor.js';
+import { decryptVSecure, DEFAULT_ENC_KEY, fetchLiveEncryptionKey } from './kuro-decryptor.js';
 function slugify(text) {
     return text
         .normalize('NFD')
@@ -321,7 +321,13 @@ export class KuroAdapter {
                                 catch { }
                             }
                             if (json && typeof json === 'object' && '_v_secure' in json) {
-                                return decryptVSecure(json._v_secure, dataKey || undefined, this.encKey);
+                                try {
+                                    return decryptVSecure(json._v_secure, dataKey || undefined, this.encKey);
+                                }
+                                catch {
+                                    this.encKey = await fetchLiveEncryptionKey(this.baseUrl);
+                                    return decryptVSecure(json._v_secure, dataKey || undefined, this.encKey);
+                                }
                             }
                             return (json || bridgePayload.text);
                         }
@@ -388,7 +394,13 @@ export class KuroAdapter {
                 const json = await response.json();
                 // Check if payload is encrypted with _v_secure
                 if (json && typeof json === 'object' && '_v_secure' in json) {
-                    return decryptVSecure(json._v_secure, dataKey || undefined, this.encKey);
+                    try {
+                        return decryptVSecure(json._v_secure, dataKey || undefined, this.encKey);
+                    }
+                    catch {
+                        this.encKey = await fetchLiveEncryptionKey(this.baseUrl);
+                        return decryptVSecure(json._v_secure, dataKey || undefined, this.encKey);
+                    }
                 }
                 return json;
             }
@@ -522,5 +534,12 @@ export class KuroAdapter {
             });
             return [];
         }
+    }
+    getImageHeaders(_url) {
+        return {
+            Referer: `${this.baseUrl}/`,
+            Origin: this.baseUrl,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+        };
     }
 }

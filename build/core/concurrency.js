@@ -68,22 +68,50 @@ export class AsyncSemaphore {
         return this.waitQueue.length;
     }
 }
+export const SOURCE_CONCURRENCY_LIMITS = {
+    mangaflix: { maxChapters: 16, maxPagesPerChapter: 8 },
+    manhastro: { maxChapters: 12, maxPagesPerChapter: 6 },
+    mangotoons: { maxChapters: 8, maxPagesPerChapter: 6 },
+    megahentai: { maxChapters: 8, maxPagesPerChapter: 6 },
+    taimumangas: { maxChapters: 8, maxPagesPerChapter: 8 },
+    hipercool: { maxChapters: 6, maxPagesPerChapter: 6 },
+    nexus: { maxChapters: 6, maxPagesPerChapter: 6 },
+    instahentai: { maxChapters: 6, maxPagesPerChapter: 6 },
+    euphoriascan: { maxChapters: 6, maxPagesPerChapter: 6 },
+    fleurblanche: { maxChapters: 6, maxPagesPerChapter: 6 },
+    littletyrant: { maxChapters: 6, maxPagesPerChapter: 6 },
+    mangalivreto: { maxChapters: 6, maxPagesPerChapter: 6 },
+    montetai: { maxChapters: 6, maxPagesPerChapter: 6 },
+    nebulosascan: { maxChapters: 6, maxPagesPerChapter: 6 },
+    nocturnesummer: { maxChapters: 6, maxPagesPerChapter: 6 },
+    tankouhentai: { maxChapters: 6, maxPagesPerChapter: 6 },
+    cafecomyaoi: { maxChapters: 6, maxPagesPerChapter: 6 },
+    kuro: { maxChapters: 2, maxPagesPerChapter: 4 },
+    hanamiheaven: { maxChapters: 2, maxPagesPerChapter: 4 },
+    hotcabaretscan: { maxChapters: 4, maxPagesPerChapter: 6 },
+    amuy: { maxChapters: 4, maxPagesPerChapter: 6 },
+};
+export const DEFAULT_SOURCE_LIMIT = {
+    maxChapters: 4,
+    maxPagesPerChapter: 4,
+};
 const DEFAULT_AUTOTUNER_CONFIG = {
     minConcurrency: 1,
-    maxConcurrency: 5,
+    maxConcurrency: 64,
     initialConcurrency: 2,
-    requiredStableCycles: 2, // 2 cycles * 30s = 1 minute of continuous stability to scale up (was 4 cycles)
-    cooldownPeriodMs: 35 * 1000, // 35s cooldown after stress/scale-down (was 120s)
-    maxRssMb: 360, // Container is 512MB: keep RSS comfortably below 360MB (152MB margin)
-    maxHeapMb: 240, // Heap threshold
-    maxExternalAndBuffersMb: 120, // Native buffers + external (accommodates heavy Mango Toons webtoons)
-    maxEventLoopLagMs: 100, // Maximum tolerated event loop lag
+    requiredStableCycles: 2,
+    cooldownPeriodMs: 35 * 1000,
+    maxRssMb: 360,
+    maxHeapMb: 240,
+    maxExternalAndBuffersMb: 120,
+    maxEventLoopLagMs: 100,
 };
 export class AdaptiveAutotuner {
     logger = new Logger('Autotuner');
     globalChapterSemaphore;
     sourceSemaphores = new Map();
     globalMediaSemaphore;
+    globalInflightRequestSemaphore;
     currentConcurrency;
     stableCycleCount = 0;
     cooldownUntil = 0;
@@ -96,7 +124,8 @@ export class AdaptiveAutotuner {
         this.config = { ...DEFAULT_AUTOTUNER_CONFIG, ...config };
         this.currentConcurrency = this.config.initialConcurrency;
         this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency);
-        this.globalMediaSemaphore = new AsyncSemaphore(6); // Concurrent image upload limit to Telegram
+        this.globalMediaSemaphore = new AsyncSemaphore(24); // 24 concurrent image uploads across 9 shards & 2 bots
+        this.globalInflightRequestSemaphore = new AsyncSemaphore(96); // Global network in-flight download budget
     }
     getGlobalChapterSemaphore() {
         return this.globalChapterSemaphore;
@@ -104,10 +133,20 @@ export class AdaptiveAutotuner {
     getGlobalMediaSemaphore() {
         return this.globalMediaSemaphore;
     }
-    getSourceSemaphore(source, limitPerSource = 2) {
+    getGlobalInflightRequestSemaphore() {
+        return this.globalInflightRequestSemaphore;
+    }
+    getSourceLimits(source) {
+        return SOURCE_CONCURRENCY_LIMITS[source] || DEFAULT_SOURCE_LIMIT;
+    }
+    getSourcePageConcurrency(source) {
+        return this.getSourceLimits(source).maxPagesPerChapter;
+    }
+    getSourceSemaphore(source, limitPerSource) {
         let sem = this.sourceSemaphores.get(source);
         if (!sem) {
-            sem = new AsyncSemaphore(limitPerSource);
+            const configuredLimit = limitPerSource ?? this.getSourceLimits(source).maxChapters;
+            sem = new AsyncSemaphore(configuredLimit);
             this.sourceSemaphores.set(source, sem);
         }
         return sem;
@@ -163,7 +202,9 @@ export class AdaptiveAutotuner {
             this.stableCycleCount = 0;
             this.cooldownUntil = now + this.config.cooldownPeriodMs;
             const previous = this.currentConcurrency;
-            const target = Math.max(this.config.minConcurrency, previous - 1);
+            const target = previous <= 4
+                ? Math.max(this.config.minConcurrency, previous - 1)
+                : Math.max(this.config.minConcurrency, Math.floor(previous * 0.75));
             this.currentConcurrency = target;
             this.globalChapterSemaphore.setCapacity(target);
             this.logger.warn(`[Autotuner STRESS] Scaled down concurrency: ${previous} -> ${target}. Cause: ${stressReason}`, {
@@ -201,7 +242,8 @@ export class AdaptiveAutotuner {
         if (this.stableCycleCount >= this.config.requiredStableCycles &&
             this.currentConcurrency < this.config.maxConcurrency) {
             const previous = this.currentConcurrency;
-            const target = previous + 1;
+            const step = this.config.maxConcurrency > 10 ? 4 : 1;
+            const target = Math.min(this.config.maxConcurrency, previous + step);
             this.currentConcurrency = target;
             this.globalChapterSemaphore.setCapacity(target);
             this.stableCycleCount = 0; // Reset counter for the next tier

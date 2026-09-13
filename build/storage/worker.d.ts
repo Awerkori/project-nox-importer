@@ -8,12 +8,13 @@ export declare class NoxWorkerStorageError extends Error {
 export declare class NoxWorkerStorageProvider implements StorageProvider {
     private workerBaseUrl;
     private bridgeToken;
-    private transport;
+    private transport?;
     private logger;
     private rateLimiter;
     private lastBotReference;
     private lastShardId;
-    constructor(workerBaseUrl: string, bridgeToken: string, transport?: typeof fetch, rateLimiter?: GlobalStorageRateLimiter);
+    constructor(workerBaseUrl: string, bridgeToken: string, transport?: typeof fetch | undefined, rateLimiter?: GlobalStorageRateLimiter);
+    private executeRequest;
     getRateLimiter(): GlobalStorageRateLimiter;
     getLastBotReference(): string;
     getLastShardId(): string | null;

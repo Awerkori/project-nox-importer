@@ -23,4 +23,5 @@ export declare class HanamiHeavenAdapter implements SourceAdapter {
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
+    getImageHeaders(_url: string): Record<string, string>;
 }

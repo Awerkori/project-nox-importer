@@ -29,7 +29,7 @@ async function main() {
             storage = new MockStorageProvider();
         }
         else {
-            storage = new NoxWorkerStorageProvider(config.NOX_MANGA_URL, config.NOX_STORAGE_BRIDGE_TOKEN);
+            storage = new NoxWorkerStorageProvider(config.NOX_MANGA_URL, config.NOX_STORAGE_BRIDGE_TOKEN, fetch);
         }
     }
     else if (config.STORAGE_PROVIDER === 'telegram') {

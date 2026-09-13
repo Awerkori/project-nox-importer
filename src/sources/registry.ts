@@ -8,6 +8,18 @@ import { HanamiHeavenAdapter } from './hanamiheaven/hanamiheaven-adapter.js';
 import { HipercoolAdapter } from './hipercool/hipercool-adapter.js';
 import { InstaHentaiAdapter } from './instahentai/instahentai-adapter.js';
 import { MegaHentaiAdapter } from './megahentai/megahentai-adapter.js';
+import { TaimuMangasAdapter } from './taimumangas/taimumangas-adapter.js';
+import { EuphoriaScanAdapter } from './euphoriascan/euphoriascan-adapter.js';
+import { FleurBlancheAdapter } from './fleurblanche/fleurblanche-adapter.js';
+import { LittleTyrantAdapter } from './littletyrant/littletyrant-adapter.js';
+import { MangaLivreToAdapter } from './mangalivreto/mangalivreto-adapter.js';
+import { MonteTaiAdapter } from './montetai/montetai-adapter.js';
+import { NebulosaScanAdapter } from './nebulosascan/nebulosascan-adapter.js';
+import { NocturneSummerAdapter } from './nocturnesummer/nocturnesummer-adapter.js';
+import { TankouHentaiAdapter } from './tankouhentai/tankouhentai-adapter.js';
+import { CafeComYaoiAdapter } from './cafecomyaoi/cafecomyaoi-adapter.js';
+import { HotCabaretScanAdapter } from './hotcabaretscan/hotcabaretscan-adapter.js';
+import { AmuyAdapter } from './amuy/amuy-adapter.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 
 export class SourceRegistry {
@@ -23,11 +35,25 @@ export class SourceRegistry {
       this.register(new KuroAdapter(rateLimiter));
       this.register(new MangoToonsAdapter(rateLimiter));
 
-      // Register adult sources (+18 / Adulto / Pornhwa)
+      // Register newly certified general PT-BR sources
+      this.register(new TaimuMangasAdapter(rateLimiter));
+      this.register(new EuphoriaScanAdapter(rateLimiter));
+      this.register(new FleurBlancheAdapter(rateLimiter));
+      this.register(new LittleTyrantAdapter(rateLimiter));
+      this.register(new MangaLivreToAdapter(rateLimiter));
+      this.register(new MonteTaiAdapter(rateLimiter));
+      this.register(new NebulosaScanAdapter(rateLimiter));
+      this.register(new NocturneSummerAdapter(rateLimiter));
+
+      // Register adult sources (+18 / Adulto / Yaoi / Hentai)
       this.register(new HanamiHeavenAdapter(rateLimiter));
       this.register(new HipercoolAdapter(rateLimiter));
       this.register(new InstaHentaiAdapter(rateLimiter));
       this.register(new MegaHentaiAdapter(rateLimiter));
+      this.register(new TankouHentaiAdapter(rateLimiter));
+      this.register(new CafeComYaoiAdapter(rateLimiter));
+      this.register(new HotCabaretScanAdapter(rateLimiter));
+      this.register(new AmuyAdapter(rateLimiter));
     }
   }
 

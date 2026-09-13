@@ -12,6 +12,12 @@ export declare class AsyncSemaphore {
     get active(): number;
     get queued(): number;
 }
+export interface SourceConcurrencyConfig {
+    maxChapters: number;
+    maxPagesPerChapter: number;
+}
+export declare const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig>;
+export declare const DEFAULT_SOURCE_LIMIT: SourceConcurrencyConfig;
 export interface AutotunerConfig {
     minConcurrency: number;
     maxConcurrency: number;
@@ -28,6 +34,7 @@ export declare class AdaptiveAutotuner {
     private globalChapterSemaphore;
     private sourceSemaphores;
     private globalMediaSemaphore;
+    private globalInflightRequestSemaphore;
     private currentConcurrency;
     private stableCycleCount;
     private cooldownUntil;
@@ -38,6 +45,9 @@ export declare class AdaptiveAutotuner {
     constructor(config?: Partial<AutotunerConfig>);
     getGlobalChapterSemaphore(): AsyncSemaphore;
     getGlobalMediaSemaphore(): AsyncSemaphore;
+    getGlobalInflightRequestSemaphore(): AsyncSemaphore;
+    getSourceLimits(source: string): SourceConcurrencyConfig;
+    getSourcePageConcurrency(source: string): number;
     getSourceSemaphore(source: string, limitPerSource?: number): AsyncSemaphore;
     recordError(type: 'error' | 'ratelimit' | 'timeout'): void;
     evaluateCycle(): {

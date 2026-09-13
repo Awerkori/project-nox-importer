@@ -34,7 +34,7 @@ async function main() {
       rootLogger.warn('Bridge token not provided, falling back to mock storage for safety');
       storage = new MockStorageProvider();
     } else {
-      storage = new NoxWorkerStorageProvider(config.NOX_MANGA_URL, config.NOX_STORAGE_BRIDGE_TOKEN);
+      storage = new NoxWorkerStorageProvider(config.NOX_MANGA_URL, config.NOX_STORAGE_BRIDGE_TOKEN, fetch);
     }
   } else if (config.STORAGE_PROVIDER === 'telegram') {
     if (!config.TELEGRAM_BOT_TOKEN || !config.TELEGRAM_CHAT_ID) {
