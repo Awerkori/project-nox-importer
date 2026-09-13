@@ -32,6 +32,9 @@ export declare class ImporterEngine {
     private autotuner;
     private publicationBarrier;
     private reconciler;
+    private circuitBreaker;
+    private sharedNetworkDetector;
+    private admissionGate;
     private isRunning;
     private stopSignal;
     private abortController;

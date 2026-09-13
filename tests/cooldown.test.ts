@@ -34,6 +34,7 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
       create role service_role bypassrls;
       create schema if not exists auth;
       create schema if not exists storage;
+      create type public.scan_member_role as enum ('LEADER', 'VICE_LEADER', 'STAFF', 'MEMBER');
       create table if not exists auth.users (
         id uuid primary key,
         email text,

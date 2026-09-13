@@ -53,6 +53,7 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
       create role service_role bypassrls;
       create schema if not exists auth;
       create schema if not exists storage;
+      create type public.scan_member_role as enum ('LEADER', 'VICE_LEADER', 'STAFF', 'MEMBER');
       create table if not exists auth.users (id uuid primary key, email text, email_confirmed_at timestamptz, raw_user_meta_data jsonb);
       create or replace function auth.uid() returns uuid language sql stable as $$
         select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
@@ -79,6 +80,7 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
     await db.query(`insert into public.access_roles (user_id, role) values ($1, 'ADMIN') on conflict (user_id) do update set role = 'ADMIN'`, [botUserId]);
 
     // Setup sources in importer_sources
+    await db.query(`update public.importer_sources set enabled = false where id not in ('mangaflix', 'kuro')`);
     await db.query(`insert into public.importer_sources (id, name, base_url, status, enabled) values ('mangaflix', 'MangaFlix', 'https://mangaflix.org', 'ACTIVE', true) on conflict (id) do update set status = 'ACTIVE', enabled = true`);
     await db.query(`insert into public.importer_sources (id, name, base_url, status, enabled) values ('kuro', 'Kuro', 'https://kuro.moe', 'ACTIVE', true) on conflict (id) do update set status = 'ACTIVE', enabled = true`);
 
