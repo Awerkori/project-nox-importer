@@ -68,7 +68,7 @@ describe('NoxWorkerStorageProvider', () => {
         headers: expect.objectContaining({
           Authorization: `Bearer ${token}`,
           'Content-Type': 'image/webp',
-          'Content-Length': '5',
+          Connection: 'close',
         }),
       })
     );

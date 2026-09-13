@@ -68,7 +68,7 @@ export class ImporterEngine {
 
   // Ready Queue bounded buffer control in RAM (< 40MB max)
   public static activeBufferedBytes = 0;
-  public static readonly MAX_BUFFERED_BYTES = 40 * 1024 * 1024;
+  public static readonly MAX_BUFFERED_BYTES = 256 * 1024 * 1024;
 
   constructor(
     private supabase: SupabaseClient,
@@ -82,9 +82,16 @@ export class ImporterEngine {
     this.checkpoints = new CheckpointManager(supabase);
     this.publicationBarrier = new PublicationBarrier(supabase);
     this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
+    const requestedMax = config.MAX_CONCURRENT_CHAPTERS || 32;
     this.autotuner = new AdaptiveAutotuner({
-      initialConcurrency: Math.min(3, config.MAX_CONCURRENT_CHAPTERS || 3),
-      maxConcurrency: Math.max(3, config.MAX_CONCURRENT_CHAPTERS || 6),
+      initialConcurrency: Math.min(12, requestedMax),
+      maxConcurrency: Math.max(16, requestedMax),
+      maxRssMb: 380,
+      maxHeapMb: 240,
+      maxExternalAndBuffersMb: 120,
+      maxEventLoopLagMs: 100,
+      requiredStableCycles: 1,
+      cooldownPeriodMs: 20 * 1000,
     });
   }
 
@@ -112,6 +119,9 @@ export class ImporterEngine {
     // 3. Launch background discovery scheduler loop
     this.runDiscoveryLoop();
 
+    // 3b. Launch continuous catalog backfill loop (expands catalog across pages 1..N)
+    this.runCatalogBackfillLoop();
+
     // 4. Launch background publication sweep loop (every 10s)
     this.runPublicationSweepLoop();
 
@@ -129,6 +139,8 @@ export class ImporterEngine {
     for (const adapter of this.registry.getAll()) {
       activeWorkers.push(this.runSourceWorker(adapter.id));
     }
+    // Dedicated discovery worker lane to guarantee DISCOVER_WORKS and SYNC_WORK are NEVER starved by chapters
+    activeWorkers.push(this.runDiscoveryWorker());
     // General worker to process any unassigned or balancing jobs
     activeWorkers.push(this.runGeneralWorker());
 
@@ -235,6 +247,78 @@ export class ImporterEngine {
 
       // Check discovery every 30 seconds
       await this.sleep(30_000);
+    }
+  }
+
+  /**
+   * Continuous catalog backfill loop (expands catalog from ~100 to thousands of works).
+   * Traverses pages 1..N of active sources using persistent checkpoints.
+   */
+  private async runCatalogBackfillLoop(): Promise<void> {
+    await this.sleep(5_000); // 5s initial warmup
+
+    while (!this.stopSignal) {
+      try {
+        await this.scheduleCatalogBackfill();
+      } catch (err: any) {
+        this.logger.error('Error during catalog backfill scheduling', { error: err?.message });
+      }
+
+      // Check backfill opportunities every 20 seconds
+      await this.sleep(20_000);
+    }
+  }
+
+  private async scheduleCatalogBackfill(): Promise<void> {
+    const { data: sources, error } = await this.supabase
+      .from('importer_sources')
+      .select('*');
+
+    if (error || !sources) return;
+
+    for (const src of sources) {
+      if (!src.enabled || src.status !== 'ACTIVE') continue;
+
+      const checkpoint = await this.checkpoints.getCheckpoint(src.id);
+      // If completed pass, allow re-scan only after 12 hours
+      if (checkpoint?.metadata?.catalog_completed) {
+        const completedAt = checkpoint.metadata.catalog_completed_at
+          ? new Date(checkpoint.metadata.catalog_completed_at).getTime()
+          : 0;
+        const twelveHoursMs = 12 * 60 * 60 * 1000;
+        if (Date.now() - completedAt < twelveHoursMs) {
+          continue;
+        }
+      }
+
+      // Backpressure check: throttle backfill if there are already 10+ discovery/sync jobs queued for this source
+      try {
+        const { count: activeJobsCount } = await this.supabase
+          .from('importer_queue')
+          .select('id', { count: 'exact', head: true })
+          .eq('source', src.id)
+          .in('task_type', ['DISCOVER_WORKS', 'SYNC_WORK'])
+          .in('status', ['QUEUED', 'IMPORTING']);
+
+        if ((activeJobsCount ?? 0) >= 10) {
+          continue;
+        }
+      } catch {}
+
+      const currentCursor = checkpoint?.cursor_value || null;
+      const dedupeKey = `${src.id}:backfill:${currentCursor || 'page1'}:${Math.floor(Date.now() / 60000)}`;
+
+      await this.queue.enqueue(
+        'DISCOVER_WORKS',
+        src.id,
+        dedupeKey,
+        {
+          workTitle: `Varredura Contínua de Catálogo (${src.name || src.id})`,
+          mode: 'bootstrap',
+          cursor: currentCursor,
+        },
+        50
+      );
     }
   }
 
@@ -540,92 +624,216 @@ export class ImporterEngine {
     }
   }
 
+  private sourceEmptyCooldown = new Map<string, number>();
+  private sourceStatusCache = new Map<string, { enabled: boolean; status: string; cooldownUntil: number; cachedAt: number }>();
+
+  private async checkSourceAvailability(source: string): Promise<boolean> {
+    const now = Date.now();
+    let cached = this.sourceStatusCache.get(source);
+    if (!cached || now - cached.cachedAt > 10_000) {
+      const { data: src } = await this.supabase
+        .from('importer_sources')
+        .select('status, enabled, cooldown_until')
+        .eq('id', source)
+        .maybeSingle();
+
+      if (src) {
+        cached = {
+          enabled: src.enabled !== false,
+          status: src.status || 'ACTIVE',
+          cooldownUntil: src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0,
+          cachedAt: now,
+        };
+        this.sourceStatusCache.set(source, cached);
+      }
+    }
+
+    if (!cached) return true;
+    if (!cached.enabled || cached.status === 'PAUSED' || cached.status === 'DISABLED' || cached.status === 'UPSTREAM_BLOCKED') {
+      return false;
+    }
+    if (cached.status === 'COOLDOWN' && now < cached.cooldownUntil) {
+      return false;
+    }
+    return true;
+  }
+
   /**
-   * Dedicated worker loop for a specific source
+   * Dedicated multi-slot concurrent runner for a specific source.
+   * Runs up to sourceLimits.maxChapters parallel worker slots, acquiring jobs atomically.
    */
   private async runSourceWorker(source: string): Promise<void> {
-    this.logger.info(`Starting dedicated runner for source: ${source}`);
+    const limits = this.autotuner.getSourceLimits(source);
+    const concurrencySlots = Math.max(1, limits.maxChapters);
+    this.logger.info(`Starting dedicated runner pool for source: ${source} (${concurrencySlots} concurrent chapter slots)`);
+
+    const slotPromises = Array.from({ length: concurrencySlots }, (_, slotIndex) =>
+      this.runSourceSlot(source, slotIndex)
+    );
+
+    await Promise.all(slotPromises);
+  }
+
+  private async runSourceSlot(source: string, slotIndex: number): Promise<void> {
+    const sourceSem = this.autotuner.getSourceSemaphore(source);
+    const globalSem = this.autotuner.getGlobalChapterSemaphore();
 
     while (!this.stopSignal) {
       try {
-        // Verify source status before attempting to acquire
-        const { data: src } = await this.supabase
-          .from('importer_sources')
-          .select('status, enabled, cooldown_until')
-          .eq('id', source)
-          .maybeSingle();
-
-        if (src) {
-          if (!src.enabled || src.status === 'PAUSED' || src.status === 'DISABLED' || src.status === 'UPSTREAM_BLOCKED') {
-            await this.sleep(10_000);
-            continue;
-          }
-
-          if (src.status === 'COOLDOWN') {
-            const cooldownUntil = src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0;
-            if (Date.now() < cooldownUntil) {
-              await this.sleep(10_000);
-              continue;
-            }
-          }
+        // 1. Check if source had no jobs recently (backoff to avoid spin)
+        const emptyUntil = this.sourceEmptyCooldown.get(source) || 0;
+        if (Date.now() < emptyUntil) {
+          await this.sleep(1500);
+          continue;
         }
 
-        // Acquire job for this source
+        // 2. Check source enabled & not in cooldown
+        const isAvailable = await this.checkSourceAvailability(source);
+        if (!isAvailable) {
+          await this.sleep(5000);
+          continue;
+        }
+
+        // 3. Acquire source permit first
+        await sourceSem.acquire();
+
+        // 4. Acquire global chapter permit
+        try {
+          await globalSem.acquire();
+        } catch (semErr) {
+          sourceSem.release();
+          throw semErr;
+        }
+
+        // We hold BOTH permits! Now atomically acquire next job for this source from queue
+        let job: QueueJob | null = null;
+        try {
+          job = await this.queue.acquireNextJob(
+            Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
+            source
+          );
+        } catch (acquireErr: any) {
+          this.logger.warn(`Error acquiring job for source ${source}: ${acquireErr?.message}`);
+          globalSem.release();
+          sourceSem.release();
+          await this.sleep(2000);
+          continue;
+        }
+
+        if (!job) {
+          // No job available for this source: back off sibling slots for 4s
+          this.sourceEmptyCooldown.set(source, Date.now() + 4000);
+          globalSem.release();
+          sourceSem.release();
+          await this.sleep(2000);
+          continue;
+        }
+
+        // Job found: clear empty cooldown
+        this.sourceEmptyCooldown.delete(source);
+
+        // Process job with lease heartbeat and timeout protection
+        try {
+          await this.executeJobDirectly(job);
+        } finally {
+          globalSem.release();
+          sourceSem.release();
+        }
+
+        // Brief yield
+        await this.sleep(50);
+      } catch (err: any) {
+        this.logger.error(`Error in worker slot ${slotIndex} for source ${source}`, { error: err?.message });
+        await this.sleep(3000);
+      }
+    }
+  }
+
+  /**
+   * General fallback worker runner running multiple concurrent slots
+   */
+  private async runGeneralWorker(): Promise<void> {
+    this.logger.info('Starting general fallback runner pool (4 concurrent slots)');
+    const slots = Array.from({ length: 4 }, (_, i) => this.runGeneralSlot(i));
+    await Promise.all(slots);
+  }
+
+  private async runGeneralSlot(slotIndex: number): Promise<void> {
+    const globalSem = this.autotuner.getGlobalChapterSemaphore();
+
+    while (!this.stopSignal) {
+      try {
+        await globalSem.acquire();
+
+        let job: QueueJob | null = null;
+        try {
+          job = await this.queue.acquireNextJob(
+            Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60)
+          );
+        } catch (acquireErr: any) {
+          globalSem.release();
+          await this.sleep(3000);
+          continue;
+        }
+
+        if (!job) {
+          globalSem.release();
+          await this.sleep(6000);
+          continue;
+        }
+
+        const sourceSem = this.autotuner.getSourceSemaphore(job.source);
+        await sourceSem.acquire();
+
+        try {
+          await this.executeJobDirectly(job);
+        } finally {
+          sourceSem.release();
+          globalSem.release();
+        }
+
+        await this.sleep(50);
+      } catch (err: any) {
+        this.logger.error(`Error in general worker slot ${slotIndex}`, { error: err?.message });
+        await this.sleep(5000);
+      }
+    }
+  }
+
+  /**
+   * Dedicated discovery worker loop to guarantee discovery is NEVER starved by chapter backlog.
+   * Continuously claims DISCOVER_WORKS and SYNC_WORK jobs from the queue.
+   */
+  private async runDiscoveryWorker(): Promise<void> {
+    this.logger.info('Starting dedicated discovery lane runner');
+
+    while (!this.stopSignal) {
+      try {
         const job = await this.queue.acquireNextJob(
           Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
-          source
+          undefined,
+          'DISCOVERY'
         );
 
         if (!job) {
-          // Queue empty for this source: idle sleep 5 seconds
           await this.sleep(5_000);
           continue;
         }
 
-        // Process job with concurrency semaphores
-        await this.executeJobWithLimits(job);
-
-        // Continuous drain: immediately check for next job without delay
-        await this.sleep(50);
+        this.logger.info(`[Discovery Lane] Acquired ${job.task_type} for source ${job.source} (Job: ${job.id})`);
+        await this.executeJobDirectly(job);
+        await this.sleep(100);
       } catch (err: any) {
-        this.logger.error(`Error in worker loop for source ${source}`, { error: err?.message });
+        this.logger.error('Error in discovery worker lane', { error: err?.message });
         await this.sleep(5_000);
       }
     }
   }
 
   /**
-   * General worker loop to process jobs with no source filter
+   * Executes a job with active lease heartbeat and hard timeout watchdog.
    */
-  private async runGeneralWorker(): Promise<void> {
-    this.logger.info('Starting general fallback runner');
-
-    while (!this.stopSignal) {
-      try {
-        const job = await this.queue.acquireNextJob(
-          Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60)
-        );
-
-        if (!job) {
-          await this.sleep(10_000);
-          continue;
-        }
-
-        await this.executeJobWithLimits(job);
-        await this.sleep(50);
-      } catch (err: any) {
-        this.logger.error('Error in general worker loop', { error: err?.message });
-        await this.sleep(5_000);
-      }
-    }
-  }
-
-  /**
-   * Executes a job respecting global and per-source concurrency semaphores.
-   * Starts atomic lease heartbeat immediately upon acquisition so that the lease
-   * is continuously renewed even while waiting for concurrency semaphore permits.
-   */
-  private async executeJobWithLimits(job: QueueJob): Promise<void> {
+  private async executeJobDirectly(job: QueueJob): Promise<void> {
     let cancelSignalTriggered = false;
     const heartbeat = this.queue.startHeartbeat(
       job.id,
@@ -650,25 +858,29 @@ export class ImporterEngine {
     });
 
     try {
-      const executionPromise = (async () => {
-        if (job.task_type === 'IMPORT_CHAPTER') {
-          const globalSem = this.autotuner.getGlobalChapterSemaphore();
-          const sourceSem = this.autotuner.getSourceSemaphore(job.source, 2);
-
-          await globalSem.runExclusive(async () => {
-            await sourceSem.runExclusive(async () => {
-              await this.processJob(job, () => cancelSignalTriggered);
-            });
-          });
-        } else {
-          await this.processJob(job, () => cancelSignalTriggered);
-        }
-      })();
-
+      const executionPromise = this.processJob(job, () => cancelSignalTriggered);
       await Promise.race([executionPromise, timeoutPromise]);
     } finally {
       if (jobTimeoutTimer) clearTimeout(jobTimeoutTimer);
       heartbeat.stop();
+    }
+  }
+
+  /**
+   * Backward-compatible entrypoint used by step() and test suites.
+   */
+  private async executeJobWithLimits(job: QueueJob): Promise<void> {
+    if (job.task_type === 'IMPORT_CHAPTER') {
+      const globalSem = this.autotuner.getGlobalChapterSemaphore();
+      const sourceSem = this.autotuner.getSourceSemaphore(job.source);
+
+      await globalSem.runExclusive(async () => {
+        await sourceSem.runExclusive(async () => {
+          await this.executeJobDirectly(job);
+        });
+      });
+    } else {
+      await this.executeJobDirectly(job);
     }
   }
 
@@ -741,18 +953,40 @@ export class ImporterEngine {
         try {
           const q = this.supabase
             .from('importer_queue')
-            .select('id, status')
+            .select('id, status, created_at')
             .eq('task_type', 'DISCOVER_WORKS')
             .eq('source', src.id);
 
           const { data: existingActive } = typeof (q as any).in === 'function'
-            ? await (q as any).in('status', ['QUEUED', 'IMPORTING', 'RETRY']).limit(1)
+            ? await (q as any).in('status', ['QUEUED', 'IMPORTING', 'RETRY']).limit(10)
             : await q.limit(10);
 
           if (existingActive && Array.isArray(existingActive)) {
-            hasActive = existingActive.some((j: any) => ['QUEUED', 'IMPORTING', 'RETRY'].includes(j.status));
+            const DISCOVERY_TTL_MS = 60 * 60 * 1000; // 1 hour TTL
+            for (const j of existingActive) {
+              const age = now - new Date(j.created_at).getTime();
+              if (['QUEUED', 'RETRY'].includes(j.status) && age > DISCOVERY_TTL_MS) {
+                this.logger.warn(`Consolidating stale DISCOVER_WORKS job ${j.id} for ${src.id} (age: ${Math.round(age / 60000)}m)`, {
+                  jobId: j.id,
+                  source: src.id,
+                  ageMinutes: Math.round(age / 60000),
+                });
+                await this.supabase
+                  .from('importer_queue')
+                  .update({
+                    status: 'SUPERSEDED',
+                    last_error: 'superseded_stale_discovery_ttl',
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq('id', j.id);
+              } else if (['QUEUED', 'IMPORTING', 'RETRY'].includes(j.status)) {
+                hasActive = true;
+              }
+            }
           }
-        } catch {}
+        } catch (err: any) {
+          this.logger.warn('Error checking existing active discoveries', { error: err?.message });
+        }
 
         if (hasActive) {
           continue;
@@ -765,14 +999,10 @@ export class ImporterEngine {
           dedupeKey,
           {
             workTitle: `Varredura de Catálogo (${src.name || src.id})`,
+            mode: 'maintenance',
           },
           10
         );
-
-        await this.supabase
-          .from('importer_sources')
-          .update({ last_sync_at: new Date().toISOString() })
-          .eq('id', src.id);
       }
     }
   }
@@ -1065,15 +1295,16 @@ export class ImporterEngine {
 
     const checkpoint = await this.checkpoints.getCheckpoint(job.source);
     const isCompleted = Boolean(checkpoint?.metadata?.catalog_completed);
-    const mode: 'bootstrap' | 'maintenance' = isCompleted ? 'maintenance' : 'bootstrap';
+    const mode: 'bootstrap' | 'maintenance' = job.payload?.mode || (isCompleted ? 'maintenance' : 'bootstrap');
+    const currentCursor = job.payload?.cursor !== undefined ? job.payload.cursor : checkpoint?.cursor_value;
 
     this.logger.info(`Running ${mode} discovery for source ${job.source}`, {
       source: job.source,
       mode,
-      cursor: checkpoint?.cursor_value,
+      cursor: currentCursor,
     });
 
-    const { works, nextCursor } = await adapter.fetchUpdatedWorks(checkpoint?.cursor_value, { mode });
+    const { works, nextCursor } = await adapter.fetchUpdatedWorks(currentCursor, { mode });
 
     this.logger.info('Discovered updated works', {
       source: job.source,
@@ -1101,14 +1332,17 @@ export class ImporterEngine {
       if (!nextCursor || works.length === 0) {
         await this.checkpoints.markCatalogCompleted(job.source, null, {
           lastDiscoveredCount: works.length,
-          lastBootstrapCursor: checkpoint?.cursor_value,
+          lastBootstrapCursor: currentCursor,
         });
+        this.logger.info(`[Catalog Backfill] Source ${job.source} reached end of catalog. Backfill pass completed.`);
       } else {
         await this.checkpoints.saveCheckpoint(job.source, nextCursor, {
           ...(checkpoint?.metadata || {}),
           catalog_completed: false,
           lastDiscoveredCount: works.length,
+          lastBackfillAt: new Date().toISOString(),
         });
+        this.logger.info(`[Catalog Backfill] Source ${job.source} advanced to cursor: ${nextCursor}`);
       }
     } else {
       const updatedCursor = (nextCursor ?? checkpoint?.cursor_value) ?? null;
@@ -1119,6 +1353,12 @@ export class ImporterEngine {
         lastDiscoveredCount: works.length,
       });
     }
+
+    // Update last_sync_at now that discovery actually executed and succeeded
+    await this.supabase
+      .from('importer_sources')
+      .update({ last_sync_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq('id', job.source);
   }
 
   private async handleSyncWork(job: QueueJob): Promise<void> {
@@ -1367,10 +1607,23 @@ export class ImporterEngine {
           .upsert(chunk, { onConflict: 'source,source_chapter_id' });
       }
 
-      // 2. Batch enqueue tasks to importer_queue
-      const queueJobs = chaptersToEnqueue.map((ch) => {
+      // 2. Batch enqueue tasks to importer_queue with Fair Scheduling
+      const queueJobs = chaptersToEnqueue.map((ch, idx) => {
         const dedupeKey = `${job.source}:chapter:${ch.sourceChapterId}`;
         const chKey = this.computeCanonicalChapterKey(ch.number, ch.title);
+
+        // Fair Scheduling:
+        // - Staff requested chapters: priority 100 (Absolute Priority)
+        // - First 5 chapters + Latest 5 chapters of new works: priority 35 (Fast bootstrap & new release catch-up)
+        // - Deep historical backlog (middle chapters): priority 20
+        // This ensures works with 1,000+ chapters never starve other works!
+        let priority = chapterPriority;
+        if (!isStaffPriority) {
+          const isInitial = idx < 5;
+          const isLatest = idx >= chaptersToEnqueue.length - 5;
+          priority = isInitial || isLatest ? 35 : 20;
+        }
+
         return {
           taskType: 'IMPORT_CHAPTER' as const,
           source: job.source,
@@ -1385,7 +1638,7 @@ export class ImporterEngine {
             expectedPageCount: ch.pageCount || null,
             staffRequested: isStaffPriority,
           },
-          priority: chapterPriority,
+          priority,
           chapterSortKey: chKey.sortKey,
         };
       });
@@ -1663,14 +1916,16 @@ export class ImporterEngine {
           expectedCount
         ).fill(null);
 
-        // Download pool concurrency: 8 in priority mode, default from config (6)
+        // Per-source page download concurrency & priority boost
+        const baseSourcePageConcurrency = this.autotuner.getSourcePageConcurrency(effectiveSource);
         const downloadConcurrency = isPriority
-          ? Math.min(8, Math.max(6, (this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY || 3) * 2))
-          : (this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY || 6);
+          ? Math.min(12, Math.max(8, baseSourcePageConcurrency * 2))
+          : Math.min(baseSourcePageConcurrency, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY || 8);
 
-        // Upload pool concurrency: up to 4, bounded by autotuner and globalMediaSemaphore
-        const uploadConcurrency = Math.min(4, Math.max(2, this.autotuner.getCurrentConcurrency()));
+        // Upload pool concurrency: up to 6, bounded by autotuner and globalMediaSemaphore
+        const uploadConcurrency = Math.min(6, Math.max(2, Math.floor(this.autotuner.getCurrentConcurrency() / 2)));
         const globalMediaSemaphore = this.autotuner.getGlobalMediaSemaphore();
+        const globalInflightRequestSemaphore = this.autotuner.getGlobalInflightRequestSemaphore();
 
         interface DownloadedPage {
           index: number;
@@ -1715,6 +1970,7 @@ export class ImporterEngine {
           try {
             while (!this.stopSignal && !pipelineError && !isCancelled?.()) {
             // Memory backpressure check: wait if in-flight active buffer >= MAX_BUFFERED_BYTES (40MB)
+            let backpressureWaitCount = 0;
             while (
               ImporterEngine.activeBufferedBytes >= ImporterEngine.MAX_BUFFERED_BYTES &&
               !this.stopSignal &&
@@ -1726,6 +1982,17 @@ export class ImporterEngine {
                 break;
               }
               await this.sleep(30);
+              backpressureWaitCount++;
+              // Watchdog: If backpressure has been waiting for more than 4.5s and readyQueue is empty,
+              // or waiting more than 15s continuously, reset phantom activeBufferedBytes to avoid deadlock
+              if ((backpressureWaitCount > 150 && readyQueue.length === 0) || backpressureWaitCount > 500) {
+                this.logger.warn('Backpressure watchdog triggered: resetting phantom activeBufferedBytes to 0', {
+                  stuckBytes: ImporterEngine.activeBufferedBytes,
+                  readyQueueLength: readyQueue.length,
+                });
+                ImporterEngine.activeBufferedBytes = 0;
+                break;
+              }
             }
 
             // Safe Checkpoint: cancellation check
@@ -1752,7 +2019,9 @@ export class ImporterEngine {
             while (attempts < 3 && !this.stopSignal && !pipelineError) {
               attempts++;
               try {
-                pageBytes = await this.fetchImageBytes(pageUrl, effectiveSource);
+                pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
+                  return await this.fetchImageBytes(pageUrl, effectiveSource);
+                });
                 tDownload += Date.now() - d0;
                 totalBytes += pageBytes.length;
                 ImporterEngine.activeBufferedBytes += pageBytes.length;
@@ -1939,11 +2208,25 @@ export class ImporterEngine {
         const producerPromises = Array.from({ length: downloadConcurrency }, () => producer());
         const consumerPromises = Array.from({ length: uploadConcurrency }, () => consumer());
 
-        await Promise.all(producerPromises);
-        allDownloadsFinished = true;
-        notifyConsumer();
+        try {
+          await Promise.all(producerPromises);
+          allDownloadsFinished = true;
+          notifyConsumer();
 
-        await Promise.all(consumerPromises);
+          await Promise.all(consumerPromises);
+        } finally {
+          // RAII Cleanup: Drain any unconsumed items left in readyQueue
+          // to prevent leaking bytes into ImporterEngine.activeBufferedBytes
+          while (readyQueue.length > 0) {
+            const leftover = readyQueue.shift();
+            if (leftover?.pageBytes) {
+              ImporterEngine.activeBufferedBytes = Math.max(
+                0,
+                ImporterEngine.activeBufferedBytes - leftover.pageBytes.length
+              );
+            }
+          }
+        }
 
         if (pipelineError) {
           // Type assertion: TS can't track mutations from async closures (producer/consumer)

@@ -52,6 +52,12 @@ export declare class ImporterEngine {
      */
     private runDiscoveryLoop;
     /**
+     * Continuous catalog backfill loop (expands catalog from ~100 to thousands of works).
+     * Traverses pages 1..N of active sources using persistent checkpoints.
+     */
+    private runCatalogBackfillLoop;
+    private scheduleCatalogBackfill;
+    /**
      * Periodic publication sweep loop (every 10s) to unblock STAGED chapters
      */
     private runPublicationSweepLoop;
@@ -85,18 +91,31 @@ export declare class ImporterEngine {
      * Periodic autotuner telemetry & evaluation loop (every 30s)
      */
     private runAutotunerLoop;
+    private sourceEmptyCooldown;
+    private sourceStatusCache;
+    private checkSourceAvailability;
     /**
-     * Dedicated worker loop for a specific source
+     * Dedicated multi-slot concurrent runner for a specific source.
+     * Runs up to sourceLimits.maxChapters parallel worker slots, acquiring jobs atomically.
      */
     private runSourceWorker;
+    private runSourceSlot;
     /**
-     * General worker loop to process jobs with no source filter
+     * General fallback worker runner running multiple concurrent slots
      */
     private runGeneralWorker;
+    private runGeneralSlot;
     /**
-     * Executes a job respecting global and per-source concurrency semaphores.
-     * Starts atomic lease heartbeat immediately upon acquisition so that the lease
-     * is continuously renewed even while waiting for concurrency semaphore permits.
+     * Dedicated discovery worker loop to guarantee discovery is NEVER starved by chapter backlog.
+     * Continuously claims DISCOVER_WORKS and SYNC_WORK jobs from the queue.
+     */
+    private runDiscoveryWorker;
+    /**
+     * Executes a job with active lease heartbeat and hard timeout watchdog.
+     */
+    private executeJobDirectly;
+    /**
+     * Backward-compatible entrypoint used by step() and test suites.
      */
     private executeJobWithLimits;
     /**

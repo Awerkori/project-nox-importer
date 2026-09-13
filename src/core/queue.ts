@@ -211,15 +211,22 @@ export class ImporterQueue {
 
   /**
    * Acquire the next job atomically using SKIP LOCKED stored procedure,
-   * optionally filtered by source for concurrent source runners.
+   * optionally filtered by source and/or task type for dedicated runner lanes.
    */
-  async acquireNextJob(leaseDurationMinutes: number = 5, source?: string): Promise<QueueJob | null> {
+  async acquireNextJob(
+    leaseDurationMinutes: number = 5,
+    source?: string,
+    taskType?: string
+  ): Promise<QueueJob | null> {
     const params: Record<string, any> = {
       p_worker_id: this.workerId,
       p_lease_duration: `${leaseDurationMinutes} minutes`,
     };
     if (source) {
       params.p_source = source;
+    }
+    if (taskType) {
+      params.p_task_type = taskType;
     }
 
     const { data, error } = await this.supabase.rpc('importer_acquire_job', params);

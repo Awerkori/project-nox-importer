@@ -92,9 +92,9 @@ export declare class GlobalStorageRateLimiter {
     recordRateLimit(retryAfterSeconds?: number): void;
     /**
      * Track transient upstream errors (502/503/network) from the Storage Bridge.
-     * Isolated failures (1 or 2) do NOT block or pause the global rate limiter.
-     * Repeated transient failures in a concentrated window (>= 3 in 30s) trigger
-     * a mild global pacing pause of 15 seconds and slight rate adjustment.
+     * Isolated failures do NOT block or pause the global rate limiter.
+     * Transient errors adjust rate target slightly if repeated, but NEVER place
+     * the global rate limiter into a hard blockedUntil lock (which is reserved for 429).
      */
     recordTransientError(): void;
     getRecentTransientErrorCount(): number;

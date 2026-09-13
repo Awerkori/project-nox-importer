@@ -69,8 +69,8 @@ describe('Storage Resilience & Rate Limiter Differentiation', () => {
     expect(providerKey).toBe('tg-file-success-after-502');
     expect(callCount).toBe(2);
 
-    // Verify first retry delay was ~4000ms + jitter (between 4000 and 5500)
-    const backoffDelay = delays.find((d) => d >= 4000 && d <= 5500);
+    // Verify first retry delay was ~1000ms + jitter (between 1000 and 1500)
+    const backoffDelay = delays.find((d) => d >= 1000 && d <= 1500);
     expect(backoffDelay).toBeDefined();
 
     // Isolated 502 (1 failure) should NOT have blocked the global rate limiter!
@@ -80,26 +80,16 @@ describe('Storage Resilience & Rate Limiter Differentiation', () => {
     vi.restoreAllMocks();
   });
 
-  it('triggers 15s global pacing only when 3 or more transient errors occur in 30s', async () => {
+  it('does NOT block the global rate limiter on 502/503 transient errors (reserves isBlocked for 429)', async () => {
     const rateLimiter = new GlobalStorageRateLimiter({ maxRequestsPerMinute: 60, minIntervalMs: 10 });
 
     expect(rateLimiter.isBlocked()).toBe(false);
 
-    // Error 1: isolated
-    rateLimiter.recordTransientError();
-    expect(rateLimiter.isBlocked()).toBe(false);
-    expect(rateLimiter.getRecentTransientErrorCount()).toBe(1);
-
-    // Error 2: isolated
-    rateLimiter.recordTransientError();
-    expect(rateLimiter.isBlocked()).toBe(false);
-    expect(rateLimiter.getRecentTransientErrorCount()).toBe(2);
-
-    // Error 3: concentrated failure pattern in 30s window -> activates mild pacing (15s)
-    rateLimiter.recordTransientError();
-    expect(rateLimiter.isBlocked()).toBe(true);
-    expect(rateLimiter.getRecentTransientErrorCount()).toBe(3);
-    expect(rateLimiter.getBlockedRemainingMs()).toBeGreaterThan(14000);
-    expect(rateLimiter.getBlockedRemainingMs()).toBeLessThanOrEqual(15000);
+    // Transient errors adjust rate but do NOT block the global limiter
+    for (let i = 1; i <= 10; i++) {
+      rateLimiter.recordTransientError();
+      expect(rateLimiter.isBlocked()).toBe(false);
+      expect(rateLimiter.getRecentTransientErrorCount()).toBe(i);
+    }
   });
 });

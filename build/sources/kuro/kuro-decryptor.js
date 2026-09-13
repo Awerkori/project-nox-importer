@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 const HOSTNAME_PART = 'kuromangas.com::v2';
 const ANTIBOT = 'x9_4v2_b';
-export const DEFAULT_ENC_KEY = 'i67ato8l6sai74jyIHfE2oMmieshoforanuYTusF4jKdqEwhUEft9dsadcxzsaipnjm8';
+export const DEFAULT_ENC_KEY = 'i7ato8l6sai74jyIHfE2oMmieshoforanuYTusF4jKdqEwhUEft9dsadcxzsaipnjm8';
 function uadd(a, b) {
     return (a + b) >>> 0;
 }
@@ -188,4 +188,37 @@ export function decryptVSecure(vSecure, dataKey, encKey = DEFAULT_ENC_KEY) {
         }
     }
     return parsed;
+}
+let _cachedLiveKey = null;
+let _lastKeyFetch = 0;
+export async function fetchLiveEncryptionKey(baseUrl = 'https://kuromangas.com') {
+    const now = Date.now();
+    if (_cachedLiveKey && now - _lastKeyFetch < 3600_000) {
+        return _cachedLiveKey;
+    }
+    try {
+        const htmlRes = await fetch(baseUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+            },
+            signal: AbortSignal.timeout(10_000),
+        });
+        const html = await htmlRes.text();
+        const scriptMatch = html.match(/src="([^"]*index-[^"]+\.js)"/i) || html.match(/src="(\/assets\/index-[^"]+\.js)"/i);
+        if (scriptMatch) {
+            const scriptUrl = scriptMatch[1].startsWith('http')
+                ? scriptMatch[1]
+                : `${baseUrl.replace(/\/$/, '')}${scriptMatch[1]}`;
+            const jsRes = await fetch(scriptUrl, { signal: AbortSignal.timeout(15_000) });
+            const js = await jsRes.text();
+            const keyMatch = js.match(/ENCRYPTION_KEY\s*[:=]\s*["']([^"']+)["']/);
+            if (keyMatch && keyMatch[1]) {
+                _cachedLiveKey = keyMatch[1];
+                _lastKeyFetch = now;
+                return _cachedLiveKey;
+            }
+        }
+    }
+    catch { }
+    return DEFAULT_ENC_KEY;
 }
