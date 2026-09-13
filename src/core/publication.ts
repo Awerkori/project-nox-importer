@@ -203,11 +203,12 @@ export class PublicationBarrier {
 
   /**
    * Cascading publication of all consecutive STAGED chapters for a work.
+   * Bounded by maxBatch to guarantee multi-work fairness.
    */
-  private async runCascadeUnderLock(workId: string): Promise<number> {
+  private async runCascadeUnderLock(workId: string, maxBatch: number = 8): Promise<number> {
     let cascadeCount = 0;
 
-    while (true) {
+    while (cascadeCount < maxBatch) {
       // Find the next STAGED chapter with lowest sort key
       const { data: stagedList, error } = await this.supabase
         .from('importer_chapter_mappings')
@@ -316,9 +317,9 @@ export class PublicationBarrier {
 
   /**
    * Periodic or startup sweep: checks all works that have STAGED chapters
-   * and attempts to publish them.
+   * and publishes them in round-robin batches across distinct works to ensure fairness.
    */
-  async sweepStagedPublications(): Promise<number> {
+  async sweepStagedPublications(maxTotalPublications: number = 40, perWorkBurst: number = 6): Promise<number> {
     try {
       const { data: stagedWorks, error } = await this.supabase
         .from('importer_chapter_mappings')
@@ -332,17 +333,32 @@ export class PublicationBarrier {
 
       const distinctWorkIds = Array.from(new Set(stagedWorks.map((r) => r.work_id)));
       let publishedTotal = 0;
+      let activeWorkIds = [...distinctWorkIds];
 
-      for (const workId of distinctWorkIds) {
-        const lock = this.getWorkLock(workId);
-        const count = await lock.runExclusive(async () => {
-          return this.runCascadeUnderLock(workId);
-        });
-        publishedTotal += count;
+      // Round-robin iteration across distinct works until backlog is cleared or maxTotalPublications reached
+      while (activeWorkIds.length > 0 && publishedTotal < maxTotalPublications) {
+        const nextActive: string[] = [];
+
+        for (const workId of activeWorkIds) {
+          if (publishedTotal >= maxTotalPublications) break;
+
+          const lock = this.getWorkLock(workId);
+          const count = await lock.runExclusive(async () => {
+            return this.runCascadeUnderLock(workId, perWorkBurst);
+          });
+
+          publishedTotal += count;
+          // If this work published its full burst limit, it may have additional staged chapters for next round
+          if (count >= perWorkBurst) {
+            nextActive.push(workId);
+          }
+        }
+
+        activeWorkIds = nextActive;
       }
 
       if (publishedTotal > 0) {
-        this.logger.info(`Sweep published ${publishedTotal} staged chapter(s) across ${distinctWorkIds.length} work(s)`);
+        this.logger.info(`Sweep published ${publishedTotal} staged chapter(s) fairly across ${distinctWorkIds.length} work(s)`);
       }
 
       return publishedTotal;
