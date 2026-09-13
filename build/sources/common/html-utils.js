@@ -24,10 +24,11 @@ export function stripHtml(str) {
     return decodeHtmlEntities(str.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
 }
 export function extractChapterNumber(str) {
-    const match = str.match(/(?:capitulo|cap[ií]tulo|cap\.?|ep\.?|ch\.?)[-_\s]*(\d+(?:[.,]\d+)?)/i) ||
-        str.match(/(\d+(?:[.,]\d+)?)/);
+    const match = str.match(/(?:capitulo|cap[ií]tulo|cap\.?|ep\.?|ch\.?)[-_\s]*(\d+(?:[.,]\d+|-\d+)?)/i) ||
+        str.match(/(\d+(?:[.,]\d+|-\d+)?)/);
     if (!match)
         return 0;
-    const num = parseFloat(match[1].replace(',', '.'));
+    const raw = match[1].replace('-', '.').replace(',', '.');
+    const num = parseFloat(raw);
     return isNaN(num) ? 0 : Number(num.toFixed(4));
 }
