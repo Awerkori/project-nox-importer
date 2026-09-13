@@ -83,6 +83,12 @@ export class SourceRegistry {
             this.adapters.set('nexus_mangas', adapter);
             this.adapters.set('nexusmangas', adapter);
         }
+        if (adapter.id === 'kuro') {
+            this.adapters.set('kuromangas', adapter);
+        }
+        if (adapter.id === 'hanamiheaven') {
+            this.adapters.set('noindexscan', adapter);
+        }
     }
     clear() {
         this.adapters.clear();
