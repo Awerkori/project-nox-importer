@@ -12,12 +12,13 @@ async function main() {
   console.log(`Upserting ${allAdapters.length} active sources into importer_sources...`);
 
   for (const a of allAdapters) {
+    const isBlockedPolicy = a.id === 'hanamiheaven' || a.id === 'kuro';
     const payload = {
       id: a.id,
       name: a.name,
       base_url: a.baseUrl,
-      status: 'ACTIVE',
-      enabled: true,
+      status: isBlockedPolicy ? 'UPSTREAM_BLOCKED' : 'ACTIVE',
+      enabled: !isBlockedPolicy,
       updated_at: new Date().toISOString(),
     };
 
@@ -25,7 +26,7 @@ async function main() {
     if (error) {
       console.error(`  ✗ Error upserting ${a.id}:`, error.message);
     } else {
-      console.log(`  ✓ Upserted ${a.id.padEnd(20)}: ACTIVE (enabled=true)`);
+      console.log(`  ✓ Upserted ${a.id.padEnd(20)}: ${payload.status} (enabled=${payload.enabled})`);
     }
   }
 
