@@ -1,0 +1,1235 @@
+[
+  {
+    "id": "acervohentai",
+    "name": "acervohentai",
+    "base_url": "",
+    "classes": "AcervoHentai:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "amuy",
+    "name": "amuy",
+    "base_url": "",
+    "classes": "Amuy:Madara()",
+    "has_cf_mention": true,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "animexnovel",
+    "name": "animexnovel",
+    "base_url": "",
+    "classes": "ChapterDto:Title,; Title:String,; AnimeXNovel:KeiSource(); BoxList:String, values: List<BoxValue>) : Filter.Group<CheckBox>(title, values.map; CheckBox:String, val id: String = name) : Filter.CheckBox(name); BoxValue:String, val id: String = name); Generated:AnimeXNovel()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "apecomics",
+    "name": "apecomics",
+    "base_url": "",
+    "classes": "Capitoons:MangaWork()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "apenasumafa",
+    "name": "apenasumafa",
+    "base_url": "",
+    "classes": "ApenasUmaFa:ZeistManga()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "argoscomics",
+    "name": "argoscomics",
+    "base_url": "",
+    "classes": "ArgosComics:KeiSource(),; MangasListDto:List<MangaDto>,; PaginationDto:Boolean,; LatestMangas:List<MangaDto>,; MangaDto:String,; MangaDetailsDto:String,; Value:String,; VolumeChapterDto:List<ChapterListDto>,; ChapterListDto:List<ChapterDto>,; ChapterDto:String,; PagesDto:List<ImageDto>,; ImageDto:String,",
+    "has_cf_mention": true,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "argosscan",
+    "name": "argosscan",
+    "base_url": "",
+    "classes": "ArgosScan:HttpSource(),; ProjectResponseDto:List<ProjectDto> = emptyList(),; ProjectDto:String,; AuthorDto:String,; TagDto:String,; ChapterResponseDto:List<ChapterDto> = emptyList(),; ChapterDateInfo:String); ChapterDto:String = \"\",; ImageDto:String,",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "arthurscan",
+    "name": "arthurscan",
+    "base_url": "",
+    "classes": "ArthurScan:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "astratoons",
+    "name": "astratoons",
+    "base_url": "",
+    "classes": "ChapterListDto:Boolean,; ComicsResponseDto:List<ComicDto>,; ComicDto:String,; CheckBox:String, val value: String) : Filter.CheckBox(name); SortFilter:Filter.Select<String>(\"Ordenar por\", arrayOf(\"Mais Recente\", \"Título\", \"Nº de Capítulos\")); StatusFilter:Filter.Select<String>(\"Status\", arrayOf(\"Todo Status\", \"Em dia\", \"Em andamento\", \"Completo\", \"Cancelado\", \"Hiato\", \"Dropado\")); TypeFilter:Filter.Group<CheckBox>(; TagFilter:Filter.Group<CheckBox>(; Astratoons:KeiSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "auratoons",
+    "name": "auratoons",
+    "base_url": "",
+    "classes": "Generated:Auratoons(); Generated:Auratoons(); Auratoons:KeiSource(); PagesDto:List<String> = emptyList())",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "azuretoons",
+    "name": "azuretoons",
+    "base_url": "",
+    "classes": "Azuretoons:HttpSource(),; AzuretoonsLoginRequestDto:String,; AzuretoonsLoginResponseDto:String,; AzuretoonsMangaDto:String,; AzuretoonsChapterDto:Float = 0F,; AzuretoonsChapterDetailDto:List<String> = emptyList(),",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "bakai",
+    "name": "bakai",
+    "base_url": "",
+    "classes": "Bakai:HttpSource(); g:String?) : Interceptor",
+    "has_cf_mention": true,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "blackoutcomics",
+    "name": "blackoutcomics",
+    "base_url": "",
+    "classes": "SearchResponseDto:List<SearchItemDto>? = null,; SearchItemDto:Long,; SearchPayloadDto:String,; StatusFilter:Filter.Select<String>(; GenreFilter:Filter.Select<String>(; OrderFilter:Filter.Select<String>(; BlackoutComics:KeiSource(),; Generated:BlackoutComics()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "bladetoons",
+    "name": "bladetoons",
+    "base_url": "",
+    "classes": "BladeToons:MangoTheme()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "borutoexplorer",
+    "name": "borutoexplorer",
+    "base_url": "",
+    "classes": "BorutoExplorer:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "brasilhentai",
+    "name": "brasilhentai",
+    "base_url": "",
+    "classes": "CategoryFilter:String,; BrasilHentai:HttpSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "bryaoi",
+    "name": "bryaoi",
+    "base_url": "",
+    "classes": "BRYaoi:HttpSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "cafecomyaoi",
+    "name": "cafecomyaoi",
+    "base_url": "",
+    "classes": "CafeComYaoi:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "cerisescans",
+    "name": "cerisescans",
+    "base_url": "",
+    "classes": "CeriseScan:HttpSource(); ComicListResponse:List<ComicDto>,; ComicDto:String,; ChapterDto:String,; SortFilter:UriSelectFilter(; GenreFilter:UriSelectFilter(; StatusFilter:UriSelectFilter(; ScanFilter:UriSelectFilter(; UriSelectFilter:String,",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "corujatoon",
+    "name": "corujatoon",
+    "base_url": "",
+    "classes": "CorujaToon:KeiSource(); SeriesListDto:List<SeriesDto>,; SeriesResponseDto:SeriesDto); PaginationDto:Int, val totalPages: Int); SeriesDto:String,; SeriesGenreDto:GenreDto? = null); GenreDto:String? = null); ChapterDto:String,; ChapterResponseDto:ChapterPagesDto); ChapterPagesDto:List<String>); ApiSelectFilter:String,; GenreFilter:ApiSelectFilter(; TypeFilter:ApiSelectFilter(; StatusFilter:ApiSelectFilter(",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "covenscan",
+    "name": "covenscan",
+    "base_url": "",
+    "classes": "CovenScan:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "drakz",
+    "name": "drakz",
+    "base_url": "",
+    "classes": "Generated:Drakz(); Generated:Drakz(); Drakz:KeiSource(); StorageLocation:String, val path: String); GenreFilter:List<String>) : Filter.Select<String>(\"Gênero\", arrayOf(\"Todos\") + options.toTypedArray()); WorkDto:String,; ViewDto:String,; RatingDto:String,; ChapterSummaryDto:String,; ChapterDto:Float,; PageDto:Int,; SignedUrlsRequest:List<String>, val expiresIn: Int); SignedUrlDto:String, @SerialName(\"signedURL\") val signedUrl: String? = null); EmptyRequestDto:List<String>)",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "dropescan",
+    "name": "dropescan",
+    "base_url": "",
+    "classes": "Generated:DropeScan(); Generated:DropeScan(); DropeScan:KeiSource(); WorkResponse:WorkDto,; WorkListResponse:List<WorkDto> = emptyList(),; RecentResponse:RecentData,; RecentData:List<WorkDto> = emptyList(),; PageMeta:Int = 0,; WorkDto:String,; BannerDto:String? = null,; GenreDto:String? = null,; PersonDto:String? = null,; ChaptersResponse:ChaptersData,; ChaptersData:List<ChapterDto> = emptyList(),; ChapterResponse:ReaderChapterData,; ReaderChapterData:JsonObject,; ChapterDto:String,; PageDto:String,",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "egotoons",
+    "name": "egotoons",
+    "base_url": "",
+    "classes": "MangaListDto:List<MangaDto>,; MangaDetailsDto:MangaDto,; PaginationDto:Boolean,; MangaDto:Int,; ChapterListDto:List<ChapterDto>,; ChapterDetailsDto:ChapterDto,; ChapterDto:Int,; FilterData:List<FilterOptionDto>,; FormatListDto:List<FilterOptionDto>,; StatusListDto:List<FilterOptionDto>,; TagListDto:List<FilterOptionDto>,; FilterOptionDto:Int,; EgoToons:KeiSource(); SelectFilter:String,; SortFilter:SelectFilter(; FormatFilter:List<FilterOptionDto>) :; StatusFilter:List<FilterOptionDto>) :; TagFilter:List<FilterOptionDto>) :; TagCheckBox:String, val value: String) : Filter.CheckBox(name)",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "erosect",
+    "name": "erosect",
+    "base_url": "",
+    "classes": "AuthInterceptor:AuthTokenProvider,; AuthTokenProvider:SharedPreferences,; PaginatedResponse:PaginationDto,; PopularResponse:List<PopularObraDto> = emptyList(),; PaginationDto:Boolean,; PopularObraDto:Int,; ObraDto:Int,; TagDto:String,; ObraDetailResponse:ObraDto,; CapitulosResponse:List<CapituloDto> = emptyList(),; CapituloDto:Int,; PageListResponse:PageChapterDto,; PageChapterDto:Int,; PageDto:Int,; LoginRequest:String,; LoginResponse:Boolean,; EroSect:HttpSource(),",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "euphoriascan",
+    "name": "euphoriascan",
+    "base_url": "",
+    "classes": "EuphoriaScan:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "exhentainetbr",
+    "name": "exhentainetbr",
+    "base_url": "",
+    "classes": "ExHentaiNetBR:HttpSource(); AlphabetFilter:String,",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "fenixproject",
+    "name": "fenixproject",
+    "base_url": "",
+    "classes": "FenixProject:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "fleurblanche",
+    "name": "fleurblanche",
+    "base_url": "",
+    "classes": "FleurBlanche:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "fliptru",
+    "name": "fliptru",
+    "base_url": "",
+    "classes": "Fliptru:HttpSource(); ChapterPage:List<SChapter>,; SearchResultDto:String,; ComicEntry:String,; UriPartFilter:String,; ListFilter:UriPartFilter(\"Lista\", LISTS); CategoryFilter:UriPartFilter(\"Genero\", CATEGORIES); TagFilter:UriPartFilter(\"Tag\", TAGS)",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "flowermanga",
+    "name": "flowermanga",
+    "base_url": "",
+    "classes": "FlowerMangaDotNet:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "galaxscanlator",
+    "name": "galaxscanlator",
+    "base_url": "",
+    "classes": "GalaxScanlator:ZeistManga()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "geasscomics",
+    "name": "geasscomics",
+    "base_url": "",
+    "classes": "GeassComics:KeiSource(),; ApiResponse:T,; WorkPageDto:List<WorkDto> = emptyList(),; WorkDto:String,; ChapterDto:Double,; ReaderChapterDto:List<String> = emptyList(),; FilterDataDto:List<FilterOptionDto>,; FilterOptionDto:String,; SortFilter:Filter.Select<String>(; TypeFilter:Filter.Group<TypeCheckBox>(; TypeCheckBox:String, val value: String) : Filter.CheckBox(name); GenreFilter:List<FilterOptionDto>) :; GenreCheckBox:String, val value: String) : Filter.CheckBox(name); TagFilter:List<FilterOptionDto>) :; TagCheckBox:String, val value: String) : Filter.CheckBox(name)",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "ghostscan",
+    "name": "ghostscan",
+    "base_url": "",
+    "classes": "GhostScan:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "hanmokkuscan",
+    "name": "hanmokkuscan",
+    "base_url": "",
+    "classes": "Hanmokkuscan:ZeistManga()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "hentaifusion",
+    "name": "hentaifusion",
+    "base_url": "",
+    "classes": "HentaiFusion:KeiSource(); FilterOption:String, val value: String); FilterGroup:String, val options: List<FilterOption>); SiteFilter:String, private val options: List<FilterOption>) :; Generated:HentaiFusion()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "hentaihome",
+    "name": "hentaihome",
+    "base_url": "",
+    "classes": "CategoryFilter:Filter.Select<String>(; HentaiHome:KeiSource(); Generated:HentaiHome()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "hentaiseason",
+    "name": "hentaiseason",
+    "base_url": "",
+    "classes": "HentaiSeason:Gattsu()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "hentaitokyo",
+    "name": "hentaitokyo",
+    "base_url": "",
+    "classes": "HentaiTokyo:Gattsu()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "hipercool",
+    "name": "hipercool",
+    "base_url": "",
+    "classes": "Hipercool:Hiper()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "hipertoon",
+    "name": "hipertoon",
+    "base_url": "",
+    "classes": "Hipertoon:Hiper()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "horahentai",
+    "name": "horahentai",
+    "base_url": "",
+    "classes": "TagDto:String,; SelectFilter:String,; CategoryFilter:SelectFilter(; TagFilter:List<TagDto>) :; HoraHentai:KeiSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "hotcabaretscan",
+    "name": "hotcabaretscan",
+    "base_url": "",
+    "classes": "HotCabaretScan:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "hqnow",
+    "name": "hqnow",
+    "base_url": "",
+    "classes": "HQNow:HttpSource(); HqNowComicBookDto:List<HqNowChapterDto> = emptyList(),; HqNowChapterDto:Int = 0,; HqNowPageDto:String,",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "huntersscans",
+    "name": "huntersscans",
+    "base_url": "",
+    "classes": "HuntersScans:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "imperiodabritannia",
+    "name": "imperiodabritannia",
+    "base_url": "",
+    "classes": "ImperioDaBritannia:MangoTheme()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "inkapk",
+    "name": "inkapk",
+    "base_url": "",
+    "classes": "Inkapk:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "inkscan",
+    "name": "inkscan",
+    "base_url": "",
+    "classes": "WorkDto:String,; SearchResultDto:String,; LatestChapterDto:WorkDto? = null,; ChapterDto:String,; FolderDto:String,; ChapterPagesDto:Double,; PageFileDto:Int,; SearchRequestDto:String,; AuthRequestDto:String? = null,; AuthResponseDto:String? = null,; AuthStorageDto:String? = null,; ChapterRequestDto:String,; SortFilter:ChoiceFilter(; FormatFilter:ChoiceFilter(; StatusFilter:ChoiceFilter(; ChapterCountFilter:ChoiceFilter(; ChoiceFilter:String,; TagFilter:Filter.Group<TagCheckBox>(; TagCheckBox:String,; InkScan:HttpSource(),; TokenValidation:Boolean, val projectMatch: Boolean); Generated:InkScan(); Generated:InkScan()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "instahentai",
+    "name": "instahentai",
+    "base_url": "",
+    "classes": "InstaHentai:KeiSource(); Generated:InstaHentai()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "jondomingues",
+    "name": "jondomingues",
+    "base_url": "",
+    "classes": "WpPostDto:Int = 0,; RenderedDto:String = \"\",; WpEmbeddedDto:featuredmedia\"); WpMediaDto:String = \"\",; WpTermDto:Int = 0,; CategoryFilter:Array<Pair<String, String>>) : Filter.Select<String>(\"Categoria / Editora\", categories.map; SortFilter:Filter.Select<String>(; JonDomingues:KeiSource(); Generated:JonDomingues()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "kamisamaexplorer",
+    "name": "kamisamaexplorer",
+    "base_url": "",
+    "classes": "KamiSamaExplorer:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "kivaratoons",
+    "name": "kivaratoons",
+    "base_url": "",
+    "classes": "MangaListDto:List<MangaDto>,; LatestUpdatesDto:List<ChapterUpdateDto>,; ChapterUpdateDto:JsonPrimitive,; MangaDto:Int,; ChapterDto:String,; ChapterPagesDto:List<PageDto> = emptyList(),; PageDto:Int = 0,; FilterOptionDto:Int,; FormatListDto:List<FilterOptionDto> = emptyList(),; StatusListDto:List<FilterOptionDto> = emptyList(),; TagListDto:List<String> = emptyList(),; FilterData:List<FilterOptionDto>,; SelectFilter:String,; SortFilter:SelectFilter(; FormatFilter:List<FilterOptionDto>) :; StatusFilter:List<FilterOptionDto>) :; GenreFilter:List<String>) :; KivaraToons:KeiSource(),",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "kuromangas",
+    "name": "kuromangas",
+    "base_url": "",
+    "classes": "BodyInfo:String,; KuroMangasDecryptor:String,; Quadruple:Int, val s1: Int, val s2: Int, val s3: Int); SecureDto:String,; LoginRequestDto:String,; MangaListResponse:List<MangaDto>,; PaginationDto:Int,; MangaDto:Int,; MangaDetailsResponse:MangaDto,; ChapterDto:Int,; LatestResponse:List<LatestMangaDto>,; LatestMangaDto:Int,; ChapterPagesResponse:Int,; SortFilter:String, private val sortOptions: List<Pair<String, String>>) : Filter.Select<String>(displayName, sortOptions.map; KuroMangas:HttpSource(),; AuthSession:String,; ExtensionGenerated:KuroMangas(); Generated:KuroMangas()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "leitordemangas",
+    "name": "leitordemangas",
+    "base_url": "",
+    "classes": "LeitorDeMangas:Aurora(); Generated:LeitorDeMangas(); Generated:LeitorDeMangas()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "leituramanga",
+    "name": "leituramanga",
+    "base_url": "",
+    "classes": "MangaResponseDto:T,; MangaListDto:List<MangaDto>,; PaginationDto:Int,; MangaDto:String,; GenreDto:String,; ChapterListDto:List<ChapterDto>,; ChapterDto:Double,; ChapterPageDto:ChapterImagesDto,; ChapterImagesDto:List<ImageDto>,; ImageDto:String,; MangaPagePropsDto:MangaIdOnlyDto,; MangaIdOnlyDto:String,; NextJsMangaIdDto:String,; GenreFilter:Filter.Select<String>(\"Gêneros\", genres.map; StatusFilter:Filter.Select<String>(\"Status\", status.map; SortFilter:Filter.Select<String>(\"Ordenar por\", sort.map; LeituraManga:HttpSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "ler999",
+    "name": "ler999",
+    "base_url": "",
+    "classes": "Ler999:ZeistManga()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "lermangas",
+    "name": "lermangas",
+    "base_url": "",
+    "classes": "LerMangas:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "littletyrant",
+    "name": "littletyrant",
+    "base_url": "",
+    "classes": "ChapterDto:HtmlDto,; HtmlDto:String,; TokenDto:String); ImageDecoderInterceptor:Interceptor; LittleTyrant:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "lycantoons",
+    "name": "lycantoons",
+    "base_url": "",
+    "classes": "PopularResponse:List<SeriesDto>,; SeriesDto:String,; PaginationDto:Boolean? = null,; SearchRequestBody:Int,; SearchResponse:List<SeriesDto>,; ChapterListDto:List<ChapterDto>,; ChapterDto:JsonElement,; PageList:List<String>,; SeriesTypeFilter:ChoiceFilter(; StatusFilter:ChoiceFilter(; ChoiceFilter:String,; TagsFilter:Filter.Group<TagCheckBox>(; TagCheckBox:String,; LycanToons:HttpSource(); ChapterResponse:List<ChapterDto>); WebViewInterceptor:String, private val userAgent: String?) : Interceptor; FetchResult:Boolean,; CloudflareBlockedException:Throwable? = null) : IOException(CLOUDFLARE_MESSAGE, cause); Generated:LycanToons(); Generated:LycanToons()",
+    "has_cf_mention": true,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "maidscan",
+    "name": "maidscan",
+    "base_url": "",
+    "classes": "MaidScan:GreenShit()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangadash",
+    "name": "mangadash",
+    "base_url": "",
+    "classes": "UriPartFilter:String, private val vals: Array<Pair<String, String>>) : Filter.Select<String>(displayName, vals.map; SortFilter:UriPartFilter(; CategoryFilter:UriPartFilter(; StatusFilter:UriPartFilter(; YearFilter:UriPartFilter(; Plus18Filter:Filter.CheckBox(\"+18 (Apenas Adulto)\", false); MangaListDto:List<MangaItemDto> = emptyList(),; MangaItemDto:Int,; PaginationDto:Boolean = false,; ChapterDataDto:String? = null,; MangaDash:HttpSource(),; Generated:MangaDash(); Generated:MangaDash()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangaflix",
+    "name": "mangaflix",
+    "base_url": "",
+    "classes": "BrowseResponseDto:List<BrowseSectionDto> = emptyList(),; BrowseSectionDto:String,; LatestResponseDto:List<MangaDto> = emptyList(),; SearchResponseDto:Data,; GenreResponseDto:List<MangaDto> = emptyList(),; GenreListResponseDto:List<GenreItemDto> = emptyList(),; GenreItemDto:String,; MetadataDto:Int = 0,; MangaDto:String,; Data:List<SearchMangaDto> = emptyList(),; SearchMangaDto:String,; MangaDetailsResponseDto:MangaDetailsDto,; MangaDetailsDto:String,; ChapterDto:String,; ChapterDetailsResponseDto:ChapterDetailsDto,; ChapterDetailsDto:List<ImageDto> = emptyList(),; ImageDto:String,; OwnerDto:String,; PosterDto:String? = null,; GenreDto:String,; Genre:String, val id: String) : Filter.CheckBox(name); GenreFilter:List<Genre>) : Filter.Group<Genre>(\"Gêneros\", genres); MangaFlix:HttpSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangalivre",
+    "name": "mangalivre",
+    "base_url": "",
+    "classes": "SelectedFilter:String,; OrderByFilter:String = \"\", options: List<Pair<String, String>>) : SelectedFilter(title, options); OrderDirectionFilter:String = \"\", options: List<Pair<String, String>>) : SelectedFilter(title, options); WrapperDto:List<MangaDto>,; PaginationDto:Boolean,; MangaDto:String,; ChapterReferenceDto:String,; ReaderAccessResponseDto:ReaderChapterDto,; ReaderChapterDto:List<String>,; ReaderAccessErrorDto:String,; ChapterDto:String,; MangaLivre:KeiSource(),",
+    "has_cf_mention": true,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangalivreblog",
+    "name": "mangalivreblog",
+    "base_url": "",
+    "classes": "PopularResponse:Boolean,; PopularData:String,; GenreFilter:Filter.Select<String>(\"Gênero\", genres.map; StatusFilter:Filter.Select<String>(\"Status\", statuses.map; RatingMinFilter:Filter.Select<String>(\"Avaliação Mínima\", ratingMins.map; SortFilter:Filter.Select<String>(\"Ordenar por\", sorts.map; OrderFilter:Filter.Select<String>(\"Ordem\", orders.map; MangaLivreBlog:HttpSource(); Generated:MangaLivreBlog(); Generated:MangaLivreBlog()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangalivreorg",
+    "name": "mangalivreorg",
+    "base_url": "",
+    "classes": "MangaListDto:List<ListItemDto> = emptyList(),; CategoryListDto:List<ListItemDto> = emptyList(),; ListItemDto:String,; SearchItemDto:String,; HomeMostReadDto:List<HomeSeriesDto> = emptyList(),; HomeReleasesDto:List<HomeReleaseDto> = emptyList(),; HomeSeriesDtoContainer:List<HomeSeriesDto> = emptyList(),; HomeSeriesDto:String? = null,; HomeReleaseDto:String,; HomeReleaseChapterDto:Float = 0f,; LegacyChapterListDto:List<LegacyChapterDto> = emptyList(),; LegacyChapterDto:String? = null,; LegacyReleaseDto:String? = null,; ScanlatorDto:String = \"\",; LegacyPagesDto:List<String> = emptyList(),; MangaDetailsDto:MangaDto,; MangaDto:String,; GenreDto:String,; ChapterDto:String,; ScanDto:String = \"\",; ChapterPagesDto:List<PageDto> = emptyList(),; PageDto:Int = 0,; FilterData:List<GenreDto> = emptyList(),; SelectFilter:String,; SortFilter:SelectFilter(; PeriodFilter:SelectFilter(; CategoryFilter:List<GenreDto>) :; MangaLivreOrg:KeiSource(); Generated:MangaLivreOrg()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangalivreto",
+    "name": "mangalivreto",
+    "base_url": "",
+    "classes": "MangaLivreTo:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "manganight",
+    "name": "manganight",
+    "base_url": "",
+    "classes": "MangaDexAtHomeDto:String = \"\",; MangaDexChapterDto:String = \"\",; SortFilter:Filter.Select<String>(; GenreFilter:Filter.Select<String>(; StatusFilter:Filter.Select<String>(; CountryFilter:Filter.Select<String>(; MangaNight:KeiSource(); Generated:MangaNight()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "manganyx",
+    "name": "manganyx",
+    "base_url": "",
+    "classes": "MangaNYX:Aurora(); Generated:MangaNYX(); Generated:MangaNYX()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangaonline",
+    "name": "mangaonline",
+    "base_url": "",
+    "classes": "MangaOnline:HttpSource(); Generated:MangaOnline(); Generated:MangaOnline()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangaonlinegreen",
+    "name": "mangaonlinegreen",
+    "base_url": "",
+    "classes": "Generated:MangaOnlineGreen(); Generated:MangaOnlineGreen(); MangaOnlineGreen:KeiSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangaonlinetv",
+    "name": "mangaonlinetv",
+    "base_url": "",
+    "classes": "Generated:MangaOnlineTv(); Generated:MangaOnlineTv(); MangaOnlineTv:KeiSource(); GenreFilter:Filter.Select<String>(\"Categoria/Gênero\", GENRES.map",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangasbrasuka",
+    "name": "mangasbrasuka",
+    "base_url": "",
+    "classes": "MangasBrasuka:Aurora(); Generated:MangasBrasuka(); Generated:MangasBrasuka()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangastop",
+    "name": "mangastop",
+    "base_url": "",
+    "classes": "MangaStop:MangaThemesia(),; TypeFilter:Filter.Select<String>(; Generated:MangaStop()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangeek",
+    "name": "mangeek",
+    "base_url": "",
+    "classes": "HomeDto:List<MangaDto>,; NewsDto:MangaDto,; CategoryDto:List<MangaDto>,; MangaDto:Long,; ChapterDto:Long,; ChapterPagesDto:List<String>,; TagsBody:List<String>,; TagFilter:String) : Filter.CheckBox(name); TagsFilter:List<String>) :; ManGeek:KeiSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mangotoons",
+    "name": "mangotoons",
+    "base_url": "",
+    "classes": "MangoToons:MangoTheme()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "manhastro",
+    "name": "manhastro",
+    "base_url": "",
+    "classes": "Manhastro:HttpSource(),; ApiResponse:Boolean,; MetaDto:Int,; MangaDto:Int,; RankingItemDto:Int,; LatestItemDto:Int,; ChapterDto:Int,; PagesResponse:Boolean,; PageData:ChapterData? = null,; ChapterData:String,; SortFilter:Filter.Select<String>(; TypeFilter:List<Pair<String, String>>) :; TypeCheckBox:String, val value: String) : Filter.CheckBox(name, false); GenreFilter:List<Pair<String, String>>) :; GenreCheckBox:String, val value: String) : Filter.CheckBox(name, false)",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mediocretoons",
+    "name": "mediocretoons",
+    "base_url": "",
+    "classes": "MediocreToons:HttpSource(),; FormatoFilter:UriSelectFilter(; StatusFilter:UriSelectFilter(; TagsFilter:Filter.Group<TagCheckBox>(; SortFilter:UriSelectFilter(; TagCheckBox:String, val value: String) : Filter.CheckBox(name); UriSelectFilter:String,; MediocrePaginationDto:Int? = null,; MediocreListDto:T,; MediocreTagDto:Int = 0,; MediocreFormatDto:Int = 0,; MediocreStatusDto:Int = 0,; MediocreChapterSimpleDto:Int = 0,; MediocreMangaDto:Int = 0,; MediocrePageSrcDto:String = \"\",; MediocreChapterDetailDto:Int = 0,",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "megahentai",
+    "name": "megahentai",
+    "base_url": "",
+    "classes": "MegaHentai:HttpSource(); CategoryFilter:Array<Pair<String, String>>) : Filter.Select<String>(\"Categoria\", options.map",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "minitwoscan",
+    "name": "minitwoscan",
+    "base_url": "",
+    "classes": "MiniTwoScan:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "montetai",
+    "name": "montetai",
+    "base_url": "",
+    "classes": "ChapterListDto:Wrapper,; Wrapper:List<ChapterDto>,; ChapterDto:String,; MonteTai:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mrtenzus",
+    "name": "mrtenzus",
+    "base_url": "",
+    "classes": "MRTenzus:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mugiwarasoficial",
+    "name": "mugiwarasoficial",
+    "base_url": "",
+    "classes": "MugiwarasOficial:Aurora(); Generated:MugiwarasOficial(); Generated:MugiwarasOficial()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "muitohentai",
+    "name": "muitohentai",
+    "base_url": "",
+    "classes": "MuitoHentai:HttpSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "mundohentai",
+    "name": "mundohentai",
+    "base_url": "",
+    "classes": "Tag:String, val slug: String); TagFilter:Array<Tag>) : Filter.Select<Tag>(\"Tag\", tags); MundoHentai:HttpSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "nebulosascan",
+    "name": "nebulosascan",
+    "base_url": "",
+    "classes": "NebulosaScan:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "nexusmangas",
+    "name": "nexusmangas",
+    "base_url": "",
+    "classes": "Generated:NexusMangas(); Generated:NexusMangas(); TopWorksRequest:Int); RankingDto:String); LatestReleaseDto:String,; WorkDto:String,; WorkGenreDto:EmbeddedTagDto? = null); WorkFormatDto:EmbeddedTagDto? = null); EmbeddedTagDto:String? = null); ScanDto:String? = null); ChapterDto:String,; ReaderPagesDto:List<String> = emptyList()); FilterOptionDto:String, val name: String); FilterData:List<FilterOptionDto>,; TypeFilter:Filter.Select<String>(\"Tipo\", TYPE_OPTIONS.map; ContentRatingFilter:Filter.Select<String>(\"Classificação\", CONTENT_RATING_OPTIONS.map; GenreFilter:List<FilterOptionDto>) : Filter.Select<String>(\"Gênero\", options.toOptionArray()); FormatFilter:List<FilterOptionDto>) : Filter.Select<String>(\"Formato\", options.toOptionArray()); NexusMangas:KeiSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "nhentaibr",
+    "name": "nhentaibr",
+    "base_url": "",
+    "classes": "NhentaiBR:KeiSource(); Generated:NhentaiBR()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "ninjascan",
+    "name": "ninjascan",
+    "base_url": "",
+    "classes": "NinjaScan:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "nocturnesummer",
+    "name": "nocturnesummer",
+    "base_url": "",
+    "classes": "NocturneSummer:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "noindexscan",
+    "name": "noindexscan",
+    "base_url": "",
+    "classes": "HanamiHeaven:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "onereader",
+    "name": "onereader",
+    "base_url": "",
+    "classes": "SearchDto:List<MangaDto>,; HomeMangaDto:String,; MangaDto:String,; ChapterDto:String,; PagesDto:List<String>,; FilterData:List<String>,; SelectFilter:String,; OrderFilter:SelectFilter(; StatusFilter:SelectFilter(; TypeFilter:List<String>) :; TagFilter:List<String>) :; OneReader:KeiSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "osakascan",
+    "name": "osakascan",
+    "base_url": "",
+    "classes": "OsakaScan:ZeistManga()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "pinkrosa",
+    "name": "pinkrosa",
+    "base_url": "",
+    "classes": "PinkRosa:ZeistManga()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "pinkseaunicorn",
+    "name": "pinkseaunicorn",
+    "base_url": "",
+    "classes": "PinkSeaUnicorn:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "pizzariascan",
+    "name": "pizzariascan",
+    "base_url": "",
+    "classes": "Pizzariascan:MangaWork()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "plumacomics",
+    "name": "plumacomics",
+    "base_url": "",
+    "classes": "Mangas:List<Manga>,; Manga:Long,; ChapterList:List<Chapter>,; Chapter:Int,; PagesList:List<PageItem>,; PageItem:Int,; Series:Long,; PlumaComics:KeiSource(); SelectFilter:String = \"\",",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "pointzerotoons",
+    "name": "pointzerotoons",
+    "base_url": "",
+    "classes": "PointZeroToons:MangaThemesia()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "portalyaoi",
+    "name": "portalyaoi",
+    "base_url": "",
+    "classes": "PortalYaoi:MadaraNoAjax()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "randomscan",
+    "name": "randomscan",
+    "base_url": "",
+    "classes": "LuraToon:HttpSource(),; LuraZipInterceptor:ZipInterceptor(); Genero:String,; Capitulo:Double,; Manga:String,; Obra:Int,; CapituloPagina:Int,; MainPageManga:String,; MainPage:List<MainPageManga>,; SearchResponseManga:String,; SearchResponse:List<SearchResponseManga>,",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "remangas",
+    "name": "remangas",
+    "base_url": "",
+    "classes": "NixApiClient:OkHttpClient,; Signer:String,; NoxManga:HttpSource(); Generated:NoxManga(); Generated:NoxManga()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "revistasequadrinhos",
+    "name": "revistasequadrinhos",
+    "base_url": "",
+    "classes": "UriPartFilter:String,; CategoryFilter:UriPartFilter(\"Categorias\", categories); TagFilter:UriPartFilter(\"Tags\", tags); RevistasEQuadrinhos:HttpSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "rfdragonscan",
+    "name": "rfdragonscan",
+    "base_url": "",
+    "classes": "ProjectsPageDto:List<ProjectDto>,; ProjectDto:String,; PaginationDto:Boolean,; MangaDetailsDto:String? = null,; NameDto:String? = null); SeasonListDto:List<SeasonGroupDto>? = null,; SeasonGroupDto:List<ChapterDataDto>? = null,; ChapterDataDto:JsonPrimitive? = null,; PagesDto:List<PageDataDto>? = null,; PageDataDto:String? = null,; RFDragonScan:HttpSource(),",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "risentoons",
+    "name": "risentoons",
+    "base_url": "",
+    "classes": "Risentoons:HttpSource(),; StorageSession:String? = null,",
+    "has_cf_mention": true,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "roxinha",
+    "name": "roxinha",
+    "base_url": "",
+    "classes": "LoginRequestDto:String,; LoginResponseDto:String,; ErrorDto:String,; SearchResponseDto:List<MangaDto> = emptyList(),; MangaDto:Int,; TicketDto:String,; ChapterDto:Int,; ChapterDetailsDto:List<String> = emptyList(),; SortFilter:Filter.Sort(; StatusFilter:Filter.Select<String>(; TypeFilter:Filter.Select<String>(; Roxinha:HttpSource(),",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "saikaiscan",
+    "name": "saikaiscan",
+    "base_url": "",
+    "classes": "SaikaiScan:HttpSource(); SaikaiScanResultDto:T? = null,; SaikaiScanMetaDto:Int,; SaikaiScanStoryDto:List<SaikaiScanPersonDto> = emptyList(),; SaikaiScanPersonDto:String,; SaikaiScanGenreDto:String,; SaikaiScanStatusDto:String,; SaikaiScanReleaseDto:String,; SaikaiScanReleaseImageDto:String); Genre:String, val id: Int) : Filter.CheckBox(title); GenreFilter:List<Genre>) :; Country:String, val id: Int); EnhancedSelect:String, values: Array<T>) : Filter.Select<T>(name, values); CountryFilter:List<Country>) :; Status:String, val id: Int); StatusFilter:List<Status>) :; SortProperty:String, val slug: String); SortByFilter:List<SortProperty>) :",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "sexkomix",
+    "name": "sexkomix",
+    "base_url": "",
+    "classes": "Sexkomix:KeiSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "shadowmanga",
+    "name": "Shadow Manga",
+    "base_url": "https://shadow-mang.onrender.com",
+    "classes": "ShadowManga:String,",
+    "has_cf_mention": false,
+    "status_code": 503,
+    "probe": "HTTP 503"
+  },
+  {
+    "id": "shiraiscans",
+    "name": "shiraiscans",
+    "base_url": "",
+    "classes": "Dto:Int? = null,; UriPartFilter:String, private val vals: Array<Pair<String, String>>) : Filter.Select<String>(displayName, vals.map; GenreFilter:UriPartFilter(; ShiraiScans:HttpSource(),",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "slimereadunoriginal",
+    "name": "slimereadunoriginal",
+    "base_url": "",
+    "classes": "GenreFilter:Filter.Text(\"Gênero/Tema\"),; SelectFilter:String,; TypeFilter:SelectFilter(; StatusFilter:SelectFilter(; AdultFilter:SelectFilter(; SortFilter:SelectFilter(; SlimeReadUnoriginal:KeiSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "spectralscan",
+    "name": "spectralscan",
+    "base_url": "",
+    "classes": "KeyData:ByteArray,; NexusToons:HttpSource(),; MangaListResponse:List<MangaListDto>? = null,; MangaListDto:String,; MangaDetailsDto:String,; CategoryDto:String,; ChapterDto:Int,; ReadResponse:String,; PageDto:Int? = null,; EncryptedResponse:String,; SelectFilter:String,; CheckboxGroup:String,; CheckboxItem:String,",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "sssscanlator",
+    "name": "sssscanlator",
+    "base_url": "",
+    "classes": "GarimpoResponse:kotlinx.serialization.json.JsonElement,; SearchMangaDto:String,; LibraryResponseDto:LibraryPaginationDto = LibraryPaginationDto(),; LibraryPaginationDto:Int = 1,; LibraryMangaDto:String,; SeriesPayloadDto:String? = null,; SeriesChapterDto:Double,; ChapterPageDto:ChapterImagesDto,; ChapterImagesDto:List<String>,; GenreFilter:Filter.Select<String>(\"Gêneros\", genreOptions.map; TypeFilter:Filter.Select<String>(\"Tipo\", typeOptions.map; StatusFilter:Filter.Select<String>(\"Status\", statusOptions.map; SortFilter:Filter.Select<String>(\"Ordenar por\", sortOptions.map; YomuComics:HttpSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "starlightscan",
+    "name": "starlightscan",
+    "base_url": "",
+    "classes": "StarlightScan:MangaThemesia()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "taimumangas",
+    "name": "taimumangas",
+    "base_url": "",
+    "classes": "LibraryResponse:List<SeriesSummary> = emptyList(),; SeriesSummary:String,; UpdatesResponse:List<UpdateSummary> = emptyList(),; UpdateSummary:String,; SeriesDetail:String,; NameId:String = \"\",; GroupInfo:String = \"\",; Genre:String = \"\",; ChapterListResponse:List<ChapterSummary> = emptyList(),; ChapterSummary:String,; ChapterDetailResponse:List<PageInfo> = emptyList(),; PageInfo:String,; SelectFilter:String,; StatusFilter:SelectFilter(; TypeFilter:SelectFilter(; SortFilter:SelectFilter(; SortOrderFilter:SelectFilter(; GenreCheckBox:String, val slug: String) : Filter.CheckBox(name); GenreFilter:Filter.Group<GenreCheckBox>(; TaimuMangas:HttpSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "taiyo",
+    "name": "taiyo",
+    "base_url": "",
+    "classes": "Taiyo:HttpSource(); SearchResultDto:List<SearchWrapper>,; SearchWrapper:List<AdditionalInfoDto>,; AdditionalInfoDto:String,; Genre:String); TitleDto:String, val language: String, val priority: Int); ChapterListDto:List<ChapterDto>, val totalPages: Int); ChapterDto:String,; ScanDto:String); MediaChapterDto:String,; ItemId:String)",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "tankouhentai",
+    "name": "tankouhentai",
+    "base_url": "",
+    "classes": "TankouHentai:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "taosect",
+    "name": "taosect",
+    "base_url": "",
+    "classes": "TaoSect:HttpSource(); GoogleDriveResponse:Boolean, val code: Int); TaoSectProjectDto:TaoSectContentDto? = null,; TaoSectContentDto:String = \"\",; TaoSectProjectInfoDto:String = \"\",; TaoSectTagDto:String = \"\",; TaoSectVolumeDto:List<TaoSectChapterDto> = emptyList(),; TaoSectChapterDto:String = \"\",; Tag:String, name: String) : Filter.TriState(name); CountryFilter:List<Tag>) :; StatusFilter:List<Tag>) :; GenreFilter:List<Tag>) :; SortFilter:List<Tag>, private val default: Int) :; FeaturedFilter:Filter.TriState(\"Mostrar destaques\"),; NsfwFilter:Filter.TriState(\"Mostrar conteúdo +18\"),",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "temakimangas",
+    "name": "temakimangas",
+    "base_url": "",
+    "classes": "TemakiMangas:ZeistManga()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "terceiroz",
+    "name": "terceiroz",
+    "base_url": "",
+    "classes": "TerceiroZ:KeiSource(); CategoryFilter:List<Pair<String, String>>) : Filter.Select<String>(\"Categoria\", options.map; Generated:TerceiroZ()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "thehentai",
+    "name": "thehentai",
+    "base_url": "",
+    "classes": "TheHentai:KeiSource(); Generated:TheHentai()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "tiamanhwa",
+    "name": "tiamanhwa",
+    "base_url": "",
+    "classes": "TiaManhwa:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "timelinecomics",
+    "name": "timelinecomics",
+    "base_url": "",
+    "classes": "BloggerFeedDto:FeedContentDto? = null,; FeedContentDto:TextHolderDto? = null,; FeedEntryDto:TextHolderDto? = null,; TextHolderDto:String = \"\",; CategoryDto:String = \"\",; LinkDto:String = \"\",; DriveFile:String,; PdfPageInterceptor:File) : Interceptor; TimelineComics:KeiSource(); Generated:TimelineComics()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "tomato",
+    "name": "tomato",
+    "base_url": "",
+    "classes": "FeedResponseDto:List<FeedSectionDto> = emptyList()); FeedSectionDto:Int, val data: List<FeedMangaDto> = emptyList(), val meta: FeedMetaDto? = null); FeedMetaDto:String? = null); FeedMangaDto:Long, val name: String, val thumbnail: String? = null); SearchRequestDto:String, val search: String, val page: Int, val tags: List<String>? = null); SearchResponseDto:List<SearchMangaDto> = emptyList()); SearchMangaDto:Long, val name: String, val type: String, val image: String? = null); MangaIdRequestDto:Long, val token: String); MangaDetailsResponseDto:MangaDetailsDto); MangaDetailsDto:Long,; ChaptersResponseDto:List<ChapterDto> = emptyList()); ChapterDto:Long,; PagesResponseDto:List<PageDto> = emptyList()); PageDto:String); CategoriesResponseDto:List<CategoryDto> = emptyList()); CategoryDto:String); LoginRequestDto:String, val password: String, val verification: String, val fingerprint: String); CheckUpdateRequestDto:String); CheckUpdateResponseDto:Int? = null, @SerialName(\"server_version\") val serverVersion: String? = null, @SerialName(\"require_captcha\") val requireCaptcha: Boolean? = null); RegisterRequestDto:String, val email: String, val password: String, val verification: String, val fingerprint: String); AuthResponseDto:Int? = null, val token: String? = null, @SerialName(\"user_name\") val userName: String? = null, val message: String? = null); TokenLoginRequestDto:String, val fingerprint: String); TokenLoginResponseDto:Int? = null, @SerialName(\"user_name\") val userName: String? = null); Category:String) : Filter.CheckBox(name); CategoryFilter:List<String>) : Filter.Group<Filter.CheckBox>(\"Categorias\", categories.map(::Category)); Tomato:KeiSource(),",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "toonbr",
+    "name": "toonbr",
+    "base_url": "",
+    "classes": "ToonBr:HttpSource(),; MangaDto:String,; ChapterDto:String,; PageDto:String? = null,; LoginResponse:String,; MangaListResponse:List<MangaDto>,; CategoryFilter:String, private val categories: List<Pair<String, String>>) : Filter.Select<String>(displayName, categories.map",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "traducoesdolipe",
+    "name": "traducoesdolipe",
+    "base_url": "",
+    "classes": "TraducoesDoLipe:ZeistManga()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "tsundokutraducoes",
+    "name": "tsundokutraducoes",
+    "base_url": "",
+    "classes": "TsundokuTraducoes:MangaThemesia()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "universohentai",
+    "name": "universohentai",
+    "base_url": "",
+    "classes": "UniversoHentai:Gattsu()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "valkyuri",
+    "name": "valkyuri",
+    "base_url": "",
+    "classes": "HomeDiscoveryResponseDto:HomeDiscoveryDataDto? = null,; HomeDiscoveryDataDto:List<HomeSectionDto> = emptyList(),; HomeSectionDto:String,; MangaListResponseDto:List<MangaDto> = emptyList(),; LatestReleasesResponseDto:List<ReleaseDto> = emptyList(),; MangaDetailsResponseDto:MangaDto,; ChapterDetailsResponseDto:ReaderDataDto? = null,; ReleaseDto:MangaDto? = null,; MangaDto:String,; GenreDto:String,; ChapterDto:String,; ReaderDataDto:ReaderChapterDto? = null,; ReaderChapterDto:List<PageDto>? = null,; PageDto:Int,; PaginationMetaDto:Int = 1,; SectionFilter:Filter.Select<String>(; CatalogSortFilter:Filter.Select<String>(; SectionOption:String,; CatalogSortOption:String,; ValkYuri:HttpSource(),",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "vegitoons",
+    "name": "vegitoons",
+    "base_url": "",
+    "classes": "Vegitoons:GreenShit()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "verdinha",
+    "name": "verdinha",
+    "base_url": "",
+    "classes": "Verdinha:GreenShit()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "wolftoon",
+    "name": "wolftoon",
+    "base_url": "https://encmakrlmutvsdzpodov.supabase.co",
+    "classes": "Wolftoon:HttpSource(); MangaDto:String,; ChapterDto:String,; PageDto:String,; Select:String, values: Array<T>) : Filter.Select<T>(name, values); StatusFilter:String, values: Array<String>) : Select<String>(name, values); TypeFilter:String, values: Array<String>) : Select<String>(name, values); GenreFilter:String, values: Array<String>) : Select<String>(name, values); OrderBy:String, values: Array<String>) : Select<String>(name, values)",
+    "has_cf_mention": false,
+    "status_code": 0,
+    "probe": "DNS_NXDOMAIN"
+  },
+  {
+    "id": "xxxyaoi",
+    "name": "xxxyaoi",
+    "base_url": "",
+    "classes": "XXXYaoi:MadaraNoAjax(); CompletedFilter:Filter.CheckBox(\"Concluídos\", false); Card:String, val path: String, val image: Element?, val id: String?); Chapter:String, val path: String, val date: String?); Candidate:List<String>, val explicit: Boolean); PagesNotFound:String) : IllegalStateException(\"XXX Yaoi: não foi possível localizar as páginas do capítulo (reader mudou; $category).\"); Generated:XXXYaoi(); Generated:XXXYaoi()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "yaoifanclub",
+    "name": "yaoifanclub",
+    "base_url": "",
+    "classes": "YaoiFanClub:ZeistManga(); Generated:YaoiFanClub(); Generated:YaoiFanClub()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "yomumangas",
+    "name": "yomumangas",
+    "base_url": "",
+    "classes": "SearchResponse:List<SearchMangaDto> = emptyList(),; HomeResponse:List<SearchMangaDto> = emptyList(),; SearchMangaDto:Int,; MangaDetailsResponse:MangaDto,; MangaDto:Int,; TagDto:String,; ChaptersResponse:List<ChapterDto> = emptyList(),; ChapterDto:String,; UriPartFilter:String,; TypeFilter:UriPartFilter(; StatusFilter:UriPartFilter(; NsfwFilter:UriPartFilter(; Genre:String, val id: String) : Filter.CheckBox(name); GenreFilter:List<Genre>) : Filter.Group<Genre>(\"Gêneros\", genres); Tag:String, val id: String) : Filter.CheckBox(name); TagFilter:List<Tag>) : Filter.Group<Tag>(\"Tags\", tags); YomuMangas:KeiSource(); Generated:YomuMangas()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "yugenmangas",
+    "name": "yugenmangas",
+    "base_url": "",
+    "classes": "LibraryWrapper:Library<T>,; Library:List<T> = emptyList(),; Pagination:Int = 0,; LatestUpdateDto:MangaDto,; MangaDto:String,; PageDto:String,; YugenMangas:HttpSource(),",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "yuriverso",
+    "name": "yuriverso",
+    "base_url": "",
+    "classes": "YuriOnAir:Madara()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "zettahq",
+    "name": "zettahq",
+    "base_url": "",
+    "classes": "Genre:String, val id: String = name); GenreCheckBox:String, val id: String = name) : Filter.CheckBox(name); GenreList:String, genres: List<Genre>, override val priority: Int = 0) :; SelectFilter:String,; ZettaHQ:HttpSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  },
+  {
+    "id": "zinnes",
+    "name": "zinnes",
+    "base_url": "",
+    "classes": "SectionResponseDto:SectionDataDto); SectionDataDto:List<ProjectDto>? = null,; SearchResponseDto:SearchPageDto); SearchPageDto:List<ProjectDto>,; DetailsResponseDto:DetailsDataDto); DetailsDataDto:ProjectDto,; TitleViewResponseDto:TitleViewDto); TitleViewDto:List<PageDto> = emptyList()); PageDto:Int,; FilterOptionDto:Int,; FilterData:List<FilterOptionDto>,; ProjectDto:Int,; AuthorDto:String? = null, val nickname: String? = null); AgeRatingDto:Int? = null, val rating: String? = null); TitleDto:Int,; ApiSelectFilter:String,; GenreFilter:List<FilterOptionDto>) :; LanguageFilter:List<FilterOptionDto>) :; TypeFilter:List<FilterOptionDto>) :; Zinnes:KeiSource()",
+    "has_cf_mention": false,
+    "probe": "NO_URL",
+    "status_code": 0
+  }
+]

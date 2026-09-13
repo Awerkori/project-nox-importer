@@ -304,7 +304,10 @@ export class MadaraAdapter implements SourceAdapter {
     const pages: string[] = [];
 
     for (const tag of imgTags) {
-      if (!/wp-manga-chapter-img|page-break|reading-content/i.test(tag) && !/wp-content\/uploads\/WP-manga/i.test(tag)) {
+      if (
+        !/wp-manga-chapter-img|page-break|reading-content|read-container/i.test(tag) &&
+        !/wp-content\/uploads\/(?:WP-manga|\d{4}\/\d{2})/i.test(tag)
+      ) {
         continue;
       }
 
