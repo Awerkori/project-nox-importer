@@ -46,6 +46,7 @@ export declare class PublicationBarrier {
     private executePublish;
     /**
      * Cascading publication of all consecutive STAGED chapters for a work.
+     * Bounded by maxBatch to guarantee multi-work fairness.
      */
     private runCascadeUnderLock;
     /**
@@ -55,7 +56,7 @@ export declare class PublicationBarrier {
     handleDefiniteFailure(workId: string, chapterNumber: number, sortKey: number, failedSource: string): Promise<void>;
     /**
      * Periodic or startup sweep: checks all works that have STAGED chapters
-     * and attempts to publish them.
+     * and publishes them in round-robin batches across distinct works to ensure fairness.
      */
-    sweepStagedPublications(): Promise<number>;
+    sweepStagedPublications(maxTotalPublications?: number, perWorkBurst?: number): Promise<number>;
 }
