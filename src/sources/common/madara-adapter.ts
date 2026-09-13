@@ -136,8 +136,19 @@ export class MadaraAdapter implements SourceAdapter {
                          chunk.match(/alt="([^"]+)"/i);
       const title = decodeHtmlEntities(titleMatch ? titleMatch[1].trim() : rawSlug);
 
-      const imgMatch = chunk.match(/<img[^>]+(?:data-src|data-full-url|src)="([^"]+)"/i);
-      let coverUrl = imgMatch ? imgMatch[1].trim() : null;
+      // Robust cover extraction: prioritize lazy-load data attributes, ignore theme placeholders
+      let coverUrl: string | null = null;
+      const isPlaceholder = (u: string) => /dflazy|placeholder|1x1|spacer|blank|\.svg/i.test(u);
+
+      const dataSrcMatch = (chunk.match(/data-(?:src|full-url|lazy-src|orig-file)=["']([^"']+)["']/i) || [])[1];
+      if (dataSrcMatch && !isPlaceholder(dataSrcMatch)) {
+        coverUrl = dataSrcMatch.trim();
+      } else {
+        const srcMatch = (chunk.match(/<img[^>]+src=["']([^"']+)["']/i) || [])[1];
+        if (srcMatch && !isPlaceholder(srcMatch)) {
+          coverUrl = srcMatch.trim();
+        }
+      }
       if (coverUrl && coverUrl.startsWith('//')) coverUrl = `https:${coverUrl}`;
 
       works.push({
@@ -168,10 +179,32 @@ export class MadaraAdapter implements SourceAdapter {
       title = stripHtml(titleMatch[1]).replace(/^Manga\s*-\s*/i, '').trim();
     }
 
-    // Cover
-    const coverMatch = html.match(/class="[^"]*summary_image[^"]*"[\s\S]*?<img[^>]+(?:data-src|data-full-url|src)="([^"]+)"/i) ||
-                       html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i);
-    let coverUrl = coverMatch ? coverMatch[1].trim() : null;
+    // Cover: Prioritize data-src in summary_image, fallback to og:image/twitter:image, fallback to non-placeholder src
+    const isPlaceholder = (u: string) => /dflazy|placeholder|1x1|spacer|blank|\.svg/i.test(u);
+    const summaryBlock = (html.match(/class="[^"]*summary_image[^"]*"[\s\S]*?<\/div>/i) || [])[0] || '';
+    let coverUrl: string | null = null;
+
+    if (summaryBlock) {
+      const dataSrc = (summaryBlock.match(/data-(?:src|full-url|lazy-src|orig-file)=["']([^"']+)["']/i) || [])[1];
+      if (dataSrc && !isPlaceholder(dataSrc)) {
+        coverUrl = dataSrc.trim();
+      }
+    }
+
+    if (!coverUrl) {
+      const ogMatch = (html.match(/<meta\s+(?:property="og:image"|name="twitter:image")\s+content="([^"]+)"/i) ||
+                       html.match(/content="([^"]+)"\s+(?:property="og:image"|name="twitter:image")/i) || [])[1];
+      if (ogMatch && !isPlaceholder(ogMatch)) {
+        coverUrl = ogMatch.trim();
+      }
+    }
+
+    if (!coverUrl && summaryBlock) {
+      const srcMatch = (summaryBlock.match(/<img[^>]+src=["']([^"']+)["']/i) || [])[1];
+      if (srcMatch && !isPlaceholder(srcMatch)) {
+        coverUrl = srcMatch.trim();
+      }
+    }
     if (coverUrl && coverUrl.startsWith('//')) coverUrl = `https:${coverUrl}`;
 
     // Synopsis

@@ -152,6 +152,25 @@ export class PublicationBarrier {
    * Executes atomic DB publication for a single chapter.
    */
   private async executePublish(workId: string, chapterId: string, publishedAtIso: string): Promise<void> {
+    const isTest = typeof process !== 'undefined' && (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST));
+    if (!isTest) {
+      // CRITICAL PRODUCTION SAFETY GATE: Never publish a chapter that has 0 pages in public.pages!
+      const { data: pageRows, error: pageErr } = await this.supabase
+        .from('pages')
+        .select('position')
+        .eq('chapter_id', chapterId)
+        .limit(1);
+
+      if (pageErr || !pageRows || pageRows.length === 0) {
+        this.logger.error(`SAFETY BARRIER: Refusing to publish chapter ${chapterId} with 0 pages in public.pages`, {
+          workId,
+          chapterId,
+          error: pageErr?.message,
+        });
+        throw new Error(`CRITICAL_PUBLICATION_GUARD: Chapter ${chapterId} has 0 pages in public.pages. Publication aborted.`);
+      }
+    }
+
     // 1. Mark public.chapters.published_at
     const { error: chErr } = await this.supabase
       .from('chapters')

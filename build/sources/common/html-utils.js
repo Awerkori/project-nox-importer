@@ -7,17 +7,36 @@ export function slugify(text) {
         .replace(/^-+|-+$/g, '');
 }
 export function decodeHtmlEntities(str) {
+    if (!str)
+        return '';
     return str
+        .replace(/&#8211;/g, '–')
+        .replace(/&#8212;/g, '—')
+        .replace(/&#8216;/g, '‘')
+        .replace(/&#8217;/g, '’')
+        .replace(/&#8220;/g, '“')
+        .replace(/&#8221;/g, '”')
+        .replace(/&#8230;/g, '…')
+        .replace(/&hellip;/g, '…')
+        .replace(/\[&hellip;\]/g, '…')
         .replace(/&amp;/g, '&')
         .replace(/&lt;/g, '<')
         .replace(/&gt;/g, '>')
         .replace(/&quot;/g, '"')
         .replace(/&#039;/g, "'")
-        .replace(/&#8217;/g, "'")
-        .replace(/&#8216;/g, "'")
-        .replace(/&#8220;/g, '"')
-        .replace(/&#8221;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&apos;/g, "'")
         .replace(/&nbsp;/g, ' ')
+        .replace(/&ndash;/g, '–')
+        .replace(/&mdash;/g, '—')
+        .replace(/&#(\d+);/g, (_, dec) => {
+        const code = Number(dec);
+        return !isNaN(code) && code > 0 && code < 65536 ? String.fromCharCode(code) : '';
+    })
+        .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+        const code = parseInt(hex, 16);
+        return !isNaN(code) && code > 0 && code < 65536 ? String.fromCharCode(code) : '';
+    })
         .trim();
 }
 export function stripHtml(str) {
