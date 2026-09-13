@@ -18,6 +18,7 @@ import { CloudflareClassifier, CloudflareClassification } from './cloudflare-cla
 import { SourceCircuitBreaker } from './circuit-breaker.js';
 import { SharedNetworkDetector } from './shared-network-detector.js';
 import { SourceAdmissionGate } from './source-admission-gate.js';
+import { PublicationSafetyBarrier } from './publication-safety-barrier.js';
 
 export { computeCanonicalChapterKey };
 
@@ -65,6 +66,7 @@ export class ImporterEngine {
   private checkpoints: CheckpointManager;
   private autotuner: AdaptiveAutotuner;
   private publicationBarrier: PublicationBarrier;
+  private safetyBarrier: PublicationSafetyBarrier;
   private reconciler: ExistingWorksReconciler;
   private circuitBreaker = new SourceCircuitBreaker();
   private sharedNetworkDetector = new SharedNetworkDetector();
@@ -88,6 +90,7 @@ export class ImporterEngine {
     this.deduplication = new DeduplicationEngine(supabase);
     this.checkpoints = new CheckpointManager(supabase);
     this.publicationBarrier = new PublicationBarrier(supabase);
+    this.safetyBarrier = new PublicationSafetyBarrier(supabase);
     this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
     const requestedMax = config.MAX_CONCURRENT_CHAPTERS || 32;
     this.autotuner = new AdaptiveAutotuner({
@@ -104,6 +107,10 @@ export class ImporterEngine {
 
   getAutotuner(): AdaptiveAutotuner {
     return this.autotuner;
+  }
+
+  getSafetyBarrier(): PublicationSafetyBarrier {
+    return this.safetyBarrier;
   }
 
   async start(): Promise<void> {
@@ -277,6 +284,9 @@ export class ImporterEngine {
   }
 
   private async scheduleCatalogBackfill(): Promise<void> {
+    const isAllowed = await this.safetyBarrier.isBackfillAllowed();
+    if (!isAllowed) return;
+
     const { data: sources, error } = await this.supabase
       .from('importer_sources')
       .select('*');
@@ -679,6 +689,13 @@ export class ImporterEngine {
 
     while (!this.stopSignal) {
       try {
+        // 0. Enforce PublicationSafetyBarrier: if CLOSED or RECOVERING, hold 0 permits, 0 worker slots
+        const canAcquire = await this.safetyBarrier.canAcquireChapters();
+        if (!canAcquire) {
+          await this.sleep(3000);
+          continue;
+        }
+
         // 1. Check if source had no jobs recently (backoff to avoid spin)
         const emptyUntil = this.sourceEmptyCooldown.get(source) || 0;
         if (Date.now() < emptyUntil) {
@@ -762,6 +779,13 @@ export class ImporterEngine {
 
     while (!this.stopSignal) {
       try {
+        // 0. Enforce PublicationSafetyBarrier: if CLOSED or RECOVERING, hold 0 permits, 0 slots
+        const canAcquire = await this.safetyBarrier.canAcquireChapters();
+        if (!canAcquire) {
+          await this.sleep(3000);
+          continue;
+        }
+
         await globalSem.acquire();
 
         let job: QueueJob | null = null;
@@ -1017,6 +1041,16 @@ export class ImporterEngine {
         this.logger.info(`Job ${job.id} cancelled by staff prior to execution.`);
         await this.queue.releaseJob(job.id, 'CANCELLED_BY_STAFF');
         return;
+      }
+
+      // Checkpoint 0b: Publication Safety Barrier check for chapter ingestion
+      if (job.task_type === 'IMPORT_CHAPTER') {
+        const canAcquire = await this.safetyBarrier.canAcquireChapters();
+        if (!canAcquire) {
+          this.logger.warn(`Skipping chapter job ${job.id}: PublicationSafetyBarrier is CLOSED/RECOVERING`);
+          await this.queue.releaseJob(job.id, 'QUEUED', 'PublicationSafetyBarrier is CLOSED/RECOVERING', 15);
+          return;
+        }
       }
 
       const { data: sourceRec } = await this.supabase
