@@ -8,6 +8,10 @@ import { AdaptiveAutotuner } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
 import { RetryPolicy, ProviderDownloadError } from './retry-policy.js';
 import { ExistingWorksReconciler } from './reconciliation.js';
+import { CloudflareClassifier } from './cloudflare-classifier.js';
+import { SourceCircuitBreaker } from './circuit-breaker.js';
+import { SharedNetworkDetector } from './shared-network-detector.js';
+import { SourceAdmissionGate } from './source-admission-gate.js';
 export { computeCanonicalChapterKey };
 export class JobCancelledByStaffError extends Error {
     jobId;
@@ -62,6 +66,9 @@ export class ImporterEngine {
     autotuner;
     publicationBarrier;
     reconciler;
+    circuitBreaker = new SourceCircuitBreaker();
+    sharedNetworkDetector = new SharedNetworkDetector();
+    admissionGate = new SourceAdmissionGate();
     isRunning = false;
     stopSignal = false;
     abortController = new AbortController();
@@ -406,35 +413,13 @@ export class ImporterEngine {
         const adapter = this.registry.get(src.id);
         if (!adapter)
             return;
+        // If shared network incident is active, suppress probe storms
+        if (this.sharedNetworkDetector.isSharedBlockActive()) {
+            this.logger.warn(`Shared network block is currently active on datacenter network. Suppressing probe for ${src.id}.`);
+            return;
+        }
         try {
-            this.logger.info(`Probing health for ${src.id}...`);
-            let searchResults = [];
-            try {
-                searchResults = await adapter.searchWorks('Solo');
-            }
-            catch (sErr) {
-                this.logger.warn(`Search probe failed for ${src.id}`, { error: sErr?.message });
-            }
-            if (!searchResults || searchResults.length === 0) {
-                this.logger.info(`Source ${src.id} search probe returned no results. Retaining UPSTREAM_BLOCKED.`);
-                await this.supabase
-                    .from('importer_sources')
-                    .update({
-                    status: 'UPSTREAM_BLOCKED',
-                    blocked_reason: 'CLOUDFLARE_DATACENTER_BLOCK',
-                    blocked_details: {
-                        message: 'Cloudflare bloqueia o ambiente atual do Importer (DIScloud / OVH). Local/Mihon: funcional; DIScloud: HTTP 403.',
-                        local_status: 200,
-                        discloud_status: 403,
-                        last_checked_at: nowIso,
-                    },
-                    last_health_check_at: nowIso,
-                    updated_at: nowIso,
-                })
-                    .eq('id', src.id);
-                return;
-            }
-            this.logger.info(`Source ${src.id} Search probe succeeded (${searchResults.length} works). Transitioning to RECOVERING to validate full pipeline.`);
+            this.logger.info(`Executing Production Admission Probe for source: ${src.id}...`);
             await this.supabase
                 .from('importer_sources')
                 .update({
@@ -443,71 +428,71 @@ export class ImporterEngine {
                 updated_at: nowIso,
             })
                 .eq('id', src.id);
-            try {
-                // Stage 2: Chapters
-                const chapters = await adapter.fetchChapters(searchResults[0].sourceWorkId).catch(() => []);
-                if (!chapters || chapters.length === 0) {
-                    throw new Error('Health check stage 2 failed: 0 chapters returned');
-                }
-                const testChapter = chapters[0];
-                // Stage 3: Pages
-                const pages = await adapter.fetchChapterPages(testChapter.sourceChapterId);
-                if (!pages || pages.length === 0) {
-                    throw new Error('Health check stage 3 failed: 0 pages returned');
-                }
-                // Stage 4: Download 1 image
-                const firstPageUrl = typeof pages[0] === 'string' ? pages[0] : pages[0]?.imageUrl;
-                const imgBytes = await this.fetchImageBytes(firstPageUrl, src.id);
-                if (!imgBytes || imgBytes.byteLength === 0) {
-                    throw new Error('Health check stage 4 failed: image download returned 0 bytes');
-                }
-                // Passed all 4 stages! Transition to ACTIVE
-                this.logger.info(`Source ${src.id} passed all 4 validation stages! Transitioning to ACTIVE.`);
-                await this.supabase
-                    .from('importer_sources')
-                    .update({
-                    status: 'ACTIVE',
-                    enabled: true,
-                    blocked_reason: null,
-                    blocked_details: {},
-                    last_health_check_at: nowIso,
-                    updated_at: nowIso,
-                })
-                    .eq('id', src.id);
-                // Unpark held jobs for this source back to QUEUED
-                try {
-                    const { error: unparkErr } = await this.supabase
-                        .from('importer_queue')
-                        .update({
-                        status: 'QUEUED',
-                        last_error: null,
-                        updated_at: nowIso,
-                    })
-                        .eq('source', src.id)
-                        .eq('status', 'BLOCKED_BY_UPSTREAM');
-                    if (!unparkErr) {
-                        this.logger.info(`Unparked held jobs for ${src.id} back to QUEUED now that source is ACTIVE`);
-                    }
-                }
-                catch (unparkErr) {
-                    this.logger.warn(`Failed to unpark jobs for ${src.id}`, { error: unparkErr?.message });
-                }
-            }
-            catch (valErr) {
-                this.logger.warn(`Source ${src.id} recovery validation failed`, { error: valErr?.message });
+            const report = await this.admissionGate.executeProdProbe(adapter);
+            if (report.overallStatus !== 'PASS') {
+                const primaryReason = report.classification || 'CLOUDFLARE_DATACENTER_BLOCK';
+                this.logger.info(`Source ${src.id} failed production admission probe (${primaryReason}). Retaining UPSTREAM_BLOCKED.`, { stages: report.stages });
+                this.circuitBreaker.recordFailure(src.id, primaryReason);
+                this.sharedNetworkDetector.recordBlockEvent({
+                    sourceId: src.id,
+                    classification: primaryReason,
+                    cfRay: report.cfRay,
+                });
                 await this.supabase
                     .from('importer_sources')
                     .update({
                     status: 'UPSTREAM_BLOCKED',
-                    blocked_reason: 'RECOVERY_VALIDATION_FAILED',
+                    blocked_reason: primaryReason,
                     blocked_details: {
-                        error: valErr?.message,
+                        message: 'Cloudflare bloqueia o ambiente atual do Importer (DIScloud / OVH ASN 16276). Local/Mihon: funcional; DIScloud: HTTP 403.',
+                        local_status: 200,
+                        discloud_status: 403,
                         last_checked_at: nowIso,
+                        stages: report.stages,
+                        cf_ray: report.cfRay,
                     },
                     last_health_check_at: nowIso,
                     updated_at: nowIso,
                 })
                     .eq('id', src.id);
+                return;
+            }
+            // Passed all 6 stages! Transition to ACTIVE
+            this.logger.info(`Source ${src.id} passed all 6 stages of Admission Probe! Transitioning to ACTIVE.`);
+            this.circuitBreaker.recordSuccess(src.id);
+            this.sourceStatusCache.delete(src.id);
+            await this.supabase
+                .from('importer_sources')
+                .update({
+                status: 'ACTIVE',
+                enabled: true,
+                blocked_reason: null,
+                blocked_details: {
+                    recovered_at: nowIso,
+                    probe_success: true,
+                    stages: report.stages,
+                },
+                last_health_check_at: nowIso,
+                updated_at: nowIso,
+            })
+                .eq('id', src.id);
+            // Unpark held jobs for this source back to QUEUED
+            try {
+                const { error: unparkErr } = await this.supabase
+                    .from('importer_queue')
+                    .update({
+                    status: 'QUEUED',
+                    last_error: null,
+                    updated_at: nowIso,
+                })
+                    .eq('source', src.id)
+                    .eq('status', 'BLOCKED_BY_UPSTREAM');
+                if (!unparkErr) {
+                    this.logger.info(`Unparked held jobs for ${src.id} back to QUEUED now that source is ACTIVE`);
+                }
+            }
+            catch (unparkErr) {
+                this.logger.warn(`Failed to unpark jobs for ${src.id}`, { error: unparkErr?.message });
             }
         }
         catch (err) {
@@ -557,6 +542,10 @@ export class ImporterEngine {
     sourceEmptyCooldown = new Map();
     sourceStatusCache = new Map();
     async checkSourceAvailability(source) {
+        // 1. Check local circuit breaker first (zero-cost in-memory check)
+        if (!this.circuitBreaker.canExecute(source)) {
+            return false;
+        }
         const now = Date.now();
         let cached = this.sourceStatusCache.get(source);
         if (!cached || now - cached.cachedAt > 10_000) {
@@ -577,7 +566,11 @@ export class ImporterEngine {
         }
         if (!cached)
             return true;
-        if (!cached.enabled || cached.status === 'PAUSED' || cached.status === 'DISABLED' || cached.status === 'UPSTREAM_BLOCKED') {
+        if (!cached.enabled ||
+            cached.status === 'PAUSED' ||
+            cached.status === 'DISABLED' ||
+            cached.status === 'UPSTREAM_BLOCKED' ||
+            cached.status === 'EXCLUDED_BY_POLICY') {
             return false;
         }
         if (cached.status === 'COOLDOWN' && now < cached.cooldownUntil) {
@@ -865,10 +858,13 @@ export class ImporterEngine {
                 if (hasActive) {
                     continue;
                 }
+                const checkpoint = await this.checkpoints.getCheckpoint(src.id);
+                const isCompleted = Boolean(checkpoint?.metadata?.catalog_completed);
+                const discoveryMode = isCompleted ? 'maintenance' : 'bootstrap';
                 const dedupeKey = `${src.id}:discover:${Math.floor(now / intervalMs)}`;
                 await this.queue.enqueue('DISCOVER_WORKS', src.id, dedupeKey, {
                     workTitle: `Varredura de Catálogo (${src.name || src.id})`,
-                    mode: 'maintenance',
+                    mode: discoveryMode,
                 }, 10);
             }
         }
@@ -1007,26 +1003,47 @@ export class ImporterEngine {
                 error: errorMessage,
                 attempts: job.attempts,
             });
-            // If error is from an upstream provider blocked by Cloudflare (HTTP 403 / Cloudflare Challenge on datacenter),
-            // transition source to UPSTREAM_BLOCKED and park the job safely in BLOCKED_BY_UPSTREAM instead of retry loop
-            const isUpstreamBlocked = /403|cloudflare|just a moment|turnstile|challenge|upstream_blocked/i.test(errorMessage) ||
-                /bloqueado por cloudflare/i.test(errorMessage);
+            // Inspect error for Cloudflare / WAF block patterns
+            const statusFromErr = err?.status || (errorMessage.includes('403') ? 403 : errorMessage.includes('429') ? 429 : 500);
+            const cfInsp = CloudflareClassifier.inspect(statusFromErr, err?.headers || {}, errorMessage, {
+                expectedType: job.task_type === 'IMPORT_CHAPTER' ? 'image' : 'json',
+                isIsolatedRequest: false,
+            });
+            const isUpstreamBlocked = ((cfInsp.isBlocked && statusFromErr !== 429) ||
+                cfInsp.isChallenge ||
+                /403|turnstile|challenge|upstream_blocked|just a moment/i.test(errorMessage) ||
+                /bloqueado por cloudflare/i.test(errorMessage)) &&
+                statusFromErr !== 429;
             if (isUpstreamBlocked) {
-                this.logger.warn(`Source ${job.source} detected upstream block (HTTP 403 / Cloudflare). Transitioning source to UPSTREAM_BLOCKED and parking job.`, {
+                const classification = cfInsp.classification || 'DATACENTER_ASN_BLOCK';
+                this.logger.warn(`Source ${job.source} detected upstream block (${classification}). Tripping circuit and parking job in BLOCKED_BY_UPSTREAM.`, {
                     jobId: job.id,
+                    classification,
                     error: errorMessage,
                 });
+                // 1. Trip circuit breaker with exponential cooldown
+                this.circuitBreaker.recordFailure(job.source, classification);
+                // 2. Track in shared network detector to avoid probe storms across sources
+                this.sharedNetworkDetector.recordBlockEvent({
+                    sourceId: job.source,
+                    classification,
+                    cfRay: cfInsp.cfRay,
+                });
+                // 3. Invalidate source availability cache
+                this.sourceStatusCache.delete(job.source);
                 const nowIso = new Date().toISOString();
                 try {
                     await this.supabase
                         .from('importer_sources')
                         .update({
                         status: 'UPSTREAM_BLOCKED',
-                        blocked_reason: 'CLOUDFLARE_DATACENTER_BLOCK',
+                        blocked_reason: classification,
                         blocked_details: {
-                            message: 'Cloudflare bloqueia o ambiente atual do Importer (DIScloud / OVH). Local/Mihon: funcional; DIScloud: HTTP 403.',
+                            message: 'Cloudflare bloqueia o ambiente atual do Importer (DIScloud / OVH ASN 16276). Local/Mihon: funcional; DIScloud: HTTP 403.',
                             local_status: 200,
                             discloud_status: 403,
+                            classification,
+                            reason: cfInsp.reason,
                             last_checked_at: nowIso,
                         },
                         updated_at: nowIso,
@@ -1034,7 +1051,7 @@ export class ImporterEngine {
                         .eq('id', job.source);
                 }
                 catch { }
-                await this.queue.releaseJob(job.id, 'BLOCKED_BY_UPSTREAM', `Bloqueado a montante: Cloudflare bloqueia o ambiente atual do Importer (DIScloud / OVH) (HTTP 403)`);
+                await this.queue.releaseJob(job.id, 'BLOCKED_BY_UPSTREAM', `Bloqueado a montante (${classification}): ${cfInsp.reason}`);
                 return;
             }
             const classification = RetryPolicy.classify(err);
@@ -2361,9 +2378,24 @@ export class ImporterEngine {
             }
             throw new ProviderDownloadError(status, url, source, `Failed to download image from ${url}: HTTP ${status}`);
         }
-        this.rateLimiter.recordSuccess(parsedUrl.host);
         const arrayBuf = await res.arrayBuffer();
-        return new Uint8Array(arrayBuf);
+        const uint8 = new Uint8Array(arrayBuf);
+        // Validate binary image integrity and check for fake HTML challenge pages returned with HTTP 200
+        const bodySnippet = uint8.byteLength < 4000 ? new TextDecoder().decode(uint8) : '';
+        const imgInsp = CloudflareClassifier.inspect(res.status, res.headers, bodySnippet, {
+            url,
+            expectedType: 'image',
+            buffer: uint8,
+            isIsolatedRequest: false,
+        });
+        if (!imgInsp.isValidImage || imgInsp.isBlocked || imgInsp.isChallenge || uint8.byteLength === 0) {
+            const cls = imgInsp.classification || 'IMAGE_CDN_BLOCK';
+            this.circuitBreaker.recordFailure(source, cls, parsedUrl.host);
+            throw new ProviderDownloadError(res.status === 200 ? 403 : res.status, url, source, `Cloudflare blocked image download (${cls}): ${imgInsp.reason}`);
+        }
+        this.rateLimiter.recordSuccess(parsedUrl.host);
+        this.circuitBreaker.recordSuccess(source, parsedUrl.host);
+        return uint8;
     }
     async resolveDynamicCandidateFallbacks(workId, chapterNumber, excludeSource, payloadFallbacks = []) {
         const candidates = [];

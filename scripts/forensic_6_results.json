@@ -1,0 +1,236 @@
+{
+  "acervohentai": {
+    "name": "Acervo Hentai",
+    "endpoints": {
+      "main": {
+        "url": "https://acervohentai.com",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95eb4bda157c9-GIG",
+        "cfMitigated": null,
+        "retryAfter": null,
+        "isChallenge": false
+      },
+      "api": {
+        "url": "https://acervohentai.com/wp-admin/admin-ajax.php",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95eb51ec057c9-GIG",
+        "isChallenge": false
+      },
+      "chapter": {
+        "url": "https://acervohentai.com/manhwa/voce-quer-fazer-isso/capitulo-1/",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95eb6aaed57c9-GIG",
+        "isChallenge": false
+      },
+      "image": {
+        "url": "https://acervohentai.com/wp-content/uploads/WP-manga/data/manga_6aa4c7e803993/45d23160321114ce1a1423738038cb9e/0001.webp",
+        "status": 200,
+        "contentType": "image/webp",
+        "server": "cloudflare",
+        "cfRay": "a3a95eb7af04d93a-GIG",
+        "bytes": 146318
+      }
+    }
+  },
+  "amuy": {
+    "name": "AMUY Scan",
+    "endpoints": {
+      "main": {
+        "url": "https://www.apenasmaisumyaoi.com",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95eb8ad8c64af-GIG",
+        "cfMitigated": null,
+        "retryAfter": null,
+        "isChallenge": false
+      },
+      "api": {
+        "url": "https://www.apenasmaisumyaoi.com/wp-admin/admin-ajax.php",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95eca6ba164af-GIG",
+        "isChallenge": false
+      },
+      "chapter": {
+        "url": "https://www.apenasmaisumyaoi.com/manga/3970/1a-temporada/capitulo-01/",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95ee8cabe64af-GIG",
+        "isChallenge": false
+      },
+      "image": {
+        "url": "https://www.apenasmaisumyaoi.com/wp-content/uploads/2026/05/site-4.png",
+        "status": 200,
+        "contentType": "image/png",
+        "server": "cloudflare",
+        "cfRay": "a3a95f139cbd64af-GIG",
+        "bytes": 45658
+      }
+    }
+  },
+  "hanamiheaven": {
+    "name": "Hanami Heaven",
+    "endpoints": {
+      "main": {
+        "url": "https://hanamiheaven.org",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "hcdn",
+        "cfRay": null,
+        "cfMitigated": null,
+        "retryAfter": null,
+        "isChallenge": false
+      },
+      "api": {
+        "url": "https://hanamiheaven.org/api/v1",
+        "status": 404,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "hcdn",
+        "cfRay": null,
+        "isChallenge": false
+      },
+      "chapter": {
+        "url": "https://hanamiheaven.org/manga/my-lewd-college-friends/cap-12",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "hcdn",
+        "cfRay": null,
+        "isChallenge": false
+      },
+      "image": {
+        "url": "https://hanamiheaven.org/images/cover.jpg",
+        "status": 404,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "hcdn",
+        "cfRay": null,
+        "bytes": 110919
+      }
+    }
+  },
+  "inkapk": {
+    "name": "Inkapk",
+    "endpoints": {
+      "main": {
+        "url": "https://inkapk.net",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95f415e4649cc-GIG",
+        "cfMitigated": null,
+        "retryAfter": null,
+        "isChallenge": false
+      },
+      "api": {
+        "url": "https://inkapk.net/wp-admin/admin-ajax.php",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95f41af2749cc-GIG",
+        "isChallenge": false
+      },
+      "chapter": {
+        "url": "https://inkapk.net/obras/a-visit-to-hell/capitulo-01/",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95f4a682949cc-GIG",
+        "isChallenge": false
+      },
+      "image": {
+        "url": "https://inkapk.net/wp-content/uploads/2025/12/logo1-1.png",
+        "status": 200,
+        "contentType": "image/png",
+        "server": "cloudflare",
+        "cfRay": "a3a95f4aa8e949cc-GIG",
+        "bytes": 18791
+      }
+    }
+  },
+  "kuro": {
+    "name": "Kuro Mangas",
+    "endpoints": {
+      "main": {
+        "url": "https://kuromangas.com",
+        "status": 200,
+        "contentType": "text/html",
+        "server": "cloudflare",
+        "cfRay": "a3a95f4b5b7a648b-GIG",
+        "cfMitigated": null,
+        "retryAfter": null,
+        "isChallenge": false
+      },
+      "api": {
+        "url": "https://kuromangas.com/api",
+        "status": 401,
+        "contentType": "application/json; charset=utf-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95f4bfbcb648b-GIG",
+        "isChallenge": false
+      },
+      "chapter": {
+        "url": "https://kuromangas.com/ler/one-piece/capitulo-1",
+        "status": 200,
+        "contentType": "text/html",
+        "server": "cloudflare",
+        "cfRay": "a3a95f4c6c01648b-GIG",
+        "isChallenge": false
+      },
+      "image": {
+        "url": "https://kuromangas.com/favicon.png",
+        "status": 200,
+        "contentType": "text/html",
+        "server": "cloudflare",
+        "cfRay": "a3a95f4cec50648b-GIG",
+        "bytes": 1727
+      }
+    }
+  },
+  "yaoifanclub": {
+    "name": "Yaoi Fan Club",
+    "endpoints": {
+      "main": {
+        "url": "https://www.yaoifanclub.com",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95f4e9e7ede17-GIG",
+        "cfMitigated": null,
+        "retryAfter": null,
+        "isChallenge": false
+      },
+      "api": {
+        "url": "https://www.yaoifanclub.com/wp-admin/admin-ajax.php",
+        "status": 403,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95f5808606d5d-GIG",
+        "isChallenge": true
+      },
+      "chapter": {
+        "url": "https://yaoifanclub.com/obra/meu-vizinho-nada-facil/capitulo-00-1/",
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "server": "cloudflare",
+        "cfRay": "a3a95f582f11de17-GIG",
+        "isChallenge": false
+      },
+      "image": {
+        "url": "https://yaoifanclub.com/wp-content/uploads/2026/08/yfcfundo.png",
+        "status": 200,
+        "contentType": "image/png",
+        "server": "cloudflare",
+        "cfRay": "a3a95f5c0a72de17-GIG",
+        "bytes": 11028
+      }
+    }
+  }
+}

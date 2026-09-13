@@ -45,6 +45,7 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
       create role service_role bypassrls;
       create schema if not exists auth;
       create schema if not exists storage;
+      create type public.scan_member_role as enum ('LEADER', 'VICE_LEADER', 'STAFF', 'MEMBER');
       create table if not exists auth.users (id uuid primary key, email text, email_confirmed_at timestamptz, raw_user_meta_data jsonb);
       create or replace function auth.uid() returns uuid language sql stable as $$
         select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
@@ -71,6 +72,9 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
 
     await db.query(`insert into auth.users (id, email, email_confirmed_at) values ($1, 'bot@projectnox.com', now())`, [botUserId]);
     await db.query(`update public.access_roles set role = 'ADMIN' where user_id = $1`, [botUserId]);
+    await db.query(`update public.importer_sources set enabled = false where id != 'nexus'`);
+    await db.query(`delete from public.importer_checkpoints where source = 'nexus'`);
+    await db.query(`update public.importer_sources set last_sync_at = null where id = 'nexus'`);
 
     const mockAdapter: SourceAdapter = {
       id: 'nexus',

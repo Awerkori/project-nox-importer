@@ -98,6 +98,7 @@ create table if not exists public.importer_checkpoints (
 -- ==============================================================================
 
 -- Acquire next available job atomically using FOR UPDATE SKIP LOCKED
+drop function if exists public.importer_acquire_job cascade;
 create or replace function public.importer_acquire_job(
   p_worker_id text,
   p_lease_duration interval default interval '5 minutes'

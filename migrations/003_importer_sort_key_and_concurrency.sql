@@ -13,7 +13,7 @@ create index if not exists importer_queue_sort_idx
   on public.importer_queue(source, priority desc, chapter_sort_key asc nulls last, next_run_at asc);
 
 -- 2. Update importer_acquire_job stored procedure with source filtering and deterministic sort key
-drop function if exists public.importer_acquire_job(text, interval);
+drop function if exists public.importer_acquire_job cascade;
 
 create or replace function public.importer_acquire_job(
   p_worker_id text,
