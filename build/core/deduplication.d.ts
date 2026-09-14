@@ -53,6 +53,12 @@ export declare class DeduplicationEngine {
     /**
      * Synchronize canonical adult tags and upstream genres to public.work_tags
      */
-    syncWorkTags(workId: string, candidate: CandidateWork, isAdult: boolean, kind?: string): Promise<void>;
+    /**
+     * Normalize and resolve a tag name to its canonical form
+     */
+    private normalizeTagName;
+    private isGarbageTag;
+    private getProviderDefaultTags;
+    syncWorkTags(workId: string, candidate: CandidateWork, isAdult: boolean, kind?: string, source?: string): Promise<void>;
     private sanitizeSlug;
 }
