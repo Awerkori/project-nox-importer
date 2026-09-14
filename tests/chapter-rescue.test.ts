@@ -276,6 +276,10 @@ describe('Cross-Provider Chapter Rescue & Page Classification', () => {
         return builder;
       },
       rpc: async (fnName: string, params: any) => {
+        if (fnName === 'importer_replace_pages') {
+          const res = await db.query('SELECT importer_replace_pages($1,$2::jsonb) count',[params.p_chapter_id,JSON.stringify(params.p_pages)]);
+          return {data:res.rows[0].count,error:null};
+        }
         // Mock all RPC calls — for publication barrier, return "can publish"
         if (fnName === 'importer_check_publication_barrier') {
           return { data: [], error: null };
