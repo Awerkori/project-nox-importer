@@ -41,7 +41,6 @@ export declare class ImporterEngine {
     private stopSignal;
     private abortController;
     static activeBufferedBytes: number;
-    static readonly MAX_BUFFERED_BYTES: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
     getAutotuner(): AdaptiveAutotuner;
     getSafetyBarrier(): PublicationSafetyBarrier;

@@ -3,6 +3,7 @@ import { DeduplicationEngine, computeCanonicalChapterKey, ADULT_SOURCES } from '
 import { CheckpointManager } from './checkpoint.js';
 import { processAndStoreMedia } from '../storage/media.js';
 import { Logger } from './logger.js';
+import { readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
 import { AdaptiveAutotuner } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
@@ -74,9 +75,8 @@ export class ImporterEngine {
     isRunning = false;
     stopSignal = false;
     abortController = new AbortController();
-    // Ready Queue bounded buffer control in RAM (< 40MB max)
+    // Actual retained image bytes; bounded globally by page permits and per-image size.
     static activeBufferedBytes = 0;
-    static MAX_BUFFERED_BYTES = 256 * 1024 * 1024;
     constructor(supabase, storage, registry, rateLimiter, config) {
         this.supabase = supabase;
         this.storage = storage;
@@ -89,16 +89,16 @@ export class ImporterEngine {
         this.publicationBarrier = new PublicationBarrier(supabase);
         this.safetyBarrier = new PublicationSafetyBarrier(supabase);
         this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
-        const requestedMax = config.MAX_CONCURRENT_CHAPTERS || 32;
+        const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 4, config.TESTED_CONCURRENCY_CEILING || 4);
         this.autotuner = new AdaptiveAutotuner({
-            initialConcurrency: Math.min(12, requestedMax),
-            maxConcurrency: Math.max(16, requestedMax),
-            maxRssMb: 380,
-            maxHeapMb: 240,
-            maxExternalAndBuffersMb: 120,
+            initialConcurrency: Math.min(2, requestedMax),
+            maxConcurrency: requestedMax,
+            maxRssMb: 260,
+            maxHeapMb: 160,
+            maxExternalAndBuffersMb: 60,
             maxEventLoopLagMs: 100,
-            requiredStableCycles: 1,
-            cooldownPeriodMs: 20 * 1000,
+            requiredStableCycles: 20,
+            cooldownPeriodMs: 60 * 1000,
         });
     }
     getAutotuner() {
@@ -274,13 +274,14 @@ export class ImporterEngine {
             }
             // Backpressure check: throttle backfill if there are already 10+ discovery/sync jobs queued for this source
             try {
-                const { count: activeJobsCount } = await this.supabase
+                const { data: activeJobs, error: activeJobsError } = await this.supabase
                     .from('importer_queue')
-                    .select('id', { count: 'exact', head: true })
+                    .select('id')
                     .eq('source', src.id)
                     .in('task_type', ['DISCOVER_WORKS', 'SYNC_WORK'])
-                    .in('status', ['QUEUED', 'IMPORTING']);
-                if ((activeJobsCount ?? 0) >= 10) {
+                    .in('status', ['QUEUED', 'IMPORTING'])
+                    .limit(10);
+                if (activeJobsError || (activeJobs?.length ?? 0) >= 10) {
                     continue;
                 }
             }
@@ -522,6 +523,19 @@ export class ImporterEngine {
                 const mem = diagnostics.getMemorySnapshot();
                 const evaluation = this.autotuner.evaluateCycle();
                 const activeJobs = diagnostics.getActiveJobsCount();
+                const uploads = this.autotuner.getGlobalMediaSemaphore();
+                const buffers = this.autotuner.getBufferedPageSemaphore();
+                this.logger.info('Pipeline capacity', {
+                    chapterConcurrency: evaluation.concurrency,
+                    testedChapterCeiling: this.config.TESTED_CONCURRENCY_CEILING || 4,
+                    mediaConcurrency: uploads.capacity,
+                    activeMediaUploads: uploads.active,
+                    bufferedPages: buffers.active,
+                    queuedBufferWaiters: buffers.queued,
+                    bufferedBytes: ImporterEngine.activeBufferedBytes,
+                    activeJobs,
+                    rssMb: mem.rssMb,
+                });
                 const lagMetrics = diagnostics.lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
                 this.logger.info(`[Autotuner Telemetry] Action: ${evaluation.action} | Concurrency: ${evaluation.concurrency} | Active Jobs: ${activeJobs} | Mem: ${mem.heapUsedMb}MB heap / ${mem.rssMb}MB rss (512MB RAM) | Reason: ${evaluation.reason}`);
                 // Record async telemetry snapshot without blocking the loop
@@ -1711,6 +1725,8 @@ export class ImporterEngine {
                 const uploadConcurrency = Math.min(6, Math.max(2, Math.floor(this.autotuner.getCurrentConcurrency() / 2)));
                 const globalMediaSemaphore = this.autotuner.getGlobalMediaSemaphore();
                 const globalInflightRequestSemaphore = this.autotuner.getGlobalInflightRequestSemaphore();
+                const bufferedPageSemaphore = this.autotuner.getBufferedPageSemaphore();
+                const bufferedWaitAbort = new AbortController();
                 const readyQueue = [];
                 let nextDownloadIndex = 0;
                 let allDownloadsFinished = false;
@@ -1719,6 +1735,14 @@ export class ImporterEngine {
                 let failed404Count = 0;
                 const consumerResolvers = [];
                 const notifyConsumer = () => {
+                    if (pipelineError || this.stopSignal || isCancelled?.()) {
+                        bufferedWaitAbort.abort();
+                        while (readyQueue.length) {
+                            const discarded = readyQueue.shift();
+                            ImporterEngine.activeBufferedBytes = Math.max(0, ImporterEngine.activeBufferedBytes - discarded.pageBytes.length);
+                            discarded.releaseBuffer();
+                        }
+                    }
                     while (consumerResolvers.length > 0) {
                         const resolve = consumerResolvers.shift();
                         if (resolve)
@@ -1747,29 +1771,6 @@ export class ImporterEngine {
                 const producer = async () => {
                     try {
                         while (!this.stopSignal && !pipelineError && !isCancelled?.()) {
-                            // Memory backpressure check: wait if in-flight active buffer >= MAX_BUFFERED_BYTES (40MB)
-                            let backpressureWaitCount = 0;
-                            while (ImporterEngine.activeBufferedBytes >= ImporterEngine.MAX_BUFFERED_BYTES &&
-                                !this.stopSignal &&
-                                !pipelineError) {
-                                if (isCancelled?.()) {
-                                    pipelineError = new JobCancelledByStaffError(job.id);
-                                    notifyConsumer();
-                                    break;
-                                }
-                                await this.sleep(30);
-                                backpressureWaitCount++;
-                                // Watchdog: If backpressure has been waiting for more than 4.5s and readyQueue is empty,
-                                // or waiting more than 15s continuously, reset phantom activeBufferedBytes to avoid deadlock
-                                if ((backpressureWaitCount > 150 && readyQueue.length === 0) || backpressureWaitCount > 500) {
-                                    this.logger.warn('Backpressure watchdog triggered: resetting phantom activeBufferedBytes to 0', {
-                                        stuckBytes: ImporterEngine.activeBufferedBytes,
-                                        readyQueueLength: readyQueue.length,
-                                    });
-                                    ImporterEngine.activeBufferedBytes = 0;
-                                    break;
-                                }
-                            }
                             // Safe Checkpoint: cancellation check
                             if (isCancelled?.() || (nextDownloadIndex % 3 === 0 && (await this.queue.isCancelRequested(job.id)))) {
                                 pipelineError = new JobCancelledByStaffError(job.id);
@@ -1783,103 +1784,117 @@ export class ImporterEngine {
                             let pageUrl = pageUrls[idx];
                             const parsedUrl = new URL(pageUrl);
                             await this.rateLimiter.acquire(parsedUrl.host);
-                            let pageBytes = null;
-                            let attempts = 0;
-                            let lastErr = null;
-                            const d0 = Date.now();
-                            while (attempts < 3 && !this.stopSignal && !pipelineError) {
-                                attempts++;
-                                try {
-                                    pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
-                                        return await this.fetchImageBytes(pageUrl, effectiveSource);
-                                    });
-                                    tDownload += Date.now() - d0;
-                                    totalBytes += pageBytes.length;
-                                    ImporterEngine.activeBufferedBytes += pageBytes.length;
+                            await bufferedPageSemaphore.acquire(AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+                            let bufferTransferred = false;
+                            try {
+                                if (this.stopSignal || pipelineError || isCancelled?.())
                                     break;
-                                }
-                                catch (err) {
-                                    lastErr = err;
-                                    if (attempts < 3 && !this.stopSignal && !pipelineError) {
-                                        await this.sleep(500 * attempts);
+                                let pageBytes = null;
+                                let attempts = 0;
+                                let lastErr = null;
+                                const d0 = Date.now();
+                                while (attempts < 3 && !this.stopSignal && !pipelineError) {
+                                    attempts++;
+                                    try {
+                                        pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
+                                            return await this.fetchImageBytes(pageUrl, effectiveSource);
+                                        });
+                                        tDownload += Date.now() - d0;
+                                        totalBytes += pageBytes.length;
+                                        ImporterEngine.activeBufferedBytes += pageBytes.length;
+                                        break;
+                                    }
+                                    catch (err) {
+                                        lastErr = err;
+                                        if (attempts < 3 && !this.stopSignal && !pipelineError) {
+                                            await this.sleep(500 * attempts);
+                                        }
                                     }
                                 }
-                            }
-                            if (!pageBytes) {
-                                const errMsg = (lastErr instanceof Error && lastErr.message) ? lastErr.message : (lastErr ? String(lastErr) : 'Erro desconhecido');
-                                const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
-                                let currentUrl = pageUrls[idx] || '';
-                                // MANIFEST REFRESH: Before blind failure, query upstream to see if URLs were updated
-                                if (is404 && !manifestRefreshed) {
-                                    manifestRefreshed = true;
-                                    try {
-                                        const refreshAdapter = this.registry.get(effectiveSource);
-                                        if (refreshAdapter) {
-                                            const refreshedUrls = await refreshAdapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber);
-                                            if (refreshedUrls && refreshedUrls.length === expectedCount) {
-                                                const isDifferent = refreshedUrls.some((u, i) => u !== pageUrls[i]);
-                                                if (isDifferent) {
-                                                    this.logger.info(`MANIFEST_REFRESH: Upstream manifest refreshed with updated URLs for chapter ${chapterNumber} on ${effectiveSource}`, {
-                                                        workId,
-                                                        chapterNumber,
-                                                        oldUrl: currentUrl,
-                                                        newUrl: refreshedUrls[idx],
-                                                    });
-                                                    pageUrls = refreshedUrls;
-                                                    currentUrl = pageUrls[idx] || '';
-                                                    // Retry downloading with the fresh URL
-                                                    try {
-                                                        pageBytes = await this.fetchImageBytes(currentUrl, effectiveSource);
-                                                        tDownload += Date.now() - d0;
-                                                        totalBytes += pageBytes.length;
-                                                        ImporterEngine.activeBufferedBytes += pageBytes.length;
+                                if (!pageBytes) {
+                                    const errMsg = (lastErr instanceof Error && lastErr.message) ? lastErr.message : (lastErr ? String(lastErr) : 'Erro desconhecido');
+                                    const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
+                                    let currentUrl = pageUrls[idx] || '';
+                                    // MANIFEST REFRESH: Before blind failure, query upstream to see if URLs were updated
+                                    if (is404 && !manifestRefreshed) {
+                                        manifestRefreshed = true;
+                                        try {
+                                            const refreshAdapter = this.registry.get(effectiveSource);
+                                            if (refreshAdapter) {
+                                                const refreshedUrls = await refreshAdapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber);
+                                                if (refreshedUrls && refreshedUrls.length === expectedCount) {
+                                                    const isDifferent = refreshedUrls.some((u, i) => u !== pageUrls[i]);
+                                                    if (isDifferent) {
+                                                        this.logger.info(`MANIFEST_REFRESH: Upstream manifest refreshed with updated URLs for chapter ${chapterNumber} on ${effectiveSource}`, {
+                                                            workId,
+                                                            chapterNumber,
+                                                            oldUrl: currentUrl,
+                                                            newUrl: refreshedUrls[idx],
+                                                        });
+                                                        pageUrls = refreshedUrls;
+                                                        currentUrl = pageUrls[idx] || '';
+                                                        // Retry downloading with the fresh URL
+                                                        try {
+                                                            pageBytes = await this.fetchImageBytes(currentUrl, effectiveSource);
+                                                            tDownload += Date.now() - d0;
+                                                            totalBytes += pageBytes.length;
+                                                            ImporterEngine.activeBufferedBytes += pageBytes.length;
+                                                        }
+                                                        catch (freshErr) {
+                                                            lastErr = freshErr;
+                                                        }
                                                     }
-                                                    catch (freshErr) {
-                                                        lastErr = freshErr;
+                                                    else {
+                                                        this.logger.info(`MANIFEST_REFRESH: Upstream manifest verified, URLs unchanged for chapter ${chapterNumber} on ${effectiveSource}`);
                                                     }
-                                                }
-                                                else {
-                                                    this.logger.info(`MANIFEST_REFRESH: Upstream manifest verified, URLs unchanged for chapter ${chapterNumber} on ${effectiveSource}`);
                                                 }
                                             }
                                         }
+                                        catch (refreshErr) {
+                                            this.logger.warn(`MANIFEST_REFRESH failed for ${effectiveSource} ch ${chapterNumber}`, { error: refreshErr?.message });
+                                        }
                                     }
-                                    catch (refreshErr) {
-                                        this.logger.warn(`MANIFEST_REFRESH failed for ${effectiveSource} ch ${chapterNumber}`, { error: refreshErr?.message });
+                                    // If recovered by manifest refresh, proceed!
+                                    if (pageBytes) {
+                                        readyQueue.push({ index: idx, pageBytes, releaseBuffer: () => bufferedPageSemaphore.release() });
+                                        bufferTransferred = true;
+                                        notifyConsumer();
+                                        continue;
                                     }
-                                }
-                                // If recovered by manifest refresh, proceed!
-                                if (pageBytes) {
-                                    readyQueue.push({ index: idx, pageBytes });
+                                    // Page Classification
+                                    const pageSemantic = classifyPageUrl(currentUrl, idx, expectedCount);
+                                    // Non-content pages (credits, recruitment, promo, warning) can be skipped with telemetry
+                                    if (is404 && pageSemantic !== 'CONTENT_PAGE') {
+                                        failed404Count++;
+                                        this.logger.warn(`SKIPPED_NON_CONTENT_PAGE: Skipping non-content 404 page ${idx + 1}/${expectedCount} (${pageSemantic}): ${currentUrl}`, {
+                                            workId,
+                                            chapterNumber,
+                                            pageSemantic,
+                                            currentUrl,
+                                            failed404Count,
+                                        });
+                                        storedPages[idx] = { mediaId: '__SKIPPED_NON_CONTENT_PAGE__', width: 0, height: 0 };
+                                        continue;
+                                    }
+                                    // Narrative story page or persistent error: CANNOT be skipped!
+                                    pipelineError = new NarrativePageUnavailableError(effectiveSource, idx, expectedCount, errMsg);
                                     notifyConsumer();
-                                    continue;
+                                    break;
                                 }
-                                // Page Classification
-                                const pageSemantic = classifyPageUrl(currentUrl, idx, expectedCount);
-                                // Non-content pages (credits, recruitment, promo, warning) can be skipped with telemetry
-                                if (is404 && pageSemantic !== 'CONTENT_PAGE') {
-                                    failed404Count++;
-                                    this.logger.warn(`SKIPPED_NON_CONTENT_PAGE: Skipping non-content 404 page ${idx + 1}/${expectedCount} (${pageSemantic}): ${currentUrl}`, {
-                                        workId,
-                                        chapterNumber,
-                                        pageSemantic,
-                                        currentUrl,
-                                        failed404Count,
-                                    });
-                                    storedPages[idx] = { mediaId: '__SKIPPED_NON_CONTENT_PAGE__', width: 0, height: 0 };
-                                    continue;
-                                }
-                                // Narrative story page or persistent error: CANNOT be skipped!
-                                pipelineError = new NarrativePageUnavailableError(effectiveSource, idx, expectedCount, errMsg);
+                                readyQueue.push({ index: idx, pageBytes, releaseBuffer: () => bufferedPageSemaphore.release() });
+                                bufferTransferred = true;
                                 notifyConsumer();
-                                break;
                             }
-                            readyQueue.push({ index: idx, pageBytes });
-                            notifyConsumer();
+                            finally {
+                                if (!bufferTransferred)
+                                    bufferedPageSemaphore.release();
+                            }
                         }
                     }
                     catch (err) {
                         pipelineError = err;
+                    }
+                    finally {
                         notifyConsumer();
                     }
                 };
@@ -1945,11 +1960,14 @@ export class ImporterEngine {
                                     ImporterEngine.activeBufferedBytes = Math.max(0, ImporterEngine.activeBufferedBytes - pageBytes.length);
                                     pageBytes = null;
                                 }
+                                item.releaseBuffer();
                             }
                         }
                     }
                     catch (err) {
                         pipelineError = err;
+                    }
+                    finally {
                         notifyConsumer();
                     }
                 };
@@ -1968,6 +1986,7 @@ export class ImporterEngine {
                         const leftover = readyQueue.shift();
                         if (leftover?.pageBytes) {
                             ImporterEngine.activeBufferedBytes = Math.max(0, ImporterEngine.activeBufferedBytes - leftover.pageBytes.length);
+                            leftover.releaseBuffer();
                         }
                     }
                 }
@@ -2407,8 +2426,7 @@ export class ImporterEngine {
                 });
                 if (bridgeRes.ok) {
                     this.rateLimiter.recordSuccess(parsedUrl.host);
-                    const arrayBuf = await bridgeRes.arrayBuffer();
-                    return new Uint8Array(arrayBuf);
+                    return await readImageBody(bridgeRes);
                 }
             }
             catch (bridgeErr) {
@@ -2426,8 +2444,7 @@ export class ImporterEngine {
             }
             throw new ProviderDownloadError(status, url, source, `Failed to download image from ${url}: HTTP ${status}`);
         }
-        const arrayBuf = await res.arrayBuffer();
-        const uint8 = new Uint8Array(arrayBuf);
+        const uint8 = await readImageBody(res);
         // Validate binary image integrity and check for fake HTML challenge pages returned with HTTP 200
         const bodySnippet = uint8.byteLength < 4000 ? new TextDecoder().decode(uint8) : '';
         const imgInsp = CloudflareClassifier.inspect(res.status, res.headers, bodySnippet, {

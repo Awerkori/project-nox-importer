@@ -8,6 +8,7 @@ import { HostRateLimiter } from './rate-limiter.js';
 import { processAndStoreMedia } from '../storage/media.js';
 import { Logger } from './logger.js';
 import { Config } from '../config.js';
+import { readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
 import { AdaptiveAutotuner, AsyncSemaphore } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
@@ -75,9 +76,8 @@ export class ImporterEngine {
   private stopSignal = false;
   private abortController = new AbortController();
 
-  // Ready Queue bounded buffer control in RAM (< 40MB max)
+  // Actual retained image bytes; bounded globally by page permits and per-image size.
   public static activeBufferedBytes = 0;
-  public static readonly MAX_BUFFERED_BYTES = 256 * 1024 * 1024;
 
   constructor(
     private supabase: SupabaseClient,
@@ -92,16 +92,16 @@ export class ImporterEngine {
     this.publicationBarrier = new PublicationBarrier(supabase);
     this.safetyBarrier = new PublicationSafetyBarrier(supabase);
     this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
-    const requestedMax = config.MAX_CONCURRENT_CHAPTERS || 32;
+    const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 4, config.TESTED_CONCURRENCY_CEILING || 4);
     this.autotuner = new AdaptiveAutotuner({
-      initialConcurrency: Math.min(12, requestedMax),
-      maxConcurrency: Math.max(16, requestedMax),
-      maxRssMb: 380,
-      maxHeapMb: 240,
-      maxExternalAndBuffersMb: 120,
+      initialConcurrency: Math.min(2, requestedMax),
+      maxConcurrency: requestedMax,
+      maxRssMb: 260,
+      maxHeapMb: 160,
+      maxExternalAndBuffersMb: 60,
       maxEventLoopLagMs: 100,
-      requiredStableCycles: 1,
-      cooldownPeriodMs: 20 * 1000,
+      requiredStableCycles: 20,
+      cooldownPeriodMs: 60 * 1000,
     });
   }
 
@@ -310,14 +310,15 @@ export class ImporterEngine {
 
       // Backpressure check: throttle backfill if there are already 10+ discovery/sync jobs queued for this source
       try {
-        const { count: activeJobsCount } = await this.supabase
+        const { data: activeJobs, error: activeJobsError } = await this.supabase
           .from('importer_queue')
-          .select('id', { count: 'exact', head: true })
+          .select('id')
           .eq('source', src.id)
           .in('task_type', ['DISCOVER_WORKS', 'SYNC_WORK'])
-          .in('status', ['QUEUED', 'IMPORTING']);
+          .in('status', ['QUEUED', 'IMPORTING'])
+          .limit(10);
 
-        if ((activeJobsCount ?? 0) >= 10) {
+        if (activeJobsError || (activeJobs?.length ?? 0) >= 10) {
           continue;
         }
       } catch {}
@@ -591,6 +592,19 @@ export class ImporterEngine {
         const mem = diagnostics.getMemorySnapshot();
         const evaluation = this.autotuner.evaluateCycle();
         const activeJobs = diagnostics.getActiveJobsCount();
+        const uploads = this.autotuner.getGlobalMediaSemaphore();
+        const buffers = this.autotuner.getBufferedPageSemaphore();
+        this.logger.info('Pipeline capacity', {
+          chapterConcurrency: evaluation.concurrency,
+          testedChapterCeiling: this.config.TESTED_CONCURRENCY_CEILING || 4,
+          mediaConcurrency: uploads.capacity,
+          activeMediaUploads: uploads.active,
+          bufferedPages: buffers.active,
+          queuedBufferWaiters: buffers.queued,
+          bufferedBytes: ImporterEngine.activeBufferedBytes,
+          activeJobs,
+          rssMb: mem.rssMb,
+        });
         const lagMetrics = (diagnostics as any).lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
 
         this.logger.info(
@@ -1998,8 +2012,11 @@ export class ImporterEngine {
         const globalMediaSemaphore = this.autotuner.getGlobalMediaSemaphore();
         const globalInflightRequestSemaphore = this.autotuner.getGlobalInflightRequestSemaphore();
 
+        const bufferedPageSemaphore = this.autotuner.getBufferedPageSemaphore();
+        const bufferedWaitAbort = new AbortController();
         interface DownloadedPage {
           index: number;
+          releaseBuffer: () => void;
           pageBytes: Uint8Array;
         }
 
@@ -2012,6 +2029,14 @@ export class ImporterEngine {
         const consumerResolvers: Array<() => void> = [];
 
         const notifyConsumer = () => {
+          if (pipelineError || this.stopSignal || isCancelled?.()) {
+            bufferedWaitAbort.abort();
+            while (readyQueue.length) {
+              const discarded = readyQueue.shift()!;
+              ImporterEngine.activeBufferedBytes = Math.max(0, ImporterEngine.activeBufferedBytes - discarded.pageBytes.length);
+              discarded.releaseBuffer();
+            }
+          }
           while (consumerResolvers.length > 0) {
             const resolve = consumerResolvers.shift();
             if (resolve) resolve();
@@ -2040,32 +2065,6 @@ export class ImporterEngine {
         const producer = async () => {
           try {
             while (!this.stopSignal && !pipelineError && !isCancelled?.()) {
-            // Memory backpressure check: wait if in-flight active buffer >= MAX_BUFFERED_BYTES (40MB)
-            let backpressureWaitCount = 0;
-            while (
-              ImporterEngine.activeBufferedBytes >= ImporterEngine.MAX_BUFFERED_BYTES &&
-              !this.stopSignal &&
-              !pipelineError
-            ) {
-              if (isCancelled?.()) {
-                pipelineError = new JobCancelledByStaffError(job.id);
-                notifyConsumer();
-                break;
-              }
-              await this.sleep(30);
-              backpressureWaitCount++;
-              // Watchdog: If backpressure has been waiting for more than 4.5s and readyQueue is empty,
-              // or waiting more than 15s continuously, reset phantom activeBufferedBytes to avoid deadlock
-              if ((backpressureWaitCount > 150 && readyQueue.length === 0) || backpressureWaitCount > 500) {
-                this.logger.warn('Backpressure watchdog triggered: resetting phantom activeBufferedBytes to 0', {
-                  stuckBytes: ImporterEngine.activeBufferedBytes,
-                  readyQueueLength: readyQueue.length,
-                });
-                ImporterEngine.activeBufferedBytes = 0;
-                break;
-              }
-            }
-
             // Safe Checkpoint: cancellation check
             if (isCancelled?.() || (nextDownloadIndex % 3 === 0 && (await this.queue.isCancelRequested(job.id)))) {
               pipelineError = new JobCancelledByStaffError(job.id);
@@ -2082,6 +2081,10 @@ export class ImporterEngine {
             const parsedUrl = new URL(pageUrl);
             await this.rateLimiter.acquire(parsedUrl.host);
 
+            await bufferedPageSemaphore.acquire(AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+            let bufferTransferred = false;
+            try {
+            if (this.stopSignal || pipelineError || isCancelled?.()) break;
             let pageBytes: Uint8Array | null = null;
             let attempts = 0;
             let lastErr: any = null;
@@ -2149,7 +2152,8 @@ export class ImporterEngine {
 
               // If recovered by manifest refresh, proceed!
               if (pageBytes) {
-                readyQueue.push({ index: idx, pageBytes });
+                readyQueue.push({ index: idx, pageBytes, releaseBuffer: () => bufferedPageSemaphore.release() });
+                bufferTransferred = true;
                 notifyConsumer();
                 continue;
               }
@@ -2182,11 +2186,16 @@ export class ImporterEngine {
               break;
             }
 
-            readyQueue.push({ index: idx, pageBytes });
+            readyQueue.push({ index: idx, pageBytes, releaseBuffer: () => bufferedPageSemaphore.release() });
+                bufferTransferred = true;
             notifyConsumer();
+            } finally {
+              if (!bufferTransferred) bufferedPageSemaphore.release();
+            }
           }
         } catch (err: any) {
           pipelineError = err;
+        } finally {
           notifyConsumer();
         }
       };
@@ -2268,10 +2277,12 @@ export class ImporterEngine {
                 );
                 pageBytes = null;
               }
+              item.releaseBuffer();
             }
           }
         } catch (err: any) {
           pipelineError = err;
+        } finally {
           notifyConsumer();
         }
       };
@@ -2295,6 +2306,7 @@ export class ImporterEngine {
                 0,
                 ImporterEngine.activeBufferedBytes - leftover.pageBytes.length
               );
+              leftover.releaseBuffer();
             }
           }
         }
@@ -2791,8 +2803,7 @@ export class ImporterEngine {
 
         if (bridgeRes.ok) {
           this.rateLimiter.recordSuccess(parsedUrl.host);
-          const arrayBuf = await bridgeRes.arrayBuffer();
-          return new Uint8Array(arrayBuf);
+          return await readImageBody(bridgeRes);
         }
       } catch (bridgeErr: any) {
         this.logger.warn(`Failed image download via bridge for ${url}`, { error: bridgeErr?.message });
@@ -2812,8 +2823,7 @@ export class ImporterEngine {
       throw new ProviderDownloadError(status, url, source, `Failed to download image from ${url}: HTTP ${status}`);
     }
 
-    const arrayBuf = await res.arrayBuffer();
-    const uint8 = new Uint8Array(arrayBuf);
+    const uint8 = await readImageBody(res);
 
     // Validate binary image integrity and check for fake HTML challenge pages returned with HTTP 200
     const bodySnippet = uint8.byteLength < 4000 ? new TextDecoder().decode(uint8) : '';

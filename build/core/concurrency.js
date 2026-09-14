@@ -1,32 +1,40 @@
 import { Logger } from './logger.js';
 import { diagnostics } from './diagnostics.js';
 export class AsyncSemaphore {
-    currentPermits;
+    activePermits = 0;
     maxPermits;
     waitQueue = [];
     constructor(maxPermits) {
         this.maxPermits = Math.max(1, maxPermits);
-        this.currentPermits = this.maxPermits;
     }
-    async acquire() {
-        if (this.currentPermits > 0) {
-            this.currentPermits--;
+    async acquire(signal) {
+        signal?.throwIfAborted();
+        if (this.activePermits < this.maxPermits) {
+            this.activePermits++;
             return;
         }
-        return new Promise((resolve) => {
-            this.waitQueue.push(resolve);
+        return new Promise((resolve, reject) => {
+            const granted = () => { signal?.removeEventListener('abort', cancelled); resolve(); };
+            const cancelled = () => {
+                const index = this.waitQueue.indexOf(granted);
+                if (index >= 0)
+                    this.waitQueue.splice(index, 1);
+                reject(signal?.reason || new Error('Semaphore acquisition aborted'));
+            };
+            signal?.addEventListener('abort', cancelled, { once: true });
+            this.waitQueue.push(granted);
         });
     }
     release() {
-        if (this.waitQueue.length > 0) {
-            const next = this.waitQueue.shift();
-            if (next)
-                next();
-        }
-        else {
-            if (this.currentPermits < this.maxPermits) {
-                this.currentPermits++;
-            }
+        if (this.activePermits === 0)
+            throw new Error('Semaphore released without an active permit');
+        this.activePermits--;
+        this.drain();
+    }
+    drain() {
+        while (this.activePermits < this.maxPermits && this.waitQueue.length > 0) {
+            this.activePermits++;
+            this.waitQueue.shift()();
         }
     }
     async runExclusive(fn) {
@@ -40,29 +48,18 @@ export class AsyncSemaphore {
     }
     setCapacity(newCapacity) {
         const target = Math.max(1, newCapacity);
-        const diff = target - this.maxPermits;
         this.maxPermits = target;
-        if (diff > 0) {
-            // Release waiting callers for newly added capacity
-            for (let i = 0; i < diff && this.waitQueue.length > 0; i++) {
-                const next = this.waitQueue.shift();
-                if (next)
-                    next();
-            }
-            this.currentPermits = Math.min(this.maxPermits, this.currentPermits + diff);
-        }
-        else if (diff < 0) {
-            this.currentPermits = Math.max(0, this.currentPermits + diff);
-        }
+        // Existing holders drain naturally after a downscale; never reissue their permits.
+        this.drain();
     }
     get capacity() {
         return this.maxPermits;
     }
     get available() {
-        return this.currentPermits;
+        return Math.max(0, this.maxPermits - this.activePermits);
     }
     get active() {
-        return this.maxPermits - this.currentPermits;
+        return this.activePermits;
     }
     get queued() {
         return this.waitQueue.length;
@@ -144,6 +141,7 @@ export class AdaptiveAutotuner {
     sourceSemaphores = new Map();
     globalMediaSemaphore;
     globalInflightRequestSemaphore;
+    bufferedPageSemaphore = new AsyncSemaphore(6);
     currentConcurrency;
     stableCycleCount = 0;
     cooldownUntil = 0;
@@ -167,6 +165,10 @@ export class AdaptiveAutotuner {
     }
     getGlobalInflightRequestSemaphore() {
         return this.globalInflightRequestSemaphore;
+    }
+    // Hold a slot from before downloading until the page has finished uploading.
+    getBufferedPageSemaphore() {
+        return this.bufferedPageSemaphore;
     }
     getSourceLimits(source) {
         return SOURCE_CONCURRENCY_LIMITS[source] || DEFAULT_SOURCE_LIMIT;
@@ -194,7 +196,8 @@ export class AdaptiveAutotuner {
     evaluateCycle() {
         const mem = diagnostics.getMemorySnapshot();
         const lag = diagnostics.lagMonitor.getMetrics();
-        const totalExternal = mem.externalMb + mem.arrayBuffersMb;
+        // Node includes arrayBuffers in external; adding both double-counts image buffers.
+        const totalExternal = mem.externalMb;
         const errors = this.cycleErrors;
         const rateLimits = this.cycleRateLimits;
         const timeouts = this.cycleTimeouts;
@@ -274,8 +277,7 @@ export class AdaptiveAutotuner {
         if (this.stableCycleCount >= this.config.requiredStableCycles &&
             this.currentConcurrency < this.config.maxConcurrency) {
             const previous = this.currentConcurrency;
-            const step = this.config.maxConcurrency > 10 ? 4 : 1;
-            const target = Math.min(this.config.maxConcurrency, previous + step);
+            const target = Math.min(this.config.maxConcurrency, previous + 1);
             this.currentConcurrency = target;
             this.globalChapterSemaphore.setCapacity(target);
             this.stableCycleCount = 0; // Reset counter for the next tier

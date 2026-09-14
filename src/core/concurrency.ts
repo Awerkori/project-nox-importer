@@ -10,13 +10,21 @@ export class AsyncSemaphore {
     this.maxPermits = Math.max(1, maxPermits);
   }
 
-  async acquire(): Promise<void> {
+  async acquire(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (this.activePermits < this.maxPermits) {
       this.activePermits++;
       return;
     }
-    return new Promise<void>((resolve) => {
-      this.waitQueue.push(resolve);
+    return new Promise<void>((resolve, reject) => {
+      const granted = () => { signal?.removeEventListener('abort', cancelled); resolve(); };
+      const cancelled = () => {
+        const index = this.waitQueue.indexOf(granted);
+        if (index >= 0) this.waitQueue.splice(index, 1);
+        reject(signal?.reason || new Error('Semaphore acquisition aborted'));
+      };
+      signal?.addEventListener('abort', cancelled, { once: true });
+      this.waitQueue.push(granted);
     });
   }
 
@@ -162,6 +170,7 @@ export class AdaptiveAutotuner {
   private sourceSemaphores = new Map<string, AsyncSemaphore>();
   private globalMediaSemaphore: AsyncSemaphore;
   private globalInflightRequestSemaphore: AsyncSemaphore;
+  private bufferedPageSemaphore = new AsyncSemaphore(6);
   private currentConcurrency: number;
   private stableCycleCount = 0;
   private cooldownUntil = 0;
@@ -190,6 +199,11 @@ export class AdaptiveAutotuner {
 
   getGlobalInflightRequestSemaphore(): AsyncSemaphore {
     return this.globalInflightRequestSemaphore;
+  }
+
+  // Hold a slot from before downloading until the page has finished uploading.
+  getBufferedPageSemaphore(): AsyncSemaphore {
+    return this.bufferedPageSemaphore;
   }
 
   getSourceLimits(source: string): SourceConcurrencyConfig {

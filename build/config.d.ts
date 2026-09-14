@@ -13,6 +13,7 @@ declare const ConfigSchema: z.ZodObject<{
     QUEUE_LEASE_DURATION_SECONDS: z.ZodDefault<z.ZodNumber>;
     QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.ZodDefault<z.ZodNumber>;
     MAX_CONCURRENT_CHAPTERS: z.ZodDefault<z.ZodNumber>;
+    TESTED_CONCURRENCY_CEILING: z.ZodDefault<z.ZodNumber>;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     LOG_LEVEL: z.ZodDefault<z.ZodEnum<["debug", "info", "warn", "error"]>>;
 }, "strip", z.ZodTypeAny, {
@@ -25,6 +26,7 @@ declare const ConfigSchema: z.ZodObject<{
     QUEUE_LEASE_DURATION_SECONDS: number;
     QUEUE_HEARTBEAT_INTERVAL_SECONDS: number;
     MAX_CONCURRENT_CHAPTERS: number;
+    TESTED_CONCURRENCY_CEILING: number;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: number;
     LOG_LEVEL: "debug" | "info" | "warn" | "error";
     NOX_STORAGE_BRIDGE_TOKEN?: string | undefined;
@@ -45,6 +47,7 @@ declare const ConfigSchema: z.ZodObject<{
     QUEUE_LEASE_DURATION_SECONDS?: number | undefined;
     QUEUE_HEARTBEAT_INTERVAL_SECONDS?: number | undefined;
     MAX_CONCURRENT_CHAPTERS?: number | undefined;
+    TESTED_CONCURRENCY_CEILING?: number | undefined;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY?: number | undefined;
     LOG_LEVEL?: "debug" | "info" | "warn" | "error" | undefined;
 }>;
