@@ -282,37 +282,88 @@ export class ZeistMangaAdapter implements SourceAdapter {
       : `${this.baseUrl}/${sourceChapterId}.html`;
 
     try {
-      const html = await this.fetchHtml(chapterUrl);
+      // Blogger sites render images via JS lightbox — not in static HTML <img> tags.
+      // Use the Blogger JSON API to get full post content including all image URLs.
+      const urlObj = new URL(chapterUrl);
+      const pathParts = urlObj.pathname.replace(/\.html$/, '').split('/').filter(Boolean);
+      const slug = pathParts[pathParts.length - 1] ?? '';
 
-      // Look for reader images in check-box, separator, or entry-content
-      const imgRegex = /<img[^>]+(?:src|data-src)=["']([^"']+)["'][^>]*>/gi;
-      const pages: string[] = [];
+      if (slug) {
+        const apiUrl = `${urlObj.origin}/feeds/posts/default?alt=json&q=${encodeURIComponent(slug)}&max-results=1`;
+        try {
+          const data = await this.fetchJson<any>(apiUrl);
+          const entries: any[] = data?.feed?.entry ?? [];
+          // Find the entry matching this exact URL
+          const entry = entries.find((e: any) => {
+            const alt = (e.link ?? []).find((l: any) => l.rel === 'alternate');
+            return alt?.href === chapterUrl;
+          }) ?? entries[0];
 
-      for (const m of html.matchAll(imgRegex)) {
-        const src = m[1];
-        if (
-          !src.includes('capa-oculta') &&
-          !src.includes('banner') &&
-          !src.includes('logo') &&
-          !src.includes('icon') &&
-          !src.includes('avatar') &&
-          (src.includes('blogger.googleusercontent.com') ||
-            src.includes('.bp.blogspot.com') ||
-            src.includes('imgur.com') ||
-            src.match(/\.(jpe?g|png|webp|avif)/i))
-        ) {
-          if (!pages.includes(src)) {
-            pages.push(src);
+          if (entry) {
+            const content: string = entry.content?.['$t'] ?? entry.summary?.['$t'] ?? '';
+            const pages = this._extractBloggerImages(content);
+            if (pages.length > 0) return pages;
           }
+        } catch (_apiErr: any) {
+          this.logger.warn(`Blogger API fallback for ${chapterUrl}: ${_apiErr.message}`);
         }
       }
 
-      return pages;
+      // Fallback: parse static HTML (works for sites that embed <img> tags)
+      const html = await this.fetchHtml(chapterUrl);
+      return this._extractBloggerImages(html);
     } catch (err: any) {
       this.logger.error(`fetchChapterPages failed for ${sourceChapterId}: ${err.message}`);
       return [];
     }
   }
+
+  /** Extract unique full-size Blogger/standard images from HTML or JSON content string. */
+  private _extractBloggerImages(content: string): string[] {
+    const seen = new Set<string>();
+    const pages: string[] = [];
+
+    // Blogger image pattern: base URL + /sNNN/ size param + filename
+    // We normalise to /s0/ (maximum size) and deduplicate by base path.
+    const bloggerRe = /(https:\/\/(?:\d+\.bp\.blogspot\.com|blogger\.googleusercontent\.com)\/[^\s"'<>]+?)\/s\d+\//gi;
+    let m: RegExpExecArray | null;
+    while ((m = bloggerRe.exec(content)) !== null) {
+      const base = m[1];
+      if (seen.has(base)) continue;
+      // Skip cover/thumbnail-only images by filename
+      const fname = base.split('/').pop() ?? '';
+      if (/(?:capa|cover|thumbnail|banner|logo|icon|avatar)/i.test(fname)) continue;
+      seen.add(base);
+      pages.push(`${base}/s0/`);
+    }
+
+    if (pages.length > 0) return pages;
+
+    // Fallback: standard <img src|data-src> parsing for non-Blogger hosts
+    const imgRe = /<img[^>]+(?:src|data-src)=["']([^"']+)["'][^>]*>/gi;
+    while ((m = imgRe.exec(content)) !== null) {
+      const src = m[1];
+      if (
+        !src.includes('capa-oculta') &&
+        !src.includes('banner') &&
+        !src.includes('logo') &&
+        !src.includes('icon') &&
+        !src.includes('avatar') &&
+        (src.includes('blogger.googleusercontent.com') ||
+          src.includes('.bp.blogspot.com') ||
+          src.includes('imgur.com') ||
+          src.match(/\.(jpe?g|png|webp|avif)/i))
+      ) {
+        if (!seen.has(src)) {
+          seen.add(src);
+          pages.push(src);
+        }
+      }
+    }
+
+    return pages;
+  }
+
 
   async searchWorks(query: string): Promise<SourceWorkSummary[]> {
     const searchUrl = `${this.baseUrl}/feeds/posts/default/-/${encodeURIComponent(

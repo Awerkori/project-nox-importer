@@ -30,6 +30,8 @@ export declare class ZeistMangaAdapter implements SourceAdapter {
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string): Promise<string[]>;
+    /** Extract unique full-size Blogger/standard images from HTML or JSON content string. */
+    private _extractBloggerImages;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
     getImageHeaders(): Record<string, string>;
     private extractCoverFromContent;
