@@ -281,6 +281,16 @@ describe('ImporterEngine End-to-End Execution', () => {
                   .catch(err => resolve({ data: null, error: err }));
               }
             }),
+            is: (col2: string, val2: null) => ({
+              then: (resolve: any) => {
+                const keys = Object.keys(row);
+                const vals = Object.values(row);
+                const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+                db.query(`update public.${table} set ${setClause} where ${col} = $${keys.length + 1} and ${col2} is null returning *`, [...vals, val])
+                  .then(r => resolve({ data: r.rows, error: null }))
+                  .catch(err => resolve({ data: null, error: err }));
+              }
+            }),
             then: (resolve: any) => {
               const keys = Object.keys(row);
               const vals = Object.values(row);
@@ -489,4 +499,17 @@ describe('ImporterEngine End-to-End Execution', () => {
     expect(newChapJobs.rows.length).toBe(0);
     expect(storage.uploads.size).toBe(uploadCountBefore);
   });
+  it('repairs an already published chapter instead of treating publication as integrity proof', async () => {
+    const job: any = (await db.query("SELECT * FROM importer_queue WHERE task_type='IMPORT_CHAPTER' LIMIT 1")).rows[0];
+    const chapter: any = (await db.query('SELECT id,published_at FROM chapters WHERE work_id=$1 AND number=1',[job.payload.workId])).rows[0];
+    await db.query('DELETE FROM pages WHERE chapter_id=$1 AND position=2',[chapter.id]);
+    const uploadsBefore = storage.uploads.size;
+    await (engine as any).handleImportChapter({...job,payload:{...job.payload,readerRepair:true}});
+    const pages = await db.query('SELECT position FROM pages WHERE chapter_id=$1 ORDER BY position',[chapter.id]);
+    expect(pages.rows.map((p:any)=>p.position)).toEqual([1,2]);
+    expect(storage.uploads.size).toBe(uploadsBefore); // Existing image bytes deduplicate; no redundant upload.
+    const after: any = (await db.query('SELECT published_at FROM chapters WHERE id=$1',[chapter.id])).rows[0];
+    expect(after.published_at).toEqual(chapter.published_at);
+  });
+
 });

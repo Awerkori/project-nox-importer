@@ -1531,7 +1531,7 @@ export class ImporterEngine {
             .eq('number', chapterNumber)
             .not('published_at', 'is', null)
             .maybeSingle();
-        if (alreadyPub) {
+        if (alreadyPub && job.payload.readerRepair !== true) {
             this.logger.info('Chapter already published by concurrent source, linking mapping and skipping duplicate download', {
                 workId,
                 chapterNumber,
@@ -1696,7 +1696,7 @@ export class ImporterEngine {
                 validPages = [];
                 skipDownloadDueToExistingPages = false;
                 // Pre-download deduplication: check if existing chapter already has all pages stored
-                if (existingChapter) {
+                if (existingChapter && job.payload.readerRepair !== true) {
                     const { data: existingPages } = await this.supabase
                         .from('pages')
                         .select('position, media_id, width, height')
