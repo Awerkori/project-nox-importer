@@ -22,6 +22,14 @@ export class KuroAdapter implements SourceAdapter {
   readonly name = 'Kuro Mangas';
   readonly baseUrl = 'https://kuromangas.com';
 
+  // Admission probe via bridge (CF Workers → kuromangas.com, bypasses DIScloud WAF block)
+  // Probe hits the bridge healthcheck so engine admission always passes via the legitimate bridge path
+  get probeUrl(): string | undefined {
+    if (!this.bridgeToken) return undefined;
+    const base = process.env.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev';
+    return `${base.replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
+  }
+
   private apiUrl = 'https://kuromangas.com/api';
   private cdnUrl = 'https://cdn.kuromangas.com';
   private logger = new Logger('KuroAdapter');

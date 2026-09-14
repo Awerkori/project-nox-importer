@@ -14,13 +14,15 @@ export class SourceAdmissionGate {
         let cfRay = null;
         let primaryClassification = null;
         let isAsnBlock = false;
-        this.logger.info(`Starting Production Admission Probe for source: ${sourceId} (${adapter.baseUrl})`);
+        // Use probeUrl if adapter defines one (e.g. Kuro via CF Workers bridge)
+        const targetUrl = adapter.probeUrl ?? adapter.baseUrl;
+        this.logger.info(`Starting Production Admission Probe for source: ${sourceId} (${targetUrl})`);
         // Helper sleep
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         // STAGE 1: BASE URL
         const t0 = Date.now();
         try {
-            const res = await transport(adapter.baseUrl, {
+            const res = await transport(targetUrl, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
                     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -31,7 +33,7 @@ export class SourceAdmissionGate {
             const bodyText = res.text ? await res.text().catch(() => '') : '';
             cfRay = res.headers?.get ? res.headers.get('cf-ray') : null;
             const insp = CloudflareClassifier.inspect(res.status, res.headers, bodyText, {
-                url: adapter.baseUrl,
+                url: targetUrl,
                 expectedType: 'html',
                 isIsolatedRequest: true,
             });

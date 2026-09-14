@@ -6,6 +6,7 @@ export declare class KuroAdapter implements SourceAdapter {
     readonly id = "kuro";
     readonly name = "Kuro Mangas";
     readonly baseUrl = "https://kuromangas.com";
+    get probeUrl(): string | undefined;
     private apiUrl;
     private cdnUrl;
     private logger;
