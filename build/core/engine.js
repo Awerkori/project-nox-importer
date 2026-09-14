@@ -2410,7 +2410,7 @@ export class ImporterEngine {
                     Referer: referer,
                     ...customHeaders,
                 },
-                signal: AbortSignal.timeout(45_000),
+                signal: AbortSignal.timeout(120_000),
             });
         }
         catch (err) {
@@ -2432,7 +2432,7 @@ export class ImporterEngine {
                             Referer: referer,
                         },
                     }),
-                    signal: AbortSignal.timeout(45_000),
+                    signal: AbortSignal.timeout(120_000),
                 });
                 if (bridgeRes.ok) {
                     this.rateLimiter.recordSuccess(parsedUrl.host);
