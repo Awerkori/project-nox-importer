@@ -93,14 +93,14 @@ export class ImporterEngine {
         this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
         const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 4, config.TESTED_CONCURRENCY_CEILING || 4);
         this.autotuner = new AdaptiveAutotuner({
-            initialConcurrency: Math.min(2, requestedMax),
+            initialConcurrency: Math.min(4, requestedMax),
             maxConcurrency: requestedMax,
-            maxRssMb: 260,
-            maxHeapMb: 160,
-            maxExternalAndBuffersMb: 60,
-            maxEventLoopLagMs: 100,
-            requiredStableCycles: 20,
-            cooldownPeriodMs: 60 * 1000,
+            maxRssMb: 350,
+            maxHeapMb: 200,
+            maxExternalAndBuffersMb: 100,
+            maxEventLoopLagMs: 250,
+            requiredStableCycles: 3,
+            cooldownPeriodMs: 10 * 1000,
         });
     }
     getAutotuner() {
