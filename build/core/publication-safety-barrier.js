@@ -83,6 +83,16 @@ export class PublicationSafetyBarrier {
         const st = await this.getState();
         return st === 'OPEN' || st === 'CAUTION';
     }
+    async canProcessChapter(workId, sortKey) {
+        if (await this.canAcquireChapters())
+            return true;
+        if (!workId || !Number.isFinite(sortKey))
+            return false;
+        const { data, error } = await this.supabase.from('importer_chapter_mappings')
+            .select('id').eq('work_id', workId).eq('status', 'STAGED')
+            .gt('chapter_sort_key', sortKey).limit(1);
+        return !error && Boolean(data?.length);
+    }
     /**
      * Checks whether historical backfill can enqueue/process bulk chapters.
      * Only allowed when state is fully OPEN.

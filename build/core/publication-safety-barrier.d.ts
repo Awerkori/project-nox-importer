@@ -40,6 +40,7 @@ export declare class PublicationSafetyBarrier {
      * If CLOSED or RECOVERING, returns false so 0 worker slots and 0 semaphores are held.
      */
     canAcquireChapters(): Promise<boolean>;
+    canProcessChapter(workId?: string, sortKey?: number): Promise<boolean>;
     /**
      * Checks whether historical backfill can enqueue/process bulk chapters.
      * Only allowed when state is fully OPEN.

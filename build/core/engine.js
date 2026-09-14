@@ -649,7 +649,7 @@ export class ImporterEngine {
                 // We hold BOTH permits! Now atomically acquire next job for this source from queue
                 let job = null;
                 try {
-                    job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), source);
+                    job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), source, 'IMPORT_CHAPTER');
                 }
                 catch (acquireErr) {
                     this.logger.warn(`Error acquiring job for source ${source}: ${acquireErr?.message}`);
@@ -699,14 +699,14 @@ export class ImporterEngine {
             try {
                 // 0. Enforce PublicationSafetyBarrier: if CLOSED or RECOVERING, hold 0 permits, 0 slots
                 const canAcquire = await this.safetyBarrier.canAcquireChapters();
-                if (!canAcquire) {
+                if (!canAcquire && slotIndex !== 0) {
                     await this.sleep(3000);
                     continue;
                 }
                 await globalSem.acquire();
                 let job = null;
                 try {
-                    job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60));
+                    job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), undefined, 'IMPORT_CHAPTER');
                 }
                 catch (acquireErr) {
                     globalSem.release();
@@ -923,7 +923,7 @@ export class ImporterEngine {
             }
             // Checkpoint 0b: Publication Safety Barrier check for chapter ingestion
             if (job.task_type === 'IMPORT_CHAPTER') {
-                const canAcquire = await this.safetyBarrier.canAcquireChapters();
+                const canAcquire = await this.safetyBarrier.canProcessChapter(job.payload?.workId, Number(job.chapter_sort_key ?? job.payload?.chapterNumber));
                 if (!canAcquire) {
                     this.logger.warn(`Skipping chapter job ${job.id}: PublicationSafetyBarrier is CLOSED/RECOVERING`);
                     await this.queue.releaseJob(job.id, 'QUEUED', 'PublicationSafetyBarrier is CLOSED/RECOVERING', 15);
