@@ -13,6 +13,7 @@ export declare class AsyncSemaphore {
     get active(): number;
     get queued(): number;
 }
+export declare function withSourceChapterPermits<T>(source: AsyncSemaphore, global: AsyncSemaphore, fn: () => Promise<T>, signal?: AbortSignal): Promise<T>;
 export interface SourceConcurrencyConfig {
     maxChapters: number;
     maxPagesPerChapter: number;

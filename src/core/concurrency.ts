@@ -74,6 +74,18 @@ export class AsyncSemaphore {
   }
 }
 
+// Every runner must acquire source before global capacity to avoid lock inversion.
+export async function withSourceChapterPermits<T>(
+  source: AsyncSemaphore, global: AsyncSemaphore, fn: () => Promise<T>, signal?: AbortSignal
+): Promise<T> {
+  await source.acquire(signal);
+  try {
+    await global.acquire(signal);
+    try { return await fn(); }
+    finally { global.release(); }
+  } finally { source.release(); }
+}
+
 export interface SourceConcurrencyConfig {
   maxChapters: number;
   maxPagesPerChapter: number;

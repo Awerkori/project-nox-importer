@@ -65,6 +65,22 @@ export class AsyncSemaphore {
         return this.waitQueue.length;
     }
 }
+// Every runner must acquire source before global capacity to avoid lock inversion.
+export async function withSourceChapterPermits(source, global, fn, signal) {
+    await source.acquire(signal);
+    try {
+        await global.acquire(signal);
+        try {
+            return await fn();
+        }
+        finally {
+            global.release();
+        }
+    }
+    finally {
+        source.release();
+    }
+}
 export const SOURCE_CONCURRENCY_LIMITS = {
     mangaflix: { maxChapters: 2, maxPagesPerChapter: 4 },
     manhastro: { maxChapters: 2, maxPagesPerChapter: 4 },
