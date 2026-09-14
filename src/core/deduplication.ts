@@ -126,47 +126,119 @@ export class DeduplicationEngine {
         };
       }
     }
-
-    // 2. Check for slug collision or exact title collision in public.works
+    // 2. Candidate Matching & Canonical Resolution
+    const incomingTitles = [title, ...(candidate.aliases || [])]
+      .map(t => t.trim())
+      .filter(t => t.length > 0);
+      
     const cleanSlug = this.sanitizeSlug(slug || title);
-    const { data: worksBySlug, error: slugErr } = await this.supabase
-      .from('works')
-      .select('id, title, slug, author, kind')
-      .eq('slug', cleanSlug);
+    const incomingSlugs = Array.from(new Set(incomingTitles.map(t => this.sanitizeSlug(t))));
+    
+    if (incomingSlugs.length === 0) {
+       incomingSlugs.push(cleanSlug);
+       incomingTitles.push(title);
+    }
 
-    if (slugErr) throw slugErr;
+    // Find candidates via slug OR aliases
+    const [bySlugRes, byAliasRes] = await Promise.all([
+      this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind').in('slug', incomingSlugs),
+      this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind').overlaps('aliases', incomingTitles)
+    ]);
 
-    const { data: worksByTitle, error: titleErr } = await this.supabase
-      .from('works')
-      .select('id, title, slug, author, kind')
-      .ilike('title', title.trim());
+    if (bySlugRes.error) throw bySlugRes.error;
+    if (byAliasRes.error) throw byAliasRes.error;
 
-    if (titleErr) throw titleErr;
+    const candidateMap = new Map<string, any>();
+    for (const w of [...(bySlugRes.data || []), ...(byAliasRes.data || [])]) {
+      candidateMap.set(w.id, w);
+    }
+    const matchedWorks = Array.from(candidateMap.values());
 
-    const matchedWorks = [...(worksBySlug || []), ...(worksByTitle || [])].filter(
-      (w, i, arr) => arr.findIndex((x) => x.id === w.id) === i
-    );
-
-    // If matches exist, evaluate whether this is a clean single canonical work match
     if (matchedWorks.length > 0) {
-      // Check if any matched work is already claimed by the SAME source with a different ID (duplicate/collision within source)
+      // Check if any matched work is already claimed by the SAME source with a different ID
       const matchedWorkIds = matchedWorks.map((w) => w.id);
       const { data: claims } = await this.supabase
         .from('importer_work_mappings')
         .select('work_id, source, source_work_id')
         .in('work_id', matchedWorkIds);
 
-      const isClaimedBySameSourceDifferentId = (claims || []).some(
-        (c) => c.source === source && c.source_work_id !== sourceWorkId
+      const claimedBySameSource = new Set(
+        (claims || [])
+          .filter((c) => c.source === source && c.source_work_id !== sourceWorkId && c.work_id)
+          .map((c) => c.work_id)
       );
 
-      if (isClaimedBySameSourceDifferentId || matchedWorks.length > 1) {
+      let bestMatch: any = null;
+      let highestScore = -1;
+
+      for (const w of matchedWorks) {
+        if (claimedBySameSource.has(w.id)) continue;
+
+        let score = 0;
+        const existingTitles = [w.title, ...(w.aliases || [])].filter(Boolean).map(t => this.sanitizeSlug(t.trim()));
+        
+        // Signal 1: Title/Alias intersection
+        const intersection = incomingSlugs.filter(s => existingTitles.includes(s));
+        if (intersection.length > 0) {
+          score += 50;
+          if (intersection.includes(cleanSlug) || intersection.includes(this.sanitizeSlug(w.title))) {
+            score += 20; // Primary title match bonus
+          }
+        }
+
+        // Signal 2: Author match
+        if (candidate.author && w.author) {
+          const inAuthor = this.sanitizeSlug(candidate.author);
+          const exAuthor = this.sanitizeSlug(w.author);
+          if (inAuthor && exAuthor && (inAuthor.includes(exAuthor) || exAuthor.includes(inAuthor))) {
+            score += 30;
+          }
+        }
+
+        // Signal 3: Synopsis basic similarity
+        if (candidate.synopsis && w.synopsis) {
+          const s1 = candidate.synopsis.toLowerCase();
+          const s2 = w.synopsis.toLowerCase();
+          if (s1.length > 50 && s2.length > 50) {
+            const w1 = s1.split(/\s+/).slice(0, 20);
+            const w2 = s2.split(/\s+/).slice(0, 20);
+            const common = w1.filter(word => w2.includes(word) && word.length > 3);
+            if (common.length >= 4) {
+              score += 15;
+            }
+          }
+        }
+
+        if (candidate.kind && w.kind && candidate.kind === w.kind) score += 5;
+
+        w._score = score;
+        if (score > highestScore) {
+          highestScore = score;
+          bestMatch = w;
+        }
+      }
+
+      const validMatches = matchedWorks.filter(w => !claimedBySameSource.has(w.id));
+      let isAmbiguous = validMatches.length === 0;
+      
+      // High confidence threshold: >= 60 points
+      if (validMatches.length > 0 && highestScore >= 60) {
+        // Ensure no other match is too close (difference < 20 points)
+        const closeMatches = validMatches.filter(w => w.id !== bestMatch.id && w._score >= highestScore - 20);
+        if (closeMatches.length > 0) {
+          isAmbiguous = true;
+        }
+      } else {
+        isAmbiguous = true;
+      }
+
+      if (isAmbiguous || !bestMatch) {
         this.logger.warn('Ambiguous work candidate detected - flagging for review', {
           source,
           sourceWorkId,
           title,
           matchedCount: matchedWorks.length,
-          isClaimedBySameSourceDifferentId,
+          bestScore: highestScore,
         });
 
         const { data: insertedMapping } = await this.supabase
@@ -179,10 +251,10 @@ export class DeduplicationEngine {
             source_title: title,
             sync_status: 'AMBIGUOUS',
             metadata: {
-              ambiguity_reason: isClaimedBySameSourceDifferentId
+              ambiguity_reason: validMatches.length === 0
                 ? 'Work already claimed by another ID from the same source'
-                : 'Conflict with multiple existing works',
-              candidates: matchedWorks,
+                : 'Conflict with multiple existing works or low confidence score',
+              candidates: matchedWorks.map(m => ({ id: m.id, title: m.title, score: m._score })),
               raw: candidate.rawMetadata,
             },
             last_synced_at: new Date().toISOString(),
@@ -195,14 +267,27 @@ export class DeduplicationEngine {
           mappingId: insertedMapping?.id ?? '',
           status: 'AMBIGUOUS',
           slug: cleanSlug,
-          reason: isClaimedBySameSourceDifferentId
-            ? 'Work already claimed by another ID from the same source.'
-            : 'Conflict with multiple existing works. Disambiguation required.',
+          reason: 'Conflict or low confidence. Disambiguation required.',
         };
       }
 
       // Exact single match: Link this source to the canonical work_id
-      const matched = matchedWorks[0];
+      const matched = bestMatch;
+      
+      // Merge missing incoming aliases into canonical work
+      const existingAliasSlugs = new Set((matched.aliases || []).map((a: string) => this.sanitizeSlug(a)));
+      const newAliases = [...(matched.aliases || [])];
+      let addedAliases = false;
+      for (const t of incomingTitles) {
+         if (!existingAliasSlugs.has(this.sanitizeSlug(t)) && t.toLowerCase() !== matched.title.toLowerCase()) {
+            newAliases.push(t);
+            addedAliases = true;
+         }
+      }
+      if (addedAliases) {
+         await this.supabase.from('works').update({ aliases: newAliases }).eq('id', matched.id);
+      }
+      
       const { data: insertedMapping } = await this.supabase
         .from('importer_work_mappings')
         .upsert({
@@ -228,6 +313,7 @@ export class DeduplicationEngine {
         slug: matched.slug,
       };
     }
+
 
     // 3. No match exists anywhere -> create brand new canonical work safely
     let uniqueSlug = cleanSlug;
