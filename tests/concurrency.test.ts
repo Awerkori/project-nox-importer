@@ -4,6 +4,44 @@ import { diagnostics } from '../src/core/diagnostics.js';
 
 describe('Concurrency & Autotuner', () => {
   describe('AsyncSemaphore', () => {
+    it('does not grant newly added capacity twice when callers are waiting', async () => {
+      const sem = new AsyncSemaphore(1);
+      await sem.acquire();
+      const waiting = sem.acquire();
+      sem.setCapacity(2);
+      await waiting;
+      expect(sem.active).toBe(2);
+      expect(sem.available).toBe(0);
+      let admitted = false;
+      const third = sem.acquire().then(() => { admitted = true; });
+      await Promise.resolve();
+      expect(admitted).toBe(false);
+      sem.release();
+      await third;
+      expect(sem.active).toBe(2);
+      sem.release();
+      sem.release();
+    });
+
+    it('drains existing holders before admitting callers after a downscale', async () => {
+      const sem = new AsyncSemaphore(3);
+      await Promise.all([sem.acquire(), sem.acquire(), sem.acquire()]);
+      let admitted = false;
+      const waiting = sem.acquire().then(() => { admitted = true; });
+      sem.setCapacity(1);
+      expect(sem.active).toBe(3);
+      sem.release();
+      sem.release();
+      await Promise.resolve();
+      expect(admitted).toBe(false);
+      expect(sem.active).toBe(1);
+      sem.release();
+      await waiting;
+      expect(sem.active).toBe(1);
+      sem.release();
+      expect(sem.available).toBe(1);
+    });
+
     it('limits concurrent executions to capacity', async () => {
       const sem = new AsyncSemaphore(2);
       let running = 0;

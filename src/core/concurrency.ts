@@ -2,18 +2,17 @@ import { Logger } from './logger.js';
 import { diagnostics } from './diagnostics.js';
 
 export class AsyncSemaphore {
-  private currentPermits: number;
+  private activePermits = 0;
   private maxPermits: number;
   private waitQueue: Array<() => void> = [];
 
   constructor(maxPermits: number) {
     this.maxPermits = Math.max(1, maxPermits);
-    this.currentPermits = this.maxPermits;
   }
 
   async acquire(): Promise<void> {
-    if (this.currentPermits > 0) {
-      this.currentPermits--;
+    if (this.activePermits < this.maxPermits) {
+      this.activePermits++;
       return;
     }
     return new Promise<void>((resolve) => {
@@ -22,13 +21,15 @@ export class AsyncSemaphore {
   }
 
   release(): void {
-    if (this.waitQueue.length > 0) {
-      const next = this.waitQueue.shift();
-      if (next) next();
-    } else {
-      if (this.currentPermits < this.maxPermits) {
-        this.currentPermits++;
-      }
+    if (this.activePermits === 0) throw new Error('Semaphore released without an active permit');
+    this.activePermits--;
+    this.drain();
+  }
+
+  private drain(): void {
+    while (this.activePermits < this.maxPermits && this.waitQueue.length > 0) {
+      this.activePermits++;
+      this.waitQueue.shift()!();
     }
   }
 
@@ -43,19 +44,9 @@ export class AsyncSemaphore {
 
   setCapacity(newCapacity: number): void {
     const target = Math.max(1, newCapacity);
-    const diff = target - this.maxPermits;
     this.maxPermits = target;
-
-    if (diff > 0) {
-      // Release waiting callers for newly added capacity
-      for (let i = 0; i < diff && this.waitQueue.length > 0; i++) {
-        const next = this.waitQueue.shift();
-        if (next) next();
-      }
-      this.currentPermits = Math.min(this.maxPermits, this.currentPermits + diff);
-    } else if (diff < 0) {
-      this.currentPermits = Math.max(0, this.currentPermits + diff);
-    }
+    // Existing holders drain naturally after a downscale; never reissue their permits.
+    this.drain();
   }
 
   get capacity(): number {
@@ -63,11 +54,11 @@ export class AsyncSemaphore {
   }
 
   get available(): number {
-    return this.currentPermits;
+    return Math.max(0, this.maxPermits - this.activePermits);
   }
 
   get active(): number {
-    return this.maxPermits - this.currentPermits;
+    return this.activePermits;
   }
 
   get queued(): number {
@@ -232,7 +223,8 @@ export class AdaptiveAutotuner {
   } {
     const mem = diagnostics.getMemorySnapshot();
     const lag = (diagnostics as any).lagMonitor.getMetrics();
-    const totalExternal = mem.externalMb + mem.arrayBuffersMb;
+    // Node includes arrayBuffers in external; adding both double-counts image buffers.
+    const totalExternal = mem.externalMb;
 
     const errors = this.cycleErrors;
     const rateLimits = this.cycleRateLimits;
@@ -321,8 +313,7 @@ export class AdaptiveAutotuner {
       this.currentConcurrency < this.config.maxConcurrency
     ) {
       const previous = this.currentConcurrency;
-      const step = this.config.maxConcurrency > 10 ? 4 : 1;
-      const target = Math.min(this.config.maxConcurrency, previous + step);
+      const target = Math.min(this.config.maxConcurrency, previous + 1);
       this.currentConcurrency = target;
       this.globalChapterSemaphore.setCapacity(target);
       this.stableCycleCount = 0; // Reset counter for the next tier
