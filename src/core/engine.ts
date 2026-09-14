@@ -1,3 +1,4 @@
+import { callProvider } from './retry-policy.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SourceRegistry } from '../sources/registry.js';
 import { StorageProvider } from '../storage/provider.js';
@@ -149,11 +150,9 @@ export class ImporterEngine {
     // 7. Launch background upstream provider health check loop (every 5 min)
     this.runUpstreamHealthLoop();
 
-    // 8. Launch independent concurrent worker loops for each registered source
+    // A bounded shared runner pool claims by queue priority. Per-source semaphores
+    // still enforce source limits, without hundreds of idle claimers ahead of fresh jobs.
     const activeWorkers: Promise<void>[] = [];
-    for (const adapter of this.registry.getAll()) {
-      activeWorkers.push(this.runSourceWorker(adapter.id));
-    }
     // Dedicated discovery worker lane to guarantee DISCOVER_WORKS and SYNC_WORK are NEVER starved by chapters
     activeWorkers.push(this.runDiscoveryWorker());
     // General worker to process any unassigned or balancing jobs
@@ -785,8 +784,9 @@ export class ImporterEngine {
    * General fallback worker runner running multiple concurrent slots
    */
   private async runGeneralWorker(): Promise<void> {
-    this.logger.info('Starting general fallback runner pool (4 concurrent slots)');
-    const slots = Array.from({ length: 4 }, (_, i) => this.runGeneralSlot(i));
+    const slotsCount = Math.min(this.config.MAX_CONCURRENT_CHAPTERS || 4, this.config.TESTED_CONCURRENCY_CEILING || 4);
+    this.logger.info(`Starting shared chapter runner pool (${slotsCount} slots)`);
+    const slots = Array.from({ length: slotsCount }, (_, i) => this.runGeneralSlot(i));
     await Promise.all(slots);
   }
 
@@ -1334,7 +1334,7 @@ export class ImporterEngine {
             updated_at: new Date().toISOString(),
           })
           .eq('id', job.source);
-      } else if (classification.retryClass === 'QUEUE_RETRY_TIMEOUT') {
+      } else if (classification.retryClass === 'QUEUE_RETRY_TIMEOUT' && classification.sourceStage !== 'provider') {
         this.autotuner.recordError('timeout');
       } else if (classification.sourceStage === 'system') {
         this.autotuner.recordError('error');
@@ -1399,7 +1399,7 @@ export class ImporterEngine {
       cursor: currentCursor,
     });
 
-    const { works, nextCursor } = await adapter.fetchUpdatedWorks(currentCursor, { mode });
+    const { works, nextCursor } = await callProvider(() => adapter.fetchUpdatedWorks(currentCursor, { mode }));
 
     this.logger.info('Discovered updated works', {
       source: job.source,
@@ -1487,7 +1487,7 @@ export class ImporterEngine {
     const adapter = this.registry.get(job.source);
     if (!adapter) throw new Error(`Source adapter not registered: ${job.source}`);
 
-    const details = await adapter.fetchWorkDetails(sourceWorkId);
+    const details = await callProvider(() => adapter.fetchWorkDetails(sourceWorkId));
     const botUserId = await this.resolveBotUserId();
 
     let coverMediaId: string | null = null;
@@ -1933,7 +1933,7 @@ export class ImporterEngine {
         let pageUrls: string[] = [];
         let primaryError: Error | null = null;
         try {
-          pageUrls = await adapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber);
+          pageUrls = await callProvider(() => adapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber));
         } catch (adapterErr: any) {
           primaryError = adapterErr instanceof Error ? adapterErr : new Error(String(adapterErr));
           this.logger.warn(`Source ${effectiveSource} failed fetchChapterPages for ch ${chapterNumber}`, {
@@ -1946,10 +1946,10 @@ export class ImporterEngine {
           if (candidateIdx === allSourceCandidates.length - 1) {
             if (allSourceCandidates.length === 1) {
               const detail = primaryError?.message ? `: ${primaryError.message}` : '';
-              throw new Error(`Source ${effectiveSource} failed to return pages for chapter ${chapterNumber} (${effectiveSourceChapterId})${detail}`);
+              throw Object.assign(new Error(`Source ${effectiveSource} failed to return pages for chapter ${chapterNumber} (${effectiveSourceChapterId})${detail}`), { sourceStage: 'provider' });
             } else {
               const detail = primaryError?.message ? ` (Primary error: ${primaryError.message})` : '';
-              throw new Error(`Failed to obtain pages for chapter ${chapterNumber} (${effectiveSourceChapterId}) across primary and fallback sources [${allSourceCandidates.map(c => c.source).join(', ')}]${detail}`);
+              throw Object.assign(new Error(`Failed to obtain pages for chapter ${chapterNumber} (${effectiveSourceChapterId}) across primary and fallback sources [${allSourceCandidates.map(c => c.source).join(', ')}]${detail}`), { sourceStage: 'provider' });
             }
           }
           continue;
@@ -2104,7 +2104,7 @@ export class ImporterEngine {
               attempts++;
               try {
                 pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
-                  return await this.fetchImageBytes(pageUrl, effectiveSource);
+                  return await callProvider(() => this.fetchImageBytes(pageUrl, effectiveSource));
                 });
                 tDownload += Date.now() - d0;
                 totalBytes += pageBytes.length;
@@ -2129,7 +2129,7 @@ export class ImporterEngine {
                 try {
                   const refreshAdapter = this.registry.get(effectiveSource);
                   if (refreshAdapter) {
-                    const refreshedUrls = await refreshAdapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber);
+                    const refreshedUrls = await callProvider(() => refreshAdapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber));
                     if (refreshedUrls && refreshedUrls.length === expectedCount) {
                       const isDifferent = refreshedUrls.some((u, i) => u !== pageUrls[i]);
                       if (isDifferent) {
@@ -2143,7 +2143,7 @@ export class ImporterEngine {
                         currentUrl = pageUrls[idx] || '';
                         // Retry downloading with the fresh URL
                         try {
-                          pageBytes = await this.fetchImageBytes(currentUrl, effectiveSource);
+                          pageBytes = await callProvider(() => this.fetchImageBytes(currentUrl, effectiveSource));
                           tDownload += Date.now() - d0;
                           totalBytes += pageBytes.length;
                           ImporterEngine.activeBufferedBytes += pageBytes.length;
