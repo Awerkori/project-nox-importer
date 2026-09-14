@@ -355,26 +355,16 @@ export class PublicationBarrier {
       let publishedTotal = 0;
       let activeWorkIds = [...distinctWorkIds];
 
-      // Round-robin iteration across distinct works until backlog is cleared or maxTotalPublications reached
-      while (activeWorkIds.length > 0 && publishedTotal < maxTotalPublications) {
-        const nextActive: string[] = [];
+      // Round-robin iteration across distinct works (one round per sweep)
+      for (const workId of activeWorkIds) {
+        if (publishedTotal >= maxTotalPublications) break;
 
-        for (const workId of activeWorkIds) {
-          if (publishedTotal >= maxTotalPublications) break;
+        const lock = this.getWorkLock(workId);
+        const count = await lock.runExclusive(async () => {
+          return this.runCascadeUnderLock(workId, perWorkBurst);
+        });
 
-          const lock = this.getWorkLock(workId);
-          const count = await lock.runExclusive(async () => {
-            return this.runCascadeUnderLock(workId, perWorkBurst);
-          });
-
-          publishedTotal += count;
-          // If this work published its full burst limit, it may have additional staged chapters for next round
-          if (count >= perWorkBurst) {
-            nextActive.push(workId);
-          }
-        }
-
-        activeWorkIds = nextActive;
+        publishedTotal += count;
       }
 
       if (publishedTotal > 0) {
