@@ -33,6 +33,12 @@ export interface SourceAdapter {
     readonly name: string;
     readonly baseUrl: string;
     /**
+     * Optional: override URL used by the admission probe.
+     * If set, the probe hits this URL instead of baseUrl.
+     * Use for sources that work via internal bridge (e.g. Kuro via CF Workers bridge).
+     */
+    readonly probeUrl?: string;
+    /**
      * Discover recently updated works from this source
      */
     fetchUpdatedWorks(cursor?: string | null, options?: {

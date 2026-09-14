@@ -162,7 +162,7 @@ export class RetryPolicy {
                 sourceStage: 'provider',
             };
         }
-        if (/Failed to download image|404|Not Found/i.test(message)) {
+        if (/\[PERMANENT_404_UNRESOLVED\]|incomplete chapter import|contains 0 valid content pages|downloaded image|too small|Failed to download image|404|Not Found/i.test(message)) {
             return {
                 retryClass: 'QUEUE_RETRY_PROVIDER',
                 isTransient: false,
@@ -171,9 +171,9 @@ export class RetryPolicy {
                 sourceStage: 'provider',
             };
         }
-        // 4. Default: fallback para Provider / Sistema
+        // 4. Default fallback: assumed system
         return {
-            retryClass: 'QUEUE_RETRY_PROVIDER',
+            retryClass: 'LOCAL_RETRY',
             isTransient: true,
             isPermanent: false,
             message,

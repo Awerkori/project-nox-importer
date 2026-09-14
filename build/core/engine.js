@@ -2055,7 +2055,9 @@ export class ImporterEngine {
                                         .eq('chapter_number', chapterNumber);
                                 }
                                 catch { }
-                                throw new Error(`[PERMANENT_404_UNRESOLVED] ${gapReason}: ${resolvedError.message}`);
+                                const gapErr = new Error(`[PERMANENT_404_UNRESOLVED] ${gapReason}: ${resolvedError.message}`);
+                                gapErr.sourceStage = 'provider';
+                                throw gapErr;
                             }
                         }
                     }
