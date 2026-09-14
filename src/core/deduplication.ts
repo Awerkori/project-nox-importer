@@ -587,22 +587,101 @@ export class DeduplicationEngine {
     }
 
     // Always sync canonical tags and upstream genres safely
-    await this.syncWorkTags(workId, candidate, isCurrentlyAdult || isAdultCandidate, updates.kind || work.kind);
+    await this.syncWorkTags(workId, candidate, isCurrentlyAdult || isAdultCandidate, updates.kind || work.kind, source);
   }
 
   /**
    * Synchronize canonical adult tags and upstream genres to public.work_tags
    */
+  /**
+   * Normalize and resolve a tag name to its canonical form
+   */
+  private normalizeTagName(raw: string): string {
+    const canonicalAliases: Record<string, string> = {
+      'bl': 'Yaoi',
+      'boys love': 'Yaoi',
+      'boy\'s love': 'Yaoi',
+      'boys-love': 'Yaoi',
+      'shounen ai': 'Yaoi',
+      'shounen-ai': 'Yaoi',
+      'shonen ai': 'Yaoi',
+      
+      'gl': 'Yuri',
+      'girls love': 'Yuri',
+      'girl\'s love': 'Yuri',
+      'girls-love': 'Yuri',
+      'shoujo ai': 'Yuri',
+      'shoujo-ai': 'Yuri',
+      'shojo ai': 'Yuri',
+      
+      'adult': 'Adulto',
+      'adults only': 'Adulto',
+      '18+': 'Adulto',
+      '+18': 'Adulto',
+      'mature': 'Adulto',
+      
+      'pornhwa': 'Pornhwa',
+      'porn hwa': 'Pornhwa',
+      
+      'manhua': 'Manhua',
+      'manga': 'Manga',
+      'manhwa': 'Manhwa',
+      'webtoon': 'Webtoon',
+      'doujinshi': 'Doujinshi'
+    };
+
+    let cleaned = raw.trim();
+    const lower = cleaned.toLowerCase();
+    
+    if (canonicalAliases[lower]) {
+      return canonicalAliases[lower];
+    }
+    
+    // Default capitalization (first letter upper)
+    if (cleaned.length > 0) {
+      cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase();
+    }
+    return cleaned;
+  }
+
+  private isGarbageTag(raw: string): boolean {
+    const garbage = [
+      'leia no nosso site', 'atualizacao', 'atualização', 'projeto da scan',
+      'completo', 'em andamento', 'em lancamento', 'em lançamento', 'cancelado', 'hiato', 'lancamento'
+    ];
+    const lower = raw.toLowerCase();
+    return garbage.some(g => lower.includes(g));
+  }
+
+  private getProviderDefaultTags(source: string): string[] {
+    const special: Record<string, string[]> = {
+      'yaoifanclub': ['Yaoi'],
+      'megahentai': ['Hentai', 'Adulto'],
+      'universohentai': ['Hentai', 'Adulto'],
+      'hentaifusion': ['Hentai', 'Adulto'],
+      'hentaihome': ['Hentai', 'Adulto'],
+      'hentaiseason': ['Hentai', 'Adulto'],
+      'hentaitokyo': ['Hentai', 'Adulto'],
+      'tankouhentai': ['Hentai', 'Adulto'],
+      'mundohentai': ['Hentai', 'Adulto'],
+      'nhentaibr': ['Hentai', 'Adulto'],
+      'instahentai': ['Hentai', 'Adulto'],
+      'hotcabaretscan': ['Hentai', 'Adulto'],
+      'yuriverso': ['Yuri']
+    };
+    return special[source] || [];
+  }
+
   async syncWorkTags(
     workId: string,
     candidate: CandidateWork,
     isAdult: boolean,
-    kind?: string
+    kind?: string,
+    source?: string
   ): Promise<void> {
     try {
       const tagRes = await this.supabase.from('tags').select('id, name, slug');
-      const allTags = tagRes?.data;
-      if (!Array.isArray(allTags) || allTags.length === 0) return;
+      const allTags = tagRes?.data || [];
 
       const tagLookup = new Map<string, string>();
       for (const t of allTags) {
@@ -613,15 +692,9 @@ export class DeduplicationEngine {
       const targetTagIds = new Set<string>();
 
       if (isAdult) {
-        // Canonical tags: +18, Adulto, Adulto (+18)
-        const adultTag18 = tagLookup.get('18') || tagLookup.get('+18');
-        const adultTag = tagLookup.get('adulto');
-        const adultTagGen = tagLookup.get('adulto-18') || tagLookup.get('adulto (+18)');
-        if (adultTag18) targetTagIds.add(adultTag18);
+        const adultTag = tagLookup.get('adulto') || tagLookup.get('18') || tagLookup.get('+18');
         if (adultTag) targetTagIds.add(adultTag);
-        if (adultTagGen) targetTagIds.add(adultTagGen);
 
-        // Canonical Pornhwa tag for adult Manhwa
         const effectiveKind = (kind || candidate.kind || '').toUpperCase();
         const hasManhwaGenre = (candidate.genres || []).some((g) => /manhwa|pornhwa/i.test(g));
         if (effectiveKind === 'MANHWA' || hasManhwaGenre) {
@@ -629,16 +702,46 @@ export class DeduplicationEngine {
           if (pornhwaTag) targetTagIds.add(pornhwaTag);
         }
       }
+      
+      const desiredTags = new Set<string>();
+      
+      if (source) {
+         const def = this.getProviderDefaultTags(source);
+         for (const d of def) desiredTags.add(d);
+      }
 
-      // Upstream genres/tags
       if (Array.isArray(candidate.genres)) {
         for (const genre of candidate.genres) {
-          const normalized = genre.trim().toLowerCase();
-          const tagId = tagLookup.get(normalized) || tagLookup.get(this.sanitizeSlug(normalized));
-          if (tagId) {
-            targetTagIds.add(tagId);
-          }
+           if (!genre || this.isGarbageTag(genre)) continue;
+           desiredTags.add(this.normalizeTagName(genre));
         }
+      }
+      
+      // Auto-create missing tags safely
+      for (const tName of desiredTags) {
+         const lower = tName.toLowerCase();
+         const tSlug = this.sanitizeSlug(lower);
+         
+         let tagId = tagLookup.get(lower) || tagLookup.get(tSlug);
+         if (!tagId) {
+            // Attempt to create it safely (idempotent due to unique constraint on slug/name)
+            const { data: newTag, error: createErr } = await this.supabase.from('tags').upsert({
+               name: tName,
+               slug: tSlug,
+               kind: 'TAG'
+            }, { onConflict: 'slug' }).select('id').maybeSingle();
+            
+            if (newTag?.id) {
+               tagId = newTag.id;
+               // Add to lookup for same run
+               if(tagId) tagLookup.set(lower, tagId);
+               if(tagId) tagLookup.set(tSlug, tagId);
+            }
+         }
+         
+         if (tagId) {
+            targetTagIds.add(tagId);
+         }
       }
 
       if (targetTagIds.size > 0) {
@@ -649,8 +752,8 @@ export class DeduplicationEngine {
         }));
         await this.supabase.from('work_tags').upsert(rows, { onConflict: 'work_id,tag_id' });
       }
-    } catch {
-      // Safe non-blocking
+    } catch (err: any) {
+      this.logger?.warn?.('Safe non-blocking error in syncWorkTags', { error: err.message });
     }
   }
 
