@@ -279,13 +279,28 @@ export class MadaraAdapter {
             ? sourceChapterId
             : `${this.baseUrl}${sourceChapterId.startsWith('/') ? '' : '/'}${sourceChapterId}`;
         const html = await this.fetchHtml(chapterUrl);
+        // Madara's paged reader renders only its first image in HTML. The complete
+        // chapter is a JSON array; sidebar thumbnails must never become chapter pages.
+        const pagedManifest = html.match(/\b(?:var|let|const)\s+chapter_preloaded_images\s*=\s*(\[[\s\S]*?\])\s*(?=[,;])/i);
+        if (pagedManifest) {
+            const urls = JSON.parse(pagedManifest[1]);
+            if (!Array.isArray(urls) || urls.length === 0 || urls.some(url => typeof url !== 'string')) {
+                throw new Error('Invalid paged chapter image manifest');
+            }
+            return [...new Set(urls.map(raw => {
+                    const url = new URL(raw, chapterUrl);
+                    if (!['https:', 'http:'].includes(url.protocol))
+                        throw new Error('Invalid chapter image URL');
+                    return url.href;
+                }))];
+        }
         // Extract all img tags
         const imgTags = html.match(/<img[^>]+>/gi) || [];
         const seen = new Set();
         const pages = [];
         for (const tag of imgTags) {
             if (!/wp-manga-chapter-img|page-break|reading-content|read-container/i.test(tag) &&
-                !/wp-content\/uploads\/(?:WP-manga|\d{4}\/\d{2})/i.test(tag)) {
+                !/wp-content\/uploads\/WP-manga\/data\//i.test(tag)) {
                 continue;
             }
             // Priority: data-src -> data-full-url -> src
