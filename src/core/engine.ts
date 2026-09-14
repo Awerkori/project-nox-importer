@@ -94,7 +94,7 @@ export class ImporterEngine {
     this.publicationBarrier = new PublicationBarrier(supabase);
     this.safetyBarrier = new PublicationSafetyBarrier(supabase);
     this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
-    const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 4, config.TESTED_CONCURRENCY_CEILING || 4);
+    const requestedMax = config.TESTED_CONCURRENCY_CEILING || 6;
     this.autotuner = new AdaptiveAutotuner({
       initialConcurrency: Math.min(4, requestedMax),
       maxConcurrency: requestedMax,
@@ -2374,7 +2374,9 @@ export class ImporterEngine {
                     .eq('chapter_number', chapterNumber);
                 } catch {}
 
-                throw new Error(`[PERMANENT_404_UNRESOLVED] ${gapReason}: ${resolvedError.message}`);
+                const gapErr = new Error(`[PERMANENT_404_UNRESOLVED] ${gapReason}: ${resolvedError.message}`);
+                (gapErr as any).sourceStage = 'provider';
+                throw gapErr;
               }
             }
           }
