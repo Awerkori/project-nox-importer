@@ -69,23 +69,23 @@ export class AsyncSemaphore {
     }
 }
 export const SOURCE_CONCURRENCY_LIMITS = {
-    mangaflix: { maxChapters: 16, maxPagesPerChapter: 8 },
-    manhastro: { maxChapters: 12, maxPagesPerChapter: 6 },
-    mangotoons: { maxChapters: 8, maxPagesPerChapter: 6 },
-    megahentai: { maxChapters: 8, maxPagesPerChapter: 6 },
-    taimumangas: { maxChapters: 8, maxPagesPerChapter: 8 },
-    hipercool: { maxChapters: 6, maxPagesPerChapter: 6 },
-    nexus: { maxChapters: 6, maxPagesPerChapter: 6 },
-    instahentai: { maxChapters: 6, maxPagesPerChapter: 6 },
-    euphoriascan: { maxChapters: 6, maxPagesPerChapter: 6 },
-    fleurblanche: { maxChapters: 6, maxPagesPerChapter: 6 },
-    littletyrant: { maxChapters: 6, maxPagesPerChapter: 6 },
-    mangalivreto: { maxChapters: 6, maxPagesPerChapter: 6 },
-    montetai: { maxChapters: 6, maxPagesPerChapter: 6 },
-    nebulosascan: { maxChapters: 6, maxPagesPerChapter: 6 },
-    nocturnesummer: { maxChapters: 6, maxPagesPerChapter: 6 },
-    tankouhentai: { maxChapters: 6, maxPagesPerChapter: 6 },
-    cafecomyaoi: { maxChapters: 6, maxPagesPerChapter: 6 },
+    mangaflix: { maxChapters: 2, maxPagesPerChapter: 4 },
+    manhastro: { maxChapters: 2, maxPagesPerChapter: 4 },
+    mangotoons: { maxChapters: 2, maxPagesPerChapter: 4 },
+    megahentai: { maxChapters: 2, maxPagesPerChapter: 4 },
+    taimumangas: { maxChapters: 2, maxPagesPerChapter: 4 },
+    hipercool: { maxChapters: 2, maxPagesPerChapter: 4 },
+    nexus: { maxChapters: 2, maxPagesPerChapter: 4 },
+    instahentai: { maxChapters: 2, maxPagesPerChapter: 4 },
+    euphoriascan: { maxChapters: 2, maxPagesPerChapter: 4 },
+    fleurblanche: { maxChapters: 2, maxPagesPerChapter: 4 },
+    littletyrant: { maxChapters: 2, maxPagesPerChapter: 4 },
+    mangalivreto: { maxChapters: 2, maxPagesPerChapter: 4 },
+    montetai: { maxChapters: 2, maxPagesPerChapter: 4 },
+    nebulosascan: { maxChapters: 2, maxPagesPerChapter: 4 },
+    nocturnesummer: { maxChapters: 2, maxPagesPerChapter: 4 },
+    tankouhentai: { maxChapters: 2, maxPagesPerChapter: 4 },
+    cafecomyaoi: { maxChapters: 2, maxPagesPerChapter: 4 },
     kuro: { maxChapters: 1, maxPagesPerChapter: 2 },
     hanamiheaven: { maxChapters: 1, maxPagesPerChapter: 2 },
     hotcabaretscan: { maxChapters: 4, maxPagesPerChapter: 6 },
@@ -124,18 +124,18 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     brasilhentai: { maxChapters: 4, maxPagesPerChapter: 6 },
 };
 export const DEFAULT_SOURCE_LIMIT = {
-    maxChapters: 4,
+    maxChapters: 2,
     maxPagesPerChapter: 4,
 };
 const DEFAULT_AUTOTUNER_CONFIG = {
     minConcurrency: 1,
-    maxConcurrency: 64,
+    maxConcurrency: 4,
     initialConcurrency: 2,
-    requiredStableCycles: 2,
-    cooldownPeriodMs: 35 * 1000,
-    maxRssMb: 360,
-    maxHeapMb: 240,
-    maxExternalAndBuffersMb: 120,
+    requiredStableCycles: 3,
+    cooldownPeriodMs: 25 * 1000,
+    maxRssMb: 260,
+    maxHeapMb: 160,
+    maxExternalAndBuffersMb: 60,
     maxEventLoopLagMs: 100,
 };
 export class AdaptiveAutotuner {
@@ -156,8 +156,8 @@ export class AdaptiveAutotuner {
         this.config = { ...DEFAULT_AUTOTUNER_CONFIG, ...config };
         this.currentConcurrency = this.config.initialConcurrency;
         this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency);
-        this.globalMediaSemaphore = new AsyncSemaphore(24); // 24 concurrent image uploads across 9 shards & 2 bots
-        this.globalInflightRequestSemaphore = new AsyncSemaphore(96); // Global network in-flight download budget
+        this.globalMediaSemaphore = new AsyncSemaphore(6); // Safe bounded concurrent image uploads
+        this.globalInflightRequestSemaphore = new AsyncSemaphore(16); // Bounded network download budget
     }
     getGlobalChapterSemaphore() {
         return this.globalChapterSemaphore;
