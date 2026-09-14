@@ -1901,7 +1901,8 @@ export class ImporterEngine {
                         }
                     }
                     catch (err) {
-                        pipelineError = err;
+                        if (!pipelineError)
+                            pipelineError = err;
                     }
                     finally {
                         notifyConsumer();
@@ -1959,7 +1960,8 @@ export class ImporterEngine {
                                 }
                             }
                             catch (err) {
-                                pipelineError = err;
+                                if (!pipelineError)
+                                    pipelineError = err;
                                 this.logger.error(`Failed to upload page ${item.index + 1}/${expectedCount}`, { error: err?.message });
                                 notifyConsumer();
                                 break;
@@ -1974,7 +1976,8 @@ export class ImporterEngine {
                         }
                     }
                     catch (err) {
-                        pipelineError = err;
+                        if (!pipelineError)
+                            pipelineError = err;
                     }
                     finally {
                         notifyConsumer();
