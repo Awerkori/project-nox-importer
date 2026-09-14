@@ -128,20 +128,10 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
     globalThis.fetch = async (url: any, init?: any) => {
       const urlStr = url.toString();
       if (urlStr.includes('page-1') || urlStr.includes('cover')) {
-        return {
-          ok: true,
-          status: 200,
-          headers: new Headers({ 'Content-Type': 'image/png' }),
-          arrayBuffer: async () => samplePngBytes.buffer.slice(samplePngBytes.byteOffset, samplePngBytes.byteOffset + samplePngBytes.byteLength),
-        } as any;
+        return new Response(samplePngBytes as Uint8Array<ArrayBuffer>, { status: 200, headers: { 'Content-Type': 'image/png' } });
       }
       if (urlStr.includes('page-2')) {
-        return {
-          ok: true,
-          status: 200,
-          headers: new Headers({ 'Content-Type': 'image/jpeg' }),
-          arrayBuffer: async () => sampleJpeg.buffer.slice(sampleJpeg.byteOffset, sampleJpeg.byteOffset + sampleJpeg.byteLength),
-        } as any;
+        return new Response(sampleJpeg as Uint8Array<ArrayBuffer>, { status: 200, headers: { 'Content-Type': 'image/jpeg' } });
       }
       return originalFetch(url, init);
     };

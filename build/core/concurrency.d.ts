@@ -1,10 +1,11 @@
 export declare class AsyncSemaphore {
-    private currentPermits;
+    private activePermits;
     private maxPermits;
     private waitQueue;
     constructor(maxPermits: number);
-    acquire(): Promise<void>;
+    acquire(signal?: AbortSignal): Promise<void>;
     release(): void;
+    private drain;
     runExclusive<T>(fn: () => Promise<T>): Promise<T>;
     setCapacity(newCapacity: number): void;
     get capacity(): number;
@@ -35,6 +36,7 @@ export declare class AdaptiveAutotuner {
     private sourceSemaphores;
     private globalMediaSemaphore;
     private globalInflightRequestSemaphore;
+    private bufferedPageSemaphore;
     private currentConcurrency;
     private stableCycleCount;
     private cooldownUntil;
@@ -46,6 +48,7 @@ export declare class AdaptiveAutotuner {
     getGlobalChapterSemaphore(): AsyncSemaphore;
     getGlobalMediaSemaphore(): AsyncSemaphore;
     getGlobalInflightRequestSemaphore(): AsyncSemaphore;
+    getBufferedPageSemaphore(): AsyncSemaphore;
     getSourceLimits(source: string): SourceConcurrencyConfig;
     getSourcePageConcurrency(source: string): number;
     getSourceSemaphore(source: string, limitPerSource?: number): AsyncSemaphore;

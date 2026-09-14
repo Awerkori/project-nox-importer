@@ -89,19 +89,9 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
     globalThis.fetch = async (url: any) => {
       const urlStr = url.toString();
       if (urlStr.includes('page-1')) {
-        return {
-          ok: true,
-          status: 200,
-          headers: new Headers({ 'Content-Type': 'image/png' }),
-          arrayBuffer: async () => samplePngBytes.buffer.slice(samplePngBytes.byteOffset, samplePngBytes.byteOffset + samplePngBytes.byteLength),
-        } as any;
+        return new Response(samplePngBytes as Uint8Array<ArrayBuffer>, { status: 200, headers: { 'Content-Type': 'image/png' } });
       }
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'Content-Type': 'image/jpeg' }),
-        arrayBuffer: async () => sampleJpeg.buffer.slice(sampleJpeg.byteOffset, sampleJpeg.byteOffset + sampleJpeg.byteLength),
-      } as any;
+      return new Response(sampleJpeg as Uint8Array<ArrayBuffer>, { status: 200, headers: { 'Content-Type': 'image/jpeg' } });
     };
 
     mfAvailableChapters = [

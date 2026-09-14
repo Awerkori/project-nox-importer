@@ -57,7 +57,8 @@ describe('New PT-BR Sources Registration & Concurrency', () => {
     for (const sourceId of expectedNewSources) {
       const limit = SOURCE_CONCURRENCY_LIMITS[sourceId];
       expect(limit).toBeDefined();
-      expect(limit.maxChapters).toBeGreaterThanOrEqual(4);
+      expect(limit.maxChapters).toBeGreaterThanOrEqual(1);
+      expect(limit.maxChapters).toBeLessThanOrEqual(4);
       expect(limit.maxPagesPerChapter).toBeGreaterThanOrEqual(4);
     }
   });
