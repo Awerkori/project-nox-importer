@@ -18,6 +18,7 @@ export declare class ProviderDownloadError extends Error {
     readonly source: string;
     constructor(status: number, url: string, source: string, message?: string);
 }
+export declare function callProvider<T>(operation: () => Promise<T>): Promise<T>;
 export declare class RetryPolicy {
     /**
      * Classifica rigorosamente o erro considerando a ORIGEM (Storage vs Provider)

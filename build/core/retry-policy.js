@@ -11,6 +11,17 @@ export class ProviderDownloadError extends Error {
         this.name = 'ProviderDownloadError';
     }
 }
+export async function callProvider(operation) {
+    try {
+        return await operation();
+    }
+    catch (value) {
+        const original = value instanceof Error ? value : new Error(String(value));
+        const error = new Error(original.message, { cause: original });
+        Object.assign(error, original, { sourceStage: 'provider' });
+        throw error;
+    }
+}
 export class RetryPolicy {
     /**
      * Classifica rigorosamente o erro considerando a ORIGEM (Storage vs Provider)
@@ -112,7 +123,7 @@ export class RetryPolicy {
                 isTransient: true,
                 isPermanent: false,
                 message,
-                sourceStage: 'system',
+                sourceStage: err?.sourceStage === 'provider' ? 'provider' : 'system',
             };
         }
         if (status === 401 || status === 403 || /unauthorized|forbidden/i.test(message)) {
@@ -166,7 +177,7 @@ export class RetryPolicy {
             isTransient: true,
             isPermanent: false,
             message,
-            sourceStage: 'system',
+            sourceStage: err?.sourceStage === 'provider' ? 'provider' : 'system',
         };
     }
     /**
