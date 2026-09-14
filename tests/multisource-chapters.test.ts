@@ -409,6 +409,10 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
         }
       }),
       rpc: async (funcName: string, args: any) => {
+        if (funcName === 'importer_replace_pages') {
+          const res = await db.query('SELECT importer_replace_pages($1,$2::jsonb) count', [args.p_chapter_id, JSON.stringify(args.p_pages)]);
+          return { data: res.rows[0].count, error: null };
+        }
         if (funcName === 'importer_acquire_job') {
           const res = await db.query(
             `select * from public.importer_acquire_job($1, $2::interval, $3)`,

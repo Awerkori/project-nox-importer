@@ -2145,9 +2145,10 @@ export class ImporterEngine {
                     width: p.width,
                     height: p.height,
                 }));
-                const { error: pageErr } = await this.supabase
-                    .from('pages')
-                    .upsert(pagesToUpsert, { onConflict: 'chapter_id,position' });
+                const { error: pageErr } = await this.supabase.rpc('importer_replace_pages', {
+                    p_chapter_id: chapterId,
+                    p_pages: pagesToUpsert,
+                });
                 if (pageErr)
                     throw pageErr;
                 const isTest = typeof process !== 'undefined' && (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST));
