@@ -3,6 +3,7 @@ import { DeduplicationEngine, computeCanonicalChapterKey, ADULT_SOURCES } from '
 import { CheckpointManager } from './checkpoint.js';
 import { processAndStoreMedia } from '../storage/media.js';
 import { Logger } from './logger.js';
+import { withSourceChapterPermits } from './concurrency.js';
 import { readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
 import { AdaptiveAutotuner } from './concurrency.js';
@@ -718,13 +719,25 @@ export class ImporterEngine {
                     continue;
                 }
                 const sourceSem = this.autotuner.getSourceSemaphore(job.source);
-                await sourceSem.acquire();
+                // Claim admission is finished. Never hold global capacity while waiting for a source.
+                globalSem.release();
+                const cancelled = new AbortController();
+                const waitingLease = this.queue.startHeartbeat(job.id, this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS, () => cancelled.abort());
+                let executing = false;
                 try {
-                    await this.executeJobDirectly(job);
+                    await withSourceChapterPermits(sourceSem, globalSem, async () => {
+                        waitingLease.stop();
+                        executing = true;
+                        await this.executeJobDirectly(job);
+                    }, AbortSignal.any([this.abortController.signal, cancelled.signal, AbortSignal.timeout(12 * 60 * 1000)]));
+                }
+                catch (err) {
+                    if (!executing)
+                        await this.queue.releaseJob(job.id, 'QUEUED', 'Admission wait interrupted', 2);
+                    throw err;
                 }
                 finally {
-                    sourceSem.release();
-                    globalSem.release();
+                    waitingLease.stop();
                 }
                 await this.sleep(50);
             }
@@ -791,11 +804,7 @@ export class ImporterEngine {
         if (job.task_type === 'IMPORT_CHAPTER') {
             const globalSem = this.autotuner.getGlobalChapterSemaphore();
             const sourceSem = this.autotuner.getSourceSemaphore(job.source);
-            await globalSem.runExclusive(async () => {
-                await sourceSem.runExclusive(async () => {
-                    await this.executeJobDirectly(job);
-                });
-            });
+            await withSourceChapterPermits(sourceSem, globalSem, () => this.executeJobDirectly(job), this.abortController.signal);
         }
         else {
             await this.executeJobDirectly(job);
