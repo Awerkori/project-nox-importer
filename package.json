@@ -9,7 +9,8 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "prepare:discloud": "npm run test && npm run build",
+    "build": "tsc && git rev-parse --short HEAD > build/COMMIT 2>/dev/null || echo unknown > build/COMMIT",
     "start": "node --max-old-space-size=288 build/index.js",
     "package:discloud": "python3 scripts/package-discloud.py",
     "test": "vitest run",

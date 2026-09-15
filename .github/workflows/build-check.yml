@@ -1,0 +1,35 @@
+name: Build Check
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  check-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Rebuild Project
+        run: npm run build
+
+      - name: Check for stale build artifacts
+        run: |
+          if [ -n "$(git status --porcelain build/ ':!build/COMMIT')" ]; then
+            echo "ERROR: The build/ directory is out of sync with src/."
+            echo "You must run 'npm run build' locally and commit the updated build/ directory."
+            git diff build/ ':!build/COMMIT'
+            exit 1
+          else
+            echo "Build directory is up to date."
+          fi
