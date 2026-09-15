@@ -1604,6 +1604,23 @@ export class ImporterEngine {
             completedPages: 0,
         });
         const tStart = Date.now();
+        // TELEMETRY PATCH
+        const telemetry = {
+            jobId: job.id,
+            source: effectiveSource,
+            workId: workId.substring(0, 8),
+            chapter: chapterNumber,
+            tStart,
+            tDownloadStart: 0,
+            tDownloadEnd: 0,
+            tUploadStart: 0,
+            tUploadEnd: 0,
+            tStaged: 0,
+            tPublished: 0,
+            totalBytesDown: 0,
+            totalBytesUp: 0,
+            pages: 0
+        };
         let tDownload = 0;
         let tUpload = 0;
         let tDb = 0;
@@ -1982,13 +1999,19 @@ export class ImporterEngine {
                         notifyConsumer();
                     }
                 };
+                telemetry.tDownloadStart = Date.now();
                 const producerPromises = Array.from({ length: downloadConcurrency }, () => producer());
+                telemetry.tUploadStart = Date.now();
                 const consumerPromises = Array.from({ length: uploadConcurrency }, () => consumer());
                 try {
                     await Promise.all(producerPromises);
+                    telemetry.tDownloadEnd = Date.now();
                     allDownloadsFinished = true;
                     notifyConsumer();
                     await Promise.all(consumerPromises);
+                    telemetry.tUploadEnd = Date.now();
+                    telemetry.totalBytesDown = totalBytes;
+                    telemetry.pages = expectedCount;
                 }
                 finally {
                     // RAII Cleanup: Drain any unconsumed items left in readyQueue
