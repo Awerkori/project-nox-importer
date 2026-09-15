@@ -2432,6 +2432,11 @@ export class ImporterEngine {
         }
 
         successfulExecution = true;
+        telemetry.tStaged = Date.now();
+        this.logger.info('TELEMETRY_JOB_STAGED', telemetry);
+        this.supabase.from('importer_queue').update({
+          payload: { ...job.payload, telemetry }
+        }).eq('id', job.id).then(() => {}).catch(() => {});
         break;
       }
 
