@@ -472,9 +472,6 @@ export class DeduplicationEngine {
       // 4.5 UNKNOWN should never overwrite a known value
       if ((fieldName === 'kind' || fieldName === 'status') && candidateValue === 'UNKNOWN' && !isCurrentEmpty && currentVal !== 'UNKNOWN') return false;
 
-      // 5. Kuro can upgrade any non-manual field
-      if (source === 'kuro') return true;
-
       // Other sources cannot overwrite populated fields
       return false;
     };
@@ -661,6 +658,13 @@ export class DeduplicationEngine {
   private getProviderDefaultTags(source: string): string[] {
     const special: Record<string, string[]> = {
       'yaoifanclub': ['Yaoi'],
+      'cafecomyaoi': ['Yaoi'],
+      'fleurblanche': ['Yaoi'],
+      'amuy': ['Yaoi'],
+      'apenasumafa': ['Yaoi'],
+      'pinkrosa': ['Yaoi'],
+      'covenscan': ['Yaoi'],
+      'borutoexplorer': ['Yaoi'],
       'megahentai': ['Hentai', 'Adulto'],
       'universohentai': ['Hentai', 'Adulto'],
       'hentaifusion': ['Hentai', 'Adulto'],
@@ -672,6 +676,11 @@ export class DeduplicationEngine {
       'nhentaibr': ['Hentai', 'Adulto'],
       'instahentai': ['Hentai', 'Adulto'],
       'hotcabaretscan': ['Hentai', 'Adulto'],
+      'acervohentai': ['Hentai', 'Adulto'],
+      'nocturnesummer': ['Pornhwa', 'Adulto'],
+      'tiamanhwa': ['Pornhwa', 'Adulto'],
+      'inkapk': ['Pornhwa', 'Adulto'],
+      'littletyrant': ['Pornhwa', 'Adulto'],
       'yuriverso': ['Yuri']
     };
     return special[source] || [];

@@ -572,7 +572,7 @@ export class KuroAdapter implements SourceAdapter {
       synopsis: manga.description?.trim() || '',
       author: manga.author || undefined,
       artist: manga.artist || undefined,
-      kind: 'MANGA',
+      kind: 'UNKNOWN',
       status,
       genres: manga.genres || [],
       alternativeTitles: manga.alternative_titles || [],
