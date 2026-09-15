@@ -197,7 +197,7 @@ export class AdaptiveAutotuner {
     this.config = { ...DEFAULT_AUTOTUNER_CONFIG, ...config };
     this.currentConcurrency = this.config.initialConcurrency;
     this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency);
-    this.globalMediaSemaphore = new AsyncSemaphore(6); // Safe bounded concurrent image uploads
+    this.globalMediaSemaphore = new AsyncSemaphore(12); // Safe bounded concurrent image uploads // Safe bounded concurrent image uploads
     this.globalInflightRequestSemaphore = new AsyncSemaphore(32); // Bounded network download budget
   }
 
