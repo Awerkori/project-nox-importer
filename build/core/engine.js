@@ -91,13 +91,13 @@ export class ImporterEngine {
         this.publicationBarrier = new PublicationBarrier(supabase);
         this.safetyBarrier = new PublicationSafetyBarrier(supabase);
         this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
-        const requestedMax = 6;
+        const requestedMax = 32;
         this.autotuner = new AdaptiveAutotuner({
-            initialConcurrency: Math.min(4, requestedMax),
+            initialConcurrency: 32,
             maxConcurrency: requestedMax,
-            maxRssMb: 350,
-            maxHeapMb: 200,
-            maxExternalAndBuffersMb: 100,
+            maxRssMb: 800,
+            maxHeapMb: 400,
+            maxExternalAndBuffersMb: 300,
             maxEventLoopLagMs: 250,
             requiredStableCycles: 3,
             cooldownPeriodMs: 10 * 1000,
@@ -774,12 +774,31 @@ export class ImporterEngine {
      * Executes a job with active lease heartbeat and hard timeout watchdog.
      */
     async executeJobDirectly(job) {
+        // ADMISSION GATE: Circuit Breaker / Health Check
+        if (job.task_type === 'IMPORT_CHAPTER') {
+            const isAvailable = await this.checkSourceAvailability(job.source);
+            if (!isAvailable) {
+                // Source is down. Do we have fallbacks?
+                const fallbacks = job.payload?.fallbackSources || [];
+                if (!Array.isArray(fallbacks) || fallbacks.length === 0) {
+                    this.logger.warn(`Source ${job.source} is blocked/tarpitting and job ${job.id} has no fallbacks. Rejecting at admission gate.`, { source: job.source, jobId: job.id });
+                    await this.supabase.from('importer_queue').update({
+                        status: 'RETRY',
+                        next_run_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+                        locked_by: null,
+                        locked_at: null,
+                        last_error: 'Source circuit breaker OPEN or UPSTREAM_BLOCKED. No fallbacks available.'
+                    }).eq('id', job.id);
+                    return;
+                }
+            }
+        }
         let cancelSignalTriggered = false;
         const heartbeat = this.queue.startHeartbeat(job.id, this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS, () => {
             cancelSignalTriggered = true;
         });
         // Hard safety timeout: prevents any single job from hogging semaphores/leases indefinitely
-        const maxJobDurationMs = job.task_type === 'IMPORT_CHAPTER' ? 12 * 60 * 1000 : 5 * 60 * 1000;
+        const maxJobDurationMs = job.task_type === 'IMPORT_CHAPTER' ? 5 * 60 * 1000 : 3 * 60 * 1000;
         let jobTimeoutTimer = null;
         const timeoutPromise = new Promise((_, reject) => {
             jobTimeoutTimer = setTimeout(() => {
@@ -1108,6 +1127,19 @@ export class ImporterEngine {
                 return;
             }
             const classification = RetryPolicy.classify(err);
+            // If it's a network/timeout error, record it in the circuit breaker!
+            if (classification.retryClass === 'QUEUE_RETRY_TIMEOUT' || errorMessage.toLowerCase().includes('timeout') || errorMessage.toLowerCase().includes('abort')) {
+                this.logger.warn(`Recording timeout/network failure for ${job.source} in circuit breaker.`);
+                const { tripped, cooldownMs } = this.circuitBreaker.recordFailure(job.source, 'TIMEOUT_TARPIT');
+                if (tripped) {
+                    // If tripped, set the DB source status as well
+                    this.supabase.from('importer_sources').update({
+                        status: 'COOLDOWN',
+                        cooldown_until: new Date(Date.now() + cooldownMs).toISOString(),
+                        blocked_reason: 'TIMEOUT_TARPIT'
+                    }).eq('id', job.source).then();
+                }
+            }
             const isStaffPriority = Boolean(job.payload?.staffRequested) || (job.priority >= 100);
             const decision = RetryPolicy.decide(classification, job.attempts, job.max_attempts, { isStaffPriority });
             if (classification.retryClass === 'QUEUE_RETRY_429') {
@@ -2476,7 +2508,7 @@ export class ImporterEngine {
                     Referer: referer,
                     ...customHeaders,
                 },
-                signal: AbortSignal.timeout(120_000),
+                signal: AbortSignal.timeout(15_000),
             });
         }
         catch (err) {
@@ -2498,7 +2530,7 @@ export class ImporterEngine {
                             Referer: referer,
                         },
                     }),
-                    signal: AbortSignal.timeout(120_000),
+                    signal: AbortSignal.timeout(15_000),
                 });
                 if (bridgeRes.ok) {
                     this.rateLimiter.recordSuccess(parsedUrl.host);
