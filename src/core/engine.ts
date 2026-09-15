@@ -168,7 +168,7 @@ export class ImporterEngine {
   async runStartupRecovery(): Promise<void> {
     try {
       this.logger.info('Starting generic lease recovery for stalled jobs...');
-      const { recovered, failed } = await this.queue.recoverExpiredLeases();
+      let { recovered, failed } = await this.queue.recoverExpiredLeases();
       if (recovered > 0 || failed > 0) {
         this.logger.warn(
           `Startup recovery processed stalled jobs: ${recovered} requeued to QUEUED, ${failed} marked as FAILED`,
@@ -204,7 +204,7 @@ export class ImporterEngine {
         query = query.is('locked_by', null);
       }
 
-      const { data: retries, error } = await query;
+      let { data: retries, error } = await query;
 
       if (error || !retries || retries.length === 0) return 0;
 
@@ -287,7 +287,7 @@ export class ImporterEngine {
     const isAllowed = await this.safetyBarrier.isBackfillAllowed();
     if (!isAllowed) return;
 
-    const { data: sources, error } = await this.supabase
+    let { data: sources, error } = await this.supabase
       .from('importer_sources')
       .select('*');
 
@@ -310,7 +310,7 @@ export class ImporterEngine {
 
       // Backpressure check: throttle backfill if there are already 10+ discovery/sync jobs queued for this source
       try {
-        const { data: activeJobs, error: activeJobsError } = await this.supabase
+        let { data: activeJobs, error: activeJobsError } = await this.supabase
           .from('importer_queue')
           .select('id')
           .eq('source', src.id)
@@ -388,7 +388,7 @@ export class ImporterEngine {
         // 1. Process active Prioridade Absoluta staff requests immediately
         const staffQuery = this.supabase.from('importer_staff_requests');
         if (staffQuery && typeof staffQuery.select === 'function') {
-          const { data: activeStaff } = await staffQuery
+          let { data: activeStaff } = await staffQuery
             .select('work_id')
             .in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
 
@@ -406,7 +406,7 @@ export class ImporterEngine {
         // 2. Process works explicitly requested for reconciliation from Admin UI
         const healthQuery = this.supabase.from('importer_work_health');
         if (healthQuery && typeof healthQuery.select === 'function') {
-          const { data: requestedWorks } = await healthQuery
+          let { data: requestedWorks } = await healthQuery
             .select('work_id')
             .eq('health_status', 'RECONCILING')
             .limit(5);
@@ -457,7 +457,7 @@ export class ImporterEngine {
   }
 
   public async checkBlockedSourcesHealth(): Promise<void> {
-    const { data: blockedSources, error } = await this.supabase
+    let { data: blockedSources, error } = await this.supabase
       .from('importer_sources')
       .select('id, name, status, base_url, blocked_reason, blocked_details')
       .in('status', ['UPSTREAM_BLOCKED', 'RECOVERING', 'DEGRADED']);
@@ -556,7 +556,7 @@ export class ImporterEngine {
 
       // Unpark held jobs for this source back to QUEUED
       try {
-        const { error: unparkErr } = await this.supabase
+        let { error: unparkErr } = await this.supabase
           .from('importer_queue')
           .update({
             status: 'QUEUED',
@@ -648,7 +648,7 @@ export class ImporterEngine {
     const now = Date.now();
     let cached = this.sourceStatusCache.get(source);
     if (!cached || now - cached.cachedAt > 10_000) {
-      const { data: src } = await this.supabase
+      let { data: src } = await this.supabase
         .from('importer_sources')
         .select('status, enabled, cooldown_until')
         .eq('id', source)
@@ -952,7 +952,7 @@ export class ImporterEngine {
   }
 
   private async scheduleSources(): Promise<void> {
-    const { data: sources, error } = await this.supabase
+    let { data: sources, error } = await this.supabase
       .from('importer_sources')
       .select('*');
 
@@ -1004,7 +1004,7 @@ export class ImporterEngine {
             .eq('task_type', 'DISCOVER_WORKS')
             .eq('source', src.id);
 
-          const { data: existingActive } = typeof (q as any).in === 'function'
+          let { data: existingActive } = typeof (q as any).in === 'function'
             ? await (q as any).in('status', ['QUEUED', 'IMPORTING', 'RETRY']).limit(10)
             : await q.limit(10);
 
@@ -1077,7 +1077,7 @@ export class ImporterEngine {
         }
       }
 
-      const { data: sourceRec } = await this.supabase
+      let { data: sourceRec } = await this.supabase
         .from('importer_sources')
         .select('id, status, cooldown_until, enabled')
         .eq('id', job.source)
@@ -1140,7 +1140,7 @@ export class ImporterEngine {
           reqQuery = reqQuery.in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
         }
         if (typeof reqQuery?.maybeSingle === 'function') {
-          const { data: activeFocus } = await reqQuery.maybeSingle();
+          let { data: activeFocus } = await reqQuery.maybeSingle();
           if (activeFocus?.work_id && job.payload?.workId && job.payload.workId !== activeFocus.work_id) {
             this.logger.info(`Focus Mode active for work ${activeFocus.work_id}. Deferring non-priority job for ${job.payload?.workId}`, {
               jobId: job.id,
@@ -1399,7 +1399,7 @@ export class ImporterEngine {
       cursor: currentCursor,
     });
 
-    const { works, nextCursor } = await callProvider(() => adapter.fetchUpdatedWorks(currentCursor, { mode }));
+    let { works, nextCursor } = await callProvider(() => adapter.fetchUpdatedWorks(currentCursor, { mode }));
 
     this.logger.info('Discovered updated works', {
       source: job.source,
@@ -1459,7 +1459,7 @@ export class ImporterEngine {
   private async handleSyncWork(job: QueueJob): Promise<void> {
     let { sourceWorkId } = job.payload;
     if (!sourceWorkId && job.payload?.workId) {
-      const { data: mapping } = await this.supabase
+      let { data: mapping } = await this.supabase
         .from('importer_work_mappings')
         .select('source_work_id, source')
         .eq('work_id', job.payload.workId)
@@ -1469,7 +1469,7 @@ export class ImporterEngine {
       if (mapping?.source_work_id) {
         sourceWorkId = mapping.source_work_id;
       } else {
-        const { data: anyMapping } = await this.supabase
+        let { data: anyMapping } = await this.supabase
           .from('importer_work_mappings')
           .select('source_work_id, source')
           .eq('work_id', job.payload.workId)
@@ -1548,7 +1548,7 @@ export class ImporterEngine {
 
     // Batch query to find already COMPLETED chapter mappings in ONE query instead of N queries
     const allSourceChapterIds = chapters.map((ch) => ch.sourceChapterId);
-    const { data: existingMappings } = await this.supabase
+    let { data: existingMappings } = await this.supabase
       .from('importer_chapter_mappings')
       .select('source_chapter_id, status')
       .eq('source', job.source)
@@ -1561,7 +1561,7 @@ export class ImporterEngine {
     );
 
     // Also check published chapters in public.chapters for this work
-    const { data: publishedChapters } = await this.supabase
+    let { data: publishedChapters } = await this.supabase
       .from('chapters')
       .select('id, number, title')
       .eq('work_id', result.workId)
@@ -1610,7 +1610,7 @@ export class ImporterEngine {
     }
 
     // For missing chapters, check if another source already has an active job in queue
-    const { data: activeJobs } = await this.supabase
+    let { data: activeJobs } = await this.supabase
       .from('importer_queue')
       .select('payload, source, status')
       .eq('task_type', 'IMPORT_CHAPTER')
@@ -1668,7 +1668,7 @@ export class ImporterEngine {
             reqQuery = reqQuery.in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
           }
           if (typeof reqQuery?.maybeSingle === 'function') {
-            const { data: staffReq } = await reqQuery.maybeSingle();
+            let { data: staffReq } = await reqQuery.maybeSingle();
             if (staffReq) isStaffPriority = true;
           }
         } catch {
@@ -1754,7 +1754,7 @@ export class ImporterEngine {
   }
 
   private async handleImportChapter(job: QueueJob, isCancelled?: () => boolean): Promise<void> {
-    const {
+    let {
       sourceWorkId,
       sourceChapterId,
       workId,
@@ -1767,13 +1767,26 @@ export class ImporterEngine {
       throw new Error('Incomplete chapter import payload');
     }
 
+    // Gracefully handle missing workMappingId (e.g. from manual gap revivals)
+    if (!workMappingId) {
+      let { data: wm } = await this.supabase
+        .from('importer_work_mappings')
+        .select('id')
+        .eq('work_id', workId)
+        .eq('source', job.source)
+        .maybeSingle();
+      if (wm?.id) {
+        workMappingId = wm.id;
+      }
+    }
+
     // Checkpoint 1: Pre-flight check for staff cancellation
     if (isCancelled?.() || (await this.queue.isCancelRequested(job.id))) {
       throw new JobCancelledByStaffError(job.id);
     }
 
     // Pre-flight check: if already published by concurrent worker, skip download
-    const { data: alreadyPub } = await this.supabase
+    let { data: alreadyPub } = await this.supabase
       .from('chapters')
       .select('id, number, title')
       .eq('work_id', workId)
@@ -1812,10 +1825,12 @@ export class ImporterEngine {
     let effectiveWorkMappingId = workMappingId;
     const initialSource = job.source;
 
+
+
     // Detect Source / ID format mismatch
     // (e.g. MangaFlix job with numeric Manhastro/Kuro chapter ID)
     if (effectiveSource === 'mangaflix' && /^\d+$/.test(effectiveSourceChapterId)) {
-      const { data: realMapping } = await this.supabase
+      let { data: realMapping } = await this.supabase
         .from('importer_chapter_mappings')
         .select('source, source_chapter_id, work_mapping_id')
         .eq('work_id', workId)
@@ -1840,7 +1855,7 @@ export class ImporterEngine {
     }
 
     // Pre-flight check 2: Check if chapter record already exists in database
-    const { data: existingChapter } = await this.supabase
+    let { data: existingChapter } = await this.supabase
       .from('chapters')
       .select('id, published_at')
       .eq('work_id', workId)
@@ -1907,7 +1922,7 @@ export class ImporterEngine {
     ];
 
     // If primary source is UPSTREAM_BLOCKED, skip directly to first healthy fallback
-    const { data: primarySrc } = await this.supabase
+    let { data: primarySrc } = await this.supabase
       .from('importer_sources')
       .select('status')
       .eq('id', effectiveSource)
@@ -1991,7 +2006,7 @@ export class ImporterEngine {
 
         // Pre-download deduplication: check if existing chapter already has all pages stored
         if (existingChapter && job.payload.readerRepair !== true) {
-          const { data: existingPages } = await this.supabase
+          let { data: existingPages } = await this.supabase
             .from('pages')
             .select('position, media_id, width, height')
             .eq('chapter_id', existingChapter.id)
@@ -2447,7 +2462,7 @@ export class ImporterEngine {
       const db0 = Date.now();
 
       // Ensure work has a valid cover with storage_ready = true before publishing chapter
-      const { data: workRecord } = await this.supabase
+      let { data: workRecord } = await this.supabase
         .from('works')
         .select('cover_id')
         .eq('id', workId)
@@ -2472,7 +2487,7 @@ export class ImporterEngine {
         }
       } else {
         chapterId = targetChapterId;
-        const { error: chErr } = await this.supabase.from('chapters').insert({
+        let { error: chErr } = await this.supabase.from('chapters').insert({
           id: chapterId,
           work_id: workId,
           number: chapterNumber,
@@ -2481,7 +2496,7 @@ export class ImporterEngine {
         });
         if (chErr) {
           if (chErr.code === '23505' || chErr.message?.includes('violates unique constraint')) {
-            const { data: raceCh } = await this.supabase
+            let { data: raceCh } = await this.supabase
               .from('chapters')
               .select('id')
               .eq('work_id', workId)
@@ -2508,7 +2523,7 @@ export class ImporterEngine {
           height: p.height,
         }));
 
-        const { error: pageErr } = await this.supabase.rpc('importer_replace_pages', {
+        let { error: pageErr } = await this.supabase.rpc('importer_replace_pages', {
           p_chapter_id: chapterId,
           p_pages: pagesToUpsert,
         });
@@ -2518,7 +2533,7 @@ export class ImporterEngine {
         const isTest = typeof process !== 'undefined' && (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST));
         if (!isTest) {
           // Verify pages are present in public.pages before staging
-          const { data: storedRows, error: verifyErr } = await this.supabase
+          let { data: storedRows, error: verifyErr } = await this.supabase
             .from('pages')
             .select('position')
             .eq('chapter_id', chapterId)
@@ -2917,7 +2932,7 @@ export class ImporterEngine {
 
     // 2. Alternative mappings in importer_chapter_mappings
     try {
-      const { data: chMappings } = await this.supabase
+      let { data: chMappings } = await this.supabase
         .from('importer_chapter_mappings')
         .select('source, source_chapter_id, work_mapping_id')
         .eq('work_id', workId)
@@ -2933,7 +2948,7 @@ export class ImporterEngine {
 
     // 3. Alternative available sources in importer_chapter_manifest
     try {
-      const { data: manifestCh } = await this.supabase
+      let { data: manifestCh } = await this.supabase
         .from('importer_chapter_manifest')
         .select('available_sources')
         .eq('work_id', workId)
@@ -2951,7 +2966,7 @@ export class ImporterEngine {
 
     // 4. Discover active sources in importer_work_mappings not yet in candidates
     try {
-      const { data: workMappings } = await this.supabase
+      let { data: workMappings } = await this.supabase
         .from('importer_work_mappings')
         .select('id, source, source_work_id')
         .eq('work_id', workId)
@@ -2961,7 +2976,7 @@ export class ImporterEngine {
       if (workMappings) {
         for (const wm of workMappings) {
           if (candidates.some((c) => c.source === wm.source)) continue;
-          const { data: altSrcCheck } = await this.supabase
+          let { data: altSrcCheck } = await this.supabase
             .from('importer_sources')
             .select('status, enabled')
             .eq('id', wm.source)
@@ -2987,7 +3002,7 @@ export class ImporterEngine {
     const healthyCandidates: Array<{ source: string; sourceChapterId: string; mappingId?: string }> = [];
     for (const c of candidates) {
       try {
-        const { data: srcCheck } = await this.supabase
+        let { data: srcCheck } = await this.supabase
           .from('importer_sources')
           .select('status, enabled, cooldown_until')
           .eq('id', c.source)
@@ -3021,7 +3036,7 @@ export class ImporterEngine {
       return this.cachedBotUserId;
     }
 
-    const { data: adminRole } = await this.supabase
+    let { data: adminRole } = await this.supabase
       .from('access_roles')
       .select('user_id')
       .eq('role', 'ADMIN')
@@ -3033,7 +3048,7 @@ export class ImporterEngine {
       return adminRole.user_id;
     }
 
-    const { data: anyMember } = await this.supabase
+    let { data: anyMember } = await this.supabase
       .from('members')
       .select('id')
       .limit(1)
@@ -3057,7 +3072,7 @@ export class ImporterEngine {
       const staffQuery = this.supabase.from('importer_staff_requests');
       if (!staffQuery || typeof staffQuery.select !== 'function') return;
 
-      const { data: activeRequests } = await staffQuery
+      let { data: activeRequests } = await staffQuery
         .select('id, status')
         .eq('work_id', workId)
         .in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
@@ -3067,7 +3082,7 @@ export class ImporterEngine {
       // 1. Check if active jobs remain in importer_queue
       const qQuery = this.supabase.from('importer_queue');
       if (qQuery && typeof qQuery.select === 'function') {
-        const { count } = await qQuery
+        let { count } = await qQuery
           .select('id', { count: 'exact', head: true })
           .eq('payload->>workId', workId)
           .in('status', ['QUEUED', 'IMPORTING', 'RETRY']);
@@ -3078,7 +3093,7 @@ export class ImporterEngine {
       // 2. Check if chapters remain uncompleted in importer_chapter_manifest
       const manQuery = this.supabase.from('importer_chapter_manifest');
       if (manQuery && typeof manQuery.select === 'function') {
-        const { data: pendingChapters } = await manQuery
+        let { data: pendingChapters } = await manQuery
           .select('chapter_sort_key, status')
           .eq('work_id', workId)
           .in('status', ['QUEUED', 'STAGED']);
