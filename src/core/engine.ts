@@ -596,7 +596,7 @@ export class ImporterEngine {
         const buffers = this.autotuner.getBufferedPageSemaphore();
         this.logger.info('Pipeline capacity', {
           chapterConcurrency: evaluation.concurrency,
-          testedChapterCeiling: this.config.TESTED_CONCURRENCY_CEILING || 4,
+          testedChapterCeiling: this.config.TESTED_CONCURRENCY_CEILING || 32,
           mediaConcurrency: uploads.capacity,
           activeMediaUploads: uploads.active,
           bufferedPages: buffers.active,
@@ -784,7 +784,7 @@ export class ImporterEngine {
    * General fallback worker runner running multiple concurrent slots
    */
   private async runGeneralWorker(): Promise<void> {
-    const slotsCount = Math.min(this.config.MAX_CONCURRENT_CHAPTERS || 4, this.config.TESTED_CONCURRENCY_CEILING || 4);
+    const slotsCount = Math.min(this.config.MAX_CONCURRENT_CHAPTERS || 32, this.config.TESTED_CONCURRENCY_CEILING || 32);
     this.logger.info(`Starting shared chapter runner pool (${slotsCount} slots)`);
     const slots = Array.from({ length: slotsCount }, (_, i) => this.runGeneralSlot(i));
     await Promise.all(slots);
