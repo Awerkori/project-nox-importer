@@ -182,7 +182,7 @@ export class AdaptiveAutotuner {
   private sourceSemaphores = new Map<string, AsyncSemaphore>();
   private globalMediaSemaphore: AsyncSemaphore;
   private globalInflightRequestSemaphore: AsyncSemaphore;
-  private bufferedPageSemaphore = new AsyncSemaphore(6);
+  private bufferedPageSemaphore = new AsyncSemaphore(60);
   private currentConcurrency: number;
   private stableCycleCount = 0;
   private cooldownUntil = 0;
@@ -197,8 +197,8 @@ export class AdaptiveAutotuner {
     this.config = { ...DEFAULT_AUTOTUNER_CONFIG, ...config };
     this.currentConcurrency = this.config.initialConcurrency;
     this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency);
-    this.globalMediaSemaphore = new AsyncSemaphore(2); // Safe bounded concurrent image uploads
-    this.globalInflightRequestSemaphore = new AsyncSemaphore(16); // Bounded network download budget
+    this.globalMediaSemaphore = new AsyncSemaphore(4); // Safe bounded concurrent image uploads
+    this.globalInflightRequestSemaphore = new AsyncSemaphore(32); // Bounded network download budget
   }
 
   getGlobalChapterSemaphore(): AsyncSemaphore {
