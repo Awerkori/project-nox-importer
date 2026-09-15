@@ -1,0 +1,9 @@
+{
+  "duration": "30 minutes",
+  "minConcurrency": 5,
+  "maxConcurrency": 6,
+  "peakRam": 157,
+  "maxLag": 35,
+  "restartCount": 75,
+  "status": "COMPLETED"
+}

@@ -21,7 +21,7 @@ async function main() {
     const __dirname = path.dirname(fileURLToPath(import.meta.url));
     let buildCommit = 'unknown';
     try {
-        buildCommit = fsSync.readFileSync(path.join(__dirname, 'COMMIT'), 'utf8').trim();
+        buildCommit = fsSync.readFileSync(path.join(__dirname, 'BUILD_ID'), 'utf8').trim();
     }
     catch (e) { /* ignore */ }
     rootLogger.info(`Starting Project Nox Importer daemon... | Build: ${buildCommit}`);
