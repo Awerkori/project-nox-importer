@@ -176,7 +176,7 @@ export class PublicationBarrier {
       .from('chapters')
       .update({ published_at: publishedAtIso })
       .eq('id', chapterId)
-      .is('published_at', null);
+      ;
 
     if (chErr) throw chErr;
 
