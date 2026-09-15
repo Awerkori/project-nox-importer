@@ -25,10 +25,10 @@ jobs:
 
       - name: Check for stale build artifacts
         run: |
-          if [ -n "$(git status --porcelain build/ ':!build/COMMIT')" ]; then
+          if [ -n "$(git status --porcelain build/ ':!build/BUILD_ID')" ]; then
             echo "ERROR: The build/ directory is out of sync with src/."
             echo "You must run 'npm run build' locally and commit the updated build/ directory."
-            git diff build/ ':!build/COMMIT'
+            git diff build/ ':!build/BUILD_ID'
             exit 1
           else
             echo "Build directory is up to date."

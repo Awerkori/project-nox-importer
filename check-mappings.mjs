@@ -1,0 +1,19 @@
+import { createClient } from '@supabase/supabase-js';
+import { readFileSync } from 'fs';
+const envRaw = readFileSync('/home/awerkori/.Projects/project-nox-importer/.env', 'utf8');
+const env = {};
+for (const line of envRaw.split('\n')) { 
+  const m = line.match(/^([A-Z_]+)=(.*)$/); 
+  if (m) env[m[1]] = m[2].trim(); 
+}
+const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+async function run() {
+  const { data: sample } = await supabase.from('importer_work_mappings').select('*').limit(1);
+  console.log('Sample:', Object.keys(sample[0]));
+  if (sample[0].raw_metadata) {
+     console.log('Has raw_metadata', typeof sample[0].raw_metadata);
+  } else if (sample[0].metadata) {
+     console.log('Has metadata', typeof sample[0].metadata);
+  }
+}
+run();

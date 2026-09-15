@@ -1,0 +1,1587 @@
+{
+  "stats": {
+    "total_works": 3124,
+    "duplicate_groups": 43
+  },
+  "groups": [
+    {
+      "groupKey": "43827204-8970-4e87-bc8c-d084d2e12673|4d069dc8-97bf-48e0-9e77-9ef6d96e950a",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "me-pegue",
+      "works": [
+        {
+          "id": "43827204-8970-4e87-bc8c-d084d2e12673",
+          "title": "Me Pegue!",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "4d069dc8-97bf-48e0-9e77-9ef6d96e950a",
+          "title": "Me Escolhe!",
+          "author": "Hermod, Cho U-Ne",
+          "aliases": [
+            "Pick Me Up!",
+            "Pick Me Up",
+            "Infinite Gacha",
+            "Me Escolha!",
+            "Me Escolhe!",
+            "Me Pegue!"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "e1d5f1b3-694a-40f9-9fa0-6d36e015481d|f69ae283-863a-4bf3-8ff2-bf54dcdc2be1",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "nano-machine",
+      "works": [
+        {
+          "id": "e1d5f1b3-694a-40f9-9fa0-6d36e015481d",
+          "title": "Nano Machine",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "f69ae283-863a-4bf3-8ff2-bf54dcdc2be1",
+          "title": "Nanotecnologia Marcial",
+          "author": "Hanjung Worya, Geobalhan",
+          "aliases": [
+            "Nano Machine"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "030535fd-1a2b-475c-873d-5c3b662a47ec|05e2cb9f-75de-4dac-8e99-2c447ddf4035|07e1da02-e2c3-4ba7-bee1-91c1673cef4b|105ad897-dffa-4e66-89ab-ed289ece0719|1493a910-af13-421e-8157-7bd3367f0ebc|1564c34f-0c77-44cd-8e0f-3478201ae664|1b2a15bb-10bd-41ba-85b3-c673aa5dc252|1db7b037-7333-495d-a274-44dc3d06fe98|1f7f81dd-9f63-4473-9f44-acee21aedfbe|21726330-336d-4673-bb32-a6cb1fbea91c|22718ce6-e803-4cb4-8920-01f3c1aab615|27242595-44b5-4683-83c6-9b47f9bf6e11|27a4e7d4-8ecc-4e09-8c40-2441380dad99|288dc82c-6773-410d-afc6-ce8a84f320ce|29455142-fb05-433d-a6be-e8f915b11674|2a2f4af3-7c2f-483f-9801-d88f76b3706b|3a6dc3fe-40f4-4ef5-8ca4-24d2bdf88d44|3e9ff4d8-5d17-4715-b45c-3038d6073457|4b1f452c-b223-404c-83f4-e0d626563397|4b625984-275f-471e-8d05-391682d2a804|4d0e0f8a-540b-41aa-8c45-0041e8ed2d5b|5baa2daf-9c9f-4b17-a20a-06885bd2120b|6e059180-f34a-4574-bd36-5fd45cc0fa9e|6ff892b6-1281-4d21-ae4c-47e07777c77e|744b87d0-28ae-450a-a0b8-ac85bd6ae60a|7888fc9b-f8b5-44fb-97f7-e9a2bd148ba3|7f8f3099-8ef6-4493-806f-1496dcc6aea8|82e39fcf-cac3-4e52-9d23-0c2ecbf32995|92513ef6-3aef-40cd-b59a-7e32837fc9fc|9fec64f8-2ea9-4b41-bf90-9de78feb951c|a5463ceb-a689-45c7-a8dc-c469ef4438aa|aee9effa-92d0-4417-bd9a-d1b12d19f736|b68a6d4f-3b56-445c-8284-0bec68aa1053|bdc8efa3-f768-4827-9ce6-121e36b260f4|c19ccad0-8d36-49c2-b7b7-04bb21659610|c60dd786-e886-4455-9fdf-aeed1f9f05e2|cffd72d4-e9bb-4f1f-a831-f1a5d00dec3c|d2d9b892-b1a2-40c3-9a43-d38804773428|d3a51a81-485e-4657-b029-d9cd8505b180|dd352e86-faf2-413b-bfc2-9ce9d76e1649|e6949ad5-aaff-4cf6-86a7-6ec6bc333ab2|f2befcea-5a4f-4430-b2d9-bdf1127f0929|f3190d84-803c-45ad-aa7b-9d6650bae324|f6d11c87-2601-4aaa-af55-60609cdff1db|f9c23526-a590-446f-aebf-2f3c147fd14c|fd23b6d0-c3c4-4573-b0f3-547f1d7a5026|ffa2c359-8c4a-4007-a13d-0ca9a0551534",
+      "confidence": "LOW_CONFIDENCE",
+      "shared_title": "",
+      "works": [
+        {
+          "id": "030535fd-1a2b-475c-873d-5c3b662a47ec",
+          "title": "Eu Me Tornei Um Homem Casado Em Outro Mundo",
+          "author": "Team Forestive",
+          "aliases": [
+            "이세계서 유부남된 썰",
+            "I Became A Married Man in Another World",
+            "Isegyeseo Yubunamdoen Sseol",
+            "How I Became a Married Man in Another World",
+            "Isegye seo Yubunam Doen Sseol"
+          ]
+        },
+        {
+          "id": "05e2cb9f-75de-4dac-8e99-2c447ddf4035",
+          "title": "Pelo Seu Assassinato",
+          "author": "Seyoon",
+          "aliases": [
+            "For Your Murder",
+            "당신의 살인을 위하여"
+          ]
+        },
+        {
+          "id": "07e1da02-e2c3-4ba7-bee1-91c1673cef4b",
+          "title": "O Gênio Marcial Que Lembra de Tudo",
+          "author": "jeokseolmok, Omin",
+          "aliases": [
+            "모든걸 기억하는 천재무사",
+            "The Genius Martial Artist Who Remembers Everything",
+            "The Genius Warrior Who Remembers Everything",
+            "The Unforgettable Genius Martial Artist",
+            "Modeungeol Gieokaneun Cheonjaemusa",
+            "The Martial Genius Who Remembers Everything"
+          ]
+        },
+        {
+          "id": "105ad897-dffa-4e66-89ab-ed289ece0719",
+          "title": "O Professor Genial Quer uma Vida Fácil",
+          "author": "Yu-In",
+          "aliases": [
+            "꿀 빨고 싶은 천재 교수님",
+            "The Genius Professor Wants to Take It Easy",
+            "The Genius Professor Wants an Easy Life",
+            "Kkul Ppalgo Sipeun Cheonjae Gyosunim"
+          ]
+        },
+        {
+          "id": "1493a910-af13-421e-8157-7bd3367f0ebc",
+          "title": "O Caçula do Mestre Espadachim",
+          "author": "AZI, Emperor Penguin",
+          "aliases": [
+            "O Filho Mais Novo do Mestre Espadachim",
+            "Swordmaster’s Youngest Son",
+            "Geomsulmyeongga Mangnaeadeul",
+            "The Youngest Son of a Master Swordsman",
+            "Swordmaster's Youngest Son",
+            "Youngest Son of the Renowned Swordsmanship Clan",
+            "剣術名家の末息子",
+            "劍術名家的小兒子",
+            "剑术名门的小儿子",
+            "The Swordmaster's Son"
+          ]
+        },
+        {
+          "id": "1564c34f-0c77-44cd-8e0f-3478201ae664",
+          "title": "O Mundo Congelado",
+          "author": "记忆的海",
+          "aliases": [
+            "Global Freeze: I Created an Apocalypse Shelte",
+            "全球冰封: 我打造了末日安全屋",
+            "Congelamento Global"
+          ]
+        },
+        {
+          "id": "1b2a15bb-10bd-41ba-85b3-c673aa5dc252",
+          "title": "[アルカ一区 (なだソルト)] だらしない女 セックスだけは満点の最悪女に僕は捕まる [ポルトガル翻訳]",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "1db7b037-7333-495d-a274-44dc3d06fe98",
+          "title": "Me Escolhe! (Novel)",
+          "author": "",
+          "aliases": [
+            "Pick Me Up, Infinite Gacha",
+            "픽 미 업!",
+            "Pick Me Up!",
+            "PICK ME UP～低レア★英雄の成り上がり～",
+            "ピックミーアップ！低レア英雄の成り上がり",
+            "Pick Me up!! Tei Rea Eiyū No Nariagari",
+            "Gacha infinito",
+            "Me Escolhe!",
+            "Infinite Gacha",
+            "Escolha-me! Gacha Infinito"
+          ]
+        },
+        {
+          "id": "1f7f81dd-9f63-4473-9f44-acee21aedfbe",
+          "title": "Reformas Com Uma Gyaru",
+          "author": "Erika Kogiku",
+          "aliases": [
+            "Kominka Gal to Renovation Gurashi",
+            "古民家ギャルとリノベ暮らし",
+            "Renovations with a Gyaru",
+            "Renovations with a Gal",
+            "Kominka Gyaru to Renovation Gurashi"
+          ]
+        },
+        {
+          "id": "21726330-336d-4673-bb32-a6cb1fbea91c",
+          "title": "Saltitante e Relaxado",
+          "author": "Takamatsu Misaki",
+          "aliases": [
+            "Skip and Loafer",
+            "スキップとローファー",
+            "Skip to Loafer"
+          ]
+        },
+        {
+          "id": "22718ce6-e803-4cb4-8920-01f3c1aab615",
+          "title": "Sistema Metropolitano",
+          "author": "Tu Shanjun (涂山君)",
+          "aliases": [
+            "都市枭雄系统",
+            "Metropolitan System"
+          ]
+        },
+        {
+          "id": "27242595-44b5-4683-83c6-9b47f9bf6e11",
+          "title": "O Santo Evolui Através da Necromancia",
+          "author": "Studio Inus",
+          "aliases": [
+            "The Saint Who Levels Up as a Necromancer",
+            "The Saint Levels Up Through Necromancy",
+            "ネクロマンサーでレベルアップする聖者様"
+          ]
+        },
+        {
+          "id": "27a4e7d4-8ecc-4e09-8c40-2441380dad99",
+          "title": "O Deus do Caos Todo Poderoso",
+          "author": "Hanjung Worya, Mad Bird",
+          "aliases": [
+            "Myst",
+            "Might",
+            "Mayhem",
+            "The Chaotic God of Extraordinary Strength",
+            "괴력 난신",
+            "怪力 亂神",
+            "ลับลางลวง"
+          ]
+        },
+        {
+          "id": "288dc82c-6773-410d-afc6-ce8a84f320ce",
+          "title": "O Retorno do Espadachim Negro",
+          "author": "SHINKOU Shotou",
+          "aliases": [
+            "The Dark Swordsman Returns",
+            "回帰した暗黒剣士２周日は無双する"
+          ]
+        },
+        {
+          "id": "29455142-fb05-433d-a6be-e8f915b11674",
+          "title": "Mago da Areia do Deserto Ardente",
+          "author": "U-Gak",
+          "aliases": [
+            "Sandmancer of the Scorched Desert",
+            "불탄 사막의 모래술사"
+          ]
+        },
+        {
+          "id": "2a2f4af3-7c2f-483f-9801-d88f76b3706b",
+          "title": "Guia de Sobrevivência do Extra da Academia",
+          "author": "Corita",
+          "aliases": [
+            "The Extra's Academy Survival Guide",
+            "아카데미에서 살아남기",
+            "Academy-eseo Saranamgi",
+            "The Extra’s Academy Survival Guide"
+          ]
+        },
+        {
+          "id": "3a6dc3fe-40f4-4ef5-8ca4-24d2bdf88d44",
+          "title": "minha namorada vilã",
+          "author": "Xing Kong (星空社)",
+          "aliases": [
+            "My Mobster Girlfriend",
+            "My Villainous Girlfriend",
+            "Wo De Fan Pai Nü You",
+            "我的反派女友",
+            "My Girlfriend is a Villain"
+          ]
+        },
+        {
+          "id": "3e9ff4d8-5d17-4715-b45c-3038d6073457",
+          "title": "Sobrevivendo Como A Princesa Ilegítima",
+          "author": "Seo-Gyeol",
+          "aliases": [
+            "Sobrevivendo Como Uma Princesa Ilegítima",
+            "Sasaenga Gongjuro Saranamgi",
+            "Surviving as the Illegitimate Princess",
+            "사생아 공주로 살아남기",
+            "Surviving as an Illegitimate Princess"
+          ]
+        },
+        {
+          "id": "4b1f452c-b223-404c-83f4-e0d626563397",
+          "title": "Imperador Mágico",
+          "author": "Nightingale (Original), No Two Comics",
+          "aliases": [
+            "Demonic Emperor",
+            "魔皇大管家",
+            "Magic Emperor",
+            "Imperador Demoníaco"
+          ]
+        },
+        {
+          "id": "4b625984-275f-471e-8d05-391682d2a804",
+          "title": "Quando Tentei me Vingar dos Valentões da Minha Cidade, Uma Batalha Diferente Começou",
+          "author": "Matsumoto Kengo",
+          "aliases": [
+            "When Trying to Get Back at the Hometown Bullies",
+            "Another Battle Began",
+            "고향에서 괴롭히던 애들한테 보복하려 했더니",
+            "다른 싸움이 시작됐다",
+            "地元のいじめっ子達に仕返ししようとしたら、別の戦いが始まった。",
+            "Jimoto no Ijimekko-tachi ni Shikaeshi Shiyou to Shitara",
+            "Betsu no Tatakai ga Hajimatta."
+          ]
+        },
+        {
+          "id": "4d0e0f8a-540b-41aa-8c45-0041e8ed2d5b",
+          "title": "Escravo Das Sombras",
+          "author": "Guiltythree",
+          "aliases": [
+            "Shadow Slave",
+            "シャドウスレイブ",
+            "Syaedou Seulleibeu",
+            "섀도우 슬레이브",
+            "Shadow’s Thrall"
+          ]
+        },
+        {
+          "id": "5baa2daf-9c9f-4b17-a20a-06885bd2120b",
+          "title": "O Governante das Trevas",
+          "author": "Yugwa",
+          "aliases": [
+            "The Ruler Of Darkness",
+            "제암진천경",
+            "Jeamjincheongyeong"
+          ]
+        },
+        {
+          "id": "6e059180-f34a-4574-bd36-5fd45cc0fa9e",
+          "title": "Uma Família de Terceira se Torna a Melhor Sob o Céu",
+          "author": "기성욱, 남사랑, Yurison (유리손)",
+          "aliases": [
+            "Third-rate Martial Family Becomes the Best Under Heaven",
+            "The World’s Strongest Is from a Third-Rate Martial Clan",
+            "삼류무가 천하제일인"
+          ]
+        },
+        {
+          "id": "6ff892b6-1281-4d21-ae4c-47e07777c77e",
+          "title": "Um Pintor Que Desenha Dungeons",
+          "author": "GLEE (글리), Hobby Writing Principle",
+          "aliases": [
+            "The Artist Who Draws Dungeons",
+            "The Painter Who Paints Dungeons",
+            "The Painter Who Creates Dungeons",
+            "The Dungeon Painter",
+            "The Painter of Dungeons",
+            "던전을 그리는 화가"
+          ]
+        },
+        {
+          "id": "744b87d0-28ae-450a-a0b8-ac85bd6ae60a",
+          "title": "Reencarnação do Rei dos Punhos",
+          "author": "Seungtu, Yu Jin Sung",
+          "aliases": [
+            "권왕환생",
+            "Reincarnation of the Fist King",
+            "Reencarnação do Deus dos Punhos"
+          ]
+        },
+        {
+          "id": "7888fc9b-f8b5-44fb-97f7-e9a2bd148ba3",
+          "title": "Parada",
+          "author": "Haruki Hajime",
+          "aliases": [
+            "Paradon",
+            "パラドン"
+          ]
+        },
+        {
+          "id": "7f8f3099-8ef6-4493-806f-1496dcc6aea8",
+          "title": "Noble Lady Reformation Guide",
+          "author": "AtlasScan",
+          "aliases": [
+            "Manual de Como Transformar Damas em Pessoas de Verdade",
+            "Sesange Nappeun Yeongaeneun Eopda",
+            "세상에 나쁜 영애는 없다"
+          ]
+        },
+        {
+          "id": "82e39fcf-cac3-4e52-9d23-0c2ecbf32995",
+          "title": "Retorno de 10.000x: Irmã Sênior, Por Favor, Comporte-se!",
+          "author": "卧巢, 掌阅文化",
+          "aliases": [
+            "Ten-Thousandfold Return Senior Sister Please Behave",
+            "Ten-Thousandfold Payback Senior Sister Have Some Self-Respect",
+            "Hệ Thống Trả Về Vạn Lần: Sư Tỷ Xin Tự Trọng",
+            "Inagaw Ang Katawan, Bumalik Ang Kapangyarihan",
+            "On Bin Kat İade: Kıdemli Abla, Lütfen Kendine Gel",
+            "Os Dez Mil Retornos, Irmã Sênior, Por Favor, Comporte-se",
+            "Retorno de 10.000 vezes, Irmã Sênior, Por Favor, Comporte-se",
+            "Sistema de Retorno: Me Vuelvo Invencible al darle cosas a Otros",
+            "Ten-Thousandfold Payback, Senior Sister, Have Some Self-Respect",
+            "Ten-Thousandfold Return, Senior Sister, Please Behave",
+            "The Body Was Taken, the Power Returned",
+            "Trả Lại Gấp Vạn, Sư Tỷ Xin Hãy Tự Trọng",
+            "Vạn Lần Hoàn Trả, Sư Tỷ Xin Tự Trọng",
+            "Система возврата: я верну всё отнятое у меня в 10 000 раз больше!",
+            "ผลตอบแทนหมื่นเท่า ศิษย์พี่หญิง โปรดสำรวมด้วย",
+            "万倍返还，师姐请自重"
+          ]
+        },
+        {
+          "id": "92513ef6-3aef-40cd-b59a-7e32837fc9fc",
+          "title": "O Melhor Engenheiro Do Mundo",
+          "author": "BK_Moon, Hyunsoo Kim",
+          "aliases": [
+            "The Greatest Estate Developer",
+            "The Greatest Estate Designer",
+            "ยอดสถาปนิกผู้พิทักษ์อาณาจักร",
+            "史上最高の領地設計士",
+            "史詩級領地設計師",
+            "역대급 영지 설계사",
+            "El mejor desarrollador inmobiliario"
+          ]
+        },
+        {
+          "id": "9fec64f8-2ea9-4b41-bf90-9de78feb951c",
+          "title": "A Devastação Do Tempo",
+          "author": "Mou Chan",
+          "aliases": [
+            "Huo Feng Liao Yuan",
+            "The Ravages of Time",
+            "火鳳燎原",
+            "Kahou Ryougen",
+            "三国志群雄伝火鳳燎原",
+            "Sangokushi Gunyuuden Kahou Ryougen",
+            "Sanguozhi Qunxiongzhuan: Huo Feng Liao Yuan"
+          ]
+        },
+        {
+          "id": "a5463ceb-a689-45c7-a8dc-c469ef4438aa",
+          "title": "A Lenda de Dangun",
+          "author": "CHEON Ee-eol (천의얼)",
+          "aliases": [
+            "오!단군",
+            "Legend of Dangun",
+            "Oh! Dangun"
+          ]
+        },
+        {
+          "id": "aee9effa-92d0-4417-bd9a-d1b12d19f736",
+          "title": "O Pintor Que Desenha Dungeons",
+          "author": "Hobby Writing Principle",
+          "aliases": [
+            "던전을 그리는 화가"
+          ]
+        },
+        {
+          "id": "b68a6d4f-3b56-445c-8284-0bec68aa1053",
+          "title": "Por Que uma Vilã Teria Virtudes?",
+          "author": "",
+          "aliases": [
+            "Where the Villain’s Loyalty Lies",
+            "Why Would a Villainess Have Virtues?",
+            "악녀에게 의리가 어디 있어",
+            "Angnyeoege Uiriga Eodi Isseo",
+            "Agnyeoege Euiriga Eodi Isseo",
+            "Where Is Justice for the Villainess?",
+            "Why Would a Villainess Have Virtue?",
+            "Where the Villain's Loyalty Lies",
+            "No Loyalty for a Villainess",
+            "Justicia para la villana",
+            "¿Dónde está la lealtad a la villana?",
+            "Да как у злодейки может быть верность?",
+            "Где преданость этой злодейке?",
+            "นางร้ายที่ไหนจะมีคุณธรรม",
+            "悪女に義理などありません",
+            "恶女哪来的义气"
+          ]
+        },
+        {
+          "id": "bdc8efa3-f768-4827-9ce6-121e36b260f4",
+          "title": "Onee-san descolada e com jeito de menino",
+          "author": "Kitada Ryouma",
+          "aliases": [
+            "Cool Boyish Onee-san",
+            "顔の良いボーイッシュお姉さん",
+            "Kao no Yoi Boisshu Oneesan"
+          ]
+        },
+        {
+          "id": "c19ccad0-8d36-49c2-b7b7-04bb21659610",
+          "title": "O Começo Depois do Fim",
+          "author": "TurtleMe",
+          "aliases": [
+            "The Beginning After the End",
+            "끝이 아닌 시작",
+            "最強の王様、二度目の人生は 何をする?",
+            "TBATE"
+          ]
+        },
+        {
+          "id": "c60dd786-e886-4455-9fdf-aeed1f9f05e2",
+          "title": "Vida de Demônio Começando Como Bebê",
+          "author": "Junggoru, Hwahyeon",
+          "aliases": [
+            "Whispers of a Scheming Demon",
+            "Demon Life from a Fledgling",
+            "새끼부터 시작하는 악마생활",
+            "A Demon's Life from Birth"
+          ]
+        },
+        {
+          "id": "cffd72d4-e9bb-4f1f-a831-f1a5d00dec3c",
+          "title": "A Imperatriz Se Casou Novamente",
+          "author": "Alpha Tart",
+          "aliases": [
+            "The Remarried Empress",
+            "A Imperatriz Se Casou Novamente",
+            "Imperatriz Divorciada",
+            "재혼 황후"
+          ]
+        },
+        {
+          "id": "d2d9b892-b1a2-40c3-9a43-d38804773428",
+          "title": "Regras Para Namorar um Canalha",
+          "author": "Seo-Yeon",
+          "aliases": [
+            "Sseuregiui Beopchik",
+            "Rules for Dating Trash",
+            "쓰레기의 법칙",
+            "The Law of Garbage",
+            "Law Of Trashy Men",
+            "ขอบายผู้ชายสายแบด",
+            "もえるゴミの法則",
+            "A Lei do Lixo"
+          ]
+        },
+        {
+          "id": "d3a51a81-485e-4657-b029-d9cd8505b180",
+          "title": "O Bacteriomante Ilimitado",
+          "author": "Cheon Yong YJ, Wonji",
+          "aliases": [
+            "무제한의 세균술사",
+            "Unlimited Bacteria Magician",
+            "The Unlimited Bacteriomancer",
+            "Unlimited Germ Mancer",
+            "The Limitless Germ Necromancer"
+          ]
+        },
+        {
+          "id": "dd352e86-faf2-413b-bfc2-9ce9d76e1649",
+          "title": "A Amiga da Minha Irmã Mais Velha É Irritante",
+          "author": "Azusa Kina",
+          "aliases": [
+            "姉ちゃんの友達がうざい話",
+            "My Older Sister's Friend Is Annoying",
+            "Nee-chan no Tomodachi ga Uzai Hanashi"
+          ]
+        },
+        {
+          "id": "e6949ad5-aaff-4cf6-86a7-6ec6bc333ab2",
+          "title": "Operação: Amor Verdadeiro",
+          "author": "kkokkalee (꼬까리)",
+          "aliases": [
+            "Operation: True Love",
+            "Operation Name Pure Love",
+            "Pure Love Operation",
+            "작전명 순정",
+            "Operação Amor Verdadeiro"
+          ]
+        },
+        {
+          "id": "f2befcea-5a4f-4430-b2d9-bdf1127f0929",
+          "title": "O Prodígio Lendário do Ducado",
+          "author": "Chena",
+          "aliases": [
+            "공작가의 역대급 신동",
+            "The Legendary Prodigy of the Duchy",
+            "O Prodígio Lendário da Casa do Duque"
+          ]
+        },
+        {
+          "id": "f3190d84-803c-45ad-aa7b-9d6650bae324",
+          "title": "O Retorno da Seita do Monte Hua",
+          "author": "Biga",
+          "aliases": [
+            "Return of the Blossoming Blade",
+            "剑尊归来",
+            "Return of The Mount Hua Sect"
+          ]
+        },
+        {
+          "id": "f6d11c87-2601-4aaa-af55-60609cdff1db",
+          "title": "The Boxer",
+          "author": "Jeong Ji-Hoon",
+          "aliases": [
+            "더 복서"
+          ]
+        },
+        {
+          "id": "f9c23526-a590-446f-aebf-2f3c147fd14c",
+          "title": "No Jogo da Morte, Só Eu Conheço os Monstros",
+          "author": "iCiyuan动漫",
+          "aliases": [
+            "I Survive Through the Game by Dominating the Wild Monster Information Network",
+            "Extending My Life In The Game: I Monopolized the Wild Monster Intelligence Network",
+            "Extending My Life Through the Game, I Monopolized the Wild Monster Intelligence Network",
+            "游戏续命，我垄断了野怪情报网"
+          ]
+        },
+        {
+          "id": "fd23b6d0-c3c4-4573-b0f3-547f1d7a5026",
+          "title": "O Cavaleiro em Eterna Regressão",
+          "author": "Soulpung, Lee Hyeon-Min",
+          "aliases": [
+            "Eternally Regressing Knight",
+            "오늘만 사는 기사",
+            "Der Ritter lebt nur heute",
+            "死に戻り騎士は今日も生きる",
+            "只活今天的轮回骑士",
+            "今日騎士",
+            "อัศวินวันเดียว",
+            "The Knight Only Lives Today"
+          ]
+        },
+        {
+          "id": "ffa2c359-8c4a-4007-a13d-0ca9a0551534",
+          "title": "As Coxas da Minha Namorada Tsundere",
+          "author": "Narui Nijima",
+          "aliases": [
+            "Tsun na Kanojo no Futomomo Jijou",
+            "ツンな彼女の太もも事情"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "7b191b50-61a3-48eb-b93f-71df00486461|7eb3e4e4-32be-4fb3-9ffd-4b1206701dd5",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "martial-peak",
+      "works": [
+        {
+          "id": "7b191b50-61a3-48eb-b93f-71df00486461",
+          "title": "Martial Peak",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "7eb3e4e4-32be-4fb3-9ffd-4b1206701dd5",
+          "title": "Pico Marcial",
+          "author": "Wǔ Liàn Diān Fēng",
+          "aliases": [
+            "Martial Peak"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "27242595-44b5-4683-83c6-9b47f9bf6e11|b77d6d8d-95ba-4ac4-88ac-f9acc50847f2",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "the-saint-levels-up-through-necromancy",
+      "works": [
+        {
+          "id": "27242595-44b5-4683-83c6-9b47f9bf6e11",
+          "title": "O Santo Evolui Através da Necromancia",
+          "author": "Studio Inus",
+          "aliases": [
+            "The Saint Who Levels Up as a Necromancer",
+            "The Saint Levels Up Through Necromancy",
+            "ネクロマンサーでレベルアップする聖者様"
+          ]
+        },
+        {
+          "id": "b77d6d8d-95ba-4ac4-88ac-f9acc50847f2",
+          "title": "The Saint Levels Up Through Necromancy",
+          "author": "AtlasScan",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "49095563-d000-423d-bf1b-8292403d18c0|df62ec72-0f03-41d2-a772-f25c500fb3d9",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "jujutsu-kaisen-modulo",
+      "works": [
+        {
+          "id": "49095563-d000-423d-bf1b-8292403d18c0",
+          "title": "Jujutsu Kaisen Modulo",
+          "author": "AKUTAMI Gege",
+          "aliases": []
+        },
+        {
+          "id": "df62ec72-0f03-41d2-a772-f25c500fb3d9",
+          "title": "Jujutsu Kaisen Módulo",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "3e9ff4d8-5d17-4715-b45c-3038d6073457|a061f62a-2745-421e-a668-e0f7daa4df08",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "sobrevivendo-como-uma-princesa-ilegitima",
+      "works": [
+        {
+          "id": "3e9ff4d8-5d17-4715-b45c-3038d6073457",
+          "title": "Sobrevivendo Como A Princesa Ilegítima",
+          "author": "Seo-Gyeol",
+          "aliases": [
+            "Sobrevivendo Como Uma Princesa Ilegítima",
+            "Sasaenga Gongjuro Saranamgi",
+            "Surviving as the Illegitimate Princess",
+            "사생아 공주로 살아남기",
+            "Surviving as an Illegitimate Princess"
+          ]
+        },
+        {
+          "id": "a061f62a-2745-421e-a668-e0f7daa4df08",
+          "title": "Sobrevivendo Como Uma Princesa Ilegítima",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "069782c1-632c-49f4-b8a5-d0646c356d85|2aefccbf-bd89-4b65-94bc-9df7be80f4f1",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "omniscient-reader",
+      "works": [
+        {
+          "id": "069782c1-632c-49f4-b8a5-d0646c356d85",
+          "title": "O Ponto de Vista do Leitor Onisciente",
+          "author": "Sing-Shong, UMI ",
+          "aliases": [
+            "Omniscient Reader's Viewpoint",
+            "ORV",
+            "Omniscient Reader"
+          ]
+        },
+        {
+          "id": "2aefccbf-bd89-4b65-94bc-9df7be80f4f1",
+          "title": "Omniscient Reader",
+          "author": "sing N song",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "07e1da02-e2c3-4ba7-bee1-91c1673cef4b|d774dddd-6e59-4c42-af22-793cbe93a7d5",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "the-martial-genius-who-remembers-everything",
+      "works": [
+        {
+          "id": "07e1da02-e2c3-4ba7-bee1-91c1673cef4b",
+          "title": "O Gênio Marcial Que Lembra de Tudo",
+          "author": "jeokseolmok, Omin",
+          "aliases": [
+            "모든걸 기억하는 천재무사",
+            "The Genius Martial Artist Who Remembers Everything",
+            "The Genius Warrior Who Remembers Everything",
+            "The Unforgettable Genius Martial Artist",
+            "Modeungeol Gieokaneun Cheonjaemusa",
+            "The Martial Genius Who Remembers Everything"
+          ]
+        },
+        {
+          "id": "d774dddd-6e59-4c42-af22-793cbe93a7d5",
+          "title": "The Martial Genius Who Remembers Everything",
+          "author": "AtlasScan",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "01f02a8f-e860-4dff-9304-f4918dad5d42|338915cc-86fa-41c5-b42c-b17ac33ad620",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "the-stellar-swordmaster",
+      "works": [
+        {
+          "id": "01f02a8f-e860-4dff-9304-f4918dad5d42",
+          "title": "The Stellar Swordmaster",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "338915cc-86fa-41c5-b42c-b17ac33ad620",
+          "title": "Mestre Espadachim Criado Pelas Estrelas",
+          "author": "Hong Dae Eui (홍대의) Q10",
+          "aliases": [
+            "The Stellar Swordmaster",
+            "Star-Embracing Swordmaster",
+            "The swordman created by the stars",
+            "Star Embracing Swordmaster"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "90ea547a-f7c5-4d63-9dfb-10cc480c3fdc|f0859d48-2b47-4b5a-aca5-950f8795495b",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "regressing-with-the-king-s-power",
+      "works": [
+        {
+          "id": "90ea547a-f7c5-4d63-9dfb-10cc480c3fdc",
+          "title": "Regressing with the King’s Power",
+          "author": "AtlasScan",
+          "aliases": []
+        },
+        {
+          "id": "f0859d48-2b47-4b5a-aca5-950f8795495b",
+          "title": "Regressando com o Poder do Monarca",
+          "author": "Ahn Soseol, Seong Hyun",
+          "aliases": [
+            "Regressing with the King's Power",
+            "Regressando com o Poder do Rei"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "1493a910-af13-421e-8157-7bd3367f0ebc|f50c0c16-717b-431b-b777-31dbea7fad0b",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "swordmaster-s-youngest-son",
+      "works": [
+        {
+          "id": "1493a910-af13-421e-8157-7bd3367f0ebc",
+          "title": "O Caçula do Mestre Espadachim",
+          "author": "AZI, Emperor Penguin",
+          "aliases": [
+            "O Filho Mais Novo do Mestre Espadachim",
+            "Swordmaster’s Youngest Son",
+            "Geomsulmyeongga Mangnaeadeul",
+            "The Youngest Son of a Master Swordsman",
+            "Swordmaster's Youngest Son",
+            "Youngest Son of the Renowned Swordsmanship Clan",
+            "剣術名家の末息子",
+            "劍術名家的小兒子",
+            "剑术名门的小儿子",
+            "The Swordmaster's Son"
+          ]
+        },
+        {
+          "id": "f50c0c16-717b-431b-b777-31dbea7fad0b",
+          "title": "Swordmaster’s Youngest Son",
+          "author": "WorldScan",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "454cd7ff-009c-42e2-a93a-0da10300fc05|d8f8e05d-a103-400f-b963-7c8c7453aa67",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "top-tier-providence",
+      "works": [
+        {
+          "id": "454cd7ff-009c-42e2-a93a-0da10300fc05",
+          "title": "Providência de Alto Nível",
+          "author": "Let Me Laugh",
+          "aliases": [
+            "Top Tier Providence",
+            "Lucky Me: I Secretly Cultivated for 1",
+            "000 Years",
+            "Dingji Qiyun, Qiaoqiao Xiulian Qian Nian"
+          ]
+        },
+        {
+          "id": "d8f8e05d-a103-400f-b963-7c8c7453aa67",
+          "title": "Top Tier Providence",
+          "author": "AtlasScan",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "13616311-1f0c-43ba-8f0b-9c7d772ba4f7|596d3cff-fbcc-4d88-b3e8-924b59950bac",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "sichuan-s-supreme-king",
+      "works": [
+        {
+          "id": "13616311-1f0c-43ba-8f0b-9c7d772ba4f7",
+          "title": "O Rei Supremo de Sichuan",
+          "author": "",
+          "aliases": [
+            "Sichuan's Supreme King",
+            "The Sichuan Tyrant",
+            "Sichuan Overlord"
+          ]
+        },
+        {
+          "id": "596d3cff-fbcc-4d88-b3e8-924b59950bac",
+          "title": "Sichuan’s Supreme King",
+          "author": "AtlasScan",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "744b87d0-28ae-450a-a0b8-ac85bd6ae60a|c1dd5aa3-9dff-4259-8c4e-1ed06462e6c9",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "reincarnation-of-the-fist-king",
+      "works": [
+        {
+          "id": "744b87d0-28ae-450a-a0b8-ac85bd6ae60a",
+          "title": "Reencarnação do Rei dos Punhos",
+          "author": "Seungtu, Yu Jin Sung",
+          "aliases": [
+            "권왕환생",
+            "Reincarnation of the Fist King",
+            "Reencarnação do Deus dos Punhos"
+          ]
+        },
+        {
+          "id": "c1dd5aa3-9dff-4259-8c4e-1ed06462e6c9",
+          "title": "Reincarnation of the Fist King",
+          "author": "AtlasScan",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "54c67573-6bb5-4c29-8cf9-857bedfcd3b7|6e059180-f34a-4574-bd36-5fd45cc0fa9e",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "third-rate-martial-family-becomes-the-best-under-heaven",
+      "works": [
+        {
+          "id": "54c67573-6bb5-4c29-8cf9-857bedfcd3b7",
+          "title": "Third-rate Martial Family Becomes the Best Under Heaven",
+          "author": "Arch Scan",
+          "aliases": []
+        },
+        {
+          "id": "6e059180-f34a-4574-bd36-5fd45cc0fa9e",
+          "title": "Uma Família de Terceira se Torna a Melhor Sob o Céu",
+          "author": "기성욱, 남사랑, Yurison (유리손)",
+          "aliases": [
+            "Third-rate Martial Family Becomes the Best Under Heaven",
+            "The World’s Strongest Is from a Third-Rate Martial Clan",
+            "삼류무가 천하제일인"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "383593cf-60a6-4339-8563-7bcf75d64a20|5baa2daf-9c9f-4b17-a20a-06885bd2120b",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "the-ruler-of-darkness",
+      "works": [
+        {
+          "id": "383593cf-60a6-4339-8563-7bcf75d64a20",
+          "title": "The Ruler Of Darkness",
+          "author": "ArinVale",
+          "aliases": []
+        },
+        {
+          "id": "5baa2daf-9c9f-4b17-a20a-06885bd2120b",
+          "title": "O Governante das Trevas",
+          "author": "Yugwa",
+          "aliases": [
+            "The Ruler Of Darkness",
+            "제암진천경",
+            "Jeamjincheongyeong"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "2a2f4af3-7c2f-483f-9801-d88f76b3706b|9acfec6f-a80e-4a8f-aa51-ddf746c5f265",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "the-extra-s-academy-survival-guide",
+      "works": [
+        {
+          "id": "2a2f4af3-7c2f-483f-9801-d88f76b3706b",
+          "title": "Guia de Sobrevivência do Extra da Academia",
+          "author": "Corita",
+          "aliases": [
+            "The Extra's Academy Survival Guide",
+            "아카데미에서 살아남기",
+            "Academy-eseo Saranamgi",
+            "The Extra’s Academy Survival Guide"
+          ]
+        },
+        {
+          "id": "9acfec6f-a80e-4a8f-aa51-ddf746c5f265",
+          "title": "The Extra's Academy Survival Guide",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "8141ecb9-2303-4623-ac97-a7e9f49baef0|ba169a84-6d29-42b6-b913-a48060beecc3",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "30-years-have-passed-since-the-prologue",
+      "works": [
+        {
+          "id": "8141ecb9-2303-4623-ac97-a7e9f49baef0",
+          "title": "30 Years Have Passed Since the Prologue",
+          "author": "WorldScan",
+          "aliases": []
+        },
+        {
+          "id": "ba169a84-6d29-42b6-b913-a48060beecc3",
+          "title": "30 Anos Desde o Prólogo",
+          "author": "Mark Ellaha",
+          "aliases": [
+            "Peurollogeueseo samsip nyeoni heulleotda",
+            "30 Years Since the Prologue",
+            "Mas...",
+            "30 Years Have Passed Since the Prologue"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "424b5f7a-8c13-4b84-8432-145ffd795ffd|d2d9b892-b1a2-40c3-9a43-d38804773428",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "a-lei-do-lixo",
+      "works": [
+        {
+          "id": "424b5f7a-8c13-4b84-8432-145ffd795ffd",
+          "title": "A Lei Do Lixo",
+          "author": "AtlasScan",
+          "aliases": []
+        },
+        {
+          "id": "d2d9b892-b1a2-40c3-9a43-d38804773428",
+          "title": "Regras Para Namorar um Canalha",
+          "author": "Seo-Yeon",
+          "aliases": [
+            "Sseuregiui Beopchik",
+            "Rules for Dating Trash",
+            "쓰레기의 법칙",
+            "The Law of Garbage",
+            "Law Of Trashy Men",
+            "ขอบายผู้ชายสายแบด",
+            "もえるゴミの法則",
+            "A Lei do Lixo"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "288dc82c-6773-410d-afc6-ce8a84f320ce|86359948-2045-48f1-9a36-7e8c870257e6",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "the-dark-swordsman-returns",
+      "works": [
+        {
+          "id": "288dc82c-6773-410d-afc6-ce8a84f320ce",
+          "title": "O Retorno do Espadachim Negro",
+          "author": "SHINKOU Shotou",
+          "aliases": [
+            "The Dark Swordsman Returns",
+            "回帰した暗黒剣士２周日は無双する"
+          ]
+        },
+        {
+          "id": "86359948-2045-48f1-9a36-7e8c870257e6",
+          "title": "The Dark Swordsman Returns",
+          "author": "AtlasScan",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "14309223-b9fc-47fb-9ded-bedafd2f8f07|1c0e0479-95bd-4035-bc03-e70a8b373104",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "revenge-of-the-baskerville-bloodhound",
+      "works": [
+        {
+          "id": "14309223-b9fc-47fb-9ded-bedafd2f8f07",
+          "title": "Vingança do Cão de Caça",
+          "author": "Lego Balbasseo",
+          "aliases": [
+            "Revenge of the Baskerville Bloodhound",
+            "O Retorno do Cão de Caça dos Baskerville",
+            "Vingança do Cão de Caça dos Baskerville",
+            "A Vingança do Cão de Caça de Sangue de Ferro",
+            "Revenge of the Iron-Blooded Sword Hound",
+            "Revenge of the Sword Clan's Hound",
+            "The Return of the Iron-Blood Sword Hound"
+          ]
+        },
+        {
+          "id": "1c0e0479-95bd-4035-bc03-e70a8b373104",
+          "title": "Revenge of the Baskerville Bloodhound",
+          "author": "Arang",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "14309223-b9fc-47fb-9ded-bedafd2f8f07|3fdff186-82df-4786-acd1-d8e428741620",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "o-retorno-do-cao-de-caca-dos-baskerville",
+      "works": [
+        {
+          "id": "14309223-b9fc-47fb-9ded-bedafd2f8f07",
+          "title": "Vingança do Cão de Caça",
+          "author": "Lego Balbasseo",
+          "aliases": [
+            "Revenge of the Baskerville Bloodhound",
+            "O Retorno do Cão de Caça dos Baskerville",
+            "Vingança do Cão de Caça dos Baskerville",
+            "A Vingança do Cão de Caça de Sangue de Ferro",
+            "Revenge of the Iron-Blooded Sword Hound",
+            "Revenge of the Sword Clan's Hound",
+            "The Return of the Iron-Blood Sword Hound"
+          ]
+        },
+        {
+          "id": "3fdff186-82df-4786-acd1-d8e428741620",
+          "title": "O Retorno do Cão de Caça dos Baskerville",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "1db7b037-7333-495d-a274-44dc3d06fe98|4d069dc8-97bf-48e0-9e77-9ef6d96e950a",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "me-escolhe",
+      "works": [
+        {
+          "id": "1db7b037-7333-495d-a274-44dc3d06fe98",
+          "title": "Me Escolhe! (Novel)",
+          "author": "",
+          "aliases": [
+            "Pick Me Up, Infinite Gacha",
+            "픽 미 업!",
+            "Pick Me Up!",
+            "PICK ME UP～低レア★英雄の成り上がり～",
+            "ピックミーアップ！低レア英雄の成り上がり",
+            "Pick Me up!! Tei Rea Eiyū No Nariagari",
+            "Gacha infinito",
+            "Me Escolhe!",
+            "Infinite Gacha",
+            "Escolha-me! Gacha Infinito"
+          ]
+        },
+        {
+          "id": "4d069dc8-97bf-48e0-9e77-9ef6d96e950a",
+          "title": "Me Escolhe!",
+          "author": "Hermod, Cho U-Ne",
+          "aliases": [
+            "Pick Me Up!",
+            "Pick Me Up",
+            "Infinite Gacha",
+            "Me Escolha!",
+            "Me Escolhe!",
+            "Me Pegue!"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "1db7b037-7333-495d-a274-44dc3d06fe98|4d069dc8-97bf-48e0-9e77-9ef6d96e950a|99900e9d-939f-40bf-8032-d954b9a133e5",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "pick-me-up",
+      "works": [
+        {
+          "id": "1db7b037-7333-495d-a274-44dc3d06fe98",
+          "title": "Me Escolhe! (Novel)",
+          "author": "",
+          "aliases": [
+            "Pick Me Up, Infinite Gacha",
+            "픽 미 업!",
+            "Pick Me Up!",
+            "PICK ME UP～低レア★英雄の成り上がり～",
+            "ピックミーアップ！低レア英雄の成り上がり",
+            "Pick Me up!! Tei Rea Eiyū No Nariagari",
+            "Gacha infinito",
+            "Me Escolhe!",
+            "Infinite Gacha",
+            "Escolha-me! Gacha Infinito"
+          ]
+        },
+        {
+          "id": "4d069dc8-97bf-48e0-9e77-9ef6d96e950a",
+          "title": "Me Escolhe!",
+          "author": "Hermod, Cho U-Ne",
+          "aliases": [
+            "Pick Me Up!",
+            "Pick Me Up",
+            "Infinite Gacha",
+            "Me Escolha!",
+            "Me Escolhe!",
+            "Me Pegue!"
+          ]
+        },
+        {
+          "id": "99900e9d-939f-40bf-8032-d954b9a133e5",
+          "title": "Pick Me Up!",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "1493a910-af13-421e-8157-7bd3367f0ebc|98bc306d-709a-40e0-a578-8cea39b12af3",
+      "confidence": "HIGH_CONFIDENCE",
+      "shared_title": "o-filho-mais-novo-do-mestre-espadachim",
+      "works": [
+        {
+          "id": "1493a910-af13-421e-8157-7bd3367f0ebc",
+          "title": "O Caçula do Mestre Espadachim",
+          "author": "AZI, Emperor Penguin",
+          "aliases": [
+            "O Filho Mais Novo do Mestre Espadachim",
+            "Swordmaster’s Youngest Son",
+            "Geomsulmyeongga Mangnaeadeul",
+            "The Youngest Son of a Master Swordsman",
+            "Swordmaster's Youngest Son",
+            "Youngest Son of the Renowned Swordsmanship Clan",
+            "剣術名家の末息子",
+            "劍術名家的小兒子",
+            "剑术名门的小儿子",
+            "The Swordmaster's Son"
+          ]
+        },
+        {
+          "id": "98bc306d-709a-40e0-a578-8cea39b12af3",
+          "title": "O Filho Mais Novo do Mestre Espadachim",
+          "author": "AZI, Emperor Penguin (황제펭귄)",
+          "aliases": [
+            "The Swordmaster's Son"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "171e0bac-601c-4832-a9a8-04397c2d6146|422d47e3-a9f6-4684-8f87-5d83c1c83624",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "veletric",
+      "works": [
+        {
+          "id": "171e0bac-601c-4832-a9a8-04397c2d6146",
+          "title": "Veletric",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "422d47e3-a9f6-4684-8f87-5d83c1c83624",
+          "title": "Relâmpago",
+          "author": "Son Jae-Ho",
+          "aliases": [
+            "Velocidade da Eletricidade",
+            "Velocista",
+            "Veletric",
+            "Eleceed"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "422d47e3-a9f6-4684-8f87-5d83c1c83624|786f1a44-a51f-4713-9836-ae77e0b93948",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "eleceed",
+      "works": [
+        {
+          "id": "422d47e3-a9f6-4684-8f87-5d83c1c83624",
+          "title": "Relâmpago",
+          "author": "Son Jae-Ho",
+          "aliases": [
+            "Velocidade da Eletricidade",
+            "Velocista",
+            "Veletric",
+            "Eleceed"
+          ]
+        },
+        {
+          "id": "786f1a44-a51f-4713-9836-ae77e0b93948",
+          "title": "Eleceed",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "6ff892b6-1281-4d21-ae4c-47e07777c77e|e974f915-cbb0-4147-8db7-03c23268f260",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "the-artist-who-draws-dungeons",
+      "works": [
+        {
+          "id": "6ff892b6-1281-4d21-ae4c-47e07777c77e",
+          "title": "Um Pintor Que Desenha Dungeons",
+          "author": "GLEE (글리), Hobby Writing Principle",
+          "aliases": [
+            "The Artist Who Draws Dungeons",
+            "The Painter Who Paints Dungeons",
+            "The Painter Who Creates Dungeons",
+            "The Dungeon Painter",
+            "The Painter of Dungeons",
+            "던전을 그리는 화가"
+          ]
+        },
+        {
+          "id": "e974f915-cbb0-4147-8db7-03c23268f260",
+          "title": "The Artist Who Draws Dungeons",
+          "author": "ArinVale",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "c9634cd4-38e1-42f2-a1e9-a7bc0dbb1219|fe7ed60d-43b7-4116-9c93-0ed2e4bb4baf",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "familia-sacana-completo",
+      "works": [
+        {
+          "id": "c9634cd4-38e1-42f2-a1e9-a7bc0dbb1219",
+          "title": "Família Sacana completo!",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "fe7ed60d-43b7-4116-9c93-0ed2e4bb4baf",
+          "title": "Família Sacana Completo",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "82e39fcf-cac3-4e52-9d23-0c2ecbf32995|b19b601f-4b8b-4332-b9d8-e4f99ef64ddb",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "retorno-de-10-000-vezes-irma-senior-por-favor-comporte-se",
+      "works": [
+        {
+          "id": "82e39fcf-cac3-4e52-9d23-0c2ecbf32995",
+          "title": "Retorno de 10.000x: Irmã Sênior, Por Favor, Comporte-se!",
+          "author": "卧巢, 掌阅文化",
+          "aliases": [
+            "Ten-Thousandfold Return Senior Sister Please Behave",
+            "Ten-Thousandfold Payback Senior Sister Have Some Self-Respect",
+            "Hệ Thống Trả Về Vạn Lần: Sư Tỷ Xin Tự Trọng",
+            "Inagaw Ang Katawan, Bumalik Ang Kapangyarihan",
+            "On Bin Kat İade: Kıdemli Abla, Lütfen Kendine Gel",
+            "Os Dez Mil Retornos, Irmã Sênior, Por Favor, Comporte-se",
+            "Retorno de 10.000 vezes, Irmã Sênior, Por Favor, Comporte-se",
+            "Sistema de Retorno: Me Vuelvo Invencible al darle cosas a Otros",
+            "Ten-Thousandfold Payback, Senior Sister, Have Some Self-Respect",
+            "Ten-Thousandfold Return, Senior Sister, Please Behave",
+            "The Body Was Taken, the Power Returned",
+            "Trả Lại Gấp Vạn, Sư Tỷ Xin Hãy Tự Trọng",
+            "Vạn Lần Hoàn Trả, Sư Tỷ Xin Tự Trọng",
+            "Система возврата: я верну всё отнятое у меня в 10 000 раз больше!",
+            "ผลตอบแทนหมื่นเท่า ศิษย์พี่หญิง โปรดสำรวมด้วย",
+            "万倍返还，师姐请自重"
+          ]
+        },
+        {
+          "id": "b19b601f-4b8b-4332-b9d8-e4f99ef64ddb",
+          "title": "Retorno de 10.000 vezes, Irmã Sênior, Por Favor, Comporte-se",
+          "author": "卧巢, 掌阅文化",
+          "aliases": [
+            "Ten-Thousandfold Return",
+            "Senior Sister",
+            "Please Behave"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "6cd3b2c8-1edc-4d94-8dd5-30c90b3d1cd3|f3e386c1-9d52-4bcf-bfbd-94e24ab2a3eb",
+      "confidence": "HIGH_CONFIDENCE",
+      "shared_title": "profissao-sem-valor-domador-de-dragoes",
+      "works": [
+        {
+          "id": "6cd3b2c8-1edc-4d94-8dd5-30c90b3d1cd3",
+          "title": "Domador de Dragões",
+          "author": "鬼泣双刀坎上天（原著）",
+          "aliases": [
+            "Profissão sem Valor: Domador de Dragões",
+            "National Job Change: I'm Stuck As the Weakest Dragon Tamer?!",
+            "Worthless Profession: Dragon Tamer"
+          ]
+        },
+        {
+          "id": "f3e386c1-9d52-4bcf-bfbd-94e24ab2a3eb",
+          "title": "Profissão sem Valor: Domador de Dragões",
+          "author": "AtlasScan",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "00f39721-91c3-4528-b3d3-513457568dfe|3ad48242-8ae0-419e-a966-9e62877ef893",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "the-second-eunuch-regains-his-manhood",
+      "works": [
+        {
+          "id": "00f39721-91c3-4528-b3d3-513457568dfe",
+          "title": "The Second Eunuch Regains His Manhood",
+          "author": "AtlasScan",
+          "aliases": []
+        },
+        {
+          "id": "3ad48242-8ae0-419e-a966-9e62877ef893",
+          "title": "O Segundo Eunuco Recupera Sua Masculinidade",
+          "author": "LICO",
+          "aliases": [
+            "The Second Eunuch Regains His Manhood",
+            "2회차 환관이 남성을 되찾음",
+            "The Eunuch Regains His Manhood in His Second Life"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "c273b3f4-f328-466a-896a-03245d6cfb72|febc5eed-43a7-4bcc-8583-e77b22de956b",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "reincarnator-s-stream",
+      "works": [
+        {
+          "id": "c273b3f4-f328-466a-896a-03245d6cfb72",
+          "title": "Reincarnator's Stream",
+          "author": "AtlasScan",
+          "aliases": []
+        },
+        {
+          "id": "febc5eed-43a7-4bcc-8583-e77b22de956b",
+          "title": "Streamer Após a Reencarnação",
+          "author": "Next Level Studio",
+          "aliases": [
+            "Reincarnated Streamer",
+            "Hwansaengja-ui Streaming",
+            "Reincarnator’s Stream"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "3ca7149a-2a0f-49dc-8bd7-3b1510e6e2f5|53fd8aea-d111-436f-953d-c958adc5ff2c",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "the-hunter-s-gonna-lay-low",
+      "works": [
+        {
+          "id": "3ca7149a-2a0f-49dc-8bd7-3b1510e6e2f5",
+          "title": "The Hunter’s Gonna Lay Low",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "53fd8aea-d111-436f-953d-c958adc5ff2c",
+          "title": "The Hunter's Gonna Lay Low",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "8e8316be-b106-4c99-a5a5-6e811d7a023e|fea11ece-484d-444b-8105-ee0143a986be",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "boku-ga-ojuushi-chan-to-saki-ni-sex-suru-hazu-datta-noni",
+      "works": [
+        {
+          "id": "8e8316be-b106-4c99-a5a5-6e811d7a023e",
+          "title": "Boku ga Ojuushi-chan to Saki ni Sex suru Hazu datta noni...",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "fea11ece-484d-444b-8105-ee0143a986be",
+          "title": "Boku ga Ojuushi-chan to Saki ni Sex suru Hazu datta noni",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "55b29c5b-02a6-41e7-8236-394fee3415a9|9f6aac66-450b-43f9-8145-7de5f8d8b4ea",
+      "confidence": "HIGH_CONFIDENCE",
+      "shared_title": "kobayashi-san-chi-no-maid-dragon-kanna-no-nichijou",
+      "works": [
+        {
+          "id": "55b29c5b-02a6-41e7-8236-394fee3415a9",
+          "title": "Kobayashi-san Chi no Maid Dragon: Kanna no Nichijou",
+          "author": "ArinVale",
+          "aliases": []
+        },
+        {
+          "id": "9f6aac66-450b-43f9-8145-7de5f8d8b4ea",
+          "title": "Kobayashi-san Chi no Maid Dragon: Kanna no Nichijou",
+          "author": "ArinVale",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "9efedce5-6010-4c44-942d-bbab5971f6b2|b274fcda-bad8-4102-ae73-de3d45b80541",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "em-busca-da-vinganca-perfeita-novel",
+      "works": [
+        {
+          "id": "9efedce5-6010-4c44-942d-bbab5971f6b2",
+          "title": "Em Busca da Vingança Perfeita – Novel",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "b274fcda-bad8-4102-ae73-de3d45b80541",
+          "title": "Em Busca da Vingança Perfeita – Novel",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "b991a632-f694-4d27-b797-7b017aa37557|dd6b079f-692b-4935-9312-f1c74cdc4a00",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "promessa-para-o-hexa",
+      "works": [
+        {
+          "id": "b991a632-f694-4d27-b797-7b017aa37557",
+          "title": "Promessa para o HEXA!",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "dd6b079f-692b-4935-9312-f1c74cdc4a00",
+          "title": "Promessa para o HEXA!",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "05946d4a-1c65-4663-ab00-942d8829b84a|2103f9ec-9fe9-487c-9781-0a1aaebdd049",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "papito-o-sogro-tarado",
+      "works": [
+        {
+          "id": "05946d4a-1c65-4663-ab00-942d8829b84a",
+          "title": "PAPITO, o sogro tarado!",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "2103f9ec-9fe9-487c-9781-0a1aaebdd049",
+          "title": "Papito, o sogro tarado",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    },
+    {
+      "groupKey": "36a417e0-d474-431a-9612-d4daa674a4f5|4b1f452c-b223-404c-83f4-e0d626563397",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "magic-emperor",
+      "works": [
+        {
+          "id": "36a417e0-d474-431a-9612-d4daa674a4f5",
+          "title": "Magic Emperor",
+          "author": "Nightingale",
+          "aliases": []
+        },
+        {
+          "id": "4b1f452c-b223-404c-83f4-e0d626563397",
+          "title": "Imperador Mágico",
+          "author": "Nightingale (Original), No Two Comics",
+          "aliases": [
+            "Demonic Emperor",
+            "魔皇大管家",
+            "Magic Emperor",
+            "Imperador Demoníaco"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "122b1026-0f0b-45c5-b8af-ed88a3ea2ce7|4b1f452c-b223-404c-83f4-e0d626563397",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "imperador-demoniaco",
+      "works": [
+        {
+          "id": "122b1026-0f0b-45c5-b8af-ed88a3ea2ce7",
+          "title": "Imperador Demoníaco",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "4b1f452c-b223-404c-83f4-e0d626563397",
+          "title": "Imperador Mágico",
+          "author": "Nightingale (Original), No Two Comics",
+          "aliases": [
+            "Demonic Emperor",
+            "魔皇大管家",
+            "Magic Emperor",
+            "Imperador Demoníaco"
+          ]
+        }
+      ]
+    },
+    {
+      "groupKey": "aacad5b0-b10c-41a2-8df1-d78326e2b927|cfb680c1-e131-49ad-879a-a867e03c0ed9",
+      "confidence": "MEDIUM_CONFIDENCE",
+      "shared_title": "a-historia-de-como-recusei-um-boquete-nao-solicitado-de-uma-garota-marrenta-que-estava-super-a-fim-de-mim-mas-acabei-transando-de-um-jeito-superdoce-e-carinhoso-com-direito-a-creampie-e-confisso",
+      "works": [
+        {
+          "id": "aacad5b0-b10c-41a2-8df1-d78326e2b927",
+          "title": "A História de Como Recusei Um Boquete Não Solicitado de Uma Garota “Marrenta” Que Estava Super a Fim de Mim, Mas Acabei Transando de Um Jeito Superdoce e Carinhoso, Com Direito a *creampie* e Confissõ",
+          "author": "",
+          "aliases": []
+        },
+        {
+          "id": "cfb680c1-e131-49ad-879a-a867e03c0ed9",
+          "title": "A História de Como Recusei Um Boquete Não Solicitado de Uma Garota “Marrenta” Que Estava Super a Fim de Mim, Mas Acabei Transando de Um Jeito Superdoce e Carinhoso, Com Direito a *creampie* e Confissõ",
+          "author": "",
+          "aliases": []
+        }
+      ]
+    }
+  ]
+}
