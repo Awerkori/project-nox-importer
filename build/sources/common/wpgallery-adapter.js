@@ -118,7 +118,7 @@ export class WpGalleryAdapter {
                 slug: p.slug || slugify(title),
                 coverUrl,
                 synopsis,
-                status: 'COMPLETED',
+                status: 'UNKNOWN',
             };
         }
         catch (err) {

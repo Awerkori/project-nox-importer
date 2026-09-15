@@ -152,7 +152,7 @@ export class WpGalleryAdapter implements SourceAdapter {
         slug: p.slug || slugify(title),
         coverUrl,
         synopsis,
-        status: 'COMPLETED',
+        status: 'UNKNOWN',
       };
     } catch (err: any) {
       this.logger.error(`fetchWorkDetails failed for ${sourceWorkId}: ${err.message}`);

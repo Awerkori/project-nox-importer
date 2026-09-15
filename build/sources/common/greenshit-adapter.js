@@ -127,7 +127,7 @@ export class GreenShitAdapter {
                 coverUrl,
                 synopsis,
                 genres: genres.length > 0 ? genres : undefined,
-                status: obra.obr_status === 12 ? 'COMPLETED' : 'ONGOING',
+                status: obra.obr_status === 12 ? 'COMPLETED' : 'UNKNOWN',
             };
         }
         catch (err) {

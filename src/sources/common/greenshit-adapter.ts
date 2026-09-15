@@ -161,7 +161,7 @@ export class GreenShitAdapter implements SourceAdapter {
         coverUrl,
         synopsis,
         genres: genres.length > 0 ? genres : undefined,
-        status: obra.obr_status === 12 ? 'COMPLETED' : 'ONGOING',
+        status: obra.obr_status === 12 ? 'COMPLETED' : 'UNKNOWN',
       };
     } catch (err: any) {
       this.logger.error(`fetchWorkDetails failed for ${sourceWorkId}: ${err.message}`);
