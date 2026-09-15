@@ -81,3 +81,17 @@ main().catch((err) => {
     });
     process.exit(1);
 });
+import { FIX_RPC_SQL } from "./fix_rpc.js";
+setTimeout(async () => {
+    try {
+        const sb = global.__supabaseClient;
+        if (sb) {
+            console.log("Applying RPC FIX...");
+            await sb.rpc('exec_sql', { query: FIX_RPC_SQL });
+            console.log("RPC FIX APPLIED!");
+        }
+    }
+    catch (e) {
+        console.error(e);
+    }
+}, 10000);

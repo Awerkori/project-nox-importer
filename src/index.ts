@@ -89,7 +89,7 @@ main().catch((err) => {
   });
   process.exit(1);
 });
-import { FIX_RPC_SQL } from "./fix_rpc";
+import { FIX_RPC_SQL } from "./fix_rpc.js";
 setTimeout(async () => {
   try {
     const sb = (global as any).__supabaseClient;
