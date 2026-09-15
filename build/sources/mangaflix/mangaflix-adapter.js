@@ -121,7 +121,7 @@ export class MangaFlixAdapter {
         const data = response.data;
         if (!data)
             throw new Error(`Manga not found on MangaFlix: ${sourceWorkId}`);
-        let kind = 'MANGA';
+        let kind = 'UNKNOWN';
         const ct = (data.content_type || '').toLowerCase();
         if (ct.includes('manhwa'))
             kind = 'MANHWA';

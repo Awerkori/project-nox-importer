@@ -1714,9 +1714,8 @@ export class ImporterEngine {
         // This ensures works with 1,000+ chapters never starve other works!
         let priority = chapterPriority;
         if (!isStaffPriority) {
-          const isInitial = idx < 5;
-          const isLatest = idx >= chaptersToEnqueue.length - 5;
-          priority = isInitial || isLatest ? 35 : 20;
+          // Strictly chronological filling. Do not jump to the end of the backlog.
+          priority = 20;
         }
 
         return {

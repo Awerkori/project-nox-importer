@@ -86,7 +86,7 @@ export class TaimuMangasAdapter {
     async fetchWorkDetails(sourceWorkId) {
         const url = `${this.apiUrl}/series/${sourceWorkId}`;
         const data = await this.request(url);
-        let status = 'ONGOING';
+        let status = 'UNKNOWN';
         const s = (data.status || '').toLowerCase();
         if (s === 'completed' || s === 'finalizado')
             status = 'COMPLETED';

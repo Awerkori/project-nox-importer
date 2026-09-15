@@ -214,13 +214,13 @@ export class ManhastroAdapter implements SourceAdapter {
         : `https://${item.imagem}`
       : null;
 
-    let kind: 'MANGA' | 'MANHWA' | 'MANHUA' | 'WEBTOON' = 'MANGA';
+    let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
     const cat = (item.categoria || '').toLowerCase();
     if (cat.includes('manhwa')) kind = 'MANHWA';
     else if (cat.includes('manhua')) kind = 'MANHUA';
     else if (cat.includes('webtoon')) kind = 'WEBTOON';
 
-    let status: 'ONGOING' | 'COMPLETED' | 'HIATUS' | 'CANCELLED' = 'ONGOING';
+    let status: SourceWorkDetails['status'] = 'UNKNOWN';
     const st = (item.status || '').toLowerCase();
     if (st.includes('completed') || st.includes('completo')) status = 'COMPLETED';
     else if (st.includes('hiat')) status = 'HIATUS';

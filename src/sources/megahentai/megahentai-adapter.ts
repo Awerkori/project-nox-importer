@@ -149,7 +149,7 @@ export class MegaHentaiAdapter implements SourceAdapter {
       if (g && !genres.includes(g)) genres.push(g);
     }
 
-    let status: SourceWorkDetails['status'] = 'ONGOING';
+    let status: SourceWorkDetails['status'] = 'UNKNOWN';
     if (/status[\s\S]*?complet/i.test(html) || /conclu[ií]d/i.test(html)) {
       status = 'COMPLETED';
     } else if (/hiat/i.test(html)) {

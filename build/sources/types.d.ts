@@ -13,8 +13,8 @@ export interface SourceWorkDetails {
     synopsis?: string;
     author?: string;
     artist?: string;
-    kind?: 'MANGA' | 'MANHWA' | 'MANHUA' | 'WEBTOON';
-    status?: 'ONGOING' | 'COMPLETED' | 'HIATUS' | 'CANCELLED';
+    kind?: 'MANGA' | 'MANHWA' | 'MANHUA' | 'WEBTOON' | 'PORNHWA' | 'UNKNOWN';
+    status?: 'ONGOING' | 'COMPLETED' | 'HIATUS' | 'CANCELLED' | 'UNKNOWN';
     year?: number;
     ageRating?: number;
     genres?: string[];

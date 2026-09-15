@@ -221,7 +221,7 @@ export class MadaraAdapter implements SourceAdapter {
     const artist = artistMatch ? stripHtml(artistMatch[1]) : undefined;
 
     // Status
-    let status: 'ONGOING' | 'COMPLETED' | 'HIATUS' | 'CANCELLED' = 'ONGOING';
+    let status: SourceWorkDetails['status'] = 'UNKNOWN';
     if (/completo|completed|finalizado/i.test(html)) {
       status = 'COMPLETED';
     } else if (/hiato|hiatus/i.test(html)) {

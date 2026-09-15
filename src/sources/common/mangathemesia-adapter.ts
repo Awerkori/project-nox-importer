@@ -175,7 +175,7 @@ export class MangaThemesiaAdapter implements SourceAdapter {
     const genres = Array.from(new Set(genreMatches.map(m => decodeHtmlEntities(m[1].trim()))));
 
     // Kind detection
-    let kind: 'MANGA' | 'MANHWA' | 'MANHUA' | 'WEBTOON' = 'MANGA';
+    let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
     const lowerGenres = genres.map(g => g.toLowerCase());
     if (lowerGenres.includes('manhwa')) kind = 'MANHWA';
     else if (lowerGenres.includes('manhua')) kind = 'MANHUA';

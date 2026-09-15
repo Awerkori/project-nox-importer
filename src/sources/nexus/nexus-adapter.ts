@@ -133,14 +133,14 @@ export class NexusAdapter implements SourceAdapter {
     }
 
     // Normalize kind
-    let kind: SourceWorkDetails['kind'] = 'MANGA';
+    let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
     const rawType = (row.type || '').toUpperCase();
-    if (rawType.includes('MANHWA')) kind = 'MANHWA';
+    if (rawType.includes('MANHWA')) kind = 'UNKNOWN';
     else if (rawType.includes('MANHUA')) kind = 'MANHUA';
     else if (rawType.includes('WEBTOON')) kind = 'WEBTOON';
 
     // Normalize status
-    let status: SourceWorkDetails['status'] = 'ONGOING';
+    let status: SourceWorkDetails['status'] = 'UNKNOWN';
     const rawStatus = (row.status || '').toUpperCase();
     if (rawStatus.includes('COMPLET') || rawStatus.includes('CONCLU')) status = 'COMPLETED';
     else if (rawStatus.includes('HIAT')) status = 'HIATUS';

@@ -138,7 +138,7 @@ export class MangaThemesiaAdapter {
         const genreMatches = Array.from(html.matchAll(/rel="tag">([^<]+)<\/a>/gi));
         const genres = Array.from(new Set(genreMatches.map(m => decodeHtmlEntities(m[1].trim()))));
         // Kind detection
-        let kind = 'MANGA';
+        let kind = 'UNKNOWN';
         const lowerGenres = genres.map(g => g.toLowerCase());
         if (lowerGenres.includes('manhwa'))
             kind = 'MANHWA';

@@ -181,7 +181,7 @@ export class HanamiHeavenAdapter {
             if (g && !genres.includes(g))
                 genres.push(g);
         }
-        let status = 'ONGOING';
+        let status = 'UNKNOWN';
         if (/status[\s\S]*?complet/i.test(html) || /conclu[ií]d/i.test(html)) {
             status = 'COMPLETED';
         }

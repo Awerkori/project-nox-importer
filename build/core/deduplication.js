@@ -301,8 +301,8 @@ export class DeduplicationEngine {
             description: decodeHtmlEntities(candidate.synopsis || '').slice(0, 10000),
             author: candidate.author?.slice(0, 100) || '',
             artist: candidate.artist?.slice(0, 100) || '',
-            kind: candidate.kind || 'MANGA',
-            status: candidate.status || 'ONGOING',
+            kind: candidate.kind || 'UNKNOWN',
+            status: candidate.status || 'UNKNOWN',
             year: candidate.year && candidate.year >= 1900 && candidate.year <= 2200 ? candidate.year : null,
             age_rating: ageRating,
             content_rating: contentRating,
@@ -397,6 +397,9 @@ export class DeduplicationEngine {
             const isCurrentEmpty = currentVal === null || currentVal === undefined || currentVal === '' || (Array.isArray(currentVal) && currentVal.length === 0);
             if (isCurrentEmpty)
                 return true;
+            // 4.5 UNKNOWN should never overwrite a known value
+            if ((fieldName === 'kind' || fieldName === 'status') && candidateValue === 'UNKNOWN' && !isCurrentEmpty && currentVal !== 'UNKNOWN')
+                return false;
             // 5. Kuro can upgrade any non-manual field
             if (source === 'kuro')
                 return true;
@@ -452,13 +455,15 @@ export class DeduplicationEngine {
             prov.artist = { source, updated_at: now };
         }
         // Kind
-        if (candidate.kind && canUpdateField('kind', candidate.kind)) {
-            updates.kind = candidate.kind;
+        const kindVal = candidate.kind || 'UNKNOWN';
+        if (canUpdateField('kind', kindVal)) {
+            updates.kind = kindVal;
             prov.kind = { source, updated_at: now };
         }
         // Status
-        if (candidate.status && canUpdateField('status', candidate.status)) {
-            updates.status = candidate.status;
+        const statusVal = candidate.status || 'UNKNOWN';
+        if (canUpdateField('status', statusVal)) {
+            updates.status = statusVal;
             prov.status = { source, updated_at: now };
         }
         // Year

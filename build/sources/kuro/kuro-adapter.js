@@ -466,7 +466,7 @@ export class KuroAdapter {
         const manga = response.manga;
         if (!manga)
             throw new Error(`Work not found on Kuro: ${sourceWorkId}`);
-        let status = 'ONGOING';
+        let status = 'UNKNOWN';
         const s = (manga.status || '').toLowerCase();
         if (s.includes('complet'))
             status = 'COMPLETED';
