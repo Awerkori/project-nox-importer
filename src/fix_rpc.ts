@@ -13,6 +13,7 @@ DECLARE
   v_has_completed_work boolean;
   v_job_id uuid;
   v_barrier_state text;
+#variable_conflict use_column
 BEGIN
   SELECT value INTO v_barrier_state FROM public.settings WHERE key = 'publication_safety_barrier';
 
@@ -74,7 +75,7 @@ BEGIN
           WHERE status = 'STAGED'
           GROUP BY work_id
         )
-        SELECT q_cand.id, q_cand.task_type, q_cand.priority, q_cand.payload, q_cand.chapter_sort_key, q_cand.created_at
+        SELECT q_cand.id, q_cand.task_type, q_cand.priority + 5000 as priority, q_cand.payload, q_cand.chapter_sort_key, q_cand.created_at
         FROM staged_works sw
         JOIN public.importer_queue q_cand 
           ON (q_cand.payload->>'workId') = sw.work_id::text
@@ -91,15 +92,7 @@ BEGIN
       CASE WHEN p_task_type = 'DISCOVERY' AND cand_batch.task_type = 'SYNC_WORK' THEN 9000 ELSE 0 END DESC,
       (
         cand_batch.priority 
-        + CASE WHEN cand_batch.task_type = 'IMPORT_CHAPTER' 
-                AND cand_batch.payload->>'workId' is not null 
-                AND cand_batch.chapter_sort_key is not null 
-                AND exists (
-                  SELECT 1 FROM public.importer_chapter_mappings staged
-                  WHERE staged.work_id = (cand_batch.payload->>'workId')::uuid
-                    AND staged.status = 'STAGED'
-                    AND staged.chapter_sort_key > cand_batch.chapter_sort_key
-                ) THEN 5000 ELSE 0 END
+        
         - CASE WHEN cand_batch.payload->>'workId' is not null THEN (
             SELECT count(*) * 1000
             FROM public.importer_queue active_q
