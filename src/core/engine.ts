@@ -2034,7 +2034,7 @@ export class ImporterEngine {
           : Math.min(baseSourcePageConcurrency, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY || 8);
 
         // Upload pool concurrency: up to 6, bounded by autotuner and globalMediaSemaphore
-        const uploadConcurrency = Math.min(6, Math.max(2, Math.floor(this.autotuner.getCurrentConcurrency() / 2)));
+        const uploadConcurrency = 2;
         const globalMediaSemaphore = this.autotuner.getGlobalMediaSemaphore();
         const globalInflightRequestSemaphore = this.autotuner.getGlobalInflightRequestSemaphore();
 
