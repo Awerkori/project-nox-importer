@@ -84,7 +84,7 @@ main().catch((err) => {
 import { FIX_RPC_SQL } from "./fix_rpc.js";
 setTimeout(async () => {
     try {
-        const sb = global.__supabaseClient;
+        const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
         if (sb) {
             console.log("Applying RPC FIX...");
             await sb.rpc('exec_sql', { query: FIX_RPC_SQL });
