@@ -2350,7 +2350,7 @@ export class ImporterEngine {
                     .from('importer_chapter_mappings')
                     .update({
                       status: 'FAILED',
-                      is_gap: true,
+                      is_gap: false,
                       last_error: gapReason,
                       updated_at: new Date().toISOString(),
                     })
@@ -2364,7 +2364,7 @@ export class ImporterEngine {
                     .from('importer_chapter_manifest')
                     .update({
                       status: 'UNRESOLVED_GAP',
-                      is_gap: true,
+                      is_gap: false,
                       gap_reason: 'PERMANENT_404_UNRESOLVED',
                       last_error: gapReason,
                       last_checked_at: new Date().toISOString(),

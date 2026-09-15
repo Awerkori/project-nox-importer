@@ -468,7 +468,7 @@ export class ExistingWorksReconciler {
                             page_count: candidate.pageCount,
                             is_page_provider: s.source === primary.source,
                             status: 'PENDING',
-                            is_gap: isGap,
+                            is_gap: false,
                             last_error: null,
                         }, { onConflict: 'source,source_chapter_id' });
                     }
@@ -502,7 +502,7 @@ export class ExistingWorksReconciler {
                     page_count: s.pageCount,
                 })),
                 page_count: candidate.pageCount,
-                is_gap: status === 'UNRESOLVED_GAP',
+                is_gap: false,
                 ...(isKnownPermanentGap ? { gap_reason: 'PERMANENT_404_UNRESOLVED' } : {}),
                 last_checked_at: new Date().toISOString(),
             });
@@ -777,8 +777,8 @@ export class ExistingWorksReconciler {
                                 page_count: cand.expectedPages,
                                 is_page_provider: false,
                                 status: 'PENDING',
-                                is_gap: true,
-                                last_error: null,
+                                is_gap: false,
+                                last_error: 'No operational sources available. Sequence remains blocked.',
                             }, { onConflict: 'source,source_chapter_id' });
                         }
                     }
@@ -808,7 +808,7 @@ export class ExistingWorksReconciler {
                             page_count: cand.expectedPages,
                             is_page_provider: s.source === primary.source,
                             status: 'PENDING',
-                            is_gap: true,
+                            is_gap: false,
                             last_error: null,
                         }, { onConflict: 'source,source_chapter_id' });
                     }
