@@ -91,13 +91,13 @@ export class ImporterEngine {
         this.publicationBarrier = new PublicationBarrier(supabase);
         this.safetyBarrier = new PublicationSafetyBarrier(supabase);
         this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
-        const requestedMax = 6;
+        const requestedMax = 32;
         this.autotuner = new AdaptiveAutotuner({
-            initialConcurrency: Math.min(4, requestedMax),
+            initialConcurrency: 32,
             maxConcurrency: requestedMax,
-            maxRssMb: 350,
-            maxHeapMb: 200,
-            maxExternalAndBuffersMb: 100,
+            maxRssMb: 800,
+            maxHeapMb: 400,
+            maxExternalAndBuffersMb: 300,
             maxEventLoopLagMs: 250,
             requiredStableCycles: 3,
             cooldownPeriodMs: 10 * 1000,
