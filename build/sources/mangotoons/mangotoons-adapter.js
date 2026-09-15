@@ -141,15 +141,15 @@ export class MangoToonsAdapter {
         const w = data.obra || data.dados || data;
         const title = w.nome || w.title || `Work ${sourceWorkId}`;
         const slug = w.slug || w.nome_url || slugify(title);
-        let kind = 'MANHWA';
+        let kind = 'UNKNOWN';
         const fmt = (w.formato_nome || '').toLowerCase();
         if (fmt.includes('manga'))
-            kind = 'MANGA';
+            kind = 'UNKNOWN';
         else if (fmt.includes('manhua'))
             kind = 'MANHUA';
         else if (fmt.includes('webtoon') || fmt.includes('comic'))
             kind = 'WEBTOON';
-        let status = 'ONGOING';
+        let status = 'UNKNOWN';
         const st = (w.status_nome || '').toLowerCase();
         if (st.includes('conclu'))
             status = 'COMPLETED';

@@ -126,7 +126,7 @@ export class TaimuMangasAdapter implements SourceAdapter {
       adult?: boolean;
     }>(url);
 
-    let status: 'ONGOING' | 'COMPLETED' | 'HIATUS' | 'CANCELLED' = 'ONGOING';
+    let status: SourceWorkDetails['status'] = 'UNKNOWN';
     const s = (data.status || '').toLowerCase();
     if (s === 'completed' || s === 'finalizado') status = 'COMPLETED';
     else if (s === 'hiatus' || s === 'hiato') status = 'HIATUS';

@@ -187,13 +187,13 @@ export class HipercoolAdapter {
         const author = series.author || undefined;
         const artist = series.artist || undefined;
         const genres = (series.genres || []).map((g) => (typeof g === 'string' ? g : g.name)).filter(Boolean);
-        let kind = 'MANHWA';
+        let kind = 'UNKNOWN';
         const rawType = (series.type || '').toUpperCase();
         if (rawType.includes('MANGA'))
-            kind = 'MANGA';
+            kind = 'UNKNOWN';
         else if (rawType.includes('WEBTOON'))
             kind = 'WEBTOON';
-        let status = 'ONGOING';
+        let status = 'UNKNOWN';
         const rawStatus = (series.status || '').toLowerCase();
         if (rawStatus.includes('complet') || rawStatus.includes('finish'))
             status = 'COMPLETED';

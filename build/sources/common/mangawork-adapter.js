@@ -129,7 +129,7 @@ export class MangaWorkAdapter {
         // Genres
         const genreMatches = Array.from(html.matchAll(/itemprop="genre"[^>]*>([^<]+)<\/a>/gi));
         const genres = Array.from(new Set(genreMatches.map(m => decodeHtmlEntities(m[1].trim()))));
-        let kind = 'MANGA';
+        let kind = 'UNKNOWN';
         const lowerGenres = genres.map(g => g.toLowerCase());
         if (lowerGenres.includes('manhwa'))
             kind = 'MANHWA';

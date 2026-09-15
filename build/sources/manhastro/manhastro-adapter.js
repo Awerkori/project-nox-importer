@@ -152,7 +152,7 @@ export class ManhastroAdapter {
                 ? item.imagem
                 : `https://${item.imagem}`
             : null;
-        let kind = 'MANGA';
+        let kind = 'UNKNOWN';
         const cat = (item.categoria || '').toLowerCase();
         if (cat.includes('manhwa'))
             kind = 'MANHWA';
@@ -160,7 +160,7 @@ export class ManhastroAdapter {
             kind = 'MANHUA';
         else if (cat.includes('webtoon'))
             kind = 'WEBTOON';
-        let status = 'ONGOING';
+        let status = 'UNKNOWN';
         const st = (item.status || '').toLowerCase();
         if (st.includes('completed') || st.includes('completo'))
             status = 'COMPLETED';

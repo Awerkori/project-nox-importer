@@ -558,7 +558,7 @@ export class KuroAdapter implements SourceAdapter {
     const manga = response.manga;
     if (!manga) throw new Error(`Work not found on Kuro: ${sourceWorkId}`);
 
-    let status: 'ONGOING' | 'COMPLETED' | 'HIATUS' | 'CANCELLED' = 'ONGOING';
+    let status: SourceWorkDetails['status'] = 'UNKNOWN';
     const s = (manga.status || '').toLowerCase();
     if (s.includes('complet')) status = 'COMPLETED';
     else if (s.includes('hiat')) status = 'HIATUS';

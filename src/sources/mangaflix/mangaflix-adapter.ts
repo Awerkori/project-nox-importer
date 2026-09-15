@@ -178,7 +178,7 @@ export class MangaFlixAdapter implements SourceAdapter {
     const data = response.data;
     if (!data) throw new Error(`Manga not found on MangaFlix: ${sourceWorkId}`);
 
-    let kind: 'MANGA' | 'MANHWA' | 'MANHUA' | 'WEBTOON' = 'MANGA';
+    let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
     const ct = (data.content_type || '').toLowerCase();
     if (ct.includes('manhwa')) kind = 'MANHWA';
     else if (ct.includes('manhua')) kind = 'MANHUA';

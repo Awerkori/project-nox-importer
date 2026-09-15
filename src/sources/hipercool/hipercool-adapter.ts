@@ -214,12 +214,12 @@ export class HipercoolAdapter implements SourceAdapter {
 
     const genres: string[] = (series.genres || []).map((g: any) => (typeof g === 'string' ? g : g.name)).filter(Boolean);
 
-    let kind: SourceWorkDetails['kind'] = 'MANHWA';
+    let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
     const rawType = (series.type || '').toUpperCase();
-    if (rawType.includes('MANGA')) kind = 'MANGA';
+    if (rawType.includes('MANGA')) kind = 'UNKNOWN';
     else if (rawType.includes('WEBTOON')) kind = 'WEBTOON';
 
-    let status: SourceWorkDetails['status'] = 'ONGOING';
+    let status: SourceWorkDetails['status'] = 'UNKNOWN';
     const rawStatus = (series.status || '').toLowerCase();
     if (rawStatus.includes('complet') || rawStatus.includes('finish')) status = 'COMPLETED';
     else if (rawStatus.includes('hiat')) status = 'HIATUS';

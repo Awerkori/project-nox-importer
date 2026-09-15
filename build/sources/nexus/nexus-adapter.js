@@ -102,16 +102,16 @@ export class NexusAdapter {
             throw new Error(`Work not found on Nexus: ${sourceWorkId}`);
         }
         // Normalize kind
-        let kind = 'MANGA';
+        let kind = 'UNKNOWN';
         const rawType = (row.type || '').toUpperCase();
         if (rawType.includes('MANHWA'))
-            kind = 'MANHWA';
+            kind = 'UNKNOWN';
         else if (rawType.includes('MANHUA'))
             kind = 'MANHUA';
         else if (rawType.includes('WEBTOON'))
             kind = 'WEBTOON';
         // Normalize status
-        let status = 'ONGOING';
+        let status = 'UNKNOWN';
         const rawStatus = (row.status || '').toUpperCase();
         if (rawStatus.includes('COMPLET') || rawStatus.includes('CONCLU'))
             status = 'COMPLETED';

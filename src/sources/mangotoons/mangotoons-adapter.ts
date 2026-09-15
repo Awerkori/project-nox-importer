@@ -171,13 +171,13 @@ export class MangoToonsAdapter implements SourceAdapter {
     const title = w.nome || w.title || `Work ${sourceWorkId}`;
     const slug = w.slug || w.nome_url || slugify(title);
 
-    let kind: SourceWorkDetails['kind'] = 'MANHWA';
+    let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
     const fmt = (w.formato_nome || '').toLowerCase();
-    if (fmt.includes('manga')) kind = 'MANGA';
+    if (fmt.includes('manga')) kind = 'UNKNOWN';
     else if (fmt.includes('manhua')) kind = 'MANHUA';
     else if (fmt.includes('webtoon') || fmt.includes('comic')) kind = 'WEBTOON';
 
-    let status: SourceWorkDetails['status'] = 'ONGOING';
+    let status: SourceWorkDetails['status'] = 'UNKNOWN';
     const st = (w.status_nome || '').toLowerCase();
     if (st.includes('conclu')) status = 'COMPLETED';
     else if (st.includes('hiat') || st.includes('paus')) status = 'HIATUS';

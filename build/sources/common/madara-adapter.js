@@ -180,7 +180,7 @@ export class MadaraAdapter {
         const artistMatch = html.match(/class="[^"]*artist-content[^"]*"[\s\S]*?<a[^>]*>([^<]+)<\/a>/i);
         const artist = artistMatch ? stripHtml(artistMatch[1]) : undefined;
         // Status
-        let status = 'ONGOING';
+        let status = 'UNKNOWN';
         if (/completo|completed|finalizado/i.test(html)) {
             status = 'COMPLETED';
         }
