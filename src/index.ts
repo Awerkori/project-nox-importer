@@ -1,3 +1,6 @@
+import fsSync from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import WebSocket from 'ws';
 import { createClient } from '@supabase/supabase-js';
 import { getConfig } from './config.js';
@@ -18,7 +21,13 @@ import { HealthMonitor } from './core/health.js';
 import { diagnostics } from './core/diagnostics.js';
 
 async function main() {
-  rootLogger.info('Starting Project Nox Importer daemon...');
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  let buildCommit = 'unknown';
+  try {
+    buildCommit = fsSync.readFileSync(path.join(__dirname, 'COMMIT'), 'utf8').trim();
+  } catch (e) { /* ignore */ }
+
+  rootLogger.info(`Starting Project Nox Importer daemon... | Build: ${buildCommit}`);
 
   const config = getConfig();
 
@@ -80,3 +89,4 @@ main().catch((err) => {
   });
   process.exit(1);
 });
+// test
