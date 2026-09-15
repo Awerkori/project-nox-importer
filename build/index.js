@@ -81,5 +81,3 @@ main().catch((err) => {
     });
     process.exit(1);
 });
-// test
-// regression test
