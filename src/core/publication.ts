@@ -311,8 +311,9 @@ export class PublicationBarrier {
         return;
       }
 
-      // No alternative source available: register GAP so the work does not stall
-      this.logger.warn(`Registering publication GAP for chapter ${chapterNumber} to unblock sequence`, {
+      // No alternative source available: mark as FAILED but DO NOT register as intentional gap.
+      // The sequence must remain blocked until the gap is genuinely resolved or manually skipped.
+      this.logger.warn(`Definite failure on all sources for chapter ${chapterNumber}. Registering UNRESOLVED GAP (sequence remains blocked).`, {
         workId,
         sortKey,
         chapterNumber,
@@ -322,16 +323,15 @@ export class PublicationBarrier {
         .from('importer_chapter_mappings')
         .update({
           status: 'FAILED',
-          is_gap: true,
-          last_error: `Definite failure on ${failedSource}. Gap registered to unblock work sequence.`,
+          is_gap: false,
+          last_error: `Definite failure on ${failedSource}. Unresolved gap, sequence blocked.`,
           updated_at: new Date().toISOString(),
         })
         .eq('work_id', workId)
         .eq('chapter_sort_key', sortKey)
         .eq('source', failedSource);
 
-      // Trigger cascade to unblock waiting STAGED chapters
-      await this.runCascadeUnderLock(workId);
+      // Do NOT trigger cascade because the work sequence is correctly blocked.
     });
   }
 
