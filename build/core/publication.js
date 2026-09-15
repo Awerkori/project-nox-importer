@@ -290,11 +290,16 @@ export class PublicationBarrier {
             for (const workId of activeWorkIds) {
                 if (publishedTotal >= maxTotalPublications)
                     break;
-                const lock = this.getWorkLock(workId);
-                const count = await lock.runExclusive(async () => {
-                    return this.runCascadeUnderLock(workId, perWorkBurst);
-                });
-                publishedTotal += count;
+                try {
+                    const lock = this.getWorkLock(workId);
+                    const count = await lock.runExclusive(async () => {
+                        return this.runCascadeUnderLock(workId, perWorkBurst);
+                    });
+                    publishedTotal += count;
+                }
+                catch (workErr) {
+                    this.logger.error('Error cascading work in sweep', { workId, error: workErr?.message });
+                }
             }
             if (publishedTotal > 0) {
                 this.logger.info(`Sweep published ${publishedTotal} staged chapter(s) fairly across ${distinctWorkIds.length} work(s)`);
