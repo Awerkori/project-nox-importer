@@ -142,13 +142,13 @@ export const DEFAULT_SOURCE_LIMIT = {
 };
 const DEFAULT_AUTOTUNER_CONFIG = {
     minConcurrency: 1,
-    maxConcurrency: 4,
-    initialConcurrency: 2,
+    maxConcurrency: 32,
+    initialConcurrency: 32,
     requiredStableCycles: 3,
     cooldownPeriodMs: 25 * 1000,
-    maxRssMb: 260,
-    maxHeapMb: 160,
-    maxExternalAndBuffersMb: 60,
+    maxRssMb: 800,
+    maxHeapMb: 400,
+    maxExternalAndBuffersMb: 300,
     maxEventLoopLagMs: 100,
 };
 export class AdaptiveAutotuner {
