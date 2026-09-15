@@ -1,0 +1,16 @@
+import { createClient } from '@supabase/supabase-js';
+import { readFileSync } from 'fs';
+const envRaw = readFileSync('/home/awerkori/.Projects/project-nox-importer/.env', 'utf8');
+const env = {};
+for (const line of envRaw.split('\n')) { 
+  const m = line.match(/^([A-Z_]+)=(.*)$/); 
+  if (m) env[m[1]] = m[2].trim(); 
+}
+const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+async function run() {
+  const { count: c1 } = await supabase.from('importer_chapter_mappings').select('*', {count: 'exact', head: true}).eq('status', 'STAGED');
+  const { count: c2 } = await supabase.from('importer_chapter_mappings').select('*', {count: 'exact', head: true}).eq('status', 'PENDING');
+  console.log('Staged mappings:', c1);
+  console.log('Pending mappings:', c2);
+}
+run();

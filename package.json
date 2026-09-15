@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "prepare:discloud": "npm run test && npm run build",
-    "build": "tsc && git rev-parse --short HEAD > build/COMMIT 2>/dev/null || echo unknown > build/COMMIT",
+    "build": "tsc && node scripts/build-id.mjs",
     "start": "node --max-old-space-size=288 build/index.js",
     "package:discloud": "python3 scripts/package-discloud.py",
     "test": "vitest run",
@@ -19,6 +19,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",
     "dotenv": "^16.4.7",
+    "puppeteer-core": "^25.11.0",
     "ws": "^8.21.3",
     "zod": "^3.24.2"
   },
