@@ -17,8 +17,10 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "@supabase/supabase-js": "^2.49.1",
     "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.45.2",
     "puppeteer-core": "^25.11.0",
     "ws": "^8.21.3",
     "zod": "^3.24.2"
@@ -27,6 +29,7 @@
     "@electric-sql/pglite": "^0.5.8",
     "@types/node": "^22.13.9",
     "@types/ws": "^8.18.1",
+    "drizzle-kit": "^0.31.10",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
     "vitest": "^3.0.7"
