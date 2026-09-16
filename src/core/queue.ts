@@ -1,4 +1,5 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { db, schema } from '../db/index.js';
+import { eq, and, or, lt, lte, desc, asc, inArray, sql } from 'drizzle-orm';
 import { Logger } from './logger.js';
 
 export type TaskType = 'DISCOVER_WORKS' | 'SYNC_WORK' | 'IMPORT_CHAPTER';
@@ -47,7 +48,7 @@ export interface QueueJob {
 export class ImporterQueue {
   private logger = new Logger('Queue');
 
-  constructor(private supabase: SupabaseClient, private workerId: string) {}
+  constructor(private  private workerId: string) {}
 
   /**
    * Enqueue a new task safely with deduplication key and optional deterministic sort key
@@ -72,7 +73,7 @@ export class ImporterQueue {
       insertRow.chapter_sort_key = chapterSortKey;
     }
 
-    const { error } = await this.supabase.from('importer_queue').insert(insertRow);
+    const { error } = await db.insert(schema.importerQueue).values(insertRow as any).then(() => ({ error: null })).catch((error) => ({ error }));
 
     if (error) {
       // Conflict on dedupe_key: check if job failed/cancelled and needs revival
@@ -229,7 +230,54 @@ export class ImporterQueue {
       params.p_task_type = taskType;
     }
 
-    const { data, error } = await this.supabase.rpc('importer_acquire_job', params);
+    // Custom Atomic Lock for Turso
+    const { data, error } = await (async () => {
+      try {
+        const result = await db.$client.execute({
+          sql: `
+            UPDATE importer_queue
+            SET status = 'IMPORTING', locked_by = :workerId, locked_at = :now, lease_expires_at = :expiresAt, attempts = attempts + 1
+            WHERE id = (
+              SELECT q.id FROM importer_queue q
+              LEFT JOIN settings s ON s.key = 'publication_safety_barrier'
+              LEFT JOIN importer_staff_requests sr ON sr.status IN ('QUEUED', 'IMPORTING', 'RETRYING')
+              WHERE (q.status = 'QUEUED' AND q.next_run_at <= :now)
+                 OR (q.status = 'IMPORTING' AND q.lease_expires_at < :now)
+                 -- Advanced filters
+                 AND (:source IS NULL OR q.source = :source)
+                 AND (:taskType IS NULL OR q.task_type = :taskType)
+                 -- Barrier checks
+                 AND (
+                   s.value IS NULL 
+                   OR json_extract(s.value, '$.open') = 1 
+                   OR (q.task_type != 'SYNC_WORK' AND q.task_type != 'IMPORT_CHAPTER')
+                 )
+                 -- Focus mode
+                 AND (
+                   sr.id IS NULL 
+                   OR (
+                     q.payload LIKE '%' || sr.work_id || '%' 
+                   )
+                 )
+              ORDER BY q.priority DESC, q.next_run_at ASC
+              LIMIT 1
+            )
+            RETURNING *;
+          `,
+          args: {
+            workerId: this.workerId,
+            now: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 5 * 60000).toISOString(),
+            source: params.p_source || null,
+            taskType: params.p_task_type || null
+          }
+        });
+        return { data: result.rows, error: null };
+      } catch (e) {
+        return { data: null, error: e };
+      }
+    })();
+
 
     if (error) {
       this.logger.error('Error acquiring queue job', { error: error.message, source });
@@ -282,13 +330,15 @@ export class ImporterQueue {
       ? `${Math.max(1, Math.round(retryDelaySeconds))} seconds`
       : null;
 
-    const { data, error } = await this.supabase.rpc('importer_release_job', {
-      p_job_id: jobId,
-      p_worker_id: this.workerId,
-      p_status: status,
-      p_error: lastError ?? null,
-      p_retry_delay: retryDelay,
-    });
+    const { data, error } = await (async () => {
+      try {
+        const result = await db.$client.execute({
+          sql: "UPDATE importer_queue SET status = :status, next_run_at = :nextRunAt, last_error = :err, locked_by = NULL, locked_at = NULL, lease_expires_at = NULL WHERE id = :jobId RETURNING id",
+          args: { jobId: params.job_id, status: params.status, nextRunAt: params.next_run_at || new Date().toISOString(), err: params.error_msg || null }
+        });
+        return { data: true, error: null };
+      } catch(e) { return { data: null, error: e }; }
+    })();
 
     if (error) {
       this.logger.error('Failed to release job', { jobId, status, error: error.message });
@@ -369,7 +419,15 @@ export class ImporterQueue {
 
     // 1. First attempt atomic RPC if available in database
     try {
-      const { data: rpcRes, error: rpcErr } = await this.supabase.rpc('importer_recover_stalled_leases');
+      const { data: rpcRes, error: rpcErr } = await (async () => {
+      try {
+        const result = await db.$client.execute({
+          sql: "UPDATE importer_queue SET status = 'QUEUED', locked_by = NULL, locked_at = NULL, lease_expires_at = NULL WHERE status = 'IMPORTING' AND lease_expires_at < :now RETURNING id",
+          args: { now: new Date().toISOString() }
+        });
+        return { data: result.rows.length, error: null };
+      } catch(e) { return { data: null, error: e }; }
+    })();
       if (!rpcErr && rpcRes && rpcRes.length > 0) {
         const rec = Number(rpcRes[0].recovered_count ?? 0);
         const fld = Number(rpcRes[0].failed_count ?? 0);

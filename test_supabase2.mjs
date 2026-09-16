@@ -1,0 +1,21 @@
+import { createClient } from '@supabase/supabase-js';
+import dotenv from 'dotenv';
+dotenv.config();
+
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+async function runTests() {
+  let start = Date.now();
+  let resPending = await supabase.from('importer_jobs').select('id', { count: 'exact', head: true }).eq('status', 'pending');
+  console.log(`Jobs pending: ${resPending.count} | time: ${Date.now() - start}ms`);
+  
+  start = Date.now();
+  let resAcquired = await supabase.from('importer_jobs').select('id', { count: 'exact', head: true }).eq('status', 'processing');
+  console.log(`Jobs processing: ${resAcquired.count} | time: ${Date.now() - start}ms`);
+  
+  // Test RPC latency
+  start = Date.now();
+  let resRpc = await supabase.rpc('importer_acquire_job', { p_worker_id: 'test-diagnostic-agent' });
+  console.log(`RPC acquire_job Time: ${Date.now() - start}ms | Error: ${resRpc.error?.message}`);
+}
+runTests();

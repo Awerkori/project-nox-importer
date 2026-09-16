@@ -41,6 +41,7 @@ describe('Generic Lease Recovery System', () => {
     await db.exec(readFileSync(resolve('migrations/005_importer_page_provider_column.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/006_importer_publication_barrier.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/007_importer_lease_recovery.sql'), 'utf8'));
+    await db.exec(`ALTER TABLE public.works ADD COLUMN IF NOT EXISTS latest_chapter_published_at timestamptz;`);
     await db.exec(readFileSync(resolve('migrations/010_importer_absolute_priority.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/011_persistent_jobs_and_staff_priority.sql'), 'utf8'));
 
