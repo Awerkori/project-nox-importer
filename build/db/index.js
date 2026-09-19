@@ -5,5 +5,4 @@
  * All database operations are now routed through the authenticated
  * Internal Worker Gateway -> Cloudflare Hyperdrive -> YugabyteDB Aeon (project_nox_prod).
  */
-
-export const db = null as any;
+export const db = null;

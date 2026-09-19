@@ -33,7 +33,7 @@ export class HealthMonitor {
   private startTime = Date.now();
   private logger = new Logger('HealthMonitor');
 
-  constructor(private storage: StorageProvider) {}
+  constructor(private storage: StorageProvider, private supabase?: any) {}
 
   async checkHealth(): Promise<HealthReport> {
     const mem = process.memoryUsage();
@@ -54,23 +54,47 @@ export class HealthMonitor {
     let dbError: string | undefined;
     const queueCounts = { queued: 0, importing: 0, failed: 0, retry: 0 };
 
-    try {
-      const { data, error } = await safeQuery(db.select({ status: schema.importerQueue.status }).from(schema.importerQueue));
-
-      if (error) {
-        dbError = (error as Error).message;
-      } else {
-        dbConnected = true;
-        for (const row of data || []) {
-          const s = (row.status || '').toLowerCase();
-          if (s === 'queued') queueCounts.queued++;
-          else if (s === 'importing') queueCounts.importing++;
-          else if (s === 'failed') queueCounts.failed++;
-          else if (s === 'retry') queueCounts.retry++;
+    if (this.supabase) {
+      try {
+        const { data, error } = await this.supabase.from('importer_queue').select('status').limit(100);
+        if (error) {
+          dbConnected = false;
+          dbError = error.message;
+        } else {
+          dbConnected = true;
+          const rows = Array.isArray(data) ? data : [];
+          for (const row of rows) {
+            const s = (row.status || '').toLowerCase();
+            if (s === 'queued') queueCounts.queued++;
+            else if (s === 'importing') queueCounts.importing++;
+            else if (s === 'failed') queueCounts.failed++;
+            else if (s === 'retry') queueCounts.retry++;
+          }
         }
+      } catch (err: any) {
+        dbConnected = false;
+        dbError = err?.message || 'Database error';
       }
-    } catch (err: any) {
-      dbError = err?.message;
+    } else {
+      try {
+        const { data, error } = await safeQuery(db.select({ status: schema.importerQueue.status }).from(schema.importerQueue));
+
+        if (error) {
+          dbError = (error as Error).message;
+        } else {
+          dbConnected = true;
+          const rows = Array.isArray(data) ? data : [];
+          for (const row of rows) {
+            const s = (row.status || '').toLowerCase();
+            if (s === 'queued') queueCounts.queued++;
+            else if (s === 'importing') queueCounts.importing++;
+            else if (s === 'failed') queueCounts.failed++;
+            else if (s === 'retry') queueCounts.retry++;
+          }
+        }
+      } catch (err: any) {
+        dbError = err?.message;
+      }
     }
 
     let overallStatus: HealthReport['status'] = 'HEALTHY';

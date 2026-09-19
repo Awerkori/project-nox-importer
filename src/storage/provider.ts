@@ -25,6 +25,7 @@ export interface StorageProvider {
    */
   getProviderKey(): string;
 
-  getLastBotReference?(): string;
-  getLastShardId?(): string | null;
+  getLastBotReference?(id?: string): string;
+  getLastShardId?(id?: string): string | null;
+  getLastChannelId?(id?: string): string | null;
 }

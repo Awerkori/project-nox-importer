@@ -1,5 +1,4 @@
-import { db, schema } from '../db/index.js';
-import { eq, sql } from 'drizzle-orm';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { Logger } from './logger.js';
 
 export interface SourceCheckpoint {

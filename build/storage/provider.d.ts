@@ -22,6 +22,7 @@ export interface StorageProvider {
      * Return canonical provider identifier for public.media ('telegram', 'supabase', etc.)
      */
     getProviderKey(): string;
-    getLastBotReference?(): string;
-    getLastShardId?(): string | null;
+    getLastBotReference?(id?: string): string;
+    getLastShardId?(id?: string): string | null;
+    getLastChannelId?(id?: string): string | null;
 }

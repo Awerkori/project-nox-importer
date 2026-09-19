@@ -11,3 +11,6 @@ yarn-error.log*
 coverage/
 supabase/
 test-import*.mjs
+config/
+scripts/*.pid
+scripts/*.log

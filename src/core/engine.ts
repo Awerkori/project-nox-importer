@@ -94,9 +94,9 @@ export class ImporterEngine {
     this.publicationBarrier = new PublicationBarrier(supabase);
     this.safetyBarrier = new PublicationSafetyBarrier(supabase);
     this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
-    const requestedMax = 2;
+    const requestedMax = config.MAX_CONCURRENT_CHAPTERS;
     this.autotuner = new AdaptiveAutotuner({
-      initialConcurrency: Math.min(4, requestedMax),
+      initialConcurrency: Math.min(requestedMax, 4),
       maxConcurrency: requestedMax,
       maxRssMb: 350,
       maxHeapMb: 200,

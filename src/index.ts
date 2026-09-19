@@ -2,7 +2,8 @@ import fsSync from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import WebSocket from 'ws';
-import { createClient } from '@supabase/supabase-js';
+import { ImporterGatewayClient } from './core/gateway-client.js';
+import { GatewaySupabaseClient } from './core/gateway-supabase.js';
 import { getConfig } from './config.js';
 
 // Polyfill native WebSocket for Node environments (e.g. Node 20 on DIScloud) where native WebSocket is missing
@@ -13,6 +14,7 @@ import { rootLogger } from './core/logger.js';
 import { HostRateLimiter } from './core/rate-limiter.js';
 import { SourceRegistry } from './sources/registry.js';
 import { StorageProvider } from './storage/provider.js';
+import { DirectTelegramStorageProvider } from './storage/direct-telegram.js';
 import { NoxWorkerStorageProvider } from './storage/worker.js';
 import { TelegramStorageProvider } from './storage/telegram.js';
 import { MockStorageProvider } from './storage/mock.js';
@@ -31,33 +33,27 @@ async function main() {
 
   const config = getConfig();
 
-  // 1. Initialize Supabase Client with service_role
-  const supabase = createClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  // 1. Initialize Internal Gateway & Database Adapter (Dedicated Worker + Dedicated Hyperdrive -> YugabyteDB Aeon)
+  const gateway = new ImporterGatewayClient(config.NOX_IMPORTER_GATEWAY_URL, config.NOX_STORAGE_BRIDGE_TOKEN || '');
+  const supabase = new GatewaySupabaseClient(gateway) as any;
 
   // 2. Initialize Storage Provider
   let storage: StorageProvider;
-  if (config.STORAGE_PROVIDER === 'worker') {
+  if (config.STORAGE_PROVIDER === 'direct_telegram' || config.STORAGE_PROVIDER === 'telegram') {
+    storage = new DirectTelegramStorageProvider();
+  } else if (config.STORAGE_PROVIDER === 'worker') {
     if (!config.NOX_STORAGE_BRIDGE_TOKEN) {
       rootLogger.warn('Bridge token not provided, falling back to mock storage for safety');
       storage = new MockStorageProvider();
     } else {
       storage = new NoxWorkerStorageProvider(config.NOX_MANGA_URL, config.NOX_STORAGE_BRIDGE_TOKEN);
     }
-  } else if (config.STORAGE_PROVIDER === 'telegram') {
-    if (!config.TELEGRAM_BOT_TOKEN || !config.TELEGRAM_CHAT_ID) {
-      rootLogger.warn('Telegram credentials not provided, falling back to mock storage for safety');
-      storage = new MockStorageProvider();
-    } else {
-      storage = new TelegramStorageProvider(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID);
-    }
   } else {
     storage = new MockStorageProvider();
   }
 
   // 3. Health & Readiness check
-  const health = new HealthMonitor(supabase, storage);
+  const health = new HealthMonitor(storage, supabase);
   const telemetry = await health.getCompactTelemetry();
   rootLogger.info(`Initial boot status: ${telemetry}`);
 
@@ -89,14 +85,3 @@ main().catch((err) => {
   });
   process.exit(1);
 });
-import { FIX_RPC_SQL } from "./fix_rpc.js";
-setTimeout(async () => {
-  try {
-    const sb = (global as any).__supabaseClient;
-    if (sb) {
-      console.log("Applying RPC FIX...");
-      await sb.rpc('exec_sql', { query: FIX_RPC_SQL });
-      console.log("RPC FIX APPLIED!");
-    }
-  } catch(e) { console.error(e); }
-}, 10000);

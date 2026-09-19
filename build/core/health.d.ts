@@ -1,4 +1,3 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
 import { StorageProvider } from '../storage/provider.js';
 export interface HealthReport {
     status: 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY';
@@ -25,11 +24,11 @@ export interface HealthReport {
     timestamp: string;
 }
 export declare class HealthMonitor {
-    private supabase;
     private storage;
+    private supabase?;
     private startTime;
     private logger;
-    constructor(supabase: SupabaseClient, storage: StorageProvider);
+    constructor(storage: StorageProvider, supabase?: any | undefined);
     checkHealth(): Promise<HealthReport>;
     getCompactTelemetry(): Promise<string>;
 }

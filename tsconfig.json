@@ -14,5 +14,5 @@
     "declaration": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "build", "dist", "tests"]
+  "exclude": ["node_modules", "build", "dist", "tests", "src/**/__tests__/*"]
 }
