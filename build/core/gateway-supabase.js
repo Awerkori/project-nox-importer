@@ -116,6 +116,15 @@ export class QueryBuilder {
         this.limitCount = 1;
         return this;
     }
+    isJsonCol(c) {
+        return c === 'metadata' || c === 'payload' || c === 'metadata_provenance' || c === 'blocked_details' || c === 'config' || c === 'progress_details' || c === 'stages';
+    }
+    serializeVal(c, val) {
+        if (this.isJsonCol(c) && typeof val === 'object' && val !== null) {
+            return JSON.stringify(val);
+        }
+        return val;
+    }
     buildSql() {
         const params = [];
         let pIdx = 1;
@@ -186,10 +195,9 @@ export class QueryBuilder {
             for (const row of rows) {
                 const tupleCols = [];
                 for (const c of cols) {
-                    const val = row[c];
+                    const val = this.serializeVal(c, row[c]);
                     params.push(val);
-                    // Cast known jsonb or array columns if needed
-                    if (c === 'metadata' || c === 'payload' || c === 'metadata_provenance') {
+                    if (this.isJsonCol(c)) {
                         tupleCols.push(`$${pIdx++}::jsonb`);
                     }
                     else if (c === 'aliases') {
@@ -201,7 +209,11 @@ export class QueryBuilder {
                 }
                 valueTuples.push(`(${tupleCols.join(', ')})`);
             }
-            const query = `INSERT INTO "${this.table}" (${cols.map(c => `"${c}"`).join(', ')}) VALUES ${valueTuples.join(', ')} RETURNING *`;
+            let conflictClause = '';
+            if (this.onConflict) {
+                conflictClause = ` ON CONFLICT (${this.onConflict.split(',').map(c => `"${c.trim()}"`).join(', ')}) DO NOTHING`;
+            }
+            const query = `INSERT INTO "${this.table}" (${cols.map(c => `"${c}"`).join(', ')}) VALUES ${valueTuples.join(', ')}${conflictClause} RETURNING *`;
             return { sql: query, params };
         }
         if (this.op === 'UPSERT') {
@@ -213,9 +225,9 @@ export class QueryBuilder {
             for (const row of rows) {
                 const tupleCols = [];
                 for (const c of cols) {
-                    const val = row[c];
+                    const val = this.serializeVal(c, row[c]);
                     params.push(val);
-                    if (c === 'metadata' || c === 'payload' || c === 'metadata_provenance') {
+                    if (this.isJsonCol(c)) {
                         tupleCols.push(`$${pIdx++}::jsonb`);
                     }
                     else if (c === 'aliases') {
@@ -243,9 +255,9 @@ export class QueryBuilder {
             const cols = Object.keys(this.updateData);
             const setClauses = [];
             for (const c of cols) {
-                const val = this.updateData[c];
+                const val = this.serializeVal(c, this.updateData[c]);
                 params.push(val);
-                if (c === 'metadata' || c === 'payload' || c === 'metadata_provenance') {
+                if (this.isJsonCol(c)) {
                     setClauses.push(`"${c}" = $${pIdx++}::jsonb`);
                 }
                 else if (c === 'aliases') {
@@ -283,7 +295,8 @@ export class QueryBuilder {
             return { data: rows, error: null, count: rows.length };
         }
         catch (err) {
-            return { data: null, error: { message: err?.message || 'Database execution error' }, count: 0 };
+            const isDup = err?.code === '23505' || err?.message?.includes('duplicate key');
+            return { data: null, error: { message: err?.message || 'Database execution error', code: isDup ? '23505' : err?.code }, count: 0 };
         }
     }
     then(onfulfilled, onrejected) {
