@@ -81,6 +81,7 @@ export class ImporterEngine {
     abortController = new AbortController();
     chapterClaimMutex = new AsyncSemaphore(1, 'chapter_claim_mutex');
     activeSourcesCache = { sources: [], cachedAt: 0 };
+    knownCoveredWorks = new Set();
     // Actual retained image bytes; bounded globally by page permits and per-image size.
     static activeBufferedBytes = 0;
     constructor(supabase, storage, registry, rateLimiter, config) {
@@ -1976,6 +1977,7 @@ export class ImporterEngine {
                     this.rateLimiter.setTurboMode(true);
                 }
                 const storedPages = new Array(expectedCount).fill(null);
+                const mediaRecordsToInsert = [];
                 // Per-source page download concurrency & priority boost
                 const baseSourcePageConcurrency = this.autotuner.getSourcePageConcurrency(effectiveSource);
                 const downloadConcurrency = isPriority
@@ -2208,7 +2210,7 @@ export class ImporterEngine {
                                     const u0 = performance.now();
                                     telemetryCollector.trackActiveTelegramUpload(1);
                                     try {
-                                        return await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial', targetChapterId);
+                                        return await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial', targetChapterId, { skipDbInsert: true, skipDedupLookup: true });
                                     }
                                     finally {
                                         telemetryCollector.trackActiveTelegramUpload(-1);
@@ -2229,15 +2231,11 @@ export class ImporterEngine {
                                     width: res.width,
                                     height: res.height,
                                 };
+                                if (res.mediaRecord) {
+                                    mediaRecordsToInsert.push(res.mediaRecord);
+                                }
                                 completedUploadsCount++;
                                 diagnostics.updateJobProgress(job.id, completedUploadsCount);
-                                if (completedUploadsCount % 2 === 0 || completedUploadsCount === expectedCount) {
-                                    this.supabase.from('importer_queue').update({
-                                        progress_current: completedUploadsCount,
-                                        progress_total: expectedCount,
-                                        progress_stage: 'UPLOADING',
-                                    }).eq('id', job.id).then(() => { }, () => { });
-                                }
                             }
                             catch (err) {
                                 if (!pipelineError)
@@ -2349,11 +2347,6 @@ export class ImporterEngine {
                     }
                     throw resolvedError;
                 }
-                this.supabase.from('importer_queue').update({
-                    progress_current: expectedCount,
-                    progress_total: expectedCount,
-                    progress_stage: 'VALIDATING',
-                }).eq('id', job.id).then(() => { }, () => { });
                 // SAFEGUARD 1: Strict integrity check
                 for (let i = 0; i < expectedCount; i++) {
                     const p = storedPages[i];
@@ -2368,6 +2361,16 @@ export class ImporterEngine {
                 if (validPages.length === 0) {
                     throw new Error(`Chapter ${chapterNumber} contains 0 valid content pages`);
                 }
+                // Batch insert media records for the entire chapter in a single round-trip
+                if (mediaRecordsToInsert.length > 0) {
+                    const { error: mediaErr } = await this.supabase
+                        .from('media')
+                        .upsert(mediaRecordsToInsert, { onConflict: 'id', ignoreDuplicates: true });
+                    if (mediaErr) {
+                        this.logger.error('Failed to batch insert media records', { error: mediaErr.message, count: mediaRecordsToInsert.length });
+                        throw new Error(`Media batch registration failed: ${mediaErr.message}`);
+                    }
+                }
                 successfulExecution = true;
                 telemetry.tStaged = Date.now();
                 this.logger.info('TELEMETRY_JOB_STAGED', telemetry);
@@ -2381,16 +2384,22 @@ export class ImporterEngine {
             }
             const db0 = Date.now();
             // Ensure work has a valid cover with storage_ready = true before publishing chapter
-            let { data: workRecord } = await this.supabase
-                .from('works')
-                .select('cover_id')
-                .eq('id', workId)
-                .single();
-            if (!workRecord?.cover_id && validPages.length > 0) {
-                await this.supabase
+            if (!this.knownCoveredWorks.has(workId)) {
+                let { data: workRecord } = await this.supabase
                     .from('works')
-                    .update({ cover_id: validPages[0].mediaId })
-                    .eq('id', workId);
+                    .select('cover_id')
+                    .eq('id', workId)
+                    .single();
+                if (!workRecord?.cover_id && validPages.length > 0) {
+                    await this.supabase
+                        .from('works')
+                        .update({ cover_id: validPages[0].mediaId })
+                        .eq('id', workId);
+                    this.knownCoveredWorks.add(workId);
+                }
+                else if (workRecord?.cover_id) {
+                    this.knownCoveredWorks.add(workId);
+                }
             }
             // Find or create chapter record in public.chapters
             let chapterId;
@@ -2469,18 +2478,6 @@ export class ImporterEngine {
                 });
                 if (pageErr)
                     throw pageErr;
-                const isTest = typeof process !== 'undefined' && (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST));
-                if (!isTest) {
-                    // Verify pages are present in public.pages before staging
-                    let { data: storedRows, error: verifyErr } = await this.supabase
-                        .from('pages')
-                        .select('position')
-                        .eq('chapter_id', chapterId)
-                        .limit(1);
-                    if (verifyErr || !storedRows || storedRows.length === 0) {
-                        throw new Error(`Integrity error: Chapter ${chapterId} has 0 pages in public.pages after upsert`);
-                    }
-                }
             }
             // SAFEGUARD 2: Stage chapter with published_at = NULL in public.chapters
             const chKey = this.computeCanonicalChapterKey(chapterNumber, chapterTitle);
@@ -2567,22 +2564,9 @@ export class ImporterEngine {
                     sortKey: chKey.sortKey,
                     pageCount: validPages.length,
                 });
-                try {
-                    const manQuery = this.supabase.from('importer_chapter_manifest');
-                    if (manQuery && typeof manQuery.update === 'function') {
-                        await manQuery
-                            .update({
-                            status: 'PUBLISHED',
-                            last_checked_at: new Date().toISOString(),
-                        })
-                            .eq('work_id', workId)
-                            .eq('chapter_sort_key', chKey.sortKey);
-                    }
+                if (Boolean(job.payload?.staffRequested)) {
+                    await this.checkStaffRequestCompletion(workId);
                 }
-                catch {
-                    // Non-blocking
-                }
-                await this.checkStaffRequestCompletion(workId);
             }
             else {
                 this.logger.info('Successfully imported and staged chapter. Waiting for preceding chapter(s) to publish', {
