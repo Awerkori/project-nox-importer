@@ -298,27 +298,46 @@ export async function heartbeatDirect(workerId, jobs) {
     }
     return updates;
 }
-/* 3. Direct Fail / Retry Batch */
+/* 3. Direct Fail / Retry / Complete Batch */
 export async function failBatchDirect(jobs) {
     const p = getYugabytePool();
     let updatedCount = 0;
     for (const item of jobs) {
-        const isTerminal = item.status === 'FAILED' || item.status === 'CANCELLED_BY_STAFF' || item.status === 'PAUSED_BY_STAFF';
+        const isCompleted = item.status === 'COMPLETED';
+        const isTerminal = isCompleted || item.status === 'FAILED' || item.status === 'CANCELLED_BY_STAFF' || item.status === 'PAUSED_BY_STAFF';
         const delaySec = item.retryDelaySeconds && item.retryDelaySeconds > 0 ? item.retryDelaySeconds : 60;
         const nextRun = isTerminal ? null : delaySec;
         const res = await p.query(`
       UPDATE importer_queue
       SET status = $1,
-          last_error = $2,
-          last_error_at = NOW(),
-          retry_reason = COALESCE($3, retry_reason),
+          last_error = CASE WHEN $1 = 'COMPLETED' THEN NULL ELSE $2 END,
+          last_error_at = CASE WHEN $1 = 'COMPLETED' THEN last_error_at ELSE NOW() END,
+          retry_reason = CASE WHEN $1 = 'COMPLETED' THEN NULL ELSE COALESCE($3, retry_reason) END,
+          last_recovered_error = CASE 
+            WHEN $1 = 'COMPLETED' AND last_error IS NOT NULL 
+            THEN COALESCE(last_recovered_error, 'AUTO_RECOVERED: ' || COALESCE($7::text, 'TRANSIENT_RECOVERED'))
+            ELSE last_recovered_error 
+          END,
+          recovered_at = CASE 
+            WHEN $1 = 'COMPLETED' AND last_error IS NOT NULL 
+            THEN NOW() 
+            ELSE recovered_at 
+          END,
           locked_by = NULL,
           locked_at = NULL,
           lease_expires_at = NULL,
           next_run_at = CASE WHEN $4::int IS NULL THEN NOW() ELSE NOW() + ($4::text || ' seconds')::interval END,
           updated_at = NOW()
       WHERE id = $5 AND ($6::text IS NULL OR locked_by = $6::text OR status != 'IMPORTING');
-    `, [item.status || 'RETRY', item.error || 'Unknown error', item.retryReason || null, nextRun, item.jobId, item.workerId || null]);
+    `, [
+            item.status || 'RETRY',
+            item.error || 'Unknown error',
+            item.retryReason || null,
+            nextRun,
+            item.jobId,
+            item.workerId || null,
+            item.recoveredReason || null,
+        ]);
         updatedCount += res.rowCount || 0;
     }
     return updatedCount;

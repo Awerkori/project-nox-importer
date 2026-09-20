@@ -6,8 +6,8 @@ export class CloudflareClassifier {
         const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
         if (bytes.length < 8)
             return false;
-        // JPEG: FF D8 FF
-        if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+        // JPEG: FF D8 (SOI marker)
+        if (bytes[0] === 0xff && bytes[1] === 0xd8)
             return true;
         // PNG: 89 50 4E 47 0D 0A 1A 0A
         if (bytes[0] === 0x89 &&
@@ -20,11 +20,12 @@ export class CloudflareClassifier {
             bytes[7] === 0x0a) {
             return true;
         }
-        // WebP: RIFF ... WEBP
+        // WebP: RIFF .... WEBP
         if (bytes[0] === 0x52 &&
             bytes[1] === 0x49 &&
             bytes[2] === 0x46 &&
             bytes[3] === 0x46 &&
+            bytes.length >= 12 &&
             bytes[8] === 0x57 &&
             bytes[9] === 0x45 &&
             bytes[10] === 0x42 &&
@@ -35,11 +36,12 @@ export class CloudflareClassifier {
         if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) {
             return true;
         }
-        // AVIF: ftypavif or ftypavis
-        if (bytes.length >= 12) {
-            const brand = String.fromCharCode(...bytes.slice(4, 12));
-            if (brand.includes('avif') || brand.includes('avis'))
+        // AVIF / HEIF: ftypavif, ftypavis, ftypmif1, ftypmiaf
+        if (bytes.length >= 16 && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) {
+            const brand = String.fromCharCode(...bytes.slice(8, Math.min(bytes.length, 32)));
+            if (brand.includes('avif') || brand.includes('avis') || brand.includes('mif1') || brand.includes('miaf')) {
                 return true;
+            }
         }
         return false;
     }
@@ -67,36 +69,42 @@ export class CloudflareClassifier {
                 retryAfterSeconds = parsed;
             }
         }
-        const lowerBody = (bodyText || '').toLowerCase();
+        // Extract text snippet from buffer if available (to inspect challenges even if bodyText was omitted)
+        let bufferSnippet = '';
+        if (context?.buffer) {
+            const b = context.buffer instanceof Uint8Array ? context.buffer : new Uint8Array(context.buffer);
+            bufferSnippet = new TextDecoder('utf-8', { fatal: false }).decode(b.slice(0, 8192));
+        }
+        const combinedBody = ((bodyText || '') + ' ' + bufferSnippet).toLowerCase();
         const isCloudflare = server.includes('cloudflare') ||
             Boolean(cfRay) ||
             server.includes('hcdn') ||
-            lowerBody.includes('cloudflare');
-        const hasChallengeIndicators = lowerBody.includes('just a moment...') ||
-            lowerBody.includes('cf-browser-verification') ||
-            lowerBody.includes('/cdn-cgi/challenge-platform') ||
-            lowerBody.includes('cf-turnstile') ||
-            lowerBody.includes('turnstile.render') ||
-            lowerBody.includes('/hcdn-cgi/jschallenge-validate') ||
-            lowerBody.includes('challenge-form');
-        const isTurnstile = lowerBody.includes('cf-turnstile') ||
-            lowerBody.includes('turnstile.render') ||
-            lowerBody.includes('challenges.cloudflare.com/turnstile');
-        const isJsChallenge = lowerBody.includes('/cdn-cgi/challenge-platform') ||
-            lowerBody.includes('cf-browser-verification') ||
-            lowerBody.includes('/hcdn-cgi/jschallenge-validate') ||
+            combinedBody.includes('cloudflare');
+        const hasChallengeIndicators = combinedBody.includes('just a moment...') ||
+            combinedBody.includes('cf-browser-verification') ||
+            combinedBody.includes('/cdn-cgi/challenge-platform') ||
+            combinedBody.includes('cf-turnstile') ||
+            combinedBody.includes('turnstile.render') ||
+            combinedBody.includes('/hcdn-cgi/jschallenge-validate') ||
+            combinedBody.includes('challenge-form');
+        const isTurnstile = combinedBody.includes('cf-turnstile') ||
+            combinedBody.includes('turnstile.render') ||
+            combinedBody.includes('challenges.cloudflare.com/turnstile');
+        const isJsChallenge = combinedBody.includes('/cdn-cgi/challenge-platform') ||
+            combinedBody.includes('cf-browser-verification') ||
+            combinedBody.includes('/hcdn-cgi/jschallenge-validate') ||
             (hasChallengeIndicators && !isTurnstile);
         // 1. Fake content detection (e.g. Cloudflare returns HTTP 200 HTML when image or JSON was expected)
         let isFakeContent = false;
         let isValidImage = true;
         if (context?.expectedType === 'image') {
             const isHtml = contentType.includes('text/html') ||
-                lowerBody.startsWith('<!doctype') ||
-                lowerBody.startsWith('<html') ||
-                lowerBody.includes('<title>');
+                combinedBody.startsWith('<!doctype') ||
+                combinedBody.startsWith('<html') ||
+                combinedBody.includes('<title>');
             if (context.buffer) {
-                const bufLen = context.buffer instanceof Uint8Array ? context.buffer.byteLength : context.buffer.byteLength;
-                isValidImage = this.isBinaryImage(context.buffer) || (!isHtml && bufLen > 0 && !hasChallengeIndicators);
+                // Strict verification: image MUST match magic bytes of JPEG, PNG, WebP, GIF or AVIF
+                isValidImage = this.isBinaryImage(context.buffer);
             }
             else {
                 isValidImage = !isHtml && (contentType.startsWith('image/') || !contentType);
