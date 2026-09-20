@@ -89,7 +89,8 @@ async function main() {
   rootLogger.info(`Initial boot status: ${telemetry}`);
 
   // 4. Initialize Rate Limiter & Source Registry
-  const rateLimiter = new HostRateLimiter(2.0);
+  const defaultHostRate = parseFloat(process.env.DEFAULT_HOST_RATE_PER_SECOND || '5.0');
+  const rateLimiter = new HostRateLimiter(defaultHostRate);
   const registry = new SourceRegistry(rateLimiter, config.NOX_STORAGE_BRIDGE_TOKEN, config.NOX_MANGA_URL);
 
   // 5. Initialize Importer Engine
