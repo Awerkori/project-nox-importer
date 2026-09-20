@@ -1,20 +1,34 @@
 import { Logger } from './logger.js';
 import { diagnostics } from './diagnostics.js';
+import { telemetryCollector } from './telemetry-collector.js';
+import { performance } from 'node:perf_hooks';
 export class AsyncSemaphore {
     activePermits = 0;
     maxPermits;
     waitQueue = [];
-    constructor(maxPermits) {
+    name;
+    constructor(maxPermits, name = 'unnamed_semaphore') {
         this.maxPermits = Math.max(1, maxPermits);
+        this.name = name;
     }
     async acquire(signal) {
         signal?.throwIfAborted();
+        telemetryCollector.updateLimiterConcurrency(this.name, this.activePermits, this.maxPermits);
         if (this.activePermits < this.maxPermits) {
             this.activePermits++;
+            telemetryCollector.recordLimiterWait(this.name, 0, this.maxPermits);
+            telemetryCollector.updateLimiterConcurrency(this.name, this.activePermits, this.maxPermits);
             return;
         }
+        const t0 = performance.now();
         return new Promise((resolve, reject) => {
-            const granted = () => { signal?.removeEventListener('abort', cancelled); resolve(); };
+            const granted = () => {
+                signal?.removeEventListener('abort', cancelled);
+                const waitMs = performance.now() - t0;
+                telemetryCollector.recordLimiterWait(this.name, waitMs, this.maxPermits);
+                telemetryCollector.updateLimiterConcurrency(this.name, this.activePermits, this.maxPermits);
+                resolve();
+            };
             const cancelled = () => {
                 const index = this.waitQueue.indexOf(granted);
                 if (index >= 0)
@@ -29,6 +43,7 @@ export class AsyncSemaphore {
         if (this.activePermits === 0)
             throw new Error('Semaphore released without an active permit');
         this.activePermits--;
+        telemetryCollector.updateLimiterConcurrency(this.name, this.activePermits, this.maxPermits);
         this.drain();
     }
     drain() {
@@ -157,7 +172,7 @@ export class AdaptiveAutotuner {
     sourceSemaphores = new Map();
     globalMediaSemaphore;
     globalInflightRequestSemaphore;
-    bufferedPageSemaphore = new AsyncSemaphore(60);
+    bufferedPageSemaphore = new AsyncSemaphore(60, 'buffered_page_semaphore');
     currentConcurrency;
     stableCycleCount = 0;
     cooldownUntil = 0;
@@ -169,9 +184,9 @@ export class AdaptiveAutotuner {
     constructor(config = {}) {
         this.config = { ...DEFAULT_AUTOTUNER_CONFIG, ...config };
         this.currentConcurrency = this.config.initialConcurrency;
-        this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency);
-        this.globalMediaSemaphore = new AsyncSemaphore(12); // Safe bounded concurrent image uploads // Safe bounded concurrent image uploads
-        this.globalInflightRequestSemaphore = new AsyncSemaphore(32); // Bounded network download budget
+        this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency, 'global_chapter_semaphore');
+        this.globalMediaSemaphore = new AsyncSemaphore(12, 'telegram_media_semaphore');
+        this.globalInflightRequestSemaphore = new AsyncSemaphore(32, 'global_download_inflight_semaphore');
     }
     getGlobalChapterSemaphore() {
         return this.globalChapterSemaphore;
@@ -196,7 +211,7 @@ export class AdaptiveAutotuner {
         let sem = this.sourceSemaphores.get(source);
         if (!sem) {
             const configuredLimit = limitPerSource ?? this.getSourceLimits(source).maxChapters;
-            sem = new AsyncSemaphore(configuredLimit);
+            sem = new AsyncSemaphore(configuredLimit, `source_semaphore:${source}`);
             this.sourceSemaphores.set(source, sem);
         }
         return sem;

@@ -1,4 +1,6 @@
 import { Logger } from './logger.js';
+import { telemetryCollector } from './telemetry-collector.js';
+import { performance } from 'node:perf_hooks';
 
 interface Bucket {
   tokens: number;
@@ -107,6 +109,7 @@ export class HostRateLimiter {
    */
   async acquire(host: string): Promise<void> {
     const bucket = this.getBucket(host);
+    const t0 = performance.now();
 
     while (true) {
       const now = Date.now();
@@ -129,6 +132,8 @@ export class HostRateLimiter {
         // Apply micro-jitter (5-15ms) to avoid perfectly periodic bursts
         const jitter = Math.floor(Math.random() * 10) + 5;
         await this.sleep(jitter);
+        const actualWaitMs = performance.now() - t0;
+        telemetryCollector.recordRateLimitWait(host, actualWaitMs);
         return;
       }
 

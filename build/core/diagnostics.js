@@ -1,4 +1,5 @@
 import { Logger } from './logger.js';
+import { telemetryCollector } from './telemetry-collector.js';
 export class EventLoopLagMonitor {
     timer = null;
     lastCheck = Date.now();
@@ -22,6 +23,10 @@ export class EventLoopLagMonitor {
             if (lag > this.maxLagMs) {
                 this.maxLagMs = lag;
             }
+            try {
+                telemetryCollector.recordEventLoopLag(lag);
+            }
+            catch { }
         }, this.intervalMs);
         this.timer.unref();
     }

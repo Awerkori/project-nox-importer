@@ -1,4 +1,5 @@
 import { Logger } from './logger.js';
+import { telemetryCollector } from './telemetry-collector.js';
 
 export interface ActiveJobContext {
   jobId: string;
@@ -69,6 +70,9 @@ export class EventLoopLagMonitor {
       if (lag > this.maxLagMs) {
         this.maxLagMs = lag;
       }
+      try {
+        telemetryCollector.recordEventLoopLag(lag);
+      } catch {}
     }, this.intervalMs);
     this.timer.unref();
   }

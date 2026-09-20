@@ -16,6 +16,8 @@ import { SourceCircuitBreaker } from './circuit-breaker.js';
 import { SharedNetworkDetector } from './shared-network-detector.js';
 import { SourceAdmissionGate } from './source-admission-gate.js';
 import { PublicationSafetyBarrier } from './publication-safety-barrier.js';
+import { telemetryCollector } from './telemetry-collector.js';
+import { performance } from 'node:perf_hooks';
 export { computeCanonicalChapterKey };
 export class JobCancelledByStaffError extends Error {
     jobId;
@@ -758,8 +760,10 @@ export class ImporterEngine {
         await Promise.all(slots);
     }
     async runGeneralSlot(slotIndex) {
+        telemetryCollector.registerSlot(slotIndex);
         // 1. Initial runner startup stagger (50-150ms per slot index) to prevent all runners opening simultaneously
         if (slotIndex > 0) {
+            telemetryCollector.setSlotState(slotIndex, 'IDLE');
             const initialStaggerMs = slotIndex * 80 + Math.floor(Math.random() * 50);
             await this.sleep(initialStaggerMs);
         }
@@ -767,14 +771,18 @@ export class ImporterEngine {
         while (!this.stopSignal) {
             try {
                 // 0. Enforce PublicationSafetyBarrier: if CLOSED or RECOVERING, hold 0 permits, 0 slots
+                telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_PUBLICATION_BARRIER');
                 const canAcquire = await this.safetyBarrier.canAcquireChapters();
                 if (!canAcquire) {
                     await this.sleep(3000);
                     continue;
                 }
                 // 1. Jitter between acquisitions (40-120ms) to avoid simultaneous claims on Gateway/Hyperdrive
+                telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 const claimJitterMs = 40 + Math.floor(Math.random() * 80);
                 await this.sleep(claimJitterMs);
+                telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_JOB');
+                const claimT0 = performance.now();
                 await globalSem.acquire();
                 let job = null;
                 try {
@@ -782,25 +790,32 @@ export class ImporterEngine {
                 }
                 catch (acquireErr) {
                     globalSem.release();
+                    telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_RETRY_BACKOFF');
                     await this.sleep(3000);
                     continue;
                 }
                 if (!job) {
                     globalSem.release();
+                    telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_JOB');
                     await this.sleep(6000);
                     continue;
                 }
+                const claimDurationMs = performance.now() - claimT0;
                 const sourceSem = this.autotuner.getSourceSemaphore(job.source);
                 // Claim admission is finished. Never hold global capacity while waiting for a source.
                 globalSem.release();
                 const cancelled = new AbortController();
                 const waitingLease = this.queue.startHeartbeat(job.id, this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS, () => cancelled.abort());
                 let executing = false;
+                const semWaitT0 = performance.now();
+                telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_SOURCE', job.source);
                 try {
                     await withSourceChapterPermits(sourceSem, globalSem, async () => {
+                        const semWaitMs = performance.now() - semWaitT0;
                         waitingLease.stop();
                         executing = true;
-                        await this.executeJobDirectly(job);
+                        telemetryCollector.setSlotState(slotIndex, 'ACTIVE_PROCESSING', `${job.source} ch ${job.payload?.chapterNumber}`);
+                        await this.executeJobDirectly(job, { claimDurationMs, semWaitMs });
                     }, AbortSignal.any([this.abortController.signal, cancelled.signal, AbortSignal.timeout(12 * 60 * 1000)]));
                 }
                 catch (err) {
@@ -810,10 +825,12 @@ export class ImporterEngine {
                 }
                 finally {
                     waitingLease.stop();
+                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 }
                 await this.sleep(50);
             }
             catch (err) {
+                telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 this.logger.error(`Error in general worker slot ${slotIndex}`, { error: err?.message });
                 await this.sleep(5000);
             }
@@ -850,7 +867,7 @@ export class ImporterEngine {
     /**
      * Executes a job with active lease heartbeat and hard timeout watchdog.
      */
-    async executeJobDirectly(job) {
+    async executeJobDirectly(job, extraTiming) {
         // ADMISSION GATE: Catalog Discovery Global Guard
         if (job.task_type === 'DISCOVER_WORKS' || job.task_type === 'SYNC_WORK') {
             const isDiscoveryAllowed = await this.isDiscoveryAllowed();
@@ -900,7 +917,7 @@ export class ImporterEngine {
             }, maxJobDurationMs);
         });
         try {
-            const executionPromise = this.processJob(job, () => cancelSignalTriggered);
+            const executionPromise = this.processJob(job, () => cancelSignalTriggered, extraTiming);
             await Promise.race([executionPromise, timeoutPromise]);
         }
         finally {
@@ -1033,7 +1050,7 @@ export class ImporterEngine {
             }
         }
     }
-    async processJob(job, isCancelled) {
+    async processJob(job, isCancelled, extraTiming) {
         try {
             // Checkpoint 0: Staff cancellation pre-flight check
             if (job.cancel_requested || isCancelled?.() || (await this.queue.isCancelRequested(job.id))) {
@@ -1145,7 +1162,7 @@ export class ImporterEngine {
                     await this.handleSyncWork(job);
                     break;
                 case 'IMPORT_CHAPTER':
-                    await this.handleImportChapter(job, isCancelled);
+                    await this.handleImportChapter(job, isCancelled, extraTiming);
                     break;
                 default:
                     throw new Error(`Unknown task type: ${job.task_type}`);
@@ -1646,7 +1663,17 @@ export class ImporterEngine {
     computeChapterSortKey(chapterNumber, chapterTitle) {
         return this.computeCanonicalChapterKey(chapterNumber, chapterTitle).sortKey;
     }
-    async handleImportChapter(job, isCancelled) {
+    async handleImportChapter(job, isCancelled, extraTiming) {
+        const jobStart = performance.now();
+        const metaStart = performance.now();
+        let sourceFetchMs = 0;
+        let pageResolutionMs = 0;
+        let chDownloadMs = 0;
+        let chTelegramUploadMs = 0;
+        let chRateLimitWaitMs = 0;
+        let chDownloadSemWaitMs = 0;
+        let chTelegramSemWaitMs = 0;
+        let metadataLoadMs = 0;
         let { sourceWorkId, sourceChapterId, workId, workMappingId, chapterNumber, chapterTitle, } = job.payload;
         if (!sourceChapterId || !workId || chapterNumber === undefined) {
             throw new Error('Incomplete chapter import payload');
@@ -1953,8 +1980,12 @@ export class ImporterEngine {
                             }
                             let pageUrl = pageUrls[idx];
                             const parsedUrl = new URL(pageUrl);
+                            const rl0 = performance.now();
                             await this.rateLimiter.acquire(parsedUrl.host);
+                            chRateLimitWaitMs += (performance.now() - rl0);
+                            const buf0 = performance.now();
                             await bufferedPageSemaphore.acquire(AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+                            chDownloadSemWaitMs += (performance.now() - buf0);
                             let bufferTransferred = false;
                             try {
                                 if (this.stopSignal || pipelineError || isCancelled?.())
@@ -1966,16 +1997,28 @@ export class ImporterEngine {
                                 while (attempts < 3 && !this.stopSignal && !pipelineError) {
                                     attempts++;
                                     try {
+                                        const inf0 = performance.now();
                                         pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
-                                            return await callProvider(() => this.fetchImageBytes(pageUrl, effectiveSource));
+                                            chDownloadSemWaitMs += (performance.now() - inf0);
+                                            telemetryCollector.trackActiveDownload(1);
+                                            try {
+                                                return await callProvider(() => this.fetchImageBytes(pageUrl, effectiveSource));
+                                            }
+                                            finally {
+                                                telemetryCollector.trackActiveDownload(-1);
+                                            }
                                         });
-                                        tDownload += Date.now() - d0;
+                                        const dlMs = Date.now() - d0;
+                                        tDownload += dlMs;
+                                        chDownloadMs += dlMs;
+                                        telemetryCollector.recordImageDownload(effectiveSource, dlMs, pageBytes.length);
                                         totalBytes += pageBytes.length;
                                         ImporterEngine.activeBufferedBytes += pageBytes.length;
                                         break;
                                     }
                                     catch (err) {
                                         lastErr = err;
+                                        telemetryCollector.recordDownloadError(attempts < 3);
                                         if (attempts < 3 && !this.stopSignal && !pipelineError) {
                                             await this.sleep(500 * attempts);
                                         }
@@ -2092,13 +2135,26 @@ export class ImporterEngine {
                             if (!item)
                                 continue;
                             let pageBytes = item.pageBytes;
+                            let uploadDuration = 0;
                             try {
-                                const u0 = Date.now();
+                                const uWait0 = performance.now();
                                 const res = await globalMediaSemaphore.runExclusive(async () => {
-                                    return await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial', targetChapterId);
+                                    const uWaitMs = performance.now() - uWait0;
+                                    chTelegramSemWaitMs += uWaitMs;
+                                    telemetryCollector.recordTelegramSemaphoreWait(uWaitMs);
+                                    const u0 = performance.now();
+                                    telemetryCollector.trackActiveTelegramUpload(1);
+                                    try {
+                                        return await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial', targetChapterId);
+                                    }
+                                    finally {
+                                        telemetryCollector.trackActiveTelegramUpload(-1);
+                                        uploadDuration = performance.now() - u0;
+                                        tUpload += uploadDuration;
+                                        chTelegramUploadMs += uploadDuration;
+                                        telemetryCollector.recordTelegramUpload(uploadDuration, pageBytes.length);
+                                    }
                                 });
-                                const uploadDuration = Date.now() - u0;
-                                tUpload += uploadDuration;
                                 if (typeof this.storage.getRateLimiter === 'function') {
                                     const limiter = this.storage.getRateLimiter();
                                     if (typeof limiter.recordSuccess === 'function') {
@@ -2419,6 +2475,27 @@ export class ImporterEngine {
                 uploadMs: tUpload,
                 dbMs: tDb,
                 status: pubResult.published ? 'COMPLETED' : 'STAGED',
+            });
+            const chTotalDuration = performance.now() - jobStart;
+            telemetryCollector.recordChapterMetric({
+                jobId: job.id,
+                source: effectiveSource,
+                chapterNumber: Number(chapterNumber),
+                pageCount: validPages.length,
+                totalBytes,
+                totalDurationMs: Math.round(chTotalDuration),
+                claim_acquire_ms: Math.round(extraTiming?.claimDurationMs || 0),
+                metadata_load_ms: Math.round(metadataLoadMs),
+                source_fetch_ms: Math.round(sourceFetchMs),
+                page_resolution_ms: Math.round(pageResolutionMs),
+                download_ms: Math.round(chDownloadMs),
+                telegram_upload_ms: Math.round(chTelegramUploadMs),
+                db_wait_ms: 0,
+                db_publish_ms: Math.round(tDb),
+                rate_limit_wait_ms: Math.round(chRateLimitWaitMs),
+                semaphore_wait_ms: Math.round(extraTiming?.semWaitMs || 0) + Math.round(chDownloadSemWaitMs) + Math.round(chTelegramSemWaitMs),
+                other_wait_ms: Math.max(0, Math.round(chTotalDuration - (sourceFetchMs + chDownloadMs + chTelegramUploadMs + tDb))),
+                timestamp: new Date().toISOString(),
             });
             if (pubResult.published) {
                 this.logger.info('Successfully imported and published chapter in canonical order', {

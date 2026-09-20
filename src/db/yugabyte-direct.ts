@@ -7,6 +7,8 @@ import { getConfig } from '../config.js';
 import { Logger } from '../core/logger.js';
 import type { GatewayJob, PublishBatchParams } from '../core/gateway-client.js';
 import { computeCanonicalChapterKey } from '../core/deduplication.js';
+import { telemetryCollector } from '../core/telemetry-collector.js';
+import { performance } from 'node:perf_hooks';
 
 const logger = new Logger('YugabyteDirect');
 
@@ -139,6 +141,34 @@ export function getYugabytePool(): pg.Pool {
   pool.on('error', (err) => {
     logger.error('Unexpected error on idle direct Yugabyte client', { error: err.message });
   });
+
+  const origConnect = pool.connect.bind(pool);
+  (pool as any).connect = async function (...args: any[]) {
+    const t0 = performance.now();
+    const queued = (pool as any).waitingCount || 0;
+    try {
+      const client = await (origConnect as any)(...args);
+      const waitMs = performance.now() - t0;
+      telemetryCollector.recordDbPoolWait(waitMs, queued);
+
+      const origClientQuery = client.query.bind(client);
+      client.query = async function (...qArgs: any[]) {
+        telemetryCollector.trackActiveDbQuery(1);
+        try {
+          return await (origClientQuery as any)(...qArgs);
+        } finally {
+          telemetryCollector.trackActiveDbQuery(-1);
+        }
+      };
+      return client;
+    } catch (err) {
+      const waitMs = performance.now() - t0;
+      telemetryCollector.recordDbPoolWait(waitMs, queued);
+      throw err;
+    }
+  };
+
+  telemetryCollector.setPool(pool);
 
   return pool;
 }
