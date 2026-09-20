@@ -14,6 +14,16 @@ export class AsyncSemaphore {
     this.name = name;
   }
 
+  tryAcquire(): boolean {
+    if (this.activePermits < this.maxPermits && this.waitQueue.length === 0) {
+      this.activePermits++;
+      telemetryCollector.recordLimiterWait(this.name, 0, this.maxPermits);
+      telemetryCollector.updateLimiterConcurrency(this.name, this.activePermits, this.maxPermits);
+      return true;
+    }
+    return false;
+  }
+
   async acquire(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     telemetryCollector.updateLimiterConcurrency(this.name, this.activePermits, this.maxPermits);
@@ -249,6 +259,11 @@ export class AdaptiveAutotuner {
       this.sourceSemaphores.set(source, sem);
     }
     return sem;
+  }
+
+  isSourceCapacityAvailable(source: string): boolean {
+    const sem = this.getSourceSemaphore(source);
+    return sem.available > 0;
   }
 
   recordError(type: 'error' | 'ratelimit' | 'timeout'): void {

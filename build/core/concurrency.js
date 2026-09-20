@@ -11,6 +11,15 @@ export class AsyncSemaphore {
         this.maxPermits = Math.max(1, maxPermits);
         this.name = name;
     }
+    tryAcquire() {
+        if (this.activePermits < this.maxPermits && this.waitQueue.length === 0) {
+            this.activePermits++;
+            telemetryCollector.recordLimiterWait(this.name, 0, this.maxPermits);
+            telemetryCollector.updateLimiterConcurrency(this.name, this.activePermits, this.maxPermits);
+            return true;
+        }
+        return false;
+    }
     async acquire(signal) {
         signal?.throwIfAborted();
         telemetryCollector.updateLimiterConcurrency(this.name, this.activePermits, this.maxPermits);
@@ -215,6 +224,10 @@ export class AdaptiveAutotuner {
             this.sourceSemaphores.set(source, sem);
         }
         return sem;
+    }
+    isSourceCapacityAvailable(source) {
+        const sem = this.getSourceSemaphore(source);
+        return sem.available > 0;
     }
     recordError(type) {
         if (type === 'ratelimit')

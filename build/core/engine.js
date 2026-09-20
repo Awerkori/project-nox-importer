@@ -7,7 +7,7 @@ import { Logger } from './logger.js';
 import { withSourceChapterPermits } from './concurrency.js';
 import { readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
-import { AdaptiveAutotuner } from './concurrency.js';
+import { AdaptiveAutotuner, AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
 import { RetryPolicy, ProviderDownloadError } from './retry-policy.js';
 import { ExistingWorksReconciler } from './reconciliation.js';
@@ -79,6 +79,8 @@ export class ImporterEngine {
     isRunning = false;
     stopSignal = false;
     abortController = new AbortController();
+    chapterClaimMutex = new AsyncSemaphore(1, 'chapter_claim_mutex');
+    activeSourcesCache = { sources: [], cachedAt: 0 };
     // Actual retained image bytes; bounded globally by page permits and per-image size.
     static activeBufferedBytes = 0;
     constructor(supabase, storage, registry, rateLimiter, config) {
@@ -609,6 +611,42 @@ export class ImporterEngine {
     }
     sourceEmptyCooldown = new Map();
     sourceStatusCache = new Map();
+    async getEligibleChapterSources() {
+        const now = Date.now();
+        if (now - this.activeSourcesCache.cachedAt > 5_000) {
+            try {
+                let { data: srcs } = await this.supabase
+                    .from('importer_sources')
+                    .select('id, enabled, chapter_ingestion_enabled, status')
+                    .eq('status', 'ACTIVE')
+                    .eq('chapter_ingestion_enabled', true);
+                if (srcs && srcs.length > 0) {
+                    const activeIds = srcs
+                        .filter((s) => s.enabled !== false)
+                        .map((s) => s.id);
+                    this.activeSourcesCache = { sources: activeIds, cachedAt: now };
+                }
+            }
+            catch (err) {
+                // Retain existing cache on transient failure
+            }
+        }
+        const candidateSources = this.activeSourcesCache.sources.length > 0
+            ? this.activeSourcesCache.sources
+            : Object.keys(SOURCE_CONCURRENCY_LIMITS);
+        const eligible = [];
+        for (const src of candidateSources) {
+            // 1. In-memory circuit breaker check
+            if (!this.circuitBreaker.canExecute(src))
+                continue;
+            // 2. Source semaphore available permit check
+            const sem = this.autotuner.getSourceSemaphore(src);
+            if (sem.available <= 0)
+                continue;
+            eligible.push(src);
+        }
+        return eligible;
+    }
     async checkSourceAvailability(source, taskType = 'IMPORT_CHAPTER') {
         // 1. Check local circuit breaker first (zero-cost in-memory check)
         if (!this.circuitBreaker.canExecute(source)) {
@@ -761,10 +799,10 @@ export class ImporterEngine {
     }
     async runGeneralSlot(slotIndex) {
         telemetryCollector.registerSlot(slotIndex);
-        // 1. Initial runner startup stagger (50-150ms per slot index) to prevent all runners opening simultaneously
+        // 1. Initial runner startup stagger (30-80ms per slot index) to prevent all runners opening simultaneously
         if (slotIndex > 0) {
             telemetryCollector.setSlotState(slotIndex, 'IDLE');
-            const initialStaggerMs = slotIndex * 80 + Math.floor(Math.random() * 50);
+            const initialStaggerMs = slotIndex * 50 + Math.floor(Math.random() * 30);
             await this.sleep(initialStaggerMs);
         }
         const globalSem = this.autotuner.getGlobalChapterSemaphore();
@@ -777,62 +815,87 @@ export class ImporterEngine {
                     await this.sleep(3000);
                     continue;
                 }
-                // 1. Jitter between acquisitions (40-120ms) to avoid simultaneous claims on Gateway/Hyperdrive
+                // 1. Jitter between iterations (20-50ms)
                 telemetryCollector.setSlotState(slotIndex, 'IDLE');
-                const claimJitterMs = 40 + Math.floor(Math.random() * 80);
+                const claimJitterMs = 20 + Math.floor(Math.random() * 30);
                 await this.sleep(claimJitterMs);
                 telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_JOB');
                 const claimT0 = performance.now();
-                await globalSem.acquire();
-                let job = null;
-                try {
-                    job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), undefined, 'IMPORT_CHAPTER');
-                }
-                catch (acquireErr) {
-                    globalSem.release();
-                    telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_RETRY_BACKOFF');
-                    await this.sleep(3000);
+                const claimResult = await this.chapterClaimMutex.runExclusive(async () => {
+                    // A. Check global chapter semaphore capacity first
+                    if (!globalSem.tryAcquire()) {
+                        return null;
+                    }
+                    // B. Find sources that currently have available capacity
+                    const eligibleSources = await this.getEligibleChapterSources();
+                    if (eligibleSources.length === 0) {
+                        globalSem.release();
+                        return null;
+                    }
+                    // C. Query Yugabyte for the highest priority job among ELIGIBLE sources
+                    let candidateJob = null;
+                    try {
+                        candidateJob = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), eligibleSources, 'IMPORT_CHAPTER');
+                    }
+                    catch (acquireErr) {
+                        this.logger.warn(`Error acquiring chapter job: ${acquireErr?.message}`);
+                        globalSem.release();
+                        return null;
+                    }
+                    if (!candidateJob) {
+                        globalSem.release();
+                        return null;
+                    }
+                    // D. Atomically acquire the source permit
+                    const sourceSem = this.autotuner.getSourceSemaphore(candidateJob.source);
+                    if (sourceSem.tryAcquire()) {
+                        return {
+                            job: candidateJob,
+                            sourcePermitAcquired: true,
+                            globalPermitAcquired: true,
+                        };
+                    }
+                    else {
+                        // In the rare race where source filled, immediately release back to QUEUED (zero blocking)
+                        this.logger.warn(`Source ${candidateJob.source} filled concurrently, releasing job ${candidateJob.id} back to QUEUED`);
+                        await this.queue.releaseJob(candidateJob.id, 'QUEUED', 'Source concurrency full, released immediately', 0);
+                        globalSem.release();
+                        return null;
+                    }
+                });
+                if (!claimResult || !claimResult.job) {
+                    telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_SOURCE', 'waiting_for_eligible_source');
+                    await this.sleep(400);
                     continue;
                 }
-                if (!job) {
-                    globalSem.release();
-                    telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_JOB');
-                    await this.sleep(6000);
-                    continue;
-                }
+                const job = claimResult.job;
+                const sourcePermitAcquired = claimResult.sourcePermitAcquired;
+                const globalPermitAcquired = claimResult.globalPermitAcquired;
                 const claimDurationMs = performance.now() - claimT0;
                 const sourceSem = this.autotuner.getSourceSemaphore(job.source);
-                // Claim admission is finished. Never hold global capacity while waiting for a source.
-                globalSem.release();
+                // 3. Heartbeat active lease during real processing
                 const cancelled = new AbortController();
-                const waitingLease = this.queue.startHeartbeat(job.id, this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS, () => cancelled.abort());
-                let executing = false;
-                const semWaitT0 = performance.now();
-                telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_SOURCE', job.source);
+                const heartbeat = this.queue.startHeartbeat(job.id, this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS, () => cancelled.abort());
+                telemetryCollector.setSlotState(slotIndex, 'ACTIVE_PROCESSING', `${job.source} ch ${job.payload?.chapterNumber}`);
                 try {
-                    await withSourceChapterPermits(sourceSem, globalSem, async () => {
-                        const semWaitMs = performance.now() - semWaitT0;
-                        waitingLease.stop();
-                        executing = true;
-                        telemetryCollector.setSlotState(slotIndex, 'ACTIVE_PROCESSING', `${job.source} ch ${job.payload?.chapterNumber}`);
-                        await this.executeJobDirectly(job, { claimDurationMs, semWaitMs });
-                    }, AbortSignal.any([this.abortController.signal, cancelled.signal, AbortSignal.timeout(12 * 60 * 1000)]));
-                }
-                catch (err) {
-                    if (!executing)
-                        await this.queue.releaseJob(job.id, 'QUEUED', 'Admission wait interrupted', 2);
-                    throw err;
+                    await this.executeJobDirectly(job, { claimDurationMs, semWaitMs: 0 });
                 }
                 finally {
-                    waitingLease.stop();
+                    heartbeat.stop();
+                    if (sourcePermitAcquired) {
+                        sourceSem.release();
+                    }
+                    if (globalPermitAcquired) {
+                        globalSem.release();
+                    }
                     telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 }
-                await this.sleep(50);
+                await this.sleep(30);
             }
             catch (err) {
                 telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 this.logger.error(`Error in general worker slot ${slotIndex}`, { error: err?.message });
-                await this.sleep(5000);
+                await this.sleep(2000);
             }
         }
     }

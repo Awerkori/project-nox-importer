@@ -145,7 +145,10 @@ export class ImporterQueue {
             p_worker_id: this.workerId,
             p_lease_duration: `${leaseDurationMinutes} minutes`,
         };
-        if (source) {
+        if (Array.isArray(source)) {
+            params.p_allowed_sources = source;
+        }
+        else if (source) {
             params.p_source = source;
         }
         if (taskType) {

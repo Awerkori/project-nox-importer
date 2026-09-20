@@ -46,6 +46,7 @@ export declare class TelemetryCollector {
     private slots;
     private activeWorkersSamples;
     private activeWorkersDistribution;
+    private sourceActiveSamples;
     private samplerTimer;
     private dbPoolWaitSamples;
     private dbPoolQueuedSamples;
@@ -112,6 +113,20 @@ export declare class TelemetryCollector {
             distribution: Record<number, number>;
             timeWith8ActivePercent: number;
             timeWithLessThan6Percent: number;
+        };
+        perSourceActive: {
+            hanamiheaven: {
+                avg: number;
+                peak: number;
+            };
+            fleurblanche: {
+                avg: number;
+                peak: number;
+            };
+            mangalivreto: {
+                avg: number;
+                peak: number;
+            };
         };
         workerTimeBreakdown: {
             workerBusyPercent: number;

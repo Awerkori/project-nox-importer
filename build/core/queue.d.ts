@@ -56,7 +56,7 @@ export declare class ImporterQueue {
      * Acquire the next job atomically using SKIP LOCKED stored procedure,
      * optionally filtered by source and/or task type for dedicated runner lanes.
      */
-    acquireNextJob(leaseDurationMinutes?: number, source?: string, taskType?: string): Promise<QueueJob | null>;
+    acquireNextJob(leaseDurationMinutes?: number, source?: string | string[], taskType?: string): Promise<QueueJob | null>;
     /**
      * Heartbeat renewal of an active lease
      */

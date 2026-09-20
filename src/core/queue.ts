@@ -215,14 +215,16 @@ export class ImporterQueue {
    */
   async acquireNextJob(
     leaseDurationMinutes: number = 5,
-    source?: string,
+    source?: string | string[],
     taskType?: string
   ): Promise<QueueJob | null> {
     const params: Record<string, any> = {
       p_worker_id: this.workerId,
       p_lease_duration: `${leaseDurationMinutes} minutes`,
     };
-    if (source) {
+    if (Array.isArray(source)) {
+      params.p_allowed_sources = source;
+    } else if (source) {
       params.p_source = source;
     }
     if (taskType) {

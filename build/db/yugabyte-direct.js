@@ -221,6 +221,7 @@ export async function acquireJobsDirect(options) {
     const workerId = options.workerId;
     const leaseMin = Math.max(1, Math.min(60, options.leaseDurationMinutes || 5));
     const source = options.source || null;
+    const allowedSources = options.allowedSources && options.allowedSources.length > 0 ? options.allowedSources : null;
     const taskType = options.taskType || null;
     const batchSize = Math.max(1, Math.min(50, options.batchSize || 10));
     const query = `
@@ -233,6 +234,7 @@ export async function acquireJobsDirect(options) {
         OR (status = 'IMPORTING' AND lease_expires_at <= NOW())
       )
         AND ($1::text IS NULL OR source = $1::text)
+        AND ($6::text[] IS NULL OR source = ANY($6::text[]))
         AND (
           $2::text IS NULL
           OR ($2::text = 'DISCOVERY' AND task_type IN ('DISCOVER_WORKS', 'SYNC_WORK'))
@@ -255,7 +257,7 @@ export async function acquireJobsDirect(options) {
               q.status, q.attempts, q.max_attempts, q.locked_by, q.locked_at,
               q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
   `;
-    const res = await p.query(query, [source, taskType, batchSize, workerId, leaseMin]);
+    const res = await p.query(query, [source, taskType, batchSize, workerId, leaseMin, allowedSources]);
     return res.rows.map((r) => ({
         ...r,
         payload: typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {}),
