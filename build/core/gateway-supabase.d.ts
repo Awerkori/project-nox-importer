@@ -44,6 +44,7 @@ export declare class QueryBuilder<T = any> implements PromiseLike<PostgrestRespo
     order(col: string, options?: {
         ascending?: boolean;
     }): this;
+    not(col: string, op: string, val: any): this;
     limit(count: number): this;
     single(): this;
     maybeSingle(): this;

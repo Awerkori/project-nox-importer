@@ -90,6 +90,18 @@ export class QueryBuilder {
         this.orderAsc = options?.ascending ?? true;
         return this;
     }
+    not(col, op, val) {
+        if (op === 'is' && val === null) {
+            this.filters.push({ col, op: 'IS NOT NULL', val });
+        }
+        else if (op === 'in') {
+            this.filters.push({ col, op: 'NOT IN', val });
+        }
+        else {
+            this.filters.push({ col, op: '!=', val });
+        }
+        return this;
+    }
     limit(count) {
         this.limitCount = count;
         return this;
@@ -107,13 +119,14 @@ export class QueryBuilder {
     buildSql() {
         const params = [];
         let pIdx = 1;
-        const buildWhere = () => {
+        const buildWhere = (prefix = '') => {
             if (this.filters.length === 0)
                 return '';
             const clauses = [];
             for (const f of this.filters) {
+                const colRef = prefix ? `${prefix}."${f.col}"` : `"${f.col}"`;
                 if (f.op === 'IS NULL' || f.op === 'IS NOT NULL') {
-                    clauses.push(`"${f.col}" ${f.op}`);
+                    clauses.push(`${colRef} ${f.op}`);
                 }
                 else if (f.op === 'IN') {
                     if (Array.isArray(f.val) && f.val.length === 0) {
@@ -121,21 +134,40 @@ export class QueryBuilder {
                     }
                     else {
                         params.push(f.val);
-                        clauses.push(`"${f.col}" = ANY($${pIdx++})`);
+                        clauses.push(`${colRef} = ANY($${pIdx++})`);
+                    }
+                }
+                else if (f.op === 'NOT IN') {
+                    if (Array.isArray(f.val) && f.val.length === 0) {
+                        clauses.push('TRUE');
+                    }
+                    else {
+                        params.push(f.val);
+                        clauses.push(`NOT (${colRef} = ANY($${pIdx++}))`);
                     }
                 }
                 else if (f.op === '&&') {
                     params.push(f.val);
-                    clauses.push(`"${f.col}" && $${pIdx++}`);
+                    clauses.push(`${colRef} && $${pIdx++}`);
                 }
                 else {
                     params.push(f.val);
-                    clauses.push(`"${f.col}" ${f.op} $${pIdx++}`);
+                    clauses.push(`${colRef} ${f.op} $${pIdx++}`);
                 }
             }
             return ` WHERE ${clauses.join(' AND ')}`;
         };
         if (this.op === 'SELECT') {
+            if (this.table === 'importer_work_mappings' && this.selectedCols.includes('works!inner')) {
+                let query = `SELECT m.id, m.work_id, m.source, m.source_work_id, m.updated_at, json_build_object('id', w.id, 'title', w.title, 'slug', w.slug, 'published', w.published, 'updated_at', w.updated_at) AS works FROM "importer_work_mappings" m INNER JOIN "works" w ON m.work_id = w.id${buildWhere('m')}`;
+                if (this.orderCol) {
+                    query += ` ORDER BY m."${this.orderCol}" ${this.orderAsc ? 'ASC' : 'DESC'}`;
+                }
+                if (this.limitCount !== null) {
+                    query += ` LIMIT ${this.limitCount}`;
+                }
+                return { sql: query, params };
+            }
             let query = `SELECT ${this.selectedCols} FROM "${this.table}"${buildWhere()}`;
             if (this.orderCol) {
                 query += ` ORDER BY "${this.orderCol}" ${this.orderAsc ? 'ASC' : 'DESC'}`;
