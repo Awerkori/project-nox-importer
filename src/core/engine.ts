@@ -2820,31 +2820,33 @@ export class ImporterEngine {
         }
       }
 
-      // SAFEGUARD 0: Re-check if published by another worker during download
-      let { data: latePubCheck } = await this.supabase
-        .from('chapters')
-        .select('published_at')
-        .eq('id', chapterId)
-        .maybeSingle();
+      // SAFEGUARD 0: Re-check if published by another worker during download (only possible if existing chapter)
+      if (existingChapter) {
+        let { data: latePubCheck } = await this.supabase
+          .from('chapters')
+          .select('published_at')
+          .eq('id', chapterId)
+          .maybeSingle();
 
-      if (latePubCheck?.published_at && job.payload.readerRepair !== true) {
-        this.logger.info('Chapter published by concurrent worker during download, skipping upsert', { chapterId });
-        await this.supabase.from('importer_chapter_mappings').upsert(
-          {
-            source: job.source,
-            source_chapter_id: sourceChapterId,
-            chapter_id: chapterId,
-            work_id: workId,
-            work_mapping_id: workMappingId,
-            chapter_number: chapterNumber,
-            chapter_sort_key: this.computeChapterSortKey(chapterNumber, chapterTitle),
-            is_page_provider: false,
-            status: 'COMPLETED',
-            last_error: null,
-          },
-          { onConflict: 'source,source_chapter_id' }
-        );
-        return;
+        if (latePubCheck?.published_at && job.payload.readerRepair !== true) {
+          this.logger.info('Chapter published by concurrent worker during download, skipping upsert', { chapterId });
+          await this.supabase.from('importer_chapter_mappings').upsert(
+            {
+              source: job.source,
+              source_chapter_id: sourceChapterId,
+              chapter_id: chapterId,
+              work_id: workId,
+              work_mapping_id: workMappingId,
+              chapter_number: chapterNumber,
+              chapter_sort_key: this.computeChapterSortKey(chapterNumber, chapterTitle),
+              is_page_provider: false,
+              status: 'COMPLETED',
+              last_error: null,
+            },
+            { onConflict: 'source,source_chapter_id' }
+          );
+          return;
+        }
       }
 
       // SAFEGUARD 1: Batch upsert into public.pages ONLY after ALL pages are verified
@@ -2865,21 +2867,8 @@ export class ImporterEngine {
         if (pageErr) throw pageErr;
       }
 
-      // SAFEGUARD 2: Stage chapter with published_at = NULL in public.chapters
+      // SAFEGUARD 2: Stage chapter with published_at = NULL and update queue concurrently
       const chKey = this.computeCanonicalChapterKey(chapterNumber, chapterTitle);
-      await this.publicationBarrier.stageChapter({
-        workId,
-        chapterId,
-        chapterNumber,
-        sortKey: chKey.sortKey,
-        source: effectiveSource,
-        sourceChapterId: effectiveSourceChapterId,
-        workMappingId: effectiveWorkMappingId,
-        pageCount: validPages.length,
-        isPageProvider: true,
-      });
-
-      // Update queue row with progress and recovery info
       const queueProgressUpdate: Record<string, any> = {
         progress_current: validPages.length,
         progress_total: validPages.length,
@@ -2891,7 +2880,21 @@ export class ImporterEngine {
         queueProgressUpdate.recovered_at = new Date().toISOString();
         queueProgressUpdate.last_error = null;
       }
-      await this.supabase.from('importer_queue').update(queueProgressUpdate).eq('id', job.id);
+
+      await Promise.all([
+        this.publicationBarrier.stageChapter({
+          workId,
+          chapterId,
+          chapterNumber,
+          sortKey: chKey.sortKey,
+          source: effectiveSource,
+          sourceChapterId: effectiveSourceChapterId,
+          workMappingId: effectiveWorkMappingId,
+          pageCount: validPages.length,
+          isPageProvider: true,
+        }),
+        this.supabase.from('importer_queue').update(queueProgressUpdate).eq('id', job.id),
+      ]);
 
       // If source was switched via rescue, update the failed source chapter mapping
       if (effectiveSource !== initialSource) {
