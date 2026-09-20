@@ -8,28 +8,34 @@ export class BandwidthLimiter {
     maxBurst;
     tokens;
     lastRefill = Date.now();
-    constructor(bytesPerSec = 4.0 * 1024 * 1024, maxBurst = 64 * 1024) {
+    waitChain = Promise.resolve();
+    constructor(bytesPerSec = 4.0 * 1024 * 1024, maxBurst) {
         this.bytesPerSec = bytesPerSec;
-        this.maxBurst = maxBurst;
-        this.tokens = maxBurst;
+        this.maxBurst = maxBurst || Math.max(bytesPerSec, 2 * 1024 * 1024);
+        this.tokens = this.maxBurst;
     }
     async acquire(bytes) {
-        while (true) {
+        const acquireInternal = async () => {
             const now = Date.now();
-            const elapsed = (now - this.lastRefill) / 1000;
+            const elapsed = Math.max(0, (now - this.lastRefill) / 1000);
             this.tokens = Math.min(this.maxBurst, this.tokens + elapsed * this.bytesPerSec);
             this.lastRefill = now;
             if (this.tokens >= bytes) {
                 this.tokens -= bytes;
                 return;
             }
-            const needed = bytes - this.tokens;
-            const waitMs = Math.ceil((needed / this.bytesPerSec) * 1000);
-            await new Promise(r => setTimeout(r, Math.min(25, Math.max(2, waitMs))));
-        }
+            const deficit = bytes - this.tokens;
+            const waitMs = Math.ceil((deficit / this.bytesPerSec) * 1000);
+            this.tokens = 0;
+            this.lastRefill = now + waitMs;
+            await new Promise((r) => setTimeout(r, waitMs));
+        };
+        this.waitChain = this.waitChain.then(acquireInternal, acquireInternal);
+        return this.waitChain;
     }
     setRate(bytesPerSec) {
         this.bytesPerSec = bytesPerSec;
+        this.maxBurst = Math.max(bytesPerSec, 2 * 1024 * 1024);
     }
 }
 export class DirectTelegramStorageProvider {
@@ -50,7 +56,7 @@ export class DirectTelegramStorageProvider {
     waitingQueue = [];
     constructor(checkpointPath, rateLimitBytesPerSec) {
         const rate = rateLimitBytesPerSec || (process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC ? parseInt(process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC, 10) : 4.0 * 1024 * 1024);
-        this.bandwidthLimiter = new BandwidthLimiter(rate, 64 * 1024);
+        this.bandwidthLimiter = new BandwidthLimiter(rate, Math.max(rate, 2 * 1024 * 1024));
         this.logger.info(`DirectTelegramStorage BandwidthLimiter configured: ${(rate / (1024 * 1024)).toFixed(1)} MB/s`);
         this.httpsAgent = new https.Agent({
             keepAlive: true,
@@ -372,7 +378,7 @@ export class DirectTelegramStorageProvider {
                 if (!req.write(headerPart)) {
                     await new Promise((r) => req.once('drain', r));
                 }
-                const chunkSize = 16 * 1024;
+                const chunkSize = 64 * 1024;
                 for (let i = 0; i < payloadBuffer.length; i += chunkSize) {
                     const chunk = payloadBuffer.subarray(i, i + chunkSize);
                     await this.bandwidthLimiter.acquire(chunk.length);
