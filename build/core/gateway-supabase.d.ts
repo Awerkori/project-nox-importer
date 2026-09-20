@@ -48,6 +48,8 @@ export declare class QueryBuilder<T = any> implements PromiseLike<PostgrestRespo
     limit(count: number): this;
     single(): this;
     maybeSingle(): this;
+    private isJsonCol;
+    private serializeVal;
     private buildSql;
     execute(): Promise<PostgrestResponse<T>>;
     then<TResult1 = PostgrestResponse<T>, TResult2 = never>(onfulfilled?: ((value: PostgrestResponse<T>) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): Promise<TResult1 | TResult2>;

@@ -143,6 +143,17 @@ export class QueryBuilder<T = any> implements PromiseLike<PostgrestResponse<T>> 
     return this;
   }
 
+  private isJsonCol(c: string): boolean {
+    return c === 'metadata' || c === 'payload' || c === 'metadata_provenance' || c === 'blocked_details' || c === 'config' || c === 'progress_details' || c === 'stages';
+  }
+
+  private serializeVal(c: string, val: any): any {
+    if (this.isJsonCol(c) && typeof val === 'object' && val !== null) {
+      return JSON.stringify(val);
+    }
+    return val;
+  }
+
   private buildSql(): { sql: string; params: any[] } {
     const params: any[] = [];
     let pIdx = 1;
@@ -211,10 +222,9 @@ export class QueryBuilder<T = any> implements PromiseLike<PostgrestResponse<T>> 
       for (const row of rows) {
         const tupleCols: string[] = [];
         for (const c of cols) {
-          const val = row[c];
+          const val = this.serializeVal(c, row[c]);
           params.push(val);
-          // Cast known jsonb or array columns if needed
-          if (c === 'metadata' || c === 'payload' || c === 'metadata_provenance') {
+          if (this.isJsonCol(c)) {
             tupleCols.push(`$${pIdx++}::jsonb`);
           } else if (c === 'aliases') {
             tupleCols.push(`$${pIdx++}::text[]`);
@@ -225,7 +235,12 @@ export class QueryBuilder<T = any> implements PromiseLike<PostgrestResponse<T>> 
         valueTuples.push(`(${tupleCols.join(', ')})`);
       }
 
-      const query = `INSERT INTO "${this.table}" (${cols.map(c => `"${c}"`).join(', ')}) VALUES ${valueTuples.join(', ')} RETURNING *`;
+      let conflictClause = '';
+      if (this.onConflict) {
+        conflictClause = ` ON CONFLICT (${this.onConflict.split(',').map(c => `"${c.trim()}"`).join(', ')}) DO NOTHING`;
+      }
+
+      const query = `INSERT INTO "${this.table}" (${cols.map(c => `"${c}"`).join(', ')}) VALUES ${valueTuples.join(', ')}${conflictClause} RETURNING *`;
       return { sql: query, params };
     }
 
@@ -239,9 +254,9 @@ export class QueryBuilder<T = any> implements PromiseLike<PostgrestResponse<T>> 
       for (const row of rows) {
         const tupleCols: string[] = [];
         for (const c of cols) {
-          const val = row[c];
+          const val = this.serializeVal(c, row[c]);
           params.push(val);
-          if (c === 'metadata' || c === 'payload' || c === 'metadata_provenance') {
+          if (this.isJsonCol(c)) {
             tupleCols.push(`$${pIdx++}::jsonb`);
           } else if (c === 'aliases') {
             tupleCols.push(`$${pIdx++}::text[]`);
@@ -270,9 +285,9 @@ export class QueryBuilder<T = any> implements PromiseLike<PostgrestResponse<T>> 
       const cols = Object.keys(this.updateData);
       const setClauses: string[] = [];
       for (const c of cols) {
-        const val = this.updateData[c];
+        const val = this.serializeVal(c, this.updateData[c]);
         params.push(val);
-        if (c === 'metadata' || c === 'payload' || c === 'metadata_provenance') {
+        if (this.isJsonCol(c)) {
           setClauses.push(`"${c}" = $${pIdx++}::jsonb`);
         } else if (c === 'aliases') {
           setClauses.push(`"${c}" = $${pIdx++}::text[]`);
@@ -314,7 +329,8 @@ export class QueryBuilder<T = any> implements PromiseLike<PostgrestResponse<T>> 
 
       return { data: rows as any, error: null, count: rows.length };
     } catch (err: any) {
-      return { data: null, error: { message: err?.message || 'Database execution error' }, count: 0 };
+      const isDup = err?.code === '23505' || err?.message?.includes('duplicate key');
+      return { data: null, error: { message: err?.message || 'Database execution error', code: isDup ? '23505' : err?.code }, count: 0 };
     }
   }
 
