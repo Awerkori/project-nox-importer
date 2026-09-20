@@ -18,12 +18,12 @@ declare const ConfigSchema: z.ZodObject<{
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     LOG_LEVEL: z.ZodDefault<z.ZodEnum<["debug", "info", "warn", "error"]>>;
     IMPORTER_DB_MODE: z.ZodDefault<z.ZodEnum<["direct", "gateway"]>>;
-    YUGABYTE_HOST: z.ZodOptional<z.ZodString>;
+    YUGABYTE_HOST: z.ZodDefault<z.ZodString>;
     YUGABYTE_PORT: z.ZodDefault<z.ZodNumber>;
-    YUGABYTE_USER: z.ZodOptional<z.ZodString>;
-    YUGABYTE_PASSWORD: z.ZodOptional<z.ZodString>;
+    YUGABYTE_USER: z.ZodDefault<z.ZodString>;
+    YUGABYTE_PASSWORD: z.ZodDefault<z.ZodString>;
     YUGABYTE_DATABASE: z.ZodDefault<z.ZodString>;
-    YUGABYTE_SSL_CERT: z.ZodOptional<z.ZodString>;
+    YUGABYTE_SSL_CERT: z.ZodDefault<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     SUPABASE_URL: string;
     SUPABASE_SERVICE_ROLE_KEY: string;
@@ -39,16 +39,16 @@ declare const ConfigSchema: z.ZodObject<{
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: number;
     LOG_LEVEL: "debug" | "info" | "warn" | "error";
     IMPORTER_DB_MODE: "direct" | "gateway";
+    YUGABYTE_HOST: string;
     YUGABYTE_PORT: number;
+    YUGABYTE_USER: string;
+    YUGABYTE_PASSWORD: string;
     YUGABYTE_DATABASE: string;
+    YUGABYTE_SSL_CERT: string;
     NOX_STORAGE_BRIDGE_TOKEN?: string | undefined;
     TELEGRAM_BOT_TOKEN?: string | undefined;
     TELEGRAM_CHAT_ID?: string | undefined;
     IMPORTER_USER_ID?: string | undefined;
-    YUGABYTE_HOST?: string | undefined;
-    YUGABYTE_USER?: string | undefined;
-    YUGABYTE_PASSWORD?: string | undefined;
-    YUGABYTE_SSL_CERT?: string | undefined;
 }, {
     SUPABASE_URL?: string | undefined;
     SUPABASE_SERVICE_ROLE_KEY?: string | undefined;
