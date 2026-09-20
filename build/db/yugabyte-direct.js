@@ -226,21 +226,25 @@ export async function acquireJobsDirect(options) {
     const batchSize = Math.max(1, Math.min(50, options.batchSize || 10));
     const query = `
     WITH to_lock AS (
-      SELECT id
-      FROM importer_queue
+      SELECT q.id
+      FROM importer_queue q
       WHERE (
-        status = 'QUEUED'
-        OR (status = 'RETRY' AND next_run_at <= NOW())
-        OR (status = 'IMPORTING' AND lease_expires_at <= NOW())
+        q.status = 'QUEUED'
+        OR (q.status = 'RETRY' AND q.next_run_at <= NOW())
       )
-        AND ($1::text IS NULL OR source = $1::text)
-        AND ($6::text[] IS NULL OR source = ANY($6::text[]))
+        AND q.attempts < COALESCE(q.max_attempts, 7)
+        AND ($1::text IS NULL OR q.source = $1::text)
+        AND ($6::text[] IS NULL OR q.source = ANY($6::text[]))
         AND (
           $2::text IS NULL
-          OR ($2::text = 'DISCOVERY' AND task_type IN ('DISCOVER_WORKS', 'SYNC_WORK'))
-          OR task_type = $2::text
+          OR ($2::text = 'DISCOVERY' AND q.task_type IN ('DISCOVER_WORKS', 'SYNC_WORK'))
+          OR q.task_type = $2::text
         )
-      ORDER BY priority DESC, chapter_sort_key ASC NULLS LAST, next_run_at ASC
+        AND (
+          $1::text IS NOT NULL
+          OR q.source IN (SELECT s.id FROM importer_sources s WHERE s.enabled = true AND s.status = 'ACTIVE')
+        )
+      ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT $3
     )
@@ -299,20 +303,68 @@ export async function failBatchDirect(jobs) {
     const p = getYugabytePool();
     let updatedCount = 0;
     for (const item of jobs) {
+        const isTerminal = item.status === 'FAILED' || item.status === 'CANCELLED_BY_STAFF' || item.status === 'PAUSED_BY_STAFF';
+        const delaySec = item.retryDelaySeconds && item.retryDelaySeconds > 0 ? item.retryDelaySeconds : 60;
+        const nextRun = isTerminal ? null : delaySec;
         const res = await p.query(`
       UPDATE importer_queue
       SET status = $1,
           last_error = $2,
+          last_error_at = NOW(),
+          retry_reason = COALESCE($3, retry_reason),
           locked_by = NULL,
           locked_at = NULL,
           lease_expires_at = NULL,
-          next_run_at = NOW() + ($3::text || ' seconds')::interval,
+          next_run_at = CASE WHEN $4::int IS NULL THEN NOW() ELSE NOW() + ($4::text || ' seconds')::interval END,
           updated_at = NOW()
-      WHERE id = $4;
-    `, [item.status || 'RETRY', item.error || 'Unknown error', item.retryDelaySeconds || 60, item.jobId]);
+      WHERE id = $5 AND ($6::text IS NULL OR locked_by = $6::text OR status != 'IMPORTING');
+    `, [item.status || 'RETRY', item.error || 'Unknown error', item.retryReason || null, nextRun, item.jobId, item.workerId || null]);
         updatedCount += res.rowCount || 0;
     }
     return updatedCount;
+}
+/* 4. Direct Stale Lease Recovery Sweeper with Fencing Safety */
+export async function recoverStalledLeasesDirect(staleGraceSeconds = 30) {
+    const p = getYugabytePool();
+    // 1. Move exhausted stale leases directly to FAILED
+    const failRes = await p.query(`
+    UPDATE importer_queue
+    SET status = 'FAILED',
+        last_error = '[LEASE_EXPIRED_EXHAUSTED] Lease expired and retry budget exhausted (' || attempts || ' attempts): ' || COALESCE(last_error, 'Worker unresponsive'),
+        last_error_at = NOW(),
+        retry_reason = 'LEASE_EXPIRED',
+        locked_by = NULL,
+        locked_at = NULL,
+        lease_expires_at = NULL,
+        next_run_at = NOW(),
+        updated_at = NOW()
+    WHERE status = 'IMPORTING'
+      AND lease_expires_at <= NOW() - ($1::text || ' seconds')::interval
+      AND attempts >= COALESCE(max_attempts, 7)
+    RETURNING id;
+  `, [staleGraceSeconds]);
+    // 2. Reclaim recoverable stale leases back to QUEUED
+    const recoverRes = await p.query(`
+    UPDATE importer_queue
+    SET status = 'QUEUED',
+        last_recovered_error = COALESCE(last_error, 'Lease expired / worker unresponsive'),
+        recovered_at = NOW(),
+        retry_reason = 'LEASE_EXPIRED',
+        last_error_at = NOW(),
+        locked_by = NULL,
+        locked_at = NULL,
+        lease_expires_at = NULL,
+        next_run_at = NOW() + INTERVAL '10 seconds',
+        updated_at = NOW()
+    WHERE status = 'IMPORTING'
+      AND lease_expires_at <= NOW() - ($1::text || ' seconds')::interval
+      AND attempts < COALESCE(max_attempts, 7)
+    RETURNING id;
+  `, [staleGraceSeconds]);
+    return {
+        recoveredCount: recoverRes.rowCount || 0,
+        failedCount: failRes.rowCount || 0,
+    };
 }
 /* 4. Direct Atomic Chapter Publication Batch */
 export async function publishBatchDirect(payload) {

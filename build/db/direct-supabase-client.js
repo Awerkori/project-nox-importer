@@ -1,4 +1,4 @@
-import { getYugabytePool, acquireJobsDirect, heartbeatDirect, failBatchDirect, } from './yugabyte-direct.js';
+import { getYugabytePool, acquireJobsDirect, heartbeatDirect, failBatchDirect, recoverStalledLeasesDirect, } from './yugabyte-direct.js';
 import { QueryBuilder, } from '../core/gateway-supabase.js';
 import { Logger } from '../core/logger.js';
 export class DirectSupabaseClient {
@@ -76,28 +76,22 @@ export class DirectSupabaseClient {
                 return { data: updates.length > 0 ? updates[0].renewed : false, error: null };
             }
             if (fn === 'importer_release_job') {
+                const delaySeconds = typeof args.p_retry_delay_seconds === 'number'
+                    ? args.p_retry_delay_seconds
+                    : (args.p_retry_delay ? parseInt(String(args.p_retry_delay).replace(/\D+/g, ''), 10) : undefined);
                 await failBatchDirect([{
                         jobId: args.p_job_id,
                         status: args.p_status || 'RETRY',
                         error: args.p_error,
-                        retryDelaySeconds: args.p_retry_delay_seconds,
+                        retryDelaySeconds: delaySeconds,
+                        retryReason: args.p_retry_class || args.p_retry_reason,
+                        workerId: args.p_worker_id,
                     }]);
                 return { data: true, error: null };
             }
             if (fn === 'importer_recover_stalled_leases') {
-                const res = await this.pool.query(`
-          UPDATE importer_queue
-          SET status = 'RETRY',
-              locked_by = NULL,
-              locked_at = NULL,
-              lease_expires_at = NULL,
-              next_run_at = NOW(),
-              updated_at = NOW()
-          WHERE status = 'IMPORTING'
-            AND lease_expires_at <= NOW()
-          RETURNING id;
-        `);
-                return { data: { recovered_count: res.rowCount || 0 }, error: null };
+                const res = await recoverStalledLeasesDirect();
+                return { data: [{ recovered_count: res.recoveredCount, failed_count: res.failedCount }], error: null };
             }
             if (fn === 'importer_replace_pages') {
                 const res = await this.pool.query('SELECT importer_replace_pages($1::uuid, $2::jsonb)', [args.p_chapter_id, JSON.stringify(args.p_pages)]);

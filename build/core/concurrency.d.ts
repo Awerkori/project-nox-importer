@@ -56,6 +56,15 @@ export declare class AdaptiveAutotuner {
     getSourcePageConcurrency(source: string): number;
     getSourceSemaphore(source: string, limitPerSource?: number): AsyncSemaphore;
     isSourceCapacityAvailable(source: string): boolean;
+    private sourceHealth;
+    recordSourceFailure(source: string): {
+        throttled: boolean;
+        newCapacity: number;
+    };
+    recordSourceSuccess(source: string): {
+        restored: boolean;
+        newCapacity: number;
+    };
     recordError(type: 'error' | 'ratelimit' | 'timeout'): void;
     evaluateCycle(): {
         concurrency: number;

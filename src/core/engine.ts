@@ -152,6 +152,9 @@ export class ImporterEngine {
     // 5. Launch background lease recovery loop (every 60s)
     this.runLeaseRecoveryLoop();
 
+    // 5b. Launch background cooldown source auto-probe loop (every 30s)
+    this.runSourceCooldownProbeLoop();
+
     // 6. Launch periodic existing works reconciliation loop (every 15 min)
     this.runReconciliationLoop();
 
@@ -418,6 +421,78 @@ export class ImporterEngine {
         await this.queue.recoverExpiredLeases();
       } catch (err: any) {
         this.logger.warn('Error during periodic lease recovery loop', { error: err?.message });
+      }
+    }
+  }
+
+  /**
+   * Periodic auto-probe and auto-healing loop for sources in COOLDOWN (runs every 30s).
+   * Restores expired cooldowns immediately and probes active ones for early auto-healing.
+   */
+  private async runSourceCooldownProbeLoop(): Promise<void> {
+    while (!this.stopSignal) {
+      await this.sleep(30_000);
+      if (this.stopSignal) break;
+
+      try {
+        const { data: cooldownSources, error } = await this.supabase
+          .from('importer_sources')
+          .select('id, name, status, base_url, cooldown_until, blocked_reason')
+          .eq('status', 'COOLDOWN');
+
+        if (error || !cooldownSources || cooldownSources.length === 0) continue;
+
+        const now = Date.now();
+        for (const src of cooldownSources) {
+          if (this.stopSignal) break;
+
+          const cooldownUntil = src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0;
+          if (now >= cooldownUntil) {
+            this.logger.info(`Source ${src.id} cooldown expired. Auto-healing back to ACTIVE.`);
+            this.circuitBreaker.reset(src.id);
+            await this.supabase
+              .from('importer_sources')
+              .update({
+                status: 'ACTIVE',
+                cooldown_until: null,
+                blocked_reason: null,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', src.id);
+            continue;
+          }
+
+          // Active cooldown: lightweight probe for early recovery
+          if (src.base_url) {
+            try {
+              const probeRes = await fetch(src.base_url, {
+                method: 'HEAD',
+                signal: AbortSignal.timeout(5_000),
+                headers: {
+                  'User-Agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                },
+              });
+              if (probeRes.ok || probeRes.status === 405) {
+                this.logger.info(`Source ${src.id} early probe succeeded (HTTP ${probeRes.status}). Auto-healing back to ACTIVE.`);
+                this.circuitBreaker.reset(src.id);
+                await this.supabase
+                  .from('importer_sources')
+                  .update({
+                    status: 'ACTIVE',
+                    cooldown_until: null,
+                    blocked_reason: null,
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq('id', src.id);
+              }
+            } catch {
+              // Probe failed, remain in cooldown
+            }
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn('Error during source cooldown auto-probe loop', { error: err?.message });
       }
     }
   }
@@ -1002,19 +1077,10 @@ export class ImporterEngine {
         const claimDurationMs = performance.now() - claimT0;
         const sourceSem = this.autotuner.getSourceSemaphore(job.source);
 
-        // 3. Heartbeat active lease during real processing
-        const cancelled = new AbortController();
-        const heartbeat = this.queue.startHeartbeat(
-          job.id,
-          this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS,
-          () => cancelled.abort()
-        );
-
         telemetryCollector.setSlotState(slotIndex, 'ACTIVE_PROCESSING', `${job.source} ch ${job.payload?.chapterNumber}`);
         try {
           await this.executeJobDirectly(job, { claimDurationMs, semWaitMs: 0 });
         } finally {
-          heartbeat.stop();
           if (sourcePermitAcquired) {
             sourceSem.release();
           }
@@ -1119,15 +1185,18 @@ export class ImporterEngine {
       }
     );
 
-    // Hard safety timeout: prevents any single job from hogging semaphores/leases indefinitely
-    const maxJobDurationMs = job.task_type === 'IMPORT_CHAPTER' ? 5 * 60 * 1000 : 3 * 60 * 1000;
+    // Dynamic safety timeout: scales with page count if available, with a minimum of 6 minutes and maximum of 15 minutes
+    const pageCountHint = typeof job.payload?.pageCount === 'number' ? job.payload.pageCount : (job.progress_total || 40);
+    const maxJobDurationMs = job.task_type === 'IMPORT_CHAPTER'
+      ? Math.min(15 * 60 * 1000, Math.max(6 * 60 * 1000, pageCountHint * 8 * 1000))
+      : 5 * 60 * 1000;
     let jobTimeoutTimer: NodeJS.Timeout | null = null;
     const timeoutPromise = new Promise<never>((_, reject) => {
       jobTimeoutTimer = setTimeout(() => {
         cancelSignalTriggered = true;
         reject(
           new Error(
-            `JobExecutionTimeout: Job ${job.id} (${job.task_type}) exceeded safety limit of ${maxJobDurationMs / 60000} minutes`
+            `JobExecutionTimeout: Job ${job.id} (${job.task_type}) exceeded safety limit of ${Math.round(maxJobDurationMs / 60000)} minutes`
           )
         );
       }, maxJobDurationMs);
@@ -1351,22 +1420,35 @@ export class ImporterEngine {
         }
 
         if (sourceRec.status === 'PAUSED' || sourceRec.status === 'DISABLED' || !sourceRec.enabled) {
-          this.logger.info(`Postponing job ${job.id}: source ${job.source} is ${sourceRec.status}`);
-          await this.queue.releaseJob(job.id, 'RETRY', `Source ${job.source} is ${sourceRec.status}`, 15);
+          this.logger.info(`Source ${job.source} is ${sourceRec.status}. Parking job ${job.id} to avoid retry spinning.`);
+          await this.queue.releaseJob(
+            job.id,
+            'PAUSED_BY_STAFF',
+            `Source ${job.source} is ${sourceRec.status} (automatically parked by engine)`,
+            0,
+            'SOURCE_PAUSED'
+          );
           return;
         }
 
         if (sourceRec.status === 'COOLDOWN') {
           const cooldownUntil = sourceRec.cooldown_until ? new Date(sourceRec.cooldown_until).getTime() : 0;
           if (Date.now() < cooldownUntil) {
-            const waitMinutes = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 60000));
-            await this.queue.releaseJob(job.id, 'RETRY', `Source in COOLDOWN until ${sourceRec.cooldown_until}`, waitMinutes);
+            const waitSeconds = Math.max(10, Math.ceil((cooldownUntil - Date.now()) / 1000));
+            await this.queue.releaseJob(
+              job.id,
+              'RETRY',
+              `Source in COOLDOWN until ${sourceRec.cooldown_until}`,
+              waitSeconds,
+              'SOURCE_TIMEOUT'
+            );
             return;
           } else {
             await this.supabase
               .from('importer_sources')
               .update({ status: 'ACTIVE', cooldown_until: null, updated_at: new Date().toISOString() })
               .eq('id', job.source);
+            this.circuitBreaker.reset(job.source);
           }
         }
       }
@@ -1595,13 +1677,22 @@ export class ImporterEngine {
         this.autotuner.recordError('error');
       }
 
+      if (classification.sourceStage === 'provider') {
+        this.autotuner.recordSourceFailure(job.source);
+      }
+
+      const structuredMsg = decision.status === 'FAILED'
+        ? decision.reason
+        : (classification.structuredMessage || errorMessage);
+
       this.logger.warn(
-        `Job ${job.id} retry decision: ${decision.status} (delay: ${decision.delaySeconds}s, class: ${classification.retryClass})`,
+        `Job ${job.id} retry decision: ${decision.status} (delay: ${decision.delaySeconds}s, code: ${classification.taxonomyCode})`,
         {
           jobId: job.id,
           source: job.source,
           workId: job.payload?.workId,
           chapterSortKey: job.chapter_sort_key,
+          taxonomyCode: classification.taxonomyCode,
           retryClass: classification.retryClass,
           attempt: job.attempts,
           delaySeconds: decision.delaySeconds,
@@ -1612,28 +1703,44 @@ export class ImporterEngine {
       await this.queue.releaseJob(
         job.id,
         decision.status,
-        this.sanitizeErrorMessage(errorMessage),
+        this.sanitizeErrorMessage(structuredMsg),
         decision.delaySeconds,
-        classification.retryClass
+        classification.taxonomyCode
       );
 
-      if (job.payload?.workId && decision.status === 'RETRY') {
-        const nextAttemptIso = new Date(Date.now() + decision.delaySeconds * 1000).toISOString();
-        try {
-          await this.supabase
-            .from('importer_staff_requests')
-            .update({
-              status: 'RETRYING',
-              last_error: this.sanitizeErrorMessage(errorMessage),
-              last_attempt_at: new Date().toISOString(),
-              next_attempt_at: nextAttemptIso,
-              attempt_count: job.attempts,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('work_id', job.payload.workId)
-            .in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
-        } catch {
-          // Non-blocking telemetry
+      if (job.payload?.workId) {
+        if (decision.status === 'RETRY') {
+          const nextAttemptIso = new Date(Date.now() + decision.delaySeconds * 1000).toISOString();
+          try {
+            await this.supabase
+              .from('importer_staff_requests')
+              .update({
+                status: 'RETRYING',
+                last_error: this.sanitizeErrorMessage(structuredMsg),
+                last_attempt_at: new Date().toISOString(),
+                next_attempt_at: nextAttemptIso,
+                attempt_count: job.attempts,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('work_id', job.payload.workId)
+              .in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
+          } catch {
+            // Non-blocking telemetry
+          }
+        } else if (decision.status === 'FAILED') {
+          try {
+            await this.supabase
+              .from('importer_staff_requests')
+              .update({
+                status: 'FAILED',
+                last_error: this.sanitizeErrorMessage(decision.reason),
+                updated_at: new Date().toISOString(),
+              })
+              .eq('work_id', job.payload.workId)
+              .in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
+          } catch {
+            // Non-blocking telemetry
+          }
         }
       }
     }
@@ -2438,10 +2545,16 @@ export class ImporterEngine {
             if (!pageBytes) {
               const errMsg = (lastErr instanceof Error && lastErr.message) ? lastErr.message : (lastErr ? String(lastErr) : 'Erro desconhecido');
               const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
+              const isRefreshable =
+                is404 ||
+                errMsg.includes('Formato não permitido') ||
+                errMsg.includes('InvalidMediaError') ||
+                errMsg.includes('403') ||
+                errMsg.includes('expired');
               let currentUrl = pageUrls[idx] || '';
 
               // MANIFEST REFRESH: Before blind failure, query upstream to see if URLs were updated
-              if (is404 && !manifestRefreshed) {
+              if (isRefreshable && !manifestRefreshed) {
                 manifestRefreshed = true;
                 try {
                   const refreshAdapter = this.registry.get(effectiveSource);
@@ -2749,6 +2862,8 @@ export class ImporterEngine {
         }
 
         successfulExecution = true;
+        this.autotuner.recordSourceSuccess(effectiveSource);
+        this.circuitBreaker.recordSuccess(effectiveSource);
         telemetry.tStaged = Date.now();
         this.logger.info('TELEMETRY_JOB_STAGED', telemetry);
         this.supabase.from('importer_queue').update({

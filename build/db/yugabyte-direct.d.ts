@@ -39,9 +39,15 @@ export declare function heartbeatDirect(workerId: string, jobs: Array<{
 export declare function failBatchDirect(jobs: Array<{
     jobId: string;
     error?: string;
-    status?: 'RETRY' | 'FAILED' | 'PAUSED_BY_STAFF';
+    status?: 'RETRY' | 'FAILED' | 'PAUSED_BY_STAFF' | 'CANCELLED_BY_STAFF' | 'BLOCKED_BY_UPSTREAM';
     retryDelaySeconds?: number;
+    retryReason?: string;
+    workerId?: string;
 }>): Promise<number>;
+export declare function recoverStalledLeasesDirect(staleGraceSeconds?: number): Promise<{
+    recoveredCount: number;
+    failedCount: number;
+}>;
 export interface PublishBatchDirectMetrics {
     beginMs: number;
     validationMs: number;
