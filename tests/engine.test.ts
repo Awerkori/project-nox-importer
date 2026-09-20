@@ -69,6 +69,7 @@ describe('ImporterEngine End-to-End Execution', () => {
     await db.exec(readFileSync(resolve('migrations/005_importer_page_provider_column.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/006_importer_publication_barrier.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/007_importer_lease_recovery.sql'), 'utf8'));
+    await db.exec(`ALTER TABLE public.works ADD COLUMN IF NOT EXISTS latest_chapter_published_at timestamptz;`);
 
     // Create bot admin member via auth.users trigger
     await db.query(`insert into auth.users (id, email, email_confirmed_at) values ($1, 'bot@projectnox.com', now())`, [botUserId]);

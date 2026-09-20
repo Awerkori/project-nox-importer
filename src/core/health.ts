@@ -1,4 +1,6 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { db } from '../db/index.js';
+import * as schema from '../db/schema.js';
+import { safeQuery } from '../db/safe.js';
 import { StorageProvider } from '../storage/provider.js';
 import { Logger } from './logger.js';
 
@@ -31,7 +33,7 @@ export class HealthMonitor {
   private startTime = Date.now();
   private logger = new Logger('HealthMonitor');
 
-  constructor(private supabase: SupabaseClient, private storage: StorageProvider) {}
+  constructor(private storage: StorageProvider, private supabase?: any) {}
 
   async checkHealth(): Promise<HealthReport> {
     const mem = process.memoryUsage();
@@ -41,7 +43,6 @@ export class HealthMonitor {
       heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
     };
 
-    // 1. Storage check
     let storageHealthy = false;
     try {
       storageHealthy = await this.storage.healthCheck();
@@ -49,30 +50,51 @@ export class HealthMonitor {
       storageHealthy = false;
     }
 
-    // 2. Database & Queue metrics check
     let dbConnected = false;
     let dbError: string | undefined;
     const queueCounts = { queued: 0, importing: 0, failed: 0, retry: 0 };
 
-    try {
-      const { data, error } = await this.supabase
-        .from('importer_queue')
-        .select('status');
-
-      if (error) {
-        dbError = error.message;
-      } else {
-        dbConnected = true;
-        for (const row of data || []) {
-          const s = (row.status || '').toLowerCase();
-          if (s === 'queued') queueCounts.queued++;
-          else if (s === 'importing') queueCounts.importing++;
-          else if (s === 'failed') queueCounts.failed++;
-          else if (s === 'retry') queueCounts.retry++;
+    if (this.supabase) {
+      try {
+        const { data, error } = await this.supabase.from('importer_queue').select('status').limit(100);
+        if (error) {
+          dbConnected = false;
+          dbError = error.message;
+        } else {
+          dbConnected = true;
+          const rows = Array.isArray(data) ? data : [];
+          for (const row of rows) {
+            const s = (row.status || '').toLowerCase();
+            if (s === 'queued') queueCounts.queued++;
+            else if (s === 'importing') queueCounts.importing++;
+            else if (s === 'failed') queueCounts.failed++;
+            else if (s === 'retry') queueCounts.retry++;
+          }
         }
+      } catch (err: any) {
+        dbConnected = false;
+        dbError = err?.message || 'Database error';
       }
-    } catch (err: any) {
-      dbError = err?.message;
+    } else {
+      try {
+        const { data, error } = await safeQuery(db.select({ status: schema.importerQueue.status }).from(schema.importerQueue));
+
+        if (error) {
+          dbError = (error as Error).message;
+        } else {
+          dbConnected = true;
+          const rows = Array.isArray(data) ? data : [];
+          for (const row of rows) {
+            const s = (row.status || '').toLowerCase();
+            if (s === 'queued') queueCounts.queued++;
+            else if (s === 'importing') queueCounts.importing++;
+            else if (s === 'failed') queueCounts.failed++;
+            else if (s === 'retry') queueCounts.retry++;
+          }
+        }
+      } catch (err: any) {
+        dbError = err?.message;
+      }
     }
 
     let overallStatus: HealthReport['status'] = 'HEALTHY';

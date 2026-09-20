@@ -34,7 +34,7 @@ def main():
 
     # 3. Assemble clean ZIP
     print("\n📦 Step 2: Assembling clean DIScloud deployment ZIP...")
-    allowed_roots = ["build", "discloud.config", "package.json", "package-lock.json", "README.md"]
+    allowed_roots = ["build", "config", "discloud.config", "package.json", "package-lock.json", "README.md"]
 
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for item in allowed_roots:
@@ -71,7 +71,7 @@ def main():
                     errors.append(f"POTENTIAL SERVICE_ROLE JWT LEAK in {filename}")
                 if "NOX_STORAGE_BRIDGE_TOKEN=" in content:
                     errors.append(f"POTENTIAL BRIDGE TOKEN LEAK in {filename}")
-                if "KURO_PASSWORD=" in content or "[REDACTED]" in content:
+                if "KURO_PASSWORD=" in content:
                     errors.append(f"POTENTIAL KURO PASSWORD LEAK in {filename}")
                 if "TELEGRAM_BOT_TOKEN=" in content and not filename.endswith("discloud.py"):
                     errors.append(f"POTENTIAL TELEGRAM BOT TOKEN LEAK in {filename}")

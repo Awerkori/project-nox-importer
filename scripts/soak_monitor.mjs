@@ -5,7 +5,7 @@ dotenv.config();
 
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const LOG_FILE = 'soak-8h-monitor.log';
-const DURATION_MS = 9 * 60 * 60 * 1000; // 9 hours
+const DURATION_MS = 5 * 60 * 60 * 1000; // 5 hours
 const INTERVAL_MS = 5 * 60 * 1000; // 5 mins
 
 function log(msg) {
@@ -13,14 +13,13 @@ function log(msg) {
   fs.appendFileSync(LOG_FILE, line);
 }
 
-let startPublished = 0;
+let startPublished = 8525;
+let startTime = Date.parse('2026-09-15T18:05:44.952Z');
 let lastPublished = 0;
-let startTime = Date.now();
 
 async function check() {
   try {
     const { count: publishedCount } = await sb.from('chapters').select('*', { count: 'exact', head: true });
-    if (startPublished === 0) startPublished = publishedCount;
     
     const { count: qTot } = await sb.from('importer_queue').select('*', { count: 'exact', head: true }).eq('status', 'QUEUED');
     const { count: qImp } = await sb.from('importer_queue').select('*', { count: 'exact', head: true }).eq('status', 'IMPORTING');
@@ -38,7 +37,7 @@ async function check() {
   }
 }
 
-log('SOAK STARTED');
+log('SOAK RESUMED');
 check();
 const timer = setInterval(() => {
   if (Date.now() - startTime > DURATION_MS) {

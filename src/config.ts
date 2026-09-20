@@ -6,9 +6,10 @@ dotenv.config();
 const ConfigSchema = z.object({
   SUPABASE_URL: z.string().url().default('https://placeholder.supabase.co'),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).default('placeholder-service-role-key'),
-  STORAGE_PROVIDER: z.enum(['worker', 'telegram', 'mock']).default('worker'),
+  STORAGE_PROVIDER: z.enum(['worker', 'telegram', 'mock', 'direct_telegram']).default('direct_telegram'),
   NOX_STORAGE_BRIDGE_TOKEN: z.string().optional(),
   NOX_MANGA_URL: z.string().url().default('https://manga.project-nox-awerkori.workers.dev'),
+  NOX_IMPORTER_GATEWAY_URL: z.string().url().default('https://project-nox-importer-gateway.project-nox-awerkori.workers.dev'),
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
   IMPORTER_USER_ID: z.string().uuid().optional(),
@@ -21,6 +22,13 @@ const ConfigSchema = z.object({
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
   BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  IMPORTER_DB_MODE: z.enum(['direct', 'gateway']).default('direct'),
+  YUGABYTE_HOST: z.string().optional(),
+  YUGABYTE_PORT: z.coerce.number().default(5433),
+  YUGABYTE_USER: z.string().optional(),
+  YUGABYTE_PASSWORD: z.string().optional(),
+  YUGABYTE_DATABASE: z.string().default('project_nox_prod'),
+  YUGABYTE_SSL_CERT: z.string().optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

@@ -1,17 +1,26 @@
-import { createClient } from '@supabase/supabase-js';
-import dotenv from 'dotenv';
-dotenv.config();
-const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+import puppeteer from 'puppeteer-core';
 async function run() {
-  console.log('Acquiring...');
-  const { data, error } = await sb.rpc('importer_acquire_job', {
-    p_worker_id: 'test_worker',
-    p_lease_duration: '1 minute'
+  const browser = await puppeteer.launch({
+    executablePath: '/usr/bin/chromium',
+    userDataDir: '/home/awerkori/.config/chromium',
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
-  console.log('Error:', error);
-  console.log('Data:', data);
-  if (data && data.length > 0) {
-    await sb.from('importer_queue').update({ status: 'QUEUED' }).eq('id', data[0].id);
-  }
+  const page = await browser.newPage();
+  await page.goto('https://supabase.com/dashboard/project/izregkwaqdygwioqzwwo/sql/new', { waitUntil: 'domcontentloaded' }).catch(e => {});
+  await new Promise(r => setTimeout(r, 5000));
+  
+  const res = await page.evaluate(async () => {
+    const token = window.localStorage.getItem('supabase.dashboard.auth.token');
+    const jwt = JSON.parse(token).access_token;
+    const r1 = await fetch('https://api.supabase.com/v1/projects/izregkwaqdygwioqzwwo/database/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${jwt}` },
+      body: JSON.stringify({ query: `SELECT * FROM importer_acquire_job('test-worker', '5 minutes'::interval);` })
+    });
+    return await r1.text();
+  });
+  console.log(res);
+  await browser.close();
 }
 run();

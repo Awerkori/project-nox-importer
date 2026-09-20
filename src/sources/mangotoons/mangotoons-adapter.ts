@@ -227,7 +227,7 @@ export class MangoToonsAdapter implements SourceAdapter {
     if (sourceChapterId.includes(':')) {
       const [wId, cId] = sourceChapterId.split(':');
       workId = wId;
-      chIdentifier = chapterNumber !== undefined ? String(chapterNumber) : cId;
+      chIdentifier = cId || (chapterNumber !== undefined ? String(chapterNumber) : '1');
     } else {
       workId = sourceChapterId;
       chIdentifier = chapterNumber !== undefined ? String(chapterNumber) : '1';

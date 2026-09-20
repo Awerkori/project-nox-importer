@@ -44,6 +44,7 @@ describe('Publication Barrier & Canonical Ordering', () => {
     await db.exec(readFileSync(resolve('migrations/005_importer_page_provider_column.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/006_importer_publication_barrier.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/007_importer_lease_recovery.sql'), 'utf8'));
+    await db.exec(`ALTER TABLE public.works ADD COLUMN IF NOT EXISTS latest_chapter_published_at timestamptz;`);
 
     // Insert bot user into auth.users
     await db.query(`insert into auth.users (id, email) values ($1, 'bot@projectnox.app')`, [testUserId]);

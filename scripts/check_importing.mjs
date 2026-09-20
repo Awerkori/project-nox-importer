@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 async function run() {
-  const { data } = await sb.from('importer_queue').select('id, status, source, dedupe_key, lease_expires_at').eq('status', 'IMPORTING').limit(20);
-  console.log('Sample Importing:', data);
+  const { data } = await sb.from('importer_queue').select('id, source, task_type, locked_at, attempts, last_error, payload').eq('status', 'IMPORTING');
+  console.log(data);
 }
 run();

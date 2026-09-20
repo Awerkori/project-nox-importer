@@ -1,31 +1,31 @@
 import puppeteer from 'puppeteer-core';
+
 async function run() {
-  const browserRes = await fetch('http://127.0.0.1:9222/json/version').catch(() => null);
-  if (!browserRes) {
-    console.log("No browser running");
-    return;
-  }
-  const browserData = await browserRes.json();
-  const browser = await puppeteer.connect({ browserWSEndpoint: browserData.webSocketDebuggerUrl, defaultViewport: null });
+  const browser = await puppeteer.launch({
+    executablePath: '/usr/bin/chromium',
+    userDataDir: '/home/awerkori/.config/chromium',
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+  
   const page = await browser.newPage();
+  await page.goto('https://supabase.com/dashboard/project/izregkwaqdygwioqzwwo/settings/general', { waitUntil: 'domcontentloaded' }).catch(e => console.log('Goto timeout ignored'));
   
-  await page.goto('https://supabase.com/dashboard/project/izregkwaqdygwioqzwwo/settings/general', { waitUntil: 'domcontentloaded' });
-  await new Promise(r => setTimeout(r, 6000));
+  await new Promise(r => setTimeout(r, 5000));
   
-  // Try to find the Restart Project button and click it
   const res = await page.evaluate(async () => {
     const token = window.localStorage.getItem('supabase.dashboard.auth.token');
+    if (!token) return { status: 'No token' };
     const jwt = JSON.parse(token).access_token;
     
-    // We can just hit the restart API directly
     const response = await fetch('https://api.supabase.com/v1/projects/izregkwaqdygwioqzwwo/restart', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${jwt}` }
     });
     return { status: response.status, body: await response.text() };
   });
-  console.log(res);
-  await page.close();
-  await browser.disconnect();
+  
+  console.log('Result:', res);
+  await browser.close();
 }
-run();
+run().catch(console.error);

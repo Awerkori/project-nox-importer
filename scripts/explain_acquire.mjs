@@ -1,9 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
-import { readFileSync } from 'fs';
-const env = Object.fromEntries(readFileSync('.env', 'utf-8').split('\n').filter(l => l.includes('=') && !l.startsWith('#')).map(l => { const i = l.indexOf('='); return [l.slice(0,i), l.slice(i+1)]; }));
-const sb = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+import dotenv from 'dotenv';
+dotenv.config();
+
+const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 async function run() {
-  const { data: acq } = await sb.rpc('importer_acquire_job', { p_worker_id: 'test' });
-  console.log("Acquired:", acq.length);
+  const { data, error } = await sb.rpc('exec_sql', { query: `EXPLAIN ANALYZE SELECT * FROM importer_acquire_job(1);` });
+  if (error) console.error(error);
+  else console.log(data);
 }
 run();

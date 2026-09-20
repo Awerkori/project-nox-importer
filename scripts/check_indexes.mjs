@@ -1,16 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
-import dotenv from 'dotenv';
-dotenv.config();
-
-const url = process.env.SUPABASE_URL;
-const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-async function queryDB(query) {
-  const r = await fetch(url + '/rest/v1/', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-    body: JSON.stringify({ query })
-  });
-  return r.json();
+import { readFileSync } from 'fs';
+const env = Object.fromEntries(readFileSync('.env', 'utf-8').split('\n').filter(l => l.includes('=') && !l.startsWith('#')).map(l => { const i = l.indexOf('='); return [l.slice(0,i), l.slice(i+1)]; }));
+const sb = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+async function run() {
+  const { data, error } = await sb.rpc('admin_get_system_health');
+  console.log("Health:", data ? "OK" : error);
 }
-// Oh wait, PostgREST doesn't support raw SQL POST.
+run();

@@ -215,8 +215,8 @@ export async function processAndStoreMedia(
   const providerKey = await storage.upload(bytes, info.mime, mediaId, chapterId);
 
   // 3. Insert record into public.media
-  const botRef = storage.getLastBotReference?.() || 'MANGA_STORAGE_01';
-  const shardId = storage.getLastShardId?.() || null;
+  const botRef = storage.getLastBotReference?.(mediaId) || 'MANGA_STORAGE_01';
+  const shardId = storage.getLastShardId?.(mediaId) || null;
   const { error: insertErr } = await supabase.from('media').insert({
     id: mediaId,
     provider: storage.getProviderKey() === 'mock' ? 'telegram' : storage.getProviderKey(),
