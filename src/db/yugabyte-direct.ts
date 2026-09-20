@@ -143,29 +143,26 @@ export function getYugabytePool(): pg.Pool {
   });
 
   const origConnect = pool.connect.bind(pool);
-  (pool as any).connect = async function (...args: any[]) {
+  (pool as any).connect = function (...args: any[]) {
     const t0 = performance.now();
     const queued = (pool as any).waitingCount || 0;
-    try {
-      const client = await (origConnect as any)(...args);
+    const cb = typeof args[0] === 'function' ? args[0] : (typeof args[1] === 'function' ? args[1] : null);
+    if (cb) {
+      return (origConnect as any)((err: any, client: any, done: any) => {
+        const waitMs = performance.now() - t0;
+        telemetryCollector.recordDbPoolWait(waitMs, queued);
+        cb(err, client, done);
+      });
+    }
+    return (origConnect as any)(...args).then((client: any) => {
       const waitMs = performance.now() - t0;
       telemetryCollector.recordDbPoolWait(waitMs, queued);
-
-      const origClientQuery = client.query.bind(client);
-      client.query = async function (...qArgs: any[]) {
-        telemetryCollector.trackActiveDbQuery(1);
-        try {
-          return await (origClientQuery as any)(...qArgs);
-        } finally {
-          telemetryCollector.trackActiveDbQuery(-1);
-        }
-      };
       return client;
-    } catch (err) {
+    }).catch((err: any) => {
       const waitMs = performance.now() - t0;
       telemetryCollector.recordDbPoolWait(waitMs, queued);
       throw err;
-    }
+    });
   };
 
   telemetryCollector.setPool(pool);

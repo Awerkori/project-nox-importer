@@ -132,30 +132,26 @@ export function getYugabytePool() {
         logger.error('Unexpected error on idle direct Yugabyte client', { error: err.message });
     });
     const origConnect = pool.connect.bind(pool);
-    pool.connect = async function (...args) {
+    pool.connect = function (...args) {
         const t0 = performance.now();
         const queued = pool.waitingCount || 0;
-        try {
-            const client = await origConnect(...args);
+        const cb = typeof args[0] === 'function' ? args[0] : (typeof args[1] === 'function' ? args[1] : null);
+        if (cb) {
+            return origConnect((err, client, done) => {
+                const waitMs = performance.now() - t0;
+                telemetryCollector.recordDbPoolWait(waitMs, queued);
+                cb(err, client, done);
+            });
+        }
+        return origConnect(...args).then((client) => {
             const waitMs = performance.now() - t0;
             telemetryCollector.recordDbPoolWait(waitMs, queued);
-            const origClientQuery = client.query.bind(client);
-            client.query = async function (...qArgs) {
-                telemetryCollector.trackActiveDbQuery(1);
-                try {
-                    return await origClientQuery(...qArgs);
-                }
-                finally {
-                    telemetryCollector.trackActiveDbQuery(-1);
-                }
-            };
             return client;
-        }
-        catch (err) {
+        }).catch((err) => {
             const waitMs = performance.now() - t0;
             telemetryCollector.recordDbPoolWait(waitMs, queued);
             throw err;
-        }
+        });
     };
     telemetryCollector.setPool(pool);
     return pool;
