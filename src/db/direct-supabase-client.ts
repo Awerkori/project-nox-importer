@@ -78,7 +78,8 @@ export class DirectSupabaseClient implements SqlClient {
           : (args.p_lease_minutes || 5);
         const jobs = await acquireJobsDirect({
           workerId: args.p_worker_id,
-          source: args.p_source,
+          source: typeof args.p_source === 'string' ? args.p_source : undefined,
+          allowedSources: args.p_allowed_sources || (Array.isArray(args.p_source) ? args.p_source : undefined),
           taskType: args.p_task_type,
           batchSize: args.p_batch_size || 1,
           leaseDurationMinutes: leaseMinutes,

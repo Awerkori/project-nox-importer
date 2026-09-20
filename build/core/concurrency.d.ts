@@ -4,6 +4,7 @@ export declare class AsyncSemaphore {
     private waitQueue;
     name: string;
     constructor(maxPermits: number, name?: string);
+    tryAcquire(): boolean;
     acquire(signal?: AbortSignal): Promise<void>;
     release(): void;
     private drain;
@@ -54,6 +55,7 @@ export declare class AdaptiveAutotuner {
     getSourceLimits(source: string): SourceConcurrencyConfig;
     getSourcePageConcurrency(source: string): number;
     getSourceSemaphore(source: string, limitPerSource?: number): AsyncSemaphore;
+    isSourceCapacityAvailable(source: string): boolean;
     recordError(type: 'error' | 'ratelimit' | 'timeout'): void;
     evaluateCycle(): {
         concurrency: number;

@@ -20,6 +20,7 @@ export declare function acquireJobsDirect(options: {
     workerId: string;
     leaseDurationMinutes?: number;
     source?: string;
+    allowedSources?: string[];
     taskType?: string;
     batchSize?: number;
 }): Promise<GatewayJob[]>;

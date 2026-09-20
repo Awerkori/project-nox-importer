@@ -83,6 +83,7 @@ export class TelemetryCollector {
   private activeWorkersDistribution: Record<number, number> = {
     0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0
   };
+  private sourceActiveSamples = new Map<string, number[]>();
   private samplerTimer: NodeJS.Timeout | null = null;
 
   // 2. DB Pool Telemetry
@@ -171,6 +172,7 @@ export class TelemetryCollector {
     this.eventLoopLagSamples = [];
     this.eluHistory = [];
     this.cpuPercentSamples = [];
+    this.sourceActiveSamples.clear();
 
     // Reset slot timers
     const now = performance.now();
@@ -353,15 +355,32 @@ export class TelemetryCollector {
     this.samplerTimer = setInterval(() => {
       // 1. Sample Active Workers
       let activeCount = 0;
+      const sourceCounts = new Map<string, number>();
       const now = performance.now();
       for (const [_, slot] of this.slots.entries()) {
         if (slot.currentState === 'ACTIVE_PROCESSING') {
           activeCount++;
+          if (slot.context) {
+            const src = slot.context.split(' ')[0];
+            if (src) {
+              sourceCounts.set(src, (sourceCounts.get(src) || 0) + 1);
+            }
+          }
         }
       }
       this.activeWorkersSamples.push(activeCount);
       const bucket = Math.min(8, Math.max(0, activeCount));
       this.activeWorkersDistribution[bucket] = (this.activeWorkersDistribution[bucket] || 0) + 1;
+
+      for (const src of ['hanamiheaven', 'fleurblanche', 'mangalivreto']) {
+        const c = sourceCounts.get(src) || 0;
+        let arr = this.sourceActiveSamples.get(src);
+        if (!arr) {
+          arr = [];
+          this.sourceActiveSamples.set(src, arr);
+        }
+        arr.push(c);
+      }
 
       // 2. Telegram concurrency sample
       this.telegramActiveUploadsSamples.push(this.telegramActiveUploads);
@@ -589,6 +608,20 @@ export class TelemetryCollector {
         distribution: this.activeWorkersDistribution,
         timeWith8ActivePercent,
         timeWithLessThan6Percent,
+      },
+      perSourceActive: {
+        hanamiheaven: {
+          avg: avg(this.sourceActiveSamples.get('hanamiheaven') || []),
+          peak: (this.sourceActiveSamples.get('hanamiheaven') || []).length ? Math.max(...(this.sourceActiveSamples.get('hanamiheaven') || [0])) : 0,
+        },
+        fleurblanche: {
+          avg: avg(this.sourceActiveSamples.get('fleurblanche') || []),
+          peak: (this.sourceActiveSamples.get('fleurblanche') || []).length ? Math.max(...(this.sourceActiveSamples.get('fleurblanche') || [0])) : 0,
+        },
+        mangalivreto: {
+          avg: avg(this.sourceActiveSamples.get('mangalivreto') || []),
+          peak: (this.sourceActiveSamples.get('mangalivreto') || []).length ? Math.max(...(this.sourceActiveSamples.get('mangalivreto') || [0])) : 0,
+        },
       },
       workerTimeBreakdown: {
         workerBusyPercent,

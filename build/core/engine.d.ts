@@ -40,6 +40,8 @@ export declare class ImporterEngine {
     private isRunning;
     private stopSignal;
     private abortController;
+    private chapterClaimMutex;
+    private activeSourcesCache;
     static activeBufferedBytes: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
     getAutotuner(): AdaptiveAutotuner;
@@ -105,6 +107,7 @@ export declare class ImporterEngine {
     private runAutotunerLoop;
     private sourceEmptyCooldown;
     private sourceStatusCache;
+    private getEligibleChapterSources;
     private checkSourceAvailability;
     /**
      * Dedicated multi-slot concurrent runner for a specific source.
