@@ -134,8 +134,7 @@ export class PublicationBarrier {
         const { error: chErr } = await this.supabase
             .from('chapters')
             .update({ published_at: publishedAtIso })
-            .eq('id', chapterId)
-            .is('published_at', null);
+            .eq('id', chapterId);
         if (chErr)
             throw chErr;
         // 2. Mark public.importer_chapter_mappings.status = 'COMPLETED'
