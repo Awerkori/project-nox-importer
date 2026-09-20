@@ -5806,6 +5806,40 @@ export declare const importerSources: import("drizzle-orm/sqlite-core").SQLiteTa
         }, {}, {
             length: number | undefined;
         }>;
+        chapterIngestionEnabled: import("drizzle-orm/sqlite-core").SQLiteColumn<{
+            name: "chapter_ingestion_enabled";
+            tableName: "importer_sources";
+            dataType: "number";
+            columnType: "SQLiteInteger";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            isPrimaryKey: false;
+            isAutoincrement: false;
+            hasRuntimeDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+            identity: undefined;
+            generated: undefined;
+        }, {}, {}>;
+        catalogDiscoveryEnabled: import("drizzle-orm/sqlite-core").SQLiteColumn<{
+            name: "catalog_discovery_enabled";
+            tableName: "importer_sources";
+            dataType: "number";
+            columnType: "SQLiteInteger";
+            data: number;
+            driverParam: number;
+            notNull: false;
+            hasDefault: false;
+            isPrimaryKey: false;
+            isAutoincrement: false;
+            hasRuntimeDefault: false;
+            enumValues: undefined;
+            baseColumn: never;
+            identity: undefined;
+            generated: undefined;
+        }, {}, {}>;
     };
     dialect: "sqlite";
 }>;

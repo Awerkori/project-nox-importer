@@ -217,13 +217,46 @@ export class ImporterEngine {
         this.stopSignal = true;
         this.abortController.abort();
     }
+    discoveryAllowedCache = false;
+    discoveryAllowedCachedAt = 0;
+    /**
+     * Checks whether catalog discovery and backfill are globally enabled in system settings.
+     * Cached for 5s to eliminate unnecessary database calls on tight loops.
+     */
+    async isDiscoveryAllowed() {
+        const now = Date.now();
+        if (now - this.discoveryAllowedCachedAt < 5_000) {
+            return this.discoveryAllowedCache;
+        }
+        try {
+            const { data } = await this.supabase
+                .from('settings')
+                .select('value')
+                .eq('key', 'catalog_discovery_enabled')
+                .maybeSingle();
+            const val = data?.value;
+            // Explicitly allowed only when not DISABLED or OFF
+            this.discoveryAllowedCache = val ? (val !== 'DISABLED' && val !== 'OFF' && val !== 'false') : true;
+            this.discoveryAllowedCachedAt = now;
+            return this.discoveryAllowedCache;
+        }
+        catch {
+            return false;
+        }
+    }
     /**
      * Periodic discovery scheduler running in the background
      */
     async runDiscoveryLoop() {
         while (!this.stopSignal) {
             try {
-                await this.scheduleSources();
+                const allowed = await this.isDiscoveryAllowed();
+                if (allowed) {
+                    await this.scheduleSources();
+                }
+                else {
+                    this.logger.debug('Catalog discovery is globally DISABLED. Discovery loop idle.');
+                }
             }
             catch (err) {
                 this.logger.error('Error during source discovery scheduling', { error: err?.message });
@@ -250,6 +283,9 @@ export class ImporterEngine {
         }
     }
     async scheduleCatalogBackfill() {
+        const isDiscoveryAllowed = await this.isDiscoveryAllowed();
+        if (!isDiscoveryAllowed)
+            return;
         const isAllowed = await this.safetyBarrier.isBackfillAllowed();
         if (!isAllowed)
             return;
@@ -259,7 +295,7 @@ export class ImporterEngine {
         if (error || !sources)
             return;
         for (const src of sources) {
-            if (!src.enabled || src.status !== 'ACTIVE')
+            if (!src.enabled || src.catalog_discovery_enabled === false || src.status !== 'ACTIVE')
                 continue;
             const checkpoint = await this.checkpoints.getCheckpoint(src.id);
             // If completed pass, allow re-scan only after 12 hours
@@ -566,7 +602,7 @@ export class ImporterEngine {
     }
     sourceEmptyCooldown = new Map();
     sourceStatusCache = new Map();
-    async checkSourceAvailability(source) {
+    async checkSourceAvailability(source, taskType = 'IMPORT_CHAPTER') {
         // 1. Check local circuit breaker first (zero-cost in-memory check)
         if (!this.circuitBreaker.canExecute(source)) {
             return false;
@@ -576,12 +612,14 @@ export class ImporterEngine {
         if (!cached || now - cached.cachedAt > 10_000) {
             let { data: src } = await this.supabase
                 .from('importer_sources')
-                .select('status, enabled, cooldown_until')
+                .select('status, enabled, cooldown_until, chapter_ingestion_enabled, catalog_discovery_enabled')
                 .eq('id', source)
                 .maybeSingle();
             if (src) {
                 cached = {
                     enabled: src.enabled !== false,
+                    chapterIngestionEnabled: src.chapter_ingestion_enabled !== false,
+                    catalogDiscoveryEnabled: src.catalog_discovery_enabled !== false,
                     status: src.status || 'ACTIVE',
                     cooldownUntil: src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0,
                     cachedAt: now,
@@ -591,15 +629,26 @@ export class ImporterEngine {
         }
         if (!cached)
             return true;
-        if (!cached.enabled ||
-            cached.status === 'PAUSED' ||
-            cached.status === 'DISABLED' ||
-            cached.status === 'UPSTREAM_BLOCKED' ||
-            cached.status === 'EXCLUDED_BY_POLICY') {
+        if (!cached.enabled)
             return false;
+        if (taskType === 'IMPORT_CHAPTER') {
+            if (!cached.chapterIngestionEnabled)
+                return false;
+            if (cached.status === 'PAUSED' ||
+                cached.status === 'DISABLED' ||
+                cached.status === 'UPSTREAM_BLOCKED' ||
+                cached.status === 'EXCLUDED_BY_POLICY') {
+                return false;
+            }
+            if (cached.status === 'COOLDOWN' && now < cached.cooldownUntil) {
+                return false;
+            }
         }
-        if (cached.status === 'COOLDOWN' && now < cached.cooldownUntil) {
-            return false;
+        else {
+            if (!cached.catalogDiscoveryEnabled)
+                return false;
+            if (cached.status !== 'ACTIVE')
+                return false;
         }
         return true;
     }
@@ -773,6 +822,11 @@ export class ImporterEngine {
         this.logger.info('Starting dedicated discovery lane runner');
         while (!this.stopSignal) {
             try {
+                const isDiscoveryAllowed = await this.isDiscoveryAllowed();
+                if (!isDiscoveryAllowed) {
+                    await this.sleep(5_000);
+                    continue;
+                }
                 const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), undefined, 'DISCOVERY');
                 if (!job) {
                     await this.sleep(5_000);
@@ -792,9 +846,25 @@ export class ImporterEngine {
      * Executes a job with active lease heartbeat and hard timeout watchdog.
      */
     async executeJobDirectly(job) {
+        // ADMISSION GATE: Catalog Discovery Global Guard
+        if (job.task_type === 'DISCOVER_WORKS' || job.task_type === 'SYNC_WORK') {
+            const isDiscoveryAllowed = await this.isDiscoveryAllowed();
+            if (!isDiscoveryAllowed) {
+                this.logger.warn(`Catalog discovery is globally DISABLED. Postponing ${job.task_type} job ${job.id}`, { jobId: job.id, source: job.source });
+                await this.supabase.from('importer_queue').update({
+                    status: 'PAUSED_BY_STAFF',
+                    pause_reason: 'CATALOG_DISCOVERY_DISABLED',
+                    locked_by: null,
+                    locked_at: null,
+                    lease_expires_at: null,
+                    updated_at: new Date().toISOString(),
+                }).eq('id', job.id);
+                return;
+            }
+        }
         // ADMISSION GATE: Circuit Breaker / Health Check
         if (job.task_type === 'IMPORT_CHAPTER') {
-            const isAvailable = await this.checkSourceAvailability(job.source);
+            const isAvailable = await this.checkSourceAvailability(job.source, 'IMPORT_CHAPTER');
             if (!isAvailable) {
                 // Source is down. Do we have fallbacks?
                 const fallbacks = job.payload?.fallbackSources || [];
@@ -861,6 +931,10 @@ export class ImporterEngine {
         return true;
     }
     async scheduleSources() {
+        const isDiscoveryAllowed = await this.isDiscoveryAllowed();
+        if (!isDiscoveryAllowed) {
+            return;
+        }
         let { data: sources, error } = await this.supabase
             .from('importer_sources')
             .select('*');
@@ -868,7 +942,11 @@ export class ImporterEngine {
             return;
         const now = Date.now();
         for (const src of sources) {
-            if (src.enabled === false || src.status === 'DISABLED' || src.status === 'PAUSED' || src.status === 'UPSTREAM_BLOCKED') {
+            if (src.enabled === false ||
+                src.catalog_discovery_enabled === false ||
+                src.status === 'DISABLED' ||
+                src.status === 'PAUSED' ||
+                src.status === 'UPSTREAM_BLOCKED') {
                 continue;
             }
             if (src.status === 'COOLDOWN') {
