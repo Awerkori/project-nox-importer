@@ -10,6 +10,7 @@ export declare class MangaFlixAdapter implements SourceAdapter {
     private logger;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     private get headers();
+    getImageHeaders(_url: string): Record<string, string>;
     private request;
     fetchUpdatedWorks(cursor?: string | null, options?: {
         mode?: 'bootstrap' | 'maintenance';

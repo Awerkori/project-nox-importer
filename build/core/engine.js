@@ -9,7 +9,7 @@ import { readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
 import { AdaptiveAutotuner, AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
-import { RetryPolicy, ProviderDownloadError } from './retry-policy.js';
+import { RetryPolicy, ProviderDownloadError, InvalidMediaError } from './retry-policy.js';
 import { ExistingWorksReconciler } from './reconciliation.js';
 import { CloudflareClassifier } from './cloudflare-classifier.js';
 import { SourceCircuitBreaker } from './circuit-breaker.js';
@@ -2155,52 +2155,18 @@ export class ImporterEngine {
                                 let pageBytes = null;
                                 let attempts = 0;
                                 let lastErr = null;
+                                let currentUrl = pageUrls[idx] || pageUrl;
                                 const d0 = Date.now();
-                                while (attempts < 3 && !this.stopSignal && !pipelineError) {
+                                while (attempts < 4 && !this.stopSignal && !pipelineError) {
                                     attempts++;
-                                    try {
-                                        const inf0 = performance.now();
-                                        pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
-                                            chDownloadSemWaitMs += (performance.now() - inf0);
-                                            telemetryCollector.trackActiveDownload(1);
-                                            try {
-                                                return await callProvider(() => this.fetchImageBytes(pageUrl, effectiveSource));
-                                            }
-                                            finally {
-                                                telemetryCollector.trackActiveDownload(-1);
-                                            }
-                                        });
-                                        const dlMs = Date.now() - d0;
-                                        tDownload += dlMs;
-                                        chDownloadMs += dlMs;
-                                        telemetryCollector.recordImageDownload(effectiveSource, dlMs, pageBytes.length);
-                                        totalBytes += pageBytes.length;
-                                        ImporterEngine.activeBufferedBytes += pageBytes.length;
-                                        break;
-                                    }
-                                    catch (err) {
-                                        lastErr = err;
-                                        telemetryCollector.recordDownloadError(attempts < 3);
-                                        if (attempts < 3 && !this.stopSignal && !pipelineError) {
-                                            await this.sleep(500 * attempts);
-                                        }
-                                    }
-                                }
-                                if (!pageBytes) {
-                                    const errMsg = (lastErr instanceof Error && lastErr.message) ? lastErr.message : (lastErr ? String(lastErr) : 'Erro desconhecido');
-                                    const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
-                                    const isRefreshable = is404 ||
-                                        errMsg.includes('Formato não permitido') ||
-                                        errMsg.includes('InvalidMediaError') ||
-                                        errMsg.includes('403') ||
-                                        errMsg.includes('expired');
-                                    let currentUrl = pageUrls[idx] || '';
-                                    // MANIFEST REFRESH: Before blind failure, query upstream to see if URLs were updated
-                                    if (isRefreshable && !manifestRefreshed) {
+                                    const timeoutMs = attempts === 1 ? 15_000 : attempts === 2 ? 25_000 : 35_000;
+                                    const freshConnection = attempts >= 2;
+                                    // On attempt 3: refresh manifest before download to check for updated CDN tokens or corrected URLs
+                                    if (attempts === 3 && !manifestRefreshed) {
                                         manifestRefreshed = true;
                                         try {
                                             const refreshAdapter = this.registry.get(effectiveSource);
-                                            if (refreshAdapter) {
+                                            if (refreshAdapter && typeof refreshAdapter.fetchChapterPages === 'function') {
                                                 const refreshedUrls = await callProvider(() => refreshAdapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber));
                                                 if (refreshedUrls && refreshedUrls.length === expectedCount) {
                                                     const isDifferent = refreshedUrls.some((u, i) => u !== pageUrls[i]);
@@ -2212,36 +2178,60 @@ export class ImporterEngine {
                                                             newUrl: refreshedUrls[idx],
                                                         });
                                                         pageUrls = refreshedUrls;
-                                                        currentUrl = pageUrls[idx] || '';
-                                                        // Retry downloading with the fresh URL
-                                                        try {
-                                                            pageBytes = await callProvider(() => this.fetchImageBytes(currentUrl, effectiveSource));
-                                                            tDownload += Date.now() - d0;
-                                                            totalBytes += pageBytes.length;
-                                                            ImporterEngine.activeBufferedBytes += pageBytes.length;
-                                                        }
-                                                        catch (freshErr) {
-                                                            lastErr = freshErr;
-                                                        }
-                                                    }
-                                                    else {
-                                                        this.logger.info(`MANIFEST_REFRESH: Upstream manifest verified, URLs unchanged for chapter ${chapterNumber} on ${effectiveSource}`);
+                                                        currentUrl = pageUrls[idx] || currentUrl;
                                                     }
                                                 }
                                             }
                                         }
                                         catch (refreshErr) {
-                                            this.logger.warn(`MANIFEST_REFRESH failed for ${effectiveSource} ch ${chapterNumber}`, { error: refreshErr?.message });
+                                            this.logger.warn(`MANIFEST_REFRESH failed during page retry for ${effectiveSource} ch ${chapterNumber}`, { error: refreshErr?.message });
                                         }
                                     }
-                                    // If recovered by manifest refresh, proceed!
-                                    if (pageBytes) {
-                                        readyQueue.push({ index: idx, pageBytes, releaseBuffer: () => bufferedPageSemaphore.release() });
-                                        bufferTransferred = true;
-                                        notifyConsumer();
-                                        continue;
+                                    try {
+                                        const inf0 = performance.now();
+                                        pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
+                                            chDownloadSemWaitMs += (performance.now() - inf0);
+                                            telemetryCollector.trackActiveDownload(1);
+                                            try {
+                                                return await callProvider(() => this.fetchImageBytes(currentUrl, effectiveSource, {
+                                                    timeoutMs,
+                                                    freshConnection,
+                                                }));
+                                            }
+                                            finally {
+                                                telemetryCollector.trackActiveDownload(-1);
+                                            }
+                                        });
+                                        const dlMs = Date.now() - d0;
+                                        tDownload += dlMs;
+                                        chDownloadMs += dlMs;
+                                        telemetryCollector.recordImageDownload(effectiveSource, dlMs, pageBytes.length);
+                                        totalBytes += pageBytes.length;
+                                        ImporterEngine.activeBufferedBytes += pageBytes.length;
+                                        if (attempts > 1) {
+                                            const autoRecoverReason = attempts === 2
+                                                ? 'TRANSIENT_TIMEOUT_RECOVERED'
+                                                : 'IMAGE_URL_REFRESHED';
+                                            this.logger.info(`AUTO_RECOVERED: Page ${idx + 1}/${expectedCount} recovered on attempt ${attempts}`, {
+                                                reason: autoRecoverReason,
+                                                source: effectiveSource,
+                                                chapterNumber,
+                                                pageIndex: idx,
+                                            });
+                                        }
+                                        break;
                                     }
-                                    // Page Classification
+                                    catch (err) {
+                                        lastErr = err;
+                                        telemetryCollector.recordDownloadError(attempts < 4);
+                                        if (attempts < 4 && !this.stopSignal && !pipelineError) {
+                                            await this.sleep(400 * attempts);
+                                        }
+                                    }
+                                }
+                                if (!pageBytes) {
+                                    const errMsg = (lastErr instanceof Error && lastErr.message) ? lastErr.message : (lastErr ? String(lastErr) : 'Erro desconhecido');
+                                    const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
                                     const pageSemantic = classifyPageUrl(currentUrl, idx, expectedCount);
                                     // Non-content pages (credits, recruitment, promo, warning) can be skipped with telemetry
                                     if (is404 && pageSemantic !== 'CONTENT_PAGE') {
@@ -2257,7 +2247,9 @@ export class ImporterEngine {
                                         continue;
                                     }
                                     // Narrative story page or persistent error: CANNOT be skipped!
-                                    pipelineError = new NarrativePageUnavailableError(effectiveSource, idx, expectedCount, errMsg);
+                                    pipelineError = (lastErr instanceof InvalidMediaError || errMsg.includes('Formato não permitido') || errMsg.includes('INVALID_MEDIA'))
+                                        ? lastErr
+                                        : new NarrativePageUnavailableError(effectiveSource, idx, expectedCount, errMsg);
                                     notifyConsumer();
                                     break;
                                 }
@@ -2391,60 +2383,67 @@ export class ImporterEngine {
                 if (pipelineError) {
                     // Type assertion: TS can't track mutations from async closures (producer/consumer)
                     const resolvedError = pipelineError;
-                    // If narrative page was unavailable and we have remaining candidate sources, rescue entire chapter!
+                    const isRescueCandidate = resolvedError instanceof NarrativePageUnavailableError ||
+                        resolvedError instanceof InvalidMediaError ||
+                        resolvedError.name === 'InvalidMediaError' ||
+                        resolvedError.message.includes('Formato não permitido') ||
+                        resolvedError.message.includes('INVALID_MEDIA') ||
+                        resolvedError.message.includes('IMAGE_TIMEOUT') ||
+                        resolvedError.message.includes('Cloudflare blocked') ||
+                        resolvedError.message.includes('ProviderDownloadError');
+                    // If image/media error occurred and we have remaining candidate sources, rescue entire chapter!
+                    if (isRescueCandidate && candidateIdx < allSourceCandidates.length - 1) {
+                        lastRescuedError = resolvedError.message;
+                        this.logger.warn(`CROSS_PROVIDER_RESCUE: Page failure on ${effectiveSource} for ch ${chapterNumber} (${resolvedError.message}). Rescuing entire chapter cleanly from ${allSourceCandidates[candidateIdx + 1].source}.`, {
+                            failedSource: effectiveSource,
+                            reason: resolvedError.message,
+                            nextCandidateSource: allSourceCandidates[candidateIdx + 1].source,
+                        });
+                        continue;
+                    }
+                    // If narrative page was unavailable with no candidate left:
                     if (resolvedError instanceof NarrativePageUnavailableError) {
-                        if (candidateIdx < allSourceCandidates.length - 1) {
-                            lastRescuedError = resolvedError.message;
-                            this.logger.warn(`CROSS_PROVIDER_RESCUE: Narrative page failed on ${effectiveSource} for ch ${chapterNumber}. Rescuing entire chapter cleanly from ${allSourceCandidates[candidateIdx + 1].source}.`, {
+                        // If permanent 404 or multiple attempts, mark as permanent gap
+                        if (/404|not found/i.test(resolvedError.message) || job.attempts >= 2) {
+                            const gapReason = '404 em imagem narrativa da fonte sem fallback disponível';
+                            this.logger.error(`PERMANENT_NARRATIVE_GAP: Chapter ${chapterNumber} of work ${workId} has permanent 404 on story pages with no viable fallback. Marking as terminal gap.`, {
+                                workId,
+                                chapterNumber,
+                                source: effectiveSource,
                                 failedPage: resolvedError.pageIndex + 1,
-                                reason: resolvedError.message,
-                                nextCandidateSource: allSourceCandidates[candidateIdx + 1].source,
                             });
-                            continue;
-                        }
-                        else {
-                            // No candidate left to rescue! If permanent 404 or multiple attempts, mark as permanent gap
-                            if (/404|not found/i.test(resolvedError.message) || job.attempts >= 2) {
-                                const gapReason = '404 em imagem narrativa da fonte sem fallback disponível';
-                                this.logger.error(`PERMANENT_NARRATIVE_GAP: Chapter ${chapterNumber} of work ${workId} has permanent 404 on story pages with no viable fallback. Marking as terminal gap.`, {
-                                    workId,
-                                    chapterNumber,
-                                    source: effectiveSource,
-                                    failedPage: resolvedError.pageIndex + 1,
-                                });
-                                // Update chapter mapping
-                                try {
-                                    await this.supabase
-                                        .from('importer_chapter_mappings')
-                                        .update({
-                                        status: 'FAILED',
-                                        is_gap: false,
-                                        last_error: gapReason,
-                                        updated_at: new Date().toISOString(),
-                                    })
-                                        .eq('work_id', workId)
-                                        .eq('chapter_number', chapterNumber);
-                                }
-                                catch { }
-                                // Update chapter manifest
-                                try {
-                                    await this.supabase
-                                        .from('importer_chapter_manifest')
-                                        .update({
-                                        status: 'UNRESOLVED_GAP',
-                                        is_gap: false,
-                                        gap_reason: 'PERMANENT_404_UNRESOLVED',
-                                        last_error: gapReason,
-                                        last_checked_at: new Date().toISOString(),
-                                    })
-                                        .eq('work_id', workId)
-                                        .eq('chapter_number', chapterNumber);
-                                }
-                                catch { }
-                                const gapErr = new Error(`[PERMANENT_404_UNRESOLVED] ${gapReason}: ${resolvedError.message}`);
-                                gapErr.sourceStage = 'provider';
-                                throw gapErr;
+                            // Update chapter mapping
+                            try {
+                                await this.supabase
+                                    .from('importer_chapter_mappings')
+                                    .update({
+                                    status: 'FAILED',
+                                    is_gap: false,
+                                    last_error: gapReason,
+                                    updated_at: new Date().toISOString(),
+                                })
+                                    .eq('work_id', workId)
+                                    .eq('chapter_number', chapterNumber);
                             }
+                            catch { }
+                            // Update chapter manifest
+                            try {
+                                await this.supabase
+                                    .from('importer_chapter_manifest')
+                                    .update({
+                                    status: 'UNRESOLVED_GAP',
+                                    is_gap: false,
+                                    gap_reason: 'PERMANENT_404_UNRESOLVED',
+                                    last_error: gapReason,
+                                    last_checked_at: new Date().toISOString(),
+                                })
+                                    .eq('work_id', workId)
+                                    .eq('chapter_number', chapterNumber);
+                            }
+                            catch { }
+                            const gapErr = new Error(`[PERMANENT_404_UNRESOLVED] ${gapReason}: ${resolvedError.message}`);
+                            gapErr.sourceStage = 'provider';
+                            throw gapErr;
                         }
                     }
                     throw resolvedError;
@@ -2811,12 +2810,14 @@ export class ImporterEngine {
         }
         return res.mediaId;
     }
-    async fetchImageBytes(url, source = 'unknown') {
+    async fetchImageBytes(url, source = 'unknown', options) {
         const parsedUrl = new URL(url);
         const isKuro = parsedUrl.host.includes('kuromangas.com');
-        const referer = isKuro
-            ? 'https://kuromangas.com/'
-            : `${parsedUrl.origin}/`;
+        const referer = options?.refererOverride
+            ? options.refererOverride
+            : isKuro
+                ? 'https://kuromangas.com/'
+                : `${parsedUrl.origin}/`;
         let customHeaders = {};
         if (source && source !== 'unknown') {
             try {
@@ -2831,16 +2832,21 @@ export class ImporterEngine {
                 // Non-blocking
             }
         }
+        const timeoutDuration = Math.min(40_000, Math.max(10_000, options?.timeoutMs || 15_000));
+        const requestHeaders = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+            Referer: referer,
+            ...customHeaders,
+        };
+        if (options?.freshConnection) {
+            requestHeaders['Connection'] = 'close';
+        }
         let res = null;
         let fetchError = null;
         try {
             res = await fetch(url, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-                    Referer: referer,
-                    ...customHeaders,
-                },
-                signal: AbortSignal.timeout(15_000),
+                headers: requestHeaders,
+                signal: AbortSignal.timeout(timeoutDuration),
             });
         }
         catch (err) {
@@ -2862,7 +2868,7 @@ export class ImporterEngine {
                             Referer: referer,
                         },
                     }),
-                    signal: AbortSignal.timeout(15_000),
+                    signal: AbortSignal.timeout(timeoutDuration),
                 });
                 if (bridgeRes.ok) {
                     this.rateLimiter.recordSuccess(parsedUrl.host);
@@ -2886,7 +2892,7 @@ export class ImporterEngine {
         }
         const uint8 = await readImageBody(res);
         // Validate binary image integrity and check for fake HTML challenge pages returned with HTTP 200
-        const bodySnippet = uint8.byteLength < 4000 ? new TextDecoder().decode(uint8) : '';
+        const bodySnippet = new TextDecoder('utf-8', { fatal: false }).decode(uint8.slice(0, 8192));
         const imgInsp = CloudflareClassifier.inspect(res.status, res.headers, bodySnippet, {
             url,
             expectedType: 'image',
@@ -2896,6 +2902,12 @@ export class ImporterEngine {
         if (!imgInsp.isValidImage || imgInsp.isBlocked || imgInsp.isChallenge || uint8.byteLength === 0) {
             const cls = imgInsp.classification || 'IMAGE_CDN_BLOCK';
             this.circuitBreaker.recordFailure(source, cls, parsedUrl.host);
+            if (imgInsp.isChallenge || imgInsp.isFakeContent) {
+                throw new InvalidMediaError(url, source, `Cloudflare challenge HTML received instead of image (${cls}): ${imgInsp.reason}`);
+            }
+            if (!imgInsp.isValidImage) {
+                throw new InvalidMediaError(url, source, `Invalid image format: magic bytes do not match PNG, JPEG, WebP, GIF or AVIF`);
+            }
             throw new ProviderDownloadError(res.status === 200 ? 403 : res.status, url, source, `Cloudflare blocked image download (${cls}): ${imgInsp.reason}`);
         }
         this.rateLimiter.recordSuccess(parsedUrl.host);
@@ -2982,6 +2994,49 @@ export class ImporterEngine {
                             }
                         }
                         catch { }
+                    }
+                }
+            }
+        }
+        catch { }
+        // 4b. Discover candidate fallbacks across sibling works with matching title
+        try {
+            const { data: currentWork } = await this.supabase
+                .from('works')
+                .select('title')
+                .eq('id', workId)
+                .maybeSingle();
+            if (currentWork?.title) {
+                const cleanTitle = currentWork.title.trim();
+                const { data: siblingWorks } = await this.supabase
+                    .from('works')
+                    .select('id')
+                    .neq('id', workId)
+                    .ilike('title', cleanTitle);
+                if (siblingWorks && siblingWorks.length > 0) {
+                    const siblingIds = siblingWorks.map((w) => w.id);
+                    const { data: siblingMappings } = await this.supabase
+                        .from('importer_work_mappings')
+                        .select('id, source, source_work_id')
+                        .in('work_id', siblingIds)
+                        .neq('source', excludeSource)
+                        .neq('sync_status', 'UNMATCHED');
+                    if (siblingMappings) {
+                        for (const wm of siblingMappings) {
+                            if (candidates.some((c) => c.source === wm.source))
+                                continue;
+                            const altAdapter = this.registry.get(wm.source);
+                            if (altAdapter && typeof altAdapter.fetchChapters === 'function') {
+                                try {
+                                    const altChapters = await altAdapter.fetchChapters(wm.source_work_id);
+                                    const matched = altChapters.find((c) => c.number === chapterNumber);
+                                    if (matched && matched.sourceChapterId) {
+                                        addCandidate(wm.source, matched.sourceChapterId, wm.id);
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
                     }
                 }
             }
