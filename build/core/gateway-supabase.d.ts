@@ -8,6 +8,12 @@ export interface PostgrestResponse<T = any> {
     } | null;
     count?: number | null;
 }
+export interface SqlClient {
+    sql<T = any>(query: string, params?: any[]): Promise<{
+        rows: T[];
+        rowCount?: number;
+    }>;
+}
 export declare class QueryBuilder<T = any> implements PromiseLike<PostgrestResponse<T>> {
     private client;
     private table;
@@ -22,7 +28,7 @@ export declare class QueryBuilder<T = any> implements PromiseLike<PostgrestRespo
     private limitCount;
     private isSingle;
     private isMaybeSingle;
-    constructor(client: ImporterGatewayClient, table: string);
+    constructor(client: SqlClient, table: string);
     select(columns?: string): this;
     insert(values: any): this;
     update(values: any): this;
