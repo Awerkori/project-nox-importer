@@ -121,7 +121,7 @@ export function getYugabytePool() {
         user: cfg.YUGABYTE_USER,
         password: cfg.YUGABYTE_PASSWORD,
         database: cfg.YUGABYTE_DATABASE,
-        max: 1, // Strict requirement: pool max = 1
+        max: 2, // Pool max = 2
         connectionTimeoutMillis: 10000,
         idleTimeoutMillis: 30000,
         ssl: sslConfig,

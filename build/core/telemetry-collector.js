@@ -542,7 +542,7 @@ export class TelemetryCollector {
             sourceDistribution: sourceDist,
             limitersAudit: limitersSummary,
             yugabyteDbPool: {
-                configuredMax: 1,
+                configuredMax: this.poolRef?.options?.max || 2,
                 waitAvgMs: avg(this.dbPoolWaitSamples),
                 waitP50Ms: percentile(this.dbPoolWaitSamples, 0.50),
                 waitP95Ms: percentile(this.dbPoolWaitSamples, 0.95),
