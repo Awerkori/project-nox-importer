@@ -34,12 +34,25 @@ async function main() {
 
   const config = getConfig();
 
-  // Network diagnostics: determine egress IP
+  // Network diagnostics: determine egress IP and TCP port reachability
   try {
     const ipRes = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(4000) }).then(r => r.json() as Promise<{ ip: string }>);
     rootLogger.info(`Container Public Egress IP: ${ipRes.ip}`);
+
+    const net = await import('net');
+    const testPort = (host: string, port: number) => new Promise<string>((resolve) => {
+      const s = new net.Socket();
+      s.setTimeout(4000);
+      s.on('connect', () => { s.destroy(); resolve('OPEN'); });
+      s.on('timeout', () => { s.destroy(); resolve('TIMEOUT'); });
+      s.on('error', (e) => { resolve('ERR: ' + e.message); });
+      s.connect(port, host);
+    });
+    const portquizRes = await testPort('portquiz.net', 5433);
+    const yugabyteRes = await testPort(config.YUGABYTE_HOST, config.YUGABYTE_PORT);
+    rootLogger.info(`Network TCP Probe: portquiz.net:5433 = ${portquizRes} | yugabyte:${config.YUGABYTE_PORT} = ${yugabyteRes}`);
   } catch (e: any) {
-    rootLogger.warn(`Failed to resolve container egress IP: ${e.message}`);
+    rootLogger.warn(`Failed network diagnostics: ${e.message}`);
   }
 
   // 1. Initialize Database Adapter based on IMPORTER_DB_MODE
