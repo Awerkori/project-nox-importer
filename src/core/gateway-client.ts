@@ -1,4 +1,5 @@
 import { Logger } from './logger.js';
+import { AsyncSemaphore } from './concurrency.js';
 
 export interface GatewayJob {
   id: string;
@@ -68,6 +69,8 @@ export class ImporterGatewayClient {
   private logger = new Logger('GatewayClient');
   private baseUrl: string;
   private bridgeToken: string;
+  // Bounded concurrency limiter: at most 4 simultaneous HTTPS calls from Importer to Gateway
+  private gatewayLimiter = new AsyncSemaphore(4);
 
   constructor(
     mangaUrl: string,
@@ -85,38 +88,40 @@ export class ImporterGatewayClient {
     body?: any;
     timeoutMs?: number;
   } = {}): Promise<T> {
-    const url = `${this.baseUrl}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
-    const method = options.method || 'GET';
-    const timeoutMs = options.timeoutMs || 20000;
+    return await this.gatewayLimiter.runExclusive(async () => {
+      const url = `${this.baseUrl}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+      const method = options.method || 'GET';
+      const timeoutMs = options.timeoutMs || 20000;
 
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.bridgeToken}`,
-      Accept: 'application/json',
-      'User-Agent': 'ProjectNox-Importer-GatewayClient/1.0',
-    };
-    if (options.body) {
-      headers['Content-Type'] = 'application/json';
-    }
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${this.bridgeToken}`,
+        Accept: 'application/json',
+        'User-Agent': 'ProjectNox-Importer-GatewayClient/1.0',
+      };
+      if (options.body) {
+        headers['Content-Type'] = 'application/json';
+      }
 
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: options.body ? JSON.stringify(options.body) : undefined,
-      signal: AbortSignal.timeout(timeoutMs),
+      const res = await fetch(url, {
+        method,
+        headers,
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(`Gateway authentication failed: HTTP ${res.status}`);
+      }
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || json?.success === false) {
+        const errMsg = json?.error || `Gateway request to ${endpoint} failed with HTTP ${res.status}`;
+        throw new Error(errMsg);
+      }
+
+      return json as T;
     });
-
-    if (res.status === 401 || res.status === 403) {
-      throw new Error(`Gateway authentication failed: HTTP ${res.status}`);
-    }
-
-    const json = await res.json().catch(() => null);
-
-    if (!res.ok || json?.success === false) {
-      const errMsg = json?.error || `Gateway request to ${endpoint} failed with HTTP ${res.status}`;
-      throw new Error(errMsg);
-    }
-
-    return json as T;
   }
 
   /* 1. Job Acquisition */

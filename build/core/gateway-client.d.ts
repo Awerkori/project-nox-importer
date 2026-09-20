@@ -64,6 +64,7 @@ export declare class ImporterGatewayClient {
     private logger;
     private baseUrl;
     private bridgeToken;
+    private gatewayLimiter;
     constructor(mangaUrl: string, bridgeToken: string);
     private request;
     acquireJobs(options: {

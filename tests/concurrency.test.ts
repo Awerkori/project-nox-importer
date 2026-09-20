@@ -124,6 +124,7 @@ describe('Concurrency & Autotuner', () => {
         maxConcurrency: 6,
         requiredStableCycles: 4,
         cooldownPeriodMs: 60_000,
+        maxRssMb: 360,
       });
 
       vi.spyOn(diagnostics, 'getMemorySnapshot').mockReturnValue({

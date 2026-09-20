@@ -91,9 +91,9 @@ export class ImporterEngine {
         this.publicationBarrier = new PublicationBarrier(supabase);
         this.safetyBarrier = new PublicationSafetyBarrier(supabase);
         this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
-        const requestedMax = config.MAX_CONCURRENT_CHAPTERS;
+        const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 5, config.TESTED_CONCURRENCY_CEILING || 32);
         this.autotuner = new AdaptiveAutotuner({
-            initialConcurrency: Math.min(requestedMax, 4),
+            initialConcurrency: requestedMax,
             maxConcurrency: requestedMax,
             maxRssMb: 350,
             maxHeapMb: 200,
@@ -613,6 +613,11 @@ export class ImporterEngine {
         await Promise.all(slotPromises);
     }
     async runSourceSlot(source, slotIndex) {
+        // 1. Initial runner startup stagger (50-150ms per slot index)
+        if (slotIndex > 0) {
+            const initialStaggerMs = slotIndex * 80 + Math.floor(Math.random() * 50);
+            await this.sleep(initialStaggerMs);
+        }
         const sourceSem = this.autotuner.getSourceSemaphore(source);
         const globalSem = this.autotuner.getGlobalChapterSemaphore();
         while (!this.stopSignal) {
@@ -623,6 +628,9 @@ export class ImporterEngine {
                     await this.sleep(3000);
                     continue;
                 }
+                // 1. Jitter between acquisitions (40-120ms) to avoid simultaneous claims on Gateway/Hyperdrive
+                const claimJitterMs = 40 + Math.floor(Math.random() * 80);
+                await this.sleep(claimJitterMs);
                 // 1. Check if source had no jobs recently (backoff to avoid spin)
                 const emptyUntil = this.sourceEmptyCooldown.get(source) || 0;
                 if (Date.now() < emptyUntil) {
@@ -688,21 +696,29 @@ export class ImporterEngine {
      * General fallback worker runner running multiple concurrent slots
      */
     async runGeneralWorker() {
-        const slotsCount = Math.min(32, this.config.TESTED_CONCURRENCY_CEILING || 32);
-        this.logger.info(`Starting shared chapter runner pool (${slotsCount} slots)`);
+        const slotsCount = Math.max(1, Math.min(this.config.MAX_CONCURRENT_CHAPTERS || 5, this.config.TESTED_CONCURRENCY_CEILING || 32));
+        this.logger.info(`Starting shared chapter runner pool (${slotsCount} slots for target concurrency ${slotsCount})`);
         const slots = Array.from({ length: slotsCount }, (_, i) => this.runGeneralSlot(i));
         await Promise.all(slots);
     }
     async runGeneralSlot(slotIndex) {
+        // 1. Initial runner startup stagger (50-150ms per slot index) to prevent all runners opening simultaneously
+        if (slotIndex > 0) {
+            const initialStaggerMs = slotIndex * 80 + Math.floor(Math.random() * 50);
+            await this.sleep(initialStaggerMs);
+        }
         const globalSem = this.autotuner.getGlobalChapterSemaphore();
         while (!this.stopSignal) {
             try {
                 // 0. Enforce PublicationSafetyBarrier: if CLOSED or RECOVERING, hold 0 permits, 0 slots
                 const canAcquire = await this.safetyBarrier.canAcquireChapters();
-                if (!canAcquire && slotIndex !== 0) {
+                if (!canAcquire) {
                     await this.sleep(3000);
                     continue;
                 }
+                // 1. Jitter between acquisitions (40-120ms) to avoid simultaneous claims on Gateway/Hyperdrive
+                const claimJitterMs = 40 + Math.floor(Math.random() * 80);
+                await this.sleep(claimJitterMs);
                 await globalSem.acquire();
                 let job = null;
                 try {

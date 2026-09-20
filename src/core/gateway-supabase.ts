@@ -420,7 +420,14 @@ export class GatewaySupabaseClient {
       const paramKeys = Object.keys(args);
       const placeholders = paramKeys.map((_, i) => `$${i + 1}`).join(', ');
       const sqlQuery = `SELECT * FROM ${fn}(${placeholders})`;
-      const res = await this.gateway.sql(sqlQuery, paramKeys.map(k => args[k]));
+      const params = paramKeys.map(k => {
+        const val = args[k];
+        if (typeof val === 'object' && val !== null) {
+          return JSON.stringify(val);
+        }
+        return val;
+      });
+      const res = await this.gateway.sql(sqlQuery, params);
       return { data: res.rows, error: null };
     } catch (err: any) {
       return { data: null, error: { message: err?.message || `RPC ${fn} failed` } };

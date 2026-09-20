@@ -309,32 +309,46 @@ export class ImporterQueue {
     onCancelRequested?: () => void
   ): { stop: () => void } {
     let stopped = false;
-    const timer = setInterval(async () => {
-      if (stopped) return;
-      try {
-        const renewed = await this.renewLease(jobId);
-        if (!renewed && !stopped) {
-          this.logger.warn('Heartbeat lease renewal failed or lost ownership', { jobId });
-        }
+    let timer: NodeJS.Timeout | null = null;
 
-        if (!stopped && onCancelRequested) {
-          const isCancelled = await this.isCancelRequested(jobId);
-          if (isCancelled && !stopped) {
-            this.logger.warn('Staff requested cancellation detected during heartbeat', { jobId });
-            onCancelRequested();
+    const scheduleNext = () => {
+      if (stopped) return;
+      // Add jitter between 0 and 3000ms to avoid synchronized renew requests across workers
+      const jitterMs = Math.floor(Math.random() * 3000);
+      const delayMs = Math.max(1000, (intervalSeconds * 1000) + jitterMs);
+
+      timer = setTimeout(async () => {
+        if (stopped) return;
+        try {
+          const renewed = await this.renewLease(jobId);
+          if (!renewed && !stopped) {
+            this.logger.warn('Heartbeat lease renewal failed or lost ownership', { jobId });
+          }
+
+          if (!stopped && onCancelRequested) {
+            const isCancelled = await this.isCancelRequested(jobId);
+            if (isCancelled && !stopped) {
+              this.logger.warn('Staff requested cancellation detected during heartbeat', { jobId });
+              onCancelRequested();
+            }
+          }
+        } catch (err: any) {
+          this.logger.error('Heartbeat interval error', { jobId, message: err?.message });
+        } finally {
+          if (!stopped) {
+            scheduleNext();
           }
         }
-      } catch (err: any) {
-        this.logger.error('Heartbeat interval error', { jobId, message: err?.message });
-      }
-    }, intervalSeconds * 1000);
+      }, delayMs);
+      timer.unref();
+    };
 
-    timer.unref();
+    scheduleNext();
 
     return {
       stop: () => {
         stopped = true;
-        clearInterval(timer);
+        if (timer) clearTimeout(timer);
       },
     };
   }
