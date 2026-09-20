@@ -43,6 +43,7 @@ export declare class BandwidthLimiter {
     private maxBurst;
     private tokens;
     private lastRefill;
+    private waitChain;
     constructor(bytesPerSec?: number, maxBurst?: number);
     acquire(bytes: number): Promise<void>;
     setRate(bytesPerSec: number): void;
