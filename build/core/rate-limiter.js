@@ -6,8 +6,14 @@ export class HostRateLimiter {
     buckets = new Map();
     logger = new Logger('RateLimiter');
     turboMode = false;
-    constructor(defaultRatePerSecond = 2.0) {
+    constructor(defaultRatePerSecond = 5.0) {
         this.defaultRatePerSecond = defaultRatePerSecond;
+        if (process.env.DEFAULT_HOST_RATE_PER_SECOND) {
+            const parsed = parseFloat(process.env.DEFAULT_HOST_RATE_PER_SECOND);
+            if (!isNaN(parsed) && parsed > 0) {
+                this.defaultRatePerSecond = parsed;
+            }
+        }
     }
     setHostRate(host, ratePerSecond, capacity, maxRatePerSecond, minRatePerSecond) {
         const minRate = minRatePerSecond ?? Math.max(1.0, ratePerSecond * 0.5);

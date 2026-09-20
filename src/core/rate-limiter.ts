@@ -19,7 +19,14 @@ export class HostRateLimiter {
   private logger = new Logger('RateLimiter');
   private turboMode = false;
 
-  constructor(private defaultRatePerSecond: number = 2.0) {}
+  constructor(private defaultRatePerSecond: number = 5.0) {
+    if (process.env.DEFAULT_HOST_RATE_PER_SECOND) {
+      const parsed = parseFloat(process.env.DEFAULT_HOST_RATE_PER_SECOND);
+      if (!isNaN(parsed) && parsed > 0) {
+        this.defaultRatePerSecond = parsed;
+      }
+    }
+  }
 
   public setHostRate(
     host: string,

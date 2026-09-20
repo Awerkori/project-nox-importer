@@ -207,7 +207,10 @@ export class AdaptiveAutotuner {
   private sourceSemaphores = new Map<string, AsyncSemaphore>();
   private globalMediaSemaphore: AsyncSemaphore;
   private globalInflightRequestSemaphore: AsyncSemaphore;
-  private bufferedPageSemaphore = new AsyncSemaphore(60, 'buffered_page_semaphore');
+  private bufferedPageSemaphore = new AsyncSemaphore(
+    parseInt(process.env.BUFFERED_PAGE_CONCURRENCY || '160', 10),
+    'buffered_page_semaphore'
+  );
   private currentConcurrency: number;
   private stableCycleCount = 0;
   private cooldownUntil = 0;
@@ -221,10 +224,11 @@ export class AdaptiveAutotuner {
   constructor(config: Partial<AutotunerConfig> = {}) {
     this.config = { ...DEFAULT_AUTOTUNER_CONFIG, ...config };
     this.currentConcurrency = this.config.initialConcurrency;
-    const mediaConcurrency = parseInt(process.env.TELEGRAM_MEDIA_CONCURRENCY || '12', 10);
+    const mediaConcurrency = parseInt(process.env.TELEGRAM_MEDIA_CONCURRENCY || '24', 10);
+    const inflightConcurrency = parseInt(process.env.DOWNLOAD_INFLIGHT_CONCURRENCY || '64', 10);
     this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency, 'global_chapter_semaphore');
     this.globalMediaSemaphore = new AsyncSemaphore(mediaConcurrency, 'telegram_media_semaphore');
-    this.globalInflightRequestSemaphore = new AsyncSemaphore(32, 'global_download_inflight_semaphore');
+    this.globalInflightRequestSemaphore = new AsyncSemaphore(inflightConcurrency, 'global_download_inflight_semaphore');
   }
 
   getGlobalChapterSemaphore(): AsyncSemaphore {
