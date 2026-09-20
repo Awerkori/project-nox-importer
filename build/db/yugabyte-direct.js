@@ -6,6 +6,8 @@ import { fileURLToPath } from 'url';
 import { getConfig } from '../config.js';
 import { Logger } from '../core/logger.js';
 import { computeCanonicalChapterKey } from '../core/deduplication.js';
+import { telemetryCollector } from '../core/telemetry-collector.js';
+import { performance } from 'node:perf_hooks';
 const logger = new Logger('YugabyteDirect');
 let pool = null;
 const EMBEDDED_YUGABYTE_CA = `-----BEGIN CERTIFICATE-----
@@ -129,6 +131,33 @@ export function getYugabytePool() {
     pool.on('error', (err) => {
         logger.error('Unexpected error on idle direct Yugabyte client', { error: err.message });
     });
+    const origConnect = pool.connect.bind(pool);
+    pool.connect = async function (...args) {
+        const t0 = performance.now();
+        const queued = pool.waitingCount || 0;
+        try {
+            const client = await origConnect(...args);
+            const waitMs = performance.now() - t0;
+            telemetryCollector.recordDbPoolWait(waitMs, queued);
+            const origClientQuery = client.query.bind(client);
+            client.query = async function (...qArgs) {
+                telemetryCollector.trackActiveDbQuery(1);
+                try {
+                    return await origClientQuery(...qArgs);
+                }
+                finally {
+                    telemetryCollector.trackActiveDbQuery(-1);
+                }
+            };
+            return client;
+        }
+        catch (err) {
+            const waitMs = performance.now() - t0;
+            telemetryCollector.recordDbPoolWait(waitMs, queued);
+            throw err;
+        }
+    };
+    telemetryCollector.setPool(pool);
     return pool;
 }
 export async function closeYugabytePool() {

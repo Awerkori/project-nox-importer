@@ -1,4 +1,6 @@
 import { Logger } from './logger.js';
+import { telemetryCollector } from './telemetry-collector.js';
+import { performance } from 'node:perf_hooks';
 export class HostRateLimiter {
     defaultRatePerSecond;
     buckets = new Map();
@@ -83,6 +85,7 @@ export class HostRateLimiter {
      */
     async acquire(host) {
         const bucket = this.getBucket(host);
+        const t0 = performance.now();
         while (true) {
             const now = Date.now();
             // Check if blocked due to 429 Retry-After
@@ -101,6 +104,8 @@ export class HostRateLimiter {
                 // Apply micro-jitter (5-15ms) to avoid perfectly periodic bursts
                 const jitter = Math.floor(Math.random() * 10) + 5;
                 await this.sleep(jitter);
+                const actualWaitMs = performance.now() - t0;
+                telemetryCollector.recordRateLimitWait(host, actualWaitMs);
                 return;
             }
             // Wait until at least 1 token is available + random jitter
