@@ -81,6 +81,11 @@ export declare class ImporterEngine {
      */
     private runLeaseRecoveryLoop;
     /**
+     * Periodic auto-probe and auto-healing loop for sources in COOLDOWN (runs every 30s).
+     * Restores expired cooldowns immediately and probes active ones for early auto-healing.
+     */
+    private runSourceCooldownProbeLoop;
+    /**
      * Periodic existing works reconciliation loop
      * Handles high-priority staff requests, on-demand admin reconciliations, and periodic catalog health batches.
      */

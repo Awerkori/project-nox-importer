@@ -200,6 +200,8 @@ export class ImporterQueue {
             p_status: status,
             p_error: lastError ?? null,
             p_retry_delay: retryDelay,
+            p_retry_delay_seconds: retryDelaySeconds,
+            p_retry_class: retryClass,
         });
         if (error) {
             this.logger.error('Failed to release job', { jobId, status, error: error.message });
@@ -318,35 +320,59 @@ export class ImporterQueue {
                 return { recovered: 0, failed: 0 };
             }
             let recoveredCount = 0;
+            let failedCount = 0;
             for (const job of stalled) {
                 const attempts = job.attempts || 1;
-                const { error: requeueErr } = await this.supabase
-                    .from('importer_queue')
-                    .update({
-                    status: 'QUEUED',
-                    locked_by: null,
-                    locked_at: null,
-                    lease_expires_at: null,
-                    next_run_at: nowIso,
-                    last_recovered_error: job.last_error || `Lease expirado (recuperado automaticamente na tentativa ${attempts})`,
-                    recovered_at: nowIso,
-                    retry_reason: 'LEASE_EXPIRED_RECOVERED',
-                    last_error: null,
-                    updated_at: nowIso,
-                })
-                    .eq('id', job.id)
-                    .eq('status', 'IMPORTING');
-                if (!requeueErr) {
-                    recoveredCount++;
+                const maxAttempts = job.max_attempts || 7;
+                if (attempts >= maxAttempts) {
+                    const { error: failErr } = await this.supabase
+                        .from('importer_queue')
+                        .update({
+                        status: 'FAILED',
+                        locked_by: null,
+                        locked_at: null,
+                        lease_expires_at: null,
+                        next_run_at: nowIso,
+                        last_error: `[LEASE_EXPIRED_EXHAUSTED] Lease expired and retry budget exhausted (${attempts}/${maxAttempts} attempts): ${job.last_error || 'Worker unresponsive'}`,
+                        last_error_at: nowIso,
+                        retry_reason: 'LEASE_EXPIRED',
+                        updated_at: nowIso,
+                    })
+                        .eq('id', job.id)
+                        .eq('status', 'IMPORTING');
+                    if (!failErr) {
+                        failedCount++;
+                    }
                 }
                 else {
-                    this.logger.error('Failed to requeue expired job to QUEUED', { jobId: job.id, error: requeueErr.message });
+                    const { error: requeueErr } = await this.supabase
+                        .from('importer_queue')
+                        .update({
+                        status: 'QUEUED',
+                        locked_by: null,
+                        locked_at: null,
+                        lease_expires_at: null,
+                        next_run_at: new Date(Date.now() + 10_000).toISOString(),
+                        last_recovered_error: job.last_error || `Lease expirado (recuperado automaticamente na tentativa ${attempts})`,
+                        recovered_at: nowIso,
+                        retry_reason: 'LEASE_EXPIRED',
+                        last_error_at: nowIso,
+                        updated_at: nowIso,
+                    })
+                        .eq('id', job.id)
+                        .eq('status', 'IMPORTING');
+                    if (!requeueErr) {
+                        recoveredCount++;
+                    }
+                    else {
+                        this.logger.error('Failed to requeue expired job to QUEUED', { jobId: job.id, error: requeueErr.message });
+                    }
                 }
             }
-            if (recoveredCount > 0) {
-                this.logger.info(`Lease recovery completed: ${recoveredCount} requeued to RETRY with backoff (0 permanently failed)`, {
+            if (recoveredCount > 0 || failedCount > 0) {
+                this.logger.info(`Lease recovery completed: ${recoveredCount} requeued to QUEUED, ${failedCount} permanently failed`, {
                     recovered: recoveredCount,
-                    failed: 0,
+                    failed: failedCount,
                 });
             }
             return { recovered: recoveredCount, failed: 0 };

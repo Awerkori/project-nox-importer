@@ -231,6 +231,46 @@ export class AdaptiveAutotuner {
         const sem = this.getSourceSemaphore(source);
         return sem.available > 0;
     }
+    sourceHealth = new Map();
+    recordSourceFailure(source) {
+        const limits = this.getSourceLimits(source);
+        let health = this.sourceHealth.get(source);
+        if (!health) {
+            health = { consecutiveFailures: 0, consecutiveSuccesses: 0, currentCapacity: limits.maxChapters };
+            this.sourceHealth.set(source, health);
+        }
+        health.consecutiveFailures++;
+        health.consecutiveSuccesses = 0;
+        // After 2 consecutive failures on a source, throttle concurrency by 1 (minimum 1)
+        if (health.consecutiveFailures >= 2 && health.currentCapacity > 1) {
+            health.currentCapacity = Math.max(1, health.currentCapacity - 1);
+            const sem = this.getSourceSemaphore(source);
+            sem.setCapacity(health.currentCapacity);
+            this.logger.warn(`Source ${source} concurrency throttled: ${health.currentCapacity + 1} -> ${health.currentCapacity} due to ${health.consecutiveFailures} consecutive failures`);
+            return { throttled: true, newCapacity: health.currentCapacity };
+        }
+        return { throttled: false, newCapacity: health.currentCapacity };
+    }
+    recordSourceSuccess(source) {
+        const limits = this.getSourceLimits(source);
+        let health = this.sourceHealth.get(source);
+        if (!health) {
+            health = { consecutiveFailures: 0, consecutiveSuccesses: 0, currentCapacity: limits.maxChapters };
+            this.sourceHealth.set(source, health);
+        }
+        health.consecutiveFailures = 0;
+        health.consecutiveSuccesses++;
+        // After 5 consecutive successes, restore capacity gradually
+        if (health.consecutiveSuccesses >= 5 && health.currentCapacity < limits.maxChapters) {
+            health.currentCapacity = Math.min(limits.maxChapters, health.currentCapacity + 1);
+            health.consecutiveSuccesses = 0;
+            const sem = this.getSourceSemaphore(source);
+            sem.setCapacity(health.currentCapacity);
+            this.logger.info(`Source ${source} concurrency restored: ${health.currentCapacity - 1} -> ${health.currentCapacity} after consecutive successes`);
+            return { restored: true, newCapacity: health.currentCapacity };
+        }
+        return { restored: false, newCapacity: health.currentCapacity };
+    }
     recordError(type) {
         if (type === 'ratelimit')
             this.cycleRateLimits++;
