@@ -173,12 +173,34 @@ export class PublicationBarrier {
 
     if (mapErr) throw mapErr;
 
-    // 3. Mark public.works.published = true if draft
+    // 3. Mark public.works.published = true and update latest_chapter_published_at
     await this.supabase
       .from('works')
-      .update({ published: true, updated_at: new Date().toISOString() })
-      .eq('id', workId)
-      .eq('published', false);
+      .update({
+        published: true,
+        latest_chapter_published_at: publishedAtIso,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', workId);
+
+    // 4. Notify site edge of publication to selectively evict cache (non-blocking)
+    try {
+      const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
+      const token = process.env.NOX_STORAGE_BRIDGE_TOKEN;
+      fetch(`${siteUrl}/api/internal/cache/invalidate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          type: 'CHAPTER_PUBLISHED',
+          workId,
+          chapterId,
+        }),
+        signal: AbortSignal.timeout(2000),
+      }).catch(() => {});
+    } catch {}
 
     // 4. Update importer_chapter_manifest status to PUBLISHED if available
     try {
