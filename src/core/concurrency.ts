@@ -221,8 +221,9 @@ export class AdaptiveAutotuner {
   constructor(config: Partial<AutotunerConfig> = {}) {
     this.config = { ...DEFAULT_AUTOTUNER_CONFIG, ...config };
     this.currentConcurrency = this.config.initialConcurrency;
+    const mediaConcurrency = parseInt(process.env.TELEGRAM_MEDIA_CONCURRENCY || '12', 10);
     this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency, 'global_chapter_semaphore');
-    this.globalMediaSemaphore = new AsyncSemaphore(12, 'telegram_media_semaphore');
+    this.globalMediaSemaphore = new AsyncSemaphore(mediaConcurrency, 'telegram_media_semaphore');
     this.globalInflightRequestSemaphore = new AsyncSemaphore(32, 'global_download_inflight_semaphore');
   }
 

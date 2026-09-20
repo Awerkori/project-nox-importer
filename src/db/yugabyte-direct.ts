@@ -130,7 +130,7 @@ export function getYugabytePool(): pg.Pool {
     user: cfg.YUGABYTE_USER,
     password: cfg.YUGABYTE_PASSWORD,
     database: cfg.YUGABYTE_DATABASE,
-    max: 2, // Pool max = 2
+    max: cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '2', 10),
     connectionTimeoutMillis: 10000,
     idleTimeoutMillis: 30000,
     ssl: sslConfig,

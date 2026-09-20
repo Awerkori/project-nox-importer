@@ -44,6 +44,9 @@ const ConfigSchema = z.object({
   // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
   BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
+  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(10).default(2),
+  UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.coerce.number().int().default(4194304),
+  TELEGRAM_MEDIA_CONCURRENCY: z.coerce.number().int().default(12),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   IMPORTER_DB_MODE: z.enum(['direct', 'gateway']).default('direct'),
   YUGABYTE_HOST: z.string().default('sa-east-1.b49305ea-8536-43e6-936e-b2fd77fc07b0.aws.yugabyte.cloud'),
