@@ -42,6 +42,7 @@ export declare class ImporterEngine {
     private abortController;
     private chapterClaimMutex;
     private activeSourcesCache;
+    private knownCoveredWorks;
     static activeBufferedBytes: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
     getAutotuner(): AdaptiveAutotuner;

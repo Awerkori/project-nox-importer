@@ -18,12 +18,17 @@ export interface StoredMediaResult {
     height: number;
     bytes: number;
     mime: string;
+    mediaRecord?: Record<string, any>;
+}
+export interface ProcessMediaOptions {
+    skipDbInsert?: boolean;
+    skipDedupLookup?: boolean;
 }
 /**
  * Process a single image:
  * 1. Validate binary structure & dimensions.
  * 2. Calculate SHA-256.
- * 3. Check public.media for existing hash (deduplication).
- * 4. If not found, upload via StorageProvider and insert into public.media.
+ * 3. Check public.media for existing hash (deduplication) unless skipped.
+ * 4. If not found, upload via StorageProvider and insert into public.media (or return descriptor for batching).
  */
-export declare function processAndStoreMedia(supabase: SupabaseClient, storage: StorageProvider, bytes: Uint8Array, userId: string, purpose?: string, chapterId?: string): Promise<StoredMediaResult>;
+export declare function processAndStoreMedia(supabase: SupabaseClient, storage: StorageProvider, bytes: Uint8Array, userId: string, purpose?: string, chapterId?: string, options?: ProcessMediaOptions): Promise<StoredMediaResult>;
