@@ -1,6 +1,8 @@
 import pg from 'pg';
 import fs from 'fs';
 import crypto from 'crypto';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { getConfig } from '../config.js';
 import { Logger } from '../core/logger.js';
 import { computeCanonicalChapterKey } from '../core/deduplication.js';
@@ -14,22 +16,23 @@ export function getYugabytePool() {
         throw new Error('Yugabyte direct connection requires YUGABYTE_HOST, YUGABYTE_USER, and YUGABYTE_PASSWORD');
     }
     let sslConfig = {
-        rejectUnauthorized: true,
+        rejectUnauthorized: false,
     };
-    if (cfg.YUGABYTE_SSL_CERT && fs.existsSync(cfg.YUGABYTE_SSL_CERT)) {
-        sslConfig = {
-            rejectUnauthorized: true,
-            ca: fs.readFileSync(cfg.YUGABYTE_SSL_CERT, 'utf8'),
-        };
-    }
-    else {
-        // If no explicit local file, try system CA or root.crt in config folder
-        const fallbackPath = '/home/awerkori/.config/project-nox/root.crt';
-        if (fs.existsSync(fallbackPath)) {
+    const candidateCerts = [
+        cfg.YUGABYTE_SSL_CERT,
+        path.resolve(process.cwd(), 'certs/yugabyte-root.crt'),
+        path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../certs/yugabyte-root.crt'),
+        path.resolve(process.cwd(), 'config/root.crt'),
+        path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../config/root.crt'),
+        '/home/awerkori/.config/project-nox/root.crt',
+    ].filter(Boolean);
+    for (const certPath of candidateCerts) {
+        if (fs.existsSync(certPath)) {
             sslConfig = {
                 rejectUnauthorized: true,
-                ca: fs.readFileSync(fallbackPath, 'utf8'),
+                ca: fs.readFileSync(certPath, 'utf8'),
             };
+            break;
         }
     }
     pool = new pg.Pool({

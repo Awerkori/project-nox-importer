@@ -6,6 +6,10 @@ export interface PostgrestResponse<T = any> {
   count?: number | null;
 }
 
+export interface SqlClient {
+  sql<T = any>(query: string, params?: any[]): Promise<{ rows: T[]; rowCount?: number }>;
+}
+
 export class QueryBuilder<T = any> implements PromiseLike<PostgrestResponse<T>> {
   private op: 'SELECT' | 'INSERT' | 'UPDATE' | 'UPSERT' | 'DELETE' = 'SELECT';
   private selectedCols: string = '*';
@@ -20,7 +24,7 @@ export class QueryBuilder<T = any> implements PromiseLike<PostgrestResponse<T>> 
   private isMaybeSingle: boolean = false;
 
   constructor(
-    private client: ImporterGatewayClient,
+    private client: SqlClient,
     private table: string
   ) {}
 

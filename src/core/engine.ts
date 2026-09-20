@@ -270,12 +270,17 @@ export class ImporterEngine {
         .eq('key', 'catalog_discovery_enabled')
         .maybeSingle();
 
-      const val = data?.value;
-      // Explicitly allowed only when not DISABLED or OFF
-      this.discoveryAllowedCache = val ? (val !== 'DISABLED' && val !== 'OFF' && val !== 'false') : true;
+      if (!data || !data.value) {
+        this.discoveryAllowedCache = false;
+        this.discoveryAllowedCachedAt = now;
+        return false;
+      }
+      const val = String(data.value).trim().toUpperCase();
+      this.discoveryAllowedCache = (val === 'ENABLED');
       this.discoveryAllowedCachedAt = now;
       return this.discoveryAllowedCache;
     } catch {
+      this.discoveryAllowedCache = false;
       return false;
     }
   }
@@ -334,7 +339,7 @@ export class ImporterEngine {
     if (error || !sources) return;
 
     for (const src of sources) {
-      if (!src.enabled || (src as any).catalog_discovery_enabled === false || src.status !== 'ACTIVE') continue;
+      if (!src.enabled || (src as any).catalog_discovery_enabled !== true || src.status !== 'ACTIVE') continue;
 
       const checkpoint = await this.checkpoints.getCheckpoint(src.id);
       // If completed pass, allow re-scan only after 12 hours
@@ -707,7 +712,7 @@ export class ImporterEngine {
         cached = {
           enabled: src.enabled !== false,
           chapterIngestionEnabled: (src as any).chapter_ingestion_enabled !== false,
-          catalogDiscoveryEnabled: (src as any).catalog_discovery_enabled !== false,
+          catalogDiscoveryEnabled: (src as any).catalog_discovery_enabled === true || (src as any).catalog_discovery_enabled === 1,
           status: src.status || 'ACTIVE',
           cooldownUntil: src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0,
           cachedAt: now,
@@ -1093,7 +1098,7 @@ export class ImporterEngine {
     for (const src of sources) {
       if (
         src.enabled === false ||
-        (src as any).catalog_discovery_enabled === false ||
+        ((src as any).catalog_discovery_enabled !== true && (src as any).catalog_discovery_enabled !== 1) ||
         src.status === 'DISABLED' ||
         src.status === 'PAUSED' ||
         src.status === 'UPSTREAM_BLOCKED'

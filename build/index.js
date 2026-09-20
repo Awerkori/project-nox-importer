@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import WebSocket from 'ws';
 import { ImporterGatewayClient } from './core/gateway-client.js';
 import { GatewaySupabaseClient } from './core/gateway-supabase.js';
+import { DirectSupabaseClient } from './db/direct-supabase-client.js';
 import { getConfig } from './config.js';
 // Polyfill native WebSocket for Node environments (e.g. Node 20 on DIScloud) where native WebSocket is missing
 if (typeof globalThis.WebSocket === 'undefined') {
@@ -27,9 +28,19 @@ async function main() {
     catch (e) { /* ignore */ }
     rootLogger.info(`Starting Project Nox Importer daemon... | Build: ${buildCommit}`);
     const config = getConfig();
-    // 1. Initialize Internal Gateway & Database Adapter (Dedicated Worker + Dedicated Hyperdrive -> YugabyteDB Aeon)
-    const gateway = new ImporterGatewayClient(config.NOX_IMPORTER_GATEWAY_URL, config.NOX_STORAGE_BRIDGE_TOKEN || '');
-    const supabase = new GatewaySupabaseClient(gateway);
+    // 1. Initialize Database Adapter based on IMPORTER_DB_MODE
+    let supabase;
+    if (config.IMPORTER_DB_MODE === 'direct') {
+        rootLogger.info('IMPORTER DATABASE MODE: DIRECT');
+        rootLogger.info('DB PATH: DIRECT YSQL TLS -> YugabyteDB Aeon');
+        supabase = new DirectSupabaseClient();
+    }
+    else {
+        rootLogger.info('IMPORTER DATABASE MODE: GATEWAY');
+        rootLogger.info('DB PATH: HTTP -> Cloudflare Worker Gateway -> Hyperdrive -> YugabyteDB Aeon');
+        const gateway = new ImporterGatewayClient(config.NOX_IMPORTER_GATEWAY_URL, config.NOX_STORAGE_BRIDGE_TOKEN || '');
+        supabase = new GatewaySupabaseClient(gateway);
+    }
     // 2. Initialize Storage Provider
     let storage;
     if (config.STORAGE_PROVIDER === 'direct_telegram' || config.STORAGE_PROVIDER === 'telegram') {
