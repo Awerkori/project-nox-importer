@@ -2,7 +2,7 @@ import { callProvider } from './retry-policy.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SourceRegistry } from '../sources/registry.js';
 import { StorageProvider } from '../storage/provider.js';
-import { ImporterQueue, QueueJob } from './queue.js';
+import { ImporterQueue, QueueJob, TaskType } from './queue.js';
 import { DeduplicationEngine, CandidateWork, computeCanonicalChapterKey, ADULT_SOURCES } from './deduplication.js';
 import { CheckpointManager } from './checkpoint.js';
 import { HostRateLimiter } from './rate-limiter.js';
@@ -93,7 +93,7 @@ export class ImporterEngine {
     this.checkpoints = new CheckpointManager(supabase);
     this.publicationBarrier = new PublicationBarrier(supabase);
     this.safetyBarrier = new PublicationSafetyBarrier(supabase);
-    this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
+    this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry, config.NOX_MANGA_URL);
     const requestedMax = Math.min(
       config.MAX_CONCURRENT_CHAPTERS || 5,
       config.TESTED_CONCURRENCY_CEILING || 32
@@ -251,13 +251,47 @@ export class ImporterEngine {
     this.abortController.abort();
   }
 
+  private discoveryAllowedCache = false;
+  private discoveryAllowedCachedAt = 0;
+
+  /**
+   * Checks whether catalog discovery and backfill are globally enabled in system settings.
+   * Cached for 5s to eliminate unnecessary database calls on tight loops.
+   */
+  async isDiscoveryAllowed(): Promise<boolean> {
+    const now = Date.now();
+    if (now - this.discoveryAllowedCachedAt < 5_000) {
+      return this.discoveryAllowedCache;
+    }
+    try {
+      const { data } = await this.supabase
+        .from('settings')
+        .select('value')
+        .eq('key', 'catalog_discovery_enabled')
+        .maybeSingle();
+
+      const val = data?.value;
+      // Explicitly allowed only when not DISABLED or OFF
+      this.discoveryAllowedCache = val ? (val !== 'DISABLED' && val !== 'OFF' && val !== 'false') : true;
+      this.discoveryAllowedCachedAt = now;
+      return this.discoveryAllowedCache;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Periodic discovery scheduler running in the background
    */
   private async runDiscoveryLoop(): Promise<void> {
     while (!this.stopSignal) {
       try {
-        await this.scheduleSources();
+        const allowed = await this.isDiscoveryAllowed();
+        if (allowed) {
+          await this.scheduleSources();
+        } else {
+          this.logger.debug('Catalog discovery is globally DISABLED. Discovery loop idle.');
+        }
       } catch (err: any) {
         this.logger.error('Error during source discovery scheduling', { error: err?.message });
       }
@@ -287,6 +321,9 @@ export class ImporterEngine {
   }
 
   private async scheduleCatalogBackfill(): Promise<void> {
+    const isDiscoveryAllowed = await this.isDiscoveryAllowed();
+    if (!isDiscoveryAllowed) return;
+
     const isAllowed = await this.safetyBarrier.isBackfillAllowed();
     if (!isAllowed) return;
 
@@ -297,7 +334,7 @@ export class ImporterEngine {
     if (error || !sources) return;
 
     for (const src of sources) {
-      if (!src.enabled || src.status !== 'ACTIVE') continue;
+      if (!src.enabled || (src as any).catalog_discovery_enabled === false || src.status !== 'ACTIVE') continue;
 
       const checkpoint = await this.checkpoints.getCheckpoint(src.id);
       // If completed pass, allow re-scan only after 12 hours
@@ -425,11 +462,13 @@ export class ImporterEngine {
           }
         }
 
-        // 3. Periodic full catalog batch every 15 minutes
-        if (now - lastFullBatch >= 15 * 60 * 1000) {
+        // 3. Periodic micro-batch every 3-4 minutes with randomized jitter (0-60s)
+        const jitterMs = Math.floor(Math.random() * 60_000);
+        const intervalMs = (3 * 60 * 1000) + jitterMs;
+        if (now - lastFullBatch >= intervalMs) {
           lastFullBatch = now;
-          this.logger.info('Starting periodic existing works reconciliation batch...');
-          await this.reconciler.reconcileExistingWorks(20);
+          this.logger.info('Starting periodic existing works reconciliation micro-batch (3 works)...');
+          await this.reconciler.reconcileExistingWorks(3);
         }
       } catch (err: any) {
         this.logger.error('Error during periodic reconciliation loop', { error: err?.message });
@@ -640,9 +679,16 @@ export class ImporterEngine {
   }
 
   private sourceEmptyCooldown = new Map<string, number>();
-  private sourceStatusCache = new Map<string, { enabled: boolean; status: string; cooldownUntil: number; cachedAt: number }>();
+  private sourceStatusCache = new Map<string, {
+    enabled: boolean;
+    chapterIngestionEnabled: boolean;
+    catalogDiscoveryEnabled: boolean;
+    status: string;
+    cooldownUntil: number;
+    cachedAt: number;
+  }>();
 
-  private async checkSourceAvailability(source: string): Promise<boolean> {
+  private async checkSourceAvailability(source: string, taskType: TaskType = 'IMPORT_CHAPTER'): Promise<boolean> {
     // 1. Check local circuit breaker first (zero-cost in-memory check)
     if (!this.circuitBreaker.canExecute(source)) {
       return false;
@@ -653,13 +699,15 @@ export class ImporterEngine {
     if (!cached || now - cached.cachedAt > 10_000) {
       let { data: src } = await this.supabase
         .from('importer_sources')
-        .select('status, enabled, cooldown_until')
+        .select('status, enabled, cooldown_until, chapter_ingestion_enabled, catalog_discovery_enabled')
         .eq('id', source)
         .maybeSingle();
 
       if (src) {
         cached = {
           enabled: src.enabled !== false,
+          chapterIngestionEnabled: (src as any).chapter_ingestion_enabled !== false,
+          catalogDiscoveryEnabled: (src as any).catalog_discovery_enabled !== false,
           status: src.status || 'ACTIVE',
           cooldownUntil: src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0,
           cachedAt: now,
@@ -669,18 +717,26 @@ export class ImporterEngine {
     }
 
     if (!cached) return true;
-    if (
-      !cached.enabled ||
-      cached.status === 'PAUSED' ||
-      cached.status === 'DISABLED' ||
-      cached.status === 'UPSTREAM_BLOCKED' ||
-      cached.status === 'EXCLUDED_BY_POLICY'
-    ) {
-      return false;
+    if (!cached.enabled) return false;
+
+    if (taskType === 'IMPORT_CHAPTER') {
+      if (!cached.chapterIngestionEnabled) return false;
+      if (
+        cached.status === 'PAUSED' ||
+        cached.status === 'DISABLED' ||
+        cached.status === 'UPSTREAM_BLOCKED' ||
+        cached.status === 'EXCLUDED_BY_POLICY'
+      ) {
+        return false;
+      }
+      if (cached.status === 'COOLDOWN' && now < cached.cooldownUntil) {
+        return false;
+      }
+    } else {
+      if (!cached.catalogDiscoveryEnabled) return false;
+      if (cached.status !== 'ACTIVE') return false;
     }
-    if (cached.status === 'COOLDOWN' && now < cached.cooldownUntil) {
-      return false;
-    }
+
     return true;
   }
 
@@ -886,6 +942,12 @@ export class ImporterEngine {
 
     while (!this.stopSignal) {
       try {
+        const isDiscoveryAllowed = await this.isDiscoveryAllowed();
+        if (!isDiscoveryAllowed) {
+          await this.sleep(5_000);
+          continue;
+        }
+
         const job = await this.queue.acquireNextJob(
           Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
           undefined,
@@ -911,9 +973,26 @@ export class ImporterEngine {
    * Executes a job with active lease heartbeat and hard timeout watchdog.
    */
   private async executeJobDirectly(job: QueueJob): Promise<void> {
+    // ADMISSION GATE: Catalog Discovery Global Guard
+    if (job.task_type === 'DISCOVER_WORKS' || job.task_type === 'SYNC_WORK') {
+      const isDiscoveryAllowed = await this.isDiscoveryAllowed();
+      if (!isDiscoveryAllowed) {
+        this.logger.warn(`Catalog discovery is globally DISABLED. Postponing ${job.task_type} job ${job.id}`, { jobId: job.id, source: job.source });
+        await this.supabase.from('importer_queue').update({
+          status: 'PAUSED_BY_STAFF',
+          pause_reason: 'CATALOG_DISCOVERY_DISABLED',
+          locked_by: null,
+          locked_at: null,
+          lease_expires_at: null,
+          updated_at: new Date().toISOString(),
+        }).eq('id', job.id);
+        return;
+      }
+    }
+
     // ADMISSION GATE: Circuit Breaker / Health Check
     if (job.task_type === 'IMPORT_CHAPTER') {
-      const isAvailable = await this.checkSourceAvailability(job.source);
+      const isAvailable = await this.checkSourceAvailability(job.source, 'IMPORT_CHAPTER');
       if (!isAvailable) {
         // Source is down. Do we have fallbacks?
         const fallbacks = job.payload?.fallbackSources || [];
@@ -998,6 +1077,11 @@ export class ImporterEngine {
   }
 
   private async scheduleSources(): Promise<void> {
+    const isDiscoveryAllowed = await this.isDiscoveryAllowed();
+    if (!isDiscoveryAllowed) {
+      return;
+    }
+
     let { data: sources, error } = await this.supabase
       .from('importer_sources')
       .select('*');
@@ -1007,7 +1091,13 @@ export class ImporterEngine {
     const now = Date.now();
 
     for (const src of sources) {
-      if (src.enabled === false || src.status === 'DISABLED' || src.status === 'PAUSED' || src.status === 'UPSTREAM_BLOCKED') {
+      if (
+        src.enabled === false ||
+        (src as any).catalog_discovery_enabled === false ||
+        src.status === 'DISABLED' ||
+        src.status === 'PAUSED' ||
+        src.status === 'UPSTREAM_BLOCKED'
+      ) {
         continue;
       }
 

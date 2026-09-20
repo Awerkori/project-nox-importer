@@ -52,6 +52,13 @@ export declare class ImporterEngine {
      */
     recoverStalled502Retries(): Promise<number>;
     stop(): void;
+    private discoveryAllowedCache;
+    private discoveryAllowedCachedAt;
+    /**
+     * Checks whether catalog discovery and backfill are globally enabled in system settings.
+     * Cached for 5s to eliminate unnecessary database calls on tight loops.
+     */
+    isDiscoveryAllowed(): Promise<boolean>;
     /**
      * Periodic discovery scheduler running in the background
      */

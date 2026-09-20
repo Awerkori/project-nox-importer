@@ -410,6 +410,8 @@ export const importerSources = sqliteTable("importer_sources", {
 	blockedReason: text("blocked_reason"),
 	blockedDetails: text("blocked_details").notNull(),
 	lastHealthCheckAt: text("last_health_check_at"),
+	chapterIngestionEnabled: integer("chapter_ingestion_enabled"),
+	catalogDiscoveryEnabled: integer("catalog_discovery_enabled"),
 });
 
 export const importerWorkMappings = sqliteTable("importer_work_mappings", {

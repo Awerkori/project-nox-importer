@@ -452,7 +452,11 @@ describe('ExistingWorksReconciler - Canonical Gap & Fresh Release Discovery', ()
             select: vi.fn().mockReturnThis(),
             eq: vi.fn().mockResolvedValue({ data: [] }),
             upsert: vi.fn((record) => {
-              savedMappings.push(record);
+              if (Array.isArray(record)) {
+                savedMappings.push(...record);
+              } else {
+                savedMappings.push(record);
+              }
               return Promise.resolve({ error: null });
             }),
           };

@@ -38,9 +38,20 @@ export declare class ExistingWorksReconciler {
     private supabase;
     private queue;
     private registry;
+    private siteUrl?;
     private logger;
     private lastReconciliationAt;
-    constructor(supabase: SupabaseClient, queue: ImporterQueue, registry: SourceRegistry);
+    constructor(supabase: SupabaseClient, queue: ImporterQueue, registry: SourceRegistry, siteUrl?: string | undefined);
+    private sleep;
+    getSystemLoad(): Promise<{
+        cpuPercent: number;
+        activeConns: number;
+    }>;
+    private checkDbCpuUsage;
+    shouldYieldOrPause(): Promise<{
+        shouldYield: boolean;
+        reason?: string;
+    }>;
     private isSourceOperationallyAvailable;
     /**
      * Discovers alternative provider mappings for a given work by searching across
