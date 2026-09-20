@@ -28,6 +28,14 @@ async function main() {
     catch (e) { /* ignore */ }
     rootLogger.info(`Starting Project Nox Importer daemon... | Build: ${buildCommit}`);
     const config = getConfig();
+    // Network diagnostics: determine egress IP
+    try {
+        const ipRes = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(4000) }).then(r => r.json());
+        rootLogger.info(`Container Public Egress IP: ${ipRes.ip}`);
+    }
+    catch (e) {
+        rootLogger.warn(`Failed to resolve container egress IP: ${e.message}`);
+    }
     // 1. Initialize Database Adapter based on IMPORTER_DB_MODE
     let supabase;
     if (config.IMPORTER_DB_MODE === 'direct') {

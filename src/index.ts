@@ -34,6 +34,14 @@ async function main() {
 
   const config = getConfig();
 
+  // Network diagnostics: determine egress IP
+  try {
+    const ipRes = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(4000) }).then(r => r.json() as Promise<{ ip: string }>);
+    rootLogger.info(`Container Public Egress IP: ${ipRes.ip}`);
+  } catch (e: any) {
+    rootLogger.warn(`Failed to resolve container egress IP: ${e.message}`);
+  }
+
   // 1. Initialize Database Adapter based on IMPORTER_DB_MODE
   let supabase: any;
   if (config.IMPORTER_DB_MODE === 'direct') {
