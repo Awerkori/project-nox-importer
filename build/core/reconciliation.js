@@ -12,12 +12,91 @@ export class ExistingWorksReconciler {
     supabase;
     queue;
     registry;
+    siteUrl;
     logger = new Logger('ExistingWorksReconciler');
     lastReconciliationAt = new Map();
-    constructor(supabase, queue, registry) {
+    constructor(supabase, queue, registry, siteUrl) {
         this.supabase = supabase;
         this.queue = queue;
         this.registry = registry;
+        this.siteUrl = siteUrl;
+    }
+    sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+    async getSystemLoad() {
+        try {
+            const sql = "SELECT (SELECT metrics FROM yb_servers_metrics LIMIT 1) as metrics, (SELECT count(*) FROM pg_stat_activity WHERE state = 'active') as active_conns";
+            let rows;
+            const gateway = this.supabase?.gateway;
+            const client = this.supabase?.client;
+            if (gateway && typeof gateway.sql === 'function') {
+                const res = await gateway.sql(sql);
+                rows = res?.rows;
+            }
+            else if (client && typeof client.sql === 'function') {
+                const res = await client.sql(sql);
+                rows = res?.rows;
+            }
+            else if (client && typeof client.query === 'function') {
+                const res = await client.query(sql);
+                rows = res?.rows;
+            }
+            if (rows && rows.length > 0) {
+                const m = rows[0]?.metrics || {};
+                const cpu = (parseFloat(m.cpu_usage_user || 0) + parseFloat(m.cpu_usage_system || 0)) * 100;
+                const conns = parseInt(rows[0]?.active_conns || 0, 10);
+                return { cpuPercent: isNaN(cpu) ? 0 : cpu, activeConns: isNaN(conns) ? 0 : conns };
+            }
+        }
+        catch (err) {
+            this.logger.debug(`Failed to get system load: ${err?.message}`);
+        }
+        return { cpuPercent: 0, activeConns: 0 };
+    }
+    async checkDbCpuUsage() {
+        const load = await this.getSystemLoad();
+        return load.cpuPercent;
+    }
+    async shouldYieldOrPause() {
+        try {
+            const sysLoad = await this.getSystemLoad();
+            if (sysLoad.cpuPercent >= 60) {
+                return { shouldYield: true, reason: `Yugabyte CPU too high (${sysLoad.cpuPercent.toFixed(1)}% >= 60%)` };
+            }
+            if (sysLoad.activeConns >= 8) {
+                return { shouldYield: true, reason: `YSQL active connections elevated (${sysLoad.activeConns} >= 8)` };
+            }
+            if (this.siteUrl) {
+                const t0 = Date.now();
+                const ctrl = new AbortController();
+                const timer = setTimeout(() => ctrl.abort(), 1500);
+                try {
+                    const probeUrl = this.siteUrl.replace(/\/$/, '') + '/api/health';
+                    const res = await fetch(probeUrl, {
+                        method: 'GET',
+                        signal: ctrl.signal,
+                        headers: { 'User-Agent': 'Nox-Reconciler-HealthCheck/1.0' },
+                    });
+                    await res.text().catch(() => { });
+                    clearTimeout(timer);
+                    const elapsed = Date.now() - t0;
+                    if (elapsed > 400) {
+                        return { shouldYield: true, reason: `Site latency degraded (${elapsed}ms > 400ms)` };
+                    }
+                }
+                catch (e) {
+                    clearTimeout(timer);
+                    if (e.name === 'AbortError') {
+                        return { shouldYield: true, reason: 'Site latency degraded (probe timeout > 1500ms)' };
+                    }
+                }
+            }
+        }
+        catch {
+            // ignore
+        }
+        return { shouldYield: false };
     }
     isSourceOperationallyAvailable(sourceId, sourcesState) {
         const state = sourcesState.get(sourceId);
@@ -413,6 +492,8 @@ export class ExistingWorksReconciler {
         // 12. Enqueue missing chapters
         let enqueuedCount = 0;
         const manifestUpserts = [];
+        const chmMappingsToUpsert = [];
+        const queueJobsToEnqueue = [];
         for (const sortKey of sortedSortKeys) {
             const candidate = manifestMap.get(sortKey);
             const isPublished = publishedNumbers.has(candidate.chapterNumber) || publishedSortKeys.has(sortKey);
@@ -454,40 +535,41 @@ export class ExistingWorksReconciler {
                 const isGap = sortKey < highestMilestone;
                 const assignedPriority = options?.priority ?? (isStaffPriority ? 100 : isGap ? 70 : 80);
                 const canonicalDedupeKey = `work:${workId}:chapter:${sortKey}`;
-                // Upsert mappings for chapter sources
+                // Queue mappings for batch upsert
                 for (const s of candidate.sources) {
-                    const chmUpsert = this.supabase.from('importer_chapter_mappings');
-                    if (chmUpsert && typeof chmUpsert.upsert === 'function') {
-                        await chmUpsert.upsert({
-                            source: s.source,
-                            source_chapter_id: s.sourceChapterId,
-                            work_id: workId,
-                            work_mapping_id: s.mappingId,
-                            chapter_number: candidate.chapterNumber,
-                            chapter_sort_key: candidate.sortKey,
-                            page_count: candidate.pageCount,
-                            is_page_provider: s.source === primary.source,
-                            status: 'PENDING',
-                            is_gap: false,
-                            last_error: null,
-                        }, { onConflict: 'source,source_chapter_id' });
-                    }
+                    chmMappingsToUpsert.push({
+                        source: s.source,
+                        source_chapter_id: s.sourceChapterId,
+                        work_id: workId,
+                        work_mapping_id: s.mappingId,
+                        chapter_number: candidate.chapterNumber,
+                        chapter_sort_key: candidate.sortKey,
+                        page_count: candidate.pageCount,
+                        is_page_provider: s.source === primary.source,
+                        status: 'PENDING',
+                        is_gap: false,
+                        last_error: null,
+                    });
                 }
-                const enqueued = await this.queue.enqueue('IMPORT_CHAPTER', primary.source, canonicalDedupeKey, {
-                    sourceWorkId: primary.sourceWorkId,
-                    sourceChapterId: primary.sourceChapterId,
-                    workId,
-                    workMappingId: primary.mappingId,
-                    chapterNumber: candidate.chapterNumber,
-                    chapterTitle: candidate.chapterTitle,
-                    expectedPageCount: candidate.pageCount || null,
-                    isGapBackfill: isGap,
-                    fallbackSources: fallbacks,
-                }, assignedPriority, candidate.sortKey);
-                if (enqueued) {
-                    enqueuedCount++;
-                    queuedSortKeys.add(sortKey);
-                }
+                queueJobsToEnqueue.push({
+                    taskType: 'IMPORT_CHAPTER',
+                    source: primary.source,
+                    dedupeKey: canonicalDedupeKey,
+                    payload: {
+                        sourceWorkId: primary.sourceWorkId,
+                        sourceChapterId: primary.sourceChapterId,
+                        workId,
+                        workMappingId: primary.mappingId,
+                        chapterNumber: candidate.chapterNumber,
+                        chapterTitle: candidate.chapterTitle,
+                        expectedPageCount: candidate.pageCount || null,
+                        isGapBackfill: isGap,
+                        fallbackSources: fallbacks,
+                    },
+                    priority: assignedPriority,
+                    chapterSortKey: candidate.sortKey,
+                });
+                queuedSortKeys.add(sortKey);
             }
             manifestUpserts.push({
                 work_id: workId,
@@ -506,6 +588,31 @@ export class ExistingWorksReconciler {
                 ...(isKnownPermanentGap ? { gap_reason: 'PERMANENT_404_UNRESOLVED' } : {}),
                 last_checked_at: new Date().toISOString(),
             });
+        }
+        // 12.1 Persist chapter mappings in chunks of 50
+        if (chmMappingsToUpsert.length > 0) {
+            const chmQuery = this.supabase.from('importer_chapter_mappings');
+            if (chmQuery && typeof chmQuery.upsert === 'function') {
+                for (let i = 0; i < chmMappingsToUpsert.length; i += 50) {
+                    const chunk = chmMappingsToUpsert.slice(i, i + 50);
+                    await chmQuery.upsert(chunk, { onConflict: 'source,source_chapter_id' });
+                }
+            }
+        }
+        // 12.2 Enqueue chapter jobs
+        if (queueJobsToEnqueue.length > 0) {
+            if (typeof this.queue.enqueueBatch === 'function') {
+                const enqueuedNum = await this.queue.enqueueBatch(queueJobsToEnqueue);
+                enqueuedCount = typeof enqueuedNum === 'number' ? enqueuedNum : queueJobsToEnqueue.length;
+            }
+            else {
+                for (const job of queueJobsToEnqueue) {
+                    const enqueued = await this.queue.enqueue(job.taskType, job.source, job.dedupeKey, job.payload, job.priority, job.chapterSortKey);
+                    if (enqueued) {
+                        enqueuedCount++;
+                    }
+                }
+            }
         }
         // 13. Persist manifest if table available
         const manQuery = this.supabase.from('importer_chapter_manifest');
@@ -587,7 +694,7 @@ export class ExistingWorksReconciler {
     /**
      * Reconciles existing works in batches, respecting rate limits and avoiding redundant work.
      */
-    async reconcileExistingWorks(batchSize = 20) {
+    async reconcileExistingWorks(batchSize = 3) {
         const stats = {
             worksScanned: 0,
             worksWithConfirmedGaps: 0,
@@ -597,6 +704,12 @@ export class ExistingWorksReconciler {
             stagedSkipped: 0,
             duplicatesAvoided: 0,
         };
+        // Pre-batch throttle check
+        const preCheck = await this.shouldYieldOrPause();
+        if (preCheck.shouldYield) {
+            this.logger.warn(`Skipping reconciliation cycle due to system load: ${preCheck.reason}`);
+            return stats;
+        }
         // 0. Query sources status
         const sourcesQuery = this.supabase.from('importer_sources');
         const { data: dbSources } = sourcesQuery && typeof sourcesQuery.select === 'function'
@@ -610,7 +723,7 @@ export class ExistingWorksReconciler {
                 cooldownUntil: s.cooldown_until ? new Date(s.cooldown_until).getTime() : null,
             });
         }
-        // 1. Fetch work mappings
+        // 1. Fetch work mappings ordered by updated_at ASC to ensure fair rotation across all works
         const mapQuery = this.supabase.from('importer_work_mappings');
         if (!mapQuery || typeof mapQuery.select !== 'function')
             return stats;
@@ -621,8 +734,8 @@ export class ExistingWorksReconciler {
             query = query.not('work_id', 'is', null);
         }
         const { data: rawMappings, error: mapErr } = await query
-            .order('updated_at', { ascending: false })
-            .limit(batchSize * 3);
+            .order('updated_at', { ascending: true })
+            .limit(batchSize * 5);
         if (mapErr) {
             this.logger.error('Failed to query work mappings for reconciliation', { error: mapErr.message });
             return stats;
@@ -641,6 +754,13 @@ export class ExistingWorksReconciler {
         }
         const now = Date.now();
         for (const [workId, sourceMappings] of worksMap.entries()) {
+            // Dynamic throttle check before processing each work
+            const throttleCheck = await this.shouldYieldOrPause();
+            if (throttleCheck.shouldYield) {
+                this.logger.warn(`Yielding reconciliation during batch: ${throttleCheck.reason}`);
+                await this.sleep(2000);
+                break;
+            }
             const lastCheck = this.lastReconciliationAt.get(workId) || 0;
             if (now - lastCheck < 10 * 60 * 1000)
                 continue;
@@ -743,8 +863,17 @@ export class ExistingWorksReconciler {
                     });
                 }
             }
-            if (candidatesBySortKey.size === 0)
+            if (candidatesBySortKey.size === 0) {
+                const wmUpdate = this.supabase.from('importer_work_mappings');
+                if (wmUpdate && typeof wmUpdate.update === 'function') {
+                    const upd = wmUpdate.update({ updated_at: new Date().toISOString() });
+                    if (upd && typeof upd.eq === 'function') {
+                        await upd.eq('work_id', workId);
+                    }
+                }
+                await this.sleep(600);
                 continue;
+            }
             const highestMilestone = Math.max(maxPublishedSort, ...Array.from(stagedSortKeys.values()), ...Array.from(completedSortKeys.values()));
             const confirmedGaps = [];
             const newChapters = [];
@@ -760,27 +889,26 @@ export class ExistingWorksReconciler {
                 stats.worksWithConfirmedGaps++;
             confirmedGaps.sort((a, b) => a.sortKey - b.sortKey);
             newChapters.sort((a, b) => a.sortKey - b.sortKey);
-            // Enqueue gaps (Priority 70)
+            const chmMappingsToUpsert = [];
+            const queueJobsToEnqueue = [];
+            // Process gaps (Priority 70)
             for (const cand of confirmedGaps) {
                 const operationalSources = cand.sources.filter((s) => this.isSourceOperationallyAvailable(s.source, sourcesState));
                 if (operationalSources.length === 0) {
                     for (const s of cand.sources) {
-                        const chmUpsert = this.supabase.from('importer_chapter_mappings');
-                        if (chmUpsert && typeof chmUpsert.upsert === 'function') {
-                            await chmUpsert.upsert({
-                                source: s.source,
-                                source_chapter_id: s.sourceChapterId,
-                                work_id: workId,
-                                work_mapping_id: s.mappingId,
-                                chapter_number: cand.chapterNumber,
-                                chapter_sort_key: cand.sortKey,
-                                page_count: cand.expectedPages,
-                                is_page_provider: false,
-                                status: 'PENDING',
-                                is_gap: false,
-                                last_error: 'No operational sources available. Sequence remains blocked.',
-                            }, { onConflict: 'source,source_chapter_id' });
-                        }
+                        chmMappingsToUpsert.push({
+                            source: s.source,
+                            source_chapter_id: s.sourceChapterId,
+                            work_id: workId,
+                            work_mapping_id: s.mappingId,
+                            chapter_number: cand.chapterNumber,
+                            chapter_sort_key: cand.sortKey,
+                            page_count: cand.expectedPages,
+                            is_page_provider: false,
+                            status: 'PENDING',
+                            is_gap: false,
+                            last_error: 'No operational sources available. Sequence remains blocked.',
+                        });
                     }
                     continue;
                 }
@@ -796,60 +924,58 @@ export class ExistingWorksReconciler {
                 }));
                 const canonicalDedupeKey = `work:${workId}:chapter:${cand.sortKey}`;
                 for (const s of cand.sources) {
-                    const chmUpsert = this.supabase.from('importer_chapter_mappings');
-                    if (chmUpsert && typeof chmUpsert.upsert === 'function') {
-                        await chmUpsert.upsert({
-                            source: s.source,
-                            source_chapter_id: s.sourceChapterId,
-                            work_id: workId,
-                            work_mapping_id: s.mappingId,
-                            chapter_number: cand.chapterNumber,
-                            chapter_sort_key: cand.sortKey,
-                            page_count: cand.expectedPages,
-                            is_page_provider: s.source === primary.source,
-                            status: 'PENDING',
-                            is_gap: false,
-                            last_error: null,
-                        }, { onConflict: 'source,source_chapter_id' });
-                    }
+                    chmMappingsToUpsert.push({
+                        source: s.source,
+                        source_chapter_id: s.sourceChapterId,
+                        work_id: workId,
+                        work_mapping_id: s.mappingId,
+                        chapter_number: cand.chapterNumber,
+                        chapter_sort_key: cand.sortKey,
+                        page_count: cand.expectedPages,
+                        is_page_provider: s.source === primary.source,
+                        status: 'PENDING',
+                        is_gap: false,
+                        last_error: null,
+                    });
                 }
-                const enqueued = await this.queue.enqueue('IMPORT_CHAPTER', primary.source, canonicalDedupeKey, {
-                    sourceWorkId: primary.sourceWorkId,
-                    sourceChapterId: primary.sourceChapterId,
-                    workId,
-                    workMappingId: primary.mappingId,
-                    chapterNumber: cand.chapterNumber,
-                    chapterTitle: cand.chapterTitle,
-                    expectedPageCount: cand.expectedPages || null,
-                    isGapBackfill: true,
-                    fallbackSources: operationalFallbackSources,
-                }, 70, cand.sortKey);
-                if (enqueued) {
-                    stats.confirmedGapsDiscovered++;
-                    stats.jobsEnqueued++;
-                }
+                queueJobsToEnqueue.push({
+                    taskType: 'IMPORT_CHAPTER',
+                    source: primary.source,
+                    dedupeKey: canonicalDedupeKey,
+                    payload: {
+                        sourceWorkId: primary.sourceWorkId,
+                        sourceChapterId: primary.sourceChapterId,
+                        workId,
+                        workMappingId: primary.mappingId,
+                        chapterNumber: cand.chapterNumber,
+                        chapterTitle: cand.chapterTitle,
+                        expectedPageCount: cand.expectedPages || null,
+                        isGapBackfill: true,
+                        fallbackSources: operationalFallbackSources,
+                    },
+                    priority: 70,
+                    chapterSortKey: cand.sortKey,
+                });
+                stats.confirmedGapsDiscovered++;
             }
-            // Enqueue new chapters (Priority 80)
+            // Process new chapters (Priority 80)
             for (const cand of newChapters) {
                 const operationalSources = cand.sources.filter((s) => this.isSourceOperationallyAvailable(s.source, sourcesState));
                 if (operationalSources.length === 0) {
                     for (const s of cand.sources) {
-                        const chmUpsert = this.supabase.from('importer_chapter_mappings');
-                        if (chmUpsert && typeof chmUpsert.upsert === 'function') {
-                            await chmUpsert.upsert({
-                                source: s.source,
-                                source_chapter_id: s.sourceChapterId,
-                                work_id: workId,
-                                work_mapping_id: s.mappingId,
-                                chapter_number: cand.chapterNumber,
-                                chapter_sort_key: cand.sortKey,
-                                page_count: cand.expectedPages,
-                                is_page_provider: false,
-                                status: 'PENDING',
-                                is_gap: false,
-                                last_error: null,
-                            }, { onConflict: 'source,source_chapter_id' });
-                        }
+                        chmMappingsToUpsert.push({
+                            source: s.source,
+                            source_chapter_id: s.sourceChapterId,
+                            work_id: workId,
+                            work_mapping_id: s.mappingId,
+                            chapter_number: cand.chapterNumber,
+                            chapter_sort_key: cand.sortKey,
+                            page_count: cand.expectedPages,
+                            is_page_provider: false,
+                            status: 'PENDING',
+                            is_gap: false,
+                            last_error: null,
+                        });
                     }
                     continue;
                 }
@@ -865,39 +991,75 @@ export class ExistingWorksReconciler {
                 }));
                 const canonicalDedupeKey = `work:${workId}:chapter:${cand.sortKey}`;
                 for (const s of cand.sources) {
-                    const chmUpsert = this.supabase.from('importer_chapter_mappings');
-                    if (chmUpsert && typeof chmUpsert.upsert === 'function') {
-                        await chmUpsert.upsert({
-                            source: s.source,
-                            source_chapter_id: s.sourceChapterId,
-                            work_id: workId,
-                            work_mapping_id: s.mappingId,
-                            chapter_number: cand.chapterNumber,
-                            chapter_sort_key: cand.sortKey,
-                            page_count: cand.expectedPages,
-                            is_page_provider: s.source === primary.source,
-                            status: 'PENDING',
-                            is_gap: false,
-                            last_error: null,
-                        }, { onConflict: 'source,source_chapter_id' });
+                    chmMappingsToUpsert.push({
+                        source: s.source,
+                        source_chapter_id: s.sourceChapterId,
+                        work_id: workId,
+                        work_mapping_id: s.mappingId,
+                        chapter_number: cand.chapterNumber,
+                        chapter_sort_key: cand.sortKey,
+                        page_count: cand.expectedPages,
+                        is_page_provider: s.source === primary.source,
+                        status: 'PENDING',
+                        is_gap: false,
+                        last_error: null,
+                    });
+                }
+                queueJobsToEnqueue.push({
+                    taskType: 'IMPORT_CHAPTER',
+                    source: primary.source,
+                    dedupeKey: canonicalDedupeKey,
+                    payload: {
+                        sourceWorkId: primary.sourceWorkId,
+                        sourceChapterId: primary.sourceChapterId,
+                        workId,
+                        workMappingId: primary.mappingId,
+                        chapterNumber: cand.chapterNumber,
+                        chapterTitle: cand.chapterTitle,
+                        expectedPageCount: cand.expectedPages || null,
+                        isNewRelease: true,
+                        fallbackSources: operationalFallbackSources,
+                    },
+                    priority: 80,
+                    chapterSortKey: cand.sortKey,
+                });
+                stats.newChaptersDiscovered++;
+            }
+            // Batch upsert chapter mappings in chunks of 50
+            if (chmMappingsToUpsert.length > 0) {
+                const chmQuery = this.supabase.from('importer_chapter_mappings');
+                if (chmQuery && typeof chmQuery.upsert === 'function') {
+                    for (let i = 0; i < chmMappingsToUpsert.length; i += 50) {
+                        const chunk = chmMappingsToUpsert.slice(i, i + 50);
+                        await chmQuery.upsert(chunk, { onConflict: 'source,source_chapter_id' });
                     }
                 }
-                const enqueued = await this.queue.enqueue('IMPORT_CHAPTER', primary.source, canonicalDedupeKey, {
-                    sourceWorkId: primary.sourceWorkId,
-                    sourceChapterId: primary.sourceChapterId,
-                    workId,
-                    workMappingId: primary.mappingId,
-                    chapterNumber: cand.chapterNumber,
-                    chapterTitle: cand.chapterTitle,
-                    expectedPageCount: cand.expectedPages || null,
-                    isNewRelease: true,
-                    fallbackSources: operationalFallbackSources,
-                }, 80, cand.sortKey);
-                if (enqueued) {
-                    stats.newChaptersDiscovered++;
-                    stats.jobsEnqueued++;
+            }
+            // Batch enqueue queue jobs
+            if (queueJobsToEnqueue.length > 0) {
+                if (typeof this.queue.enqueueBatch === 'function') {
+                    const enqueuedNum = await this.queue.enqueueBatch(queueJobsToEnqueue);
+                    stats.jobsEnqueued += typeof enqueuedNum === 'number' ? enqueuedNum : queueJobsToEnqueue.length;
+                }
+                else {
+                    for (const job of queueJobsToEnqueue) {
+                        const enqueued = await this.queue.enqueue(job.taskType, job.source, job.dedupeKey, job.payload, job.priority, job.chapterSortKey);
+                        if (enqueued) {
+                            stats.jobsEnqueued++;
+                        }
+                    }
                 }
             }
+            // Update work mapping timestamp so it rotates to the back of the queue
+            const wmUpdate = this.supabase.from('importer_work_mappings');
+            if (wmUpdate && typeof wmUpdate.update === 'function') {
+                const upd = wmUpdate.update({ updated_at: new Date().toISOString() });
+                if (upd && typeof upd.eq === 'function') {
+                    await upd.eq('work_id', workId);
+                }
+            }
+            // Micro-yield between works (600ms)
+            await this.sleep(600);
         }
         this.logger.info('Reconciliation cycle completed', stats);
         return stats;

@@ -93,7 +93,7 @@ export class ImporterEngine {
     this.checkpoints = new CheckpointManager(supabase);
     this.publicationBarrier = new PublicationBarrier(supabase);
     this.safetyBarrier = new PublicationSafetyBarrier(supabase);
-    this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry);
+    this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry, config.NOX_MANGA_URL);
     const requestedMax = Math.min(
       config.MAX_CONCURRENT_CHAPTERS || 5,
       config.TESTED_CONCURRENCY_CEILING || 32
@@ -425,11 +425,13 @@ export class ImporterEngine {
           }
         }
 
-        // 3. Periodic full catalog batch every 15 minutes
-        if (now - lastFullBatch >= 15 * 60 * 1000) {
+        // 3. Periodic micro-batch every 3-4 minutes with randomized jitter (0-60s)
+        const jitterMs = Math.floor(Math.random() * 60_000);
+        const intervalMs = (3 * 60 * 1000) + jitterMs;
+        if (now - lastFullBatch >= intervalMs) {
           lastFullBatch = now;
-          this.logger.info('Starting periodic existing works reconciliation batch...');
-          await this.reconciler.reconcileExistingWorks(20);
+          this.logger.info('Starting periodic existing works reconciliation micro-batch (3 works)...');
+          await this.reconciler.reconcileExistingWorks(3);
         }
       } catch (err: any) {
         this.logger.error('Error during periodic reconciliation loop', { error: err?.message });
