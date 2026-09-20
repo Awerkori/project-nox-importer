@@ -28,8 +28,6 @@ import { NinjaScanAdapter } from './ninjascan/ninjascan-adapter.js';
 import { YuriVersoAdapter } from './yuriverso/yuriverso-adapter.js';
 import { AcervoHentaiAdapter } from './acervohentai/acervohentai-adapter.js';
 import { InkapkAdapter } from './inkapk/inkapk-adapter.js';
-import { TiaManhwaAdapter } from './tiamanhwa/tiamanhwa-adapter.js';
-import { PointZeroToonsAdapter } from './pointzerotoons/pointzerotoons-adapter.js';
 import { ApeComicsAdapter } from './apecomics/apecomics-adapter.js';
 import { PizzariaScanAdapter } from './pizzariascan/pizzariascan-adapter.js';
 import { YaoiFanClubAdapter } from './yaoifanclub/yaoifanclub-adapter.js';
@@ -78,8 +76,6 @@ export class SourceRegistry {
             this.register(new MrTenzusAdapter(rateLimiter));
             this.register(new NinjaScanAdapter(rateLimiter));
             this.register(new YuriVersoAdapter(rateLimiter));
-            this.register(new TiaManhwaAdapter(rateLimiter));
-            this.register(new PointZeroToonsAdapter(rateLimiter));
             this.register(new ApeComicsAdapter(rateLimiter));
             this.register(new PizzariaScanAdapter(rateLimiter));
             this.register(new MangaOnlineTvAdapter(rateLimiter));
@@ -120,6 +116,8 @@ export class SourceRegistry {
         if (adapter.id === 'nexus') {
             this.adapters.set('nexus_mangas', adapter);
             this.adapters.set('nexusmangas', adapter);
+            this.adapters.set('nexus_toons', adapter);
+            this.adapters.set('nexustoons', adapter);
         }
         if (adapter.id === 'kuro') {
             this.adapters.set('kuromangas', adapter);

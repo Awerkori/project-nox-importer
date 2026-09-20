@@ -79,11 +79,24 @@ export class ZeistMangaAdapter {
             'romance', 'series', 'shounen', 'shoujo', 'seinen', 'slice of life', 'vida escolar',
             'update', 'project', 'ongoing', 'completo', 'dropado', 'destaques', 'pt', 'new', 'novel',
             'medicinal', 'cultivo', 'martial arts', 'harem', 'action', 'fantasy', 'school life',
-            'supernatural', 'dropped', 'em lançamento', 'em andamento', 'finalizado', 'hiato'
+            'supernatural', 'dropped', 'em lançamento', 'em andamento', 'finalizado', 'hiato',
+            '+18', '+16', '+14', '+12', '18+', '16+', '14+', '12+', 'adulto', 'hentai', 'mature', 'smut',
+            'doujinshi', 'coreano', 'japones', 'chines', 'mangas', 'manhwas', 'webtoons'
         ]);
+        // Priority 1: Match title directly if present in categories
+        const lowerTitle = title.trim().toLowerCase();
         for (const c of categories) {
             const lower = c.trim().toLowerCase();
-            if (!generic.has(lower) && !/^\d+(\.\d+)?$/.test(lower) && lower.length > 1) {
+            if (lower === lowerTitle) {
+                return c.trim();
+            }
+        }
+        // Priority 2: Return first non-generic, non-numeric, non-age-rating category
+        for (const c of categories) {
+            const lower = c.trim().toLowerCase();
+            if (!generic.has(lower) &&
+                !/^[+~#]|\d+(\.\d+)?$/.test(lower) &&
+                lower.length > 1) {
                 return c.trim();
             }
         }
@@ -232,8 +245,24 @@ export class ZeistMangaAdapter {
             const urlObj = new URL(chapterUrl);
             const pathParts = urlObj.pathname.replace(/\.html$/, '').split('/').filter(Boolean);
             const slug = pathParts[pathParts.length - 1] ?? '';
+            // Blogger sites render images via JS lightbox — not in static HTML <img> tags.
+            // Use the Blogger JSON API with exact path parameter first:
+            try {
+                const pathUrl = `${urlObj.origin}/feeds/posts/default?alt=json&path=${encodeURIComponent(urlObj.pathname)}`;
+                const data = await this.fetchJson(pathUrl);
+                const entry = data?.entry || data?.feed?.entry?.[0];
+                if (entry) {
+                    const content = entry.content?.['$t'] ?? entry.summary?.['$t'] ?? '';
+                    const pages = this._extractBloggerImages(content);
+                    if (pages.length > 0)
+                        return pages;
+                }
+            }
+            catch (_pathErr) {
+                // Fall back to slug search
+            }
             if (slug) {
-                const apiUrl = `${urlObj.origin}/feeds/posts/default?alt=json&q=${encodeURIComponent(slug)}&max-results=1`;
+                const apiUrl = `${urlObj.origin}/feeds/posts/default?alt=json&q=${encodeURIComponent(slug)}&max-results=5`;
                 try {
                     const data = await this.fetchJson(apiUrl);
                     const entries = data?.feed?.entry ?? [];
@@ -266,20 +295,20 @@ export class ZeistMangaAdapter {
     _extractBloggerImages(content) {
         const seen = new Set();
         const pages = [];
-        // Blogger image pattern: base URL + /sNNN/ size param + filename
+        // Blogger image pattern: base URL + /(sNNN|wNNN|s0|...)/ size param + filename
         // We normalise to /s0/ (maximum size) and deduplicate by base path.
-        const bloggerRe = /(https:\/\/(?:\d+\.bp\.blogspot\.com|blogger\.googleusercontent\.com)\/[^\s"'<>]+?)\/s\d+\//gi;
+        const bloggerRe = /(https:\/\/(?:\d+\.bp\.blogspot\.com|blogger\.googleusercontent\.com)\/[^\s"'<>]+?)\/(?:s\d+|s0|w\d+|w\d+-[^/]+)\/([^\s"'<>]+?\.(?:jpe?g|png|webp|avif|gif))/gi;
         let m;
         while ((m = bloggerRe.exec(content)) !== null) {
             const base = m[1];
+            const filename = m[2];
             if (seen.has(base))
                 continue;
             // Skip cover/thumbnail-only images by filename
-            const fname = base.split('/').pop() ?? '';
-            if (/(?:capa|cover|thumbnail|banner|logo|icon|avatar)/i.test(fname))
+            if (/(?:capa|cover|thumbnail|banner|logo|icon|avatar)/i.test(filename))
                 continue;
             seen.add(base);
-            pages.push(`${base}/s0/`);
+            pages.push(`${base}/s0/${filename}`);
         }
         if (pages.length > 0)
             return pages;
