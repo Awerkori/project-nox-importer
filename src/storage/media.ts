@@ -165,14 +165,20 @@ export interface StoredMediaResult {
   height: number;
   bytes: number;
   mime: string;
+  mediaRecord?: Record<string, any>;
+}
+
+export interface ProcessMediaOptions {
+  skipDbInsert?: boolean;
+  skipDedupLookup?: boolean;
 }
 
 /**
  * Process a single image:
  * 1. Validate binary structure & dimensions.
  * 2. Calculate SHA-256.
- * 3. Check public.media for existing hash (deduplication).
- * 4. If not found, upload via StorageProvider and insert into public.media.
+ * 3. Check public.media for existing hash (deduplication) unless skipped.
+ * 4. If not found, upload via StorageProvider and insert into public.media (or return descriptor for batching).
  */
 export async function processAndStoreMedia(
   supabase: SupabaseClient,
@@ -180,44 +186,47 @@ export async function processAndStoreMedia(
   bytes: Uint8Array,
   userId: string,
   purpose: string = 'editorial',
-  chapterId?: string
+  chapterId?: string,
+  options?: ProcessMediaOptions
 ): Promise<StoredMediaResult> {
   const info = inspectImage(bytes);
   const sha256 = calculateSha256(bytes);
 
-  // 1. Deduplication lookup
-  const { data: existing, error: findErr } = await supabase
-    .from('media')
-    .select('id, width, height, bytes, mime')
-    .eq('sha256', sha256)
-    .eq('storage_ready', true)
-    .limit(1)
-    .maybeSingle();
+  // 1. Deduplication lookup (optional, skipped during batch chapter ingestion to avoid distributed seq scans)
+  if (!options?.skipDedupLookup) {
+    const { data: existing, error: findErr } = await supabase
+      .from('media')
+      .select('id, width, height, bytes, mime')
+      .eq('sha256', sha256)
+      .eq('storage_ready', true)
+      .limit(1)
+      .maybeSingle();
 
-  if (findErr) {
-    logger.warn('Media hash lookup error', { error: findErr.message });
-  }
+    if (findErr) {
+      logger.warn('Media hash lookup error', { error: findErr.message });
+    }
 
-  if (existing) {
-    logger.debug('Media deduplicated via SHA-256', { id: existing.id, sha256 });
-    return {
-      mediaId: existing.id,
-      reused: true,
-      width: existing.width,
-      height: existing.height,
-      bytes: existing.bytes,
-      mime: existing.mime,
-    };
+    if (existing) {
+      logger.debug('Media deduplicated via SHA-256', { id: existing.id, sha256 });
+      return {
+        mediaId: existing.id,
+        reused: true,
+        width: existing.width,
+        height: existing.height,
+        bytes: existing.bytes,
+        mime: existing.mime,
+      };
+    }
   }
 
   // 2. Upload to storage provider
   const mediaId = crypto.randomUUID();
   const providerKey = await storage.upload(bytes, info.mime, mediaId, chapterId);
 
-  // 3. Insert record into public.media
+  // 3. Prepare media record
   const botRef = storage.getLastBotReference?.(mediaId) || 'MANGA_STORAGE_01';
   const shardId = storage.getLastShardId?.(mediaId) || null;
-  const { error: insertErr } = await supabase.from('media').insert({
+  const mediaRecord = {
     id: mediaId,
     provider: storage.getProviderKey() === 'mock' ? 'telegram' : storage.getProviderKey(),
     provider_key: providerKey,
@@ -231,11 +240,16 @@ export async function processAndStoreMedia(
     created_by: userId,
     storage_ready: true,
     purpose,
-  });
+    chapter_id: chapterId || null,
+  };
 
-  if (insertErr) {
-    logger.error('Failed to register media in database', { error: insertErr.message, mediaId });
-    throw new Error(`Media registration failed: ${insertErr.message}`);
+  // 4. Insert into public.media unless caller will batch insert
+  if (!options?.skipDbInsert) {
+    const { error: insertErr } = await supabase.from('media').insert(mediaRecord);
+    if (insertErr) {
+      logger.error('Failed to register media in database', { error: insertErr.message, mediaId });
+      throw new Error(`Media registration failed: ${insertErr.message}`);
+    }
   }
 
   return {
@@ -245,5 +259,6 @@ export async function processAndStoreMedia(
     height: info.height,
     bytes: bytes.length,
     mime: info.mime,
+    mediaRecord,
   };
 }
