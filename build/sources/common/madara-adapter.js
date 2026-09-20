@@ -299,27 +299,35 @@ export class MadaraAdapter {
         const seen = new Set();
         const pages = [];
         for (const tag of imgTags) {
-            if (!/wp-manga-chapter-img|page-break|reading-content|read-container/i.test(tag) &&
-                !/wp-content\/uploads\/WP-manga\/data\//i.test(tag)) {
+            if (!/wp-manga-chapter-img|page-break|reading-content|read-container|chapter-image/i.test(tag) &&
+                !/wp-content\/uploads\/(?:WP-manga\/data\/|\d{4}\/\d{2}\/)/i.test(tag)) {
                 continue;
             }
-            // Priority: data-src -> data-full-url -> src
+            // Priority: data-lzl-src -> data-lazy-src -> data-src -> data-full-url -> data-orig-src -> src
+            const dataLzl = (tag.match(/data-lzl-src=["']([^"']+)["']/i) || [])[1];
+            const dataLazy = (tag.match(/data-lazy-src=["']([^"']+)["']/i) || [])[1];
             const dataSrc = (tag.match(/data-src=["']([^"']+)["']/i) || [])[1];
             const dataFull = (tag.match(/data-full-url=["']([^"']+)["']/i) || [])[1];
+            const dataOrig = (tag.match(/data-orig-src=["']([^"']+)["']/i) || [])[1];
             const rawSrc = (tag.match(/src=["']([^"']+)["']/i) || [])[1];
-            let candidate = (dataSrc || dataFull || rawSrc || '').trim();
+            let candidate = (dataLzl || dataLazy || dataSrc || dataFull || dataOrig || rawSrc || '').trim();
             if (!candidate)
                 continue;
-            if (/dflazy|placeholder|loading/i.test(candidate)) {
-                if (dataSrc && !/dflazy|placeholder/i.test(dataSrc))
-                    candidate = dataSrc.trim();
-                else if (dataFull && !/dflazy|placeholder/i.test(dataFull))
-                    candidate = dataFull.trim();
-                else
+            // Avoid base64 data URIs or generic placeholders
+            if (candidate.startsWith('data:') || /dflazy|placeholder|loading/i.test(candidate)) {
+                const fallbacks = [dataLzl, dataLazy, dataSrc, dataFull, dataOrig, rawSrc];
+                const validFallback = fallbacks.find((u) => u && !u.startsWith('data:') && !/dflazy|placeholder|loading/i.test(u));
+                if (validFallback) {
+                    candidate = validFallback.trim();
+                }
+                else {
                     continue;
+                }
             }
             const filename = candidate.split('/').pop()?.split('?')[0] || '';
-            if (/(?:^|[_\-.])(logo|avatar|icon|banner|ads|advert|discord|telegram)(?:[_\-.]|$)/i.test(filename))
+            if (/(?:^|[_\-.])(logo|avatar|icon|banner|ads|advert|discord|telegram|capa|thumb|thun|fechar|loading|credit)(?:[_\-.]|$)/i.test(filename))
+                continue;
+            if (/-\d+x\d+\.(?:jpe?g|png|webp|avif)/i.test(filename))
                 continue;
             if (candidate.startsWith('//'))
                 candidate = `https:${candidate}`;
