@@ -53,7 +53,7 @@ export class BandwidthLimiter {
   private tokens: number;
   private lastRefill: number = Date.now();
 
-  constructor(bytesPerSec: number = 2.0 * 1024 * 1024, maxBurst: number = 32 * 1024) {
+  constructor(bytesPerSec: number = 4.0 * 1024 * 1024, maxBurst: number = 64 * 1024) {
     this.bytesPerSec = bytesPerSec;
     this.maxBurst = maxBurst;
     this.tokens = maxBurst;
@@ -100,8 +100,9 @@ export class DirectTelegramStorageProvider implements StorageProvider {
   private waitingQueue: Array<() => void> = [];
 
   constructor(checkpointPath?: string, rateLimitBytesPerSec?: number) {
-    const rate = rateLimitBytesPerSec || (process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC ? parseInt(process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC, 10) : 2.0 * 1024 * 1024);
-    this.bandwidthLimiter = new BandwidthLimiter(rate, 32 * 1024);
+    const rate = rateLimitBytesPerSec || (process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC ? parseInt(process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC, 10) : 4.0 * 1024 * 1024);
+    this.bandwidthLimiter = new BandwidthLimiter(rate, 64 * 1024);
+    this.logger.info(`DirectTelegramStorage BandwidthLimiter configured: ${(rate / (1024 * 1024)).toFixed(1)} MB/s`);
 
     this.httpsAgent = new https.Agent({
       keepAlive: true,
