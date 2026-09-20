@@ -49,6 +49,8 @@ import { HentaiFusionAdapter } from './hentaifusion/hentaifusion-adapter.js';
 import { ZettaHqAdapter } from './zettahq/zettahq-adapter.js';
 import { NHentaiBrAdapter } from './nhentaibr/nhentaibr-adapter.js';
 import { BrasilHentaiAdapter } from './brasilhentai/brasilhentai-adapter.js';
+import { PointZeroToonsAdapter } from './pointzerotoons/pointzerotoons-adapter.js';
+import { GeassComicsAdapter } from './geasscomics/geasscomics-adapter.js';
 export class SourceRegistry {
     adapters = new Map();
     constructor(rateLimiter, bridgeToken, mangaUrl) {
@@ -87,6 +89,8 @@ export class SourceRegistry {
             this.register(new OsakaScanAdapter(rateLimiter));
             this.register(new MaidScanAdapter(rateLimiter));
             this.register(new VegitoonsAdapter(rateLimiter));
+            this.register(new PointZeroToonsAdapter(rateLimiter));
+            this.register(new GeassComicsAdapter(rateLimiter));
             // Register adult sources (+18 / Adulto / Yaoi / Hentai)
             this.register(new HanamiHeavenAdapter(rateLimiter));
             this.register(new HipercoolAdapter(rateLimiter));
@@ -124,6 +128,11 @@ export class SourceRegistry {
         }
         if (adapter.id === 'hanamiheaven') {
             this.adapters.set('noindexscan', adapter);
+        }
+        if (adapter.id === 'pointzerotoons') {
+            this.adapters.set('kitsuneyako', adapter);
+            this.adapters.set('pointzero', adapter);
+            this.adapters.set('point_zero_toons', adapter);
         }
     }
     clear() {

@@ -1,8 +1,16 @@
-import { MangaThemesiaAdapter } from '../common/mangathemesia-adapter.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
-import { SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
-export declare class PointZeroToonsAdapter extends MangaThemesiaAdapter {
+export declare class GeassComicsAdapter implements SourceAdapter {
+    private rateLimiter;
+    private transport;
+    readonly id = "geasscomics";
+    readonly name = "Geass Comics";
+    readonly baseUrl = "https://geasscomics.xyz";
+    private readonly apiUrl;
+    private logger;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
+    private get headers();
+    private fetchJson;
     fetchUpdatedWorks(cursor?: string | null, options?: {
         mode?: 'bootstrap' | 'maintenance';
     }): Promise<{
@@ -12,5 +20,6 @@ export declare class PointZeroToonsAdapter extends MangaThemesiaAdapter {
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
+    searchWorks(query: string): Promise<SourceWorkSummary[]>;
     getImageHeaders(_url: string): Record<string, string>;
 }
