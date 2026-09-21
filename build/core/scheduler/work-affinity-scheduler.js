@@ -355,7 +355,7 @@ export class WorkAffinityScheduler {
         )
           AND q.task_type = 'IMPORT_CHAPTER'
           AND q.attempts < COALESCE(q.max_attempts, 7)
-          AND s.enabled = 1
+          AND s.enabled = true
           AND s.status = 'ACTIVE'
           AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
