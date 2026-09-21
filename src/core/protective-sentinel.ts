@@ -301,7 +301,8 @@ export class ProtectiveSentinel {
     label: 'home' | 'reader' | 'media',
     url: string,
     thresholdMs: number,
-    slaTargetMs: number
+    slaTargetMs: number,
+    isRetry = false
   ): Promise<void> {
     return new Promise<void>((resolve) => {
       const t0 = performance.now();
@@ -320,6 +321,9 @@ export class ProtectiveSentinel {
           const finish = async () => {
             if (resolved) return;
             resolved = true;
+            try {
+              res.resume();
+            } catch {}
             const ttfbMs = Math.round(performance.now() - t0);
             await this.handleProbeResult(label, url, ttfbMs, thresholdMs, slaTargetMs, res.statusCode || 200);
             resolve();
@@ -331,6 +335,14 @@ export class ProtectiveSentinel {
       );
 
       req.on('error', async (err: any) => {
+        try {
+          this.httpAgent.destroy();
+          this.httpAgent = new https.Agent({ keepAlive: true, maxSockets: 5 });
+        } catch {}
+        if (!isRetry && (err?.message?.includes('socket hang up') || err?.code === 'ECONNRESET')) {
+          this.logger.info(`Transient keepalive reset on ${label} probe, retrying with fresh socket...`);
+          return this.probeSiteLatency(label, url, thresholdMs, slaTargetMs, true).then(resolve);
+        }
         await this.handleProbeError(label, url, err);
         resolve();
       });
