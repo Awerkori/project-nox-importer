@@ -347,11 +347,12 @@ export class ExistingWorksReconciler {
     let workSlug = '';
     let workKind = undefined;
     let workAliases: string[] = [];
+    let isWorkPublished = false;
 
     const worksQuery = this.supabase.from('works');
     if (worksQuery && typeof worksQuery.select === 'function') {
       const { data: w } = await worksQuery
-        .select('id, title, slug, kind, aliases')
+        .select('id, title, slug, kind, aliases, published')
         .eq('id', workId)
         .maybeSingle();
 
@@ -360,6 +361,7 @@ export class ExistingWorksReconciler {
         workSlug = w.slug || '';
         workKind = w.kind;
         workAliases = w.aliases || [];
+        isWorkPublished = Boolean(w.published);
       }
     }
 
@@ -552,6 +554,10 @@ export class ExistingWorksReconciler {
       }
     }
 
+    if (!isWorkPublished && publishedChapters.length > 0) {
+      isWorkPublished = true;
+    }
+
     // 10. Check Staff Priority
     let isStaffPriority = options?.priority === 100;
     if (!isStaffPriority) {
@@ -633,6 +639,7 @@ export class ExistingWorksReconciler {
       payload: Record<string, any>;
       priority: number;
       chapterSortKey: number;
+      status?: string;
     }> = [];
 
     for (const sortKey of sortedSortKeys) {
@@ -678,7 +685,25 @@ export class ExistingWorksReconciler {
           }));
 
         const isGap = sortKey < highestMilestone;
-        const assignedPriority = options?.priority ?? (isStaffPriority ? 100 : isGap ? 70 : 80);
+        let assignedPriority = 50;
+        if (options?.priority !== undefined) {
+          assignedPriority = options.priority;
+        } else if (isStaffPriority) {
+          assignedPriority = 100;
+        } else if (isWorkPublished) {
+          // P1: Existing published work backfill/internal gaps (70-80)
+          assignedPriority = isGap ? 70 : 80;
+        } else {
+          // P2: Unpublished new work (50)
+          assignedPriority = 50;
+        }
+
+        let chapterJobStatus: 'QUEUED' | 'PAUSED_BY_STAFF' = 'QUEUED';
+        if (!isWorkPublished && !isStaffPriority) {
+          // Non-admitted new works must have their chapters parked in PAUSED_BY_STAFF
+          chapterJobStatus = 'PAUSED_BY_STAFF';
+        }
+
         const canonicalDedupeKey = `work:${workId}:chapter:${sortKey}`;
 
         // Queue mappings for batch upsert
@@ -715,9 +740,12 @@ export class ExistingWorksReconciler {
           },
           priority: assignedPriority,
           chapterSortKey: candidate.sortKey,
+          status: chapterJobStatus,
         });
 
-        queuedSortKeys.add(sortKey);
+        if (chapterJobStatus === 'QUEUED') {
+          queuedSortKeys.add(sortKey);
+        }
       }
 
       manifestUpserts.push({
@@ -914,7 +942,10 @@ export class ExistingWorksReconciler {
       return stats;
     }
 
-    const mappings = (rawMappings || []).filter((m: any) => m.work_id != null);
+    const mappings = (rawMappings || []).filter((m: any) =>
+      m.work_id != null &&
+      (m.works?.published === true || m.works?.published === 'true' || m.works?.published === undefined)
+    );
     if (!mappings || mappings.length === 0) return stats;
 
     // 2. Group by work_id
