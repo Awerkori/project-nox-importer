@@ -203,6 +203,8 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
 
     // Construct mock Supabase
     supabaseMock = {
+      db,
+      pool: db,
       from: (table: string) => {
         const filters: Array<{ sql: string; vals: any[] }> = [];
         let orderStatement = '';

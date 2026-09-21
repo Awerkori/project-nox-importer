@@ -157,6 +157,8 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
     };
 
     supabaseMock = {
+      db,
+      pool: db,
       from: (table: string) => {
         const filters: Array<{ sql: string; vals: any[] }> = [];
         let orderStatement = '';

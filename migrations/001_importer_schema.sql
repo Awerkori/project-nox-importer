@@ -29,7 +29,7 @@ create table if not exists public.importer_work_mappings (
   work_id uuid references public.works(id) on delete set null,
   source_slug text not null,
   source_title text not null,
-  sync_status text not null default 'SYNCED' check(sync_status in ('SYNCED', 'AMBIGUOUS', 'IGNORED', 'FAILED')),
+  sync_status text not null default 'SYNCED' check(sync_status in ('SYNCED', 'ACTIVE', 'WAITING_ADMISSION', 'AMBIGUOUS', 'IGNORED', 'FAILED')),
   metadata jsonb not null default '{}'::jsonb,
   last_synced_at timestamptz,
   created_at timestamptz not null default now(),

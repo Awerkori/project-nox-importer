@@ -108,8 +108,19 @@ export class ImporterEngine {
     this.protectiveSentinel = new ProtectiveSentinel(supabase, undefined, config.NOX_MANGA_URL);
     this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry, config.NOX_MANGA_URL);
     this.schedulerStateStore = new SchedulerStateStore();
-    this.admissionController = new AdmissionController(this.schedulerStateStore, this.protectiveSentinel);
-    this.scheduler = new WorkAffinityScheduler(this.schedulerStateStore, this.admissionController, this.protectiveSentinel);
+    let dbPool: any = (supabase as any)?.getPool?.() || (supabase as any)?.pool || (supabase as any)?.db;
+    if (dbPool && typeof dbPool.connect !== 'function') {
+      const dbObj = dbPool;
+      dbPool = {
+        query: (text: string, params?: any[]) => dbObj.query(text, params),
+        connect: async () => ({
+          query: (text: string, params?: any[]) => dbObj.query(text, params),
+          release: () => {},
+        }),
+      };
+    }
+    this.admissionController = new AdmissionController(this.schedulerStateStore, this.protectiveSentinel, dbPool);
+    this.scheduler = new WorkAffinityScheduler(this.schedulerStateStore, this.admissionController, this.protectiveSentinel, dbPool);
     this.publicationBarrier.onPublished = (isFreshRelease: boolean) => {
       this.scheduler.recordPublication(isFreshRelease);
     };
@@ -2131,18 +2142,16 @@ export class ImporterEngine {
       const watermark = await this.scheduler.getWatermark(result.workId, job.source);
       const isWorkAlreadyOnSite = (publishedChapters && publishedChapters.length > 0) || false;
 
-      // Admission policy for new works cohort (P2 active new works bounded to maxActiveNewWorks <= 4)
+      // Admission policy for new works cohort (Strict Section 5 Admission Gate)
       let isAdmitted = isWorkAlreadyOnSite || isStaffPriority;
       if (!isAdmitted) {
-        const config = this.schedulerStateStore.getConfig();
-        const activeNewWorks = this.schedulerStateStore.getActiveWorks().filter(
-          (w) => w.lane === 'P2' && w.state === 'FILLING'
-        );
-        if (activeNewWorks.length < config.maxActiveNewWorks) {
+        const gate = await this.admissionController.canAdmitNewWork();
+        if (gate.allowed) {
+          const config = this.schedulerStateStore.getConfig();
           isAdmitted = true;
           this.schedulerStateStore.setActiveWork({
             workId: result.workId,
-            workTitle: (result as any).work?.title || 'Unknown Title',
+            workTitle: (result as any).work?.title || details.title || 'Unknown Title',
             lane: 'P2',
             state: 'FILLING',
             primarySource: job.source,
@@ -2156,6 +2165,10 @@ export class ImporterEngine {
             criticalGapSortKey: null,
             criticalGapUnblockCount: 0,
           });
+          this.logger.info(`[ADMISSION_GATE_PASSED] Admitted new work "${details.title}" into P2 cohort`);
+        } else {
+          isAdmitted = false;
+          this.logger.info(`[ADMISSION_GATE_HELD] New work "${details.title}" (${result.workId}) kept in WAITING_ADMISSION: ${gate.reason}`);
         }
       }
 
