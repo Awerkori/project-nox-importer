@@ -368,7 +368,7 @@ export class PublicationBarrier {
       }
 
       // No alternative source available: mark as FAILED but DO NOT register as intentional gap.
-      // The sequence must remain blocked until the gap is genuinely resolved or manually skipped.
+      // The sequence must remain blocked until the gap is genuinely resolved or explicitly marked.
       this.logger.warn(`Definite failure on all sources for chapter ${chapterNumber}. Registering UNRESOLVED GAP (sequence remains blocked).`, {
         workId,
         sortKey,
@@ -387,7 +387,7 @@ export class PublicationBarrier {
         .eq('chapter_sort_key', sortKey)
         .eq('source', failedSource);
 
-      // Do NOT trigger cascade because the work sequence is correctly blocked.
+      // Do NOT trigger cascade because the work sequence is correctly blocked until explicit gap resolution.
     });
   }
 
