@@ -110,7 +110,9 @@ export class GreenShitAdapter implements SourceAdapter {
         const id = String(item.obr_id);
         const slug = item.obr_slug || slugify(title);
         const coverImg = item.obr_imagem;
-        const coverUrl = coverImg ? `${this.cdnUrl}/scans/${this.scanId}/obras/${id}/${coverImg}` : null;
+        const coverUrl = coverImg
+          ? (coverImg.startsWith('http') ? coverImg : `${this.cdnUrl}/scans/${this.scanId}/obras/${id}/${coverImg}`)
+          : null;
 
         works.push({
           sourceWorkId: id,
@@ -144,7 +146,9 @@ export class GreenShitAdapter implements SourceAdapter {
       const title = decodeHtmlEntities(obra.obr_nome || '').trim();
       const synopsis = obra.obr_descricao ? decodeHtmlEntities(stripHtml(obra.obr_descricao)).trim() : undefined;
       const coverImg = obra.obr_imagem;
-      const coverUrl = coverImg ? `${this.cdnUrl}/scans/${this.scanId}/obras/${sourceWorkId}/${coverImg}` : null;
+      const coverUrl = coverImg
+        ? (coverImg.startsWith('http') ? coverImg : `${this.cdnUrl}/scans/${this.scanId}/obras/${sourceWorkId}/${coverImg}`)
+        : null;
 
       const genres: string[] = [];
       if (obra.genero?.gen_nome) genres.push(obra.genero.gen_nome);
