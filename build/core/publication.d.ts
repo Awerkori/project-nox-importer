@@ -20,6 +20,7 @@ export declare class PublicationBarrier {
     private supabase;
     private logger;
     private workLocks;
+    onPublished?: (isFreshRelease: boolean) => void;
     constructor(supabase: SupabaseClient);
     private getWorkLock;
     /**

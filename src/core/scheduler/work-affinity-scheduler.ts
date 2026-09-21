@@ -46,6 +46,14 @@ export class WorkAffinityScheduler {
   private p1Count1h = 0;
   private p2Count1h = 0;
 
+  // Production Heartbeat & Publication Watchdog (Sections 16, 17, 18, 24, 25, 29)
+  private lastClaimTime = Date.now();
+  private lastCompletionTime = Date.now();
+  private lastAnyPublicationTime = Date.now();
+  private lastFreshReleaseTime = Date.now();
+  private lastBackfillPublicationTime = Date.now();
+  private watchdogRunning = false;
+
   constructor(
     private stateStore: SchedulerStateStore,
     private admissionController: AdmissionController,
@@ -60,7 +68,22 @@ export class WorkAffinityScheduler {
     await this.syncInFlightCountsFromDb();
     this.admissionController.start();
     this.startMetricsReporter();
+    this.startPublicationWatchdog();
     this.logger.info('WorkAffinityScheduler initialized and running');
+  }
+
+  recordPublication(isFreshRelease: boolean): void {
+    const now = Date.now();
+    this.lastAnyPublicationTime = now;
+    if (isFreshRelease) {
+      this.lastFreshReleaseTime = now;
+    } else {
+      this.lastBackfillPublicationTime = now;
+    }
+  }
+
+  recordJobCompletion(): void {
+    this.lastCompletionTime = Date.now();
   }
 
   /**
@@ -324,9 +347,10 @@ export class WorkAffinityScheduler {
 
       // -------------------------------------------------------------
       // WORK-CONSERVING FALLBACK: Claim any available job belonging to ACTIVE works
-      // If ACTIVE_NEW_WORKS = 0, unadmitted P2 works MUST NOT be claimed.
+      // If ACTIVE works have no available jobs and workers are idle (< 16 busy),
+      // allow claiming any safe P1/P2 job from healthy sources! (Sections 5 & 8)
       // -------------------------------------------------------------
-      const activeWorkIds = activeWorks.map((w) => w.workId);
+      const activeWorkIds = activeWorks.filter((w) => w.state === 'FILLING').map((w) => w.workId);
       let fallbackJob = null;
       if (activeWorkIds.length > 0) {
         fallbackJob = await this.claimSingleJob(client, {
@@ -337,10 +361,21 @@ export class WorkAffinityScheduler {
         });
       }
 
+      // Work-conserving spare capacity drain: if active works have no jobs and workers are idle
+      if (!fallbackJob && this.inFlightByWork.size < 16) {
+        fallbackJob = await this.claimSingleJob(client, {
+          workerId: options.workerId,
+          leaseMin,
+          allowedSources,
+          minPriority: 50, // P1 (75/80) or P2 (50/70)
+        });
+      }
+
       if (fallbackJob) {
         const waitTimeMs = performance.now() - t0;
         const workId = fallbackJob.payload?.workId || '';
         this.onJobStarted(workId);
+        this.lastClaimTime = Date.now();
 
         const decision: SchedulerDecision = {
           jobId: fallbackJob.id,
@@ -367,6 +402,7 @@ export class WorkAffinityScheduler {
 
   /**
    * Helper to atomically claim 1 job with SKIP LOCKED.
+   * Ensures the source is enabled, active, and not in cooldown.
    */
   private async claimSingleJob(
     client: any,
@@ -384,12 +420,16 @@ export class WorkAffinityScheduler {
       WITH to_lock AS (
         SELECT q.id
         FROM importer_queue q
+        JOIN importer_sources s ON s.id = q.source
         WHERE (
           q.status = 'QUEUED'
           OR (q.status = 'RETRY' AND q.next_run_at <= NOW())
         )
           AND q.task_type = 'IMPORT_CHAPTER'
           AND q.attempts < COALESCE(q.max_attempts, 7)
+          AND s.enabled = 1
+          AND s.status = 'ACTIVE'
+          AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::int IS NULL OR q.priority >= $2::int)
           AND ($3::text IS NULL OR (q.payload->>'workId') = $3::text)
@@ -425,11 +465,82 @@ export class WorkAffinityScheduler {
 
     if (res.rows.length === 0) return null;
     const r = res.rows[0];
+    this.lastClaimTime = Date.now();
     return {
       ...r,
       payload: typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {}),
       chapter_sort_key: r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null,
     };
+  }
+
+  /**
+   * Publication Watchdog & Auto-Recovery Tree (Sections 16, 24, 25, 29).
+   * Monitors elapsed time since last publication.
+   * If eligible jobs exist and no publication occurs for 5m -> WARNING.
+   * If no publication occurs for 10m -> Triggers AUTO-RECOVERY routine!
+   */
+  private startPublicationWatchdog(): void {
+    if (this.watchdogRunning) return;
+    this.watchdogRunning = true;
+
+    setInterval(async () => {
+      try {
+        const client = await this.pool.connect();
+        try {
+          const statsRes = await client.query(`
+            SELECT 
+              COUNT(CASE WHEN status = 'QUEUED' AND priority >= 50 THEN 1 END) as eligible_queued,
+              COUNT(CASE WHEN status = 'IMPORTING' THEN 1 END) as importing_cnt
+            FROM importer_queue
+            WHERE task_type = 'IMPORT_CHAPTER';
+          `);
+          const row = statsRes.rows[0];
+          const eligibleQueued = parseInt(row?.eligible_queued || '0', 10);
+          const importingCnt = parseInt(row?.importing_cnt || '0', 10);
+
+          if (eligibleQueued > 0) {
+            const elapsedPubMs = Date.now() - this.lastAnyPublicationTime;
+
+            if (elapsedPubMs >= 10 * 60 * 1000) {
+              this.logger.error(
+                `🚨 [PUBLICATION_WATCHDOG] Pipeline stalled: 0 publications for ${(elapsedPubMs / 60000).toFixed(1)}m while ${eligibleQueued} eligible jobs exist (${importingCnt} importing). Triggering AUTO-RECOVERY TREE!`
+              );
+              // Auto-Recovery Action 1: Force admission cycle to unblock works
+              await this.admissionController.runAdmissionCycle();
+
+              // Auto-Recovery Action 2: Recover stale leases
+              await client.query(`
+                UPDATE importer_queue
+                SET status = 'RETRY',
+                    attempts = attempts + 1,
+                    locked_by = NULL,
+                    locked_at = NULL,
+                    lease_expires_at = NULL,
+                    next_run_at = NOW(),
+                    updated_at = NOW()
+                WHERE status = 'IMPORTING' AND lease_expires_at < NOW();
+              `);
+
+              // Auto-Recovery Action 3: Sentinel auto-resume evaluation
+              if (await this.protectiveSentinel.isProtectiveStopActive()) {
+                await this.protectiveSentinel.evaluateAutoResume();
+              }
+
+              // Auto-Recovery Action 4: Sync in-flight map
+              await this.syncInFlightCountsFromDb();
+            } else if (elapsedPubMs >= 5 * 60 * 1000) {
+              this.logger.warn(
+                `⚠️ [PUBLICATION_WATCHDOG] Warning: 0 publications for ${(elapsedPubMs / 60000).toFixed(1)}m with ${eligibleQueued} eligible jobs (${importingCnt} importing). Observing...`
+              );
+            }
+          }
+        } finally {
+          client.release();
+        }
+      } catch (err: any) {
+        this.logger.warn('Error in Publication Watchdog loop', { error: err?.message });
+      }
+    }, 30000);
   }
 
   /**
