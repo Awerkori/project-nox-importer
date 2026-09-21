@@ -1,4 +1,5 @@
 import { callProvider } from './retry-policy.js';
+import { getYugabytePool } from '../db/yugabyte-direct.js';
 import { ImporterQueue } from './queue.js';
 import { DeduplicationEngine, computeCanonicalChapterKey, ADULT_SOURCES } from './deduplication.js';
 import { CheckpointManager } from './checkpoint.js';
@@ -2013,17 +2014,17 @@ export class ImporterEngine {
             }, { onConflict: 'source,source_chapter_id' });
             // Auto-cancel any other sibling QUEUED/RETRY jobs for this work + chapter
             try {
-                await this.supabase
-                    .from('importer_queue')
-                    .update({
-                    status: 'COMPLETED',
-                    updated_at: new Date().toISOString(),
-                    last_error: 'CANONICAL_ALREADY_SATISFIED',
-                })
-                    .eq('task_type', 'IMPORT_CHAPTER')
-                    .in('status', ['QUEUED', 'RETRY'])
-                    .eq('chapter_sort_key', sortKey)
-                    .filter('payload->>workId', 'eq', workId);
+                const pool = getYugabytePool();
+                await pool.query(`
+          UPDATE importer_queue
+          SET status = 'COMPLETED',
+              updated_at = NOW(),
+              last_error = 'CANONICAL_ALREADY_SATISFIED'
+          WHERE task_type = 'IMPORT_CHAPTER'
+            AND status IN ('QUEUED', 'RETRY')
+            AND chapter_sort_key = $1
+            AND (payload->>'workId') = $2;
+        `, [sortKey, workId]);
             }
             catch { }
             return;

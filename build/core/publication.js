@@ -1,3 +1,4 @@
+import { getYugabytePool } from '../db/yugabyte-direct.js';
 import { Logger } from './logger.js';
 import { AsyncSemaphore } from './concurrency.js';
 import { computeCanonicalChapterKey } from './deduplication.js';
@@ -154,28 +155,27 @@ export class PublicationBarrier {
         // 2b. Cancel / auto-complete any remaining QUEUED/RETRY jobs in importer_queue for this chapter
         try {
             if (sortKey !== undefined && sortKey !== null) {
-                await this.supabase
-                    .from('importer_queue')
-                    .update({
-                    status: 'COMPLETED',
-                    updated_at: new Date().toISOString(),
-                    last_error: 'CANONICAL_ALREADY_SATISFIED',
-                })
-                    .eq('task_type', 'IMPORT_CHAPTER')
-                    .in('status', ['QUEUED', 'RETRY'])
-                    .eq('chapter_sort_key', sortKey)
-                    .filter('payload->>workId', 'eq', workId);
-                await this.supabase
-                    .from('importer_chapter_mappings')
-                    .update({
-                    status: 'COMPLETED',
-                    is_page_provider: false,
-                    chapter_id: chapterId,
-                    updated_at: new Date().toISOString(),
-                })
-                    .eq('work_id', workId)
-                    .eq('chapter_sort_key', sortKey)
-                    .in('status', ['PENDING', 'QUEUED']);
+                const pool = getYugabytePool();
+                await pool.query(`
+          UPDATE importer_queue
+          SET status = 'COMPLETED',
+              updated_at = NOW(),
+              last_error = 'CANONICAL_ALREADY_SATISFIED'
+          WHERE task_type = 'IMPORT_CHAPTER'
+            AND status IN ('QUEUED', 'RETRY')
+            AND chapter_sort_key = $1
+            AND (payload->>'workId') = $2;
+        `, [sortKey, workId]);
+                await pool.query(`
+          UPDATE importer_chapter_mappings
+          SET status = 'COMPLETED',
+              is_page_provider = false,
+              chapter_id = $1,
+              updated_at = NOW()
+          WHERE work_id = $2::uuid
+            AND chapter_sort_key = $3
+            AND status IN ('PENDING', 'QUEUED');
+        `, [chapterId, workId, sortKey]);
             }
         }
         catch (cancelErr) {
