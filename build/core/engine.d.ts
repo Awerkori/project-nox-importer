@@ -6,6 +6,7 @@ import { HostRateLimiter } from './rate-limiter.js';
 import { Config } from '../config.js';
 import { AdaptiveAutotuner } from './concurrency.js';
 import { PublicationSafetyBarrier } from './publication-safety-barrier.js';
+import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from './scheduler/index.js';
 export { computeCanonicalChapterKey };
 export declare class JobCancelledByStaffError extends Error {
     readonly jobId: string;
@@ -33,7 +34,11 @@ export declare class ImporterEngine {
     private autotuner;
     private publicationBarrier;
     private safetyBarrier;
+    private protectiveSentinel;
     private reconciler;
+    schedulerStateStore: SchedulerStateStore;
+    admissionController: AdmissionController;
+    scheduler: WorkAffinityScheduler;
     private circuitBreaker;
     private sharedNetworkDetector;
     private admissionGate;
@@ -81,8 +86,8 @@ export declare class ImporterEngine {
      */
     private runLeaseRecoveryLoop;
     /**
-     * Periodic auto-probe and auto-healing loop for sources in COOLDOWN (runs every 30s).
-     * Restores expired cooldowns immediately and probes active ones for early auto-healing.
+     * Periodic auto-probe and auto-healing loop for sources in COOLDOWN / DEGRADED (runs every 30s).
+     * Restores expired cooldowns immediately through production admission probe.
      */
     private runSourceCooldownProbeLoop;
     /**
@@ -105,6 +110,7 @@ export declare class ImporterEngine {
         base_url?: string;
         blocked_reason?: string | null;
         blocked_details?: any;
+        cooldown_until?: string | null;
     }): Promise<void>;
     private autotunerCycleCount;
     /**

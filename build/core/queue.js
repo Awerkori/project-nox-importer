@@ -100,7 +100,7 @@ export class ImporterQueue {
                 dedupe_key: j.dedupeKey,
                 payload: j.payload || {},
                 priority: j.priority ?? 10,
-                status: 'QUEUED',
+                status: j.status || 'QUEUED',
             };
             if (j.chapterSortKey !== undefined && j.chapterSortKey !== null) {
                 row.chapter_sort_key = j.chapterSortKey;

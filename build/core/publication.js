@@ -87,7 +87,7 @@ export class PublicationBarrier {
      * Try to publish a chapter if the barrier is cleared.
      * If publication succeeds, immediately triggers cascade to publish any consecutive STAGED chapters.
      */
-    async tryPublish(workId, sortKey, chapterId) {
+    async tryPublish(workId, sortKey, chapterId, isFreshRelease = false) {
         const lock = this.getWorkLock(workId);
         return lock.runExclusive(async () => {
             const check = await this.checkBarrier(workId, sortKey);
@@ -102,8 +102,8 @@ export class PublicationBarrier {
                 return { published: false, reason: check.reason };
             }
             // Barrier cleared! Publish this chapter
-            await this.executePublish(workId, chapterId, new Date().toISOString(), sortKey);
-            this.logger.info('Chapter published via barrier', { workId, sortKey, chapterId });
+            await this.executePublish(workId, chapterId, new Date().toISOString(), sortKey, isFreshRelease);
+            this.logger.info('Chapter published via barrier', { workId, sortKey, chapterId, isFreshRelease });
             // Run immediate cascade for subsequent STAGED chapters of this work
             await this.runCascadeUnderLock(workId);
             return { published: true };
@@ -112,11 +112,24 @@ export class PublicationBarrier {
     /**
      * Executes atomic DB publication for a single chapter.
      */
-    async executePublish(workId, chapterId, publishedAtIso, sortKey) {
+    async executePublish(workId, chapterId, publishedAtIso, sortKey, isFreshRelease = false) {
+        // 0. Query current work status and latest_chapter_published_at
+        const { data: workInfo } = await this.supabase
+            .from('works')
+            .select('latest_chapter_published_at, slug')
+            .eq('id', workId)
+            .maybeSingle();
+        const existingLatest = workInfo?.latest_chapter_published_at;
+        let chPublishedAt = publishedAtIso;
+        if (!isFreshRelease && existingLatest) {
+            // Historical backfill: set chapter published_at 1s before existingLatest so DB trigger
+            // update_work_latest_chapter does NOT overwrite latest_chapter_published_at!
+            chPublishedAt = new Date(new Date(existingLatest).getTime() - 1000).toISOString();
+        }
         // 1. Mark public.chapters.published_at
         const { error: chErr } = await this.supabase
             .from('chapters')
-            .update({ published_at: publishedAtIso })
+            .update({ published_at: chPublishedAt })
             .eq('id', chapterId);
         if (chErr)
             throw chErr;
@@ -127,12 +140,38 @@ export class PublicationBarrier {
             .eq('chapter_id', chapterId);
         if (mapErr)
             throw mapErr;
-        // 3. Mark public.works.published = true if draft
+        // 3. Update public.works: only update latest_chapter_published_at for fresh releases or first chapter
+        const workUpdate = {
+            published: true,
+            updated_at: new Date().toISOString(),
+        };
+        if (isFreshRelease || !existingLatest) {
+            workUpdate.latest_chapter_published_at = publishedAtIso;
+        }
         await this.supabase
             .from('works')
-            .update({ published: true, updated_at: new Date().toISOString() })
-            .eq('id', workId)
-            .eq('published', false);
+            .update(workUpdate)
+            .eq('id', workId);
+        // 4. Invalidate edge cache (only invalidate Home & Lançamentos if FRESH_RELEASE)
+        try {
+            const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
+            const token = process.env.NOX_STORAGE_BRIDGE_TOKEN;
+            fetch(`${siteUrl}/api/internal/cache/invalidate`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify({
+                    type: isFreshRelease ? 'CHAPTER_PUBLISHED' : 'OBRA_UPDATE',
+                    workId,
+                    workSlug: workInfo?.slug,
+                    chapterId,
+                }),
+                signal: AbortSignal.timeout(2000),
+            }).catch(() => { });
+        }
+        catch { }
         // 4. Update importer_chapter_manifest status to PUBLISHED if available
         try {
             const manQuery = this.supabase.from('importer_chapter_manifest');

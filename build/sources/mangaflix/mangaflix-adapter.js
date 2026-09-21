@@ -14,6 +14,7 @@ export class MangaFlixAdapter {
     id = 'mangaflix';
     name = 'MangaFlix';
     baseUrl = 'https://mangaflix.net';
+    probeUrl = 'https://api.mangaflix.net/v1/genres/6511eb5eae08773cd4189ec5/mangas/?offset=0&limit=1';
     apiUrl = 'https://api.mangaflix.net/v1';
     logger = new Logger('MangaFlixAdapter');
     constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {

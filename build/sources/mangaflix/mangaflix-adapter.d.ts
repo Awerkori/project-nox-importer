@@ -6,6 +6,7 @@ export declare class MangaFlixAdapter implements SourceAdapter {
     readonly id = "mangaflix";
     readonly name = "MangaFlix";
     readonly baseUrl = "https://mangaflix.net";
+    readonly probeUrl = "https://api.mangaflix.net/v1/genres/6511eb5eae08773cd4189ec5/mangas/?offset=0&limit=1";
     private apiUrl;
     private logger;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);

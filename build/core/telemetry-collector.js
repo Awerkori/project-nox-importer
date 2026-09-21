@@ -119,6 +119,7 @@ export class TelemetryCollector {
                 WAITING_FOR_PUBLICATION_BARRIER: 0,
                 WAITING_FOR_RETRY_BACKOFF: 0,
                 WAITING_FOR_MUTEX: 0,
+                PROTECTIVE_STOP: 0,
             };
         }
         this.logger.info(`Started diagnostic telemetry session: ${sessionId}`);
@@ -146,6 +147,7 @@ export class TelemetryCollector {
                     WAITING_FOR_PUBLICATION_BARRIER: 0,
                     WAITING_FOR_RETRY_BACKOFF: 0,
                     WAITING_FOR_MUTEX: 0,
+                    PROTECTIVE_STOP: 0,
                 },
             });
         }
@@ -373,6 +375,7 @@ export class TelemetryCollector {
             WAITING_FOR_PUBLICATION_BARRIER: 0,
             WAITING_FOR_RETRY_BACKOFF: 0,
             WAITING_FOR_MUTEX: 0,
+            PROTECTIVE_STOP: 0,
         };
         const now = performance.now();
         for (const [_, slot] of this.slots.entries()) {
