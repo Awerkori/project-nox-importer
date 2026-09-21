@@ -163,6 +163,8 @@ describe('ImporterEngine End-to-End Execution', () => {
 
     // Construct Supabase client adapter for PGlite
     supabaseMock = {
+      db,
+      pool: db,
       from: (table: string) => {
         const filters: Array<{ sql: string; vals: any[] }> = [];
         let orderStatement = '';

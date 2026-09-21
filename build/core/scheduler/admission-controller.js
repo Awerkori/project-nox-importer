@@ -16,12 +16,25 @@ export class AdmissionController {
     stateStore;
     protectiveSentinel;
     logger = new Logger('AdmissionController');
-    pool = getYugabytePool();
+    pool;
     isRunning = false;
     loopTimer = null;
-    constructor(stateStore, protectiveSentinel) {
+    constructor(stateStore, protectiveSentinel, pool) {
         this.stateStore = stateStore;
         this.protectiveSentinel = protectiveSentinel;
+        const rawPool = pool || getYugabytePool();
+        if (typeof rawPool.connect === 'function') {
+            this.pool = rawPool;
+        }
+        else {
+            this.pool = {
+                connect: async () => ({
+                    query: (text, params) => rawPool.query(text, params),
+                    release: () => { },
+                }),
+                query: (text, params) => rawPool.query(text, params),
+            };
+        }
     }
     /**
      * Starts the periodic admission background loop (every 5 seconds).
@@ -54,6 +67,149 @@ export class AdmissionController {
                 this.scheduleNextCycle(5000);
             }
         }, delayMs);
+    }
+    /**
+     * Section 5: Admission Gate Obrigatório
+     *
+     * CAN_ADMIT_NEW_WORK =
+     *   NO_P0_WAITING
+     *   AND NO_HEALTHY_P1_CLAIMABLE
+     *   AND P2_ACTIVE_COHORT_BELOW_LIMIT
+     *   AND SYSTEM_HEALTHY
+     *
+     * Se false: obra permanece WAITING_ADMISSION.
+     */
+    async canAdmitNewWork() {
+        const config = this.stateStore.getConfig();
+        // 1. SYSTEM_HEALTHY
+        const isStopActive = await this.protectiveSentinel.isProtectiveStopActive();
+        if (isStopActive) {
+            return {
+                allowed: false,
+                reason: 'SYSTEM_UNHEALTHY: PROTECTIVE_STOP is active',
+                metrics: {
+                    p0Waiting: 0,
+                    p1Claimable: 0,
+                    p1AvailableChapters: 0,
+                    p1WorksWaiting: 0,
+                    p2ActiveCohortSize: 0,
+                    p2UnfinishedCount: 0,
+                    systemHealthy: false,
+                },
+            };
+        }
+        const client = await this.pool.connect();
+        try {
+            // 2. NO_P0_WAITING
+            const p0Res = await client.query(`
+        SELECT COUNT(*) as p0_cnt
+        FROM importer_queue
+        WHERE task_type = 'IMPORT_CHAPTER'
+          AND status IN ('QUEUED', 'RETRY')
+          AND priority >= 100
+      `);
+            const p0Waiting = parseInt(p0Res.rows[0]?.p0_cnt || '0', 10);
+            if (p0Waiting > 0) {
+                return {
+                    allowed: false,
+                    reason: `P0_WAITING: ${p0Waiting} P0 releases/jobs waiting`,
+                    metrics: {
+                        p0Waiting,
+                        p1Claimable: 0,
+                        p1AvailableChapters: 0,
+                        p1WorksWaiting: 0,
+                        p2ActiveCohortSize: 0,
+                        p2UnfinishedCount: 0,
+                        systemHealthy: true,
+                    },
+                };
+            }
+            // 3. NO_HEALTHY_P1_CLAIMABLE & P1_WORKS_WITH_AVAILABLE_MISSING_CHAPTERS
+            const p1Res = await client.query(`
+        SELECT 
+          COUNT(CASE WHEN q.status IN ('QUEUED', 'RETRY') AND (q.next_run_at IS NULL OR q.next_run_at <= NOW()) THEN 1 END) as claimable_cnt,
+          COUNT(CASE WHEN q.status = 'PAUSED_BY_STAFF' THEN 1 END) as paused_cnt,
+          COUNT(DISTINCT q.payload->>'workId') as works_cnt
+        FROM importer_queue q
+        JOIN works w ON w.id = (q.payload->>'workId')::uuid
+        JOIN importer_sources s ON s.id = q.source
+        WHERE q.task_type = 'IMPORT_CHAPTER'
+          AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
+          AND w.published = true
+          AND s.enabled = true
+          AND s.status = 'ACTIVE'
+          AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW());
+      `);
+            const p1Claimable = parseInt(p1Res.rows[0]?.claimable_cnt || '0', 10);
+            const p1AvailableChapters = parseInt(p1Res.rows[0]?.paused_cnt || '0', 10);
+            const p1WorksWaiting = parseInt(p1Res.rows[0]?.works_cnt || '0', 10);
+            if (p1Claimable > 0) {
+                return {
+                    allowed: false,
+                    reason: `HEALTHY_P1_CLAIMABLE: ${p1Claimable} P1 jobs queued on active sources`,
+                    metrics: {
+                        p0Waiting: 0,
+                        p1Claimable,
+                        p1AvailableChapters,
+                        p1WorksWaiting,
+                        p2ActiveCohortSize: 0,
+                        p2UnfinishedCount: 0,
+                        systemHealthy: true,
+                    },
+                };
+            }
+            if (p1AvailableChapters > 0) {
+                return {
+                    allowed: false,
+                    reason: `P1_AVAILABLE_CHAPTERS_EXIST: ${p1AvailableChapters} chapters waiting across ${p1WorksWaiting} catalog works`,
+                    metrics: {
+                        p0Waiting: 0,
+                        p1Claimable: 0,
+                        p1AvailableChapters,
+                        p1WorksWaiting,
+                        p2ActiveCohortSize: 0,
+                        p2UnfinishedCount: 0,
+                        systemHealthy: true,
+                    },
+                };
+            }
+            // 4. P2_ACTIVE_COHORT_BELOW_LIMIT:
+            // Requirement 2: Limite de obras novas ativas simultâneas (default maxActiveNewWorks <= 4)
+            const activeWorks = this.stateStore.getActiveWorks();
+            const activeP2Works = activeWorks.filter((w) => w.lane === 'P2' && w.state === 'FILLING');
+            const maxP2Cohort = config.maxActiveNewWorks || 4;
+            if (activeP2Works.length >= maxP2Cohort) {
+                return {
+                    allowed: false,
+                    reason: `P2_ACTIVE_COHORT_FULL: ${activeP2Works.length}/${maxP2Cohort} active works`,
+                    metrics: {
+                        p0Waiting: 0,
+                        p1Claimable: 0,
+                        p1AvailableChapters: 0,
+                        p1WorksWaiting: 0,
+                        p2ActiveCohortSize: activeP2Works.length,
+                        p2UnfinishedCount: activeP2Works.length,
+                        systemHealthy: true,
+                    },
+                };
+            }
+            return {
+                allowed: true,
+                reason: 'CAN_ADMIT_NEW_WORK_ALLOWED',
+                metrics: {
+                    p0Waiting: 0,
+                    p1Claimable: 0,
+                    p1AvailableChapters: 0,
+                    p1WorksWaiting: 0,
+                    p2ActiveCohortSize: activeP2Works.length,
+                    p2UnfinishedCount: 0,
+                    systemHealthy: true,
+                },
+            };
+        }
+        finally {
+            client.release();
+        }
     }
     /**
      * Executes a single admission reconciliation cycle.
@@ -191,9 +347,9 @@ export class AdmissionController {
                 idleWorkers = Math.max(0, 18 - importingCnt);
             }
             catch { }
-            // Elastic backfill: if workers are idle, allow expanding active P1 up to 14 works
+            // Elastic backfill: if workers are idle, allow expanding active P1 up to 20 works
             const targetBackfillLimit = idleWorkers >= 4
-                ? Math.min(14, config.maxActiveBackfillWorks + Math.floor(idleWorkers / 3))
+                ? Math.min(20, config.maxActiveBackfillWorks + Math.floor(idleWorkers / 2))
                 : config.maxActiveBackfillWorks;
             const backfillSlotsAvailable = Math.max(0, targetBackfillLimit - activeBackfills.length);
             // P2 uses spare capacity when P1 cannot occupy available workers
@@ -269,8 +425,12 @@ export class AdmissionController {
                     });
                 }
             }
-            // 2. Replenish P2 New Works (Work-Conserving: uses spare worker capacity)
-            if (newWorkSlotsAvailable > 0) {
+            // 2. Replenish P2 New Works (Strictly guarded by Admission Gate)
+            const p2Gate = await this.canAdmitNewWork();
+            if (!p2Gate.allowed) {
+                this.logger.debug(`[ADMISSION_GATE_HOLD] P2 replenishment blocked: ${p2Gate.reason}`);
+            }
+            else if (newWorkSlotsAvailable > 0) {
                 const activeIds = this.stateStore.getActiveWorks().map((w) => w.workId);
                 const candidatesRes = await client.query(`SELECT (q.payload->>'workId') as work_id,
                   w.title,
@@ -414,6 +574,13 @@ export class AdmissionController {
         try {
             const lanesToTry = preferredLane ? [preferredLane] : ['P1', 'P2'];
             for (const lane of lanesToTry) {
+                if (lane === 'P2') {
+                    const gate = await this.canAdmitNewWork();
+                    if (!gate.allowed) {
+                        this.logger.debug(`[ADMISSION_GATE_HOLD] admitNextWorkOnDemand blocked for P2: ${gate.reason}`);
+                        continue;
+                    }
+                }
                 const isP1 = lane === 'P1';
                 const query = `
           SELECT (q.payload->>'workId') as work_id,

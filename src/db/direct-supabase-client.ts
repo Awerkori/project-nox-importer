@@ -21,6 +21,10 @@ export class DirectSupabaseClient implements SqlClient {
     this.pool = pool || getYugabytePool();
   }
 
+  getPool(): pg.Pool {
+    return this.pool;
+  }
+
   from<T = any>(table: string): QueryBuilder<T> {
     return new QueryBuilder<T>(this, table);
   }

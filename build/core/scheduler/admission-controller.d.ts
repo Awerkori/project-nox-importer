@@ -20,13 +20,37 @@ export declare class AdmissionController {
     private pool;
     private isRunning;
     private loopTimer;
-    constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel);
+    constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     /**
      * Starts the periodic admission background loop (every 5 seconds).
      */
     start(): void;
     stop(): void;
     private scheduleNextCycle;
+    /**
+     * Section 5: Admission Gate Obrigatório
+     *
+     * CAN_ADMIT_NEW_WORK =
+     *   NO_P0_WAITING
+     *   AND NO_HEALTHY_P1_CLAIMABLE
+     *   AND P2_ACTIVE_COHORT_BELOW_LIMIT
+     *   AND SYSTEM_HEALTHY
+     *
+     * Se false: obra permanece WAITING_ADMISSION.
+     */
+    canAdmitNewWork(): Promise<{
+        allowed: boolean;
+        reason: string;
+        metrics: {
+            p0Waiting: number;
+            p1Claimable: number;
+            p1AvailableChapters: number;
+            p1WorksWaiting: number;
+            p2ActiveCohortSize: number;
+            p2UnfinishedCount: number;
+            systemHealthy: boolean;
+        };
+    }>;
     /**
      * Executes a single admission reconciliation cycle.
      */

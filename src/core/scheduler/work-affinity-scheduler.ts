@@ -34,7 +34,7 @@ export interface AcquiredSchedulerJob {
 
 export class WorkAffinityScheduler {
   private logger = new Logger('WorkAffinityScheduler');
-  private pool = getYugabytePool();
+  private pool: any;
   private inFlightByWork: Map<string, number> = new Map();
   private inFlightChapterKeys: Set<string> = new Set();
   private p0ConsecutiveClaims = 0;
@@ -58,8 +58,22 @@ export class WorkAffinityScheduler {
   constructor(
     private stateStore: SchedulerStateStore,
     private admissionController: AdmissionController,
-    private protectiveSentinel: ProtectiveSentinel
-  ) {}
+    private protectiveSentinel: ProtectiveSentinel,
+    pool?: any
+  ) {
+    const rawPool = pool || getYugabytePool();
+    if (typeof rawPool.connect === 'function') {
+      this.pool = rawPool;
+    } else {
+      this.pool = {
+        connect: async () => ({
+          query: (text: string, params?: any[]) => rawPool.query(text, params),
+          release: () => {},
+        }),
+        query: (text: string, params?: any[]) => rawPool.query(text, params),
+      };
+    }
+  }
 
   /**
    * Initializes state and synchronizes in-flight counts from DB.
@@ -374,7 +388,46 @@ export class WorkAffinityScheduler {
       }
 
       // -------------------------------------------------------------
+      // LANE P1: Catalog Backfill Dynamic Claim (Any Existing Published Work)
+      // When currently tracked active P1 works cannot supply a job (e.g. at
+      // max in-flight per work, or primary source temporarily down), claim
+      // directly from ANY existing catalog work (w.published = true) in the database.
+      // 
+      // STRICT RULE: Workers NEVER drop to P2 while ANY claimable P1 job exists!
+      // -------------------------------------------------------------
+      const catalogP1Job = await this.claimCatalogP1Job(client, {
+        workerId: options.workerId,
+        leaseMin,
+        allowedSources,
+        disallowedWorkIds: fullWorkIds,
+      });
+
+      if (catalogP1Job) {
+        const waitTimeMs = performance.now() - t0;
+        const workId = catalogP1Job.payload?.workId || '';
+        this.onJobStarted(workId, catalogP1Job.chapter_sort_key);
+        this.p1Count1h++;
+
+        const decision: SchedulerDecision = {
+          jobId: catalogP1Job.id,
+          workId,
+          workTitle: catalogP1Job.payload?.chapterTitle || 'Catalog P1 Backfill',
+          chapterNumber: catalogP1Job.payload?.chapterNumber ?? 0,
+          chapterSortKey: catalogP1Job.chapter_sort_key ?? 0,
+          lane: SchedulerLane.P1_BACKFILL,
+          reason: 'CATALOG_P1_BACKFILL_CLAIM',
+          workState: 'FILLING',
+          source: catalogP1Job.source,
+          waitTimeMs: Math.round(waitTimeMs * 10) / 10,
+          decisionTime: new Date().toISOString(),
+        };
+        this.logDecision(decision);
+        return catalogP1Job;
+      }
+
+      // -------------------------------------------------------------
       // LANE P2: Active New Works (Fair Round-Robin with Affinity)
+      // Only executes when ALL P1 catalog work is exhausted or source-blocked!
       // -------------------------------------------------------------
       const eligibleP2Works = p2Works.filter(
         (w) => (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork
@@ -445,7 +498,7 @@ export class WorkAffinityScheduler {
       // If active works have no jobs, check real total worker occupancy
       const totalInFlight = this.getTotalInFlight();
       if (!fallbackJob && totalInFlight < 18) {
-        const newlyAdmitted = await this.admissionController.admitNextWorkOnDemand(undefined, allowedSources || undefined);
+        const newlyAdmitted = await this.admissionController.admitNextWorkOnDemand('P1', allowedSources || undefined);
         if (newlyAdmitted) {
           fallbackJob = await this.claimSingleJob(client, {
             workerId: options.workerId,
@@ -484,6 +537,132 @@ export class WorkAffinityScheduler {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Helper to atomically claim 1 P1 job for ANY existing catalog work with SKIP LOCKED.
+   * Strictly restricts to published works (w.published = true) on active, enabled sources.
+   * Enforces that P1 work across the catalog is processed before ANY P2 work!
+   */
+  private async claimCatalogP1Job(
+    client: any,
+    opts: {
+      workerId: string;
+      leaseMin: number;
+      allowedSources: string[] | null;
+      disallowedWorkIds?: string[] | null;
+    }
+  ): Promise<any | null> {
+    const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
+
+    const query = `
+      WITH to_lock AS (
+        SELECT q.id
+        FROM importer_queue q
+        JOIN works w ON w.id = (q.payload->>'workId')::uuid
+        JOIN importer_sources s ON s.id = q.source
+        WHERE (
+          q.status = 'QUEUED'
+          OR (q.status = 'RETRY' AND q.next_run_at <= NOW())
+        )
+          AND q.task_type = 'IMPORT_CHAPTER'
+          AND q.attempts < COALESCE(q.max_attempts, 7)
+          AND w.published = true
+          AND s.enabled = true
+          AND s.status = 'ACTIVE'
+          AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
+          AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
+          AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
+          AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
+        ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+      )
+      UPDATE importer_queue q
+      SET status = 'IMPORTING',
+          locked_by = $4,
+          locked_at = NOW(),
+          lease_expires_at = NOW() + ($5::text || ' minutes')::interval,
+          attempts = q.attempts + 1,
+          updated_at = NOW()
+      FROM to_lock
+      WHERE q.id = to_lock.id
+      RETURNING q.id, q.task_type, q.source, q.priority, q.payload, q.dedupe_key,
+                q.status, q.attempts, q.max_attempts, q.locked_by, q.locked_at,
+                q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
+    `;
+
+    for (let drainAttempt = 0; drainAttempt < 10; drainAttempt++) {
+      const res = await client.query(query, [
+        opts.allowedSources,
+        opts.disallowedWorkIds || null,
+        disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
+        opts.workerId,
+        opts.leaseMin,
+      ]);
+
+      if (res.rows.length === 0) return null;
+      const r = res.rows[0];
+      const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
+      const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
+      const workId = payload?.workId;
+      const chapterNumber = payload?.chapterNumber;
+
+      // Pre-flight check: is this chapter already published canonically in chapters table?
+      if (workId && (chapterNumber !== undefined || sortKey !== null)) {
+        const pubCheck = await client.query(`
+          SELECT id FROM chapters 
+          WHERE work_id = $1::uuid 
+            AND (number = $2::numeric OR ($3::numeric IS NOT NULL AND number = $3::numeric))
+            AND published_at IS NOT NULL
+          LIMIT 1;
+        `, [workId, chapterNumber !== undefined ? chapterNumber : sortKey, sortKey]);
+
+        if (pubCheck.rows.length > 0) {
+          const publishedChapterId = pubCheck.rows[0].id;
+          this.logger.info(`Claimed catalog P1 job ${r.id} for work ${workId} ch ${chapterNumber} is already published. Auto-completing.`);
+          await client.query(`
+            UPDATE importer_queue
+            SET status = 'COMPLETED',
+                locked_by = NULL,
+                locked_at = NULL,
+                updated_at = NOW()
+            WHERE id = $1;
+          `, [r.id]);
+          await client.query(`
+            UPDATE importer_chapter_mappings
+            SET status = 'COMPLETED',
+                chapter_id = $1::uuid,
+                updated_at = NOW()
+            WHERE source = $2 AND work_id = $3::uuid AND (chapter_number = $4::numeric OR chapter_sort_key = $5::numeric);
+          `, [publishedChapterId, r.source, workId, chapterNumber ?? sortKey, sortKey ?? chapterNumber]);
+          continue;
+        }
+      }
+
+      // If work not in stateStore, add it to activeWorks as P1
+      if (workId && !this.stateStore.getActiveWork(workId)) {
+        this.stateStore.setActiveWork({
+          workId,
+          workTitle: payload?.chapterTitle || 'Catalog Work',
+          lane: 'P1',
+          state: 'FILLING',
+          primarySource: r.source,
+          admittedAt: new Date().toISOString(),
+          lastActivityAt: new Date().toISOString(),
+          totalChapters: 50,
+          publishedChapters: 0,
+          queuedChapters: 5,
+          inFlightChapters: 1,
+          frontierSortKey: sortKey,
+          criticalGapSortKey: null,
+          criticalGapUnblockCount: 0,
+        });
+      }
+
+      return r;
+    }
+    return null;
   }
 
   /**
