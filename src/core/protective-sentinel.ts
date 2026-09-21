@@ -29,7 +29,7 @@ export interface SentinelThresholds {
 
 export const DEFAULT_SENTINEL_THRESHOLDS: SentinelThresholds = {
   homeTtfbPreSlaMs: 210,
-  readerTtfbPreSlaMs: 130,
+  readerTtfbPreSlaMs: 210,
   mediaTtfbPreSlaMs: 105,
   ysqlConnTripwire: 12,
   maxRssMb: 440,
@@ -45,8 +45,9 @@ export class ProtectiveSentinel {
   private isRunning = false;
   private stopSignal = false;
   private consecutivePreSlaViolations = new Map<string, number>();
-  private httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 30000 });
-  private httpAgent = new http.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 30000 });
+  private homeAgent = new https.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 60000 });
+  private readerAgent = new https.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 60000 });
+  private httpAgent = new http.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 60000 });
 
   constructor(
     private supabase: SupabaseClient,
@@ -277,9 +278,9 @@ export class ProtectiveSentinel {
       // Quick latency probes
       if (this.siteUrl) {
         const homeSlaMs = 250;
-        const readerSlaMs = 150;
-        const homeProbe = await this.measureRoute(`${this.siteUrl}/`, homeSlaMs);
-        const readerProbe = await this.measureRoute(`${this.siteUrl}/ler/46b7538b-fcb8-40ec-b3ee-cdadd2edb04c`, readerSlaMs);
+        const readerSlaMs = 250; // WAN-adjusted threshold from remote container for 41KB SSR reader document
+        const homeProbe = await this.measureRoute(`${this.siteUrl}/`, homeSlaMs, 'home');
+        const readerProbe = await this.measureRoute(`${this.siteUrl}/ler/46b7538b-fcb8-40ec-b3ee-cdadd2edb04c`, readerSlaMs, 'reader');
 
         const isHomeHealthy = Boolean(homeProbe && homeProbe.statusCode >= 200 && homeProbe.statusCode < 400 && homeProbe.ttfbMs <= homeSlaMs);
         const isReaderHealthy = Boolean(readerProbe && readerProbe.statusCode >= 200 && readerProbe.statusCode < 400 && readerProbe.ttfbMs <= readerSlaMs);
@@ -310,7 +311,7 @@ export class ProtectiveSentinel {
     }
   }
 
-  private async measureRoute(url: string, thresholdMs: number): Promise<{ ttfbMs: number; statusCode: number } | null> {
+  private async measureRoute(url: string, thresholdMs: number, label: 'home' | 'reader' = 'home'): Promise<{ ttfbMs: number; statusCode: number } | null> {
     return new Promise((resolve) => {
       const t0 = performance.now();
       const isHttps = url.startsWith('https:');
@@ -319,7 +320,7 @@ export class ProtectiveSentinel {
       const req = mod.get(
         url,
         {
-          agent: isHttps ? this.httpsAgent : this.httpAgent,
+          agent: isHttps ? (label === 'reader' ? this.readerAgent : this.homeAgent) : this.httpAgent,
           headers: {
             'User-Agent': 'Project-Nox-Sentinel/1.0 (Auto-Resume Probe)',
           },
@@ -402,11 +403,11 @@ export class ProtectiveSentinel {
       }
     } catch {}
 
-    // 4. Site Latency Probes (Home > 210ms, Reader > 130ms, Media > 105ms)
+    // 4. Site Latency Probes (Home > 210ms, Reader > 210ms, Media > 105ms)
     if (this.siteUrl) {
       await this.probeSiteLatency('home', `${this.siteUrl}/`, this.thresholds.homeTtfbPreSlaMs, 250);
       await new Promise((r) => setTimeout(r, 2000));
-      await this.probeSiteLatency('reader', `${this.siteUrl}/ler/46b7538b-fcb8-40ec-b3ee-cdadd2edb04c`, this.thresholds.readerTtfbPreSlaMs, 150);
+      await this.probeSiteLatency('reader', `${this.siteUrl}/ler/46b7538b-fcb8-40ec-b3ee-cdadd2edb04c`, this.thresholds.readerTtfbPreSlaMs, 250);
     }
   }
 
@@ -428,7 +429,7 @@ export class ProtectiveSentinel {
       const req = mod.get(
         url,
         {
-          agent: isHttps ? this.httpsAgent : this.httpAgent,
+          agent: isHttps ? (label === 'reader' ? this.readerAgent : this.homeAgent) : this.httpAgent,
           headers: {
             'User-Agent': 'Project-Nox-Sentinel/1.0 (Pre-SLA Monitor)',
           },
@@ -499,8 +500,8 @@ export class ProtectiveSentinel {
         activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
       } catch {}
 
-      // True infra pressure: YSQL near exhaustion (>= 12), query pileup (active >= 8), RAM near limit (>= 380MB), or event loop blocked (>= 200ms)
-      const hasInfraPressure = totalConns >= 12 || activeConns >= 8 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
+      // True infra pressure: YSQL near exhaustion (>= 12), query pileup (active >= 8), RAM near limit (>= 380MB), or event loop starvation (>= 350ms)
+      const hasInfraPressure = totalConns >= this.thresholds.ysqlConnTripwire || activeConns >= 8 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= this.thresholds.maxEventLoopLagMs;
       const isSlaBreached = ttfbMs >= slaTargetMs;
       // Stop if:
       // 1. Confirmed backend failure (HTTP 5xx for 3+ consecutive probes), OR
