@@ -396,15 +396,13 @@ export class ProtectiveSentinel {
             // True infra pressure: YSQL near exhaustion (>= 12), query pileup (active >= 8), RAM near limit (>= 380MB), or event loop blocked (>= 200ms)
             const hasInfraPressure = totalConns >= 12 || activeConns >= 8 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
             const isSlaBreached = ttfbMs >= slaTargetMs;
-            // Severe breakdown: HTTP 5xx for 3+ probes, or sustained severe degradation (>= 1500ms for 5+ consecutive probes)
-            const isSevereSustained = (isStatusError && count >= 3) || (ttfbMs >= 1500 && count >= 5);
             // Stop if:
-            // A) Actual SLA breached (>= slaTargetMs) for 2 consecutive probes WITH confirmed infra pressure, OR
-            // B) Pre-SLA threshold exceeded for 3+ consecutive probes WITH confirmed infra pressure, OR
-            // C) Severe sustained breakdown (HTTP 5xx for 3+ probes or >= 1500ms for 5+ probes)
-            const shouldTrip = (isSlaBreached && count >= 2 && hasInfraPressure) ||
-                (count >= 3 && hasInfraPressure) ||
-                isSevereSustained;
+            // 1. Confirmed backend failure (HTTP 5xx for 3+ consecutive probes), OR
+            // 2. Latency exceeding SLA target for 2 consecutive probes WITH confirmed infra pressure, OR
+            // 3. Pre-SLA threshold exceeded for 3+ consecutive probes WITH confirmed infra pressure
+            const shouldTrip = (isStatusError && count >= 3) ||
+                (isSlaBreached && count >= 2 && hasInfraPressure) ||
+                (count >= 3 && hasInfraPressure);
             if (shouldTrip) {
                 this.consecutivePreSlaViolations.set(label, 0);
                 await this.triggerProtectiveStop(`Pre-SLA Guard Rail Breached with Correlated Importer Pressure on ${label.toUpperCase()}: observed ${ttfbMs}ms (HTTP ${statusCode}) > ${isSlaBreached ? `SLA target ${slaTargetMs}ms` : `threshold ${thresholdMs}ms`} (YSQL: ${totalConns}/13 total [${activeConns} active], RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms)`, { label, url, ttfbMs, thresholdMs, slaTargetMs, status: statusCode, totalConns, activeConns, rssMb: mem.rssMb, lagMs: lagMetrics.avgLagMs });
