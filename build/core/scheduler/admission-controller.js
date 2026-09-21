@@ -179,8 +179,8 @@ export class AdmissionController {
              AND w.latest_chapter_published_at IS NOT NULL
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
            GROUP BY (q.payload->>'workId'), w.title, q.source
-           ORDER BY queued_count DESC, pending_jobs ASC
-           LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], backfillSlotsAvailable * 2]);
+           ORDER BY pending_jobs ASC, queued_count DESC
+           LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], Math.max(50, backfillSlotsAvailable * 5)]);
                 let admitted = 0;
                 for (const cand of candidatesRes.rows) {
                     if (admitted >= backfillSlotsAvailable)
