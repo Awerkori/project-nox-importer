@@ -36,7 +36,7 @@ export declare class PublicationBarrier {
      * Try to publish a chapter if the barrier is cleared.
      * If publication succeeds, immediately triggers cascade to publish any consecutive STAGED chapters.
      */
-    tryPublish(workId: string, sortKey: number, chapterId: string): Promise<{
+    tryPublish(workId: string, sortKey: number, chapterId: string, isFreshRelease?: boolean): Promise<{
         published: boolean;
         reason?: string;
     }>;

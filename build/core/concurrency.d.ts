@@ -68,7 +68,7 @@ export declare class AdaptiveAutotuner {
     recordError(type: 'error' | 'ratelimit' | 'timeout'): void;
     evaluateCycle(): {
         concurrency: number;
-        action: 'SCALED_UP' | 'SCALED_DOWN' | 'STABLE' | 'COOLDOWN';
+        action: 'SCALED_UP' | 'SCALED_DOWN' | 'STABLE' | 'COOLDOWN' | 'STRESS_DETECTED';
         reason: string;
     };
     getCurrentConcurrency(): number;

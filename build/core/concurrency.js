@@ -319,24 +319,16 @@ export class AdaptiveAutotuner {
             stressReason = `Detected repeated failures: ${errors} errors, ${timeouts} timeouts in cycle`;
         }
         if (stressReason) {
-            // Scale-down on real pattern or resource stress
             this.stableCycleCount = 0;
             this.cooldownUntil = now + this.config.cooldownPeriodMs;
-            const previous = this.currentConcurrency;
-            const target = previous <= 4
-                ? Math.max(this.config.minConcurrency, previous - 1)
-                : Math.max(this.config.minConcurrency, Math.floor(previous * 0.75));
-            this.currentConcurrency = target;
-            this.globalChapterSemaphore.setCapacity(target);
-            this.logger.warn(`[Autotuner STRESS] Scaled down concurrency: ${previous} -> ${target}. Cause: ${stressReason}`, {
-                previous,
-                target,
+            this.logger.warn(`[Autotuner STRESS] Stress detected: ${stressReason}. Concurrency maintained at ${this.currentConcurrency} (downscaling disabled).`, {
+                concurrency: this.currentConcurrency,
                 stressReason,
                 cooldownSeconds: Math.round(this.config.cooldownPeriodMs / 1000),
                 memory: mem,
                 lag,
             });
-            return { concurrency: target, action: 'SCALED_DOWN', reason: stressReason };
+            return { concurrency: this.currentConcurrency, action: 'STRESS_DETECTED', reason: stressReason };
         }
         // Isolated error handling: cycleErrors === 1 or cycleTimeouts === 1
         // Do NOT scale down; do NOT enter cooldown; maintain concurrency and pause ramp-up

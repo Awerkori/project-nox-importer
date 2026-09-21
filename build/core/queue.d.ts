@@ -51,6 +51,7 @@ export declare class ImporterQueue {
         payload?: Record<string, any>;
         priority?: number;
         chapterSortKey?: number | null;
+        status?: string;
     }>): Promise<number>;
     /**
      * Acquire the next job atomically using SKIP LOCKED stored procedure,

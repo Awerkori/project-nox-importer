@@ -324,7 +324,7 @@ export class AdaptiveAutotuner {
 
   evaluateCycle(): {
     concurrency: number;
-    action: 'SCALED_UP' | 'SCALED_DOWN' | 'STABLE' | 'COOLDOWN';
+    action: 'SCALED_UP' | 'SCALED_DOWN' | 'STABLE' | 'COOLDOWN' | 'STRESS_DETECTED';
     reason: string;
   } {
     const mem = diagnostics.getMemorySnapshot();
@@ -364,27 +364,18 @@ export class AdaptiveAutotuner {
     }
 
     if (stressReason) {
-      // Scale-down on real pattern or resource stress
       this.stableCycleCount = 0;
       this.cooldownUntil = now + this.config.cooldownPeriodMs;
 
-      const previous = this.currentConcurrency;
-      const target = previous <= 4
-        ? Math.max(this.config.minConcurrency, previous - 1)
-        : Math.max(this.config.minConcurrency, Math.floor(previous * 0.75));
-      this.currentConcurrency = target;
-      this.globalChapterSemaphore.setCapacity(target);
-
-      this.logger.warn(`[Autotuner STRESS] Scaled down concurrency: ${previous} -> ${target}. Cause: ${stressReason}`, {
-        previous,
-        target,
+      this.logger.warn(`[Autotuner STRESS] Stress detected: ${stressReason}. Concurrency maintained at ${this.currentConcurrency} (downscaling disabled).`, {
+        concurrency: this.currentConcurrency,
         stressReason,
         cooldownSeconds: Math.round(this.config.cooldownPeriodMs / 1000),
         memory: mem,
         lag,
       });
 
-      return { concurrency: target, action: 'SCALED_DOWN', reason: stressReason };
+      return { concurrency: this.currentConcurrency, action: 'STRESS_DETECTED', reason: stressReason };
     }
 
     // Isolated error handling: cycleErrors === 1 or cycleTimeouts === 1

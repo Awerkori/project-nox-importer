@@ -16,7 +16,9 @@ import { SourceCircuitBreaker } from './circuit-breaker.js';
 import { SharedNetworkDetector } from './shared-network-detector.js';
 import { SourceAdmissionGate } from './source-admission-gate.js';
 import { PublicationSafetyBarrier } from './publication-safety-barrier.js';
+import { ProtectiveSentinel } from './protective-sentinel.js';
 import { telemetryCollector } from './telemetry-collector.js';
+import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from './scheduler/index.js';
 import { performance } from 'node:perf_hooks';
 export { computeCanonicalChapterKey };
 export class JobCancelledByStaffError extends Error {
@@ -72,7 +74,11 @@ export class ImporterEngine {
     autotuner;
     publicationBarrier;
     safetyBarrier;
+    protectiveSentinel;
     reconciler;
+    schedulerStateStore;
+    admissionController;
+    scheduler;
     circuitBreaker = new SourceCircuitBreaker();
     sharedNetworkDetector = new SharedNetworkDetector();
     admissionGate = new SourceAdmissionGate();
@@ -95,7 +101,11 @@ export class ImporterEngine {
         this.checkpoints = new CheckpointManager(supabase);
         this.publicationBarrier = new PublicationBarrier(supabase);
         this.safetyBarrier = new PublicationSafetyBarrier(supabase);
+        this.protectiveSentinel = new ProtectiveSentinel(supabase, undefined, config.NOX_MANGA_URL);
         this.reconciler = new ExistingWorksReconciler(supabase, this.queue, registry, config.NOX_MANGA_URL);
+        this.schedulerStateStore = new SchedulerStateStore();
+        this.admissionController = new AdmissionController(this.schedulerStateStore, this.protectiveSentinel);
+        this.scheduler = new WorkAffinityScheduler(this.schedulerStateStore, this.admissionController, this.protectiveSentinel);
         const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 5, config.TESTED_CONCURRENCY_CEILING || 32);
         this.autotuner = new AdaptiveAutotuner({
             initialConcurrency: requestedMax,
@@ -125,6 +135,8 @@ export class ImporterEngine {
         });
         // 1. Run startup recovery for stalled jobs from crashed instances
         await this.runStartupRecovery();
+        // 1b. Initialize WorkAffinityScheduler & AdmissionController
+        await this.scheduler.initialize();
         // 2. Launch background autotuner telemetry loop (every 30s)
         this.runAutotunerLoop();
         // 3. Launch background discovery scheduler loop
@@ -139,8 +151,10 @@ export class ImporterEngine {
         this.runSourceCooldownProbeLoop();
         // 6. Launch periodic existing works reconciliation loop (every 15 min)
         this.runReconciliationLoop();
-        // 7. Launch background upstream provider health check loop (every 5 min)
+        // 7. Launch background upstream provider health check loop (every 60s)
         this.runUpstreamHealthLoop();
+        // 8. Launch Pre-SLA Sentinel watchdog loop (every 15s)
+        this.protectiveSentinel.startWatchdogLoop();
         // A bounded shared runner pool claims by queue priority. Per-source semaphores
         // still enforce source limits, without hundreds of idle claimers ahead of fresh jobs.
         const activeWorkers = [];
@@ -150,6 +164,7 @@ export class ImporterEngine {
         activeWorkers.push(this.runGeneralWorker());
         // Wait until all workers finish upon stop signal
         await Promise.all(activeWorkers);
+        this.admissionController.stop();
         this.isRunning = false;
         this.logger.info('Importer Engine stopped gracefully');
     }
@@ -376,8 +391,8 @@ export class ImporterEngine {
         }
     }
     /**
-     * Periodic auto-probe and auto-healing loop for sources in COOLDOWN (runs every 30s).
-     * Restores expired cooldowns immediately and probes active ones for early auto-healing.
+     * Periodic auto-probe and auto-healing loop for sources in COOLDOWN / DEGRADED (runs every 30s).
+     * Restores expired cooldowns immediately through production admission probe.
      */
     async runSourceCooldownProbeLoop() {
         while (!this.stopSignal) {
@@ -388,7 +403,7 @@ export class ImporterEngine {
                 const { data: cooldownSources, error } = await this.supabase
                     .from('importer_sources')
                     .select('id, name, status, base_url, cooldown_until, blocked_reason')
-                    .eq('status', 'COOLDOWN');
+                    .in('status', ['COOLDOWN', 'DEGRADED', 'PROBING']);
                 if (error || !cooldownSources || cooldownSources.length === 0)
                     continue;
                 const now = Date.now();
@@ -396,48 +411,12 @@ export class ImporterEngine {
                     if (this.stopSignal)
                         break;
                     const cooldownUntil = src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0;
-                    if (now >= cooldownUntil) {
-                        this.logger.info(`Source ${src.id} cooldown expired. Auto-healing back to ACTIVE.`);
-                        this.circuitBreaker.reset(src.id);
-                        await this.supabase
-                            .from('importer_sources')
-                            .update({
-                            status: 'ACTIVE',
-                            cooldown_until: null,
-                            blocked_reason: null,
-                            updated_at: new Date().toISOString(),
-                        })
-                            .eq('id', src.id);
+                    if (src.status === 'COOLDOWN' && now < cooldownUntil) {
+                        // Still within cooldown period, skip until expiry
                         continue;
                     }
-                    // Active cooldown: lightweight probe for early recovery
-                    if (src.base_url) {
-                        try {
-                            const probeRes = await fetch(src.base_url, {
-                                method: 'HEAD',
-                                signal: AbortSignal.timeout(5_000),
-                                headers: {
-                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-                                },
-                            });
-                            if (probeRes.ok || probeRes.status === 405) {
-                                this.logger.info(`Source ${src.id} early probe succeeded (HTTP ${probeRes.status}). Auto-healing back to ACTIVE.`);
-                                this.circuitBreaker.reset(src.id);
-                                await this.supabase
-                                    .from('importer_sources')
-                                    .update({
-                                    status: 'ACTIVE',
-                                    cooldown_until: null,
-                                    blocked_reason: null,
-                                    updated_at: new Date().toISOString(),
-                                })
-                                    .eq('id', src.id);
-                            }
-                        }
-                        catch {
-                            // Probe failed, remain in cooldown
-                        }
-                    }
+                    // Cooldown expired or DEGRADED: probe for auto-healing to ACTIVE
+                    await this.probeSourceHealth(src);
                 }
             }
             catch (err) {
@@ -522,14 +501,14 @@ export class ImporterEngine {
             catch (err) {
                 this.logger.error('Error during upstream sources health check loop', { error: err?.message });
             }
-            await this.sleep(5 * 60_000);
+            await this.sleep(60_000);
         }
     }
     async checkBlockedSourcesHealth() {
         let { data: blockedSources, error } = await this.supabase
             .from('importer_sources')
-            .select('id, name, status, base_url, blocked_reason, blocked_details')
-            .in('status', ['UPSTREAM_BLOCKED', 'RECOVERING', 'DEGRADED']);
+            .select('id, name, status, base_url, blocked_reason, blocked_details, cooldown_until')
+            .in('status', ['UPSTREAM_BLOCKED', 'RECOVERING', 'PROBING', 'DEGRADED', 'COOLDOWN']);
         if (error || !blockedSources || blockedSources.length === 0)
             return;
         for (const src of blockedSources) {
@@ -553,7 +532,7 @@ export class ImporterEngine {
             await this.supabase
                 .from('importer_sources')
                 .update({
-                status: 'RECOVERING',
+                status: 'PROBING',
                 last_health_check_at: nowIso,
                 updated_at: nowIso,
             })
@@ -561,13 +540,33 @@ export class ImporterEngine {
             const report = await this.admissionGate.executeProdProbe(adapter);
             if (report.overallStatus !== 'PASS') {
                 const primaryReason = report.classification || 'CLOUDFLARE_DATACENTER_BLOCK';
-                this.logger.info(`Source ${src.id} failed production admission probe (${primaryReason}). Retaining UPSTREAM_BLOCKED.`, { stages: report.stages });
+                this.logger.info(`Source ${src.id} failed production admission probe (${primaryReason}).`, { stages: report.stages });
                 this.circuitBreaker.recordFailure(src.id, primaryReason);
                 this.sharedNetworkDetector.recordBlockEvent({
                     sourceId: src.id,
                     classification: primaryReason,
                     cfRay: report.cfRay,
                 });
+                if (src.status === 'COOLDOWN' || src.status === 'DEGRADED' || src.status === 'PROBING') {
+                    const { cooldownMs } = this.circuitBreaker.recordFailure(src.id, primaryReason);
+                    const nextCooldownIso = new Date(Date.now() + (cooldownMs || 60_000)).toISOString();
+                    await this.supabase
+                        .from('importer_sources')
+                        .update({
+                        status: 'COOLDOWN',
+                        cooldown_until: nextCooldownIso,
+                        blocked_reason: primaryReason,
+                        blocked_details: {
+                            stages: report.stages,
+                            cf_ray: report.cfRay,
+                            last_checked_at: nowIso,
+                        },
+                        last_health_check_at: nowIso,
+                        updated_at: nowIso,
+                    })
+                        .eq('id', src.id);
+                    return;
+                }
                 await this.supabase
                     .from('importer_sources')
                     .update({
@@ -888,6 +887,12 @@ export class ImporterEngine {
                     await this.sleep(3000);
                     continue;
                 }
+                // 0b. Enforce ProtectiveSentinel: if PROTECTIVE_STOP active, hold 0 permits, 0 new claims
+                if (await this.protectiveSentinel.isProtectiveStopActive()) {
+                    telemetryCollector.setSlotState(slotIndex, 'PROTECTIVE_STOP');
+                    await this.sleep(3000);
+                    continue;
+                }
                 // 1. Jitter between iterations (20-50ms)
                 telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 const claimJitterMs = 20 + Math.floor(Math.random() * 30);
@@ -905,10 +910,14 @@ export class ImporterEngine {
                         globalSem.release();
                         return null;
                     }
-                    // C. Query Yugabyte for the highest priority job among ELIGIBLE sources
+                    // C. Query Yugabyte for the highest priority job among ELIGIBLE sources via WorkAffinityScheduler
                     let candidateJob = null;
                     try {
-                        candidateJob = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), eligibleSources, 'IMPORT_CHAPTER');
+                        candidateJob = await this.scheduler.acquireNextChapterJob({
+                            workerId: this.config.WORKER_ID,
+                            leaseDurationMinutes: Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
+                            allowedSources: eligibleSources,
+                        });
                     }
                     catch (acquireErr) {
                         this.logger.warn(`Error acquiring chapter job: ${acquireErr?.message}`);
@@ -931,6 +940,9 @@ export class ImporterEngine {
                     else {
                         // In the rare race where source filled, immediately release back to QUEUED (zero blocking)
                         this.logger.warn(`Source ${candidateJob.source} filled concurrently, releasing job ${candidateJob.id} back to QUEUED`);
+                        if (candidateJob.payload?.workId) {
+                            this.scheduler.onJobFinished(candidateJob.payload.workId);
+                        }
                         await this.queue.releaseJob(candidateJob.id, 'QUEUED', 'Source concurrency full, released immediately', 0);
                         globalSem.release();
                         return null;
@@ -951,6 +963,9 @@ export class ImporterEngine {
                     await this.executeJobDirectly(job, { claimDurationMs, semWaitMs: 0 });
                 }
                 finally {
+                    if (job.payload?.workId) {
+                        this.scheduler.onJobFinished(job.payload.workId);
+                    }
                     if (sourcePermitAcquired) {
                         sourceSem.release();
                     }
@@ -976,6 +991,10 @@ export class ImporterEngine {
         this.logger.info('Starting dedicated discovery lane runner');
         while (!this.stopSignal) {
             try {
+                if (await this.protectiveSentinel.isProtectiveStopActive()) {
+                    await this.sleep(3000);
+                    continue;
+                }
                 const isDiscoveryAllowed = await this.isDiscoveryAllowed();
                 if (!isDiscoveryAllowed) {
                     await this.sleep(5_000);
@@ -1342,13 +1361,8 @@ export class ImporterEngine {
                 statusFromErr !== 429;
             if (isUpstreamBlocked) {
                 const classification = cfInsp.classification || 'DATACENTER_ASN_BLOCK';
-                this.logger.warn(`Source ${job.source} detected upstream block (${classification}). Tripping circuit and parking job in BLOCKED_BY_UPSTREAM.`, {
-                    jobId: job.id,
-                    classification,
-                    error: errorMessage,
-                });
-                // 1. Trip circuit breaker with exponential cooldown
-                this.circuitBreaker.recordFailure(job.source, classification);
+                // 1. Record failure in circuit breaker
+                const { tripped, cooldownMs } = this.circuitBreaker.recordFailure(job.source, classification);
                 // 2. Track in shared network detector to avoid probe storms across sources
                 this.sharedNetworkDetector.recordBlockEvent({
                     sourceId: job.source,
@@ -1358,26 +1372,47 @@ export class ImporterEngine {
                 // 3. Invalidate source availability cache
                 this.sourceStatusCache.delete(job.source);
                 const nowIso = new Date().toISOString();
-                try {
-                    await this.supabase
-                        .from('importer_sources')
-                        .update({
-                        status: 'UPSTREAM_BLOCKED',
-                        blocked_reason: classification,
-                        blocked_details: {
-                            message: 'Cloudflare bloqueia o ambiente atual do Importer (DIScloud / OVH ASN 16276). Local/Mihon: funcional; DIScloud: HTTP 403.',
-                            local_status: 200,
-                            discloud_status: 403,
-                            classification,
-                            reason: cfInsp.reason,
-                            last_checked_at: nowIso,
-                        },
-                        updated_at: nowIso,
-                    })
-                        .eq('id', job.source);
+                if (tripped) {
+                    // Tripped circuit breaker after reaching failure threshold: move to COOLDOWN (not permanent UPSTREAM_BLOCKED!)
+                    const cooldownUntilIso = new Date(Date.now() + cooldownMs).toISOString();
+                    this.logger.warn(`Source ${job.source} tripped circuit breaker (${classification}). Entering COOLDOWN until ${cooldownUntilIso}.`, { jobId: job.id, classification, cooldownMs, error: errorMessage });
+                    try {
+                        await this.supabase
+                            .from('importer_sources')
+                            .update({
+                            status: 'COOLDOWN',
+                            cooldown_until: cooldownUntilIso,
+                            blocked_reason: classification,
+                            blocked_details: {
+                                classification,
+                                reason: cfInsp.reason,
+                                last_checked_at: nowIso,
+                                cooldown_until: cooldownUntilIso,
+                            },
+                            updated_at: nowIso,
+                        })
+                            .eq('id', job.source);
+                    }
+                    catch { }
                 }
-                catch { }
-                await this.queue.releaseJob(job.id, 'BLOCKED_BY_UPSTREAM', `Bloqueado a montante (${classification}): ${cfInsp.reason}`);
+                else {
+                    // 1st or 2nd failure: mark DEGRADED (can still process other jobs or be retried)
+                    this.logger.warn(`Source ${job.source} recorded transient block (${classification}). Marking DEGRADED (failure threshold not reached).`, { jobId: job.id, classification, error: errorMessage });
+                    try {
+                        await this.supabase
+                            .from('importer_sources')
+                            .update({
+                            status: 'DEGRADED',
+                            blocked_reason: classification,
+                            updated_at: nowIso,
+                        })
+                            .eq('id', job.source);
+                    }
+                    catch { }
+                }
+                // Release job to RETRY with backoff delay so it is not permanently stuck
+                const backoffSeconds = Math.max(60, Math.round(cooldownMs / 1000) || 60);
+                await this.queue.releaseJob(job.id, 'RETRY', `Bloqueio a montante transitório (${classification}): ${cfInsp.reason || errorMessage}`, backoffSeconds);
                 return;
             }
             const classification = RetryPolicy.classify(err);
@@ -1781,20 +1816,36 @@ export class ImporterEngine {
                     .from('importer_chapter_mappings')
                     .upsert(chunk, { onConflict: 'source,source_chapter_id' });
             }
-            // 2. Batch enqueue tasks to importer_queue with Fair Scheduling
+            // Check persistent watermark and catalog existence
+            const watermark = await this.scheduler.getWatermark(result.workId, job.source);
+            const isWorkAlreadyOnSite = (publishedChapters && publishedChapters.length > 0) || false;
+            // 2. Batch enqueue tasks to importer_queue with Work-Oriented Priority & Sliding Window
             const queueJobs = chaptersToEnqueue.map((ch, idx) => {
                 const dedupeKey = `${job.source}:chapter:${ch.sourceChapterId}`;
                 const chKey = this.computeCanonicalChapterKey(ch.number, ch.title);
-                // Fair Scheduling:
-                // - Staff requested chapters: priority 100 (Absolute Priority)
-                // - First 5 chapters + Latest 5 chapters of new works: priority 35 (Fast bootstrap & new release catch-up)
-                // - Deep historical backlog (middle chapters): priority 20
-                // This ensures works with 1,000+ chapters never starve other works!
-                let priority = chapterPriority;
-                if (!isStaffPriority) {
-                    // Strictly chronological filling. Do not jump to the end of the backlog.
-                    priority = 20;
+                let priority = 50;
+                let isFreshRelease = false;
+                if (isStaffPriority) {
+                    priority = 100;
+                    isFreshRelease = true;
                 }
+                else if (isWorkAlreadyOnSite && watermark && chKey.sortKey > watermark.lastSeenSortKey) {
+                    // P0: Fresh New Release of tracked/existing work
+                    priority = 100;
+                    isFreshRelease = true;
+                }
+                else if (isWorkAlreadyOnSite) {
+                    // P1: Backfill of existing work
+                    priority = 75;
+                    isFreshRelease = false;
+                }
+                else {
+                    // P2: New work initial fill
+                    priority = 50;
+                    isFreshRelease = false;
+                }
+                // Sliding window: only first 8 chapters into QUEUED, rest into PAUSED_BY_STAFF
+                const status = (isFreshRelease || idx < 8) ? 'QUEUED' : 'PAUSED_BY_STAFF';
                 return {
                     taskType: 'IMPORT_CHAPTER',
                     source: job.source,
@@ -1808,12 +1859,36 @@ export class ImporterEngine {
                         chapterTitle: ch.title || '',
                         expectedPageCount: ch.pageCount || null,
                         staffRequested: isStaffPriority,
+                        isFreshRelease,
                     },
                     priority,
                     chapterSortKey: chKey.sortKey,
+                    status,
                 };
             });
             await this.queue.enqueueBatch(queueJobs);
+            // Update persistent watermark
+            if (chapters.length > 0) {
+                let maxSort = 0;
+                let maxChNum = 0;
+                let maxChId = '';
+                for (const c of chapters) {
+                    const k = this.computeCanonicalChapterKey(c.number, c.title).sortKey;
+                    if (k > maxSort) {
+                        maxSort = k;
+                        maxChNum = typeof c.number === 'number' ? c.number : parseFloat(String(c.number));
+                        maxChId = c.sourceChapterId;
+                    }
+                }
+                await this.scheduler.setWatermark({
+                    workId: result.workId,
+                    source: job.source,
+                    lastSeenChapter: maxChNum,
+                    lastSeenSortKey: maxSort,
+                    lastSeenChapterId: maxChId,
+                    lastDiscoveryAt: new Date().toISOString(),
+                });
+            }
         }
         // Discovery complete for this work sync cycle: sweep any STAGED chapters that were waiting on discovery
         await this.publicationBarrier.sweepStagedPublications();
@@ -2475,6 +2550,14 @@ export class ImporterEngine {
                 successfulExecution = true;
                 this.autotuner.recordSourceSuccess(effectiveSource);
                 this.circuitBreaker.recordSuccess(effectiveSource);
+                if (this.sourceStatusCache.get(effectiveSource)?.status === 'DEGRADED') {
+                    this.sourceStatusCache.delete(effectiveSource);
+                    this.supabase
+                        .from('importer_sources')
+                        .update({ status: 'ACTIVE', blocked_reason: null, updated_at: new Date().toISOString() })
+                        .eq('id', effectiveSource)
+                        .then(undefined, () => { });
+                }
                 telemetry.tStaged = Date.now();
                 this.logger.info('TELEMETRY_JOB_STAGED', telemetry);
                 this.supabase.from('importer_queue').update({
@@ -2612,7 +2695,8 @@ export class ImporterEngine {
                     .eq('chapter_number', chapterNumber);
             }
             // SAFEGUARD 3: Try to publish immediately 1x via barrier. If blocked, release worker slot immediately!
-            const pubResult = await this.publicationBarrier.tryPublish(workId, chKey.sortKey, chapterId);
+            const isFreshRelease = Boolean(job.payload?.isFreshRelease);
+            const pubResult = await this.publicationBarrier.tryPublish(workId, chKey.sortKey, chapterId, isFreshRelease);
             tDb = Date.now() - db0;
             // Record fine-grained chapter job metric asynchronously
             void this.recordJobMetric({

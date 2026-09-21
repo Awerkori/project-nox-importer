@@ -5,7 +5,7 @@ export class SourceCircuitBreaker {
     maxCooldownMs;
     logger = new Logger('CircuitBreaker');
     circuits = new Map();
-    constructor(failureThreshold = 3, initialCooldownMs = 5 * 60_000, maxCooldownMs = 60 * 60_000) {
+    constructor(failureThreshold = 3, initialCooldownMs = 60_000, maxCooldownMs = 60 * 60_000) {
         this.failureThreshold = failureThreshold;
         this.initialCooldownMs = initialCooldownMs;
         this.maxCooldownMs = maxCooldownMs;
@@ -48,8 +48,8 @@ export class SourceCircuitBreaker {
         c.lastSuccessAt = Date.now();
         c.cooldownUntil = null;
         c.probeAttempts = 0;
-        if (c.state === 'HALF_OPEN' || c.state === 'DEGRADED') {
-            this.logger.info(`Circuit for ${key} fully recovered to CLOSED`);
+        if (c.state !== 'CLOSED') {
+            this.logger.info(`Circuit for ${key} fully recovered to CLOSED (from ${c.state})`);
             c.state = 'CLOSED';
         }
     }
@@ -59,25 +59,26 @@ export class SourceCircuitBreaker {
         c.consecutiveFailures++;
         c.lastFailureAt = Date.now();
         c.lastClassification = classification;
-        // Calculate exponential backoff cooldown with jitter
-        const exponent = Math.min(c.consecutiveFailures - 1, 5);
+        // Calculate exponential backoff cooldown with jitter (60s -> 120s -> 240s...)
+        const exponent = Math.min(Math.max(0, c.consecutiveFailures - this.failureThreshold), 5);
         const baseCooldown = Math.min(this.initialCooldownMs * Math.pow(2, exponent), this.maxCooldownMs);
-        const jitter = Math.floor(Math.random() * 30_000); // 0-30s jitter
+        const jitter = Math.floor(Math.random() * 10_000); // 0-10s jitter
         const cooldownMs = baseCooldown + jitter;
         if (c.state === 'HALF_OPEN') {
-            // Re-trip immediately
+            // Re-trip immediately on probe failure
             c.state = 'OPEN';
             c.cooldownUntil = Date.now() + cooldownMs;
             this.logger.warn(`Circuit for ${key} probe failed. Re-tripping to OPEN for ${Math.round(cooldownMs / 1000)}s`);
             return { tripped: true, cooldownMs };
         }
-        if (c.consecutiveFailures >= this.failureThreshold || classification === 'DATACENTER_ASN_BLOCK') {
+        if (c.consecutiveFailures >= this.failureThreshold) {
             c.state = 'OPEN';
             c.cooldownUntil = Date.now() + cooldownMs;
             this.logger.warn(`Circuit for ${key} tripped to OPEN (${c.consecutiveFailures} failures, cause: ${classification}). Cooldown: ${Math.round(cooldownMs / 1000)}s`);
             return { tripped: true, cooldownMs };
         }
         c.state = 'DEGRADED';
+        this.logger.warn(`Circuit for ${key} recorded failure #${c.consecutiveFailures} (cause: ${classification}). State: DEGRADED (threshold: ${this.failureThreshold})`);
         return { tripped: false, cooldownMs: 0 };
     }
     getState(sourceId, host) {

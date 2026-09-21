@@ -14,7 +14,8 @@ export type SlotStateType =
   | 'WAITING_FOR_DB_POOL'
   | 'WAITING_FOR_PUBLICATION_BARRIER'
   | 'WAITING_FOR_RETRY_BACKOFF'
-  | 'WAITING_FOR_MUTEX';
+  | 'WAITING_FOR_MUTEX'
+  | 'PROTECTIVE_STOP';
 
 export interface ChapterMetricRecord {
   jobId: string;
@@ -191,6 +192,7 @@ export class TelemetryCollector {
         WAITING_FOR_PUBLICATION_BARRIER: 0,
         WAITING_FOR_RETRY_BACKOFF: 0,
         WAITING_FOR_MUTEX: 0,
+        PROTECTIVE_STOP: 0,
       };
     }
 
@@ -221,6 +223,7 @@ export class TelemetryCollector {
           WAITING_FOR_PUBLICATION_BARRIER: 0,
           WAITING_FOR_RETRY_BACKOFF: 0,
           WAITING_FOR_MUTEX: 0,
+          PROTECTIVE_STOP: 0,
         },
       });
     }
@@ -472,6 +475,7 @@ export class TelemetryCollector {
       WAITING_FOR_PUBLICATION_BARRIER: 0,
       WAITING_FOR_RETRY_BACKOFF: 0,
       WAITING_FOR_MUTEX: 0,
+      PROTECTIVE_STOP: 0,
     };
 
     const now = performance.now();

@@ -153,6 +153,7 @@ export class ImporterQueue {
       payload?: Record<string, any>;
       priority?: number;
       chapterSortKey?: number | null;
+      status?: string;
     }>
   ): Promise<number> {
     if (jobs.length === 0) return 0;
@@ -164,7 +165,7 @@ export class ImporterQueue {
         dedupe_key: j.dedupeKey,
         payload: j.payload || {},
         priority: j.priority ?? 10,
-        status: 'QUEUED',
+        status: j.status || 'QUEUED',
       };
       if (j.chapterSortKey !== undefined && j.chapterSortKey !== null) {
         row.chapter_sort_key = j.chapterSortKey;
