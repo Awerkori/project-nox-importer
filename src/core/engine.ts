@@ -1,5 +1,6 @@
 import { callProvider } from './retry-policy.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { getYugabytePool } from '../db/yugabyte-direct.js';
 import { SourceRegistry } from '../sources/registry.js';
 import { StorageProvider } from '../storage/provider.js';
 import { ImporterQueue, QueueJob, TaskType } from './queue.js';
@@ -2342,17 +2343,17 @@ export class ImporterEngine {
 
       // Auto-cancel any other sibling QUEUED/RETRY jobs for this work + chapter
       try {
-        await this.supabase
-          .from('importer_queue')
-          .update({
-            status: 'COMPLETED',
-            updated_at: new Date().toISOString(),
-            last_error: 'CANONICAL_ALREADY_SATISFIED',
-          })
-          .eq('task_type', 'IMPORT_CHAPTER')
-          .in('status', ['QUEUED', 'RETRY'])
-          .eq('chapter_sort_key', sortKey)
-          .filter('payload->>workId', 'eq', workId);
+        const pool = getYugabytePool();
+        await pool.query(`
+          UPDATE importer_queue
+          SET status = 'COMPLETED',
+              updated_at = NOW(),
+              last_error = 'CANONICAL_ALREADY_SATISFIED'
+          WHERE task_type = 'IMPORT_CHAPTER'
+            AND status IN ('QUEUED', 'RETRY')
+            AND chapter_sort_key = $1
+            AND (payload->>'workId') = $2;
+        `, [sortKey, workId]);
       } catch {}
 
       return;
