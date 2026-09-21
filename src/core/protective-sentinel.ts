@@ -466,25 +466,31 @@ export class ProtectiveSentinel {
       const mem = diagnostics.getMemorySnapshot();
       const lagMetrics = (diagnostics as any).lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
       let activeConns = 0;
+      let totalConns = 0;
       try {
         const pool = getYugabytePool();
-        const cRes = await pool.query('SELECT count(*) FROM pg_stat_activity');
-        activeConns = parseInt(cRes.rows[0]?.count || '0', 10);
+        const cRes = await pool.query(`
+          SELECT count(*) as total,
+                 count(*) FILTER (WHERE state = 'active') as active
+          FROM pg_stat_activity
+        `);
+        totalConns = parseInt(cRes.rows[0]?.total || '0', 10);
+        activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
       } catch {}
 
-      const hasInfraPressure = activeConns >= 10 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
+      const hasInfraPressure = totalConns >= 12 || activeConns >= 4 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
       const isSevereSustained = count >= 3 && (isStatusError || ttfbMs >= 1500);
 
       if (count >= 2) {
         if (hasInfraPressure || isSevereSustained) {
           this.consecutivePreSlaViolations.set(label, 0);
           await this.triggerProtectiveStop(
-            `Pre-SLA Guard Rail Breached with Correlated Importer Pressure on ${label.toUpperCase()}: observed ${ttfbMs}ms (HTTP ${statusCode}) > pre-SLA threshold ${thresholdMs}ms (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms)`,
-            { label, url, ttfbMs, thresholdMs, slaTargetMs, status: statusCode, activeConns, rssMb: mem.rssMb, lagMs: lagMetrics.avgLagMs }
+            `Pre-SLA Guard Rail Breached with Correlated Importer Pressure on ${label.toUpperCase()}: observed ${ttfbMs}ms (HTTP ${statusCode}) > pre-SLA threshold ${thresholdMs}ms (YSQL: ${totalConns}/13 total [${activeConns} active], RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms)`,
+            { label, url, ttfbMs, thresholdMs, slaTargetMs, status: statusCode, totalConns, activeConns, rssMb: mem.rssMb, lagMs: lagMetrics.avgLagMs }
           );
         } else {
           this.logger.warn(
-            `[EDGE_TRANSIENT_WARNING] Route ${label} (${url}) TTFB: ${ttfbMs}ms (HTTP ${statusCode}) > threshold ${thresholdMs}ms, but importer infra is healthy (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms). Observing without tripping PROTECTIVE_STOP.`
+            `[EDGE_TRANSIENT_WARNING] Route ${label} (${url}) TTFB: ${ttfbMs}ms (HTTP ${statusCode}) > threshold ${thresholdMs}ms, but importer infra is healthy (YSQL: ${totalConns}/13 total [${activeConns} active], RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms). Observing without tripping PROTECTIVE_STOP.`
           );
         }
       } else {
@@ -505,24 +511,30 @@ export class ProtectiveSentinel {
     const mem = diagnostics.getMemorySnapshot();
     const lagMetrics = (diagnostics as any).lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
     let activeConns = 0;
+    let totalConns = 0;
     try {
       const pool = getYugabytePool();
-      const cRes = await pool.query('SELECT count(*) FROM pg_stat_activity');
-      activeConns = parseInt(cRes.rows[0]?.count || '0', 10);
+      const cRes = await pool.query(`
+        SELECT count(*) as total,
+               count(*) FILTER (WHERE state = 'active') as active
+        FROM pg_stat_activity
+      `);
+      totalConns = parseInt(cRes.rows[0]?.total || '0', 10);
+      activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
     } catch {}
 
-    const hasInfraPressure = activeConns >= 10 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
+    const hasInfraPressure = totalConns >= 12 || activeConns >= 4 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
 
     if (count >= 5) {
       if (hasInfraPressure) {
         this.consecutivePreSlaViolations.set(label, 0);
         await this.triggerProtectiveStop(
-          `Pre-SLA Health Probe Failed on ${label.toUpperCase()} (${count} consecutive failures) with Correlated Importer Pressure: ${err?.message} (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms)`,
-          { label, url, error: err?.message, activeConns, rssMb: mem.rssMb, lagMs: lagMetrics.avgLagMs }
+          `Pre-SLA Health Probe Failed on ${label.toUpperCase()} (${count} consecutive failures) with Correlated Importer Pressure: ${err?.message} (YSQL: ${totalConns}/13 total [${activeConns} active], RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms)`,
+          { label, url, error: err?.message, totalConns, activeConns, rssMb: mem.rssMb, lagMs: lagMetrics.avgLagMs }
         );
       } else {
         this.logger.warn(
-          `[EDGE_PROBE_ERROR_WARNING] Health probe on ${label} (${url}) failed (${count} consecutive): ${err?.message}, but importer infra is healthy (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB). Observing without tripping PROTECTIVE_STOP.`
+          `[EDGE_PROBE_ERROR_WARNING] Health probe on ${label} (${url}) failed (${count} consecutive): ${err?.message}, but importer infra is healthy (YSQL: ${totalConns}/13 total [${activeConns} active], RSS: ${mem.rssMb}MB). Observing without tripping PROTECTIVE_STOP.`
         );
       }
     }
