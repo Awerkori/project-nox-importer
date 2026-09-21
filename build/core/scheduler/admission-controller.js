@@ -197,9 +197,9 @@ export class AdmissionController {
                 : config.maxActiveBackfillWorks;
             const backfillSlotsAvailable = Math.max(0, targetBackfillLimit - activeBackfills.length);
             // P2 uses spare capacity when P1 cannot occupy available workers
-            const targetNewWorksLimit = idleWorkers >= 4
-                ? Math.min(config.maxActiveNewWorks, Math.max(2, Math.floor(idleWorkers / 2)))
-                : (activeBackfills.length < config.maxActiveBackfillWorks ? config.maxActiveNewWorks : 0);
+            // Strictly restrict active P2 cohort to <= config.maxActiveNewWorks (default 4).
+            const maxP2Cohort = config.maxActiveNewWorks;
+            const targetNewWorksLimit = idleWorkers >= 4 ? maxP2Cohort : 0;
             const newWorkSlotsAvailable = Math.max(0, targetNewWorksLimit - activeNewWorks.length);
             // Track active sources for source diversity (Section 81)
             const sourceCounts = new Map();

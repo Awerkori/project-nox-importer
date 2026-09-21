@@ -66,7 +66,7 @@ export interface SchedulerDecision {
 export interface SchedulerConfig {
   enabled: boolean;
   shadowMode: boolean;
-  maxActiveNewWorks: number;       // Default: 8 (ensures diversity and affinity)
+  maxActiveNewWorks: number;       // Default: 4 (strict cohort limit)
   maxActiveBackfillWorks: number;  // Default: 10 (controls horizontal fragmentation in P1)
   maxInflightPerWork: number;      // Default: 2 (guarantees >= 9 works concurrently across 18 workers)
   slidingWindowSize: number;       // Default: 8 chapters admitted to QUEUED per active work

@@ -43,11 +43,13 @@ describe('Head-of-Line Blocking Fix Verification', () => {
     expect(autotuner.isSourceCapacityAvailable('hanamiheaven')).toBe(false);
     expect(hanamiSem.tryAcquire()).toBe(false);
 
-    // Meanwhile fleurblanche (maxChapters = 2) remains available
-    expect(SOURCE_CONCURRENCY_LIMITS.fleurblanche.maxChapters).toBe(2);
+    // Meanwhile fleurblanche (maxChapters = 3) remains available
+    expect(SOURCE_CONCURRENCY_LIMITS.fleurblanche.maxChapters).toBe(3);
     expect(autotuner.isSourceCapacityAvailable('fleurblanche')).toBe(true);
 
     const fleurSem = autotuner.getSourceSemaphore('fleurblanche');
+    expect(fleurSem.tryAcquire()).toBe(true);
+    expect(autotuner.isSourceCapacityAvailable('fleurblanche')).toBe(true); // 2 permits remaining
     expect(fleurSem.tryAcquire()).toBe(true);
     expect(autotuner.isSourceCapacityAvailable('fleurblanche')).toBe(true); // 1 permit remaining
     expect(fleurSem.tryAcquire()).toBe(true);
@@ -61,6 +63,7 @@ describe('Head-of-Line Blocking Fix Verification', () => {
     // Release fleur
     fleurSem.release();
     fleurSem.release();
+    fleurSem.release();
     expect(autotuner.isSourceCapacityAvailable('fleurblanche')).toBe(true);
   });
 
@@ -68,7 +71,7 @@ describe('Head-of-Line Blocking Fix Verification', () => {
     const autotuner = new AdaptiveAutotuner({ initialConcurrency: 8 });
     const claimMutex = new AsyncSemaphore(1, 'claim_mutex');
 
-    // Sources: hanami (1), fleur (2), manga (2) -> sum = 5 permits
+    // Sources: hanami (1), fleur (3), manga (2) -> sum = 6 permits
     const activeSources = ['hanamiheaven', 'fleurblanche', 'mangalivreto'];
 
     // Simulated queue with priority:
@@ -111,12 +114,12 @@ describe('Head-of-Line Blocking Fix Verification', () => {
 
     await Promise.all(slotClaims);
 
-    // Exactly 5 jobs should be claimed (1 hanami, 2 fleur, 2 manga)
-    expect(claimedJobs.length).toBe(5);
+    // Exactly 6 jobs should be claimed (1 hanami, 3 fleur, 2 manga)
+    expect(claimedJobs.length).toBe(6);
 
     const sourcesClaimed = claimedJobs.map(c => c.job.source);
     expect(sourcesClaimed.filter(s => s === 'hanamiheaven').length).toBe(1);
-    expect(sourcesClaimed.filter(s => s === 'fleurblanche').length).toBe(2);
+    expect(sourcesClaimed.filter(s => s === 'fleurblanche').length).toBe(3);
     expect(sourcesClaimed.filter(s => s === 'mangalivreto').length).toBe(2);
 
     // Slots 5, 6, 7 did NOT claim or block on hanami!

@@ -56,7 +56,8 @@ describe('Importer Database Schema & Atomic Lease Locks', () => {
 
     for (const file of migrationFiles) {
       const sql = readFileSync(resolve(mangaMigrationsDir, file), 'utf8')
-        .replace('create extension if not exists pgcrypto;', '');
+        .replace('create extension if not exists pgcrypto;', '')
+        .replace(/create\s+index\s+concurrently/gi, 'create index');
       await db.exec(sql);
     }
 

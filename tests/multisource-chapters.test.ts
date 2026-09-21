@@ -42,6 +42,18 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
     0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0xff, 0xd9,
   ]);
 
+  const sampleCoverJpeg = new Uint8Array(2000);
+  sampleCoverJpeg[0] = 0xff; sampleCoverJpeg[1] = 0xd8;
+  sampleCoverJpeg[2] = 0xff; sampleCoverJpeg[3] = 0xc0;
+  sampleCoverJpeg[4] = 0x00; sampleCoverJpeg[5] = 0x0b;
+  sampleCoverJpeg[6] = 0x08;
+  sampleCoverJpeg[7] = 0x01; sampleCoverJpeg[8] = 0x2c; // height = 300
+  sampleCoverJpeg[9] = 0x00; sampleCoverJpeg[10] = 0xc8; // width = 200
+  sampleCoverJpeg[11] = 0x01; sampleCoverJpeg[12] = 0x01; sampleCoverJpeg[13] = 0x11; sampleCoverJpeg[14] = 0x00;
+  sampleCoverJpeg[15] = 0xff; sampleCoverJpeg[16] = 0xda;
+  sampleCoverJpeg[17] = 0x00; sampleCoverJpeg[18] = 0x08; sampleCoverJpeg[19] = 0x01; sampleCoverJpeg[20] = 0x01; sampleCoverJpeg[21] = 0x00; sampleCoverJpeg[22] = 0x00; sampleCoverJpeg[23] = 0x3f; sampleCoverJpeg[24] = 0x00;
+  sampleCoverJpeg[1998] = 0xff; sampleCoverJpeg[1999] = 0xd9;
+
   let originalFetch: typeof globalThis.fetch;
 
   beforeAll(async () => {
@@ -67,7 +79,8 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
     const files = readdirSync(mangaMigrationsDir).filter(f => f.endsWith('.sql')).sort();
     for (const f of files) {
       const sql = readFileSync(resolve(mangaMigrationsDir, f), 'utf8')
-        .replace('create extension if not exists pgcrypto;', '');
+        .replace('create extension if not exists pgcrypto;', '')
+        .replace(/create\s+index\s+concurrently/gi, 'create index');
       await db.exec(sql);
     }
     await db.exec(readFileSync(resolve('migrations/001_importer_schema.sql'), 'utf8'));
@@ -75,6 +88,9 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
     await db.exec(readFileSync(resolve('migrations/003_importer_sort_key_and_concurrency.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/004_importer_telemetry_and_provenance.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/005_importer_page_provider_column.sql'), 'utf8'));
+    await db.exec(readFileSync(resolve('migrations/20260914171000_atomic_reader_repair.sql'), 'utf8'));
+    await db.exec(`ALTER TABLE public.chapters ADD COLUMN IF NOT EXISTS is_fresh_release boolean DEFAULT false;`);
+    await db.exec(`ALTER TABLE public.works ADD COLUMN IF NOT EXISTS latest_chapter_published_at timestamptz;`);
 
     await db.query(`insert into auth.users (id, email, email_confirmed_at) values ($1, 'bot@projectnox.com', now())`, [botUserId]);
     await db.query(`insert into public.access_roles (user_id, role) values ($1, 'ADMIN') on conflict (user_id) do update set role = 'ADMIN'`, [botUserId]);
@@ -83,11 +99,15 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
     await db.query(`update public.importer_sources set enabled = false where id not in ('mangaflix', 'kuro')`);
     await db.query(`insert into public.importer_sources (id, name, base_url, status, enabled) values ('mangaflix', 'MangaFlix', 'https://mangaflix.org', 'ACTIVE', true) on conflict (id) do update set status = 'ACTIVE', enabled = true`);
     await db.query(`insert into public.importer_sources (id, name, base_url, status, enabled) values ('kuro', 'Kuro', 'https://kuro.moe', 'ACTIVE', true) on conflict (id) do update set status = 'ACTIVE', enabled = true`);
+    await db.query(`insert into public.settings (key, value) values ('catalog_discovery_enabled', 'ENABLED') on conflict (key) do update set value = 'ENABLED'`);
 
     // Mock fetch for image downloads
     originalFetch = globalThis.fetch;
     globalThis.fetch = async (url: any) => {
       const urlStr = url.toString();
+      if (urlStr.includes('cover')) {
+        return new Response(sampleCoverJpeg as Uint8Array<ArrayBuffer>, { status: 200, headers: { 'Content-Type': 'image/jpeg' } });
+      }
       if (urlStr.includes('page-1')) {
         return new Response(samplePngBytes as Uint8Array<ArrayBuffer>, { status: 200, headers: { 'Content-Type': 'image/png' } });
       }
@@ -122,6 +142,7 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
         synopsis: 'Mangaflix synopsis',
         kind: 'MANHWA',
         status: 'ONGOING',
+        coverUrl: 'https://cdn.mangaflix.org/cover.png',
       }),
       fetchChapters: async () => mfAvailableChapters,
       fetchChapterPages: async () => [
@@ -150,6 +171,7 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
         author: 'Kuro Author',
         kind: 'MANHWA',
         status: 'ONGOING',
+        coverUrl: 'https://cdn.kuro.moe/cover.png',
       }),
       fetchChapters: async () => [
         {
@@ -181,182 +203,143 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
 
     // Construct mock Supabase
     supabaseMock = {
-      from: (table: string) => ({
-        select: (...cols: any[]) => ({
-          order: (col: string, opts?: any) => ({
-            limit: (n: number) => ({
-              then: (resolve: any) => {
-                const dir = opts?.ascending ? 'asc' : 'desc';
-                db.query(`select * from public.${table} order by ${col} ${dir} limit ${n}`)
-                  .then(r => resolve({ data: r.rows, error: null }));
-              }
-            }),
-            then: (resolve: any) => {
-              const dir = opts?.ascending ? 'asc' : 'desc';
-              db.query(`select * from public.${table} order by ${col} ${dir}`)
-                .then(r => resolve({ data: r.rows, error: null }));
-            }
-          }),
+      from: (table: string) => {
+        const filters: Array<{ sql: string; vals: any[] }> = [];
+        let orderStatement = '';
+        let limitCount: number | null = null;
+
+        const builder: any = {
+          select: () => builder,
           eq: (col: string, val: any) => {
-            const execQuery = async () => {
-              const res = await db.query(`select * from public.${table} where ${col} = $1`, [val]);
-              return { data: res.rows, error: null };
-            };
-            return {
-              not: (notCol: string, op: string, notVal: any) => {
-                const execQueryWithNot = async () => {
-                  let sql = `select * from public.${table} where ${col} = $1`;
-                  if (op === 'is' && notVal === null) {
-                    sql += ` and ${notCol} is not null`;
-                  }
-                  const res = await db.query(sql, [val]);
-                  return { data: res.rows, error: null };
-                };
-                return {
-                  maybeSingle: async () => {
-                    const res = await execQueryWithNot();
-                    return { data: res.data[0] || null, error: null };
-                  },
-                  then: (resolve: any) => execQueryWithNot().then(resolve),
-                };
-              },
-              eq: (col2: string, val2: any) => {
-                const execQuery2 = async () => {
-                  const res = await db.query(`select * from public.${table} where ${col} = $1 and ${col2} = $2`, [val, val2]);
-                  return { data: res.rows, error: null };
-                };
-                return {
-                  not: (col3: string, op: string, val3: any) => {
-                    const execWithNot = async () => {
-                      const notSql = op === 'is' ? `${col3} is not null` : `${col3} != $3`;
-                      const params = op === 'is' ? [val, val2] : [val, val2, val3];
-                      const res = await db.query(`select * from public.${table} where ${col} = $1 and ${col2} = $2 and ${notSql}`, params);
-                      return { data: res.rows, error: null };
-                    };
-                    return {
-                      maybeSingle: async () => {
-                        const res = await execWithNot();
-                        return { data: res.data[0] || null, error: null };
-                      },
-                      single: async () => {
-                        const res = await execWithNot();
-                        return { data: res.data[0] || null, error: null };
-                      },
-                      then: (resolve: any) => execWithNot().then(resolve),
-                    };
-                  },
-                  order: (ordCol: string, opts?: any) => ({
-                    limit: (n: number) => ({
-                      then: (resolve: any) => {
-                        const dir = opts?.ascending ? 'asc' : 'desc';
-                        db.query(`select * from public.${table} where ${col} = $1 and ${col2} = $2 order by ${ordCol} ${dir} limit ${n}`, [val, val2])
-                          .then((r: any) => resolve({ data: r.rows, error: null }))
-                          .catch((err: any) => resolve({ data: null, error: err }));
-                      },
-                    }),
-                    then: (resolve: any) => {
-                      const dir = opts?.ascending ? 'asc' : 'desc';
-                      db.query(`select * from public.${table} where ${col} = $1 and ${col2} = $2 order by ${ordCol} ${dir}`, [val, val2])
-                        .then((r: any) => resolve({ data: r.rows, error: null }))
-                        .catch((err: any) => resolve({ data: null, error: err }));
-                    },
-                  }),
-                  limit: (n: number) => ({
-                    maybeSingle: async () => {
-                      const res = await execQuery2();
-                      return { data: res.data[0] || null, error: null };
-                    },
-                    single: async () => {
-                      const res = await execQuery2();
-                      return { data: res.data[0] || null, error: null };
-                    },
-                  }),
-                  maybeSingle: async () => {
-                    const res = await execQuery2();
-                    return { data: res.data[0] || null, error: null };
-                  },
-                  single: async () => {
-                    const res = await execQuery2();
-                    return { data: res.data[0] || null, error: null };
-                  },
-                  then: (resolve: any) => execQuery2().then(resolve),
-                };
-              },
-              in: (col2: string, vals: any[]) => ({
-                then: (resolve: any) => {
-                  if (vals.length === 0) return resolve({ data: [], error: null });
-                  const placeholders = vals.map((_, i) => `$${i + 2}`).join(',');
-                  db.query(`select * from public.${table} where ${col} = $1 and ${col2} in (${placeholders})`, [val, ...vals])
-                    .then(r => resolve({ data: r.rows, error: null }))
-                    .catch(err => resolve({ data: null, error: err }));
-                }
-              }),
-              maybeSingle: async () => {
-                const res = await db.query(`select * from public.${table} where ${col} = $1 limit 1`, [val]);
-                return { data: res.rows[0] || null, error: null };
-              },
-              single: async () => {
-                const res = await db.query(`select * from public.${table} where ${col} = $1 limit 1`, [val]);
-                return { data: res.rows[0] || null, error: null };
-              },
-              limit: (n: number) => ({
-                maybeSingle: async () => {
-                  const res = await db.query(`select * from public.${table} where ${col} = $1 limit 1`, [val]);
-                  return { data: res.rows[0] || null, error: null };
-                }
-              }),
-              then: (resolve: any) => {
-                db.query(`select * from public.${table} where ${col} = $1`, [val]).then(r => resolve({ data: r.rows, error: null }));
-              }
-            };
+            filters.push({ sql: `${col} = $PARAM`, vals: [val] });
+            return builder;
           },
-          ilike: (col: string, val: any) => ({
-            then: (resolve: any) => {
-              db.query(`select * from public.${table} where ${col} ilike $1`, [val]).then(r => resolve({ data: r.rows, error: null }));
+          neq: (col: string, val: any) => {
+            filters.push({ sql: `${col} != $PARAM`, vals: [val] });
+            return builder;
+          },
+          lt: (col: string, val: any) => {
+            filters.push({ sql: `${col} < $PARAM`, vals: [val] });
+            return builder;
+          },
+          lte: (col: string, val: any) => {
+            filters.push({ sql: `${col} <= $PARAM`, vals: [val] });
+            return builder;
+          },
+          gt: (col: string, val: any) => {
+            filters.push({ sql: `${col} > $PARAM`, vals: [val] });
+            return builder;
+          },
+          gte: (col: string, val: any) => {
+            filters.push({ sql: `${col} >= $PARAM`, vals: [val] });
+            return builder;
+          },
+          ilike: (col: string, val: any) => {
+            filters.push({ sql: `${col} ilike $PARAM`, vals: [val] });
+            return builder;
+          },
+          in: (col: string, vals: any[]) => {
+            if (!vals || vals.length === 0) {
+              filters.push({ sql: `1 = 0`, vals: [] });
+            } else {
+              filters.push({ sql: `${col} = ANY($PARAM)`, vals: [vals] });
             }
-          }),
-          in: (col: string, vals: any[]) => ({
-            then: (resolve: any) => {
-              if (vals.length === 0) return resolve({ data: [], error: null });
-              const placeholders = vals.map((_, i) => `$${i + 1}`).join(',');
-              db.query(`select * from public.${table} where ${col} in (${placeholders})`, vals)
-                .then(r => resolve({ data: r.rows, error: null }));
+            return builder;
+          },
+          overlaps: (col: string, vals: any[]) => {
+            if (!vals || vals.length === 0) {
+              filters.push({ sql: `1 = 0`, vals: [] });
+            } else {
+              filters.push({ sql: `${col} && $PARAM`, vals: [vals] });
             }
-          }),
-          then: (resolve: any) => {
-            db.query(`select * from public.${table}`).then(r => resolve({ data: r.rows, error: null }));
+            return builder;
+          },
+          not: (col: string, op: string, val: any) => {
+            if (op === 'is' && val === null) {
+              filters.push({ sql: `${col} is not null`, vals: [] });
+            } else {
+              filters.push({ sql: `${col} != $PARAM`, vals: [val] });
+            }
+            return builder;
+          },
+          order: (col: string, opts?: { ascending?: boolean }) => {
+            const dir = opts?.ascending === false ? 'desc' : 'asc';
+            orderStatement = `order by ${col} ${dir}`;
+            return builder;
+          },
+          limit: (n: number) => {
+            limitCount = n;
+            return builder;
+          },
+          _execute: async (limitOne = false) => {
+            const allVals: any[] = [];
+            let whereClause = '';
+            if (filters.length > 0) {
+              const parts = filters.map(f => {
+                let s = f.sql;
+                for (const v of f.vals) {
+                  allVals.push(v);
+                  s = s.replace('$PARAM', `$${allVals.length}`);
+                }
+                return s;
+              });
+              whereClause = `where ${parts.join(' and ')}`;
+            }
+            let query = `select * from public.${table} ${whereClause} ${orderStatement}`;
+            if (limitOne) query += ` limit 1`;
+            else if (limitCount) query += ` limit ${limitCount}`;
+            try {
+              const res = await db.query(query, allVals);
+              return { data: res.rows || [], error: null };
+            } catch (err: any) {
+              return { data: null, error: err };
+            }
+          },
+          maybeSingle: async () => {
+            const res = await builder._execute(true);
+            return { data: res.data?.[0] || null, error: res.error };
+          },
+          single: async () => {
+            const res = await builder._execute(true);
+            return { data: res.data?.[0] || null, error: res.error };
+          },
+          then: (resolve: any, reject?: any) => {
+            builder._execute().then((r: any) => resolve(r), reject);
           }
-        }),
+        };
+
+        return {
+          select: () => builder,
         insert: (row: any) => ({
-          then: (resolve: any) => {
+          then: (resolve?: any, reject?: any) => {
             const keys = Object.keys(row);
             const vals = Object.values(row);
             const cols = keys.join(', ');
             const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
             db.query(`insert into public.${table} (${cols}) values (${placeholders}) returning *`, vals)
-              .then(r => resolve({ data: r.rows[0], error: null }))
-              .catch(err => resolve({ data: null, error: err }));
+              .then(r => resolve?.({ data: r.rows[0], error: null }))
+              .catch(err => reject ? reject(err) : resolve?.({ data: null, error: err }));
           }
         }),
         update: (row: any) => ({
           eq: (col: string, val: any) => ({
             eq: (col2: string, val2: any) => ({
-              then: (resolve: any) => {
+              then: (resolve?: any, reject?: any) => {
                 const keys = Object.keys(row);
                 const vals = Object.values(row);
                 const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
                 db.query(`update public.${table} set ${setClause} where ${col} = $${keys.length + 1} and ${col2} = $${keys.length + 2} returning *`, [...vals, val, val2])
-                  .then(r => resolve({ data: r.rows, error: null }))
-                  .catch(err => resolve({ data: null, error: err }));
+                  .then(r => resolve?.({ data: r.rows, error: null }))
+                  .catch(err => reject ? reject(err) : resolve?.({ data: null, error: err }));
               }
             }),
-            then: (resolve: any) => {
+            then: (resolve?: any, reject?: any) => {
               const keys = Object.keys(row);
               const vals = Object.values(row);
               const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
               db.query(`update public.${table} set ${setClause} where ${col} = $${keys.length + 1} returning *`, [...vals, val])
-                .then(r => resolve({ data: r.rows, error: null }))
-                .catch(err => resolve({ data: null, error: err }));
+                .then(r => resolve?.({ data: r.rows, error: null }))
+                .catch(err => reject ? reject(err) : resolve?.({ data: null, error: err }));
             }
           })
         }),
@@ -381,8 +364,8 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
                 return { data: res.rows[0], error: null };
               }
             }),
-            then: async (resolve: any) => {
-              if (rows.length === 0) return resolve({ data: [], error: null });
+            then: async (resolve?: any, reject?: any) => {
+              if (rows.length === 0) return resolve?.({ data: [], error: null });
               const results: any[] = [];
               for (const row of rows) {
                 const keys = Object.keys(row);
@@ -400,15 +383,16 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
                   `, vals);
                   if (res.rows[0]) results.push(res.rows[0]);
                 } catch (err: any) {
-                  return resolve({ data: null, error: err });
+                  return reject ? reject(err) : resolve?.({ data: null, error: err });
                 }
               }
-              resolve({ data: results, error: null });
+              resolve?.({ data: results, error: null });
             }
           };
         }
-      }),
-      rpc: async (funcName: string, args: any) => {
+      };
+    },
+    rpc: async (funcName: string, args: any) => {
         if (funcName === 'importer_replace_pages') {
           const res = await db.query('SELECT importer_replace_pages($1,$2::jsonb) count', [args.p_chapter_id, JSON.stringify(args.p_pages)]);
           return { data: res.rows[0].count, error: null };

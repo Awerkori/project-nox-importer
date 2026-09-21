@@ -563,6 +563,7 @@ export class KuroAdapter implements SourceAdapter {
     if (s.includes('complet')) status = 'COMPLETED';
     else if (s.includes('hiat')) status = 'HIATUS';
     else if (s.includes('cancel')) status = 'CANCELLED';
+    else if (s.includes('ongo') || s.includes('andamento') || s.includes('releasing') || s.includes('ativo') || s.includes('lancamento') || s.includes('lançamento')) status = 'ONGOING';
 
     return {
       sourceWorkId: String(manga.id),

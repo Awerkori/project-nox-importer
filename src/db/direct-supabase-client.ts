@@ -39,34 +39,117 @@ export class DirectSupabaseClient implements SqlClient {
         const barrierSetting = await this.pool.query(
           "SELECT value FROM settings WHERE key = 'publication_safety_barrier' LIMIT 1"
         );
-        const state = barrierSetting.rows[0]?.value || 'CLOSED';
-        if (state === 'OPEN') {
+        const state = (barrierSetting.rows[0]?.value || 'CLOSED').toUpperCase();
+        if (state === 'EMERGENCY_HALT') {
           return {
-            data: [{ can_publish: true, reason: 'SAFETY_BARRIER_OPEN', blocking_count: 0, blocking_sort_keys: [] }],
+            data: [{ can_publish: false, reason: 'EMERGENCY_HALT_ACTIVE', blocking_count: 1, blocking_sort_keys: [] }],
             error: null,
           };
         }
 
-        const res = await this.pool.query(`
-          SELECT
-            CASE
-              WHEN COUNT(*) = 0 THEN TRUE
-              ELSE FALSE
-            END AS can_publish,
-            COUNT(*)::int AS blocking_count,
-            COALESCE(ARRAY_AGG(chapter_sort_key), ARRAY[]::numeric[]) AS blocking_sort_keys,
-            CASE
-              WHEN COUNT(*) = 0 THEN 'BARRIER_CLEAR'
-              ELSE 'UNPUBLISHED_PRECEDING_CHAPTERS'
-            END AS reason
+        const targetSortKey = Number(args.p_target_sort_key);
+        const workId = args.p_work_id;
+
+        // 1. Check for any preceding incomplete chapters in mappings for this work
+        const precRes = await this.pool.query(`
+          SELECT chapter_sort_key
           FROM importer_chapter_mappings
           WHERE work_id = $1::uuid
             AND chapter_sort_key < $2::numeric
             AND status != 'COMPLETED'
             AND is_gap IS NOT TRUE
-        `, [args.p_work_id, args.p_target_sort_key]);
+          ORDER BY chapter_sort_key ASC
+        `, [workId, targetSortKey]);
 
-        return { data: res.rows || [], error: null };
+        if (precRes.rows.length > 0) {
+          const blockingKeys = precRes.rows.map((r: any) => parseFloat(r.chapter_sort_key));
+          return {
+            data: [{
+              can_publish: false,
+              reason: 'UNPUBLISHED_PRECEDING_CHAPTERS',
+              blocking_count: precRes.rows.length,
+              blocking_sort_keys: blockingKeys,
+            }],
+            error: null,
+          };
+        }
+
+        // 2. Continuity & Gap Check against published chapters
+        const pubRes = await this.pool.query(`
+          SELECT COALESCE(MAX(number), -1) as max_published
+          FROM chapters
+          WHERE work_id = $1::uuid
+            AND published_at IS NOT NULL
+        `, [workId]);
+
+        const maxPublished = parseFloat(pubRes.rows[0]?.max_published ?? '-1');
+
+        if (maxPublished < 0) {
+          // No published chapters yet: only initial chapters (<= 1.5) or explicit gaps are allowed
+          if (targetSortKey > 1.5) {
+            const initCheck = await this.pool.query(`
+              SELECT
+                COUNT(CASE WHEN chapter_sort_key <= 1.5 AND is_gap IS NOT TRUE THEN 1 END) as init_count,
+                COUNT(CASE WHEN chapter_sort_key < $2::numeric AND is_gap IS TRUE THEN 1 END) as gap_count
+              FROM importer_chapter_mappings
+              WHERE work_id = $1::uuid
+            `, [workId, targetSortKey]);
+
+            const initCount = parseInt(initCheck.rows[0]?.init_count || '0', 10);
+            const gapCount = parseInt(initCheck.rows[0]?.gap_count || '0', 10);
+
+            if (initCount > 0 || gapCount === 0) {
+              return {
+                data: [{
+                  can_publish: false,
+                  reason: initCount > 0 ? 'WAITING_FOR_INITIAL_CHAPTERS' : 'UNRESOLVED_GAP',
+                  blocking_count: 1,
+                  blocking_sort_keys: [1.0],
+                }],
+                error: null,
+              };
+            }
+          }
+        } else if (targetSortKey > maxPublished) {
+          const step = targetSortKey - maxPublished;
+          if (step > 1.5) {
+            // Step anomaly: check if intermediate chapters exist and if gaps are registered
+            const gapCheck = await this.pool.query(`
+              SELECT
+                COUNT(CASE WHEN is_gap IS NOT TRUE AND status != 'COMPLETED' THEN 1 END) as pending_intermediate,
+                COUNT(CASE WHEN is_gap IS TRUE THEN 1 END) as gap_count
+              FROM importer_chapter_mappings
+              WHERE work_id = $1::uuid
+                AND chapter_sort_key > $2::numeric
+                AND chapter_sort_key < $3::numeric
+            `, [workId, maxPublished, targetSortKey]);
+
+            const pendingIntermediate = parseInt(gapCheck.rows[0]?.pending_intermediate || '0', 10);
+            const gapCount = parseInt(gapCheck.rows[0]?.gap_count || '0', 10);
+
+            if (pendingIntermediate > 0 || gapCount === 0) {
+              return {
+                data: [{
+                  can_publish: false,
+                  reason: pendingIntermediate > 0 ? 'UNPUBLISHED_PRECEDING_CHAPTERS' : 'UNRESOLVED_GAP',
+                  blocking_count: pendingIntermediate > 0 ? pendingIntermediate : Math.max(1, Math.floor(step) - 1),
+                  blocking_sort_keys: [],
+                }],
+                error: null,
+              };
+            }
+          }
+        }
+
+        return {
+          data: [{
+            can_publish: true,
+            reason: 'BARRIER_CLEAR',
+            blocking_count: 0,
+            blocking_sort_keys: [],
+          }],
+          error: null,
+        };
       }
 
       if (fn === 'importer_prune_telemetry') {

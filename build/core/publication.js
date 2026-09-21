@@ -100,6 +100,13 @@ export class PublicationBarrier {
                     blockingCount: check.blockingCount,
                     blockingSortKeys: check.blockingSortKeys,
                 });
+                if (check.reason.includes('GAP') || check.reason.includes('WAITING')) {
+                    await this.supabase
+                        .from('importer_chapter_mappings')
+                        .update({ status: 'WAITING_FOR_GAP', updated_at: new Date().toISOString() })
+                        .eq('chapter_id', chapterId)
+                        .eq('status', 'STAGED');
+                }
                 return { published: false, reason: check.reason };
             }
             // Barrier cleared! Publish this chapter
@@ -121,11 +128,17 @@ export class PublicationBarrier {
             .eq('id', workId)
             .maybeSingle();
         const existingLatest = workInfo?.latest_chapter_published_at;
-        // 1. Mark public.chapters.published_at (ALWAYS REAL TIMESTAMP) and is_fresh_release
+        // 1. Mark public.chapters.published_at (preserving existing published_at if already published)
+        const { data: existingCh } = await this.supabase
+            .from('chapters')
+            .select('published_at')
+            .eq('id', chapterId)
+            .maybeSingle();
+        const finalPublishedAt = existingCh?.published_at || publishedAtIso;
         const { error: chErr } = await this.supabase
             .from('chapters')
             .update({
-            published_at: publishedAtIso,
+            published_at: finalPublishedAt,
             is_fresh_release: isFreshRelease,
         })
             .eq('id', chapterId);
@@ -211,12 +224,12 @@ export class PublicationBarrier {
     async runCascadeUnderLock(workId, maxBatch = 8) {
         let cascadeCount = 0;
         while (cascadeCount < maxBatch) {
-            // Find the next STAGED chapter with lowest sort key
+            // Find the next STAGED or WAITING_FOR_GAP chapter with lowest sort key
             const { data: stagedList, error } = await this.supabase
                 .from('importer_chapter_mappings')
                 .select('chapter_id, chapter_sort_key, chapter_number')
                 .eq('work_id', workId)
-                .eq('status', 'STAGED')
+                .in('status', ['STAGED', 'WAITING_FOR_GAP'])
                 .order('chapter_sort_key', { ascending: true })
                 .limit(1);
             if (error || !stagedList || stagedList.length === 0) {

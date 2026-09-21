@@ -34,7 +34,8 @@ describe('Publication Barrier & Canonical Ordering', () => {
     const files = readdirSync(mangaMigrationsDir).filter((f) => f.endsWith('.sql')).sort();
     for (const f of files) {
       const sql = readFileSync(resolve(mangaMigrationsDir, f), 'utf8')
-        .replace('create extension if not exists pgcrypto;', '');
+        .replace('create extension if not exists pgcrypto;', '')
+        .replace(/create\s+index\s+concurrently/gi, 'create index');
       await db.exec(sql);
     }
     await db.exec(readFileSync(resolve('migrations/001_importer_schema.sql'), 'utf8'));
@@ -45,6 +46,7 @@ describe('Publication Barrier & Canonical Ordering', () => {
     await db.exec(readFileSync(resolve('migrations/006_importer_publication_barrier.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/007_importer_lease_recovery.sql'), 'utf8'));
     await db.exec(`ALTER TABLE public.works ADD COLUMN IF NOT EXISTS latest_chapter_published_at timestamptz;`);
+    await db.exec(`ALTER TABLE public.chapters ADD COLUMN IF NOT EXISTS is_fresh_release boolean default true;`);
 
     // Insert bot user into auth.users
     await db.query(`insert into auth.users (id, email) values ($1, 'bot@projectnox.app')`, [testUserId]);
@@ -95,6 +97,14 @@ describe('Publication Barrier & Canonical Ordering', () => {
           not: (col: string, op: string, val: any) => {
             if (op === 'is' && val === null) {
               filterStatements.push({ sql: `${col} is not null`, vals: [] });
+            }
+            return builder;
+          },
+          in: (col: string, vals: any[]) => {
+            if (!vals || vals.length === 0) {
+              filterStatements.push({ sql: `1 = 0`, vals: [] });
+            } else {
+              filterStatements.push({ sql: `${col} = ANY($${filterStatements.length + 1})`, vals: [vals] });
             }
             return builder;
           },
@@ -155,6 +165,50 @@ describe('Publication Barrier & Canonical Ordering', () => {
               then: (resolveFn: any, rejectFn?: any) => executeUpdate().then(resolveFn, rejectFn),
             };
             return updateBuilder;
+          },
+          maybeSingle: async () => {
+            const allVals: any[] = [];
+            let whereClause = '';
+            if (filterStatements.length > 0) {
+              const parts = filterStatements.map((f) => {
+                let s = f.sql;
+                for (const v of f.vals) {
+                  allVals.push(v);
+                  s = s.replace(/\$\d+/, `$${allVals.length}`);
+                }
+                return s;
+              });
+              whereClause = `where ${parts.join(' and ')}`;
+            }
+            let query = `select ${selectedColumns} from public.${table} ${whereClause} ${orderStatement} limit 1`;
+            try {
+              const res = await db.query(query, allVals);
+              return { data: res.rows[0] || null, error: null };
+            } catch (err: any) {
+              return { data: null, error: err };
+            }
+          },
+          single: async () => {
+            const allVals: any[] = [];
+            let whereClause = '';
+            if (filterStatements.length > 0) {
+              const parts = filterStatements.map((f) => {
+                let s = f.sql;
+                for (const v of f.vals) {
+                  allVals.push(v);
+                  s = s.replace(/\$\d+/, `$${allVals.length}`);
+                }
+                return s;
+              });
+              whereClause = `where ${parts.join(' and ')}`;
+            }
+            let query = `select ${selectedColumns} from public.${table} ${whereClause} ${orderStatement} limit 1`;
+            try {
+              const res = await db.query(query, allVals);
+              return { data: res.rows[0] || null, error: null };
+            } catch (err: any) {
+              return { data: null, error: err };
+            }
           },
           then: async (resolveFn: any, rejectFn?: any) => {
             const allVals: any[] = [];
@@ -360,10 +414,23 @@ describe('Publication Barrier & Canonical Ordering', () => {
     const pub6Before = await barrier.tryPublish(testWorkId, 6, ch6Id);
     expect(pub6Before.published).toBe(false);
 
-    // Cap 5 suffers definite failure: handleDefiniteFailure marks gap
+    // Cap 5 suffers definite failure: handleDefiniteFailure records UNRESOLVED GAP (sequence remains blocked!)
     await barrier.handleDefiniteFailure(testWorkId, 5, 5, 'kuro');
 
-    // Cap 6 should now be unblocked and published via cascade!
+    // Sequence remains blocked by safety barrier! Cap 6 must still NOT be published
+    const check6StillBlocked = await db.query(`select published_at from public.chapters where id = $1`, [ch6Id]);
+    expect((check6StillBlocked.rows[0] as any).published_at).toBeNull();
+
+    // Now resolve the gap explicitly (e.g. editorial review approves gap or gap marker is set)
+    await db.query(
+      `update public.importer_chapter_mappings set is_gap = true where work_id = $1 and chapter_sort_key = 5`,
+      [testWorkId]
+    );
+
+    // Now Cap 6 should unblock and publish!
+    const pub6After = await barrier.tryPublish(testWorkId, 6, ch6Id);
+    expect(pub6After.published).toBe(true);
+
     const check6After = await db.query(`select published_at from public.chapters where id = $1`, [ch6Id]);
     expect((check6After.rows[0] as any).published_at).not.toBeNull();
   });

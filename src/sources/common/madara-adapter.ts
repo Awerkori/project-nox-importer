@@ -234,6 +234,15 @@ export class MadaraAdapter implements SourceAdapter {
     const genreMatches = Array.from(html.matchAll(/href="[^"]*(?:\/manga-genre\/|\/genero\/)[^"]*"[^>]*>([^<]+)<\/a>/gi));
     const genres = genreMatches.map((m) => stripHtml(m[1])).filter(Boolean);
 
+    // Alternative Titles
+    let alternativeTitles: string[] = [];
+    const altRegex = /(?:outro\(s\)\s*nome\(s\)|alternative\s*(?:titles?)?|alt\s*name|other\s*names?|nomes\s*alternativos)[^<]*<\/(?:h[345]|div|span|strong|b)>[\s\S]*?<div[^>]*class="[^"]*summary-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
+    const altMatch = html.match(altRegex);
+    if (altMatch) {
+      const rawAlt = stripHtml(altMatch[1]);
+      alternativeTitles = rawAlt.split(/[,;\/\n\r]+/).map(s => decodeHtmlEntities(s.trim())).filter(s => s.length > 1);
+    }
+
     return {
       sourceWorkId,
       slug: slugify(sourceWorkId),
@@ -244,6 +253,7 @@ export class MadaraAdapter implements SourceAdapter {
       artist,
       status,
       genres: genres.length > 0 ? Array.from(new Set(genres)) : undefined,
+      alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
     };
   }
 

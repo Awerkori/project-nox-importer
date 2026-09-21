@@ -22,7 +22,7 @@ UPDATE importer_sources
 SET
   status = 'TEMPORARILY_UNAVAILABLE',
   blocked_reason = 'Domain migrated',
-  blocked_details = 'mangaonline.red redirects to mangaonline.love which is currently unreachable (verified 2026-09-14)',
+  blocked_details = jsonb_build_object('reason', 'mangaonline.red redirects to mangaonline.love which is currently unreachable (verified 2026-09-14)'),
   cooldown_until = NOW() + INTERVAL '24 hours',
   updated_at = NOW()
 WHERE id = 'mangaonline';

@@ -474,6 +474,8 @@ export class KuroAdapter {
             status = 'HIATUS';
         else if (s.includes('cancel'))
             status = 'CANCELLED';
+        else if (s.includes('ongo') || s.includes('andamento') || s.includes('releasing') || s.includes('ativo') || s.includes('lancamento') || s.includes('lançamento'))
+            status = 'ONGOING';
         return {
             sourceWorkId: String(manga.id),
             title: manga.title,

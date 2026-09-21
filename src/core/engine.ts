@@ -367,7 +367,7 @@ export class ImporterEngine {
     if (error || !sources) return;
 
     for (const src of sources) {
-      if (!src.enabled || (src as any).catalog_discovery_enabled !== true || src.status !== 'ACTIVE') continue;
+      if (!src.enabled || (src as any).catalog_discovery_enabled === false || (src as any).catalog_discovery_enabled === 0 || src.status !== 'ACTIVE') continue;
 
       const checkpoint = await this.checkpoints.getCheckpoint(src.id);
       // If completed pass, allow re-scan only after 12 hours
@@ -1287,7 +1287,8 @@ export class ImporterEngine {
     for (const src of sources) {
       if (
         src.enabled === false ||
-        ((src as any).catalog_discovery_enabled !== true && (src as any).catalog_discovery_enabled !== 1) ||
+        (src as any).catalog_discovery_enabled === false ||
+        (src as any).catalog_discovery_enabled === 0 ||
         src.status === 'DISABLED' ||
         src.status === 'PAUSED' ||
         src.status === 'UPSTREAM_BLOCKED'
@@ -2113,6 +2114,42 @@ export class ImporterEngine {
       const watermark = await this.scheduler.getWatermark(result.workId, job.source);
       const isWorkAlreadyOnSite = (publishedChapters && publishedChapters.length > 0) || false;
 
+      // Admission policy for new works cohort (P2 active new works bounded to maxActiveNewWorks <= 4)
+      let isAdmitted = isWorkAlreadyOnSite || isStaffPriority;
+      if (!isAdmitted) {
+        const config = this.schedulerStateStore.getConfig();
+        const activeNewWorks = this.schedulerStateStore.getActiveWorks().filter(
+          (w) => w.lane === 'P2' && w.state === 'FILLING'
+        );
+        if (activeNewWorks.length < config.maxActiveNewWorks) {
+          isAdmitted = true;
+          this.schedulerStateStore.setActiveWork({
+            workId: result.workId,
+            workTitle: (result as any).work?.title || 'Unknown Title',
+            lane: 'P2',
+            state: 'FILLING',
+            primarySource: job.source,
+            admittedAt: new Date().toISOString(),
+            lastActivityAt: new Date().toISOString(),
+            totalChapters: chaptersToEnqueue.length,
+            publishedChapters: 0,
+            queuedChapters: Math.min(chaptersToEnqueue.length, config.slidingWindowSize || 8),
+            inFlightChapters: 0,
+            frontierSortKey: null,
+            criticalGapSortKey: null,
+            criticalGapUnblockCount: 0,
+          });
+        }
+      }
+
+      // P3 discoveries must NOT flood the queue. If not admitted, set WAITING_ADMISSION.
+      if (!isAdmitted) {
+        await this.supabase
+          .from('importer_work_mappings')
+          .update({ sync_status: 'WAITING_ADMISSION' })
+          .eq('id', result.mappingId);
+      }
+
       // 2. Batch enqueue tasks to importer_queue with Work-Oriented Priority & Sliding Window
       const queueJobs = chaptersToEnqueue.map((ch, idx) => {
         const dedupeKey = `${job.source}:chapter:${ch.sourceChapterId}`;
@@ -2133,13 +2170,19 @@ export class ImporterEngine {
           priority = 75;
           isFreshRelease = false;
         } else {
-          // P2: New work initial fill
+          // P2: New work initial fill (dormant until admitted)
           priority = 50;
           isFreshRelease = false;
         }
 
-        // Sliding window: only first 8 chapters into QUEUED, rest into PAUSED_BY_STAFF
-        const status = (isFreshRelease || idx < 8) ? 'QUEUED' : 'PAUSED_BY_STAFF';
+        // Sliding window: only admitted works or staff/fresh releases can start in QUEUED (first 8 chapters).
+        // Works waiting for cohort admission stay completely in PAUSED_BY_STAFF.
+        let status: 'QUEUED' | 'PAUSED_BY_STAFF' = 'PAUSED_BY_STAFF';
+        if (isStaffPriority || isFreshRelease) {
+          status = 'QUEUED';
+        } else if (isAdmitted && idx < 8) {
+          status = 'QUEUED';
+        }
 
         return {
           taskType: 'IMPORT_CHAPTER' as const,
@@ -2775,7 +2818,7 @@ export class ImporterEngine {
                     botUserId,
                     'editorial',
                     targetChapterId,
-                    { skipDbInsert: true, skipDedupLookup: true }
+                    { skipDbInsert: true, skipDedupLookup: !job.payload?.readerRepair }
                   );
                 } finally {
                   telemetryCollector.trackActiveTelegramUpload(-1);
@@ -2799,7 +2842,7 @@ export class ImporterEngine {
                 height: res.height,
               };
 
-              if (res.mediaRecord) {
+              if (res.mediaRecord && !res.reused) {
                 mediaRecordsToInsert.push(res.mediaRecord);
               }
 
