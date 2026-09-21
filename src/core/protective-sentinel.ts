@@ -312,7 +312,7 @@ export class ProtectiveSentinel {
       const req = mod.get(
         url,
         {
-          agent: isHttps ? this.httpAgent : undefined,
+          agent: false,
           headers: { 'User-Agent': 'Project-Nox-Sentinel/1.0 (Auto-Resume Probe)' },
           timeout: 4000,
         },
@@ -409,7 +409,7 @@ export class ProtectiveSentinel {
       const req = mod.get(
         url,
         {
-          agent: isHttps ? this.httpAgent : undefined,
+          agent: false,
           headers: { 'User-Agent': 'Project-Nox-Sentinel/1.0 (Pre-SLA Monitor)' },
           timeout: 5000,
         },
@@ -432,12 +432,8 @@ export class ProtectiveSentinel {
       );
 
       req.on('error', async (err: any) => {
-        try {
-          this.httpAgent.destroy();
-          this.httpAgent = new https.Agent({ keepAlive: true, maxSockets: 5 });
-        } catch {}
         if (!isRetry && (err?.message?.includes('socket hang up') || err?.code === 'ECONNRESET')) {
-          this.logger.info(`Transient keepalive reset on ${label} probe, retrying with fresh socket...`);
+          this.logger.info(`Transient reset on ${label} probe, retrying with fresh socket...`);
           return this.probeSiteLatency(label, url, thresholdMs, slaTargetMs, true).then(resolve);
         }
         await this.handleProbeError(label, url, err);
@@ -504,12 +500,31 @@ export class ProtectiveSentinel {
   private async handleProbeError(label: 'home' | 'reader' | 'media', url: string, err: any): Promise<void> {
     const count = (this.consecutivePreSlaViolations.get(label) || 0) + 1;
     this.consecutivePreSlaViolations.set(label, count);
-    if (count >= 4) {
-      this.consecutivePreSlaViolations.set(label, 0);
-      await this.triggerProtectiveStop(
-        `Pre-SLA Health Probe Failed on ${label.toUpperCase()} (${count} consecutive failures): ${err?.message}`,
-        { label, url, error: err?.message }
-      );
+
+    // Check for correlated importer pressure
+    const mem = diagnostics.getMemorySnapshot();
+    const lagMetrics = (diagnostics as any).lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
+    let activeConns = 0;
+    try {
+      const pool = getYugabytePool();
+      const cRes = await pool.query('SELECT count(*) FROM pg_stat_activity');
+      activeConns = parseInt(cRes.rows[0]?.count || '0', 10);
+    } catch {}
+
+    const hasInfraPressure = activeConns >= 10 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
+
+    if (count >= 5) {
+      if (hasInfraPressure) {
+        this.consecutivePreSlaViolations.set(label, 0);
+        await this.triggerProtectiveStop(
+          `Pre-SLA Health Probe Failed on ${label.toUpperCase()} (${count} consecutive failures) with Correlated Importer Pressure: ${err?.message} (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms)`,
+          { label, url, error: err?.message, activeConns, rssMb: mem.rssMb, lagMs: lagMetrics.avgLagMs }
+        );
+      } else {
+        this.logger.warn(
+          `[EDGE_PROBE_ERROR_WARNING] Health probe on ${label} (${url}) failed (${count} consecutive): ${err?.message}, but importer infra is healthy (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB). Observing without tripping PROTECTIVE_STOP.`
+        );
+      }
     }
   }
 }
