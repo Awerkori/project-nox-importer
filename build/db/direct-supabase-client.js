@@ -7,6 +7,9 @@ export class DirectSupabaseClient {
     constructor(pool) {
         this.pool = pool || getYugabytePool();
     }
+    getPool() {
+        return this.pool;
+    }
     from(table) {
         return new QueryBuilder(this, table);
     }

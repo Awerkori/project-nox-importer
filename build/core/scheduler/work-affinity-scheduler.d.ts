@@ -42,7 +42,7 @@ export declare class WorkAffinityScheduler {
     private lastFreshReleaseTime;
     private lastBackfillPublicationTime;
     private watchdogRunning;
-    constructor(stateStore: SchedulerStateStore, admissionController: AdmissionController, protectiveSentinel: ProtectiveSentinel);
+    constructor(stateStore: SchedulerStateStore, admissionController: AdmissionController, protectiveSentinel: ProtectiveSentinel, pool?: any);
     /**
      * Initializes state and synchronizes in-flight counts from DB.
      */
@@ -80,6 +80,12 @@ export declare class WorkAffinityScheduler {
      * Core intelligent claim logic implementing P0 -> P1 -> P2 -> Fallback.
      */
     private executeIntelligentClaim;
+    /**
+     * Helper to atomically claim 1 P1 job for ANY existing catalog work with SKIP LOCKED.
+     * Strictly restricts to published works (w.published = true) on active, enabled sources.
+     * Enforces that P1 work across the catalog is processed before ANY P2 work!
+     */
+    private claimCatalogP1Job;
     /**
      * Helper to atomically claim 1 job with SKIP LOCKED.
      * Ensures the source is enabled, active, and not in cooldown.
