@@ -218,7 +218,7 @@ export class AdmissionController {
              AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
              AND w.published = true
              AND w.latest_chapter_published_at IS NOT NULL
-             AND s.enabled = 1
+             AND s.enabled = true
              AND s.status = 'ACTIVE'
              AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
@@ -279,7 +279,7 @@ export class AdmissionController {
            WHERE q.task_type = 'IMPORT_CHAPTER'
              AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
              AND (w.published IS FALSE OR w.latest_chapter_published_at IS NULL)
-             AND s.enabled = 1
+             AND s.enabled = true
              AND s.status = 'ACTIVE'
              AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
