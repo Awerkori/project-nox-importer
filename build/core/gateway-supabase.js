@@ -322,29 +322,7 @@ export class GatewaySupabaseClient {
                 }
                 const targetSortKey = Number(args.p_target_sort_key);
                 const workId = args.p_work_id;
-                // 1. Check for any preceding incomplete chapters in mappings for this work
-                const precRes = await this.gateway.sql(`
-          SELECT chapter_sort_key
-          FROM importer_chapter_mappings
-          WHERE work_id = $1::uuid
-            AND chapter_sort_key < $2::numeric
-            AND status != 'COMPLETED'
-            AND is_gap IS NOT TRUE
-          ORDER BY chapter_sort_key ASC
-        `, [workId, targetSortKey]);
-                if (precRes.rows.length > 0) {
-                    const blockingKeys = precRes.rows.map((r) => parseFloat(r.chapter_sort_key));
-                    return {
-                        data: [{
-                                can_publish: false,
-                                reason: 'UNPUBLISHED_PRECEDING_CHAPTERS',
-                                blocking_count: precRes.rows.length,
-                                blocking_sort_keys: blockingKeys,
-                            }],
-                        error: null,
-                    };
-                }
-                // 2. Continuity & Gap Check against published chapters
+                // 1. Get current highest published chapter in the canonical chapters table
                 const pubRes = await this.gateway.sql(`
           SELECT COALESCE(MAX(number), -1) as max_published
           FROM chapters
@@ -352,23 +330,24 @@ export class GatewaySupabaseClient {
             AND published_at IS NOT NULL
         `, [workId]);
                 const maxPublished = parseFloat(pubRes.rows[0]?.max_published ?? '-1');
+                // Case A: Initial publication (no published chapters yet)
                 if (maxPublished < 0) {
-                    // No published chapters yet: only initial chapters (<= 1.5) or explicit gaps are allowed
                     if (targetSortKey > 1.5) {
+                        // Check if initial chapter (1.0 or <= 1.5) exists and is pending
                         const initCheck = await this.gateway.sql(`
               SELECT
-                COUNT(CASE WHEN chapter_sort_key <= 1.5 AND is_gap IS NOT TRUE THEN 1 END) as init_count,
-                COUNT(CASE WHEN chapter_sort_key < $2::numeric AND is_gap IS TRUE THEN 1 END) as gap_count
+                COUNT(CASE WHEN chapter_sort_key <= 1.5 AND is_gap IS NOT TRUE AND status != 'COMPLETED' THEN 1 END) as init_count,
+                COUNT(CASE WHEN chapter_sort_key <= 1.5 AND is_gap IS TRUE THEN 1 END) as gap_count
               FROM importer_chapter_mappings
               WHERE work_id = $1::uuid
-            `, [workId, targetSortKey]);
+            `, [workId]);
                         const initCount = parseInt(initCheck.rows[0]?.init_count || '0', 10);
                         const gapCount = parseInt(initCheck.rows[0]?.gap_count || '0', 10);
-                        if (initCount > 0 || gapCount === 0) {
+                        if (initCount > 0 && gapCount === 0) {
                             return {
                                 data: [{
                                         can_publish: false,
-                                        reason: initCount > 0 ? 'WAITING_FOR_INITIAL_CHAPTERS' : 'UNRESOLVED_GAP',
+                                        reason: 'WAITING_FOR_INITIAL_CHAPTERS',
                                         blocking_count: 1,
                                         blocking_sort_keys: [1.0],
                                     }],
@@ -376,33 +355,101 @@ export class GatewaySupabaseClient {
                             };
                         }
                     }
+                    return {
+                        data: [{
+                                can_publish: true,
+                                reason: 'INITIAL_CHAPTER_CLEAR',
+                                blocking_count: 0,
+                                blocking_sort_keys: [],
+                            }],
+                        error: null,
+                    };
                 }
-                else if (targetSortKey > maxPublished) {
-                    const step = targetSortKey - maxPublished;
-                    if (step > 1.5) {
-                        // Step anomaly: check if intermediate chapters exist and if gaps are registered
-                        const gapCheck = await this.gateway.sql(`
-              SELECT
-                COUNT(CASE WHEN is_gap IS NOT TRUE AND status != 'COMPLETED' THEN 1 END) as pending_intermediate,
-                COUNT(CASE WHEN is_gap IS TRUE THEN 1 END) as gap_count
-              FROM importer_chapter_mappings
-              WHERE work_id = $1::uuid
-                AND chapter_sort_key > $2::numeric
-                AND chapter_sort_key < $3::numeric
-            `, [workId, maxPublished, targetSortKey]);
-                        const pendingIntermediate = parseInt(gapCheck.rows[0]?.pending_intermediate || '0', 10);
-                        const gapCount = parseInt(gapCheck.rows[0]?.gap_count || '0', 10);
-                        if (pendingIntermediate > 0 || gapCount === 0) {
-                            return {
-                                data: [{
-                                        can_publish: false,
-                                        reason: pendingIntermediate > 0 ? 'UNPUBLISHED_PRECEDING_CHAPTERS' : 'UNRESOLVED_GAP',
-                                        blocking_count: pendingIntermediate > 0 ? pendingIntermediate : Math.max(1, Math.floor(step) - 1),
-                                        blocking_sort_keys: [],
-                                    }],
-                                error: null,
-                            };
-                        }
+                // Case B: Backfill / Repair publication (targetSortKey <= maxPublished)
+                // Backfills fill in past missing slots and must always be allowed to publish.
+                if (targetSortKey <= maxPublished) {
+                    return {
+                        data: [{
+                                can_publish: true,
+                                reason: 'BACKFILL_CLEAR',
+                                blocking_count: 0,
+                                blocking_sort_keys: [],
+                            }],
+                        error: null,
+                    };
+                }
+                // Case C: Frontier advancement (targetSortKey > maxPublished)
+                const step = targetSortKey - maxPublished;
+                // C1: Normal sequential progression (step <= 1.05)
+                if (step <= 1.05) {
+                    return {
+                        data: [{
+                                can_publish: true,
+                                reason: 'BARRIER_CLEAR',
+                                blocking_count: 0,
+                                blocking_sort_keys: [],
+                            }],
+                        error: null,
+                    };
+                }
+                // C2: Potential gap (step > 1.05). Check only intermediate chapters strictly between maxPublished and targetSortKey.
+                const gapCheck = await this.gateway.sql(`
+          SELECT DISTINCT m.chapter_sort_key
+          FROM importer_chapter_mappings m
+          WHERE m.work_id = $1::uuid
+            AND m.chapter_sort_key > $2::numeric
+            AND m.chapter_sort_key < $3::numeric
+            AND m.is_gap IS NOT TRUE
+            -- Exclude if already published in canonical chapters table
+            AND NOT EXISTS (
+              SELECT 1 FROM chapters c
+              WHERE c.work_id = m.work_id
+                AND c.number = m.chapter_sort_key
+                AND c.published_at IS NOT NULL
+            )
+            -- Exclude if already completed by ANY provider mapping
+            AND NOT EXISTS (
+              SELECT 1 FROM importer_chapter_mappings m2
+              WHERE m2.work_id = m.work_id
+                AND m2.chapter_sort_key = m.chapter_sort_key
+                AND m2.status = 'COMPLETED'
+            )
+          ORDER BY m.chapter_sort_key ASC
+        `, [workId, maxPublished, targetSortKey]);
+                if (gapCheck.rows.length > 0) {
+                    const blockingKeys = gapCheck.rows.map((r) => parseFloat(r.chapter_sort_key));
+                    return {
+                        data: [{
+                                can_publish: false,
+                                reason: 'UNPUBLISHED_PRECEDING_CHAPTERS',
+                                blocking_count: gapCheck.rows.length,
+                                blocking_sort_keys: blockingKeys,
+                            }],
+                        error: null,
+                    };
+                }
+                // If no uncompleted mapping rows exist between maxPublished and targetSortKey,
+                // but step is large (e.g. integer skip with no mappings at all), check if an explicit gap is registered.
+                if (step > 1.5) {
+                    const explicitGapCheck = await this.gateway.sql(`
+            SELECT COUNT(*) as gap_count
+            FROM importer_chapter_mappings
+            WHERE work_id = $1::uuid
+              AND chapter_sort_key > $2::numeric
+              AND chapter_sort_key < $3::numeric
+              AND is_gap IS TRUE
+          `, [workId, maxPublished, targetSortKey]);
+                    const gapCount = parseInt(explicitGapCheck.rows[0]?.gap_count || '0', 10);
+                    if (gapCount === 0) {
+                        return {
+                            data: [{
+                                    can_publish: false,
+                                    reason: 'UNRESOLVED_GAP',
+                                    blocking_count: Math.max(1, Math.floor(step) - 1),
+                                    blocking_sort_keys: [],
+                                }],
+                            error: null,
+                        };
                     }
                 }
                 return {
