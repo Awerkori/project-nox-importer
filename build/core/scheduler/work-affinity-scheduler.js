@@ -268,13 +268,19 @@ export class WorkAffinityScheduler {
                 }
             }
             // -------------------------------------------------------------
-            // WORK-CONSERVING FALLBACK: Claim any available job
+            // WORK-CONSERVING FALLBACK: Claim any available job belonging to ACTIVE works
+            // If ACTIVE_NEW_WORKS = 0, unadmitted P2 works MUST NOT be claimed.
             // -------------------------------------------------------------
-            const fallbackJob = await this.claimSingleJob(client, {
-                workerId: options.workerId,
-                leaseMin,
-                allowedSources,
-            });
+            const activeWorkIds = activeWorks.map((w) => w.workId);
+            let fallbackJob = null;
+            if (activeWorkIds.length > 0) {
+                fallbackJob = await this.claimSingleJob(client, {
+                    workerId: options.workerId,
+                    leaseMin,
+                    allowedSources,
+                    allowedWorkIds: activeWorkIds,
+                });
+            }
             if (fallbackJob) {
                 const waitTimeMs = performance.now() - t0;
                 const workId = fallbackJob.payload?.workId || '';
@@ -319,6 +325,7 @@ export class WorkAffinityScheduler {
           AND ($2::int IS NULL OR q.priority >= $2::int)
           AND ($3::text IS NULL OR (q.payload->>'workId') = $3::text)
           AND ($4::numeric IS NULL OR q.chapter_sort_key = $4::numeric)
+          AND ($7::text[] IS NULL OR (q.payload->>'workId') = ANY($7::text[]))
         ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -343,6 +350,7 @@ export class WorkAffinityScheduler {
             opts.sortKey || null,
             opts.workerId,
             opts.leaseMin,
+            opts.allowedWorkIds || null,
         ]);
         if (res.rows.length === 0)
             return null;
