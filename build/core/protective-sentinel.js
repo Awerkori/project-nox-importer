@@ -393,16 +393,23 @@ export class ProtectiveSentinel {
                 activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
             }
             catch { }
-            const hasInfraPressure = totalConns >= 12 || activeConns >= 4 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
+            // True infra pressure: YSQL near exhaustion (>= 12), query pileup (active >= 8), RAM near limit (>= 380MB), or event loop blocked (>= 200ms)
+            const hasInfraPressure = totalConns >= 12 || activeConns >= 8 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
+            const isSlaBreached = ttfbMs >= slaTargetMs;
             const isSevereSustained = count >= 3 && (isStatusError || ttfbMs >= 1500);
-            if (count >= 2) {
-                if (hasInfraPressure || isSevereSustained) {
-                    this.consecutivePreSlaViolations.set(label, 0);
-                    await this.triggerProtectiveStop(`Pre-SLA Guard Rail Breached with Correlated Importer Pressure on ${label.toUpperCase()}: observed ${ttfbMs}ms (HTTP ${statusCode}) > pre-SLA threshold ${thresholdMs}ms (YSQL: ${totalConns}/13 total [${activeConns} active], RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms)`, { label, url, ttfbMs, thresholdMs, slaTargetMs, status: statusCode, totalConns, activeConns, rssMb: mem.rssMb, lagMs: lagMetrics.avgLagMs });
-                }
-                else {
-                    this.logger.warn(`[EDGE_TRANSIENT_WARNING] Route ${label} (${url}) TTFB: ${ttfbMs}ms (HTTP ${statusCode}) > threshold ${thresholdMs}ms, but importer infra is healthy (YSQL: ${totalConns}/13 total [${activeConns} active], RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms). Observing without tripping PROTECTIVE_STOP.`);
-                }
+            // Stop if:
+            // A) Actual SLA breached (>= slaTargetMs) for 2 consecutive probes WITH infra pressure, OR
+            // B) Pre-SLA threshold exceeded for 3+ consecutive probes WITH confirmed infra pressure, OR
+            // C) Severe sustained breakdown (HTTP 5xx or > 1500ms for 3+ probes)
+            const shouldTrip = (isSlaBreached && count >= 2 && hasInfraPressure) ||
+                (count >= 3 && hasInfraPressure) ||
+                isSevereSustained;
+            if (shouldTrip) {
+                this.consecutivePreSlaViolations.set(label, 0);
+                await this.triggerProtectiveStop(`Pre-SLA Guard Rail Breached with Correlated Importer Pressure on ${label.toUpperCase()}: observed ${ttfbMs}ms (HTTP ${statusCode}) > ${isSlaBreached ? `SLA target ${slaTargetMs}ms` : `threshold ${thresholdMs}ms`} (YSQL: ${totalConns}/13 total [${activeConns} active], RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms)`, { label, url, ttfbMs, thresholdMs, slaTargetMs, status: statusCode, totalConns, activeConns, rssMb: mem.rssMb, lagMs: lagMetrics.avgLagMs });
+            }
+            else if (count >= 2) {
+                this.logger.warn(`[EDGE_TRANSIENT_WARNING] Route ${label} (${url}) TTFB: ${ttfbMs}ms (HTTP ${statusCode}) > threshold ${thresholdMs}ms, but infra is within safe bounds (YSQL: ${totalConns}/13 total [${activeConns} active], RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms). Observing without tripping PROTECTIVE_STOP.`);
             }
             else {
                 this.logger.warn(`[Pre-SLA Latency Warning] Route ${label} (${url}) TTFB: ${ttfbMs}ms (HTTP ${statusCode}) > threshold ${thresholdMs}ms (SLA: ${slaTargetMs}ms). Consecutive sample: ${count}/2`);
@@ -431,7 +438,7 @@ export class ProtectiveSentinel {
             activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
         }
         catch { }
-        const hasInfraPressure = totalConns >= 12 || activeConns >= 4 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
+        const hasInfraPressure = totalConns >= 12 || activeConns >= 8 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
         if (count >= 5) {
             if (hasInfraPressure) {
                 this.consecutivePreSlaViolations.set(label, 0);
