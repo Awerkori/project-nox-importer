@@ -481,7 +481,7 @@ export class DeduplicationEngine {
             if (fieldName === 'age_rating' && isCurrentlyAdult && candidateValue < 18)
                 return false;
             // 4. If field is empty in DB, any source can fill it
-            const currentVal = work[fieldName];
+            const currentVal = fieldName === 'cover' ? work.cover_id : work[fieldName];
             const isCurrentEmpty = currentVal === null || currentVal === undefined || currentVal === '' || (Array.isArray(currentVal) && currentVal.length === 0);
             if (isCurrentEmpty)
                 return true;
@@ -565,10 +565,54 @@ export class DeduplicationEngine {
             updates.age_rating = targetAge;
             prov.age_rating = { source, updated_at: now };
         }
-        // Cover
-        if (candidate.coverId && canUpdateField('cover', candidate.coverId)) {
-            updates.cover_id = candidate.coverId;
-            prov.cover = { source, updated_at: now };
+        // Cover Precedence:
+        // MANUAL/ADMIN > HEALTHY CANONICAL > NEW VALID SOURCE > FALLBACK
+        if (candidate.coverId) {
+            if (prov.cover?.source === 'manual') {
+                this.logger.debug('Preserving manual cover for work', { workId });
+            }
+            else if (work.cover_id) {
+                // Verify if existing canonical cover is healthy in media table
+                const { data: existingMedia } = await this.supabase
+                    .from('media')
+                    .select('id, storage_ready, bytes, width, height')
+                    .eq('id', work.cover_id)
+                    .maybeSingle();
+                const isHealthy = existingMedia &&
+                    existingMedia.storage_ready === true &&
+                    (existingMedia.bytes || 0) >= 1500 &&
+                    (existingMedia.width || 0) >= 100 &&
+                    (existingMedia.height || 0) >= 140;
+                if (isHealthy) {
+                    // Preserve healthy canonical cover - do NOT overwrite
+                    this.logger.debug('Preserving healthy canonical cover for work', {
+                        workId,
+                        coverId: work.cover_id,
+                        source,
+                    });
+                }
+                else {
+                    // Existing cover is broken, corrupted or missing - repair with valid candidate cover
+                    updates.cover_id = candidate.coverId;
+                    prov.cover = { source, updated_at: now };
+                    this.logger.info('Replacing broken/unhealthy cover with valid candidate cover', {
+                        workId,
+                        oldCoverId: work.cover_id,
+                        newCoverId: candidate.coverId,
+                        source,
+                    });
+                }
+            }
+            else {
+                // Work has null cover: adopt valid candidate cover
+                updates.cover_id = candidate.coverId;
+                prov.cover = { source, updated_at: now };
+                this.logger.info('Adopting valid cover for work with null cover', {
+                    workId,
+                    coverId: candidate.coverId,
+                    source,
+                });
+            }
         }
         // Commit updates if any field changed
         if (Object.keys(updates).length > 0) {

@@ -165,8 +165,15 @@ export declare class ImporterEngine {
     private recordTelemetrySnapshot;
     private pruneTelemetry;
     private sanitizeErrorMessage;
-    private downloadAndRegisterImage;
-    private fetchImageBytes;
+    downloadAndRegisterImage(url: string, userId: string, purpose?: string, source?: string): Promise<string>;
+    fetchImageBytes(url: string, source?: string, options?: {
+        timeoutMs?: number;
+        freshConnection?: boolean;
+        refererOverride?: string;
+    }): Promise<Uint8Array>;
+    tryRawMetadataCoverFallback(raw: Record<string, any>, botUserId: string, source: string, excludeUrl?: string | null): Promise<string | null>;
+    trySiblingMappingCoverFallback(workId: string | undefined, excludeSource: string, slugOrTitle: string, botUserId: string): Promise<string | null>;
+    ensureWorkHasCover(workId: string, botUserId: string): Promise<string | null>;
     private resolveDynamicCandidateFallbacks;
     private cachedBotUserId;
     private resolveBotUserId;
