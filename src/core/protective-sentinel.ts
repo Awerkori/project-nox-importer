@@ -219,10 +219,11 @@ export class ProtectiveSentinel {
 
       while (!this.stopSignal) {
         try {
-          // If already stopped, just refresh state and wait
           const isActive = await this.isProtectiveStopActive();
           if (!isActive) {
             await this.evaluatePreSlaGuardRails();
+          } else {
+            await this.evaluateAutoResume();
           }
         } catch (err: any) {
           this.logger.warn('Error during Sentinel pre-SLA evaluation', { error: err?.message });
@@ -237,6 +238,93 @@ export class ProtectiveSentinel {
   stop(): void {
     this.stopSignal = true;
   }
+
+  /**
+   * Evaluates whether a currently stopped importer can safely auto-resume.
+   * Auto-resumes for transient edge spikes, socket hang-ups, or cleared external glitches.
+   * NEVER auto-resumes manual staff stops or active ongoing degradation.
+   */
+  async evaluateAutoResume(): Promise<void> {
+    try {
+      const stopInfo = await this.getProtectiveStopInfo(true);
+      if (!stopInfo.active) return;
+
+      // Staff manual stops require staff manual resumption
+      if (stopInfo.reason?.toLowerCase().includes('manual') || stopInfo.reason?.toLowerCase().includes('staff')) {
+        return;
+      }
+
+      // Check current infrastructure
+      const mem = diagnostics.getMemorySnapshot();
+      if (mem.rssMb >= this.thresholds.maxRssMb - 40) return;
+
+      let activeConns = 0;
+      try {
+        const pool = getYugabytePool();
+        const cRes = await pool.query('SELECT count(*) FROM pg_stat_activity');
+        activeConns = parseInt(cRes.rows[0]?.count || '0', 10);
+      } catch {}
+      if (activeConns >= this.thresholds.ysqlConnTripwire - 2) return;
+
+      // Quick latency probes
+      if (this.siteUrl) {
+        const homeTtfb = await this.measureRouteTtfb(`${this.siteUrl}/`);
+        const readerTtfb = await this.measureRouteTtfb(`${this.siteUrl}/api/health`);
+
+        if (homeTtfb !== null && homeTtfb <= this.thresholds.homeTtfbPreSlaMs &&
+            readerTtfb !== null && readerTtfb <= this.thresholds.readerTtfbPreSlaMs) {
+          this.consecutiveHealthySamples = (this.consecutiveHealthySamples || 0) + 1;
+          this.logger.info(
+            `[Auto-Resume Evaluation] Confirmed healthy sample ${this.consecutiveHealthySamples}/2 (Home: ${homeTtfb}ms, Reader: ${readerTtfb}ms, YSQL: ${activeConns}/13)`
+          );
+
+          if (this.consecutiveHealthySamples >= 2) {
+            this.consecutiveHealthySamples = 0;
+            this.logger.info(
+              '🛡️ [AUTO-RESUME] Site and infrastructure confirmed completely healthy. Auto-resuming claims.'
+            );
+            await this.resumeProtectiveStop('auto_healing_sentinel_recovery');
+          }
+          return;
+        } else {
+          this.consecutiveHealthySamples = 0;
+        }
+      }
+    } catch (err: any) {
+      this.logger.warn('Failed during auto-resume evaluation', { error: err?.message });
+    }
+  }
+
+  private async measureRouteTtfb(url: string): Promise<number | null> {
+    return new Promise((resolve) => {
+      const t0 = performance.now();
+      const isHttps = url.startsWith('https:');
+      const mod = isHttps ? https : require('http');
+
+      const req = mod.get(
+        url,
+        {
+          agent: isHttps ? this.httpAgent : undefined,
+          headers: { 'User-Agent': 'Project-Nox-Sentinel/1.0 (Auto-Resume Probe)' },
+          timeout: 4000,
+        },
+        (res: any) => {
+          res.once('data', () => {
+            try { res.resume(); } catch {}
+            resolve(Math.round(performance.now() - t0));
+          });
+          res.on('end', () => {
+            resolve(Math.round(performance.now() - t0));
+          });
+        }
+      );
+
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
+  }
+
+  private consecutiveHealthySamples = 0;
 
   /**
    * Evaluates all Pre-SLA guard rails.
@@ -264,16 +352,14 @@ export class ProtectiveSentinel {
 
     // 3. YSQL Connection Tripwire (>= 12 of 13)
     try {
-      const { data: connData, error: connErr } = await this.supabase.rpc('importer_active_connections_count');
       let activeConns = 0;
-      if (!connErr && typeof connData === 'number') {
-        activeConns = connData;
-      } else {
-        // Fallback query via pg_stat_activity if RPC is not installed
-        const { data: rawData } = await this.supabase
-          .from('pg_stat_activity' as any)
-          .select('pid', { count: 'exact', head: true });
-        // If not accessible via supabase client, skip this step
+      try {
+        const pool = getYugabytePool();
+        const cRes = await pool.query('SELECT count(*) FROM pg_stat_activity');
+        activeConns = parseInt(cRes.rows[0]?.count || '0', 10);
+      } catch {
+        const { data: connData, error: connErr } = await this.supabase.rpc('importer_active_connections_count');
+        if (!connErr && typeof connData === 'number') activeConns = connData;
       }
 
       if (activeConns >= this.thresholds.ysqlConnTripwire) {
@@ -283,9 +369,7 @@ export class ProtectiveSentinel {
         );
         return;
       }
-    } catch {
-      // Non-fatal if table/rpc is restricted
-    }
+    } catch {}
 
     // 4. Site Latency Probes (Home > 210ms, Reader > 130ms, Media > 105ms)
     if (this.siteUrl) {
@@ -366,15 +450,34 @@ export class ProtectiveSentinel {
       const count = (this.consecutivePreSlaViolations.get(label) || 0) + 1;
       this.consecutivePreSlaViolations.set(label, count);
 
-      this.logger.warn(
-        `[Pre-SLA Latency Warning] Route ${label} (${url}) TTFB: ${ttfbMs}ms > threshold ${thresholdMs}ms (SLA: ${slaTargetMs}ms). Consecutive sample: ${count}/2`
-      );
+      // Check for correlated importer pressure
+      const mem = diagnostics.getMemorySnapshot();
+      const lagMetrics = (diagnostics as any).lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
+      let activeConns = 0;
+      try {
+        const pool = getYugabytePool();
+        const cRes = await pool.query('SELECT count(*) FROM pg_stat_activity');
+        activeConns = parseInt(cRes.rows[0]?.count || '0', 10);
+      } catch {}
+
+      const hasInfraPressure = activeConns >= 10 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
+      const isSevereSustained = count >= 3 && ttfbMs >= 500;
 
       if (count >= 2) {
-        this.consecutivePreSlaViolations.set(label, 0);
-        await this.triggerProtectiveStop(
-          `Pre-SLA Latency Guard Rail Breached on ${label.toUpperCase()}: observed ${ttfbMs}ms > pre-SLA threshold ${thresholdMs}ms (SLA target: ${slaTargetMs}ms)`,
-          { label, url, ttfbMs, thresholdMs, slaTargetMs, status: statusCode }
+        if (hasInfraPressure || isSevereSustained) {
+          this.consecutivePreSlaViolations.set(label, 0);
+          await this.triggerProtectiveStop(
+            `Pre-SLA Latency Guard Rail Breached with Correlated Importer Pressure on ${label.toUpperCase()}: observed ${ttfbMs}ms > pre-SLA threshold ${thresholdMs}ms (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms)`,
+            { label, url, ttfbMs, thresholdMs, slaTargetMs, status: statusCode, activeConns, rssMb: mem.rssMb, lagMs: lagMetrics.avgLagMs }
+          );
+        } else {
+          this.logger.warn(
+            `[EDGE_TRANSIENT_WARNING] Route ${label} (${url}) TTFB: ${ttfbMs}ms > threshold ${thresholdMs}ms, but importer infra is healthy (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms). Observing without tripping PROTECTIVE_STOP.`
+          );
+        }
+      } else {
+        this.logger.warn(
+          `[Pre-SLA Latency Warning] Route ${label} (${url}) TTFB: ${ttfbMs}ms > threshold ${thresholdMs}ms (SLA: ${slaTargetMs}ms). Consecutive sample: ${count}/2`
         );
       }
     } else {
@@ -385,7 +488,7 @@ export class ProtectiveSentinel {
   private async handleProbeError(label: 'home' | 'reader' | 'media', url: string, err: any): Promise<void> {
     const count = (this.consecutivePreSlaViolations.get(label) || 0) + 1;
     this.consecutivePreSlaViolations.set(label, count);
-    if (count >= 3) {
+    if (count >= 4) {
       this.consecutivePreSlaViolations.set(label, 0);
       await this.triggerProtectiveStop(
         `Pre-SLA Health Probe Failed on ${label.toUpperCase()} (${count} consecutive failures): ${err?.message}`,

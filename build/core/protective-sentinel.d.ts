@@ -56,6 +56,14 @@ export declare class ProtectiveSentinel {
     startWatchdogLoop(): void;
     stop(): void;
     /**
+     * Evaluates whether a currently stopped importer can safely auto-resume.
+     * Auto-resumes for transient edge spikes, socket hang-ups, or cleared external glitches.
+     * NEVER auto-resumes manual staff stops or active ongoing degradation.
+     */
+    evaluateAutoResume(): Promise<void>;
+    private measureRouteTtfb;
+    private consecutiveHealthySamples;
+    /**
      * Evaluates all Pre-SLA guard rails.
      */
     evaluatePreSlaGuardRails(): Promise<void>;

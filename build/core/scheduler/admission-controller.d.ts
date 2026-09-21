@@ -37,6 +37,7 @@ export declare class AdmissionController {
     private reconcileActiveWorks;
     /**
      * Step 2: Replenishes active sets (P1 Backfill and P2 New Works) if slots are free.
+     * Work-conserving: considers actual worker utilization and elastic capacity.
      */
     private replenishActiveSets;
     /**

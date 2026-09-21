@@ -354,6 +354,7 @@ export const chapters = sqliteTable("chapters", {
     createdAt: text("created_at").notNull(),
     origin: text().notNull(),
     viewsTotal: integer("views_total").notNull(),
+    isFreshRelease: integer("is_fresh_release"),
 });
 export const importerSources = sqliteTable("importer_sources", {
     id: text().primaryKey().notNull(),

@@ -109,6 +109,9 @@ export class ImporterEngine {
     this.schedulerStateStore = new SchedulerStateStore();
     this.admissionController = new AdmissionController(this.schedulerStateStore, this.protectiveSentinel);
     this.scheduler = new WorkAffinityScheduler(this.schedulerStateStore, this.admissionController, this.protectiveSentinel);
+    this.publicationBarrier.onPublished = (isFreshRelease: boolean) => {
+      this.scheduler.recordPublication(isFreshRelease);
+    };
     const requestedMax = Math.min(
       config.MAX_CONCURRENT_CHAPTERS || 5,
       config.TESTED_CONCURRENCY_CEILING || 32
@@ -1097,6 +1100,7 @@ export class ImporterEngine {
           if (job.payload?.workId) {
             this.scheduler.onJobFinished(job.payload.workId);
           }
+          this.scheduler.recordJobCompletion();
           if (sourcePermitAcquired) {
             sourceSem.release();
           }

@@ -35,11 +35,19 @@ export declare class WorkAffinityScheduler {
     private p0Count1h;
     private p1Count1h;
     private p2Count1h;
+    private lastClaimTime;
+    private lastCompletionTime;
+    private lastAnyPublicationTime;
+    private lastFreshReleaseTime;
+    private lastBackfillPublicationTime;
+    private watchdogRunning;
     constructor(stateStore: SchedulerStateStore, admissionController: AdmissionController, protectiveSentinel: ProtectiveSentinel);
     /**
      * Initializes state and synchronizes in-flight counts from DB.
      */
     initialize(): Promise<void>;
+    recordPublication(isFreshRelease: boolean): void;
+    recordJobCompletion(): void;
     /**
      * Synchronizes in-flight job counts per work from DB at startup.
      */
@@ -58,8 +66,16 @@ export declare class WorkAffinityScheduler {
     private executeIntelligentClaim;
     /**
      * Helper to atomically claim 1 job with SKIP LOCKED.
+     * Ensures the source is enabled, active, and not in cooldown.
      */
     private claimSingleJob;
+    /**
+     * Publication Watchdog & Auto-Recovery Tree (Sections 16, 24, 25, 29).
+     * Monitors elapsed time since last publication.
+     * If eligible jobs exist and no publication occurs for 5m -> WARNING.
+     * If no publication occurs for 10m -> Triggers AUTO-RECOVERY routine!
+     */
+    private startPublicationWatchdog;
     /**
      * Shadow Mode simulation: calculates what the intelligent scheduler would choose,
      * compares with the legacy choice, and returns the legacy job.

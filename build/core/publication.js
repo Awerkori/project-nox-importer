@@ -5,6 +5,7 @@ export class PublicationBarrier {
     supabase;
     logger = new Logger('PublicationBarrier');
     workLocks = new Map();
+    onPublished;
     constructor(supabase) {
         this.supabase = supabase;
     }
@@ -120,16 +121,13 @@ export class PublicationBarrier {
             .eq('id', workId)
             .maybeSingle();
         const existingLatest = workInfo?.latest_chapter_published_at;
-        let chPublishedAt = publishedAtIso;
-        if (!isFreshRelease && existingLatest) {
-            // Historical backfill: set chapter published_at 1s before existingLatest so DB trigger
-            // update_work_latest_chapter does NOT overwrite latest_chapter_published_at!
-            chPublishedAt = new Date(new Date(existingLatest).getTime() - 1000).toISOString();
-        }
-        // 1. Mark public.chapters.published_at
+        // 1. Mark public.chapters.published_at (ALWAYS REAL TIMESTAMP) and is_fresh_release
         const { error: chErr } = await this.supabase
             .from('chapters')
-            .update({ published_at: chPublishedAt })
+            .update({
+            published_at: publishedAtIso,
+            is_fresh_release: isFreshRelease,
+        })
             .eq('id', chapterId);
         if (chErr)
             throw chErr;
@@ -152,6 +150,10 @@ export class PublicationBarrier {
             .from('works')
             .update(workUpdate)
             .eq('id', workId);
+        try {
+            this.onPublished?.(isFreshRelease);
+        }
+        catch { }
         // 4. Invalidate edge cache (only invalidate Home & Lançamentos if FRESH_RELEASE)
         try {
             const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';

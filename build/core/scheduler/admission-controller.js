@@ -121,15 +121,37 @@ export class AdmissionController {
                         work.criticalGapSortKey = null;
                         work.criticalGapUnblockCount = 0;
                     }
-                    // Check if caught up (zero queued, zero importing, zero paused remaining)
-                    if (queuedCnt === 0 && importingCnt === 0 && pausedCnt === 0) {
-                        work.state = 'CAUGHT_UP';
-                        this.logger.info(`Work ${work.workTitle} (${work.workId}) reached CAUGHT_UP state. Vacating active set slot.`, {
-                            publishedChapters: pubCnt,
-                            lane: work.lane,
-                        });
-                        this.stateStore.removeActiveWork(work.workId);
+                    // Check primary source health (Section 6: Obra bloqueada não pode consumir capacidade útil)
+                    const srcCheck = await client.query(`SELECT status, cooldown_until FROM importer_sources WHERE id = $1`, [work.primarySource]);
+                    const srcRow = srcCheck.rows[0];
+                    const isSourceBlocked = srcRow && (srcRow.status !== 'ACTIVE' || (srcRow.cooldown_until && new Date(srcRow.cooldown_until) > new Date()));
+                    if (isSourceBlocked) {
+                        if (work.state !== 'BLOCKED') {
+                            this.logger.info(`Work ${work.workTitle} (${work.workId}) marked BLOCKED (source ${work.primarySource} in cooldown/blocked). Vacating active slot.`);
+                            work.state = 'BLOCKED';
+                            this.stateStore.setActiveWork(work);
+                        }
                         continue;
+                    }
+                    else if (work.state === 'BLOCKED') {
+                        this.logger.info(`Work ${work.workTitle} (${work.workId}) unblocked as source ${work.primarySource} recovered.`);
+                        work.state = 'FILLING';
+                        this.stateStore.setActiveWork(work);
+                    }
+                    // Check if caught up (zero queued, zero importing, zero paused remaining) - Section 11 & 12
+                    if (queuedCnt === 0 && importingCnt === 0 && pausedCnt === 0 && pubCnt > 0) {
+                        const mapCheck = await client.query(`SELECT COUNT(*) as unimported FROM importer_chapter_mappings WHERE work_id = $1::uuid AND status NOT IN ('COMPLETED', 'FAILED')`, [work.workId]);
+                        const unimported = parseInt(mapCheck.rows[0]?.unimported || '0', 10);
+                        if (unimported === 0) {
+                            work.state = 'CAUGHT_UP';
+                            const beforeCount = this.stateStore.getActiveWorks().filter((w) => w.state === 'FILLING').length;
+                            this.logger.info(`[CAUGHT_UP_CYCLE] Work ${work.workTitle} (${work.workId}) reached CAUGHT_UP state (all ${pubCnt} canonical chapters published). Vacating active set slot. ACTIVE SET BEFORE: ${beforeCount} -> AFTER: ${beforeCount - 1}`, {
+                                publishedChapters: pubCnt,
+                                lane: work.lane,
+                            });
+                            this.stateStore.removeActiveWork(work.workId);
+                            continue;
+                        }
                     }
                     work.state = 'FILLING';
                     work.lastActivityAt = new Date().toISOString();
@@ -146,21 +168,39 @@ export class AdmissionController {
     }
     /**
      * Step 2: Replenishes active sets (P1 Backfill and P2 New Works) if slots are free.
+     * Work-conserving: considers actual worker utilization and elastic capacity.
      */
     async replenishActiveSets() {
         const config = this.stateStore.getConfig();
         const activeWorks = this.stateStore.getActiveWorks();
-        const activeBackfills = activeWorks.filter((w) => w.lane === 'P1');
-        const activeNewWorks = activeWorks.filter((w) => w.lane === 'P2');
-        const backfillSlotsAvailable = config.maxActiveBackfillWorks - activeBackfills.length;
-        const newWorkSlotsAvailable = config.maxActiveNewWorks - activeNewWorks.length;
-        // Track active sources for source diversity (Section 81)
-        const sourceCounts = new Map();
-        for (const w of activeWorks) {
-            sourceCounts.set(w.primarySource, (sourceCounts.get(w.primarySource) || 0) + 1);
-        }
+        // Only FILLING works consume active logical capacity (BLOCKED works do not)
+        const activeBackfills = activeWorks.filter((w) => w.lane === 'P1' && w.state === 'FILLING');
+        const activeNewWorks = activeWorks.filter((w) => w.lane === 'P2' && w.state === 'FILLING');
         const client = await this.pool.connect();
         try {
+            // Measure current worker utilization for elastic scheduling (Section 7 & 8)
+            let idleWorkers = 0;
+            try {
+                const qAct = await client.query(`SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`);
+                const importingCnt = parseInt(qAct.rows[0]?.cnt || '0', 10);
+                idleWorkers = Math.max(0, 18 - importingCnt);
+            }
+            catch { }
+            // Elastic backfill: if workers are idle, allow expanding active P1 up to 14 works
+            const targetBackfillLimit = idleWorkers >= 4
+                ? Math.min(14, config.maxActiveBackfillWorks + Math.floor(idleWorkers / 3))
+                : config.maxActiveBackfillWorks;
+            const backfillSlotsAvailable = Math.max(0, targetBackfillLimit - activeBackfills.length);
+            // P2 uses spare capacity when P1 cannot occupy available workers
+            const targetNewWorksLimit = idleWorkers >= 4
+                ? Math.min(config.maxActiveNewWorks, Math.max(2, Math.floor(idleWorkers / 2)))
+                : (activeBackfills.length < config.maxActiveBackfillWorks ? config.maxActiveNewWorks : 0);
+            const newWorkSlotsAvailable = Math.max(0, targetNewWorksLimit - activeNewWorks.length);
+            // Track active sources for source diversity (Section 81)
+            const sourceCounts = new Map();
+            for (const w of activeWorks.filter((w) => w.state === 'FILLING')) {
+                sourceCounts.set(w.primarySource, (sourceCounts.get(w.primarySource) || 0) + 1);
+            }
             // 1. Replenish P1 Backfill Works
             if (backfillSlotsAvailable > 0) {
                 const activeIds = activeWorks.map((w) => w.workId);
@@ -173,10 +213,14 @@ export class AdmissionController {
                   MIN(q.chapter_sort_key) as min_sort_key
            FROM importer_queue q
            JOIN works w ON w.id = (q.payload->>'workId')::uuid
+           JOIN importer_sources s ON s.id = q.source
            WHERE q.task_type = 'IMPORT_CHAPTER'
              AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
              AND w.published = true
              AND w.latest_chapter_published_at IS NOT NULL
+             AND s.enabled = 1
+             AND s.status = 'ACTIVE'
+             AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
            GROUP BY (q.payload->>'workId'), w.title, q.source
            ORDER BY pending_jobs ASC, queued_count DESC
@@ -186,8 +230,8 @@ export class AdmissionController {
                     if (admitted >= backfillSlotsAvailable)
                         break;
                     const srcCount = sourceCounts.get(cand.source) || 0;
-                    // Source diversity check: avoid putting more than 60% of active works on one source if others exist
-                    if (srcCount >= 6 && candidatesRes.rows.length > backfillSlotsAvailable) {
+                    const otherSourceCandidates = candidatesRes.rows.filter((r) => r.source !== cand.source);
+                    if (srcCount >= 6 && otherSourceCandidates.length > 0 && candidatesRes.rows.length > backfillSlotsAvailable) {
                         continue;
                     }
                     const newWork = {
@@ -209,15 +253,17 @@ export class AdmissionController {
                     this.stateStore.setActiveWork(newWork);
                     sourceCounts.set(cand.source, srcCount + 1);
                     admitted++;
-                    this.logger.info(`Admitted work into ACTIVE_BACKFILL_WORKS (P1)`, {
+                    const activeAfter = this.stateStore.getActiveWorks().filter((w) => w.state === 'FILLING').length;
+                    this.logger.info(`[ADMISSION_TRIGGERED] Admitted work into ACTIVE_BACKFILL_WORKS (P1). Active Set Now: ${activeAfter}`, {
                         workId: newWork.workId,
                         title: newWork.workTitle,
                         source: newWork.primarySource,
                         pendingJobs: cand.pending_jobs,
+                        admissionsTriggered: admitted,
                     });
                 }
             }
-            // 2. Replenish P2 New Works
+            // 2. Replenish P2 New Works (Work-Conserving: uses spare worker capacity)
             if (newWorkSlotsAvailable > 0) {
                 const activeIds = this.stateStore.getActiveWorks().map((w) => w.workId);
                 const candidatesRes = await client.query(`SELECT (q.payload->>'workId') as work_id,
@@ -229,19 +275,24 @@ export class AdmissionController {
                   MIN(q.chapter_sort_key) as min_sort_key
            FROM importer_queue q
            JOIN works w ON w.id = (q.payload->>'workId')::uuid
+           JOIN importer_sources s ON s.id = q.source
            WHERE q.task_type = 'IMPORT_CHAPTER'
              AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
              AND (w.published IS FALSE OR w.latest_chapter_published_at IS NULL)
+             AND s.enabled = 1
+             AND s.status = 'ACTIVE'
+             AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
            GROUP BY (q.payload->>'workId'), w.title, q.source
            ORDER BY queued_count DESC, pending_jobs ASC
-           LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], newWorkSlotsAvailable * 2]);
+           LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], newWorkSlotsAvailable * 3]);
                 let admitted = 0;
                 for (const cand of candidatesRes.rows) {
                     if (admitted >= newWorkSlotsAvailable)
                         break;
                     const srcCount = sourceCounts.get(cand.source) || 0;
-                    if (srcCount >= 6 && candidatesRes.rows.length > newWorkSlotsAvailable) {
+                    const otherSourceCandidates = candidatesRes.rows.filter((r) => r.source !== cand.source);
+                    if (srcCount >= 6 && otherSourceCandidates.length > 0 && candidatesRes.rows.length > newWorkSlotsAvailable) {
                         continue;
                     }
                     const newWork = {
@@ -263,11 +314,12 @@ export class AdmissionController {
                     this.stateStore.setActiveWork(newWork);
                     sourceCounts.set(cand.source, srcCount + 1);
                     admitted++;
-                    this.logger.info(`Admitted work into ACTIVE_NEW_WORKS (P2)`, {
+                    this.logger.info(`[ADMISSION_TRIGGERED] Admitted work into ACTIVE_NEW_WORKS (P2) via spare capacity`, {
                         workId: newWork.workId,
                         title: newWork.workTitle,
                         source: newWork.primarySource,
                         pendingJobs: cand.pending_jobs,
+                        idleWorkers,
                     });
                 }
             }
