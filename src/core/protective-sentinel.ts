@@ -1,3 +1,4 @@
+import http from 'http';
 import https from 'https';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { Logger } from './logger.js';
@@ -44,7 +45,8 @@ export class ProtectiveSentinel {
   private isRunning = false;
   private stopSignal = false;
   private consecutivePreSlaViolations = new Map<string, number>();
-  private httpAgent = new https.Agent({ keepAlive: true, maxSockets: 5 });
+  private httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 30000 });
+  private httpAgent = new http.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 30000 });
 
   constructor(
     private supabase: SupabaseClient,
@@ -285,7 +287,7 @@ export class ProtectiveSentinel {
         if (isHomeHealthy && isReaderHealthy) {
           this.consecutiveHealthySamples = (this.consecutiveHealthySamples || 0) + 1;
           this.logger.info(
-            `[Auto-Resume Evaluation] Confirmed healthy sample ${this.consecutiveHealthySamples}/2 (Home: ${homeProbe!.ttfbMs}ms [${homeProbe!.statusCode}], Reader: ${readerProbe!.ttfbMs}ms [${readerProbe!.statusCode}], YSQL: ${activeConns}/13)`
+            `[Auto-Resume Evaluation] Confirmed healthy sample ${this.consecutiveHealthySamples}/2 (Home: ${homeProbe!.ttfbMs}ms [${homeProbe!.statusCode}], Reader: ${readerProbe!.ttfbMs}ms [${readerProbe!.statusCode}], YSQL: ${totalConns}/13 total [${activeConns} active])`
           );
 
           if (this.consecutiveHealthySamples >= 2) {
@@ -298,6 +300,9 @@ export class ProtectiveSentinel {
           return;
         } else {
           this.consecutiveHealthySamples = 0;
+          this.logger.warn(
+            `[Auto-Resume Evaluation] Sample unhealthy: Home=${homeProbe?.ttfbMs}ms [${homeProbe?.statusCode}] (healthy=${isHomeHealthy}), Reader=${readerProbe?.ttfbMs}ms [${readerProbe?.statusCode}] (healthy=${isReaderHealthy}), YSQL=${totalConns}/13 total [${activeConns} active]`
+          );
         }
       }
     } catch (err: any) {
@@ -309,14 +314,13 @@ export class ProtectiveSentinel {
     return new Promise((resolve) => {
       const t0 = performance.now();
       const isHttps = url.startsWith('https:');
-      const mod = isHttps ? https : require('http');
+      const mod = isHttps ? https : http;
 
       const req = mod.get(
         url,
         {
-          agent: false,
+          agent: isHttps ? this.httpsAgent : this.httpAgent,
           headers: {
-            'Connection': 'close',
             'User-Agent': 'Project-Nox-Sentinel/1.0 (Auto-Resume Probe)',
           },
           timeout: 4000,
@@ -370,20 +374,29 @@ export class ProtectiveSentinel {
 
     // 3. YSQL Connection Tripwire (>= 12 of 13)
     try {
+      let totalConns = 0;
       let activeConns = 0;
       try {
         const pool = getYugabytePool();
-        const cRes = await pool.query('SELECT count(*) FROM pg_stat_activity');
-        activeConns = parseInt(cRes.rows[0]?.count || '0', 10);
+        const cRes = await pool.query(`
+          SELECT count(*) as total,
+                 count(*) FILTER (WHERE state = 'active') as active
+          FROM pg_stat_activity
+        `);
+        totalConns = parseInt(cRes.rows[0]?.total || '0', 10);
+        activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
       } catch {
         const { data: connData, error: connErr } = await this.supabase.rpc('importer_active_connections_count');
-        if (!connErr && typeof connData === 'number') activeConns = connData;
+        if (!connErr && typeof connData === 'number') {
+          totalConns = connData;
+          activeConns = connData;
+        }
       }
 
-      if (activeConns >= this.thresholds.ysqlConnTripwire) {
+      if (totalConns >= this.thresholds.ysqlConnTripwire) {
         await this.triggerProtectiveStop(
-          `Pre-SLA YSQL Connection Tripwire Exceeded: ${activeConns} active connections >= ${this.thresholds.ysqlConnTripwire} (limit 13)`,
-          { activeConnections: activeConns, tripwire: this.thresholds.ysqlConnTripwire }
+          `Pre-SLA YSQL Connection Tripwire Exceeded: ${totalConns} total connections (${activeConns} active) >= ${this.thresholds.ysqlConnTripwire} (limit 13)`,
+          { totalConnections: totalConns, activeConnections: activeConns, tripwire: this.thresholds.ysqlConnTripwire }
         );
         return;
       }
@@ -410,14 +423,13 @@ export class ProtectiveSentinel {
     return new Promise<void>((resolve) => {
       const t0 = performance.now();
       const isHttps = url.startsWith('https:');
-      const mod = isHttps ? https : require('http');
+      const mod = isHttps ? https : http;
 
       const req = mod.get(
         url,
         {
-          agent: false,
+          agent: isHttps ? this.httpsAgent : this.httpAgent,
           headers: {
-            'Connection': 'close',
             'User-Agent': 'Project-Nox-Sentinel/1.0 (Pre-SLA Monitor)',
           },
           timeout: 5000,

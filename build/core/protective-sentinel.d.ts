@@ -28,6 +28,7 @@ export declare class ProtectiveSentinel {
     private isRunning;
     private stopSignal;
     private consecutivePreSlaViolations;
+    private httpsAgent;
     private httpAgent;
     constructor(supabase: SupabaseClient, thresholds?: SentinelThresholds, siteUrl?: string | undefined);
     /**
