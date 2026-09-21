@@ -226,12 +226,13 @@ export class ProtectiveSentinel {
                 return;
             // Quick latency probes
             if (this.siteUrl) {
-                const homeTtfb = await this.measureRouteTtfb(`${this.siteUrl}/`);
-                const readerTtfb = await this.measureRouteTtfb(`${this.siteUrl}/api/health`);
-                if (homeTtfb !== null && homeTtfb <= this.thresholds.homeTtfbPreSlaMs &&
-                    readerTtfb !== null && readerTtfb <= this.thresholds.readerTtfbPreSlaMs) {
+                const homeProbe = await this.measureRoute(`${this.siteUrl}/`, this.thresholds.homeTtfbPreSlaMs);
+                const readerProbe = await this.measureRoute(`${this.siteUrl}/ler/46b7538b-fcb8-40ec-b3ee-cdadd2edb04c`, this.thresholds.readerTtfbPreSlaMs);
+                const isHomeHealthy = Boolean(homeProbe && homeProbe.statusCode >= 200 && homeProbe.statusCode < 400 && homeProbe.ttfbMs <= this.thresholds.homeTtfbPreSlaMs);
+                const isReaderHealthy = Boolean(readerProbe && readerProbe.statusCode >= 200 && readerProbe.statusCode < 400 && readerProbe.ttfbMs <= this.thresholds.readerTtfbPreSlaMs);
+                if (isHomeHealthy && isReaderHealthy) {
                     this.consecutiveHealthySamples = (this.consecutiveHealthySamples || 0) + 1;
-                    this.logger.info(`[Auto-Resume Evaluation] Confirmed healthy sample ${this.consecutiveHealthySamples}/2 (Home: ${homeTtfb}ms, Reader: ${readerTtfb}ms, YSQL: ${activeConns}/13)`);
+                    this.logger.info(`[Auto-Resume Evaluation] Confirmed healthy sample ${this.consecutiveHealthySamples}/2 (Home: ${homeProbe.ttfbMs}ms [${homeProbe.statusCode}], Reader: ${readerProbe.ttfbMs}ms [${readerProbe.statusCode}], YSQL: ${activeConns}/13)`);
                     if (this.consecutiveHealthySamples >= 2) {
                         this.consecutiveHealthySamples = 0;
                         this.logger.info('🛡️ [AUTO-RESUME] Site and infrastructure confirmed completely healthy. Auto-resuming claims.');
@@ -248,7 +249,7 @@ export class ProtectiveSentinel {
             this.logger.warn('Failed during auto-resume evaluation', { error: err?.message });
         }
     }
-    async measureRouteTtfb(url) {
+    async measureRoute(url, thresholdMs) {
         return new Promise((resolve) => {
             const t0 = performance.now();
             const isHttps = url.startsWith('https:');
@@ -258,16 +259,22 @@ export class ProtectiveSentinel {
                 headers: { 'User-Agent': 'Project-Nox-Sentinel/1.0 (Auto-Resume Probe)' },
                 timeout: 4000,
             }, (res) => {
-                res.once('data', () => {
+                let resolved = false;
+                const finish = () => {
+                    if (resolved)
+                        return;
+                    resolved = true;
                     try {
                         res.resume();
                     }
                     catch { }
-                    resolve(Math.round(performance.now() - t0));
-                });
-                res.on('end', () => {
-                    resolve(Math.round(performance.now() - t0));
-                });
+                    resolve({
+                        ttfbMs: Math.round(performance.now() - t0),
+                        statusCode: res.statusCode || 500,
+                    });
+                };
+                res.once('data', finish);
+                res.on('end', finish);
             });
             req.on('error', () => resolve(null));
             req.on('timeout', () => { req.destroy(); resolve(null); });
@@ -312,7 +319,7 @@ export class ProtectiveSentinel {
         // 4. Site Latency Probes (Home > 210ms, Reader > 130ms, Media > 105ms)
         if (this.siteUrl) {
             await this.probeSiteLatency('home', `${this.siteUrl}/`, this.thresholds.homeTtfbPreSlaMs, 250);
-            await this.probeSiteLatency('reader', `${this.siteUrl}/api/health`, this.thresholds.readerTtfbPreSlaMs, 150);
+            await this.probeSiteLatency('reader', `${this.siteUrl}/ler/46b7538b-fcb8-40ec-b3ee-cdadd2edb04c`, this.thresholds.readerTtfbPreSlaMs, 150);
         }
     }
     /**
@@ -364,7 +371,9 @@ export class ProtectiveSentinel {
         });
     }
     async handleProbeResult(label, url, ttfbMs, thresholdMs, slaTargetMs, statusCode) {
-        if (ttfbMs > thresholdMs) {
+        const isStatusError = statusCode >= 500;
+        const isViolating = ttfbMs > thresholdMs || isStatusError;
+        if (isViolating) {
             const count = (this.consecutivePreSlaViolations.get(label) || 0) + 1;
             this.consecutivePreSlaViolations.set(label, count);
             // Check for correlated importer pressure
@@ -378,18 +387,18 @@ export class ProtectiveSentinel {
             }
             catch { }
             const hasInfraPressure = activeConns >= 10 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
-            const isSevereSustained = count >= 3 && ttfbMs >= 500;
+            const isSevereSustained = count >= 3 && (ttfbMs >= 500 || isStatusError);
             if (count >= 2) {
                 if (hasInfraPressure || isSevereSustained) {
                     this.consecutivePreSlaViolations.set(label, 0);
-                    await this.triggerProtectiveStop(`Pre-SLA Latency Guard Rail Breached with Correlated Importer Pressure on ${label.toUpperCase()}: observed ${ttfbMs}ms > pre-SLA threshold ${thresholdMs}ms (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms)`, { label, url, ttfbMs, thresholdMs, slaTargetMs, status: statusCode, activeConns, rssMb: mem.rssMb, lagMs: lagMetrics.avgLagMs });
+                    await this.triggerProtectiveStop(`Pre-SLA Guard Rail Breached with Correlated Importer Pressure on ${label.toUpperCase()}: observed ${ttfbMs}ms (HTTP ${statusCode}) > pre-SLA threshold ${thresholdMs}ms (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms)`, { label, url, ttfbMs, thresholdMs, slaTargetMs, status: statusCode, activeConns, rssMb: mem.rssMb, lagMs: lagMetrics.avgLagMs });
                 }
                 else {
-                    this.logger.warn(`[EDGE_TRANSIENT_WARNING] Route ${label} (${url}) TTFB: ${ttfbMs}ms > threshold ${thresholdMs}ms, but importer infra is healthy (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms). Observing without tripping PROTECTIVE_STOP.`);
+                    this.logger.warn(`[EDGE_TRANSIENT_WARNING] Route ${label} (${url}) TTFB: ${ttfbMs}ms (HTTP ${statusCode}) > threshold ${thresholdMs}ms, but importer infra is healthy (YSQL: ${activeConns}/13, RSS: ${mem.rssMb}MB, Lag: ${lagMetrics.avgLagMs}ms). Observing without tripping PROTECTIVE_STOP.`);
                 }
             }
             else {
-                this.logger.warn(`[Pre-SLA Latency Warning] Route ${label} (${url}) TTFB: ${ttfbMs}ms > threshold ${thresholdMs}ms (SLA: ${slaTargetMs}ms). Consecutive sample: ${count}/2`);
+                this.logger.warn(`[Pre-SLA Latency Warning] Route ${label} (${url}) TTFB: ${ttfbMs}ms (HTTP ${statusCode}) > threshold ${thresholdMs}ms (SLA: ${slaTargetMs}ms). Consecutive sample: ${count}/2`);
             }
         }
         else {

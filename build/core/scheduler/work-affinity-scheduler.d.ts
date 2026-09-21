@@ -49,6 +49,21 @@ export declare class WorkAffinityScheduler {
     recordPublication(isFreshRelease: boolean): void;
     recordJobCompletion(): void;
     /**
+     * Hydrates publication and activity heartbeats from database on boot.
+     * Prevents watchdog blindness across process restarts.
+     */
+    private hydrateHeartbeatFromDb;
+    /**
+     * Authoritative calculation of total workers currently executing chapter jobs.
+     * Counts SUM of all in-flight jobs across all works, NOT merely Map keys count.
+     */
+    getTotalInFlight(): number;
+    /**
+     * Returns list of work IDs that have reached or exceeded MAX_INFLIGHT_PER_WORK.
+     * Used to strictly prevent exceeding 2 concurrent jobs per work across all paths.
+     */
+    getFullInFlightWorkIds(maxInFlight?: number): string[];
+    /**
      * Synchronizes in-flight job counts per work from DB at startup.
      */
     private syncInFlightCountsFromDb;
@@ -70,9 +85,9 @@ export declare class WorkAffinityScheduler {
      */
     private claimSingleJob;
     /**
-     * Publication Watchdog & Auto-Recovery Tree (Sections 16, 24, 25, 29).
-     * Monitors elapsed time since last publication.
-     * If eligible jobs exist and no publication occurs for 5m -> WARNING.
+     * Publication Watchdog & Auto-Recovery Tree (Sections 6, 7, 8, 16).
+     * Monitors elapsed time since last publication and real backlog.
+     * If any safe backlog exists and no publication occurs for 5m -> WARNING.
      * If no publication occurs for 10m -> Triggers AUTO-RECOVERY routine!
      */
     private startPublicationWatchdog;
