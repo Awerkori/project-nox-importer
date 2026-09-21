@@ -216,13 +216,19 @@ export class ProtectiveSentinel {
             if (mem.rssMb >= this.thresholds.maxRssMb - 40)
                 return;
             let activeConns = 0;
+            let totalConns = 0;
             try {
                 const pool = getYugabytePool();
-                const cRes = await pool.query('SELECT count(*) FROM pg_stat_activity');
-                activeConns = parseInt(cRes.rows[0]?.count || '0', 10);
+                const cRes = await pool.query(`
+          SELECT count(*) as total,
+                 count(*) FILTER (WHERE state = 'active') as active
+          FROM pg_stat_activity
+        `);
+                totalConns = parseInt(cRes.rows[0]?.total || '0', 10);
+                activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
             }
             catch { }
-            if (activeConns >= this.thresholds.ysqlConnTripwire - 2)
+            if (totalConns >= this.thresholds.ysqlConnTripwire || activeConns >= 8)
                 return;
             // Quick latency probes
             if (this.siteUrl) {
@@ -387,7 +393,7 @@ export class ProtectiveSentinel {
             }
             catch { }
             const hasInfraPressure = activeConns >= 10 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
-            const isSevereSustained = count >= 3 && (ttfbMs >= 500 || isStatusError);
+            const isSevereSustained = count >= 3 && (isStatusError || ttfbMs >= 1500);
             if (count >= 2) {
                 if (hasInfraPressure || isSevereSustained) {
                     this.consecutivePreSlaViolations.set(label, 0);

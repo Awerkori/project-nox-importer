@@ -138,20 +138,25 @@ export class AdmissionController {
                         work.state = 'FILLING';
                         this.stateStore.setActiveWork(work);
                     }
-                    // Check if caught up (zero queued, zero importing, zero paused remaining) - Section 11 & 12
-                    if (queuedCnt === 0 && importingCnt === 0 && pausedCnt === 0 && pubCnt > 0) {
-                        const mapCheck = await client.query(`SELECT COUNT(*) as unimported FROM importer_chapter_mappings WHERE work_id = $1::uuid AND status NOT IN ('COMPLETED', 'FAILED')`, [work.workId]);
-                        const unimported = parseInt(mapCheck.rows[0]?.unimported || '0', 10);
-                        if (unimported === 0) {
-                            work.state = 'CAUGHT_UP';
-                            const beforeCount = this.stateStore.getActiveWorks().filter((w) => w.state === 'FILLING').length;
-                            this.logger.info(`[CAUGHT_UP_CYCLE] Work ${work.workTitle} (${work.workId}) reached CAUGHT_UP state (all ${pubCnt} canonical chapters published). Vacating active set slot. ACTIVE SET BEFORE: ${beforeCount} -> AFTER: ${beforeCount - 1}`, {
-                                publishedChapters: pubCnt,
-                                lane: work.lane,
-                            });
-                            this.stateStore.removeActiveWork(work.workId);
-                            continue;
+                    // Check if caught up or drained (zero queued, zero importing, zero paused remaining) - Sections 11 & 12
+                    if (queuedCnt === 0 && importingCnt === 0 && pausedCnt === 0) {
+                        let unimported = 0;
+                        try {
+                            const mapCheck = await client.query(`SELECT COUNT(*) as unimported FROM importer_chapter_mappings WHERE work_id = $1::uuid AND status NOT IN ('COMPLETED', 'FAILED')`, [work.workId]);
+                            unimported = parseInt(mapCheck.rows[0]?.unimported || '0', 10);
                         }
+                        catch { }
+                        const isCaughtUp = unimported === 0 && pubCnt > 0;
+                        const stateLabel = isCaughtUp ? 'CAUGHT_UP' : 'DRAINED';
+                        work.state = isCaughtUp ? 'CAUGHT_UP' : 'COMPLETE';
+                        const beforeCount = this.stateStore.getActiveWorks().filter((w) => w.state === 'FILLING').length;
+                        this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${stateLabel} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused). Vacating active slot. ACTIVE SET BEFORE: ${beforeCount} -> AFTER: ${beforeCount - 1}`, {
+                            publishedChapters: pubCnt,
+                            unimportedMappings: unimported,
+                            lane: work.lane,
+                        });
+                        this.stateStore.removeActiveWork(work.workId);
+                        continue;
                     }
                     work.state = 'FILLING';
                     work.lastActivityAt = new Date().toISOString();
@@ -223,15 +228,16 @@ export class AdmissionController {
              AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
            GROUP BY (q.payload->>'workId'), w.title, q.source
-           ORDER BY pending_jobs ASC, queued_count DESC
-           LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], Math.max(50, backfillSlotsAvailable * 5)]);
+            ORDER BY queued_count DESC, pending_jobs DESC
+            LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], Math.max(50, backfillSlotsAvailable * 5)]);
                 let admitted = 0;
                 for (const cand of candidatesRes.rows) {
                     if (admitted >= backfillSlotsAvailable)
                         break;
                     const srcCount = sourceCounts.get(cand.source) || 0;
-                    const otherSourceCandidates = candidatesRes.rows.filter((r) => r.source !== cand.source);
-                    if (srcCount >= 6 && otherSourceCandidates.length > 0 && candidatesRes.rows.length > backfillSlotsAvailable) {
+                    const maxWorksPerSource = cand.source === 'mangaflix' ? 2 : 3;
+                    const otherSourceCandidates = candidatesRes.rows.filter((r) => (sourceCounts.get(r.source) || 0) < (r.source === 'mangaflix' ? 2 : 3));
+                    if (srcCount >= maxWorksPerSource && otherSourceCandidates.length > 0) {
                         continue;
                     }
                     const newWork = {
@@ -284,15 +290,16 @@ export class AdmissionController {
              AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
            GROUP BY (q.payload->>'workId'), w.title, q.source
-           ORDER BY queued_count DESC, pending_jobs ASC
+           ORDER BY queued_count DESC, pending_jobs DESC
            LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], newWorkSlotsAvailable * 3]);
                 let admitted = 0;
                 for (const cand of candidatesRes.rows) {
                     if (admitted >= newWorkSlotsAvailable)
                         break;
                     const srcCount = sourceCounts.get(cand.source) || 0;
-                    const otherSourceCandidates = candidatesRes.rows.filter((r) => r.source !== cand.source);
-                    if (srcCount >= 6 && otherSourceCandidates.length > 0 && candidatesRes.rows.length > newWorkSlotsAvailable) {
+                    const maxWorksPerSource = cand.source === 'mangaflix' ? 2 : 3;
+                    const otherSourceCandidates = candidatesRes.rows.filter((r) => (sourceCounts.get(r.source) || 0) < (r.source === 'mangaflix' ? 2 : 3));
+                    if (srcCount >= maxWorksPerSource && otherSourceCandidates.length > 0) {
                         continue;
                     }
                     const newWork = {
@@ -396,6 +403,13 @@ export class AdmissionController {
             return null;
         const activeWorks = this.stateStore.getActiveWorks();
         const activeIds = activeWorks.map((w) => w.workId);
+        const sourceCounts = new Map();
+        for (const w of activeWorks.filter((w) => w.state === 'FILLING')) {
+            sourceCounts.set(w.primarySource, (sourceCounts.get(w.primarySource) || 0) + 1);
+        }
+        const saturatedSources = Array.from(sourceCounts.entries())
+            .filter(([src, cnt]) => cnt >= (src === 'mangaflix' ? 2 : 3))
+            .map(([src]) => src);
         const client = await this.pool.connect();
         try {
             const lanesToTry = preferredLane ? [preferredLane] : ['P1', 'P2'];
@@ -419,13 +433,15 @@ export class AdmissionController {
             AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
             AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
             AND NOT ((q.payload->>'workId') = ANY($2::text[]))
+            AND ($3::text[] IS NULL OR NOT (q.source = ANY($3::text[])))
           GROUP BY (q.payload->>'workId'), w.title, q.source
-          ORDER BY ${isP1 ? 'pending_jobs ASC, queued_count DESC' : 'queued_count DESC, pending_jobs ASC'}
+          ORDER BY queued_count DESC, pending_jobs DESC
           LIMIT 1;
         `;
                 const res = await client.query(query, [
                     allowedSources && allowedSources.length > 0 ? allowedSources : null,
                     activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
+                    saturatedSources.length > 0 ? saturatedSources : null,
                 ]);
                 if (res.rows.length > 0) {
                     const cand = res.rows[0];

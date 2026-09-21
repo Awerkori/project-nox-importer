@@ -896,9 +896,9 @@ export class ImporterEngine {
                     await this.sleep(3000);
                     continue;
                 }
-                // 1. Jitter between iterations (20-50ms)
+                // 1. Jitter between iterations (10-30ms)
                 telemetryCollector.setSlotState(slotIndex, 'IDLE');
-                const claimJitterMs = 20 + Math.floor(Math.random() * 30);
+                const claimJitterMs = 10 + Math.floor(Math.random() * 20);
                 await this.sleep(claimJitterMs);
                 telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_JOB');
                 const claimT0 = performance.now();
@@ -953,7 +953,7 @@ export class ImporterEngine {
                 });
                 if (!claimResult || !claimResult.job) {
                     telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_SOURCE', 'waiting_for_eligible_source');
-                    await this.sleep(400);
+                    await this.sleep(150);
                     continue;
                 }
                 const job = claimResult.job;
