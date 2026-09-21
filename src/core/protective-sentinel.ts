@@ -481,12 +481,13 @@ export class ProtectiveSentinel {
       // True infra pressure: YSQL near exhaustion (>= 12), query pileup (active >= 8), RAM near limit (>= 380MB), or event loop blocked (>= 200ms)
       const hasInfraPressure = totalConns >= 12 || activeConns >= 8 || mem.rssMb >= 380 || lagMetrics.avgLagMs >= 200;
       const isSlaBreached = ttfbMs >= slaTargetMs;
-      const isSevereSustained = count >= 3 && (isStatusError || ttfbMs >= 1500);
+      // Severe breakdown: HTTP 5xx for 3+ probes, or sustained severe degradation (>= 1500ms for 5+ consecutive probes)
+      const isSevereSustained = (isStatusError && count >= 3) || (ttfbMs >= 1500 && count >= 5);
 
       // Stop if:
-      // A) Actual SLA breached (>= slaTargetMs) for 2 consecutive probes WITH infra pressure, OR
+      // A) Actual SLA breached (>= slaTargetMs) for 2 consecutive probes WITH confirmed infra pressure, OR
       // B) Pre-SLA threshold exceeded for 3+ consecutive probes WITH confirmed infra pressure, OR
-      // C) Severe sustained breakdown (HTTP 5xx or > 1500ms for 3+ probes)
+      // C) Severe sustained breakdown (HTTP 5xx for 3+ probes or >= 1500ms for 5+ probes)
       const shouldTrip = (isSlaBreached && count >= 2 && hasInfraPressure) ||
                          (count >= 3 && hasInfraPressure) ||
                          isSevereSustained;
