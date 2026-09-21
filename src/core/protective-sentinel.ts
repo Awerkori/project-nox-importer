@@ -387,6 +387,7 @@ export class ProtectiveSentinel {
     // 4. Site Latency Probes (Home > 210ms, Reader > 130ms, Media > 105ms)
     if (this.siteUrl) {
       await this.probeSiteLatency('home', `${this.siteUrl}/`, this.thresholds.homeTtfbPreSlaMs, 250);
+      await new Promise((r) => setTimeout(r, 2000));
       await this.probeSiteLatency('reader', `${this.siteUrl}/ler/46b7538b-fcb8-40ec-b3ee-cdadd2edb04c`, this.thresholds.readerTtfbPreSlaMs, 150);
     }
   }
@@ -410,7 +411,10 @@ export class ProtectiveSentinel {
         url,
         {
           agent: false,
-          headers: { 'User-Agent': 'Project-Nox-Sentinel/1.0 (Pre-SLA Monitor)' },
+          headers: {
+            'Connection': 'close',
+            'User-Agent': 'Project-Nox-Sentinel/1.0 (Pre-SLA Monitor)',
+          },
           timeout: 5000,
         },
         (res: any) => {
