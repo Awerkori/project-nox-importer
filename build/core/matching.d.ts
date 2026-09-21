@@ -15,6 +15,16 @@ export interface MatchCandidate {
     kind?: string;
 }
 /**
+ * Curated Canonical Synonym Groups.
+ * Bridges disparate translation titles (Portuguese, English, Romanized, Pinyin)
+ * for popular works to prevent multi-source catalog fragmentation.
+ */
+export declare const KNOWN_CANONICAL_SYNONYM_GROUPS: string[][];
+/**
+ * Returns alternative titles for a known canonical synonym group if any match.
+ */
+export declare function getCanonicalSynonyms(text: string): string[];
+/**
  * Normalizes title string by removing accents, lowercasing, stripping punctuation
  * and filtering common scan/format noise words.
  */
