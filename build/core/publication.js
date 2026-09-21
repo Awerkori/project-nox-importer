@@ -151,14 +151,15 @@ export class PublicationBarrier {
             .eq('chapter_id', chapterId);
         if (mapErr)
             throw mapErr;
-        // 3. Update public.works: only update latest_chapter_published_at for fresh releases or first chapter
+        // 3. Update public.works: update latest_chapter_published_at whenever ANY chapter is published
         const workUpdate = {
             published: true,
             updated_at: new Date().toISOString(),
         };
-        if (isFreshRelease || !existingLatest) {
-            workUpdate.latest_chapter_published_at = publishedAtIso;
-        }
+        workUpdate.latest_chapter_published_at =
+            !existingLatest || new Date(publishedAtIso) > new Date(existingLatest)
+                ? publishedAtIso
+                : existingLatest;
         await this.supabase
             .from('works')
             .update(workUpdate)
@@ -167,7 +168,7 @@ export class PublicationBarrier {
             this.onPublished?.(isFreshRelease);
         }
         catch { }
-        // 4. Invalidate edge cache (only invalidate Home & Lançamentos if FRESH_RELEASE)
+        // 4. Invalidate edge cache (ALWAYS invalidate Home & Lançamentos whenever ANY chapter is published)
         try {
             const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
             const token = process.env.NOX_STORAGE_BRIDGE_TOKEN;
@@ -178,7 +179,7 @@ export class PublicationBarrier {
                     ...(token ? { Authorization: `Bearer ${token}` } : {}),
                 },
                 body: JSON.stringify({
-                    type: isFreshRelease ? 'CHAPTER_PUBLISHED' : 'OBRA_UPDATE',
+                    type: 'CHAPTER_PUBLISHED',
                     workId,
                     workSlug: workInfo?.slug,
                     chapterId,
