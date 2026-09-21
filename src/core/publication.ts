@@ -205,6 +205,37 @@ export class PublicationBarrier {
 
     if (mapErr) throw mapErr;
 
+    // 2b. Cancel / auto-complete any remaining QUEUED/RETRY jobs in importer_queue for this chapter
+    try {
+      if (sortKey !== undefined && sortKey !== null) {
+        await this.supabase
+          .from('importer_queue')
+          .update({
+            status: 'COMPLETED',
+            updated_at: new Date().toISOString(),
+            last_error: 'CANONICAL_ALREADY_SATISFIED',
+          })
+          .eq('task_type', 'IMPORT_CHAPTER')
+          .in('status', ['QUEUED', 'RETRY'])
+          .eq('chapter_sort_key', sortKey)
+          .filter('payload->>workId', 'eq', workId);
+
+        await this.supabase
+          .from('importer_chapter_mappings')
+          .update({
+            status: 'COMPLETED',
+            is_page_provider: false,
+            chapter_id: chapterId,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('work_id', workId)
+          .eq('chapter_sort_key', sortKey)
+          .in('status', ['PENDING', 'QUEUED']);
+      }
+    } catch (cancelErr: any) {
+      this.logger.warn('Failed to auto-cancel redundant queue jobs on publish', { error: cancelErr?.message });
+    }
+
     // 3. Update public.works: update latest_chapter_published_at whenever ANY chapter is published
     const workUpdate: Record<string, any> = {
       published: true,

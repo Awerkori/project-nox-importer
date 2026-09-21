@@ -1072,7 +1072,7 @@ export class ImporterEngine {
             // In the rare race where source filled, immediately release back to QUEUED (zero blocking)
             this.logger.warn(`Source ${candidateJob.source} filled concurrently, releasing job ${candidateJob.id} back to QUEUED`);
             if (candidateJob.payload?.workId) {
-              this.scheduler.onJobFinished(candidateJob.payload.workId);
+              this.scheduler.onJobFinished(candidateJob.payload.workId, candidateJob.chapter_sort_key);
             }
             await this.queue.releaseJob(candidateJob.id, 'QUEUED', 'Source concurrency full, released immediately', 0);
             globalSem.release();
@@ -1098,7 +1098,7 @@ export class ImporterEngine {
           await this.executeJobDirectly(job, { claimDurationMs, semWaitMs: 0 });
         } finally {
           if (job.payload?.workId) {
-            this.scheduler.onJobFinished(job.payload.workId);
+            this.scheduler.onJobFinished(job.payload.workId, job.chapter_sort_key);
           }
           this.scheduler.recordJobCompletion();
           if (sourcePermitAcquired) {
@@ -2339,6 +2339,22 @@ export class ImporterEngine {
         },
         { onConflict: 'source,source_chapter_id' }
       );
+
+      // Auto-cancel any other sibling QUEUED/RETRY jobs for this work + chapter
+      try {
+        await this.supabase
+          .from('importer_queue')
+          .update({
+            status: 'COMPLETED',
+            updated_at: new Date().toISOString(),
+            last_error: 'CANONICAL_ALREADY_SATISFIED',
+          })
+          .eq('task_type', 'IMPORT_CHAPTER')
+          .in('status', ['QUEUED', 'RETRY'])
+          .eq('chapter_sort_key', sortKey)
+          .filter('payload->>workId', 'eq', workId);
+      } catch {}
+
       return;
     }
 

@@ -36,6 +36,7 @@ export class WorkAffinityScheduler {
   private logger = new Logger('WorkAffinityScheduler');
   private pool = getYugabytePool();
   private inFlightByWork: Map<string, number> = new Map();
+  private inFlightChapterKeys: Set<string> = new Set();
   private p0ConsecutiveClaims = 0;
   private rrIndexP1 = 0;
   private rrIndexP2 = 0;
@@ -167,8 +168,20 @@ export class WorkAffinityScheduler {
             this.inFlightByWork.set(r.work_id, parseInt(r.cnt, 10));
           }
         }
-        this.logger.info('Synchronized in-flight counts from DB', {
+        const resCh = await client.query(`
+          SELECT (payload->>'workId') as work_id, chapter_sort_key
+          FROM importer_queue
+          WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER' AND (payload->>'workId') IS NOT NULL AND chapter_sort_key IS NOT NULL;
+        `);
+        this.inFlightChapterKeys.clear();
+        for (const r of resCh.rows) {
+          if (r.work_id && r.chapter_sort_key) {
+            this.inFlightChapterKeys.add(`${r.work_id}:${r.chapter_sort_key}`);
+          }
+        }
+        this.logger.info('Synchronized in-flight counts and chapter keys from DB', {
           activeWorksWithInFlight: this.inFlightByWork.size,
+          inFlightChapters: this.inFlightChapterKeys.size,
           totalInFlightWorkers: this.getTotalInFlight(),
         });
       } finally {
@@ -249,7 +262,7 @@ export class WorkAffinityScheduler {
         if (this.p0WaitTimes.length > 100) this.p0WaitTimes.shift();
 
         const workId = p0Job.payload?.workId || '';
-        this.onJobStarted(workId);
+        this.onJobStarted(workId, p0Job.chapter_sort_key);
         this.lastClaimTime = Date.now();
 
         const decision: SchedulerDecision = {
@@ -293,7 +306,7 @@ export class WorkAffinityScheduler {
 
         if (gapJob) {
           const waitTimeMs = performance.now() - t0;
-          this.onJobStarted(cw.workId);
+          this.onJobStarted(cw.workId, gapJob.chapter_sort_key);
           this.p1Count1h++;
 
           const decision: SchedulerDecision = {
@@ -338,7 +351,7 @@ export class WorkAffinityScheduler {
           if (p1Job) {
             this.rrIndexP1 = idx + 1;
             const waitTimeMs = performance.now() - t0;
-            this.onJobStarted(targetWork.workId);
+            this.onJobStarted(targetWork.workId, p1Job.chapter_sort_key);
             this.p1Count1h++;
 
             const decision: SchedulerDecision = {
@@ -384,7 +397,7 @@ export class WorkAffinityScheduler {
           if (p2Job) {
             this.rrIndexP2 = idx + 1;
             const waitTimeMs = performance.now() - t0;
-            this.onJobStarted(targetWork.workId);
+            this.onJobStarted(targetWork.workId, p2Job.chapter_sort_key);
             this.p2Count1h++;
 
             const decision: SchedulerDecision = {
@@ -447,7 +460,7 @@ export class WorkAffinityScheduler {
       if (fallbackJob) {
         const waitTimeMs = performance.now() - t0;
         const workId = fallbackJob.payload?.workId || '';
-        this.onJobStarted(workId);
+        this.onJobStarted(workId, fallbackJob.chapter_sort_key);
         this.lastClaimTime = Date.now();
 
         const decision: SchedulerDecision = {
@@ -490,6 +503,8 @@ export class WorkAffinityScheduler {
       disallowedWorkIds?: string[] | null;
     }
   ): Promise<any | null> {
+    const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
+
     const query = `
       WITH to_lock AS (
         SELECT q.id
@@ -510,6 +525,7 @@ export class WorkAffinityScheduler {
           AND ($4::numeric IS NULL OR q.chapter_sort_key = $4::numeric)
           AND ($7::text[] IS NULL OR (q.payload->>'workId') = ANY($7::text[]))
           AND ($8::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($8::text[])))
+          AND ($9::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($9::text[])))
         ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -528,25 +544,77 @@ export class WorkAffinityScheduler {
                 q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
     `;
 
-    const res = await client.query(query, [
-      opts.allowedSources,
-      opts.minPriority || null,
-      opts.workId || null,
-      opts.sortKey || null,
-      opts.workerId,
-      opts.leaseMin,
-      opts.allowedWorkIds || null,
-      opts.disallowedWorkIds || null,
-    ]);
+    for (let drainAttempt = 0; drainAttempt < 10; drainAttempt++) {
+      const res = await client.query(query, [
+        opts.allowedSources,
+        opts.minPriority || null,
+        opts.workId || null,
+        opts.sortKey || null,
+        opts.workerId,
+        opts.leaseMin,
+        opts.allowedWorkIds || null,
+        opts.disallowedWorkIds || null,
+        disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
+      ]);
 
-    if (res.rows.length === 0) return null;
-    const r = res.rows[0];
-    this.lastClaimTime = Date.now();
-    return {
-      ...r,
-      payload: typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {}),
-      chapter_sort_key: r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null,
-    };
+      if (res.rows.length === 0) return null;
+      const r = res.rows[0];
+      const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
+      const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
+      const workId = payload?.workId;
+      const chapterNumber = payload?.chapterNumber;
+
+      // Pre-flight check: is this chapter already published canonically in chapters table?
+      if (workId && (chapterNumber !== undefined || sortKey !== null)) {
+        const pubCheck = await client.query(`
+          SELECT id FROM chapters 
+          WHERE work_id = $1::uuid 
+            AND (number = $2::numeric OR ($3::numeric IS NOT NULL AND number = $3::numeric))
+            AND published_at IS NOT NULL
+          LIMIT 1;
+        `, [workId, chapterNumber !== undefined ? chapterNumber : sortKey, sortKey]);
+
+        if (pubCheck.rows.length > 0) {
+          const publishedChapterId = pubCheck.rows[0].id;
+          this.logger.info(`Claimed job ${r.id} for work ${workId} ch ${chapterNumber} is already canonically published. Auto-completing immediately without worker execution.`);
+
+          await client.query(`
+            UPDATE importer_queue 
+            SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
+            WHERE id = $1;
+          `, [r.id]);
+
+          if (sortKey !== null) {
+            await client.query(`
+              UPDATE importer_queue
+              SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
+              WHERE (payload->>'workId') = $1
+                AND chapter_sort_key = $2
+                AND status IN ('QUEUED', 'RETRY')
+                AND task_type = 'IMPORT_CHAPTER';
+            `, [workId, sortKey]);
+
+            await client.query(`
+              UPDATE importer_chapter_mappings
+              SET status = 'COMPLETED', is_page_provider = false, chapter_id = $3, updated_at = NOW()
+              WHERE work_id = $1::uuid AND chapter_sort_key = $2 AND status IN ('PENDING', 'QUEUED');
+            `, [workId, sortKey, publishedChapterId]);
+          }
+
+          // Continue loop to claim next genuine job
+          continue;
+        }
+      }
+
+      this.lastClaimTime = Date.now();
+      return {
+        ...r,
+        payload,
+        chapter_sort_key: sortKey,
+      };
+    }
+
+    return null;
   }
 
   /**
@@ -692,26 +760,32 @@ export class WorkAffinityScheduler {
     } catch {}
 
     if (chosenJob?.payload?.workId) {
-      this.onJobStarted(chosenJob.payload.workId);
+      this.onJobStarted(chosenJob.payload.workId, chosenJob.chapter_sort_key);
     }
     return chosenJob;
   }
 
   // --- In-Flight Accounting ---
 
-  onJobStarted(workId: string): void {
+  onJobStarted(workId: string, chapterSortKey?: number | null): void {
     if (!workId) return;
     const current = this.inFlightByWork.get(workId) || 0;
     this.inFlightByWork.set(workId, current + 1);
+    if (chapterSortKey !== undefined && chapterSortKey !== null) {
+      this.inFlightChapterKeys.add(`${workId}:${chapterSortKey}`);
+    }
   }
 
-  onJobFinished(workId: string): void {
+  onJobFinished(workId: string, chapterSortKey?: number | null): void {
     if (!workId) return;
     const current = this.inFlightByWork.get(workId) || 1;
     if (current <= 1) {
       this.inFlightByWork.delete(workId);
     } else {
       this.inFlightByWork.set(workId, current - 1);
+    }
+    if (chapterSortKey !== undefined && chapterSortKey !== null) {
+      this.inFlightChapterKeys.delete(`${workId}:${chapterSortKey}`);
     }
   }
 

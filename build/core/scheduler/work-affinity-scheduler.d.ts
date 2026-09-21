@@ -28,6 +28,7 @@ export declare class WorkAffinityScheduler {
     private logger;
     private pool;
     private inFlightByWork;
+    private inFlightChapterKeys;
     private p0ConsecutiveClaims;
     private rrIndexP1;
     private rrIndexP2;
@@ -96,8 +97,8 @@ export declare class WorkAffinityScheduler {
      * compares with the legacy choice, and returns the legacy job.
      */
     private executeShadowModeSimulation;
-    onJobStarted(workId: string): void;
-    onJobFinished(workId: string): void;
+    onJobStarted(workId: string, chapterSortKey?: number | null): void;
+    onJobFinished(workId: string, chapterSortKey?: number | null): void;
     getInFlightCount(workId: string): number;
     getWatermark(workId: string, source: string): Promise<import("./types.js").WorkWatermark | undefined>;
     setWatermark(watermark: any): Promise<void>;
