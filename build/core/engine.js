@@ -2487,22 +2487,9 @@ export class ImporterEngine {
             }
             const db0 = Date.now();
             // Ensure work has a valid cover with storage_ready = true before publishing chapter
+            // Track covered works without corrupting cover_id with chapter pages
             if (!this.knownCoveredWorks.has(workId)) {
-                let { data: workRecord } = await this.supabase
-                    .from('works')
-                    .select('cover_id')
-                    .eq('id', workId)
-                    .single();
-                if (!workRecord?.cover_id && validPages.length > 0) {
-                    await this.supabase
-                        .from('works')
-                        .update({ cover_id: validPages[0].mediaId })
-                        .eq('id', workId);
-                    this.knownCoveredWorks.add(workId);
-                }
-                else if (workRecord?.cover_id) {
-                    this.knownCoveredWorks.add(workId);
-                }
+                this.knownCoveredWorks.add(workId);
             }
             // Find or create chapter record in public.chapters
             let chapterId;
@@ -2799,14 +2786,33 @@ export class ImporterEngine {
     }
     async downloadAndRegisterImage(url, userId, purpose = 'editorial') {
         const parsedUrl = new URL(url);
+        if (purpose === 'editorial') {
+            const isChapterPattern = /\/(chapter|capitulo|reader|leitor|page|pagina|paginas)\b|_page_\d+/i.test(parsedUrl.pathname);
+            if (isChapterPattern) {
+                throw new Error(`Rejected cover URL matching chapter pattern: ${url}`);
+            }
+        }
         await this.rateLimiter.acquire(parsedUrl.host);
         const bytes = await this.fetchImageBytes(url);
         if (bytes.length < 1500) {
             throw new Error(`Downloaded image is too small (${bytes.length} bytes), likely a placeholder or spacer: ${url}`);
         }
+        if (purpose === 'editorial' && bytes.length > 4_000_000) {
+            throw new Error(`Cover image too large (${bytes.length} bytes), max 4MB allowed: ${url}`);
+        }
         const res = await processAndStoreMedia(this.supabase, this.storage, bytes, userId, purpose);
         if (res.width <= 50 || res.height <= 50) {
             throw new Error(`Downloaded image dimensions are too small (${res.width}x${res.height}), likely a placeholder: ${url}`);
+        }
+        if (purpose === 'editorial') {
+            if (res.width < 100 || res.height < 140) {
+                throw new Error(`Cover dimensions too small (${res.width}x${res.height}): ${url}`);
+            }
+            const ratio = res.height / res.width;
+            const invRatio = res.width / res.height;
+            if (ratio > 2.5 || invRatio > 2.5) {
+                throw new Error(`Cover aspect ratio rejected (${res.width}x${res.height}, ratio=${ratio.toFixed(2)}): ${url}`);
+            }
         }
         return res.mediaId;
     }
