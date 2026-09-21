@@ -1638,14 +1638,23 @@ export class ImporterEngine {
         let coverMediaId = null;
         if (details.coverUrl) {
             try {
-                coverMediaId = await this.downloadAndRegisterImage(details.coverUrl, botUserId, 'editorial');
+                coverMediaId = await this.downloadAndRegisterImage(details.coverUrl, botUserId, 'editorial', job.source);
             }
             catch (coverErr) {
-                this.logger.warn('Failed to import cover image, proceeding without cover', {
+                this.logger.warn('Failed to import cover image from primary coverUrl, attempting fallback', {
                     error: coverErr?.message,
                     coverUrl: details.coverUrl,
+                    source: job.source,
                 });
             }
+        }
+        // Fallback 1: Raw metadata cover alternatives
+        if (!coverMediaId && details.raw) {
+            coverMediaId = await this.tryRawMetadataCoverFallback(details.raw, botUserId, job.source, details.coverUrl);
+        }
+        // Fallback 2: Sibling mappings from other mapped sources
+        if (!coverMediaId && (job.payload?.workId || details.sourceWorkId)) {
+            coverMediaId = await this.trySiblingMappingCoverFallback(job.payload?.workId, job.source, details.slug || details.title, botUserId);
         }
         const candidate = {
             source: job.source,
@@ -2614,8 +2623,17 @@ export class ImporterEngine {
             }
             const db0 = Date.now();
             // Ensure work has a valid cover with storage_ready = true before publishing chapter
-            // Track covered works without corrupting cover_id with chapter pages
             if (!this.knownCoveredWorks.has(workId)) {
+                try {
+                    const botUserId = await this.resolveBotUserId();
+                    await this.ensureWorkHasCover(workId, botUserId);
+                }
+                catch (coverCheckErr) {
+                    this.logger.warn('Non-fatal error verifying work cover before chapter publish', {
+                        workId,
+                        error: coverCheckErr?.message,
+                    });
+                }
                 this.knownCoveredWorks.add(workId);
             }
             // Find or create chapter record in public.chapters
@@ -2912,7 +2930,7 @@ export class ImporterEngine {
             .replace(/\bundefined\b/gi, 'erro desconhecido')
             .slice(0, 1000);
     }
-    async downloadAndRegisterImage(url, userId, purpose = 'editorial') {
+    async downloadAndRegisterImage(url, userId, purpose = 'editorial', source = 'unknown') {
         const parsedUrl = new URL(url);
         if (purpose === 'editorial') {
             const isChapterPattern = /\/(chapter|capitulo|reader|leitor|page|pagina|paginas)\b|_page_\d+/i.test(parsedUrl.pathname);
@@ -2921,7 +2939,7 @@ export class ImporterEngine {
             }
         }
         await this.rateLimiter.acquire(parsedUrl.host);
-        const bytes = await this.fetchImageBytes(url);
+        const bytes = await this.fetchImageBytes(url, source);
         if (bytes.length < 1500) {
             throw new Error(`Downloaded image is too small (${bytes.length} bytes), likely a placeholder or spacer: ${url}`);
         }
@@ -2933,6 +2951,9 @@ export class ImporterEngine {
             throw new Error(`Downloaded image dimensions are too small (${res.width}x${res.height}), likely a placeholder: ${url}`);
         }
         if (purpose === 'editorial') {
+            if (res.mime === 'image/gif') {
+                throw new Error(`Animated GIF rejected as cover image: ${url}`);
+            }
             if (res.width < 100 || res.height < 140) {
                 throw new Error(`Cover dimensions too small (${res.width}x${res.height}): ${url}`);
             }
@@ -2977,14 +2998,41 @@ export class ImporterEngine {
         }
         let res = null;
         let fetchError = null;
-        try {
-            res = await fetch(url, {
-                headers: requestHeaders,
-                signal: AbortSignal.timeout(timeoutDuration),
-            });
-        }
-        catch (err) {
-            fetchError = err;
+        let attempts = 0;
+        const maxAttempts = 3;
+        while (attempts < maxAttempts) {
+            attempts++;
+            fetchError = null;
+            try {
+                res = await fetch(url, {
+                    headers: requestHeaders,
+                    signal: AbortSignal.timeout(timeoutDuration),
+                });
+                if (res.ok)
+                    break;
+                if (res.status === 429) {
+                    const retryAfter = res.headers.get('Retry-After');
+                    this.rateLimiter.handle429(parsedUrl.host, retryAfter);
+                    break;
+                }
+                if (res.status >= 500 && res.status <= 504 && attempts < maxAttempts) {
+                    await new Promise((r) => setTimeout(r, 400 * attempts));
+                    continue;
+                }
+                break;
+            }
+            catch (err) {
+                fetchError = err;
+                if (attempts < maxAttempts &&
+                    (err?.name === 'TimeoutError' ||
+                        err?.name === 'AbortError' ||
+                        err?.message?.includes('fetch failed') ||
+                        err?.message?.includes('network'))) {
+                    await new Promise((r) => setTimeout(r, 400 * attempts));
+                    continue;
+                }
+                break;
+            }
         }
         // If Cloudflare 403 or network error occurred and internal bridge is configured, fallback to bridge
         if ((fetchError || res?.status === 403) && this.config.NOX_STORAGE_BRIDGE_TOKEN && isKuro) {
@@ -3047,6 +3095,122 @@ export class ImporterEngine {
         this.rateLimiter.recordSuccess(parsedUrl.host);
         this.circuitBreaker.recordSuccess(source, parsedUrl.host);
         return uint8;
+    }
+    async tryRawMetadataCoverFallback(raw, botUserId, source, excludeUrl) {
+        const candidateUrls = [
+            raw?.poster?.default_url,
+            raw?.poster?.large_url,
+            raw?.poster?.url,
+            raw?.cover_url,
+            raw?.coverUrl,
+            raw?.thumbnail,
+            raw?.thumbnail_url,
+            raw?.imagem,
+            raw?.image,
+            raw?.banner_imagem,
+        ].filter((u) => typeof u === 'string' &&
+            u.length > 5 &&
+            u.startsWith('http') &&
+            u !== excludeUrl);
+        for (const url of candidateUrls) {
+            try {
+                const mediaId = await this.downloadAndRegisterImage(url, botUserId, 'editorial', source);
+                this.logger.info('Recovered cover from raw metadata fallback', { source, url, mediaId });
+                return mediaId;
+            }
+            catch {
+                // Continue trying next candidate
+            }
+        }
+        return null;
+    }
+    async trySiblingMappingCoverFallback(workId, excludeSource, slugOrTitle, botUserId) {
+        try {
+            let targetWorkId = workId;
+            if (!targetWorkId && slugOrTitle) {
+                const cleanSlug = slugOrTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+                const { data: matched } = await this.supabase
+                    .from('works')
+                    .select('id')
+                    .or(`slug.eq.${cleanSlug},title.eq.${slugOrTitle}`)
+                    .maybeSingle();
+                targetWorkId = matched?.id;
+            }
+            if (!targetWorkId)
+                return null;
+            const { data: mappings } = await this.supabase
+                .from('importer_work_mappings')
+                .select('source, source_work_id, metadata')
+                .eq('work_id', targetWorkId)
+                .neq('source', excludeSource);
+            if (!mappings || mappings.length === 0)
+                return null;
+            for (const m of mappings) {
+                if (m.metadata) {
+                    const recovered = await this.tryRawMetadataCoverFallback(m.metadata, botUserId, m.source);
+                    if (recovered)
+                        return recovered;
+                }
+                try {
+                    const siblingAdapter = this.registry.get(m.source);
+                    if (siblingAdapter && typeof siblingAdapter.fetchWorkDetails === 'function') {
+                        const sibDetails = await callProvider(() => siblingAdapter.fetchWorkDetails(m.source_work_id));
+                        if (sibDetails?.coverUrl) {
+                            const mediaId = await this.downloadAndRegisterImage(sibDetails.coverUrl, botUserId, 'editorial', m.source);
+                            this.logger.info('Recovered cover from sibling source adapter', {
+                                source: m.source,
+                                workId: targetWorkId,
+                                mediaId,
+                            });
+                            return mediaId;
+                        }
+                    }
+                }
+                catch {
+                    // Continue to next sibling
+                }
+            }
+        }
+        catch (err) {
+            this.logger.warn('Failed in sibling cover fallback resolution', { error: err?.message });
+        }
+        return null;
+    }
+    async ensureWorkHasCover(workId, botUserId) {
+        const { data: work } = await this.supabase
+            .from('works')
+            .select('id, cover_id, title, slug, metadata_provenance')
+            .eq('id', workId)
+            .maybeSingle();
+        if (!work)
+            return null;
+        if (work.cover_id) {
+            const { data: m } = await this.supabase
+                .from('media')
+                .select('id, storage_ready, bytes, width, height')
+                .eq('id', work.cover_id)
+                .maybeSingle();
+            if (m && m.storage_ready && (m.bytes || 0) >= 1500 && (m.width || 0) >= 100 && (m.height || 0) >= 140) {
+                return work.cover_id;
+            }
+            this.logger.warn('Work has broken/unready cover, attempting recovery', {
+                workId,
+                badCoverId: work.cover_id,
+            });
+        }
+        const recoveredMediaId = await this.trySiblingMappingCoverFallback(workId, '', work.slug || work.title, botUserId);
+        if (recoveredMediaId) {
+            await this.supabase
+                .from('works')
+                .update({
+                cover_id: recoveredMediaId,
+                updated_at: new Date().toISOString(),
+            })
+                .eq('id', workId);
+            this.logger.info('Repaired work cover before chapter publish', { workId, coverId: recoveredMediaId });
+            return recoveredMediaId;
+        }
+        return null;
     }
     async resolveDynamicCandidateFallbacks(workId, chapterNumber, excludeSource, payloadFallbacks = []) {
         const candidates = [];
