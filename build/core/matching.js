@@ -25,6 +25,86 @@ const NOISE_TOKENS = new Set([
     'official',
 ]);
 /**
+ * Curated Canonical Synonym Groups.
+ * Bridges disparate translation titles (Portuguese, English, Romanized, Pinyin)
+ * for popular works to prevent multi-source catalog fragmentation.
+ */
+export const KNOWN_CANONICAL_SYNONYM_GROUPS = [
+    [
+        'imperador magico',
+        'imperador demoniaco',
+        'magic emperor',
+        'demonic emperor',
+        'the servant is the demon king',
+        'the servant is the demon king?!',
+        'mo huang da guan jia',
+        'devil butler',
+        'the devils butler',
+    ],
+    [
+        'mestre supremo de artes marciais',
+        'supreme martial artist',
+        'peerless martial god',
+    ],
+    [
+        'solo leveling',
+        'only i level up',
+        'na honjaman rebeleob',
+    ],
+    [
+        'o comeco depois do fim',
+        'the beginning after the end',
+        'tbate',
+    ],
+    [
+        'ponto de vista do leitor onisciente',
+        'omniscient reader viewpoint',
+        'orv',
+        'leitor onisciente',
+    ],
+    [
+        'o retorno do heroi da classe desastre',
+        'return of the disaster class hero',
+        'return of the disaster-class hero',
+        'retorno do heroi de nivel maximo',
+    ],
+    [
+        'o mercenario de ouro',
+        'mercenary enrollment',
+        'teenage mercenary',
+    ],
+    [
+        'grande mestre das artes marciais',
+        'grandmaster of demonic cultivation',
+        'mo dao zu shi',
+    ],
+    [
+        'troublesome sister 2',
+        'troublesome sister 2: blazing sun',
+        'troublesome sister season 2',
+    ],
+];
+/**
+ * Returns alternative titles for a known canonical synonym group if any match.
+ */
+export function getCanonicalSynonyms(text) {
+    if (!text)
+        return [];
+    const norm = normalizeTitle(text);
+    if (!norm)
+        return [];
+    const matchedGroup = KNOWN_CANONICAL_SYNONYM_GROUPS.find((group) => group.some((member) => {
+        const normMember = normalizeTitle(member);
+        return norm === normMember || norm.replace(/\s+/g, '') === normMember.replace(/\s+/g, '');
+    }));
+    if (!matchedGroup)
+        return [];
+    return matchedGroup.filter((m) => {
+        const nm = normalizeTitle(m);
+        return nm !== norm && nm.replace(/\s+/g, '') !== norm.replace(/\s+/g, '');
+    });
+}
+/**
  * Normalizes title string by removing accents, lowercasing, stripping punctuation
  * and filtering common scan/format noise words.
  */
@@ -184,13 +264,17 @@ export function matchWorkCandidate(target, candidate) {
     // Safety Guard 2: Season mismatch
     const targetSeason = extractSeason(target.title);
     const candSeason = extractSeason(candidate.title);
-    if (targetSeason && candSeason && targetSeason !== candSeason) {
-        return {
-            matched: false,
-            confidenceScore: 0.0,
-            matchMethod: 'NO_MATCH',
-            reason: `Season mismatch: ${targetSeason} vs ${candSeason}`,
-        };
+    if (targetSeason !== candSeason && (targetSeason || candSeason)) {
+        const s1 = targetSeason || 's1';
+        const s2 = candSeason || 's1';
+        if (s1 !== s2) {
+            return {
+                matched: false,
+                confidenceScore: 0.0,
+                matchMethod: 'NO_MATCH',
+                reason: `Season mismatch: ${targetSeason || 'Season 1'} vs ${candSeason || 'Season 1'}`,
+            };
+        }
     }
     // Safety Guard 3: Spin-off / Side Story mismatch
     const targetSpin = extractSpinOff(target.title);
@@ -238,6 +322,18 @@ export function matchWorkCandidate(target, candidate) {
     // Check known aliases / alternative titles
     const targetAliases = (target.aliases || []).map(normalizeTitle).filter(Boolean);
     const candAliases = (candidate.aliases || []).map(normalizeTitle).filter(Boolean);
+    // Check curated canonical synonym groups (e.g. Imperador Mágico vs Imperador Demoníaco vs Magic Emperor)
+    const targetSynonyms = getCanonicalSynonyms(target.title).map(normalizeTitle);
+    if (targetSynonyms.includes(normCand) ||
+        targetSynonyms.some((s) => s.replace(/\s+/g, '') === normCand.replace(/\s+/g, '')) ||
+        candAliases.some((ca) => targetSynonyms.includes(ca))) {
+        return {
+            matched: true,
+            confidenceScore: 0.96,
+            matchMethod: 'ALIAS_EXACT',
+            reason: 'Matched known canonical synonym group (e.g. translation variant)',
+        };
+    }
     // Check cross-alias matches
     for (const alias of targetAliases) {
         if (alias === normCand ||

@@ -1,6 +1,6 @@
 import { Logger } from './logger.js';
 import { decodeHtmlEntities } from '../sources/common/html-utils.js';
-import { matchWorkCandidate } from './matching.js';
+import { matchWorkCandidate, getCanonicalSynonyms } from './matching.js';
 export const ADULT_SOURCES = new Set([
     'hanamiheaven',
     'hipercool',
@@ -85,9 +85,12 @@ export class DeduplicationEngine {
             }
         }
         // 2. Candidate Matching & Canonical Resolution across all sources
-        const rawIncomingTitles = [title, ...(candidate.aliases || [])]
+        const initialTitles = [title, ...(candidate.aliases || [])]
             .map(t => decodeHtmlEntities(t || '').trim())
             .filter(t => t.length > 0);
+        // Automatically enrich with curated canonical translation synonyms
+        const synonymTitles = initialTitles.flatMap(t => getCanonicalSynonyms(t));
+        const rawIncomingTitles = Array.from(new Set([...initialTitles, ...synonymTitles]));
         const cleanSlug = this.sanitizeSlug(slug || title);
         const incomingSlugs = Array.from(new Set([cleanSlug, ...rawIncomingTitles.map(t => this.sanitizeSlug(t))]));
         const incomingTitles = Array.from(new Set(rawIncomingTitles));
