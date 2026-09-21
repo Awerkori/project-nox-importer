@@ -181,6 +181,15 @@ export class MangaThemesiaAdapter implements SourceAdapter {
     else if (lowerGenres.includes('manhua')) kind = 'MANHUA';
     else if (lowerGenres.includes('webtoon')) kind = 'WEBTOON';
 
+    // Alternative Titles
+    let alternativeTitles: string[] = [];
+    const altMatch = html.match(/class="(?:alter|alternative|wd-full)"[^>]*>([\s\S]*?)<\/(?:span|div)>/i) ||
+                     html.match(/(?:alternative|alternativo|other\s*names?)[^<]*<\/(?:b|strong|span)>[\s\S]*?<span>([\s\S]*?)<\/span>/i);
+    if (altMatch) {
+      const rawAlt = stripHtml(altMatch[1]);
+      alternativeTitles = rawAlt.split(/[,;\/\n\r]+/).map(s => decodeHtmlEntities(s.trim())).filter(s => s.length > 1);
+    }
+
     return {
       sourceWorkId,
       title,
@@ -190,6 +199,7 @@ export class MangaThemesiaAdapter implements SourceAdapter {
       genres,
       kind,
       status: 'ONGOING',
+      alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
     };
   }
 

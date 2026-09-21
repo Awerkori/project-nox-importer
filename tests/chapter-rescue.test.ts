@@ -77,7 +77,8 @@ describe('Cross-Provider Chapter Rescue & Page Classification', () => {
     const mangaMigrationsDir = resolve('/home/awerkori/.Projects/project-nox-manga/supabase/migrations');
     const files = readdirSync(mangaMigrationsDir).filter((f) => f.endsWith('.sql')).sort();
     for (const f of files) {
-      const sql = readFileSync(resolve(mangaMigrationsDir, f), 'utf8').replace('create extension if not exists pgcrypto;', '');
+      const sql = readFileSync(resolve(mangaMigrationsDir, f), 'utf8').replace('create extension if not exists pgcrypto;', '')
+        .replace(/create\s+index\s+concurrently/gi, 'create index');
       await db.exec(sql);
     }
     await db.exec(readFileSync(resolve('migrations/001_importer_schema.sql'), 'utf8'));
@@ -88,6 +89,7 @@ describe('Cross-Provider Chapter Rescue & Page Classification', () => {
     await db.exec(readFileSync(resolve('migrations/006_importer_publication_barrier.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/007_importer_lease_recovery.sql'), 'utf8'));
     await db.exec(`ALTER TABLE public.works ADD COLUMN IF NOT EXISTS latest_chapter_published_at timestamptz;`);
+    await db.exec(`ALTER TABLE public.chapters ADD COLUMN IF NOT EXISTS is_fresh_release boolean DEFAULT false;`);
 
     await db.query(`insert into auth.users (id, email, email_confirmed_at) values ($1, 'bot@projectnox.com', now())`, [botUserId]);
     await db.query(`update public.access_roles set role = 'ADMIN' where user_id = $1`, [botUserId]);
@@ -173,6 +175,26 @@ describe('Cross-Provider Chapter Rescue & Page Classification', () => {
           },
           neq: (col: string, val: any) => {
             filterStatements.push({ sql: `${col} != $${filterStatements.length + 1}`, vals: [val] });
+            return builder;
+          },
+          in: (col: string, vals: any[]) => {
+            if (!vals || vals.length === 0) {
+              filterStatements.push({ sql: `1 = 0`, vals: [] });
+            } else {
+              filterStatements.push({ sql: `${col} = ANY($${filterStatements.length + 1})`, vals: [vals] });
+            }
+            return builder;
+          },
+          ilike: (col: string, val: any) => {
+            filterStatements.push({ sql: `${col} ilike $${filterStatements.length + 1}`, vals: [val] });
+            return builder;
+          },
+          overlaps: (col: string, vals: any[]) => {
+            if (!vals || vals.length === 0) {
+              filterStatements.push({ sql: `1 = 0`, vals: [] });
+            } else {
+              filterStatements.push({ sql: `${col} && $${filterStatements.length + 1}`, vals: [vals] });
+            }
             return builder;
           },
           not: (col: string, op: string, val: any) => {
@@ -325,9 +347,17 @@ describe('Cross-Provider Chapter Rescue & Page Classification', () => {
   });
 
   it('performs cross-provider chapter rescue when a narrative page fails with 404 on primary source', async () => {
-    // 1. Create work in DB
+    // 1. Create work in DB with valid cover
+    const coverRes = await db.query(
+      `insert into public.media (created_by, provider, provider_key, mime, width, height, bytes, sha256, storage_ready, purpose)
+       values ($1, 'telegram', 'tg-cover-rescue', 'image/jpeg', 800, 1200, 50000, 'sha-cover-rescue', true, 'editorial') returning id`,
+      [botUserId]
+    );
+    const coverId = (coverRes.rows[0] as any).id;
+
     const wRes = await db.query(
-      `insert into public.works (title, slug, published) values ('Koko ni Iru yo!', 'koko-ni-iru-yo', true) returning id`
+      `insert into public.works (title, slug, published, cover_id) values ('Koko ni Iru yo!', 'koko-ni-iru-yo', true, $1) returning id`,
+      [coverId]
     );
     const workId = (wRes.rows[0] as any).id;
 

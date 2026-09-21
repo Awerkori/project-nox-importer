@@ -66,7 +66,8 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
     const migrationFiles = readdirSync(mangaMigrationsDir).filter((f) => f.endsWith('.sql')).sort();
     for (const f of migrationFiles) {
       const sql = readFileSync(resolve(mangaMigrationsDir, f), 'utf8')
-        .replace('create extension if not exists pgcrypto;', '');
+        .replace('create extension if not exists pgcrypto;', '')
+        .replace(/create\s+index\s+concurrently/gi, 'create index');
       await db.exec(sql);
     }
     await db.exec(readFileSync(resolve('migrations/001_importer_schema.sql'), 'utf8'));
@@ -75,6 +76,7 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
 
     await db.query(`insert into auth.users (id, email, email_confirmed_at) values ($1, 'bot@projectnox.com', now())`, [botUserId]);
     await db.query(`update public.access_roles set role = 'ADMIN' where user_id = $1`, [botUserId]);
+    await db.query(`insert into public.settings (key, value) values ('catalog_discovery_enabled', 'ENABLED') on conflict (key) do update set value = 'ENABLED'`);
 
     supabaseMock = {
       from: (table: string) => {

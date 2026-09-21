@@ -157,6 +157,8 @@ export class MangoToonsAdapter {
             status = 'HIATUS';
         else if (st.includes('cancel'))
             status = 'CANCELLED';
+        else if (st.includes('ongo') || st.includes('andamento') || st.includes('releasing') || st.includes('ativo') || st.includes('lanç') || st.includes('lanc'))
+            status = 'ONGOING';
         const genres = (w.tags || []).map((t) => t.nome || t.name).filter(Boolean);
         return {
             sourceWorkId: String(w.id || sourceWorkId),

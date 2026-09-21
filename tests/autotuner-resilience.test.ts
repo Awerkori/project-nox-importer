@@ -65,7 +65,7 @@ describe('Autotuner Resilience & Penalty Elimination', () => {
     expect(result.concurrency).toBe(2);
   });
 
-  it('scales down by 1 when an error pattern (cycleErrors >= 2) occurs and applies 35s cooldown', () => {
+  it('detects stress and enters cooldown without downscaling when error pattern (cycleErrors >= 2) occurs', () => {
     const autotuner = new AdaptiveAutotuner({
       initialConcurrency: 3,
       minConcurrency: 1,
@@ -78,8 +78,8 @@ describe('Autotuner Resilience & Penalty Elimination', () => {
     autotuner.recordError('error');
 
     const result = autotuner.evaluateCycle();
-    expect(result.action).toBe('SCALED_DOWN');
-    expect(result.concurrency).toBe(2);
+    expect(result.action).toBe('STRESS_DETECTED');
+    expect(result.concurrency).toBe(3);
     expect(result.reason).toContain('Detected error pattern');
 
     // Immediate next evaluation while in cooldown

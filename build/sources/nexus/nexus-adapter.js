@@ -105,20 +105,22 @@ export class NexusAdapter {
         let kind = 'UNKNOWN';
         const rawType = (row.type || '').toUpperCase();
         if (rawType.includes('MANHWA'))
-            kind = 'UNKNOWN';
+            kind = 'MANHWA';
         else if (rawType.includes('MANHUA'))
             kind = 'MANHUA';
         else if (rawType.includes('WEBTOON'))
             kind = 'WEBTOON';
         // Normalize status
         let status = 'UNKNOWN';
-        const rawStatus = (row.status || '').toUpperCase();
+        const rawStatus = (row.status || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
         if (rawStatus.includes('COMPLET') || rawStatus.includes('CONCLU'))
             status = 'COMPLETED';
         else if (rawStatus.includes('HIAT'))
             status = 'HIATUS';
         else if (rawStatus.includes('CANCEL'))
             status = 'CANCELLED';
+        else if (rawStatus.includes('ONGO') || rawStatus.includes('RELEAS') || rawStatus.includes('ANDAM') || rawStatus.includes('LANC'))
+            status = 'ONGOING';
         // Extract genres
         const genres = [];
         if (Array.isArray(row.work_genres)) {

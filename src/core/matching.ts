@@ -79,12 +79,21 @@ export function slugifyTitle(text: string): string {
 }
 
 /**
- * Extracts season identifier if present (e.g., 's2', 'season 2', '2a temporada')
+ * Extracts season identifier if present (e.g., 's2', 'season 2', '2a temporada', 'season ii', 'parte 2')
  */
 export function extractSeason(text: string): string | null {
   const norm = text.toLowerCase();
-  const match = norm.match(/(?:season|temporada|temp|s)\s*(\d+)/i) || norm.match(/(\d+)[ªaºo]?\s*temporada/i);
-  return match ? `s${match[1]}` : null;
+  // Roman numerals mapping
+  const romanMap: Record<string, string> = {
+    'i': '1', 'ii': '2', 'iii': '3', 'iv': '4', 'v': '5', 'vi': '6', 'vii': '7'
+  };
+
+  const match = norm.match(/(?:season|temporada|temp|part|parte|s)\s*(\d+|vii|vi|v|iv|iii|ii|i)\b/i) ||
+                norm.match(/(\d+)[ªaºo]?\s*(?:temporada|season|parte|part)\b/i);
+  if (!match) return null;
+  const raw = match[1].toLowerCase();
+  const num = romanMap[raw] || raw;
+  return `s${num}`;
 }
 
 /**
@@ -92,14 +101,14 @@ export function extractSeason(text: string): string | null {
  */
 export function isNovel(text: string, kind?: string): boolean {
   const t = (text + ' ' + (kind || '')).toLowerCase();
-  return /\b(novel|light novel|webnovel|ln|wn)\b/i.test(t);
+  return /\b(novel|light novel|webnovel|ln|wn|web novel|romance|livro)\b/i.test(t);
 }
 
 /**
  * Checks whether text indicates a spin-off, side story, or gaiden
  */
 export function extractSpinOff(text: string): boolean {
-  return /\b(side story|gaiden|spin-off|spinoff|extra story)\b/i.test(text.toLowerCase());
+  return /\b(side story|gaiden|spin-off|spinoff|extra story|hist[oó]ria paralela|hist[oó]ria extra|historia paralela|historia extra)\b/i.test(text.toLowerCase());
 }
 
 /**

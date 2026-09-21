@@ -274,11 +274,13 @@ export class ProtectiveSentinel {
 
       // Quick latency probes
       if (this.siteUrl) {
-        const homeProbe = await this.measureRoute(`${this.siteUrl}/`, this.thresholds.homeTtfbPreSlaMs);
-        const readerProbe = await this.measureRoute(`${this.siteUrl}/ler/46b7538b-fcb8-40ec-b3ee-cdadd2edb04c`, this.thresholds.readerTtfbPreSlaMs);
+        const homeSlaMs = 250;
+        const readerSlaMs = 150;
+        const homeProbe = await this.measureRoute(`${this.siteUrl}/`, homeSlaMs);
+        const readerProbe = await this.measureRoute(`${this.siteUrl}/ler/46b7538b-fcb8-40ec-b3ee-cdadd2edb04c`, readerSlaMs);
 
-        const isHomeHealthy = Boolean(homeProbe && homeProbe.statusCode >= 200 && homeProbe.statusCode < 400 && homeProbe.ttfbMs <= this.thresholds.homeTtfbPreSlaMs);
-        const isReaderHealthy = Boolean(readerProbe && readerProbe.statusCode >= 200 && readerProbe.statusCode < 400 && readerProbe.ttfbMs <= this.thresholds.readerTtfbPreSlaMs);
+        const isHomeHealthy = Boolean(homeProbe && homeProbe.statusCode >= 200 && homeProbe.statusCode < 400 && homeProbe.ttfbMs <= homeSlaMs);
+        const isReaderHealthy = Boolean(readerProbe && readerProbe.statusCode >= 200 && readerProbe.statusCode < 400 && readerProbe.ttfbMs <= readerSlaMs);
 
         if (isHomeHealthy && isReaderHealthy) {
           this.consecutiveHealthySamples = (this.consecutiveHealthySamples || 0) + 1;
@@ -313,7 +315,10 @@ export class ProtectiveSentinel {
         url,
         {
           agent: false,
-          headers: { 'User-Agent': 'Project-Nox-Sentinel/1.0 (Auto-Resume Probe)' },
+          headers: {
+            'Connection': 'close',
+            'User-Agent': 'Project-Nox-Sentinel/1.0 (Auto-Resume Probe)',
+          },
           timeout: 4000,
         },
         (res: any) => {

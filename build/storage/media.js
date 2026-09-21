@@ -212,7 +212,7 @@ export async function processAndStoreMedia(supabase, storage, bytes, userId, pur
         created_by: userId,
         storage_ready: true,
         purpose,
-        chapter_id: chapterId || null,
+        chapter_id: null,
     };
     // 4. Insert into public.media unless caller will batch insert
     if (!options?.skipDbInsert) {

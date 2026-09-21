@@ -141,8 +141,8 @@ describe('Concurrency & Autotuner', () => {
       });
 
       const res = autotuner.evaluateCycle();
-      expect(res.action).toBe('SCALED_DOWN');
-      expect(res.concurrency).toBe(3); // Reduced by 1 level: 4 -> 3
+      expect(res.action).toBe('STRESS_DETECTED');
+      expect(res.concurrency).toBe(4); // Maintained under stress while cooldown is applied
       expect(res.reason).toContain('High RSS');
 
       // Subsequent cycle even if memory recovers should be in COOLDOWN
@@ -157,7 +157,7 @@ describe('Concurrency & Autotuner', () => {
       expect(coolRes.action).toBe('COOLDOWN');
     });
 
-    it('immediately scales down when 429 rate limit or errors are recorded', () => {
+    it('immediately records stress and applies cooldown when 429 rate limit or errors are recorded', () => {
       const autotuner = new AdaptiveAutotuner({
         initialConcurrency: 3,
         minConcurrency: 1,
@@ -182,7 +182,8 @@ describe('Concurrency & Autotuner', () => {
       autotuner.recordError('ratelimit');
 
       const res = autotuner.evaluateCycle();
-      expect(res.action).toBe('SCALED_DOWN');
+      expect(res.action).toBe('STRESS_DETECTED');
+      expect(res.concurrency).toBe(3);
       expect(res.reason).toContain('429');
     });
   });

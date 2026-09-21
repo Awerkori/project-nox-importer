@@ -262,7 +262,13 @@ describe('UPSTREAM_BLOCKED Isolation, Job Parking & Cross-Provider Fallback', ()
         return { ok: true, status: 200 } as any;
       }
       if (u.includes('img.nx-toons.xyz')) {
-        return { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(10) } as any;
+        const validJpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]);
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'image/jpeg' }),
+          arrayBuffer: async () => validJpeg.buffer,
+        } as any;
       }
       return { ok: false, status: 404 } as any;
     });
@@ -274,9 +280,9 @@ describe('UPSTREAM_BLOCKED Isolation, Job Parking & Cross-Provider Fallback', ()
         status: 'UPSTREAM_BLOCKED',
       });
 
-      // Should first transition to RECOVERING, then to ACTIVE
+      // Should first transition to PROBING, then to ACTIVE
       expect(updates.length).toBe(2);
-      expect(updates[0].status).toBe('RECOVERING');
+      expect(updates[0].status).toBe('PROBING');
       expect(updates[1].status).toBe('ACTIVE');
       expect(updates[1].enabled).toBe(true);
       expect(updates[1].blocked_reason).toBeNull();

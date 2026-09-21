@@ -1,5 +1,6 @@
 import { Logger } from './logger.js';
 import { decodeHtmlEntities } from '../sources/common/html-utils.js';
+import { matchWorkCandidate } from './matching.js';
 export const ADULT_SOURCES = new Set([
     'hanamiheaven',
     'hipercool',
@@ -83,28 +84,46 @@ export class DeduplicationEngine {
                 };
             }
         }
-        // 2. Candidate Matching & Canonical Resolution
-        const incomingTitles = [title, ...(candidate.aliases || [])]
-            .map(t => t.trim())
+        // 2. Candidate Matching & Canonical Resolution across all sources
+        const rawIncomingTitles = [title, ...(candidate.aliases || [])]
+            .map(t => decodeHtmlEntities(t || '').trim())
             .filter(t => t.length > 0);
         const cleanSlug = this.sanitizeSlug(slug || title);
-        const incomingSlugs = Array.from(new Set(incomingTitles.map(t => this.sanitizeSlug(t))));
+        const incomingSlugs = Array.from(new Set([cleanSlug, ...rawIncomingTitles.map(t => this.sanitizeSlug(t))]));
+        const incomingTitles = Array.from(new Set(rawIncomingTitles));
         if (incomingSlugs.length === 0) {
             incomingSlugs.push(cleanSlug);
             incomingTitles.push(title);
         }
-        // Find candidates via slug OR aliases
-        const [bySlugRes, byAliasRes] = await Promise.all([
-            this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind').in('slug', incomingSlugs),
-            this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind').overlaps('aliases', incomingTitles)
+        // Step 2A: Query existing mappings in importer_work_mappings by source_slug OR source_title
+        const [byMapSlugRes, byMapTitleRes] = await Promise.all([
+            this.supabase.from('importer_work_mappings').select('work_id, source, source_slug, source_title').in('source_slug', incomingSlugs).not('work_id', 'is', null),
+            this.supabase.from('importer_work_mappings').select('work_id, source, source_slug, source_title').in('source_title', incomingTitles).not('work_id', 'is', null),
         ]);
-        if (bySlugRes.error)
-            throw bySlugRes.error;
-        if (byAliasRes.error)
-            throw byAliasRes.error;
+        const mappedWorkIds = new Set();
+        for (const m of [...(byMapSlugRes.data || []), ...(byMapTitleRes.data || [])]) {
+            if (m.work_id)
+                mappedWorkIds.add(m.work_id);
+        }
+        // Step 2B: Query works table by slug, aliases, title, or mapped workIds
+        const workQueries = [
+            this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind, status').in('slug', incomingSlugs),
+            this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind, status').overlaps('aliases', incomingTitles),
+            this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind, status').in('title', incomingTitles),
+        ];
+        if (mappedWorkIds.size > 0) {
+            workQueries.push(this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind, status').in('id', Array.from(mappedWorkIds)));
+        }
+        const workQueryResults = await Promise.all(workQueries);
+        for (const res of workQueryResults) {
+            if (res.error)
+                throw res.error;
+        }
         const candidateMap = new Map();
-        for (const w of [...(bySlugRes.data || []), ...(byAliasRes.data || [])]) {
-            candidateMap.set(w.id, w);
+        for (const res of workQueryResults) {
+            for (const w of res.data || []) {
+                candidateMap.set(w.id, w);
+            }
         }
         const matchedWorks = Array.from(candidateMap.values());
         if (matchedWorks.length > 0) {
@@ -119,28 +138,35 @@ export class DeduplicationEngine {
                 .map((c) => c.work_id));
             let bestMatch = null;
             let highestScore = -1;
+            let secondScore = -1;
             for (const w of matchedWorks) {
                 if (claimedBySameSource.has(w.id))
                     continue;
-                let score = 0;
-                const existingTitles = [w.title, ...(w.aliases || [])].filter(Boolean).map(t => this.sanitizeSlug(t.trim()));
-                // Signal 1: Title/Alias intersection
-                const intersection = incomingSlugs.filter(s => existingTitles.includes(s));
-                if (intersection.length > 0) {
-                    score += 50;
-                    if (intersection.includes(cleanSlug) || intersection.includes(this.sanitizeSlug(w.title))) {
-                        score += 20; // Primary title match bonus
-                    }
+                // Use matchWorkCandidate with strict safety constraints (Novel vs Comic, Seasons, Spin-offs)
+                const matchResult = matchWorkCandidate({
+                    title: w.title,
+                    slug: w.slug,
+                    aliases: w.aliases || [],
+                    kind: w.kind,
+                }, {
+                    title: candidate.title,
+                    slug: cleanSlug,
+                    aliases: incomingTitles,
+                    kind: candidate.kind,
+                });
+                if (!matchResult.matched) {
+                    continue;
                 }
-                // Signal 2: Author match
+                let score = matchResult.confidenceScore;
+                // Additional signal: Author match bonus
                 if (candidate.author && w.author) {
                     const inAuthor = this.sanitizeSlug(candidate.author);
                     const exAuthor = this.sanitizeSlug(w.author);
                     if (inAuthor && exAuthor && (inAuthor.includes(exAuthor) || exAuthor.includes(inAuthor))) {
-                        score += 30;
+                        score = Math.min(1.0, score + 0.05);
                     }
                 }
-                // Signal 3: Synopsis basic similarity
+                // Additional signal: Synopsis basic overlap bonus
                 if (candidate.synopsis && w.synopsis) {
                     const s1 = candidate.synopsis.toLowerCase();
                     const s2 = w.synopsis.toLowerCase();
@@ -149,33 +175,36 @@ export class DeduplicationEngine {
                         const w2 = s2.split(/\s+/).slice(0, 20);
                         const common = w1.filter(word => w2.includes(word) && word.length > 3);
                         if (common.length >= 4) {
-                            score += 15;
+                            score = Math.min(1.0, score + 0.05);
                         }
                     }
                 }
-                if (candidate.kind && w.kind && candidate.kind === w.kind)
-                    score += 5;
                 w._score = score;
                 if (score > highestScore) {
+                    secondScore = highestScore;
                     highestScore = score;
                     bestMatch = w;
                 }
+                else if (score > secondScore) {
+                    secondScore = score;
+                }
             }
-            const validMatches = matchedWorks.filter(w => !claimedBySameSource.has(w.id));
-            let isAmbiguous = validMatches.length === 0;
-            // High confidence threshold: >= 60 points
-            if (validMatches.length > 0 && highestScore >= 60) {
-                // Ensure no other match is too close (difference < 20 points)
-                const closeMatches = validMatches.filter(w => w.id !== bestMatch.id && w._score >= highestScore - 20);
-                if (closeMatches.length > 0) {
+            const validMatches = matchedWorks.filter(w => !claimedBySameSource.has(w.id) && w._score !== undefined && w._score >= 0.80);
+            let isAmbiguous = false;
+            // High confidence threshold: >= 0.85
+            if (!bestMatch || highestScore < 0.85) {
+                if (matchedWorks.some(w => claimedBySameSource.has(w.id)) || (highestScore >= 0.60 && highestScore < 0.85)) {
                     isAmbiguous = true;
                 }
             }
             else {
-                isAmbiguous = true;
+                // If second best match is very close (< 0.10 difference), consider ambiguous
+                if (validMatches.length > 1 && secondScore >= highestScore - 0.10) {
+                    isAmbiguous = true;
+                }
             }
-            if (isAmbiguous || !bestMatch) {
-                this.logger.warn('Ambiguous work candidate detected - flagging for review', {
+            if (isAmbiguous) {
+                this.logger.warn('Ambiguous work candidate detected - flagging for review (ZERO works created)', {
                     source,
                     sourceWorkId,
                     title,
@@ -210,45 +239,49 @@ export class DeduplicationEngine {
                     reason: 'Conflict or low confidence. Disambiguation required.',
                 };
             }
-            // Exact single match: Link this source to the canonical work_id
-            const matched = bestMatch;
-            // Merge missing incoming aliases into canonical work
-            const existingAliasSlugs = new Set((matched.aliases || []).map((a) => this.sanitizeSlug(a)));
-            const newAliases = [...(matched.aliases || [])];
-            let addedAliases = false;
-            for (const t of incomingTitles) {
-                if (!existingAliasSlugs.has(this.sanitizeSlug(t)) && t.toLowerCase() !== matched.title.toLowerCase()) {
-                    newAliases.push(t);
-                    addedAliases = true;
+            if (bestMatch && highestScore >= 0.85) {
+                // High-confidence single match: Link this source to the canonical work_id
+                const matched = bestMatch;
+                // Non-destructively merge missing incoming aliases into canonical work
+                const existingAliasSlugs = new Set((matched.aliases || []).map((a) => this.sanitizeSlug(a)));
+                const newAliases = [...(matched.aliases || [])];
+                let addedAliases = false;
+                for (const t of incomingTitles) {
+                    if (!existingAliasSlugs.has(this.sanitizeSlug(t)) && t.toLowerCase() !== matched.title.toLowerCase()) {
+                        newAliases.push(t);
+                        addedAliases = true;
+                        existingAliasSlugs.add(this.sanitizeSlug(t));
+                    }
                 }
+                if (addedAliases) {
+                    await this.supabase.from('works').update({ aliases: newAliases }).eq('id', matched.id);
+                }
+                const { data: insertedMapping } = await this.supabase
+                    .from('importer_work_mappings')
+                    .upsert({
+                    source,
+                    source_work_id: sourceWorkId,
+                    work_id: matched.id,
+                    source_slug: cleanSlug,
+                    source_title: title,
+                    sync_status: 'SYNCED',
+                    metadata: candidate.rawMetadata || {},
+                    last_synced_at: new Date().toISOString(),
+                }, { onConflict: 'source,source_work_id' })
+                    .select()
+                    .single();
+                // Apply per-field metadata precedence (ADMIN > KURO > OTHER)
+                await this.applyMetadataPrecedence(matched.id, candidate, source);
+                return {
+                    workId: matched.id,
+                    mappingId: insertedMapping?.id ?? '',
+                    status: 'EXISTING_MAPPING',
+                    slug: matched.slug,
+                };
             }
-            if (addedAliases) {
-                await this.supabase.from('works').update({ aliases: newAliases }).eq('id', matched.id);
-            }
-            const { data: insertedMapping } = await this.supabase
-                .from('importer_work_mappings')
-                .upsert({
-                source,
-                source_work_id: sourceWorkId,
-                work_id: matched.id,
-                source_slug: cleanSlug,
-                source_title: title,
-                sync_status: 'SYNCED',
-                metadata: candidate.rawMetadata || {},
-                last_synced_at: new Date().toISOString(),
-            }, { onConflict: 'source,source_work_id' })
-                .select()
-                .single();
-            // Apply per-field metadata precedence (ADMIN > KURO > OTHER)
-            await this.applyMetadataPrecedence(matched.id, candidate, source);
-            return {
-                workId: matched.id,
-                mappingId: insertedMapping?.id ?? '',
-                status: 'EXISTING_MAPPING',
-                slug: matched.slug,
-            };
         }
-        // 3. No match exists anywhere -> create brand new canonical work safely
+        // 3. No match exists anywhere -> Genuinely new candidate.
+        // Acquire transactional advisory lock to prevent race condition between concurrent workers.
         let uniqueSlug = cleanSlug;
         let suffix = 1;
         while (true) {
@@ -261,96 +294,151 @@ export class DeduplicationEngine {
                 break;
             uniqueSlug = `${cleanSlug}-${++suffix}`;
         }
-        const now = new Date().toISOString();
-        const isAdultSource = ADULT_SOURCES.has(source) || candidate.contentRating === 'ADULT_18';
-        const contentRating = isAdultSource ? 'ADULT_18' : (candidate.contentRating || 'GENERAL');
-        const ageRating = isAdultSource ? Math.max(18, candidate.ageRating ?? 18) : (candidate.ageRating ?? 12);
-        const initialProv = {};
-        if (title)
-            initialProv.title = { source, updated_at: now };
-        if (candidate.synopsis) {
-            initialProv.synopsis = { source, updated_at: now };
-            initialProv.description = { source, updated_at: now };
+        const pool = typeof this.supabase.sql === 'function' ? this.supabase : null;
+        let lockHash = null;
+        if (pool) {
+            try {
+                const hashRes = await pool.sql(`SELECT hashtext('work_create:' || $1) as h`, [uniqueSlug]);
+                if (hashRes.rows?.[0]?.h !== undefined) {
+                    lockHash = parseInt(String(hashRes.rows[0].h), 10);
+                    await pool.sql(`SELECT pg_advisory_lock($1)`, [lockHash]);
+                }
+            }
+            catch (err) {
+                this.logger.warn('Advisory lock not acquired, falling back to slug check', { error: err?.message });
+            }
         }
-        if (candidate.author)
-            initialProv.author = { source, updated_at: now };
-        if (candidate.artist)
-            initialProv.artist = { source, updated_at: now };
-        if (candidate.kind)
+        try {
+            // Re-check after acquiring lock in case concurrent worker created it
+            const { data: recheck } = await this.supabase
+                .from('works')
+                .select('id, title, slug, aliases')
+                .eq('slug', uniqueSlug)
+                .maybeSingle();
+            if (recheck) {
+                this.logger.info(`Work was created concurrently by another worker: ${recheck.id} (${recheck.slug}). Linking mapping.`);
+                const { data: insertedMapping } = await this.supabase
+                    .from('importer_work_mappings')
+                    .upsert({
+                    source,
+                    source_work_id: sourceWorkId,
+                    work_id: recheck.id,
+                    source_slug: uniqueSlug,
+                    source_title: title,
+                    sync_status: 'SYNCED',
+                    metadata: candidate.rawMetadata || {},
+                    last_synced_at: new Date().toISOString(),
+                }, { onConflict: 'source,source_work_id' })
+                    .select()
+                    .single();
+                return {
+                    workId: recheck.id,
+                    mappingId: insertedMapping?.id ?? '',
+                    status: 'EXISTING_MAPPING',
+                    slug: recheck.slug,
+                };
+            }
+            const now = new Date().toISOString();
+            const isAdultSource = ADULT_SOURCES.has(source) || candidate.contentRating === 'ADULT_18';
+            const contentRating = isAdultSource ? 'ADULT_18' : (candidate.contentRating || 'GENERAL');
+            const ageRating = isAdultSource ? Math.max(18, candidate.ageRating ?? 18) : (candidate.ageRating ?? 12);
+            const validKinds = new Set(['MANGA', 'MANHWA', 'MANHUA', 'WEBTOON']);
+            const validStatuses = new Set(['ONGOING', 'COMPLETED', 'HIATUS', 'CANCELLED']);
+            const safeKind = candidate.kind && validKinds.has(candidate.kind) ? candidate.kind : 'MANHWA';
+            const safeStatus = candidate.status && validStatuses.has(candidate.status) ? candidate.status : 'ONGOING';
+            const initialProv = {};
+            if (title)
+                initialProv.title = { source, updated_at: now };
+            if (candidate.synopsis) {
+                initialProv.synopsis = { source, updated_at: now };
+                initialProv.description = { source, updated_at: now };
+            }
+            if (candidate.author)
+                initialProv.author = { source, updated_at: now };
+            if (candidate.artist)
+                initialProv.artist = { source, updated_at: now };
             initialProv.kind = { source, updated_at: now };
-        if (candidate.status)
             initialProv.status = { source, updated_at: now };
-        if (candidate.year)
-            initialProv.year = { source, updated_at: now };
-        initialProv.age_rating = { source, updated_at: now };
-        initialProv.content_rating = { source, updated_at: now };
-        if (isAdultSource) {
-            initialProv.adult_source = { source, updated_at: now };
+            if (candidate.year)
+                initialProv.year = { source, updated_at: now };
+            initialProv.age_rating = { source, updated_at: now };
+            initialProv.content_rating = { source, updated_at: now };
+            if (isAdultSource) {
+                initialProv.adult_source = { source, updated_at: now };
+            }
+            if (candidate.coverId)
+                initialProv.cover = { source, updated_at: now };
+            if (candidate.aliases && candidate.aliases.length > 0)
+                initialProv.aliases = { source, updated_at: now };
+            const newWorkId = crypto.randomUUID();
+            const { error: insertWorkErr } = await this.supabase.from('works').insert({
+                id: newWorkId,
+                slug: uniqueSlug,
+                title: decodeHtmlEntities(title).slice(0, 200),
+                aliases: (candidate.aliases || []).map((a) => decodeHtmlEntities(a)),
+                synopsis: decodeHtmlEntities(candidate.synopsis || '').slice(0, 5000),
+                description: decodeHtmlEntities(candidate.synopsis || '').slice(0, 10000),
+                author: candidate.author?.slice(0, 100) || '',
+                artist: candidate.artist?.slice(0, 100) || '',
+                kind: safeKind,
+                status: safeStatus,
+                year: candidate.year && candidate.year >= 1900 && candidate.year <= 2200 ? candidate.year : null,
+                age_rating: ageRating,
+                content_rating: contentRating,
+                published: false,
+                featured: false,
+                cover_id: candidate.coverId || null,
+                metadata_provenance: initialProv,
+            });
+            if (insertWorkErr) {
+                this.logger.error('Failed to create new work', { error: insertWorkErr.message });
+                throw insertWorkErr;
+            }
+            const mappingMetadata = { ...(candidate.rawMetadata || {}) };
+            if (isAdultSource) {
+                mappingMetadata.adult_source = true;
+                mappingMetadata.adult_source_id = source;
+            }
+            const { data: insertedMapping, error: mapInsertErr } = await this.supabase
+                .from('importer_work_mappings')
+                .upsert({
+                source,
+                source_work_id: sourceWorkId,
+                work_id: newWorkId,
+                source_slug: uniqueSlug,
+                source_title: title,
+                sync_status: 'SYNCED',
+                metadata: mappingMetadata,
+                last_synced_at: now,
+            }, { onConflict: 'source,source_work_id' })
+                .select()
+                .single();
+            if (mapInsertErr)
+                throw mapInsertErr;
+            // Attach canonical adult tags and upstream genres safely
+            await this.syncWorkTags(newWorkId, candidate, isAdultSource, safeKind);
+            this.logger.info('Created new work & mapping', {
+                workId: newWorkId,
+                slug: uniqueSlug,
+                title,
+                source,
+                contentRating,
+            });
+            return {
+                workId: newWorkId,
+                mappingId: insertedMapping.id,
+                status: 'NEW_WORK',
+                slug: uniqueSlug,
+            };
         }
-        if (candidate.coverId)
-            initialProv.cover = { source, updated_at: now };
-        if (candidate.aliases && candidate.aliases.length > 0)
-            initialProv.aliases = { source, updated_at: now };
-        const newWorkId = crypto.randomUUID();
-        const { error: insertWorkErr } = await this.supabase.from('works').insert({
-            id: newWorkId,
-            slug: uniqueSlug,
-            title: decodeHtmlEntities(title).slice(0, 200),
-            aliases: (candidate.aliases || []).map((a) => decodeHtmlEntities(a)),
-            synopsis: decodeHtmlEntities(candidate.synopsis || '').slice(0, 5000),
-            description: decodeHtmlEntities(candidate.synopsis || '').slice(0, 10000),
-            author: candidate.author?.slice(0, 100) || '',
-            artist: candidate.artist?.slice(0, 100) || '',
-            kind: candidate.kind || 'UNKNOWN',
-            status: candidate.status || 'UNKNOWN',
-            year: candidate.year && candidate.year >= 1900 && candidate.year <= 2200 ? candidate.year : null,
-            age_rating: ageRating,
-            content_rating: contentRating,
-            published: false,
-            featured: false,
-            cover_id: candidate.coverId || null,
-            metadata_provenance: initialProv,
-        });
-        if (insertWorkErr) {
-            this.logger.error('Failed to create new work', { error: insertWorkErr.message });
-            throw insertWorkErr;
+        finally {
+            if (lockHash !== null && pool) {
+                try {
+                    await pool.sql(`SELECT pg_advisory_unlock($1)`, [lockHash]);
+                }
+                catch { }
+            }
         }
-        const mappingMetadata = { ...(candidate.rawMetadata || {}) };
-        if (isAdultSource) {
-            mappingMetadata.adult_source = true;
-            mappingMetadata.adult_source_id = source;
-        }
-        const { data: insertedMapping, error: mapInsertErr } = await this.supabase
-            .from('importer_work_mappings')
-            .upsert({
-            source,
-            source_work_id: sourceWorkId,
-            work_id: newWorkId,
-            source_slug: uniqueSlug,
-            source_title: title,
-            sync_status: 'SYNCED',
-            metadata: mappingMetadata,
-            last_synced_at: now,
-        }, { onConflict: 'source,source_work_id' })
-            .select()
-            .single();
-        if (mapInsertErr)
-            throw mapInsertErr;
-        // Attach canonical adult tags and upstream genres safely
-        await this.syncWorkTags(newWorkId, candidate, isAdultSource, candidate.kind);
-        this.logger.info('Created new work & mapping', {
-            workId: newWorkId,
-            slug: uniqueSlug,
-            title,
-            source,
-            contentRating,
-        });
-        return {
-            workId: newWorkId,
-            mappingId: insertedMapping.id,
-            status: 'NEW_WORK',
-            slug: uniqueSlug,
-        };
     }
     /**
      * Applies field-level metadata precedence:
@@ -400,6 +488,9 @@ export class DeduplicationEngine {
             // 4.5 UNKNOWN should never overwrite a known value
             if ((fieldName === 'kind' || fieldName === 'status') && candidateValue === 'UNKNOWN' && !isCurrentEmpty && currentVal !== 'UNKNOWN')
                 return false;
+            // 5. Kuro can upgrade any non-manual field
+            if (source === 'kuro')
+                return true;
             // Other sources cannot overwrite populated fields
             return false;
         };
@@ -600,9 +691,11 @@ export class DeduplicationEngine {
             }
             const targetTagIds = new Set();
             if (isAdult) {
-                const adultTag = tagLookup.get('adulto') || tagLookup.get('18') || tagLookup.get('+18');
-                if (adultTag)
-                    targetTagIds.add(adultTag);
+                for (const key of ['adulto', '18', '+18', 'adulto-18', 'adulto (+18)']) {
+                    const tId = tagLookup.get(key);
+                    if (tId)
+                        targetTagIds.add(tId);
+                }
                 const effectiveKind = (kind || candidate.kind || '').toUpperCase();
                 const hasManhwaGenre = (candidate.genres || []).some((g) => /manhwa|pornhwa/i.test(g));
                 if (effectiveKind === 'MANHWA' || hasManhwaGenre) {

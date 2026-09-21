@@ -31,7 +31,8 @@ describe('Generic Lease Recovery System', () => {
     const files = readdirSync(mangaMigrationsDir).filter((f) => f.endsWith('.sql')).sort();
     for (const f of files) {
       const sql = readFileSync(resolve(mangaMigrationsDir, f), 'utf8')
-        .replace('create extension if not exists pgcrypto;', '');
+        .replace('create extension if not exists pgcrypto;', '')
+        .replace(/create\s+index\s+concurrently/gi, 'create index');
       await db.exec(sql);
     }
     await db.exec(readFileSync(resolve('migrations/001_importer_schema.sql'), 'utf8'));

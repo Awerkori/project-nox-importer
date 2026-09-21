@@ -182,6 +182,7 @@ export class MangoToonsAdapter implements SourceAdapter {
     if (st.includes('conclu')) status = 'COMPLETED';
     else if (st.includes('hiat') || st.includes('paus')) status = 'HIATUS';
     else if (st.includes('cancel')) status = 'CANCELLED';
+    else if (st.includes('ongo') || st.includes('andamento') || st.includes('releasing') || st.includes('ativo') || st.includes('lanç') || st.includes('lanc')) status = 'ONGOING';
 
     const genres: string[] = (w.tags || []).map((t: any) => t.nome || t.name).filter(Boolean);
 

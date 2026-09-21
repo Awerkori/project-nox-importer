@@ -24,7 +24,7 @@ export declare function normalizeTitle(text: string): string;
  */
 export declare function slugifyTitle(text: string): string;
 /**
- * Extracts season identifier if present (e.g., 's2', 'season 2', '2a temporada')
+ * Extracts season identifier if present (e.g., 's2', 'season 2', '2a temporada', 'season ii', 'parte 2')
  */
 export declare function extractSeason(text: string): string | null;
 /**

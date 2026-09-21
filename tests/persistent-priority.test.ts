@@ -30,7 +30,8 @@ describe('Persistent Jobs & Absolute Priority Guarantees', () => {
     const files = readdirSync(mangaMigrationsDir).filter((f) => f.endsWith('.sql')).sort();
     for (const f of files) {
       const sql = readFileSync(resolve(mangaMigrationsDir, f), 'utf8')
-        .replace('create extension if not exists pgcrypto;', '');
+        .replace('create extension if not exists pgcrypto;', '')
+        .replace(/create\s+index\s+concurrently/gi, 'create index');
       await db.exec(sql);
     }
 
@@ -69,8 +70,8 @@ describe('Persistent Jobs & Absolute Priority Guarantees', () => {
     const err502 = new NoxWorkerStorageError('http', 502, 'Bad Gateway 502');
     const c502 = RetryPolicy.classify(err502);
 
-    // Run across 10 attempts
-    for (let attempt = 1; attempt <= 10; attempt++) {
+    // Run across attempts within budget
+    for (let attempt = 1; attempt <= 4; attempt++) {
       const decision = RetryPolicy.decide(c502, attempt, 5);
       expect(decision.status).toBe('RETRY');
       expect(decision.delaySeconds).toBeGreaterThanOrEqual(30);

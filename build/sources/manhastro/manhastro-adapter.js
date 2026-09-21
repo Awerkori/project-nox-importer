@@ -161,13 +161,15 @@ export class ManhastroAdapter {
         else if (cat.includes('webtoon'))
             kind = 'WEBTOON';
         let status = 'UNKNOWN';
-        const st = (item.status || '').toLowerCase();
+        const st = (item.status || '').toLowerCase().replace(/[^a-z0-9]/g, '');
         if (st.includes('completed') || st.includes('completo'))
             status = 'COMPLETED';
         else if (st.includes('hiat'))
             status = 'HIATUS';
         else if (st.includes('cancel'))
             status = 'CANCELLED';
+        else if (st.includes('ongo') || st.includes('andamento') || st.includes('releasing') || st.includes('ativo') || st.includes('lanc'))
+            status = 'ONGOING';
         return {
             sourceWorkId: String(item.manga_id),
             title,
