@@ -25,10 +25,10 @@ export class SchedulerStateStore {
     enabled: true,
     shadowMode: false,
     maxActiveNewWorks: 8,
-    maxActiveBackfillWorks: 10,
+    maxActiveBackfillWorks: 12,
     maxInflightPerWork: 2,
-    slidingWindowSize: 8,
-    slidingWindowMin: 3,
+    slidingWindowSize: 12,
+    slidingWindowMin: 4,
     antiStarvationRatio: 4,
   };
   private metricsCache: SchedulerMetrics | null = null;
