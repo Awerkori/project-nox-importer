@@ -61,7 +61,7 @@ export declare class ProtectiveSentinel {
      * NEVER auto-resumes manual staff stops or active ongoing degradation.
      */
     evaluateAutoResume(): Promise<void>;
-    private measureRouteTtfb;
+    private measureRoute;
     private consecutiveHealthySamples;
     /**
      * Evaluates all Pre-SLA guard rails.

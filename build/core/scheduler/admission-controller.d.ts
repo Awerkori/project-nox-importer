@@ -12,6 +12,7 @@
  */
 import { ProtectiveSentinel } from '../protective-sentinel.js';
 import { SchedulerStateStore } from './state-store.js';
+import { ActiveWork } from './types.js';
 export declare class AdmissionController {
     private stateStore;
     private protectiveSentinel;
@@ -46,4 +47,10 @@ export declare class AdmissionController {
      * promotes the next batch (up to `slidingWindowSize`) from PAUSED_BY_STAFF to QUEUED.
      */
     private maintainSlidingWindows;
+    /**
+     * On-demand admission: admits the highest priority waiting work into the active set
+     * when workers are idle and currently active works cannot supply jobs.
+     * Work-conserving and strictly controlled: preserves work-affinity, fairness, and sliding window.
+     */
+    admitNextWorkOnDemand(preferredLane?: 'P1' | 'P2', allowedSources?: string[]): Promise<ActiveWork | null>;
 }

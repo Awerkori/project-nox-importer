@@ -443,4 +443,118 @@ export class AdmissionController {
       client.release();
     }
   }
+
+  /**
+   * On-demand admission: admits the highest priority waiting work into the active set
+   * when workers are idle and currently active works cannot supply jobs.
+   * Work-conserving and strictly controlled: preserves work-affinity, fairness, and sliding window.
+   */
+  async admitNextWorkOnDemand(
+    preferredLane?: 'P1' | 'P2',
+    allowedSources?: string[]
+  ): Promise<ActiveWork | null> {
+    const config = this.stateStore.getConfig();
+    if (!config.enabled && !config.shadowMode) return null;
+    if (await this.protectiveSentinel.isProtectiveStopActive()) return null;
+
+    const activeWorks = this.stateStore.getActiveWorks();
+    const activeIds = activeWorks.map((w) => w.workId);
+
+    const client = await this.pool.connect();
+    try {
+      const lanesToTry = preferredLane ? [preferredLane] : (['P1', 'P2'] as const);
+
+      for (const lane of lanesToTry) {
+        const isP1 = lane === 'P1';
+        const query = `
+          SELECT (q.payload->>'workId') as work_id,
+                 w.title,
+                 q.source,
+                 COUNT(*) as pending_jobs,
+                 COUNT(CASE WHEN q.status = 'QUEUED' THEN 1 END) as queued_count,
+                 MIN(q.chapter_sort_key) as min_sort_key
+          FROM importer_queue q
+          JOIN works w ON w.id = (q.payload->>'workId')::uuid
+          JOIN importer_sources s ON s.id = q.source
+          WHERE q.task_type = 'IMPORT_CHAPTER'
+            AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
+            AND ${isP1 ? 'w.published = true AND w.latest_chapter_published_at IS NOT NULL' : '(w.published IS FALSE OR w.latest_chapter_published_at IS NULL)'}
+            AND s.enabled = true
+            AND s.status = 'ACTIVE'
+            AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
+            AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
+            AND NOT ((q.payload->>'workId') = ANY($2::text[]))
+          GROUP BY (q.payload->>'workId'), w.title, q.source
+          ORDER BY ${isP1 ? 'pending_jobs ASC, queued_count DESC' : 'queued_count DESC, pending_jobs ASC'}
+          LIMIT 1;
+        `;
+
+        const res = await client.query(query, [
+          allowedSources && allowedSources.length > 0 ? allowedSources : null,
+          activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
+        ]);
+
+        if (res.rows.length > 0) {
+          const cand = res.rows[0];
+          const newWork: ActiveWork = {
+            workId: cand.work_id,
+            workTitle: cand.title || 'Unknown Title',
+            lane,
+            state: 'FILLING',
+            primarySource: cand.source,
+            admittedAt: new Date().toISOString(),
+            lastActivityAt: new Date().toISOString(),
+            totalChapters: parseInt(cand.pending_jobs || '0', 10),
+            publishedChapters: 0,
+            queuedChapters: parseInt(cand.queued_count || '0', 10),
+            inFlightChapters: 0,
+            frontierSortKey: cand.min_sort_key ? parseFloat(cand.min_sort_key) : null,
+            criticalGapSortKey: null,
+            criticalGapUnblockCount: 0,
+          };
+
+          this.stateStore.setActiveWork(newWork);
+
+          // If this work has fewer than slidingWindowMin queued chapters, promote next batch
+          if (newWork.queuedChapters < config.slidingWindowMin) {
+            const needed = config.slidingWindowSize - newWork.queuedChapters;
+            const targetPriority = isP1 ? 75 : 50;
+            const promoteRes = await client.query(
+              `WITH to_promote AS (
+                 SELECT id
+                 FROM importer_queue
+                 WHERE status = 'PAUSED_BY_STAFF'
+                   AND task_type = 'IMPORT_CHAPTER'
+                   AND (payload->>'workId') = $1
+                 ORDER BY chapter_sort_key ASC NULLS LAST
+                 LIMIT $2
+               )
+               UPDATE importer_queue q
+               SET status = 'QUEUED',
+                   priority = $3,
+                   next_run_at = NOW(),
+                   updated_at = NOW()
+               FROM to_promote
+               WHERE q.id = to_promote.id
+               RETURNING q.id;`,
+              [newWork.workId, needed, targetPriority]
+            );
+            newWork.queuedChapters += promoteRes.rows.length;
+            this.stateStore.setActiveWork(newWork);
+          }
+
+          this.logger.info(`[ON_DEMAND_ADMISSION] Admitted work ${newWork.workTitle} into ${lane}`, {
+            workId: newWork.workId,
+            lane,
+            source: newWork.primarySource,
+          });
+
+          return newWork;
+        }
+      }
+      return null;
+    } finally {
+      client.release();
+    }
+  }
 }
