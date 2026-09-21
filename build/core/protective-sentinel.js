@@ -1,5 +1,7 @@
+import https from 'https';
 import { Logger } from './logger.js';
 import { diagnostics } from './diagnostics.js';
+import { getYugabytePool } from '../db/yugabyte-direct.js';
 export const DEFAULT_SENTINEL_THRESHOLDS = {
     homeTtfbPreSlaMs: 210,
     readerTtfbPreSlaMs: 130,
@@ -20,6 +22,7 @@ export class ProtectiveSentinel {
     isRunning = false;
     stopSignal = false;
     consecutivePreSlaViolations = new Map();
+    httpAgent = new https.Agent({ keepAlive: true, maxSockets: 5 });
     constructor(supabase, thresholds = DEFAULT_SENTINEL_THRESHOLDS, siteUrl) {
         this.supabase = supabase;
         this.thresholds = thresholds;
@@ -42,6 +45,27 @@ export class ProtectiveSentinel {
             return this.cachedInfo;
         }
         try {
+            try {
+                const pool = getYugabytePool();
+                const res = await pool.query("SELECT value FROM settings WHERE key = 'importer_protective_stop'");
+                if (res.rows.length > 0 && res.rows[0].value) {
+                    const raw = res.rows[0].value;
+                    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                    this.cachedInfo = {
+                        active: Boolean(parsed.active),
+                        reason: parsed.reason || null,
+                        details: parsed.details || null,
+                        triggered_at: parsed.triggered_at || null,
+                        resumed_at: parsed.resumed_at || null,
+                        resumed_by: parsed.resumed_by || null,
+                    };
+                    this.lastFetchMs = now;
+                    return this.cachedInfo;
+                }
+            }
+            catch {
+                // Fall through to supabase
+            }
             const { data, error } = await this.supabase
                 .from('settings')
                 .select('value')
@@ -88,15 +112,22 @@ export class ProtectiveSentinel {
         };
         this.cachedInfo = payload;
         this.lastFetchMs = Date.now();
+        this.consecutivePreSlaViolations.clear();
         this.logger.error(`🚨 [PROTECTIVE_STOP TRIGGERED] ${reason}. Halting new claims immediately. In-flight jobs will safely drain. Manual resumption required.`, { reason, details, triggered_at: nowIso });
         try {
-            await this.supabase.from('settings').upsert({
-                key: 'importer_protective_stop',
-                value: JSON.stringify(payload),
-            });
+            const pool = getYugabytePool();
+            await pool.query("INSERT INTO settings (key, value) VALUES ('importer_protective_stop', $1) ON CONFLICT (key) DO UPDATE SET value = $1", [JSON.stringify(payload)]);
         }
-        catch (dbErr) {
-            this.logger.error('Failed to persist importer_protective_stop to database', { error: dbErr?.message });
+        catch {
+            try {
+                await this.supabase.from('settings').upsert({
+                    key: 'importer_protective_stop',
+                    value: JSON.stringify(payload),
+                });
+            }
+            catch (dbErr) {
+                this.logger.error('Failed to persist importer_protective_stop to database', { error: dbErr?.message });
+            }
         }
     }
     /**
@@ -111,15 +142,22 @@ export class ProtectiveSentinel {
         };
         this.cachedInfo = payload;
         this.lastFetchMs = Date.now();
+        this.consecutivePreSlaViolations.clear();
         this.logger.info(`[PROTECTIVE_STOP RESUMED] Importer resumed by ${resumedBy}.`, { resumed_at: nowIso });
         try {
-            await this.supabase.from('settings').upsert({
-                key: 'importer_protective_stop',
-                value: JSON.stringify(payload),
-            });
+            const pool = getYugabytePool();
+            await pool.query("INSERT INTO settings (key, value) VALUES ('importer_protective_stop', $1) ON CONFLICT (key) DO UPDATE SET value = $1", [JSON.stringify(payload)]);
         }
-        catch (dbErr) {
-            this.logger.error('Failed to clear importer_protective_stop in database', { error: dbErr?.message });
+        catch {
+            try {
+                await this.supabase.from('settings').upsert({
+                    key: 'importer_protective_stop',
+                    value: JSON.stringify(payload),
+                });
+            }
+            catch (dbErr) {
+                this.logger.error('Failed to clear importer_protective_stop in database', { error: dbErr?.message });
+            }
         }
     }
     /**
@@ -202,36 +240,60 @@ export class ProtectiveSentinel {
         }
     }
     /**
-     * Probes site route latency. Requires 2 consecutive violations before tripping to eliminate transient network blips.
+     * Probes site route latency using keep-alive connection. Requires 2 consecutive violations before tripping to eliminate transient network blips.
      */
     async probeSiteLatency(label, url, thresholdMs, slaTargetMs) {
-        const t0 = performance.now();
-        try {
-            const res = await fetch(url, {
-                method: 'GET',
+        return new Promise((resolve) => {
+            const t0 = performance.now();
+            const isHttps = url.startsWith('https:');
+            const mod = isHttps ? https : require('http');
+            const req = mod.get(url, {
+                agent: isHttps ? this.httpAgent : undefined,
                 headers: { 'User-Agent': 'Project-Nox-Sentinel/1.0 (Pre-SLA Monitor)' },
-                signal: AbortSignal.timeout(5000),
+                timeout: 5000,
+            }, (res) => {
+                let resolved = false;
+                const finish = async () => {
+                    if (resolved)
+                        return;
+                    resolved = true;
+                    const ttfbMs = Math.round(performance.now() - t0);
+                    await this.handleProbeResult(label, url, ttfbMs, thresholdMs, slaTargetMs, res.statusCode || 200);
+                    resolve();
+                };
+                res.once('data', () => { void finish(); });
+                res.on('end', () => { void finish(); });
             });
-            const ttfbMs = Math.round(performance.now() - t0);
-            if (ttfbMs > thresholdMs) {
-                const count = (this.consecutivePreSlaViolations.get(label) || 0) + 1;
-                this.consecutivePreSlaViolations.set(label, count);
-                this.logger.warn(`[Pre-SLA Latency Warning] Route ${label} (${url}) TTFB: ${ttfbMs}ms > threshold ${thresholdMs}ms (SLA: ${slaTargetMs}ms). Consecutive sample: ${count}/2`);
-                if (count >= 2) {
-                    await this.triggerProtectiveStop(`Pre-SLA Latency Guard Rail Breached on ${label.toUpperCase()}: observed ${ttfbMs}ms > pre-SLA threshold ${thresholdMs}ms (SLA target: ${slaTargetMs}ms)`, { label, url, ttfbMs, thresholdMs, slaTargetMs, status: res.status });
-                }
-            }
-            else {
-                this.consecutivePreSlaViolations.set(label, 0);
-            }
-        }
-        catch (err) {
-            // Transient timeout or network drop on probe: record 1 violation, do not trip immediately
+            req.on('error', async (err) => {
+                await this.handleProbeError(label, url, err);
+                resolve();
+            });
+            req.on('timeout', () => {
+                req.destroy();
+                void this.handleProbeError(label, url, new Error('Request timed out after 5000ms')).then(() => resolve());
+            });
+        });
+    }
+    async handleProbeResult(label, url, ttfbMs, thresholdMs, slaTargetMs, statusCode) {
+        if (ttfbMs > thresholdMs) {
             const count = (this.consecutivePreSlaViolations.get(label) || 0) + 1;
             this.consecutivePreSlaViolations.set(label, count);
-            if (count >= 3) {
-                await this.triggerProtectiveStop(`Pre-SLA Health Probe Failed on ${label.toUpperCase()} (${count} consecutive failures): ${err?.message}`, { label, url, error: err?.message });
+            this.logger.warn(`[Pre-SLA Latency Warning] Route ${label} (${url}) TTFB: ${ttfbMs}ms > threshold ${thresholdMs}ms (SLA: ${slaTargetMs}ms). Consecutive sample: ${count}/2`);
+            if (count >= 2) {
+                this.consecutivePreSlaViolations.set(label, 0);
+                await this.triggerProtectiveStop(`Pre-SLA Latency Guard Rail Breached on ${label.toUpperCase()}: observed ${ttfbMs}ms > pre-SLA threshold ${thresholdMs}ms (SLA target: ${slaTargetMs}ms)`, { label, url, ttfbMs, thresholdMs, slaTargetMs, status: statusCode });
             }
+        }
+        else {
+            this.consecutivePreSlaViolations.set(label, 0);
+        }
+    }
+    async handleProbeError(label, url, err) {
+        const count = (this.consecutivePreSlaViolations.get(label) || 0) + 1;
+        this.consecutivePreSlaViolations.set(label, count);
+        if (count >= 3) {
+            this.consecutivePreSlaViolations.set(label, 0);
+            await this.triggerProtectiveStop(`Pre-SLA Health Probe Failed on ${label.toUpperCase()} (${count} consecutive failures): ${err?.message}`, { label, url, error: err?.message });
         }
     }
 }

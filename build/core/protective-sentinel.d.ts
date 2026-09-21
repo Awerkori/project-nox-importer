@@ -28,6 +28,7 @@ export declare class ProtectiveSentinel {
     private isRunning;
     private stopSignal;
     private consecutivePreSlaViolations;
+    private httpAgent;
     constructor(supabase: SupabaseClient, thresholds?: SentinelThresholds, siteUrl?: string | undefined);
     /**
      * Checks whether the protective stop is currently active.
@@ -59,7 +60,9 @@ export declare class ProtectiveSentinel {
      */
     evaluatePreSlaGuardRails(): Promise<void>;
     /**
-     * Probes site route latency. Requires 2 consecutive violations before tripping to eliminate transient network blips.
+     * Probes site route latency using keep-alive connection. Requires 2 consecutive violations before tripping to eliminate transient network blips.
      */
     private probeSiteLatency;
+    private handleProbeResult;
+    private handleProbeError;
 }
