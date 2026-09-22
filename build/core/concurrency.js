@@ -179,6 +179,56 @@ const DEFAULT_AUTOTUNER_CONFIG = {
     rssEmergencyLimitMb: parseInt(process.env.RSS_EMERGENCY_LIMIT_MB || '410', 10),
     maxBufferedBytes: parseInt(process.env.MAX_BUFFERED_BYTES || String(64 * 1024 * 1024), 10),
 };
+// RAII Token representing an atomic slice of the memory buffer budget.
+export class BufferReservation {
+    autotuner;
+    _reservedBytes;
+    _released = false;
+    _committed = false;
+    constructor(autotuner, _reservedBytes) {
+        this.autotuner = autotuner;
+        this._reservedBytes = _reservedBytes;
+    }
+    get reservedBytes() {
+        return this._reservedBytes;
+    }
+    get isCommitted() {
+        return this._committed;
+    }
+    get isReleased() {
+        return this._released;
+    }
+    /**
+     * Upgrades the reserved byte budget if Content-Length exceeds initial reservation.
+     */
+    async upgrade(newBytes, signal) {
+        if (this._released || this._committed)
+            return;
+        if (newBytes <= this._reservedBytes)
+            return;
+        const additional = newBytes - this._reservedBytes;
+        await this.autotuner.upgradeReservation(additional, signal);
+        this._reservedBytes = newBytes;
+    }
+    /**
+     * Commits actual downloaded bytes into activeBufferedBytes and frees the reserved budget.
+     */
+    commit(actualBytes) {
+        if (this._released || this._committed)
+            return;
+        this._committed = true;
+        this.autotuner.commitReservation(this._reservedBytes, actualBytes);
+    }
+    /**
+     * Releases the reserved budget on failure, cancellation, or skip without committing.
+     */
+    release() {
+        if (this._released || this._committed)
+            return;
+        this._released = true;
+        this.autotuner.releaseReservation(this._reservedBytes);
+    }
+}
 export class AdaptiveAutotuner {
     logger = new Logger('Autotuner');
     globalChapterSemaphore;
@@ -190,9 +240,10 @@ export class AdaptiveAutotuner {
     stableCycleCount = 0;
     cooldownUntil = 0;
     config;
-    // Active buffer tracking & backpressure waiters
+    // Active and reserved buffer tracking & backpressure waiters
     activeBufferedBytes = 0;
-    bufferWaiters = [];
+    reservedBufferedBytes = 0;
+    reservationWaiters = [];
     // Window error counters
     cycleErrors = 0;
     cycleRateLimits = 0;
@@ -221,97 +272,166 @@ export class AdaptiveAutotuner {
     getBufferedPageSemaphore() {
         return this.bufferedPageSemaphore;
     }
+    canAdmitReservation(requestedBytes) {
+        const mem = diagnostics.getMemorySnapshot();
+        const totalCommitted = this.activeBufferedBytes + this.reservedBufferedBytes;
+        // Hard ceiling: ACTIVE + RESERVED + REQUESTED <= MAX_BUFFERED_BYTES
+        if (totalCommitted + requestedBytes > this.config.maxBufferedBytes) {
+            return false;
+        }
+        // Memory headroom: RSS below soft limit
+        if (mem.rssMb >= this.config.rssSoftLimitMb) {
+            // Forward progress exception: If ZERO active and ZERO reserved buffers exist,
+            // allow single-slot progress to prevent permanent deadlock
+            // when baseline Node process RSS is warm without buffers.
+            if (totalCommitted === 0) {
+                return true;
+            }
+            return false;
+        }
+        return true;
+    }
+    async reserveBufferBudget(requestedBytes = 2 * 1024 * 1024, signal) {
+        signal?.throwIfAborted();
+        // Fast-path: Synchronously admit if no queue and headroom exists.
+        // Node.js single-threaded event loop guarantees check-and-increment is atomic.
+        if (this.reservationWaiters.length === 0 && this.canAdmitReservation(requestedBytes)) {
+            this.reservedBufferedBytes += requestedBytes;
+            return new BufferReservation(this, requestedBytes);
+        }
+        const t0 = performance.now();
+        return new Promise((resolve, reject) => {
+            let intervalTimer = null;
+            const waiter = {
+                requestedBytes,
+                t0,
+                signal,
+                resolve: (reservation) => {
+                    cleanup();
+                    const waitedMs = performance.now() - t0;
+                    telemetryCollector.recordLimiterWait('memory_backpressure', waitedMs, this.config.maxBufferedBytes);
+                    if (waitedMs > 1000) {
+                        this.logger.info(`[Memory Backpressure] Admitted after ${Math.round(waitedMs)}ms wait (Active: ${Math.round(this.activeBufferedBytes / 1024 / 1024)}MB, Reserved: ${Math.round(this.reservedBufferedBytes / 1024 / 1024)}MB, RSS: ${diagnostics.getMemorySnapshot().rssMb}MB)`);
+                    }
+                    resolve(reservation);
+                },
+                reject: (err) => {
+                    cleanup();
+                    reject(err);
+                },
+            };
+            const cleanup = () => {
+                if (intervalTimer)
+                    clearInterval(intervalTimer);
+                signal?.removeEventListener('abort', onAbort);
+                const idx = this.reservationWaiters.indexOf(waiter);
+                if (idx >= 0)
+                    this.reservationWaiters.splice(idx, 1);
+            };
+            const onAbort = () => {
+                cleanup();
+                reject(signal?.reason || new Error('Buffer reservation aborted'));
+            };
+            signal?.addEventListener('abort', onAbort, { once: true });
+            this.reservationWaiters.push(waiter);
+            // Periodically check if conditions became favorable (e.g. RSS dropped or GC ran)
+            intervalTimer = setInterval(() => {
+                this.drainReservationWaiters();
+            }, 200);
+        });
+    }
+    async upgradeReservation(additionalBytes, signal) {
+        if (additionalBytes <= 0)
+            return;
+        signal?.throwIfAborted();
+        if (this.reservationWaiters.length === 0 && this.canAdmitReservation(additionalBytes)) {
+            this.reservedBufferedBytes += additionalBytes;
+            return;
+        }
+        const t0 = performance.now();
+        return new Promise((resolve, reject) => {
+            let intervalTimer = null;
+            const waiter = {
+                requestedBytes: additionalBytes,
+                t0,
+                signal,
+                resolve: () => {
+                    cleanup();
+                    resolve();
+                },
+                reject: (err) => {
+                    cleanup();
+                    reject(err);
+                },
+            };
+            const cleanup = () => {
+                if (intervalTimer)
+                    clearInterval(intervalTimer);
+                signal?.removeEventListener('abort', onAbort);
+                const idx = this.reservationWaiters.indexOf(waiter);
+                if (idx >= 0)
+                    this.reservationWaiters.splice(idx, 1);
+            };
+            const onAbort = () => {
+                cleanup();
+                reject(signal?.reason || new Error('Buffer reservation upgrade aborted'));
+            };
+            signal?.addEventListener('abort', onAbort, { once: true });
+            this.reservationWaiters.push(waiter);
+            intervalTimer = setInterval(() => {
+                this.drainReservationWaiters();
+            }, 200);
+        });
+    }
+    commitReservation(reservedBytes, actualBytes) {
+        this.reservedBufferedBytes = Math.max(0, this.reservedBufferedBytes - reservedBytes);
+        this.activeBufferedBytes += actualBytes;
+        this.drainReservationWaiters();
+    }
+    releaseReservation(reservedBytes) {
+        this.reservedBufferedBytes = Math.max(0, this.reservedBufferedBytes - reservedBytes);
+        this.drainReservationWaiters();
+    }
+    releaseActiveBufferedBytes(actualBytes) {
+        if (actualBytes <= 0)
+            return;
+        this.activeBufferedBytes = Math.max(0, this.activeBufferedBytes - actualBytes);
+        this.drainReservationWaiters();
+    }
+    drainReservationWaiters() {
+        while (this.reservationWaiters.length > 0) {
+            const next = this.reservationWaiters[0];
+            if (this.canAdmitReservation(next.requestedBytes)) {
+                this.reservationWaiters.shift();
+                this.reservedBufferedBytes += next.requestedBytes;
+                const reservation = new BufferReservation(this, next.requestedBytes);
+                next.resolve(reservation);
+            }
+            else {
+                break; // FIFO barrier: if next cannot fit, keep waiting
+            }
+        }
+    }
     trackBufferedBytes(bytes) {
         if (bytes <= 0)
             return;
         this.activeBufferedBytes += bytes;
     }
     releaseBufferedBytes(bytes) {
-        if (bytes <= 0)
-            return;
-        this.activeBufferedBytes = Math.max(0, this.activeBufferedBytes - bytes);
-        this.wakeBufferWaiters();
+        this.releaseActiveBufferedBytes(bytes);
     }
     getBufferedBytes() {
         return this.activeBufferedBytes;
     }
-    wakeBufferWaiters() {
-        const mem = diagnostics.getMemorySnapshot();
-        const isBufferHealthy = this.activeBufferedBytes < (this.config.maxBufferedBytes * 0.75);
-        const isRssHealthy = mem.rssMb < this.config.rssSoftLimitMb;
-        if (isBufferHealthy && isRssHealthy) {
-            while (this.bufferWaiters.length > 0) {
-                const resolve = this.bufferWaiters.shift();
-                if (resolve)
-                    resolve();
-            }
-        }
+    getReservedBytes() {
+        return this.reservedBufferedBytes;
+    }
+    getCommittedBytes() {
+        return this.activeBufferedBytes + this.reservedBufferedBytes;
     }
     async waitForMemoryHeadroom(estimatedBytes = 1.5 * 1024 * 1024, signal) {
-        signal?.throwIfAborted();
-        const mem = diagnostics.getMemorySnapshot();
-        // Fast-path: buffer within budget AND RSS below soft limit
-        if ((this.activeBufferedBytes + estimatedBytes) <= this.config.maxBufferedBytes && mem.rssMb < this.config.rssSoftLimitMb) {
-            return;
-        }
-        // Edge-case: if no buffers are currently held, avoid deadlock when RSS is simply warm
-        if (this.activeBufferedBytes === 0 && mem.rssMb < this.config.rssHardLimitMb) {
-            return;
-        }
-        const t0 = performance.now();
-        return new Promise((resolve, reject) => {
-            let intervalTimer = null;
-            let maxWaitTimer = null;
-            const cleanup = () => {
-                if (intervalTimer)
-                    clearInterval(intervalTimer);
-                if (maxWaitTimer)
-                    clearTimeout(maxWaitTimer);
-                signal?.removeEventListener('abort', onAbort);
-                const idx = this.bufferWaiters.indexOf(check);
-                if (idx >= 0)
-                    this.bufferWaiters.splice(idx, 1);
-            };
-            const onAbort = () => {
-                cleanup();
-                reject(signal?.reason || new Error('Memory headroom wait aborted'));
-            };
-            const check = () => {
-                const currentMem = diagnostics.getMemorySnapshot();
-                const bufferOk = (this.activeBufferedBytes + estimatedBytes) <= this.config.maxBufferedBytes;
-                const rssOk = currentMem.rssMb < this.config.rssSoftLimitMb;
-                if (bufferOk && rssOk) {
-                    cleanup();
-                    const waitedMs = performance.now() - t0;
-                    if (waitedMs > 500) {
-                        this.logger.info(`[Memory Backpressure] Headroom recovered after ${Math.round(waitedMs)}ms (RSS: ${currentMem.rssMb}MB, Buffers: ${Math.round(this.activeBufferedBytes / 1024 / 1024)}MB)`);
-                    }
-                    resolve();
-                }
-                else if (currentMem.rssMb >= this.config.rssEmergencyLimitMb) {
-                    if (typeof global.gc === 'function') {
-                        try {
-                            global.gc();
-                        }
-                        catch { }
-                    }
-                }
-            };
-            signal?.addEventListener('abort', onAbort, { once: true });
-            this.bufferWaiters.push(check);
-            intervalTimer = setInterval(check, 300);
-            // Max backpressure wait safety escape: prevent permanent stall if RSS doesn't drop
-            maxWaitTimer = setTimeout(() => {
-                cleanup();
-                if (this.activeBufferedBytes < this.config.maxBufferedBytes) {
-                    resolve();
-                }
-                else {
-                    this.bufferWaiters.push(check);
-                    intervalTimer = setInterval(check, 500);
-                }
-            }, 10_000);
-        });
+        const reservation = await this.reserveBufferBudget(estimatedBytes, signal);
+        reservation.release();
     }
     getSourceLimits(source) {
         return SOURCE_CONCURRENCY_LIMITS[source] || DEFAULT_SOURCE_LIMIT;
@@ -513,13 +633,14 @@ export class AdaptiveAutotuner {
         this.stableCycleCount++;
         if (this.stableCycleCount >= this.config.requiredStableCycles &&
             this.currentConcurrency < this.config.maxConcurrency) {
-            // Memory proximity hold: do NOT scale up if close to soft limit or buffers are high
-            if (mem.rssMb >= (this.config.rssSoftLimitMb - 20) || this.activeBufferedBytes > (this.config.maxBufferedBytes * 0.7)) {
-                this.logger.info(`[Autotuner HOLD] Concurrency maintained at ${this.currentConcurrency} due to memory proximity (RSS: ${mem.rssMb}MB, Buffers: ${Math.round(this.activeBufferedBytes / 1024 / 1024)}MB)`);
+            // Memory proximity hold: do NOT scale up if close to soft limit or committed buffers are high
+            const totalCommitted = this.activeBufferedBytes + this.reservedBufferedBytes;
+            if (mem.rssMb >= (this.config.rssSoftLimitMb - 20) || totalCommitted > (this.config.maxBufferedBytes * 0.7)) {
+                this.logger.info(`[Autotuner HOLD] Concurrency maintained at ${this.currentConcurrency} due to memory proximity (RSS: ${mem.rssMb}MB, Committed: ${Math.round(totalCommitted / 1024 / 1024)}MB)`);
                 return {
                     concurrency: this.currentConcurrency,
                     action: 'STABLE',
-                    reason: `Holding concurrency at ${this.currentConcurrency} (RSS: ${mem.rssMb}MB, Buffers: ${Math.round(this.activeBufferedBytes / 1024 / 1024)}MB)`,
+                    reason: `Holding concurrency at ${this.currentConcurrency} (RSS: ${mem.rssMb}MB, Committed: ${Math.round(totalCommitted / 1024 / 1024)}MB)`,
                 };
             }
             const previous = this.currentConcurrency;
