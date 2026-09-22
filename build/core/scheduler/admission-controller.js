@@ -137,8 +137,7 @@ export class AdmissionController {
           AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
           AND w.published = true
           AND s.enabled = true
-          AND s.status = 'ACTIVE'
-          AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW());
+          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())));
       `);
             const p1Claimable = parseInt(p1Res.rows[0]?.claimable_cnt || '0', 10);
             const p1AvailableChapters = parseInt(p1Res.rows[0]?.paused_cnt || '0', 10);
@@ -404,8 +403,7 @@ export class AdmissionController {
              AND w.published = true
              AND w.latest_chapter_published_at IS NOT NULL
              AND s.enabled = true
-             AND s.status = 'ACTIVE'
-             AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
+             AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
            GROUP BY (q.payload->>'workId'), w.title, q.source, p.max_published
            HAVING (MIN(q.chapter_sort_key) <= COALESCE(p.max_published, -1) + 1.5 OR p.max_published IS NULL)
@@ -416,8 +414,8 @@ export class AdmissionController {
                     if (admitted >= backfillSlotsAvailable)
                         break;
                     const srcCount = sourceCounts.get(cand.source) || 0;
-                    const maxWorksPerSource = cand.source === 'mangaflix' ? 2 : 3;
-                    const otherSourceCandidates = candidatesRes.rows.filter((r) => (sourceCounts.get(r.source) || 0) < (r.source === 'mangaflix' ? 2 : 3));
+                    const maxWorksPerSource = idleWorkers >= 4 ? 4 : (cand.source === 'mangaflix' ? 2 : 3);
+                    const otherSourceCandidates = candidatesRes.rows.filter((r) => (sourceCounts.get(r.source) || 0) < maxWorksPerSource);
                     if (srcCount >= maxWorksPerSource && otherSourceCandidates.length > 0) {
                         continue;
                     }
@@ -471,8 +469,7 @@ export class AdmissionController {
              AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
              AND (w.published IS FALSE OR w.latest_chapter_published_at IS NULL)
              AND s.enabled = true
-             AND s.status = 'ACTIVE'
-             AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
+             AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
            GROUP BY (q.payload->>'workId'), w.title, q.source
            ORDER BY queued_count DESC, pending_jobs DESC
@@ -629,8 +626,7 @@ export class AdmissionController {
             AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
             AND ${isP1 ? 'w.published = true AND w.latest_chapter_published_at IS NOT NULL' : '(w.published IS FALSE OR w.latest_chapter_published_at IS NULL)'}
             AND s.enabled = true
-            AND s.status = 'ACTIVE'
-            AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
+            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
             AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
             AND NOT ((q.payload->>'workId') = ANY($2::text[]))
             AND ($3::text[] IS NULL OR NOT (q.source = ANY($3::text[])))
