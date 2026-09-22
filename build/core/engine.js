@@ -410,8 +410,8 @@ export class ImporterEngine {
      * Restores expired cooldowns immediately through production admission probe.
      */
     async runSourceCooldownProbeLoop() {
+        await this.sleep(3_000);
         while (!this.stopSignal) {
-            await this.sleep(30_000);
             if (this.stopSignal)
                 break;
             try {
@@ -437,6 +437,7 @@ export class ImporterEngine {
             catch (err) {
                 this.logger.warn('Error during source cooldown auto-probe loop', { error: err?.message });
             }
+            await this.sleep(30_000);
         }
     }
     /**
@@ -704,12 +705,22 @@ export class ImporterEngine {
             try {
                 let { data: srcs } = await this.supabase
                     .from('importer_sources')
-                    .select('id, enabled, chapter_ingestion_enabled, status')
-                    .eq('status', 'ACTIVE')
+                    .select('id, enabled, chapter_ingestion_enabled, status, cooldown_until')
                     .eq('chapter_ingestion_enabled', true);
                 if (srcs && srcs.length > 0) {
                     const activeIds = srcs
-                        .filter((s) => s.enabled !== false)
+                        .filter((s) => {
+                        if (s.enabled === false)
+                            return false;
+                        if (s.status === 'ACTIVE')
+                            return true;
+                        if (['COOLDOWN', 'PROBING', 'DEGRADED'].includes(s.status)) {
+                            if (!s.cooldown_until)
+                                return true;
+                            return new Date(s.cooldown_until).getTime() <= now;
+                        }
+                        return false;
+                    })
                         .map((s) => s.id);
                     this.activeSourcesCache = { sources: activeIds, cachedAt: now };
                 }

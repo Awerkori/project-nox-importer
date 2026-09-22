@@ -494,8 +494,7 @@ export class WorkAffinityScheduler {
           AND q.attempts < COALESCE(q.max_attempts, 7)
           AND w.published = true
           AND s.enabled = true
-          AND s.status = 'ACTIVE'
-          AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
+          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
@@ -602,8 +601,7 @@ export class WorkAffinityScheduler {
           AND q.task_type = 'IMPORT_CHAPTER'
           AND q.attempts < COALESCE(q.max_attempts, 7)
           AND s.enabled = true
-          AND s.status = 'ACTIVE'
-          AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
+          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::int IS NULL OR q.priority >= $2::int)
           AND ($3::text IS NULL OR (q.payload->>'workId') = $3::text)
@@ -709,13 +707,13 @@ export class WorkAffinityScheduler {
                     const activeWorkIds = this.stateStore.getActiveWorks().map((w) => w.workId);
                     const statsRes = await client.query(`
             SELECT 
-              COUNT(CASE WHEN q.status = 'QUEUED' AND s.enabled = true AND s.status = 'ACTIVE' AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()) THEN 1 END) as claimable_now,
-              COUNT(CASE WHEN q.status = 'RETRY' AND q.next_run_at <= NOW() AND s.enabled = true AND s.status = 'ACTIVE' AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()) THEN 1 END) as retry_due,
+              COUNT(CASE WHEN q.status = 'QUEUED' AND s.enabled = true AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()))) THEN 1 END) as claimable_now,
+              COUNT(CASE WHEN q.status = 'RETRY' AND q.next_run_at <= NOW() AND s.enabled = true AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()))) THEN 1 END) as retry_due,
               COUNT(CASE WHEN q.status = 'IMPORTING' THEN 1 END) as importing_cnt,
               COUNT(CASE WHEN q.status = 'PAUSED_BY_STAFF' THEN 1 END) as paused_by_staff_cnt,
-              COUNT(DISTINCT CASE WHEN q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF') AND s.enabled = true AND s.status = 'ACTIVE' AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()) THEN (q.payload->>'workId') END) as valid_waiting_works,
+              COUNT(DISTINCT CASE WHEN q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF') AND s.enabled = true AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()))) THEN (q.payload->>'workId') END) as valid_waiting_works,
               COUNT(CASE WHEN q.status IN ('QUEUED', 'RETRY') AND (q.payload->>'workId') = ANY($1::text[]) THEN 1 END) as active_work_pending,
-              COUNT(DISTINCT CASE WHEN q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF') AND s.enabled = true AND s.status = 'ACTIVE' AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()) AND NOT ((q.payload->>'workId') = ANY($1::text[])) THEN (q.payload->>'workId') END) as admission_candidates
+              COUNT(DISTINCT CASE WHEN q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF') AND s.enabled = true AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()))) AND NOT ((q.payload->>'workId') = ANY($1::text[])) THEN (q.payload->>'workId') END) as admission_candidates
             FROM importer_queue q
             LEFT JOIN importer_sources s ON s.id = q.source
             WHERE q.task_type = 'IMPORT_CHAPTER';
