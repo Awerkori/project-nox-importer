@@ -171,6 +171,10 @@ export class SchedulerStateStore {
     // --- Dynamic Settings Refresh ---
     async refreshSettingsFromDb() {
         try {
+            const cfgRes = await this.pool.query(`SELECT value FROM importer_scheduler_state WHERE key = 'config'`);
+            if (cfgRes.rows.length > 0 && typeof cfgRes.rows[0].value === 'object') {
+                this.configCache = { ...this.configCache, ...cfgRes.rows[0].value };
+            }
             const res = await this.pool.query(`SELECT key, value FROM settings WHERE key IN ('work_affinity_scheduler_enabled', 'work_affinity_scheduler_shadow')`);
             for (const r of res.rows) {
                 if (r.key === 'work_affinity_scheduler_enabled') {

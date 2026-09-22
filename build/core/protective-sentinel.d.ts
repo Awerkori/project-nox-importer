@@ -1,7 +1,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+export type IncidentClassification = 'TRANSIENT_EDGE_INCIDENT' | 'REAL_SYSTEM_PRESSURE' | 'YSQL_PRESSURE' | 'IMPORTER_PRESSURE' | 'MANUAL_STOP';
 export interface ProtectiveStopInfo {
     active: boolean;
     reason?: string | null;
+    classification?: IncidentClassification | null;
     details?: any;
     triggered_at?: string | null;
     resumed_at?: string | null;
@@ -27,7 +29,9 @@ export declare class ProtectiveSentinel {
     private cacheTtlMs;
     private isRunning;
     private stopSignal;
-    private consecutivePreSlaViolations;
+    private consecutive5xxErrors;
+    private consecutiveLatencyViolations;
+    private consecutiveProbeErrors;
     private homeAgent;
     private readerAgent;
     private httpAgent;
@@ -42,37 +46,51 @@ export declare class ProtectiveSentinel {
      */
     getProtectiveStopInfo(forceFresh?: boolean): Promise<ProtectiveStopInfo>;
     /**
-     * Triggers a persistent PROTECTIVE STOP.
+     * Triggers a persistent PROTECTIVE STOP with incident classification.
      * Halts all new job claims, allows in-flight jobs to safely drain,
-     * keeps publication barrier alive, and requires manual resumption.
+     * keeps publication barrier alive.
      */
-    triggerProtectiveStop(reason: string, details: any): Promise<void>;
+    triggerProtectiveStop(reason: string, details: any, classification?: IncidentClassification): Promise<void>;
     /**
-     * Resumes normal operation (intended for explicit manual/staff resumption).
+     * Resumes normal operation.
      */
     resumeProtectiveStop(resumedBy?: string): Promise<void>;
     /**
      * Background sentinel watchdog loop.
-     * Probes pre-SLA metrics every 15s. If pre-SLA stress is detected, trips PROTECTIVE_STOP.
+     * Probes metrics every 15s. If stopped, triggers rapid auto-heal checks.
      */
     startWatchdogLoop(): void;
     stop(): void;
     /**
      * Evaluates whether a currently stopped importer can safely auto-resume.
-     * Auto-resumes for transient edge spikes, socket hang-ups, or cleared external glitches.
+     * Distinguishes transient edge incidents from sustained pressure.
+     * Checks 2 consecutive healthy samples with 5s debounce for rapid recovery (15-30s).
      * NEVER auto-resumes manual staff stops or active ongoing degradation.
      */
     evaluateAutoResume(): Promise<void>;
     private measureRoute;
-    private consecutiveHealthySamples;
     /**
      * Evaluates all Pre-SLA guard rails.
      */
     evaluatePreSlaGuardRails(): Promise<void>;
     /**
-     * Probes site route latency using keep-alive connection. Requires 2 consecutive violations before tripping to eliminate transient network blips.
+     * Probes site route latency using keep-alive connection.
      */
     private probeSiteLatency;
-    private handleProbeResult;
-    private handleProbeError;
+    /**
+     * Evaluates probe responses, strictly distinguishing:
+     * A) TRANSIENT EDGE INCIDENTS:
+     *    - 1 isolated 5xx
+     *    - normal WAN latency jitter
+     *    - healthy DB and importer
+     *    => DO NOT STOP, log warning and observe.
+     *
+     * B) REAL SYSTEM PRESSURE:
+     *    - >= 3 consecutive 5xx errors (sustained edge/Worker failure)
+     *    - >= 2 consecutive 5xx errors WITH confirmed infra pressure
+     *    - Sustained severe latency (>= 3000ms) for 3+ consecutive probes
+     *    => Trip PROTECTIVE_STOP with appropriate classification.
+     */
+    handleProbeResult(label: 'home' | 'reader' | 'media', url: string, ttfbMs: number, thresholdMs: number, slaTargetMs: number, statusCode: number): Promise<void>;
+    handleProbeError(label: 'home' | 'reader' | 'media', url: string, err: any): Promise<void>;
 }
