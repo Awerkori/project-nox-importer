@@ -37,6 +37,28 @@ export interface AutotunerConfig {
     rssEmergencyLimitMb: number;
     maxBufferedBytes: number;
 }
+export declare class BufferReservation {
+    private autotuner;
+    private _reservedBytes;
+    private _released;
+    private _committed;
+    constructor(autotuner: AdaptiveAutotuner, _reservedBytes: number);
+    get reservedBytes(): number;
+    get isCommitted(): boolean;
+    get isReleased(): boolean;
+    /**
+     * Upgrades the reserved byte budget if Content-Length exceeds initial reservation.
+     */
+    upgrade(newBytes: number, signal?: AbortSignal): Promise<void>;
+    /**
+     * Commits actual downloaded bytes into activeBufferedBytes and frees the reserved budget.
+     */
+    commit(actualBytes: number): void;
+    /**
+     * Releases the reserved budget on failure, cancellation, or skip without committing.
+     */
+    release(): void;
+}
 export declare class AdaptiveAutotuner {
     private logger;
     private globalChapterSemaphore;
@@ -49,7 +71,8 @@ export declare class AdaptiveAutotuner {
     private cooldownUntil;
     private config;
     private activeBufferedBytes;
-    private bufferWaiters;
+    private reservedBufferedBytes;
+    private reservationWaiters;
     private cycleErrors;
     private cycleRateLimits;
     private cycleTimeouts;
@@ -58,10 +81,18 @@ export declare class AdaptiveAutotuner {
     getGlobalMediaSemaphore(): AsyncSemaphore;
     getGlobalInflightRequestSemaphore(): AsyncSemaphore;
     getBufferedPageSemaphore(): AsyncSemaphore;
+    canAdmitReservation(requestedBytes: number): boolean;
+    reserveBufferBudget(requestedBytes?: number, signal?: AbortSignal): Promise<BufferReservation>;
+    upgradeReservation(additionalBytes: number, signal?: AbortSignal): Promise<void>;
+    commitReservation(reservedBytes: number, actualBytes: number): void;
+    releaseReservation(reservedBytes: number): void;
+    releaseActiveBufferedBytes(actualBytes: number): void;
+    private drainReservationWaiters;
     trackBufferedBytes(bytes: number): void;
     releaseBufferedBytes(bytes: number): void;
     getBufferedBytes(): number;
-    private wakeBufferWaiters;
+    getReservedBytes(): number;
+    getCommittedBytes(): number;
     waitForMemoryHeadroom(estimatedBytes?: number, signal?: AbortSignal): Promise<void>;
     getSourceLimits(source: string): SourceConcurrencyConfig;
     getSourcePageConcurrency(source: string): number;

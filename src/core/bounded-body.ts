@@ -1,5 +1,5 @@
 // Match the existing media validator's size limit before buffering the response.
-export async function readImageBody(response: Response, maxBytes = 19_000_000): Promise<Uint8Array> {
+export async function readImageBody(response: Response, maxBytes = 20 * 1024 * 1024): Promise<Uint8Array> {
   const declared = Number(response.headers.get('content-length'));
   if (declared > maxBytes) {
     await response.body?.cancel();

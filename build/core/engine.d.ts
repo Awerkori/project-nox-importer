@@ -4,7 +4,7 @@ import { StorageProvider } from '../storage/provider.js';
 import { computeCanonicalChapterKey } from './deduplication.js';
 import { HostRateLimiter } from './rate-limiter.js';
 import { Config } from '../config.js';
-import { AdaptiveAutotuner } from './concurrency.js';
+import { AdaptiveAutotuner, BufferReservation } from './concurrency.js';
 import { PublicationSafetyBarrier } from './publication-safety-barrier.js';
 import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from './scheduler/index.js';
 export { computeCanonicalChapterKey };
@@ -177,6 +177,7 @@ export declare class ImporterEngine {
         timeoutMs?: number;
         freshConnection?: boolean;
         refererOverride?: string;
+        reservation?: BufferReservation;
     }): Promise<Uint8Array>;
     tryRawMetadataCoverFallback(raw: Record<string, any>, botUserId: string, source: string, excludeUrl?: string | null): Promise<string | null>;
     trySiblingMappingCoverFallback(workId: string | undefined, excludeSource: string, slugOrTitle: string, botUserId: string): Promise<string | null>;

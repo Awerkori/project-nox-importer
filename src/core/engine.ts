@@ -13,7 +13,7 @@ import { Config } from '../config.js';
 import { withSourceChapterPermits } from './concurrency.js';
 import { readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
-import { AdaptiveAutotuner, AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from './concurrency.js';
+import { AdaptiveAutotuner, AsyncSemaphore, BufferReservation, SOURCE_CONCURRENCY_LIMITS } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
 import { NoxWorkerStorageError } from '../storage/worker.js';
 import { RetryPolicy, ProviderDownloadError, InvalidMediaError } from './retry-policy.js';
@@ -777,6 +777,8 @@ export class ImporterEngine {
           bufferedPages: buffers.active,
           queuedBufferWaiters: buffers.queued,
           bufferedBytes: ImporterEngine.activeBufferedBytes,
+          reservedBytes: this.autotuner.getReservedBytes(),
+          committedBytes: this.autotuner.getCommittedBytes(),
           activeJobs,
           rssMb: mem.rssMb,
         });
@@ -2664,7 +2666,7 @@ export class ImporterEngine {
             bufferedWaitAbort.abort();
             while (readyQueue.length) {
               const discarded = readyQueue.shift()!;
-              this.autotuner.releaseBufferedBytes(discarded.pageBytes.length);
+              this.autotuner.releaseActiveBufferedBytes(discarded.pageBytes.length);
               ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
               discarded.releaseBuffer();
             }
@@ -2716,13 +2718,17 @@ export class ImporterEngine {
             chRateLimitWaitMs += (performance.now() - rl0);
 
             const buf0 = performance.now();
-            await this.autotuner.waitForMemoryHeadroom(1.5 * 1024 * 1024, AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+            const reservation = await this.autotuner.reserveBufferBudget(
+              2.0 * 1024 * 1024,
+              AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal])
+            );
             await bufferedPageSemaphore.acquire(AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
             chDownloadSemWaitMs += (performance.now() - buf0);
             let bufferTransferred = false;
+            let reservationCommitted = false;
+            let pageBytes: Uint8Array | null = null;
             try {
             if (this.stopSignal || pipelineError || isCancelled?.()) break;
-            let pageBytes: Uint8Array | null = null;
             let attempts = 0;
             let lastErr: any = null;
             let currentUrl = pageUrls[idx] || pageUrl;
@@ -2777,6 +2783,7 @@ export class ImporterEngine {
                       this.fetchImageBytes(currentUrl, effectiveSource, {
                         timeoutMs,
                         freshConnection,
+                        reservation,
                       })
                     );
                   } finally {
@@ -2789,7 +2796,8 @@ export class ImporterEngine {
                 chDownloadMs += dlMs;
                 telemetryCollector.recordImageDownload(effectiveSource, dlMs, pageBytes.length);
                 totalBytes += pageBytes.length;
-                this.autotuner.trackBufferedBytes(pageBytes.length);
+                reservation.commit(pageBytes.length);
+                reservationCommitted = true;
                 ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
 
                 if (attempts > 1) {
@@ -2846,10 +2854,18 @@ export class ImporterEngine {
             }
 
             readyQueue.push({ index: idx, pageBytes, releaseBuffer: () => bufferedPageSemaphore.release() });
-                bufferTransferred = true;
+            bufferTransferred = true;
             notifyConsumer();
             } finally {
-              if (!bufferTransferred) bufferedPageSemaphore.release();
+              if (!bufferTransferred) {
+                if (reservationCommitted && pageBytes) {
+                  this.autotuner.releaseActiveBufferedBytes(pageBytes.length);
+                  ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
+                } else if (!reservationCommitted) {
+                  reservation.release();
+                }
+                bufferedPageSemaphore.release();
+              }
             }
           }
         } catch (err: any) {
@@ -2941,7 +2957,7 @@ export class ImporterEngine {
               break;
             } finally {
               if (pageBytes) {
-                this.autotuner.releaseBufferedBytes(pageBytes.length);
+                this.autotuner.releaseActiveBufferedBytes(pageBytes.length);
                 ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
                 pageBytes = null;
               }
@@ -2976,7 +2992,7 @@ export class ImporterEngine {
           while (readyQueue.length > 0) {
             const leftover = readyQueue.shift();
             if (leftover?.pageBytes) {
-              this.autotuner.releaseBufferedBytes(leftover.pageBytes.length);
+              this.autotuner.releaseActiveBufferedBytes(leftover.pageBytes.length);
               ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
               leftover.releaseBuffer();
             }
@@ -3511,6 +3527,7 @@ export class ImporterEngine {
       timeoutMs?: number;
       freshConnection?: boolean;
       refererOverride?: string;
+      reservation?: BufferReservation;
     }
   ): Promise<Uint8Array> {
     const parsedUrl = new URL(url);
@@ -3608,6 +3625,19 @@ export class ImporterEngine {
 
         if (bridgeRes.ok) {
           this.rateLimiter.recordSuccess(parsedUrl.host);
+          const bridgeLenStr = bridgeRes.headers.get('content-length');
+          if (bridgeLenStr) {
+            const bridgeBytes = parseInt(bridgeLenStr, 10);
+            if (!Number.isNaN(bridgeBytes)) {
+              if (bridgeBytes > 20 * 1024 * 1024) {
+                await bridgeRes.body?.cancel().catch(() => {});
+                throw new InvalidMediaError(url, `Bridge image declared content-length exceeds 20MB limit`);
+              }
+              if (options?.reservation && bridgeBytes > options.reservation.reservedBytes) {
+                await options.reservation.upgrade(bridgeBytes);
+              }
+            }
+          }
           return await readImageBody(bridgeRes);
         }
       } catch (bridgeErr: any) {
@@ -3626,6 +3656,21 @@ export class ImporterEngine {
         this.rateLimiter.handle429(parsedUrl.host, retryAfter);
       }
       throw new ProviderDownloadError(status, url, source, `Failed to download image from ${url}: HTTP ${status}`);
+    }
+
+    // Inspect declared Content-Length and enforce 20MB upper ceiling + reservation upgrade
+    const declaredLengthStr = res.headers.get('content-length');
+    if (declaredLengthStr) {
+      const declaredBytes = parseInt(declaredLengthStr, 10);
+      if (!Number.isNaN(declaredBytes)) {
+        if (declaredBytes > 20 * 1024 * 1024) {
+          await res.body?.cancel().catch(() => {});
+          throw new InvalidMediaError(url, `Image declared content-length (${Math.round(declaredBytes / 1024 / 1024)}MB) exceeds maximum safe limit of 20MB`);
+        }
+        if (options?.reservation && declaredBytes > options.reservation.reservedBytes) {
+          await options.reservation.upgrade(declaredBytes);
+        }
+      }
     }
 
     const uint8 = await readImageBody(res);
