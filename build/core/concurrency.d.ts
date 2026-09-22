@@ -52,6 +52,7 @@ export declare class BufferReservation {
     upgrade(newBytes: number, signal?: AbortSignal): Promise<void>;
     /**
      * Commits actual downloaded bytes into activeBufferedBytes and frees the reserved budget.
+     * Defensive invariant: actualBytes must NOT exceed reservedBytes.
      */
     commit(actualBytes: number): void;
     /**
@@ -72,6 +73,7 @@ export declare class AdaptiveAutotuner {
     private config;
     private activeBufferedBytes;
     private reservedBufferedBytes;
+    private maxCommittedBytesObserved;
     private reservationWaiters;
     private cycleErrors;
     private cycleRateLimits;
@@ -93,6 +95,8 @@ export declare class AdaptiveAutotuner {
     getBufferedBytes(): number;
     getReservedBytes(): number;
     getCommittedBytes(): number;
+    private updateMaxCommittedObserved;
+    getMaxCommittedBytesObserved(): number;
     waitForMemoryHeadroom(estimatedBytes?: number, signal?: AbortSignal): Promise<void>;
     getSourceLimits(source: string): SourceConcurrencyConfig;
     getSourcePageConcurrency(source: string): number;
