@@ -250,7 +250,7 @@ export class AdmissionController {
              FROM importer_queue
              WHERE task_type = 'IMPORT_CHAPTER' AND (payload->>'workId') = $1`, [work.workId]);
                     // B. Count published chapters
-                    const pubRes = await client.query(`SELECT COUNT(*) as pub_cnt FROM chapters WHERE work_id = $1::uuid AND published_at IS NOT NULL`, [work.workId]);
+                    const pubRes = await client.query(`SELECT COUNT(*) as pub_cnt, COALESCE(MAX(number), -1) as max_pub FROM chapters WHERE work_id = $1::uuid AND published_at IS NOT NULL`, [work.workId]);
                     // C. Detect STAGED barrier gaps for this work
                     const stagedRes = await client.query(`SELECT COUNT(*) as staged_cnt, MIN(chapter_sort_key) as min_staged
              FROM importer_chapter_mappings
@@ -261,6 +261,7 @@ export class AdmissionController {
                     const pausedCnt = parseInt(qRow?.paused_cnt || '0', 10);
                     const minSortKey = qRow?.min_sort_key ? parseFloat(qRow.min_sort_key) : null;
                     const pubCnt = parseInt(pubRes.rows[0]?.pub_cnt || '0', 10);
+                    const maxPub = parseFloat(pubRes.rows[0]?.max_pub ?? '-1');
                     const stagedCnt = parseInt(stagedRes.rows[0]?.staged_cnt || '0', 10);
                     const minStaged = stagedRes.rows[0]?.min_staged ? parseFloat(stagedRes.rows[0].min_staged) : null;
                     work.queuedChapters = queuedCnt;
@@ -268,6 +269,11 @@ export class AdmissionController {
                     work.publishedChapters = pubCnt;
                     work.totalChapters = pubCnt + queuedCnt + importingCnt + pausedCnt;
                     work.frontierSortKey = minSortKey;
+                    // Promote P2 work to P1 if it has published chapters
+                    if (pubCnt > 0 && work.lane === 'P2') {
+                        this.logger.info(`Work ${work.workTitle} (${work.workId}) promoted from P2 to P1 (${pubCnt} published chapters).`);
+                        work.lane = 'P1';
+                    }
                     // Critical gap detection: if we have staged chapters and missing sort key is < minStaged
                     if (stagedCnt > 0 && minSortKey !== null && minStaged !== null && minSortKey < minStaged) {
                         work.criticalGapSortKey = minSortKey;
@@ -276,6 +282,18 @@ export class AdmissionController {
                     else {
                         work.criticalGapSortKey = null;
                         work.criticalGapUnblockCount = 0;
+                    }
+                    // Gap blocking check: if minSortKey has an unresolvable gap (> maxPub + 1.5),
+                    // any newly imported chapters will be stuck in STAGED. Block work to vacate active slot.
+                    const expectedFrontier = maxPub >= 0 ? maxPub + 1.5 : 1.5;
+                    const isGapBlocked = minSortKey !== null && minSortKey > expectedFrontier;
+                    if (isGapBlocked) {
+                        if (work.state !== 'BLOCKED') {
+                            this.logger.warn(`Work ${work.workTitle} (${work.workId}) marked BLOCKED due to unresolvable gap (minSortKey ${minSortKey} > expectedFrontier ${expectedFrontier}, maxPub ${maxPub}). Vacating active slot.`);
+                            work.state = 'BLOCKED';
+                            this.stateStore.setActiveWork(work);
+                        }
+                        continue;
                     }
                     // Check primary source health (Section 6: Obra bloqueada não pode consumir capacidade útil)
                     const srcCheck = await client.query(`SELECT status, cooldown_until FROM importer_sources WHERE id = $1`, [work.primarySource]);
@@ -375,6 +393,12 @@ export class AdmissionController {
            FROM importer_queue q
            JOIN works w ON w.id = (q.payload->>'workId')::uuid
            JOIN importer_sources s ON s.id = q.source
+           LEFT JOIN (
+             SELECT work_id, COALESCE(MAX(number), -1) as max_published
+             FROM chapters
+             WHERE published_at IS NOT NULL
+             GROUP BY work_id
+           ) p ON p.work_id = w.id
            WHERE q.task_type = 'IMPORT_CHAPTER'
              AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
              AND w.published = true
@@ -383,9 +407,10 @@ export class AdmissionController {
              AND s.status = 'ACTIVE'
              AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
-           GROUP BY (q.payload->>'workId'), w.title, q.source
-            ORDER BY queued_count DESC, pending_jobs DESC
-            LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], Math.max(50, backfillSlotsAvailable * 5)]);
+           GROUP BY (q.payload->>'workId'), w.title, q.source, p.max_published
+           HAVING (MIN(q.chapter_sort_key) <= COALESCE(p.max_published, -1) + 1.5 OR p.max_published IS NULL)
+           ORDER BY queued_count DESC, pending_jobs DESC
+           LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], Math.max(50, backfillSlotsAvailable * 5)]);
                 let admitted = 0;
                 for (const cand of candidatesRes.rows) {
                     if (admitted >= backfillSlotsAvailable)
@@ -506,6 +531,8 @@ export class AdmissionController {
         const client = await this.pool.connect();
         try {
             for (const work of activeWorks) {
+                if (work.state !== 'FILLING')
+                    continue;
                 if (work.queuedChapters < config.slidingWindowMin) {
                     const needed = config.slidingWindowSize - work.queuedChapters;
                     if (needed <= 0)
@@ -592,6 +619,12 @@ export class AdmissionController {
           FROM importer_queue q
           JOIN works w ON w.id = (q.payload->>'workId')::uuid
           JOIN importer_sources s ON s.id = q.source
+          LEFT JOIN (
+            SELECT work_id, COALESCE(MAX(number), -1) as max_published
+            FROM chapters
+            WHERE published_at IS NOT NULL
+            GROUP BY work_id
+          ) p ON p.work_id = w.id
           WHERE q.task_type = 'IMPORT_CHAPTER'
             AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
             AND ${isP1 ? 'w.published = true AND w.latest_chapter_published_at IS NOT NULL' : '(w.published IS FALSE OR w.latest_chapter_published_at IS NULL)'}
@@ -601,7 +634,8 @@ export class AdmissionController {
             AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
             AND NOT ((q.payload->>'workId') = ANY($2::text[]))
             AND ($3::text[] IS NULL OR NOT (q.source = ANY($3::text[])))
-          GROUP BY (q.payload->>'workId'), w.title, q.source
+          GROUP BY (q.payload->>'workId'), w.title, q.source, p.max_published
+          HAVING ${isP1 ? '(MIN(q.chapter_sort_key) <= COALESCE(p.max_published, -1) + 1.5 OR p.max_published IS NULL)' : '(MIN(q.chapter_sort_key) <= 1.5)'}
           ORDER BY queued_count DESC, pending_jobs DESC
           LIMIT 1;
         `;
