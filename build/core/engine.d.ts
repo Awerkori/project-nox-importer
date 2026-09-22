@@ -91,6 +91,13 @@ export declare class ImporterEngine {
      */
     private runSourceCooldownProbeLoop;
     /**
+     * Periodic atomic background cleanup of redundant queue jobs (runs every 30s).
+     * Safely marks queued/retrying jobs as COMPLETED with CANONICAL_ALREADY_SATISFIED
+     * if their canonical chapter has already been published in chapters table.
+     * Full worker slots wasted = 0.
+     */
+    private runRedundantJobCleanupLoop;
+    /**
      * Periodic existing works reconciliation loop
      * Handles high-priority staff requests, on-demand admin reconciliations, and periodic catalog health batches.
      */

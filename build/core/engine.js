@@ -164,6 +164,8 @@ export class ImporterEngine {
         this.runLeaseRecoveryLoop();
         // 5b. Launch background cooldown source auto-probe loop (every 30s)
         this.runSourceCooldownProbeLoop();
+        // 5c. Launch background controlled redundant job cleanup loop (every 30s)
+        this.runRedundantJobCleanupLoop();
         // 6. Launch periodic existing works reconciliation loop (every 15 min)
         this.runReconciliationLoop();
         // 7. Launch background upstream provider health check loop (every 60s)
@@ -436,6 +438,28 @@ export class ImporterEngine {
             }
             catch (err) {
                 this.logger.warn('Error during source cooldown auto-probe loop', { error: err?.message });
+            }
+            await this.sleep(30_000);
+        }
+    }
+    /**
+     * Periodic atomic background cleanup of redundant queue jobs (runs every 30s).
+     * Safely marks queued/retrying jobs as COMPLETED with CANONICAL_ALREADY_SATISFIED
+     * if their canonical chapter has already been published in chapters table.
+     * Full worker slots wasted = 0.
+     */
+    async runRedundantJobCleanupLoop() {
+        await this.sleep(5_000);
+        while (!this.stopSignal) {
+            if (this.stopSignal)
+                break;
+            try {
+                if (typeof this.scheduler.runControlledRedundantJobCleanup === 'function') {
+                    await this.scheduler.runControlledRedundantJobCleanup(200);
+                }
+            }
+            catch (err) {
+                this.logger.warn('Error during redundant job cleanup loop', { error: err?.message });
             }
             await this.sleep(30_000);
         }

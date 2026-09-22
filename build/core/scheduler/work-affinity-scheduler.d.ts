@@ -111,4 +111,13 @@ export declare class WorkAffinityScheduler {
     private logDecision;
     private startMetricsReporter;
     collectMetrics(): Promise<SchedulerMetrics>;
+    /**
+     * Controlled atomic background cleanup for redundant queue jobs.
+     * Safely marks queued/retrying jobs as COMPLETED with CANONICAL_ALREADY_SATISFIED
+     * if their canonical chapter is already published in chapters table.
+     * Preserves provider mappings and fallbacks without blind DELETES.
+     */
+    runControlledRedundantJobCleanup(batchSize?: number): Promise<{
+        cleaned: number;
+    }>;
 }

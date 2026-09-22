@@ -351,7 +351,11 @@ export class AdmissionController {
             [work.primarySource]
           );
           const srcRow = srcCheck.rows[0];
-          const isSourceBlocked = srcRow && (srcRow.status !== 'ACTIVE' || (srcRow.cooldown_until && new Date(srcRow.cooldown_until) > new Date()));
+          const isSourceBlocked = srcRow && (
+            srcRow.status === 'DISABLED' ||
+            srcRow.status === 'PAUSED' ||
+            (srcRow.status === 'COOLDOWN' && srcRow.cooldown_until && new Date(srcRow.cooldown_until) > new Date())
+          );
 
           if (isSourceBlocked) {
             if (work.state !== 'BLOCKED') {
@@ -426,9 +430,10 @@ export class AdmissionController {
         idleWorkers = Math.max(0, 18 - importingCnt);
       } catch {}
 
-      // Elastic backfill: if workers are idle, allow expanding active P1 up to 20 works
-      const targetBackfillLimit = idleWorkers >= 4
-        ? Math.min(20, config.maxActiveBackfillWorks + Math.floor(idleWorkers / 2))
+      // Elastic backfill: if workers are idle, allow expanding active P1 up to 36 works
+      // to guarantee full worker utilization without violating maxInflightPerWork = 2.
+      const targetBackfillLimit = idleWorkers >= 2
+        ? Math.min(36, Math.max(config.maxActiveBackfillWorks, 18 + idleWorkers))
         : config.maxActiveBackfillWorks;
       const backfillSlotsAvailable = Math.max(0, targetBackfillLimit - activeBackfills.length);
 
