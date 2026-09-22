@@ -32,6 +32,10 @@ export interface AutotunerConfig {
     maxHeapMb: number;
     maxExternalAndBuffersMb: number;
     maxEventLoopLagMs: number;
+    rssSoftLimitMb: number;
+    rssHardLimitMb: number;
+    rssEmergencyLimitMb: number;
+    maxBufferedBytes: number;
 }
 export declare class AdaptiveAutotuner {
     private logger;
@@ -44,6 +48,8 @@ export declare class AdaptiveAutotuner {
     private stableCycleCount;
     private cooldownUntil;
     private config;
+    private activeBufferedBytes;
+    private bufferWaiters;
     private cycleErrors;
     private cycleRateLimits;
     private cycleTimeouts;
@@ -52,6 +58,11 @@ export declare class AdaptiveAutotuner {
     getGlobalMediaSemaphore(): AsyncSemaphore;
     getGlobalInflightRequestSemaphore(): AsyncSemaphore;
     getBufferedPageSemaphore(): AsyncSemaphore;
+    trackBufferedBytes(bytes: number): void;
+    releaseBufferedBytes(bytes: number): void;
+    getBufferedBytes(): number;
+    private wakeBufferWaiters;
+    waitForMemoryHeadroom(estimatedBytes?: number, signal?: AbortSignal): Promise<void>;
     getSourceLimits(source: string): SourceConcurrencyConfig;
     getSourcePageConcurrency(source: string): number;
     getSourceSemaphore(source: string, limitPerSource?: number): AsyncSemaphore;

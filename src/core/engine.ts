@@ -125,18 +125,22 @@ export class ImporterEngine {
       this.scheduler.recordPublication(isFreshRelease);
     };
     const requestedMax = Math.min(
-      config.MAX_CONCURRENT_CHAPTERS || 5,
-      config.TESTED_CONCURRENCY_CEILING || 32
+      config.MAX_CONCURRENT_CHAPTERS || 8,
+      config.TESTED_CONCURRENCY_CEILING || 18
     );
     this.autotuner = new AdaptiveAutotuner({
-      initialConcurrency: requestedMax,
+      initialConcurrency: Math.min(requestedMax, 8),
       maxConcurrency: requestedMax,
       maxRssMb: 350,
       maxHeapMb: 200,
       maxExternalAndBuffersMb: 100,
       maxEventLoopLagMs: 250,
       requiredStableCycles: 3,
-      cooldownPeriodMs: 10 * 1000,
+      cooldownPeriodMs: 15 * 1000,
+      rssSoftLimitMb: 330,
+      rssHardLimitMb: 380,
+      rssEmergencyLimitMb: 410,
+      maxBufferedBytes: 64 * 1024 * 1024,
     });
   }
 
@@ -2660,7 +2664,8 @@ export class ImporterEngine {
             bufferedWaitAbort.abort();
             while (readyQueue.length) {
               const discarded = readyQueue.shift()!;
-              ImporterEngine.activeBufferedBytes = Math.max(0, ImporterEngine.activeBufferedBytes - discarded.pageBytes.length);
+              this.autotuner.releaseBufferedBytes(discarded.pageBytes.length);
+              ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
               discarded.releaseBuffer();
             }
           }
@@ -2711,6 +2716,7 @@ export class ImporterEngine {
             chRateLimitWaitMs += (performance.now() - rl0);
 
             const buf0 = performance.now();
+            await this.autotuner.waitForMemoryHeadroom(1.5 * 1024 * 1024, AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
             await bufferedPageSemaphore.acquire(AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
             chDownloadSemWaitMs += (performance.now() - buf0);
             let bufferTransferred = false;
@@ -2783,7 +2789,8 @@ export class ImporterEngine {
                 chDownloadMs += dlMs;
                 telemetryCollector.recordImageDownload(effectiveSource, dlMs, pageBytes.length);
                 totalBytes += pageBytes.length;
-                ImporterEngine.activeBufferedBytes += pageBytes.length;
+                this.autotuner.trackBufferedBytes(pageBytes.length);
+                ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
 
                 if (attempts > 1) {
                   const autoRecoverReason = attempts === 2
@@ -2934,10 +2941,8 @@ export class ImporterEngine {
               break;
             } finally {
               if (pageBytes) {
-                ImporterEngine.activeBufferedBytes = Math.max(
-                  0,
-                  ImporterEngine.activeBufferedBytes - pageBytes.length
-                );
+                this.autotuner.releaseBufferedBytes(pageBytes.length);
+                ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
                 pageBytes = null;
               }
               item.releaseBuffer();
@@ -2971,10 +2976,8 @@ export class ImporterEngine {
           while (readyQueue.length > 0) {
             const leftover = readyQueue.shift();
             if (leftover?.pageBytes) {
-              ImporterEngine.activeBufferedBytes = Math.max(
-                0,
-                ImporterEngine.activeBufferedBytes - leftover.pageBytes.length
-              );
+              this.autotuner.releaseBufferedBytes(leftover.pageBytes.length);
+              ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
               leftover.releaseBuffer();
             }
           }

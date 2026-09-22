@@ -141,9 +141,9 @@ describe('Concurrency & Autotuner', () => {
       });
 
       const res = autotuner.evaluateCycle();
-      expect(res.action).toBe('STRESS_DETECTED');
-      expect(res.concurrency).toBe(4); // Maintained under stress while cooldown is applied
-      expect(res.reason).toContain('High RSS');
+      expect(res.action).toBe('SCALED_DOWN');
+      expect(res.concurrency).toBeLessThan(4); // Downscales under memory stress
+      expect(res.reason).toContain('RSS');
 
       // Subsequent cycle even if memory recovers should be in COOLDOWN
       vi.spyOn(diagnostics, 'getMemorySnapshot').mockReturnValue({

@@ -187,18 +187,26 @@ export interface AutotunerConfig {
   maxHeapMb: number;
   maxExternalAndBuffersMb: number;
   maxEventLoopLagMs: number;
+  rssSoftLimitMb: number;
+  rssHardLimitMb: number;
+  rssEmergencyLimitMb: number;
+  maxBufferedBytes: number;
 }
 
 const DEFAULT_AUTOTUNER_CONFIG: AutotunerConfig = {
   minConcurrency: 1,
-  maxConcurrency: 32,
-  initialConcurrency: 32,
+  maxConcurrency: 18,
+  initialConcurrency: 8,
   requiredStableCycles: 3,
   cooldownPeriodMs: 25 * 1000,
-  maxRssMb: 800,
-  maxHeapMb: 400,
-  maxExternalAndBuffersMb: 300,
-  maxEventLoopLagMs: 100,
+  maxRssMb: 350,
+  maxHeapMb: 200,
+  maxExternalAndBuffersMb: 100,
+  maxEventLoopLagMs: 250,
+  rssSoftLimitMb: parseInt(process.env.RSS_SOFT_LIMIT_MB || '330', 10),
+  rssHardLimitMb: parseInt(process.env.RSS_HARD_LIMIT_MB || '380', 10),
+  rssEmergencyLimitMb: parseInt(process.env.RSS_EMERGENCY_LIMIT_MB || '410', 10),
+  maxBufferedBytes: parseInt(process.env.MAX_BUFFERED_BYTES || String(64 * 1024 * 1024), 10),
 };
 
 export class AdaptiveAutotuner {
@@ -207,14 +215,15 @@ export class AdaptiveAutotuner {
   private sourceSemaphores = new Map<string, AsyncSemaphore>();
   private globalMediaSemaphore: AsyncSemaphore;
   private globalInflightRequestSemaphore: AsyncSemaphore;
-  private bufferedPageSemaphore = new AsyncSemaphore(
-    parseInt(process.env.BUFFERED_PAGE_CONCURRENCY || '160', 10),
-    'buffered_page_semaphore'
-  );
+  private bufferedPageSemaphore: AsyncSemaphore;
   private currentConcurrency: number;
   private stableCycleCount = 0;
   private cooldownUntil = 0;
   private config: AutotunerConfig;
+
+  // Active buffer tracking & backpressure waiters
+  private activeBufferedBytes = 0;
+  private bufferWaiters: Array<() => void> = [];
 
   // Window error counters
   private cycleErrors = 0;
@@ -224,8 +233,10 @@ export class AdaptiveAutotuner {
   constructor(config: Partial<AutotunerConfig> = {}) {
     this.config = { ...DEFAULT_AUTOTUNER_CONFIG, ...config };
     this.currentConcurrency = this.config.initialConcurrency;
-    const mediaConcurrency = parseInt(process.env.TELEGRAM_MEDIA_CONCURRENCY || '24', 10);
-    const inflightConcurrency = parseInt(process.env.DOWNLOAD_INFLIGHT_CONCURRENCY || '64', 10);
+    const mediaConcurrency = parseInt(process.env.TELEGRAM_MEDIA_CONCURRENCY || '12', 10);
+    const inflightConcurrency = parseInt(process.env.DOWNLOAD_INFLIGHT_CONCURRENCY || '16', 10);
+    const bufferedConcurrency = parseInt(process.env.BUFFERED_PAGE_CONCURRENCY || '32', 10);
+    this.bufferedPageSemaphore = new AsyncSemaphore(bufferedConcurrency, 'buffered_page_semaphore');
     this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency, 'global_chapter_semaphore');
     this.globalMediaSemaphore = new AsyncSemaphore(mediaConcurrency, 'telegram_media_semaphore');
     this.globalInflightRequestSemaphore = new AsyncSemaphore(inflightConcurrency, 'global_download_inflight_semaphore');
@@ -246,6 +257,102 @@ export class AdaptiveAutotuner {
   // Hold a slot from before downloading until the page has finished uploading.
   getBufferedPageSemaphore(): AsyncSemaphore {
     return this.bufferedPageSemaphore;
+  }
+
+  trackBufferedBytes(bytes: number): void {
+    if (bytes <= 0) return;
+    this.activeBufferedBytes += bytes;
+  }
+
+  releaseBufferedBytes(bytes: number): void {
+    if (bytes <= 0) return;
+    this.activeBufferedBytes = Math.max(0, this.activeBufferedBytes - bytes);
+    this.wakeBufferWaiters();
+  }
+
+  getBufferedBytes(): number {
+    return this.activeBufferedBytes;
+  }
+
+  private wakeBufferWaiters(): void {
+    const mem = diagnostics.getMemorySnapshot();
+    const isBufferHealthy = this.activeBufferedBytes < (this.config.maxBufferedBytes * 0.75);
+    const isRssHealthy = mem.rssMb < this.config.rssSoftLimitMb;
+
+    if (isBufferHealthy && isRssHealthy) {
+      while (this.bufferWaiters.length > 0) {
+        const resolve = this.bufferWaiters.shift();
+        if (resolve) resolve();
+      }
+    }
+  }
+
+  async waitForMemoryHeadroom(estimatedBytes: number = 1.5 * 1024 * 1024, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const mem = diagnostics.getMemorySnapshot();
+
+    // Fast-path: buffer within budget AND RSS below soft limit
+    if ((this.activeBufferedBytes + estimatedBytes) <= this.config.maxBufferedBytes && mem.rssMb < this.config.rssSoftLimitMb) {
+      return;
+    }
+
+    // Edge-case: if no buffers are currently held, avoid deadlock when RSS is simply warm
+    if (this.activeBufferedBytes === 0 && mem.rssMb < this.config.rssHardLimitMb) {
+      return;
+    }
+
+    const t0 = performance.now();
+    return new Promise<void>((resolve, reject) => {
+      let intervalTimer: NodeJS.Timeout | null = null;
+      let maxWaitTimer: NodeJS.Timeout | null = null;
+
+      const cleanup = () => {
+        if (intervalTimer) clearInterval(intervalTimer);
+        if (maxWaitTimer) clearTimeout(maxWaitTimer);
+        signal?.removeEventListener('abort', onAbort);
+        const idx = this.bufferWaiters.indexOf(check);
+        if (idx >= 0) this.bufferWaiters.splice(idx, 1);
+      };
+
+      const onAbort = () => {
+        cleanup();
+        reject(signal?.reason || new Error('Memory headroom wait aborted'));
+      };
+
+      const check = () => {
+        const currentMem = diagnostics.getMemorySnapshot();
+        const bufferOk = (this.activeBufferedBytes + estimatedBytes) <= this.config.maxBufferedBytes;
+        const rssOk = currentMem.rssMb < this.config.rssSoftLimitMb;
+
+        if (bufferOk && rssOk) {
+          cleanup();
+          const waitedMs = performance.now() - t0;
+          if (waitedMs > 500) {
+            this.logger.info(`[Memory Backpressure] Headroom recovered after ${Math.round(waitedMs)}ms (RSS: ${currentMem.rssMb}MB, Buffers: ${Math.round(this.activeBufferedBytes / 1024 / 1024)}MB)`);
+          }
+          resolve();
+        } else if (currentMem.rssMb >= this.config.rssEmergencyLimitMb) {
+          if (typeof (global as any).gc === 'function') {
+            try { (global as any).gc(); } catch {}
+          }
+        }
+      };
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.bufferWaiters.push(check);
+      intervalTimer = setInterval(check, 300);
+
+      // Max backpressure wait safety escape: prevent permanent stall if RSS doesn't drop
+      maxWaitTimer = setTimeout(() => {
+        cleanup();
+        if (this.activeBufferedBytes < this.config.maxBufferedBytes) {
+          resolve();
+        } else {
+          this.bufferWaiters.push(check);
+          intervalTimer = setInterval(check, 500);
+        }
+      }, 10_000);
+    });
   }
 
   getSourceLimits(source: string): SourceConcurrencyConfig {
@@ -343,14 +450,30 @@ export class AdaptiveAutotuner {
 
     const now = Date.now();
 
-    // Check for stress condition (requiring scale-down)
+    // Check for stress condition (requiring scale-down or cooldown)
     let stressReason: string | null = null;
-    if (mem.rssMb >= this.config.maxRssMb) {
-      stressReason = `High RSS: ${mem.rssMb}MB >= limit ${this.config.maxRssMb}MB`;
+    let isMemoryStress = false;
+    let isEmergency = false;
+    let isSevere = false;
+
+    if (mem.rssMb >= this.config.rssEmergencyLimitMb) {
+      stressReason = `Emergency RSS: ${mem.rssMb}MB >= limit ${this.config.rssEmergencyLimitMb}MB`;
+      isEmergency = true;
+      isMemoryStress = true;
+    } else if (mem.rssMb >= this.config.rssHardLimitMb) {
+      stressReason = `Hard RSS: ${mem.rssMb}MB >= limit ${this.config.rssHardLimitMb}MB`;
+      isSevere = true;
+      isMemoryStress = true;
+    } else if (mem.rssMb >= this.config.rssSoftLimitMb || mem.rssMb >= this.config.maxRssMb) {
+      const limit = Math.min(this.config.rssSoftLimitMb, this.config.maxRssMb);
+      stressReason = `High RSS: ${mem.rssMb}MB >= limit ${limit}MB`;
+      isMemoryStress = true;
     } else if (mem.heapUsedMb >= this.config.maxHeapMb) {
       stressReason = `High Heap: ${mem.heapUsedMb}MB >= limit ${this.config.maxHeapMb}MB`;
+      isMemoryStress = true;
     } else if (totalExternal >= this.config.maxExternalAndBuffersMb) {
       stressReason = `High External/Buffers: ${totalExternal}MB >= limit ${this.config.maxExternalAndBuffersMb}MB`;
+      isMemoryStress = true;
     } else if (lag.avgLagMs >= this.config.maxEventLoopLagMs) {
       stressReason = `High Event Loop Lag: ${lag.avgLagMs}ms >= limit ${this.config.maxEventLoopLagMs}ms`;
     } else if (rateLimits > 0) {
@@ -367,15 +490,49 @@ export class AdaptiveAutotuner {
       this.stableCycleCount = 0;
       this.cooldownUntil = now + this.config.cooldownPeriodMs;
 
-      this.logger.warn(`[Autotuner STRESS] Stress detected: ${stressReason}. Concurrency maintained at ${this.currentConcurrency} (downscaling disabled).`, {
-        concurrency: this.currentConcurrency,
-        stressReason,
-        cooldownSeconds: Math.round(this.config.cooldownPeriodMs / 1000),
-        memory: mem,
-        lag,
-      });
+      const previous = this.currentConcurrency;
+      let target = previous;
+      let action: 'SCALED_DOWN' | 'STRESS_DETECTED' = 'STRESS_DETECTED';
 
-      return { concurrency: this.currentConcurrency, action: 'STRESS_DETECTED', reason: stressReason };
+      if (isMemoryStress) {
+        if (isEmergency) {
+          target = this.config.minConcurrency;
+          if (typeof (global as any).gc === 'function') {
+            try { (global as any).gc(); } catch {}
+          }
+        } else if (isSevere) {
+          target = Math.max(this.config.minConcurrency, previous - 3);
+          if (typeof (global as any).gc === 'function') {
+            try { (global as any).gc(); } catch {}
+          }
+        } else {
+          target = Math.max(this.config.minConcurrency, previous - 1);
+        }
+        action = target < previous ? 'SCALED_DOWN' : 'STRESS_DETECTED';
+        this.currentConcurrency = target;
+        this.globalChapterSemaphore.setCapacity(target);
+
+        this.logger.warn(`[Autotuner STRESS] Memory stress detected: ${stressReason}. Scaled down: ${previous} -> ${target}`, {
+          previous,
+          target,
+          stressReason,
+          isEmergency,
+          cooldownSeconds: Math.round(this.config.cooldownPeriodMs / 1000),
+          memory: mem,
+          lag,
+        });
+      } else {
+        // Network/error pattern stress: maintain concurrency while applying cooldown
+        this.logger.warn(`[Autotuner STRESS] Stress detected: ${stressReason}. Concurrency maintained at ${this.currentConcurrency} during cooldown.`, {
+          concurrency: this.currentConcurrency,
+          stressReason,
+          cooldownSeconds: Math.round(this.config.cooldownPeriodMs / 1000),
+          memory: mem,
+          lag,
+        });
+      }
+
+      return { concurrency: target, action, reason: stressReason };
     }
 
     // Isolated error handling: cycleErrors === 1 or cycleTimeouts === 1
@@ -409,6 +566,18 @@ export class AdaptiveAutotuner {
       this.stableCycleCount >= this.config.requiredStableCycles &&
       this.currentConcurrency < this.config.maxConcurrency
     ) {
+      // Memory proximity hold: do NOT scale up if close to soft limit or buffers are high
+      if (mem.rssMb >= (this.config.rssSoftLimitMb - 20) || this.activeBufferedBytes > (this.config.maxBufferedBytes * 0.7)) {
+        this.logger.info(
+          `[Autotuner HOLD] Concurrency maintained at ${this.currentConcurrency} due to memory proximity (RSS: ${mem.rssMb}MB, Buffers: ${Math.round(this.activeBufferedBytes / 1024 / 1024)}MB)`
+        );
+        return {
+          concurrency: this.currentConcurrency,
+          action: 'STABLE',
+          reason: `Holding concurrency at ${this.currentConcurrency} (RSS: ${mem.rssMb}MB, Buffers: ${Math.round(this.activeBufferedBytes / 1024 / 1024)}MB)`,
+        };
+      }
+
       const previous = this.currentConcurrency;
       const target = Math.min(this.config.maxConcurrency, previous + 1);
       this.currentConcurrency = target;
