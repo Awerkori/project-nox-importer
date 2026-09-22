@@ -343,9 +343,11 @@ export class WorkAffinityScheduler {
 
       // -------------------------------------------------------------
       // LANE P1: Active Backfill Works (Fair Round-Robin)
+      // Strictly excludes works with pending critical gaps (to avoid downloading ahead)
+      // and works marked BLOCKED.
       // -------------------------------------------------------------
       const eligibleP1Works = p1Works.filter(
-        (w) => (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork
+        (w) => w.state === 'FILLING' && w.criticalGapSortKey === null && (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork
       );
 
       if (eligibleP1Works.length > 0) {
@@ -573,6 +575,18 @@ export class WorkAffinityScheduler {
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
+          AND NOT EXISTS (
+            SELECT 1 FROM chapters c
+            WHERE c.work_id = (q.payload->>'workId')::uuid
+              AND c.number = q.chapter_sort_key
+              AND c.published_at IS NOT NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM importer_chapter_mappings sm
+            WHERE sm.work_id = (q.payload->>'workId')::uuid
+              AND sm.status = 'STAGED'
+              AND sm.chapter_sort_key <= q.chapter_sort_key
+          )
         ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -703,6 +717,18 @@ export class WorkAffinityScheduler {
           AND ($7::text[] IS NULL OR (q.payload->>'workId') = ANY($7::text[]))
           AND ($8::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($8::text[])))
           AND ($9::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($9::text[])))
+          AND NOT EXISTS (
+            SELECT 1 FROM chapters c
+            WHERE c.work_id = (q.payload->>'workId')::uuid
+              AND c.number = q.chapter_sort_key
+              AND c.published_at IS NOT NULL
+          )
+          AND ($4::numeric IS NOT NULL OR NOT EXISTS (
+            SELECT 1 FROM importer_chapter_mappings sm
+            WHERE sm.work_id = (q.payload->>'workId')::uuid
+              AND sm.status = 'STAGED'
+              AND sm.chapter_sort_key <= q.chapter_sort_key
+          ))
         ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -1067,4 +1093,64 @@ export class WorkAffinityScheduler {
       lastUpdated: new Date().toISOString(),
     };
   }
+
+  /**
+   * Controlled atomic background cleanup for redundant queue jobs.
+   * Safely marks queued/retrying jobs as COMPLETED with CANONICAL_ALREADY_SATISFIED
+   * if their canonical chapter is already published in chapters table.
+   * Preserves provider mappings and fallbacks without blind DELETES.
+   */
+  async runControlledRedundantJobCleanup(batchSize: number = 200): Promise<{ cleaned: number }> {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query(`
+        WITH redundant AS (
+          SELECT q.id, (q.payload->>'workId')::uuid as work_id, q.chapter_sort_key, q.source, c.id as chapter_id
+          FROM importer_queue q
+          JOIN chapters c ON c.work_id = (q.payload->>'workId')::uuid
+                         AND c.number = q.chapter_sort_key
+                         AND c.published_at IS NOT NULL
+          WHERE q.status IN ('QUEUED', 'RETRY')
+            AND q.task_type = 'IMPORT_CHAPTER'
+          LIMIT $1
+        ),
+        updated_q AS (
+          UPDATE importer_queue q
+          SET status = 'COMPLETED',
+              locked_by = NULL,
+              locked_at = NULL,
+              last_error = 'CANONICAL_ALREADY_SATISFIED',
+              updated_at = NOW()
+          FROM redundant r
+          WHERE q.id = r.id
+          RETURNING q.id
+        ),
+        updated_m AS (
+          UPDATE importer_chapter_mappings m
+          SET status = 'COMPLETED',
+              chapter_id = r.chapter_id,
+              is_page_provider = false,
+              updated_at = NOW()
+          FROM redundant r
+          WHERE m.source = r.source
+            AND m.work_id = r.work_id
+            AND m.chapter_sort_key = r.chapter_sort_key
+            AND m.status IN ('PENDING', 'QUEUED')
+          RETURNING m.id
+        )
+        SELECT count(*) as count FROM updated_q;
+      `, [batchSize]);
+      const cleaned = parseInt(res.rows[0]?.count || '0', 10);
+      if (cleaned > 0) {
+        this.logger.info(`[REDUNDANCY_CLEANUP] Safely short-circuited ${cleaned} redundant jobs for already published chapters.`);
+      }
+      return { cleaned };
+    } catch (err: any) {
+      this.logger.warn('[REDUNDANCY_CLEANUP_ERROR] Failed to run redundant job cleanup', { error: err?.message });
+      return { cleaned: 0 };
+    } finally {
+      client.release();
+    }
+  }
 }
+

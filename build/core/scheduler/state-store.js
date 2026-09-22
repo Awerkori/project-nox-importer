@@ -16,7 +16,7 @@ export class SchedulerStateStore {
         enabled: true,
         shadowMode: false,
         maxActiveNewWorks: 4,
-        maxActiveBackfillWorks: 10,
+        maxActiveBackfillWorks: 24,
         maxInflightPerWork: 2,
         slidingWindowSize: 12,
         slidingWindowMin: 4,
