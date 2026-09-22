@@ -698,6 +698,7 @@ export class ImporterEngine {
                     bufferedBytes: ImporterEngine.activeBufferedBytes,
                     reservedBytes: this.autotuner.getReservedBytes(),
                     committedBytes: this.autotuner.getCommittedBytes(),
+                    bufferBudgetMaxObserved: this.autotuner.getMaxCommittedBytesObserved(),
                     activeJobs,
                     rssMb: mem.rssMb,
                 });
@@ -2348,7 +2349,7 @@ export class ImporterEngine {
                             await this.rateLimiter.acquire(parsedUrl.host);
                             chRateLimitWaitMs += (performance.now() - rl0);
                             const buf0 = performance.now();
-                            const reservation = await this.autotuner.reserveBufferBudget(2.0 * 1024 * 1024, AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+                            let reservation = await this.autotuner.reserveBufferBudget(2.0 * 1024 * 1024, AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
                             await bufferedPageSemaphore.acquire(AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
                             chDownloadSemWaitMs += (performance.now() - buf0);
                             let bufferTransferred = false;
@@ -2431,7 +2432,13 @@ export class ImporterEngine {
                                     catch (err) {
                                         lastErr = err;
                                         telemetryCollector.recordDownloadError(attempts < 4);
+                                        if (err instanceof InvalidMediaError) {
+                                            break;
+                                        }
                                         if (attempts < 4 && !this.stopSignal && !pipelineError) {
+                                            if (reservation.isReleased) {
+                                                reservation = await this.autotuner.reserveBufferBudget(2.0 * 1024 * 1024, AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+                                            }
                                             await this.sleep(400 * attempts);
                                         }
                                     }
@@ -3158,7 +3165,7 @@ export class ImporterEngine {
                             }
                         }
                     }
-                    return await readImageBody(bridgeRes);
+                    return await readImageBody(bridgeRes, { reservation: options?.reservation });
                 }
             }
             catch (bridgeErr) {
@@ -3190,7 +3197,7 @@ export class ImporterEngine {
                 }
             }
         }
-        const uint8 = await readImageBody(res);
+        const uint8 = await readImageBody(res, { reservation: options?.reservation });
         // Validate binary image integrity and check for fake HTML challenge pages returned with HTTP 200
         const bodySnippet = new TextDecoder('utf-8', { fatal: false }).decode(uint8.slice(0, 8192));
         const imgInsp = CloudflareClassifier.inspect(res.status, res.headers, bodySnippet, {

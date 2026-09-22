@@ -244,9 +244,15 @@ export class BufferReservation {
 
   /**
    * Commits actual downloaded bytes into activeBufferedBytes and frees the reserved budget.
+   * Defensive invariant: actualBytes must NOT exceed reservedBytes.
    */
   commit(actualBytes: number): void {
     if (this._released || this._committed) return;
+    if (actualBytes > this._reservedBytes) {
+      throw new Error(
+        `BufferReservation invariant violation: cannot commit ${actualBytes} bytes exceeding reserved budget ${this._reservedBytes} bytes without prior upgrade`
+      );
+    }
     this._committed = true;
     this.autotuner.commitReservation(this._reservedBytes, actualBytes);
   }
@@ -276,6 +282,7 @@ export class AdaptiveAutotuner {
   // Active and reserved buffer tracking & backpressure waiters
   private activeBufferedBytes = 0;
   private reservedBufferedBytes = 0;
+  private maxCommittedBytesObserved = 0;
   private reservationWaiters: Array<{
     requestedBytes: number;
     t0: number;
@@ -351,6 +358,7 @@ export class AdaptiveAutotuner {
     // Node.js single-threaded event loop guarantees check-and-increment is atomic.
     if (this.reservationWaiters.length === 0 && this.canAdmitReservation(requestedBytes)) {
       this.reservedBufferedBytes += requestedBytes;
+      this.updateMaxCommittedObserved();
       return new BufferReservation(this, requestedBytes);
     }
 
@@ -407,6 +415,7 @@ export class AdaptiveAutotuner {
 
     if (this.reservationWaiters.length === 0 && this.canAdmitReservation(additionalBytes)) {
       this.reservedBufferedBytes += additionalBytes;
+      this.updateMaxCommittedObserved();
       return;
     }
 
@@ -449,8 +458,14 @@ export class AdaptiveAutotuner {
   }
 
   commitReservation(reservedBytes: number, actualBytes: number): void {
+    if (actualBytes > reservedBytes) {
+      throw new Error(
+        `commitReservation invariant violation: actualBytes (${actualBytes}) exceeds reservedBytes (${reservedBytes})`
+      );
+    }
     this.reservedBufferedBytes = Math.max(0, this.reservedBufferedBytes - reservedBytes);
     this.activeBufferedBytes += actualBytes;
+    this.updateMaxCommittedObserved();
     this.drainReservationWaiters();
   }
 
@@ -471,6 +486,7 @@ export class AdaptiveAutotuner {
       if (this.canAdmitReservation(next.requestedBytes)) {
         this.reservationWaiters.shift();
         this.reservedBufferedBytes += next.requestedBytes;
+        this.updateMaxCommittedObserved();
         const reservation = new BufferReservation(this, next.requestedBytes);
         next.resolve(reservation);
       } else {
@@ -482,6 +498,7 @@ export class AdaptiveAutotuner {
   trackBufferedBytes(bytes: number): void {
     if (bytes <= 0) return;
     this.activeBufferedBytes += bytes;
+    this.updateMaxCommittedObserved();
   }
 
   releaseBufferedBytes(bytes: number): void {
@@ -498,6 +515,17 @@ export class AdaptiveAutotuner {
 
   getCommittedBytes(): number {
     return this.activeBufferedBytes + this.reservedBufferedBytes;
+  }
+
+  private updateMaxCommittedObserved(): void {
+    const total = this.activeBufferedBytes + this.reservedBufferedBytes;
+    if (total > this.maxCommittedBytesObserved) {
+      this.maxCommittedBytesObserved = total;
+    }
+  }
+
+  getMaxCommittedBytesObserved(): number {
+    return this.maxCommittedBytesObserved;
   }
 
   async waitForMemoryHeadroom(estimatedBytes: number = 1.5 * 1024 * 1024, signal?: AbortSignal): Promise<void> {
