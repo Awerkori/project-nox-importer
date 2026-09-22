@@ -236,11 +236,50 @@ export class PublicationBarrier {
       this.logger.warn('Failed to auto-cancel redundant queue jobs on publish', { error: cancelErr?.message });
     }
 
-    // 3. Update public.works: update latest_chapter_published_at whenever ANY chapter is published
+    // 3. Update public.works: enforce publication barrier (valid metadata + valid cover)
+    let shouldPublishWork = false;
+    try {
+      const { data: currentWork } = await this.supabase
+        .from('works')
+        .select('id, title, slug, cover_id, published')
+        .eq('id', workId)
+        .maybeSingle();
+
+      if (currentWork?.cover_id && currentWork.title && currentWork.slug) {
+        const { data: coverMedia } = await this.supabase
+          .from('media')
+          .select('id, storage_ready, bytes')
+          .eq('id', currentWork.cover_id)
+          .maybeSingle();
+
+        if (coverMedia && coverMedia.storage_ready && (coverMedia.bytes || 0) >= 1500) {
+          shouldPublishWork = true;
+        } else {
+          this.logger.warn('Work cover is not storage_ready or too small, publication barrier withheld published=true', {
+            workId,
+            coverId: currentWork.cover_id,
+            bytes: coverMedia?.bytes,
+          });
+        }
+      } else {
+        this.logger.warn('Work missing cover_id or canonical metadata, publication barrier withheld published=true', {
+          workId,
+          hasCover: Boolean(currentWork?.cover_id),
+          hasTitle: Boolean(currentWork?.title),
+          hasSlug: Boolean(currentWork?.slug),
+        });
+      }
+    } catch (barrierErr: any) {
+      this.logger.warn('Error checking publication barrier for work', { workId, error: barrierErr?.message });
+    }
+
     const workUpdate: Record<string, any> = {
-      published: true,
       updated_at: new Date().toISOString(),
     };
+
+    if (shouldPublishWork) {
+      workUpdate.published = true;
+    }
 
     workUpdate.latest_chapter_published_at =
       !existingLatest || new Date(publishedAtIso) > new Date(existingLatest)

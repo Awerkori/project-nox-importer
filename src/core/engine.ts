@@ -3083,14 +3083,16 @@ export class ImporterEngine {
       if (!this.knownCoveredWorks.has(workId)) {
         try {
           const botUserId = await this.resolveBotUserId();
-          await this.ensureWorkHasCover(workId, botUserId);
+          const coverId = await this.ensureWorkHasCover(workId, botUserId);
+          if (coverId) {
+            this.knownCoveredWorks.add(workId);
+          }
         } catch (coverCheckErr: any) {
           this.logger.warn('Non-fatal error verifying work cover before chapter publish', {
             workId,
             error: coverCheckErr?.message,
           });
         }
-        this.knownCoveredWorks.add(workId);
       }
 
       // Find or create chapter record in public.chapters
@@ -3443,8 +3445,8 @@ export class ImporterEngine {
     if (bytes.length < 1500) {
       throw new Error(`Downloaded image is too small (${bytes.length} bytes), likely a placeholder or spacer: ${url}`);
     }
-    if (purpose === 'editorial' && bytes.length > 4_000_000) {
-      throw new Error(`Cover image too large (${bytes.length} bytes), max 4MB allowed: ${url}`);
+    if (purpose === 'editorial' && bytes.length > 10_000_000) {
+      throw new Error(`Cover image too large (${bytes.length} bytes), max 10MB allowed: ${url}`);
     }
     const res = await processAndStoreMedia(this.supabase, this.storage, bytes, userId, purpose);
     if (res.width <= 50 || res.height <= 50) {
