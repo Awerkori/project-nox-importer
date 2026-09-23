@@ -430,7 +430,11 @@ export async function recoverStalledLeasesDirect(staleGraceSeconds: number = 30)
         next_run_at = NOW(),
         updated_at = NOW()
     WHERE status = 'IMPORTING'
-      AND lease_expires_at <= NOW() - ($1::text || ' seconds')::interval
+      AND (
+        lease_expires_at <= NOW() - ($1::text || ' seconds')::interval
+        OR (lease_expires_at IS NULL AND (locked_at <= NOW() - INTERVAL '5 minutes' OR updated_at <= NOW() - INTERVAL '5 minutes'))
+        OR (locked_at <= NOW() - INTERVAL '15 minutes' AND updated_at <= NOW() - INTERVAL '15 minutes')
+      )
       AND attempts >= COALESCE(max_attempts, 7)
     RETURNING id;
   `, [staleGraceSeconds]);
@@ -449,7 +453,11 @@ export async function recoverStalledLeasesDirect(staleGraceSeconds: number = 30)
         next_run_at = NOW() + INTERVAL '10 seconds',
         updated_at = NOW()
     WHERE status = 'IMPORTING'
-      AND lease_expires_at <= NOW() - ($1::text || ' seconds')::interval
+      AND (
+        lease_expires_at <= NOW() - ($1::text || ' seconds')::interval
+        OR (lease_expires_at IS NULL AND (locked_at <= NOW() - INTERVAL '5 minutes' OR updated_at <= NOW() - INTERVAL '5 minutes'))
+        OR (locked_at <= NOW() - INTERVAL '15 minutes' AND updated_at <= NOW() - INTERVAL '15 minutes')
+      )
       AND attempts < COALESCE(max_attempts, 7)
     RETURNING id;
   `, [staleGraceSeconds]);
