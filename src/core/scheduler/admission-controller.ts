@@ -123,7 +123,7 @@ export class AdmissionController {
 
     const client = await this.pool.connect();
     try {
-      // 2. NO_P0_WAITING
+      // 2. NO_P0_WAITING (P0 is absolute)
       const p0Res = await client.query(`
         SELECT COUNT(*) as p0_cnt
         FROM importer_queue
@@ -148,59 +148,8 @@ export class AdmissionController {
         };
       }
 
-      // 3. NO_HEALTHY_P1_CLAIMABLE & P1_WORKS_WITH_AVAILABLE_MISSING_CHAPTERS
-      const p1Res = await client.query(`
-        SELECT 
-          COUNT(CASE WHEN q.status IN ('QUEUED', 'RETRY') AND (q.next_run_at IS NULL OR q.next_run_at <= NOW()) THEN 1 END) as claimable_cnt,
-          COUNT(CASE WHEN q.status = 'PAUSED_BY_STAFF' THEN 1 END) as paused_cnt,
-          COUNT(DISTINCT q.payload->>'workId') as works_cnt
-        FROM importer_queue q
-        JOIN works w ON w.id = (q.payload->>'workId')::uuid
-        JOIN importer_sources s ON s.id = q.source
-        WHERE q.task_type = 'IMPORT_CHAPTER'
-          AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
-          AND w.published = true
-          AND s.enabled = true
-          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())));
-      `);
-      const p1Claimable = parseInt(p1Res.rows[0]?.claimable_cnt || '0', 10);
-      const p1AvailableChapters = parseInt(p1Res.rows[0]?.paused_cnt || '0', 10);
-      const p1WorksWaiting = parseInt(p1Res.rows[0]?.works_cnt || '0', 10);
-
-      if (p1Claimable > 0) {
-        return {
-          allowed: false,
-          reason: `HEALTHY_P1_CLAIMABLE: ${p1Claimable} P1 jobs queued on active sources`,
-          metrics: {
-            p0Waiting: 0,
-            p1Claimable,
-            p1AvailableChapters,
-            p1WorksWaiting,
-            p2ActiveCohortSize: 0,
-            p2UnfinishedCount: 0,
-            systemHealthy: true,
-          },
-        };
-      }
-
-      if (p1AvailableChapters > 0) {
-        return {
-          allowed: false,
-          reason: `P1_AVAILABLE_CHAPTERS_EXIST: ${p1AvailableChapters} chapters waiting across ${p1WorksWaiting} catalog works`,
-          metrics: {
-            p0Waiting: 0,
-            p1Claimable: 0,
-            p1AvailableChapters,
-            p1WorksWaiting,
-            p2ActiveCohortSize: 0,
-            p2UnfinishedCount: 0,
-            systemHealthy: true,
-          },
-        };
-      }
-
-      // 4. P2_ACTIVE_COHORT_BELOW_LIMIT:
-      // Requirement 2: Limite de obras novas ativas simultâneas (default maxActiveNewWorks <= 4)
+      // 3. P2_ACTIVE_COHORT_BELOW_LIMIT:
+      // Strictly restrict active P2 cohort to <= config.maxActiveNewWorks (default 4)
       const activeWorks = this.stateStore.getActiveWorks();
       const activeP2Works = activeWorks.filter((w) => w.lane === 'P2' && w.state === 'FILLING');
       const maxP2Cohort = config.maxActiveNewWorks || 4;
@@ -209,6 +158,32 @@ export class AdmissionController {
         return {
           allowed: false,
           reason: `P2_ACTIVE_COHORT_FULL: ${activeP2Works.length}/${maxP2Cohort} active works`,
+          metrics: {
+            p0Waiting: 0,
+            p1Claimable: 0,
+            p1AvailableChapters: 0,
+            p1WorksWaiting: 0,
+            p2ActiveCohortSize: activeP2Works.length,
+            p2UnfinishedCount: activeP2Works.length,
+            systemHealthy: true,
+          },
+        };
+      }
+
+      // 4. WORKER_CAPACITY_CHECK:
+      // P0 >>> P1 > P2 > P3. If all 18 workers are fully utilized, wait.
+      // But if there is spare worker capacity (< 18 in-flight) AND activeP2Works < maxP2Cohort:
+      // allow P2/P3 new works to admit so P3 never dies of starvation from catalog backlog.
+      const inFlightRes = await client.query(
+        `SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`
+      );
+      const importingCnt = parseInt(inFlightRes.rows[0]?.cnt || '0', 10);
+      const maxTotalWorkers = 18;
+
+      if (importingCnt >= maxTotalWorkers) {
+        return {
+          allowed: false,
+          reason: `WORKERS_FULLY_UTILIZED: ${importingCnt}/${maxTotalWorkers} chapters in-flight`,
           metrics: {
             p0Waiting: 0,
             p1Claimable: 0,
@@ -270,139 +245,127 @@ export class AdmissionController {
    */
   private async reconcileActiveWorks(): Promise<void> {
     const activeWorks = this.stateStore.getActiveWorks();
+    if (activeWorks.length === 0) return;
 
-    for (const work of activeWorks) {
+    try {
+      const client = await this.pool.connect();
       try {
-        const client = await this.pool.connect();
-        try {
-          // A. Count queued & importing jobs for this work
-          const queueRes = await client.query(
-            `SELECT 
-               COUNT(CASE WHEN status = 'QUEUED' THEN 1 END) as queued_cnt,
-               COUNT(CASE WHEN status = 'IMPORTING' THEN 1 END) as importing_cnt,
-               COUNT(CASE WHEN status = 'PAUSED_BY_STAFF' THEN 1 END) as paused_cnt,
-               MIN(CASE WHEN status IN ('QUEUED', 'PAUSED_BY_STAFF') THEN chapter_sort_key END) as min_sort_key
-             FROM importer_queue
-             WHERE task_type = 'IMPORT_CHAPTER' AND (payload->>'workId') = $1`,
-            [work.workId]
-          );
+        for (const work of activeWorks) {
+          try {
+            // A. Count queued & importing jobs for this work
+            const queueRes = await client.query(
+              `SELECT 
+                 COUNT(CASE WHEN status = 'QUEUED' THEN 1 END) as queued_cnt,
+                 COUNT(CASE WHEN status = 'IMPORTING' THEN 1 END) as importing_cnt,
+                 COUNT(CASE WHEN status = 'PAUSED_BY_STAFF' THEN 1 END) as paused_cnt,
+                 MIN(CASE WHEN status IN ('QUEUED', 'PAUSED_BY_STAFF') THEN chapter_sort_key END) as min_sort_key
+               FROM importer_queue
+               WHERE task_type = 'IMPORT_CHAPTER' AND (payload->>'workId') = $1`,
+              [work.workId]
+            );
 
-          // B. Count published chapters
-          const pubRes = await client.query(
-            `SELECT COUNT(*) as pub_cnt, COALESCE(MAX(number), -1) as max_pub FROM chapters WHERE work_id = $1::uuid AND published_at IS NOT NULL`,
-            [work.workId]
-          );
+            // B. Count published chapters
+            const pubRes = await client.query(
+              `SELECT COUNT(*) as pub_cnt, COALESCE(MAX(number), -1) as max_pub FROM chapters WHERE work_id = $1::uuid AND published_at IS NOT NULL`,
+              [work.workId]
+            );
 
-          // C. Detect STAGED barrier gaps for this work
-          const stagedRes = await client.query(
-            `SELECT COUNT(*) as staged_cnt, MIN(chapter_sort_key) as min_staged
-             FROM importer_chapter_mappings
-             WHERE work_id = $1::uuid AND status = 'STAGED'`,
-            [work.workId]
-          );
+            // C. Detect STAGED barrier gaps for this work
+            const stagedRes = await client.query(
+              `SELECT COUNT(*) as staged_cnt, MIN(chapter_sort_key) as min_staged
+               FROM importer_chapter_mappings
+               WHERE work_id = $1::uuid AND status = 'STAGED'`,
+              [work.workId]
+            );
 
-          const qRow = queueRes.rows[0];
-          const queuedCnt = parseInt(qRow?.queued_cnt || '0', 10);
-          const importingCnt = parseInt(qRow?.importing_cnt || '0', 10);
-          const pausedCnt = parseInt(qRow?.paused_cnt || '0', 10);
-          const minSortKey = qRow?.min_sort_key ? parseFloat(qRow.min_sort_key) : null;
-          const pubCnt = parseInt(pubRes.rows[0]?.pub_cnt || '0', 10);
-          const maxPub = parseFloat(pubRes.rows[0]?.max_pub ?? '-1');
-          const stagedCnt = parseInt(stagedRes.rows[0]?.staged_cnt || '0', 10);
-          const minStaged = stagedRes.rows[0]?.min_staged ? parseFloat(stagedRes.rows[0].min_staged) : null;
+            const qRow = queueRes.rows[0];
+            const queuedCnt = parseInt(qRow?.queued_cnt || '0', 10);
+            const importingCnt = parseInt(qRow?.importing_cnt || '0', 10);
+            const pausedCnt = parseInt(qRow?.paused_cnt || '0', 10);
+            const minSortKey = qRow?.min_sort_key ? parseFloat(qRow.min_sort_key) : null;
+            const pubCnt = parseInt(pubRes.rows[0]?.pub_cnt || '0', 10);
+            const maxPub = parseFloat(pubRes.rows[0]?.max_pub ?? '-1');
+            const stagedCnt = parseInt(stagedRes.rows[0]?.staged_cnt || '0', 10);
+            const minStaged = stagedRes.rows[0]?.min_staged ? parseFloat(stagedRes.rows[0].min_staged) : null;
 
-          work.queuedChapters = queuedCnt;
-          work.inFlightChapters = importingCnt;
-          work.publishedChapters = pubCnt;
-          work.totalChapters = pubCnt + queuedCnt + importingCnt + pausedCnt;
-          work.frontierSortKey = minSortKey;
+            work.queuedChapters = queuedCnt;
+            work.inFlightChapters = importingCnt;
+            work.publishedChapters = pubCnt;
+            work.totalChapters = pubCnt + queuedCnt + importingCnt + pausedCnt;
+            work.frontierSortKey = minSortKey;
 
-          // Promote P2 work to P1 if it has published chapters
-          if (pubCnt > 0 && work.lane === 'P2') {
-            this.logger.info(`Work ${work.workTitle} (${work.workId}) promoted from P2 to P1 (${pubCnt} published chapters).`);
-            work.lane = 'P1';
-          }
+            // Promote P2 work to P1 if it has published chapters
+            if (pubCnt > 0 && work.lane === 'P2') {
+              this.logger.info(`Work ${work.workTitle} (${work.workId}) promoted from P2 to P1 (${pubCnt} published chapters).`);
+              work.lane = 'P1';
+            }
 
-          // Critical gap detection: if we have staged chapters and missing sort key is < minStaged
-          if (stagedCnt > 0 && minSortKey !== null && minStaged !== null && minSortKey < minStaged) {
-            work.criticalGapSortKey = minSortKey;
-            work.criticalGapUnblockCount = stagedCnt;
-          } else {
-            work.criticalGapSortKey = null;
-            work.criticalGapUnblockCount = 0;
-          }
+            // Critical gap detection
+            if (stagedCnt > 0 && minSortKey !== null && minStaged !== null && minSortKey < minStaged) {
+              work.criticalGapSortKey = minSortKey;
+              work.criticalGapUnblockCount = stagedCnt;
+            } else {
+              work.criticalGapSortKey = null;
+              work.criticalGapUnblockCount = 0;
+            }
 
-          // Gap blocking check: if minSortKey has an unresolvable gap (> maxPub + 1.5),
-          // any newly imported chapters will be stuck in STAGED. Block work to vacate active slot.
-          const expectedFrontier = maxPub >= 0 ? maxPub + 1.5 : 1.5;
-          const isGapBlocked = minSortKey !== null && minSortKey > expectedFrontier;
-          if (isGapBlocked) {
-            if (work.state !== 'BLOCKED') {
-              this.logger.warn(`Work ${work.workTitle} (${work.workId}) marked BLOCKED due to unresolvable gap (minSortKey ${minSortKey} > expectedFrontier ${expectedFrontier}, maxPub ${maxPub}). Vacating active slot.`);
-              work.state = 'BLOCKED';
+            // Gap blocking check
+            const expectedFrontier = maxPub >= 0 ? maxPub + 1.5 : 1.5;
+            const isGapBlocked = minSortKey !== null && minSortKey > expectedFrontier;
+            if (isGapBlocked) {
+              if (work.state !== 'BLOCKED') {
+                this.logger.warn(`Work ${work.workTitle} (${work.workId}) marked BLOCKED due to unresolvable gap. Vacating active slot.`);
+                work.state = 'BLOCKED';
+                this.stateStore.setActiveWork(work);
+              }
+              continue;
+            }
+
+            // Check primary source health
+            const srcCheck = await client.query(
+              `SELECT status, cooldown_until FROM importer_sources WHERE id = $1`,
+              [work.primarySource]
+            );
+            const srcRow = srcCheck.rows[0];
+            const isSourceBlocked = srcRow && (
+              srcRow.status === 'DISABLED' ||
+              srcRow.status === 'PAUSED' ||
+              (srcRow.status === 'COOLDOWN' && srcRow.cooldown_until && new Date(srcRow.cooldown_until) > new Date())
+            );
+
+            if (isSourceBlocked) {
+              if (work.state !== 'BLOCKED') {
+                this.logger.info(`Work ${work.workTitle} (${work.workId}) marked BLOCKED (source ${work.primarySource} in cooldown/blocked). Vacating active slot.`);
+                work.state = 'BLOCKED';
+                this.stateStore.setActiveWork(work);
+              }
+              continue;
+            } else if (work.state === 'BLOCKED') {
+              this.logger.info(`Work ${work.workTitle} (${work.workId}) unblocked as source ${work.primarySource} recovered.`);
+              work.state = 'FILLING';
               this.stateStore.setActiveWork(work);
             }
-            continue;
-          }
 
-          // Check primary source health (Section 6: Obra bloqueada não pode consumir capacidade útil)
-          const srcCheck = await client.query(
-            `SELECT status, cooldown_until FROM importer_sources WHERE id = $1`,
-            [work.primarySource]
-          );
-          const srcRow = srcCheck.rows[0];
-          const isSourceBlocked = srcRow && (
-            srcRow.status === 'DISABLED' ||
-            srcRow.status === 'PAUSED' ||
-            (srcRow.status === 'COOLDOWN' && srcRow.cooldown_until && new Date(srcRow.cooldown_until) > new Date())
-          );
-
-          if (isSourceBlocked) {
-            if (work.state !== 'BLOCKED') {
-              this.logger.info(`Work ${work.workTitle} (${work.workId}) marked BLOCKED (source ${work.primarySource} in cooldown/blocked). Vacating active slot.`);
-              work.state = 'BLOCKED';
-              this.stateStore.setActiveWork(work);
+            // Check if caught up or drained
+            if (queuedCnt === 0 && importingCnt === 0 && pausedCnt === 0) {
+              work.state = pubCnt > 0 ? 'CAUGHT_UP' : 'COMPLETE';
+              this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${work.state} state. Vacating active slot.`);
+              this.stateStore.removeActiveWork(work.workId);
+              continue;
             }
-            continue;
-          } else if (work.state === 'BLOCKED') {
-            this.logger.info(`Work ${work.workTitle} (${work.workId}) unblocked as source ${work.primarySource} recovered.`);
+
             work.state = 'FILLING';
+            work.lastActivityAt = new Date().toISOString();
             this.stateStore.setActiveWork(work);
+          } catch (workErr: any) {
+            this.logger.warn(`Failed to reconcile active work ${work.workId}`, { error: workErr?.message });
           }
-
-          // Check if caught up or drained (zero queued, zero importing, zero paused remaining) - Sections 11 & 12
-          if (queuedCnt === 0 && importingCnt === 0 && pausedCnt === 0) {
-            let unimported = 0;
-            try {
-              const mapCheck = await client.query(
-                `SELECT COUNT(*) as unimported FROM importer_chapter_mappings WHERE work_id = $1::uuid AND status NOT IN ('COMPLETED', 'FAILED')`,
-                [work.workId]
-              );
-              unimported = parseInt(mapCheck.rows[0]?.unimported || '0', 10);
-            } catch {}
-
-            const isCaughtUp = unimported === 0 && pubCnt > 0;
-            const stateLabel = isCaughtUp ? 'CAUGHT_UP' : 'DRAINED';
-            work.state = isCaughtUp ? 'CAUGHT_UP' : 'COMPLETE';
-            const beforeCount = this.stateStore.getActiveWorks().filter((w) => w.state === 'FILLING').length;
-            this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${stateLabel} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused). Vacating active slot. ACTIVE SET BEFORE: ${beforeCount} -> AFTER: ${beforeCount - 1}`, {
-              publishedChapters: pubCnt,
-              unimportedMappings: unimported,
-              lane: work.lane,
-            });
-            this.stateStore.removeActiveWork(work.workId);
-            continue;
-          }
-
-          work.state = 'FILLING';
-          work.lastActivityAt = new Date().toISOString();
-          this.stateStore.setActiveWork(work);
-        } finally {
-          client.release();
         }
-      } catch (err: any) {
-        this.logger.warn(`Failed to reconcile active work ${work.workId}`, { error: err?.message });
+      } finally {
+        client.release();
       }
+    } catch (err: any) {
+      this.logger.warn('Failed to reconcile active works', { error: err?.message });
     }
   }
 
@@ -439,8 +402,8 @@ export class AdmissionController {
 
       // P2 uses spare capacity when P1 cannot occupy available workers
       // Strictly restrict active P2 cohort to <= config.maxActiveNewWorks (default 4).
-      const maxP2Cohort = config.maxActiveNewWorks;
-      const targetNewWorksLimit = idleWorkers >= 4 ? maxP2Cohort : 0;
+      const maxP2Cohort = config.maxActiveNewWorks || 4;
+      const targetNewWorksLimit = idleWorkers >= 1 ? maxP2Cohort : 0;
       const newWorkSlotsAvailable = Math.max(0, targetNewWorksLimit - activeNewWorks.length);
 
       // Track active sources for source diversity (Section 81)

@@ -48,6 +48,7 @@ export declare class ImporterEngine {
     private chapterClaimMutex;
     private activeSourcesCache;
     private knownCoveredWorks;
+    private lastProgressTimestamp;
     static activeBufferedBytes: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
     getAutotuner(): AdaptiveAutotuner;
@@ -109,6 +110,13 @@ export declare class ImporterEngine {
      * UPSTREAM_BLOCKED -> RECOVERING -> ACTIVE (only after validating Search, Chapters, Pages, and Download)
      */
     private runUpstreamHealthLoop;
+    /**
+     * Periodic Liveness Watchdog and Auto-Recovery Loop (Section 7, 8 & 16)
+     * Evaluates pipeline liveness against 5 distinct operational states:
+     * HEALTHY_IDLE, HEALTHY_WORKING, BACKPRESSURED, STALLED, DEAD.
+     * Emits operational WARNING (>=15m) and CRITICAL (>=30m) alerts and runs auto-recovery.
+     */
+    private runLivenessWatchdogLoop;
     checkBlockedSourcesHealth(): Promise<void>;
     probeSourceHealth(src: {
         id: string;

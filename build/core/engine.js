@@ -89,6 +89,7 @@ export class ImporterEngine {
     chapterClaimMutex = new AsyncSemaphore(1, 'chapter_claim_mutex');
     activeSourcesCache = { sources: [], cachedAt: 0 };
     knownCoveredWorks = new Set();
+    lastProgressTimestamp = Date.now();
     // Actual retained image bytes; bounded globally by page permits and per-image size.
     static activeBufferedBytes = 0;
     constructor(supabase, storage, registry, rateLimiter, config) {
@@ -176,6 +177,8 @@ export class ImporterEngine {
         this.runUpstreamHealthLoop();
         // 8. Launch Pre-SLA Sentinel watchdog loop (every 15s)
         this.protectiveSentinel.startWatchdogLoop();
+        // 9. Launch Liveness Watchdog and Auto-Recovery loop (every 30s)
+        this.runLivenessWatchdogLoop();
         // A bounded shared runner pool claims by queue priority. Per-source semaphores
         // still enforce source limits, without hundreds of idle claimers ahead of fresh jobs.
         const activeWorkers = [];
@@ -546,6 +549,95 @@ export class ImporterEngine {
                 this.logger.error('Error during upstream sources health check loop', { error: err?.message });
             }
             await this.sleep(60_000);
+        }
+    }
+    /**
+     * Periodic Liveness Watchdog and Auto-Recovery Loop (Section 7, 8 & 16)
+     * Evaluates pipeline liveness against 5 distinct operational states:
+     * HEALTHY_IDLE, HEALTHY_WORKING, BACKPRESSURED, STALLED, DEAD.
+     * Emits operational WARNING (>=15m) and CRITICAL (>=30m) alerts and runs auto-recovery.
+     */
+    async runLivenessWatchdogLoop() {
+        await this.sleep(30_000);
+        while (!this.stopSignal) {
+            if (this.stopSignal)
+                break;
+            try {
+                const now = Date.now();
+                const mem = diagnostics.getMemorySnapshot();
+                const activeJobsCount = diagnostics.getActiveJobsCount();
+                const isStopActive = await this.protectiveSentinel.isProtectiveStopActive();
+                // Query queue for eligible work count
+                const pool = getYugabytePool();
+                const qRes = await pool.query(`SELECT 
+             COUNT(CASE WHEN status IN ('QUEUED', 'RETRY') AND (next_run_at IS NULL OR next_run_at <= NOW()) THEN 1 END) as eligible_cnt,
+             COUNT(CASE WHEN status = 'IMPORTING' THEN 1 END) as importing_cnt
+           FROM importer_queue WHERE task_type = 'IMPORT_CHAPTER'`);
+                const eligibleCount = parseInt(qRes.rows[0]?.eligible_cnt || '0', 10);
+                const importingCount = parseInt(qRes.rows[0]?.importing_cnt || '0', 10);
+                const timeSinceProgressMs = now - this.lastProgressTimestamp;
+                const minutesSinceProgress = Math.floor(timeSinceProgressMs / 60_000);
+                let livenessState = 'HEALTHY_WORKING';
+                if (eligibleCount === 0 && importingCount === 0 && activeJobsCount === 0) {
+                    livenessState = 'HEALTHY_IDLE';
+                }
+                else if (isStopActive || mem.rssMb >= 380) {
+                    livenessState = 'BACKPRESSURED';
+                }
+                else if (eligibleCount > 0 && minutesSinceProgress >= 15 && importingCount === 0) {
+                    livenessState = 'STALLED';
+                }
+                else {
+                    livenessState = 'HEALTHY_WORKING';
+                }
+                if (livenessState === 'STALLED') {
+                    if (minutesSinceProgress >= 30) {
+                        this.logger.error(`🚨 [LIVENESS CRITICAL] Importer STALLED: ${eligibleCount} eligible jobs waiting, but NO progress for ${minutesSinceProgress} minutes! Triggering aggressive auto-recovery...`);
+                    }
+                    else {
+                        this.logger.warn(`⚠️ [LIVENESS WARNING] Importer STALLED: ${eligibleCount} eligible jobs waiting, but NO progress for ${minutesSinceProgress} minutes. Triggering auto-recovery...`);
+                    }
+                    // Auto-recovery actions:
+                    // 1. Recover stale leases
+                    try {
+                        const { recovered } = await this.queue.recoverExpiredLeases();
+                        if (recovered > 0) {
+                            this.logger.info(`[Liveness Auto-Recovery] Requeued ${recovered} stalled jobs back to QUEUED.`);
+                        }
+                    }
+                    catch (e) {
+                        this.logger.warn('Liveness lease recovery failed', { error: e?.message });
+                    }
+                    // 2. Clear old hung jobs in diagnostics (>15m)
+                    const allJobs = diagnostics.getActiveJobs();
+                    for (const j of allJobs) {
+                        if (now - j.startedAt > 15 * 60 * 1000) {
+                            this.logger.warn(`[Liveness Auto-Recovery] Evicting orphaned in-memory job ${j.jobId} running for ${Math.floor((now - j.startedAt) / 1000)}s`);
+                            diagnostics.unregisterJob(j.jobId);
+                        }
+                    }
+                    // 3. Clear protective stop if site is healthy
+                    if (isStopActive) {
+                        await this.protectiveSentinel.evaluateAutoResume();
+                    }
+                    // 4. Re-run admission cycle to admit eligible works
+                    try {
+                        await this.admissionController.runAdmissionCycle();
+                    }
+                    catch (e) {
+                        this.logger.warn('Liveness admission replenishment failed', { error: e?.message });
+                    }
+                    // Reset progress timer window so next check can evaluate recovery
+                    this.lastProgressTimestamp = Date.now();
+                }
+                else {
+                    this.logger.info(`[Liveness Watchdog] State: ${livenessState} | Eligible: ${eligibleCount} | InFlight: ${importingCount} | LastProgress: ${minutesSinceProgress}m ago`);
+                }
+            }
+            catch (err) {
+                this.logger.warn('Error during liveness watchdog cycle', { error: err?.message });
+            }
+            await this.sleep(30_000);
         }
     }
     async checkBlockedSourcesHealth() {
@@ -2894,6 +2986,7 @@ export class ImporterEngine {
                 other_wait_ms: Math.max(0, Math.round(chTotalDuration - (sourceFetchMs + chDownloadMs + chTelegramUploadMs + tDb))),
                 timestamp: new Date().toISOString(),
             });
+            this.lastProgressTimestamp = Date.now();
             if (pubResult.published) {
                 this.logger.info('Successfully imported and published chapter in canonical order', {
                     workId,
