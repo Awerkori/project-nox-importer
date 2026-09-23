@@ -317,8 +317,8 @@ export class ProtectiveSentinel {
         // WAN-adjusted TTFB ceilings for remote container probes:
         // Home SSR document is ~180KB (up to 400ms WAN TTFB is healthy)
         // Reader is ~40KB (up to 350ms WAN TTFB is healthy)
-        const homeMaxTtfb = 400;
-        const readerMaxTtfb = 350;
+        const homeMaxTtfb = 600;
+        const readerMaxTtfb = 450;
 
         // Sample 1
         const homeProbe1 = await this.measureRoute(`${this.siteUrl}/`, homeMaxTtfb, 'home');

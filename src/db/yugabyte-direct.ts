@@ -130,12 +130,15 @@ export function getYugabytePool(): pg.Pool {
     user: cfg.YUGABYTE_USER,
     password: cfg.YUGABYTE_PASSWORD,
     database: cfg.YUGABYTE_DATABASE,
-    max: cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '2', 10),
+    max: cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '6', 10),
     connectionTimeoutMillis: 10000,
     idleTimeoutMillis: 30000,
+    query_timeout: 20000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10000,
     ssl: sslConfig,
     application_name: 'project-nox-importer-direct',
-    options: '-c max_parallel_workers_per_gather=0',
+    options: '-c max_parallel_workers_per_gather=0 -c statement_timeout=15000 -c idle_in_transaction_session_timeout=10000',
   });
 
   pool.on('error', (err) => {
