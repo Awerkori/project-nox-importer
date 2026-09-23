@@ -227,10 +227,13 @@ export class AdmissionController {
                WHERE task_type = 'IMPORT_CHAPTER' AND (payload->>'workId') = $1`, [work.workId]);
                         // B. Count published chapters
                         const pubRes = await client.query(`SELECT COUNT(*) as pub_cnt, COALESCE(MAX(number), -1) as max_pub FROM chapters WHERE work_id = $1::uuid AND published_at IS NOT NULL`, [work.workId]);
-                        // C. Detect STAGED barrier gaps for this work
-                        const stagedRes = await client.query(`SELECT COUNT(*) as staged_cnt, MIN(chapter_sort_key) as min_staged
+                        // C. Detect STAGED barrier gaps and unimported mappings for this work
+                        const stagedRes = await client.query(`SELECT 
+                 COUNT(CASE WHEN status = 'STAGED' THEN 1 END) as staged_cnt,
+                 MIN(CASE WHEN status = 'STAGED' THEN chapter_sort_key END) as min_staged,
+                 COUNT(CASE WHEN status NOT IN ('COMPLETED', 'FAILED') THEN 1 END) as unimported_cnt
                FROM importer_chapter_mappings
-               WHERE work_id = $1::uuid AND status = 'STAGED'`, [work.workId]);
+               WHERE work_id = $1::uuid`, [work.workId]);
                         const qRow = queueRes.rows[0];
                         const queuedCnt = parseInt(qRow?.queued_cnt || '0', 10);
                         const importingCnt = parseInt(qRow?.importing_cnt || '0', 10);
@@ -240,6 +243,7 @@ export class AdmissionController {
                         const maxPub = parseFloat(pubRes.rows[0]?.max_pub ?? '-1');
                         const stagedCnt = parseInt(stagedRes.rows[0]?.staged_cnt || '0', 10);
                         const minStaged = stagedRes.rows[0]?.min_staged ? parseFloat(stagedRes.rows[0].min_staged) : null;
+                        const unimportedCnt = parseInt(stagedRes.rows[0]?.unimported_cnt || '0', 10);
                         work.queuedChapters = queuedCnt;
                         work.inFlightChapters = importingCnt;
                         work.publishedChapters = pubCnt;
@@ -289,10 +293,18 @@ export class AdmissionController {
                             work.state = 'FILLING';
                             this.stateStore.setActiveWork(work);
                         }
-                        // Check if caught up or drained
+                        // Check if caught up or drained (zero queued, zero importing, zero paused, AND zero unimported mappings remaining)
                         if (queuedCnt === 0 && importingCnt === 0 && pausedCnt === 0) {
-                            work.state = pubCnt > 0 ? 'CAUGHT_UP' : 'COMPLETE';
-                            this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${work.state} state. Vacating active slot.`);
+                            if (unimportedCnt > 0) {
+                                // Work still has unimported, staged, or pending chapter mappings — do NOT vacate slot prematurely
+                                work.state = 'FILLING';
+                                work.lastActivityAt = new Date().toISOString();
+                                this.stateStore.setActiveWork(work);
+                                continue;
+                            }
+                            const isCaughtUp = pubCnt > 0;
+                            work.state = isCaughtUp ? 'CAUGHT_UP' : 'COMPLETE';
+                            this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${work.state} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${unimportedCnt} unimported mappings). Vacating active slot.`);
                             this.stateStore.removeActiveWork(work.workId);
                             continue;
                         }

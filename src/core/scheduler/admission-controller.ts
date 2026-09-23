@@ -270,11 +270,14 @@ export class AdmissionController {
               [work.workId]
             );
 
-            // C. Detect STAGED barrier gaps for this work
+            // C. Detect STAGED barrier gaps and unimported mappings for this work
             const stagedRes = await client.query(
-              `SELECT COUNT(*) as staged_cnt, MIN(chapter_sort_key) as min_staged
+              `SELECT 
+                 COUNT(CASE WHEN status = 'STAGED' THEN 1 END) as staged_cnt,
+                 MIN(CASE WHEN status = 'STAGED' THEN chapter_sort_key END) as min_staged,
+                 COUNT(CASE WHEN status NOT IN ('COMPLETED', 'FAILED') THEN 1 END) as unimported_cnt
                FROM importer_chapter_mappings
-               WHERE work_id = $1::uuid AND status = 'STAGED'`,
+               WHERE work_id = $1::uuid`,
               [work.workId]
             );
 
@@ -287,6 +290,7 @@ export class AdmissionController {
             const maxPub = parseFloat(pubRes.rows[0]?.max_pub ?? '-1');
             const stagedCnt = parseInt(stagedRes.rows[0]?.staged_cnt || '0', 10);
             const minStaged = stagedRes.rows[0]?.min_staged ? parseFloat(stagedRes.rows[0].min_staged) : null;
+            const unimportedCnt = parseInt(stagedRes.rows[0]?.unimported_cnt || '0', 10);
 
             work.queuedChapters = queuedCnt;
             work.inFlightChapters = importingCnt;
@@ -346,10 +350,19 @@ export class AdmissionController {
               this.stateStore.setActiveWork(work);
             }
 
-            // Check if caught up or drained
+            // Check if caught up or drained (zero queued, zero importing, zero paused, AND zero unimported mappings remaining)
             if (queuedCnt === 0 && importingCnt === 0 && pausedCnt === 0) {
-              work.state = pubCnt > 0 ? 'CAUGHT_UP' : 'COMPLETE';
-              this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${work.state} state. Vacating active slot.`);
+              if (unimportedCnt > 0) {
+                // Work still has unimported, staged, or pending chapter mappings — do NOT vacate slot prematurely
+                work.state = 'FILLING';
+                work.lastActivityAt = new Date().toISOString();
+                this.stateStore.setActiveWork(work);
+                continue;
+              }
+
+              const isCaughtUp = pubCnt > 0;
+              work.state = isCaughtUp ? 'CAUGHT_UP' : 'COMPLETE';
+              this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${work.state} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${unimportedCnt} unimported mappings). Vacating active slot.`);
               this.stateStore.removeActiveWork(work.workId);
               continue;
             }

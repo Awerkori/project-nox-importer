@@ -8,6 +8,23 @@ import { AdaptiveAutotuner, BufferReservation } from './concurrency.js';
 import { PublicationSafetyBarrier } from './publication-safety-barrier.js';
 import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from './scheduler/index.js';
 export { computeCanonicalChapterKey };
+export type InternalLivenessState = 'HEALTHY_IDLE' | 'HEALTHY_WORKING' | 'BACKPRESSURED' | 'STALLED';
+export type ExternalLivenessState = InternalLivenessState | 'DEAD';
+export declare function computeInternalLivenessState(params: {
+    isStopActive: boolean;
+    rssMb: number;
+    rssTripwireMb?: number;
+    eligibleCount: number;
+    importingCount: number;
+    activeJobsCount: number;
+    minutesSinceProgress: number;
+}): InternalLivenessState;
+export declare function computeExternalLivenessState(params: {
+    lastHeartbeatTimestamp: number;
+    now?: number;
+    heartbeatTimeoutMs?: number;
+    internalState: InternalLivenessState;
+}): ExternalLivenessState;
 export declare class JobCancelledByStaffError extends Error {
     readonly jobId: string;
     constructor(jobId: string, message?: string);
@@ -49,6 +66,7 @@ export declare class ImporterEngine {
     private activeSourcesCache;
     private knownCoveredWorks;
     private lastProgressTimestamp;
+    private lastAutoRecoveryTimestamp;
     static activeBufferedBytes: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
     getAutotuner(): AdaptiveAutotuner;
