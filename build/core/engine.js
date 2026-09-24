@@ -2003,26 +2003,23 @@ export class ImporterEngine {
         });
         if (chaptersToEnqueue.length > 0) {
             let isStaffPriority = Boolean(job.payload?.staffRequested);
-            if (!isStaffPriority) {
-                try {
-                    let reqQuery = this.supabase
-                        .from('importer_staff_requests')
-                        .select('id')
-                        .eq('work_id', result.workId);
-                    if (typeof reqQuery?.in === 'function') {
-                        reqQuery = reqQuery.in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
-                    }
-                    if (typeof reqQuery?.maybeSingle === 'function') {
-                        let { data: staffReq } = await reqQuery.maybeSingle();
-                        if (staffReq)
-                            isStaffPriority = true;
-                    }
-                }
-                catch {
-                    // Safe fallback
+            let staffPriorityBoost = 0;
+            try {
+                let { data: staffReq } = await this.supabase
+                    .from('importer_staff_requests')
+                    .select('id, priority_boost')
+                    .eq('work_id', result.workId)
+                    .eq('status', 'ACTIVE')
+                    .maybeSingle();
+                if (staffReq) {
+                    isStaffPriority = true;
+                    staffPriorityBoost = staffReq.priority_boost || 0;
                 }
             }
-            const chapterPriority = isStaffPriority ? 100 : 30;
+            catch {
+                // Safe fallback
+            }
+            const chapterPriority = isStaffPriority ? 1000 + staffPriorityBoost : 30;
             // 1. Batch pre-register in importer_chapter_mappings in chunks
             const mappingsToUpsert = chaptersToEnqueue.map((ch) => {
                 const chKey = this.computeCanonicalChapterKey(ch.number, ch.title);
@@ -2093,7 +2090,7 @@ export class ImporterEngine {
                 let priority = 50;
                 let isFreshRelease = false;
                 if (isStaffPriority) {
-                    priority = 100;
+                    priority = 1000 + staffPriorityBoost;
                     isFreshRelease = true;
                 }
                 else if (isWorkAlreadyOnSite && watermark && chKey.sortKey > watermark.lastSeenSortKey) {
@@ -2133,6 +2130,8 @@ export class ImporterEngine {
                         chapterTitle: ch.title || '',
                         expectedPageCount: ch.pageCount || null,
                         staffRequested: isStaffPriority,
+                        staffForced: isStaffPriority,
+                        originalPriority: isWorkAlreadyOnSite ? 75 : 50,
                         isFreshRelease,
                     },
                     priority,

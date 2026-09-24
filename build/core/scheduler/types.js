@@ -6,6 +6,7 @@
  */
 export var SchedulerLane;
 (function (SchedulerLane) {
+    SchedulerLane["STAFF_FORCED"] = "STAFF_FORCED";
     SchedulerLane["P0_FRESH_RELEASE"] = "P0_FRESH_RELEASE";
     SchedulerLane["P1_CRITICAL_GAP"] = "P1_CRITICAL_GAP";
     SchedulerLane["P1_BACKFILL"] = "P1_BACKFILL";

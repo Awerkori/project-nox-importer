@@ -175,7 +175,8 @@ export async function testConnection() {
              count(*) FILTER (WHERE state = 'active')::int as active,
              count(*) FILTER (WHERE state = 'idle')::int as idle,
              count(*) FILTER (WHERE state = 'idle in transaction')::int as idle_in_tx
-      FROM pg_stat_activity;
+      FROM pg_stat_activity
+      WHERE datname = current_database();
     `);
         const stats = statRes.rows[0] || {};
         return {
@@ -202,7 +203,8 @@ export async function testRollback() {
         await client.query('ROLLBACK');
         const statRes = await client.query(`
       SELECT count(*) FILTER (WHERE state = 'idle in transaction')::int as idle_in_tx
-      FROM pg_stat_activity;
+      FROM pg_stat_activity
+      WHERE datname = current_database();
     `);
         return {
             rollbackOk: true,
@@ -247,7 +249,14 @@ export async function acquireJobsDirect(options) {
           $1::text IS NOT NULL
           OR q.source IN (SELECT s.id FROM importer_sources s WHERE s.enabled = true AND s.status = 'ACTIVE')
         )
-      ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
+      ORDER BY 
+        CASE 
+          WHEN (q.payload->>'staffForced')::boolean = true OR q.priority >= 1000 THEN 0 
+          ELSE 1 
+        END ASC,
+        q.priority DESC, 
+        q.chapter_sort_key ASC NULLS LAST, 
+        q.next_run_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT $3
     )

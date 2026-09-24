@@ -87,6 +87,13 @@ export declare class WorkAffinityScheduler {
      */
     private claimCatalogP1Job;
     /**
+     * Helper to atomically claim 1 STAFF_FORCED job with SKIP LOCKED.
+     * Priority >= 1000 or payload.staffForced = true or work with active importer_staff_requests.
+     * Strictly prioritizes staff requests by priority_boost DESC, created_at ASC (manual ordering),
+     * then canonical chapter_sort_key ASC.
+     */
+    private claimStaffForcedJob;
+    /**
      * Helper to atomically claim 1 job with SKIP LOCKED.
      * Ensures the source is enabled, active, and not in cooldown.
      */

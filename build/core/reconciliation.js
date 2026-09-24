@@ -26,7 +26,7 @@ export class ExistingWorksReconciler {
     }
     async getSystemLoad() {
         try {
-            const sql = "SELECT (SELECT metrics FROM yb_servers_metrics LIMIT 1) as metrics, (SELECT count(*) FROM pg_stat_activity WHERE state = 'active') as active_conns";
+            const sql = "SELECT (SELECT metrics FROM yb_servers_metrics LIMIT 1) as metrics, (SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND datname = current_database()) as active_conns";
             let rows;
             const gateway = this.supabase?.gateway;
             const client = this.supabase?.client;
@@ -439,15 +439,15 @@ export class ExistingWorksReconciler {
             isWorkPublished = true;
         }
         // 10. Check Staff Priority
-        let isStaffPriority = options?.priority === 100;
+        let isStaffPriority = options?.priority === 1000 || options?.priority === 100;
         if (!isStaffPriority) {
             try {
                 const staffQuery = this.supabase.from('importer_staff_requests');
                 if (staffQuery && typeof staffQuery.select === 'function') {
                     const { data: staffReq } = await staffQuery
-                        .select('id')
+                        .select('id, priority_boost')
                         .eq('work_id', workId)
-                        .in('status', ['QUEUED', 'IMPORTING', 'RETRYING'])
+                        .eq('status', 'ACTIVE')
                         .maybeSingle();
                     if (staffReq)
                         isStaffPriority = true;
@@ -538,20 +538,13 @@ export class ExistingWorksReconciler {
                     mappingId: s.mappingId,
                 }));
                 const isGap = sortKey < highestMilestone;
-                let assignedPriority = 50;
+                const naturalPriority = isWorkPublished ? (isGap ? 70 : 80) : 50;
+                let assignedPriority = naturalPriority;
                 if (options?.priority !== undefined) {
                     assignedPriority = options.priority;
                 }
                 else if (isStaffPriority) {
-                    assignedPriority = 100;
-                }
-                else if (isWorkPublished) {
-                    // P1: Existing published work backfill/internal gaps (70-80)
-                    assignedPriority = isGap ? 70 : 80;
-                }
-                else {
-                    // P2: Unpublished new work (50)
-                    assignedPriority = 50;
+                    assignedPriority = 1000;
                 }
                 let chapterJobStatus = 'QUEUED';
                 if (!isWorkPublished && !isStaffPriority) {
@@ -589,6 +582,7 @@ export class ExistingWorksReconciler {
                         expectedPageCount: candidate.pageCount || null,
                         isGapBackfill: isGap,
                         fallbackSources: fallbacks,
+                        ...(isStaffPriority ? { staffForced: true, originalPriority: naturalPriority } : {}),
                     },
                     priority: assignedPriority,
                     chapterSortKey: candidate.sortKey,
