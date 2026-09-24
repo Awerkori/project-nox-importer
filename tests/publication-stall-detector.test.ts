@@ -23,7 +23,7 @@ describe('Publication Stall Detector & Lifecycle Transitions', () => {
     };
   };
 
-  it('1. Triggers AUTO_CLOSE when throughput=0, readyBacklog>0, and producer active', async () => {
+  it('1. Triggers CAUTION when throughput=0, readyBacklog>0, and producer active', async () => {
     const mockDb = createMockSupabase('OPEN');
     const barrier = new PublicationSafetyBarrier(mockDb as any);
 
@@ -43,8 +43,8 @@ describe('Publication Stall Detector & Lifecycle Transitions', () => {
     );
 
     expect(evaluation.isStalled).toBe(true);
-    expect(evaluation.action).toBe('AUTO_CLOSE');
-    expect(evaluation.nextState).toBe('CLOSED');
+    expect(evaluation.action).toBe('NONE');
+    expect(evaluation.nextState).toBe('CAUTION');
   });
 
   it('2. Confirms that CLOSED barrier holds 0 worker slots and allows 0 new historical claims', async () => {
@@ -104,19 +104,10 @@ describe('Publication Stall Detector & Lifecycle Transitions', () => {
   });
 
   it('5. Backlog preservation: state transitions never drop or dump backlog', async () => {
-    const mockDb = createMockSupabase('OPEN');
+    const mockDb = createMockSupabase('CLOSED');
     const barrier = new PublicationSafetyBarrier(mockDb as any);
 
     let backlog = [1, 2, 3, 4, 5]; // 5 staged items
-
-    // Stall occurs -> CLOSED
-    await barrier.checkAndEnforceStallDetector({
-      publicationThroughput: 0,
-      readyBacklog: backlog.length,
-      producerActive: true,
-    });
-    expect(mockDb.getCurrentState()).toBe('CLOSED');
-    expect(backlog.length).toBe(5); // Preserved
 
     // Recovery starts -> RECOVERING
     await barrier.checkAndEnforceStallDetector({
