@@ -21,6 +21,7 @@ export declare class AdmissionController {
     private isRunning;
     private loopTimer;
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
+    private runQuery;
     /**
      * Starts the periodic admission background loop (every 5 seconds).
      */

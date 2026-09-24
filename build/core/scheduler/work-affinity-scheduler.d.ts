@@ -43,6 +43,7 @@ export declare class WorkAffinityScheduler {
     private lastBackfillPublicationTime;
     private watchdogRunning;
     constructor(stateStore: SchedulerStateStore, admissionController: AdmissionController, protectiveSentinel: ProtectiveSentinel, pool?: any);
+    private runQuery;
     /**
      * Initializes state and synchronizes in-flight counts from DB.
      */
