@@ -25,8 +25,8 @@ const TRANSIENT_ERROR_PATTERNS = [
     /econnreset/i,
     /econnrefused/i,
     /econnaborted/i,
-    /lease expiry/i,
-    /lease expired/i,
+    /lease[_\s-]expir/i,
+    /lease/i,
     /cdn error/i,
     /500/i,
     /502/i,
@@ -118,4 +118,73 @@ export async function validatePermanentGapCandidate(params) {
         alternativeSourcesAvailable: [],
         safeToMarkGap: true,
     };
+}
+/**
+ * The ONLY safe, authorized pathway to mark a permanent gap (is_gap = true) in the database.
+ * Enforces pre-validation via validatePermanentGapCandidate.
+ * If safeToMarkGap !== true, mutation is strictly forbidden and rejected.
+ */
+export async function markPermanentGapSafely(client, params) {
+    // If alternativeSources wasn't explicitly supplied, check the database for actual alternative chapter mappings
+    let alternatives = params.alternativeSources;
+    if (!alternatives && client?.query) {
+        try {
+            const altRes = await client.query(`SELECT m.source,
+                EXISTS (
+                  SELECT 1 FROM importer_chapter_mappings cm
+                  WHERE cm.work_id = m.work_id
+                    AND cm.source = m.source
+                    AND cm.chapter_sort_key = $2
+                    AND cm.status IN ('COMPLETED', 'STAGED', 'IMPORTING', 'PENDING')
+                    AND cm.is_gap = false
+                ) as has_chapter
+         FROM importer_work_mappings m
+         WHERE m.work_id = $1::uuid AND m.source != $3;`, [params.workId, params.chapterSortKey, params.source]);
+            alternatives = altRes.rows.map((r) => ({
+                source: r.source,
+                hasChapter: Boolean(r.has_chapter),
+            }));
+        }
+        catch {
+            alternatives = [];
+        }
+    }
+    const validation = await validatePermanentGapCandidate({
+        ...params,
+        alternativeSources: alternatives || [],
+    });
+    if (!validation.safeToMarkGap) {
+        return {
+            mutated: false,
+            validation,
+            error: `Mutation rejected by GapValidator: ${validation.reason}`,
+        };
+    }
+    // Permitted to mark permanent gap
+    try {
+        await client.query(`UPDATE importer_chapter_mappings
+       SET is_gap = true,
+           status = 'COMPLETED',
+           last_error = $1,
+           updated_at = NOW()
+       WHERE work_id = $2::uuid
+         AND chapter_sort_key = $3
+         AND source = $4;`, [
+            `PERMANENT_GAP_VALIDATED: ${validation.reason}`,
+            params.workId,
+            params.chapterSortKey,
+            params.source,
+        ]);
+        return {
+            mutated: true,
+            validation,
+        };
+    }
+    catch (dbErr) {
+        return {
+            mutated: false,
+            validation,
+            error: `Database update failed: ${dbErr?.message}`,
+        };
+    }
 }
