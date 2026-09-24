@@ -123,13 +123,13 @@ export class AdmissionController {
 
     const client = await this.pool.connect();
     try {
-      // 2. NO_P0_WAITING (P0 is absolute)
+      // 2. NO_P0_WAITING (Real P0 releases: 100 <= priority < 1000; staff-forced >= 1000 belongs to chapter data plane)
       const p0Res = await client.query(`
         SELECT COUNT(*) as p0_cnt
         FROM importer_queue
         WHERE task_type = 'IMPORT_CHAPTER'
           AND status IN ('QUEUED', 'RETRY')
-          AND priority >= 100
+          AND priority >= 100 AND priority < 1000
       `);
       const p0Waiting = parseInt(p0Res.rows[0]?.p0_cnt || '0', 10);
       if (p0Waiting > 0) {
@@ -149,9 +149,19 @@ export class AdmissionController {
       }
 
       // 3. P2_ACTIVE_COHORT_BELOW_LIMIT:
-      // Strictly restrict active P2 cohort to <= config.maxActiveNewWorks (default 4)
+      // Strictly restrict active P2 cohort to <= config.maxActiveNewWorks (default 4).
+      // Filter out stale P2 works that have been in FILLING for >= 30m without progress.
       const activeWorks = this.stateStore.getActiveWorks();
-      const activeP2Works = activeWorks.filter((w) => w.lane === 'P2' && w.state === 'FILLING');
+      const nowMs = Date.now();
+      const activeP2Works = activeWorks.filter((w) => {
+        if (w.lane !== 'P2' || w.state !== 'FILLING') return false;
+        const admittedTime = new Date(w.admittedAt).getTime();
+        const lastActTime = new Date(w.lastActivityAt || w.admittedAt).getTime();
+        if (w.publishedChapters === 0 && (nowMs - admittedTime >= 30 * 60 * 1000) && (nowMs - lastActTime >= 15 * 60 * 1000)) {
+          return false; // Stale cohort work does not block new admissions
+        }
+        return true;
+      });
       const maxP2Cohort = config.maxActiveNewWorks || 4;
 
       if (activeP2Works.length >= maxP2Cohort) {
@@ -317,11 +327,9 @@ export class AdmissionController {
             const expectedFrontier = maxPub >= 0 ? maxPub + 1.5 : 1.5;
             const isGapBlocked = minSortKey !== null && minSortKey > expectedFrontier;
             if (isGapBlocked) {
-              if (work.state !== 'BLOCKED') {
-                this.logger.warn(`Work ${work.workTitle} (${work.workId}) marked BLOCKED due to unresolvable gap. Vacating active slot.`);
-                work.state = 'BLOCKED';
-                this.stateStore.setActiveWork(work);
-              }
+              this.logger.warn(`Work ${work.workTitle} (${work.workId}) marked BLOCKED due to unresolvable gap. Vacating active slot.`);
+              work.state = 'BLOCKED';
+              this.stateStore.removeActiveWork(work.workId);
               continue;
             }
 
@@ -338,11 +346,9 @@ export class AdmissionController {
             );
 
             if (isSourceBlocked) {
-              if (work.state !== 'BLOCKED') {
-                this.logger.info(`Work ${work.workTitle} (${work.workId}) marked BLOCKED (source ${work.primarySource} in cooldown/blocked). Vacating active slot.`);
-                work.state = 'BLOCKED';
-                this.stateStore.setActiveWork(work);
-              }
+              this.logger.info(`Work ${work.workTitle} (${work.workId}) marked BLOCKED (source ${work.primarySource} in cooldown/blocked). Vacating active slot.`);
+              work.state = 'BLOCKED';
+              this.stateStore.removeActiveWork(work.workId);
               continue;
             } else if (work.state === 'BLOCKED') {
               this.logger.info(`Work ${work.workTitle} (${work.workId}) unblocked as source ${work.primarySource} recovered.`);
@@ -350,21 +356,25 @@ export class AdmissionController {
               this.stateStore.setActiveWork(work);
             }
 
-            // Check if caught up or drained (zero queued, zero importing, zero paused, AND zero unimported mappings remaining)
+            // Check if caught up or drained (zero queued, zero importing, zero paused)
             if (queuedCnt === 0 && importingCnt === 0 && pausedCnt === 0) {
-              if (unimportedCnt > 0) {
-                // Work still has unimported, staged, or pending chapter mappings — do NOT vacate slot prematurely
-                work.state = 'FILLING';
-                work.lastActivityAt = new Date().toISOString();
-                this.stateStore.setActiveWork(work);
-                continue;
-              }
-
               const isCaughtUp = pubCnt > 0;
               work.state = isCaughtUp ? 'CAUGHT_UP' : 'COMPLETE';
-              this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${work.state} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${unimportedCnt} unimported mappings). Vacating active slot.`);
+              this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${work.state} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${pubCnt} published). Vacating active slot.`);
               this.stateStore.removeActiveWork(work.workId);
               continue;
+            }
+
+            // Check if P2 new work is stale in cohort (admitted >= 30m ago with 0 in-flight and no progress)
+            if (work.lane === 'P2') {
+              const admittedMs = new Date(work.admittedAt).getTime();
+              const lastActMs = new Date(work.lastActivityAt || work.admittedAt).getTime();
+              const nowMs = Date.now();
+              if (work.publishedChapters === 0 && importingCnt === 0 && (nowMs - admittedMs >= 30 * 60 * 1000) && (nowMs - lastActMs >= 15 * 60 * 1000)) {
+                this.logger.warn(`[ACTIVE_SET_VACATED] Stale P2 work ${work.workTitle} (${work.workId}) vacated from active cohort (>30m with 0 in-flight) to allow new admissions.`);
+                this.stateStore.removeActiveWork(work.workId);
+                continue;
+              }
             }
 
             work.state = 'FILLING';
@@ -391,8 +401,17 @@ export class AdmissionController {
     const activeWorks = this.stateStore.getActiveWorks();
 
     // Only FILLING works consume active logical capacity (BLOCKED works do not)
+    const nowMs = Date.now();
     const activeBackfills = activeWorks.filter((w) => w.lane === 'P1' && w.state === 'FILLING');
-    const activeNewWorks = activeWorks.filter((w) => w.lane === 'P2' && w.state === 'FILLING');
+    const activeNewWorks = activeWorks.filter((w) => {
+      if (w.lane !== 'P2' || w.state !== 'FILLING') return false;
+      const admittedMs = new Date(w.admittedAt).getTime();
+      const lastActMs = new Date(w.lastActivityAt || w.admittedAt).getTime();
+      if (w.publishedChapters === 0 && (nowMs - admittedMs >= 30 * 60 * 1000) && (nowMs - lastActMs >= 15 * 60 * 1000)) {
+        return false;
+      }
+      return true;
+    });
 
     const client = await this.pool.connect();
     try {
@@ -524,8 +543,8 @@ export class AdmissionController {
              AND s.enabled = true
              AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
-           GROUP BY (q.payload->>'workId'), w.title, q.source
-           ORDER BY queued_count DESC, pending_jobs DESC
+           GROUP BY (q.payload->>'workId'), w.title, q.source, w.created_at
+           ORDER BY w.created_at DESC
            LIMIT $2`,
           [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], newWorkSlotsAvailable * 3]
         );
@@ -561,6 +580,41 @@ export class AdmissionController {
           this.stateStore.setActiveWork(newWork);
           sourceCounts.set(cand.source, srcCount + 1);
           admitted++;
+
+          // 1. Transition work mapping from WAITING_ADMISSION to ACTIVE
+          try {
+            await client.query(
+              `UPDATE importer_work_mappings 
+               SET sync_status = 'ACTIVE', updated_at = NOW() 
+               WHERE work_id = $1::uuid AND sync_status = 'WAITING_ADMISSION'`,
+              [newWork.workId]
+            );
+          } catch {}
+
+          // 2. Promote initial sliding window of chapters from PAUSED_BY_STAFF to QUEUED (priority 50)
+          try {
+            const promRes = await client.query(
+              `WITH to_promote AS (
+                 SELECT id FROM importer_queue
+                 WHERE (payload->>'workId') = $1
+                   AND task_type = 'IMPORT_CHAPTER'
+                   AND status = 'PAUSED_BY_STAFF'
+                 ORDER BY chapter_sort_key ASC NULLS LAST
+                 LIMIT 8
+               )
+               UPDATE importer_queue q
+               SET status = 'QUEUED', priority = 50, next_run_at = NOW(), updated_at = NOW()
+               FROM to_promote
+               WHERE q.id = to_promote.id
+               RETURNING q.id`,
+              [newWork.workId]
+            );
+            if (promRes.rows.length > 0) {
+              newWork.queuedChapters = promRes.rows.length;
+              this.stateStore.setActiveWork(newWork);
+            }
+          } catch {}
+
           this.logger.info(`[ADMISSION_TRIGGERED] Admitted work into ACTIVE_NEW_WORKS (P2) via spare capacity`, {
             workId: newWork.workId,
             title: newWork.workTitle,

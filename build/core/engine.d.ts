@@ -67,6 +67,7 @@ export declare class ImporterEngine {
     private knownCoveredWorks;
     private lastProgressTimestamp;
     private lastAutoRecoveryTimestamp;
+    private lastNewWorkAutoRecoveryTimestamp;
     static activeBufferedBytes: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
     getAutotuner(): AdaptiveAutotuner;
@@ -166,10 +167,15 @@ export declare class ImporterEngine {
     private runGeneralWorker;
     private runGeneralSlot;
     /**
-     * Dedicated discovery worker loop to guarantee discovery is NEVER starved by chapter backlog.
-     * Continuously claims DISCOVER_WORKS and SYNC_WORK jobs from the queue.
+     * Dedicated discovery worker loop to guarantee catalog scanning is NEVER starved by chapter backlog.
+     * Continuously claims DISCOVER_WORKS jobs from the queue.
      */
     private runDiscoveryWorker;
+    /**
+     * Dedicated catalog sync worker loop to guarantee work metadata / chapter discovery runs steadily.
+     * Continuously claims SYNC_WORK jobs from the queue.
+     */
+    private runCatalogSyncWorker;
     /**
      * Executes a job with active lease heartbeat and hard timeout watchdog.
      */

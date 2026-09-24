@@ -130,6 +130,7 @@ export class ImporterEngine {
   private knownCoveredWorks = new Set<string>();
   private lastProgressTimestamp: number = Date.now();
   private lastAutoRecoveryTimestamp: number = 0;
+  private lastNewWorkAutoRecoveryTimestamp: number = 0;
 
   // Actual retained image bytes; bounded globally by page permits and per-image size.
   public static activeBufferedBytes = 0;
@@ -246,8 +247,10 @@ export class ImporterEngine {
     // A bounded shared runner pool claims by queue priority. Per-source semaphores
     // still enforce source limits, without hundreds of idle claimers ahead of fresh jobs.
     const activeWorkers: Promise<void>[] = [];
-    // Dedicated discovery worker lane to guarantee DISCOVER_WORKS and SYNC_WORK are NEVER starved by chapters
+    // Dedicated discovery worker lane to guarantee DISCOVER_WORKS is NEVER starved
     activeWorkers.push(this.runDiscoveryWorker());
+    // Dedicated sync worker lane to guarantee SYNC_WORK runs steadily alongside discovery
+    activeWorkers.push(this.runCatalogSyncWorker());
     // General worker to process any unassigned or balancing jobs
     activeWorkers.push(this.runGeneralWorker());
 
@@ -716,10 +719,56 @@ export class ImporterEngine {
           minutesSinceProgress,
         });
 
+        // New Work Pipeline Telemetry & Liveness
+        let lastNewWorkCreatedAt: Date | null = null;
+        let lastNewWorkAdmittedAt: Date | null = null;
+        let waitingAdmissionCount = 0;
+        try {
+          const nwRes = await pool.query(`
+            SELECT 
+              (SELECT MAX(created_at) FROM works) as last_created,
+              (SELECT MAX(updated_at) FROM importer_work_mappings WHERE sync_status = 'ACTIVE') as last_admitted,
+              (SELECT COUNT(*) FROM importer_work_mappings WHERE sync_status = 'WAITING_ADMISSION') as waiting_admission_cnt
+          `);
+          if (nwRes.rows[0]) {
+            lastNewWorkCreatedAt = nwRes.rows[0].last_created ? new Date(nwRes.rows[0].last_created) : null;
+            lastNewWorkAdmittedAt = nwRes.rows[0].last_admitted ? new Date(nwRes.rows[0].last_admitted) : null;
+            waitingAdmissionCount = parseInt(nwRes.rows[0].waiting_admission_cnt || '0', 10);
+          }
+        } catch (nwErr: any) {
+          this.logger.warn('Failed to query new work pipeline metrics', { error: nwErr?.message });
+        }
+
+        const latestNewWorkActivityMs = Math.max(
+          lastNewWorkCreatedAt?.getTime() || 0,
+          lastNewWorkAdmittedAt?.getTime() || 0
+        );
+        const minutesSinceLastNewWork = latestNewWorkActivityMs > 0
+          ? Math.floor((now - latestNewWorkActivityMs) / 60_000)
+          : 999;
+
+        let newWorkPipeline: 'NEW_WORK_PIPELINE_HEALTHY' | 'NEW_WORK_PIPELINE_IDLE' | 'NEW_WORK_PIPELINE_STALLED' | 'NEW_WORK_PIPELINE_BACKPRESSURED' = 'NEW_WORK_PIPELINE_HEALTHY';
+
+        if (isStopActive || mem.rssMb > 450) {
+          newWorkPipeline = 'NEW_WORK_PIPELINE_BACKPRESSURED';
+        } else if (waitingAdmissionCount === 0) {
+          newWorkPipeline = 'NEW_WORK_PIPELINE_IDLE';
+        } else if (minutesSinceLastNewWork >= 30) {
+          newWorkPipeline = 'NEW_WORK_PIPELINE_STALLED';
+        } else {
+          newWorkPipeline = 'NEW_WORK_PIPELINE_HEALTHY';
+        }
+
         // Write atomic heartbeat to database settings table for external watchdog / supervisor monitoring
         try {
           const hbPayload = JSON.stringify({
             state: livenessState,
+            chapterPipeline: livenessState === 'STALLED' ? 'STALLED' : 'WORKING',
+            newWorkPipeline,
+            minutesSinceLastNewWork,
+            waitingAdmissionCount,
+            lastNewWorkCreatedAt: lastNewWorkCreatedAt ? lastNewWorkCreatedAt.toISOString() : null,
+            lastNewWorkAdmittedAt: lastNewWorkAdmittedAt ? lastNewWorkAdmittedAt.toISOString() : null,
             timestamp: new Date().toISOString(),
             pid: process.pid,
             workerId: this.config.WORKER_ID,
@@ -737,6 +786,20 @@ export class ImporterEngine {
           );
         } catch (hbErr: any) {
           this.logger.warn('Failed to record importer_heartbeat to settings', { error: hbErr?.message });
+        }
+
+        // Section 6 Auto-Recovery for New Work Pipeline Stalls
+        if (newWorkPipeline === 'NEW_WORK_PIPELINE_STALLED') {
+          const timeSinceLastNewWorkRecovery = now - this.lastNewWorkAutoRecoveryTimestamp;
+          if (timeSinceLastNewWorkRecovery >= 3 * 60 * 1000) {
+            this.lastNewWorkAutoRecoveryTimestamp = now;
+            this.logger.warn(`⚠️ [NEW_WORK_PIPELINE_STALLED] No new work created or admitted for ${minutesSinceLastNewWork} minutes with ${waitingAdmissionCount} candidates waiting. Triggering auto-recovery...`);
+            try {
+              await this.admissionController.runAdmissionCycle();
+            } catch (admErr: any) {
+              this.logger.warn('New work auto-recovery admission cycle failed', { error: admErr?.message });
+            }
+          }
         }
 
         if (livenessState === 'STALLED') {
@@ -1370,8 +1433,8 @@ export class ImporterEngine {
   }
 
   /**
-   * Dedicated discovery worker loop to guarantee discovery is NEVER starved by chapter backlog.
-   * Continuously claims DISCOVER_WORKS and SYNC_WORK jobs from the queue.
+   * Dedicated discovery worker loop to guarantee catalog scanning is NEVER starved by chapter backlog.
+   * Continuously claims DISCOVER_WORKS jobs from the queue.
    */
   private async runDiscoveryWorker(): Promise<void> {
     this.logger.info('Starting dedicated discovery lane runner');
@@ -1392,7 +1455,7 @@ export class ImporterEngine {
         const job = await this.queue.acquireNextJob(
           Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
           undefined,
-          'DISCOVERY'
+          'DISCOVER_WORKS'
         );
 
         if (!job) {
@@ -1405,6 +1468,47 @@ export class ImporterEngine {
         await this.sleep(100);
       } catch (err: any) {
         this.logger.error('Error in discovery worker lane', { error: err?.message });
+        await this.sleep(5_000);
+      }
+    }
+  }
+
+  /**
+   * Dedicated catalog sync worker loop to guarantee work metadata / chapter discovery runs steadily.
+   * Continuously claims SYNC_WORK jobs from the queue.
+   */
+  private async runCatalogSyncWorker(): Promise<void> {
+    this.logger.info('Starting dedicated catalog sync lane runner');
+
+    while (!this.stopSignal) {
+      try {
+        if (await this.protectiveSentinel.isProtectiveStopActive()) {
+          await this.sleep(3000);
+          continue;
+        }
+
+        const isDiscoveryAllowed = await this.isDiscoveryAllowed();
+        if (!isDiscoveryAllowed) {
+          await this.sleep(5_000);
+          continue;
+        }
+
+        const job = await this.queue.acquireNextJob(
+          Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
+          undefined,
+          'SYNC_WORK'
+        );
+
+        if (!job) {
+          await this.sleep(5_000);
+          continue;
+        }
+
+        this.logger.info(`[Sync Lane] Acquired ${job.task_type} for source ${job.source} (Job: ${job.id})`);
+        await this.executeJobDirectly(job);
+        await this.sleep(100);
+      } catch (err: any) {
+        this.logger.error('Error in catalog sync worker lane', { error: err?.message });
         await this.sleep(5_000);
       }
     }
