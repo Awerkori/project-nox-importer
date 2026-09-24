@@ -44,7 +44,7 @@ const ConfigSchema = z.object({
   // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
   BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
-  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(10).default(6),
+  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(10).default(4),
   UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.coerce.number().int().default(4194304),
   TELEGRAM_MEDIA_CONCURRENCY: z.coerce.number().int().default(12),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
