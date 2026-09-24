@@ -429,12 +429,20 @@ export class AdmissionController {
          ORDER BY queued_count DESC, pending_jobs DESC
          LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], Math.max(50, backfillSlotsAvailable * 5)]);
             let admitted = 0;
-            for (const cand of candidatesRes.rows) {
+            // Prioritize candidate works from sources with fewest active works to maximize diversity
+            const sortedCandidates = [...candidatesRes.rows].sort((a, b) => {
+                const countA = sourceCounts.get(a.source) || 0;
+                const countB = sourceCounts.get(b.source) || 0;
+                if (countA !== countB)
+                    return countA - countB;
+                return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
+            });
+            for (const cand of sortedCandidates) {
                 if (admitted >= backfillSlotsAvailable)
                     break;
                 const srcCount = sourceCounts.get(cand.source) || 0;
                 const maxWorksPerSource = idleWorkers >= 2 ? 4 : 3;
-                const otherSourceCandidates = candidatesRes.rows.filter((r) => (sourceCounts.get(r.source) || 0) < maxWorksPerSource);
+                const otherSourceCandidates = sortedCandidates.filter((r) => (sourceCounts.get(r.source) || 0) < maxWorksPerSource);
                 if (srcCount >= maxWorksPerSource && otherSourceCandidates.length > 0) {
                     continue;
                 }
@@ -494,12 +502,19 @@ export class AdmissionController {
          ORDER BY w.created_at DESC
          LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], newWorkSlotsAvailable * 3]);
             let admitted = 0;
-            for (const cand of candidatesRes.rows) {
+            const sortedP2Candidates = [...candidatesRes.rows].sort((a, b) => {
+                const countA = sourceCounts.get(a.source) || 0;
+                const countB = sourceCounts.get(b.source) || 0;
+                if (countA !== countB)
+                    return countA - countB;
+                return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
+            });
+            for (const cand of sortedP2Candidates) {
                 if (admitted >= newWorkSlotsAvailable)
                     break;
                 const srcCount = sourceCounts.get(cand.source) || 0;
                 const maxWorksPerSource = idleWorkers >= 2 ? 4 : 3;
-                const otherSourceCandidates = candidatesRes.rows.filter((r) => (sourceCounts.get(r.source) || 0) < maxWorksPerSource);
+                const otherSourceCandidates = sortedP2Candidates.filter((r) => (sourceCounts.get(r.source) || 0) < maxWorksPerSource);
                 if (srcCount >= maxWorksPerSource && otherSourceCandidates.length > 0) {
                     continue;
                 }
@@ -669,7 +684,10 @@ export class AdmissionController {
           AND ($3::text[] IS NULL OR NOT (q.source = ANY($3::text[])))
         GROUP BY (q.payload->>'workId'), w.title, q.source, p.max_published
         HAVING ${isP1 ? '(MIN(q.chapter_sort_key) <= COALESCE(p.max_published, -1) + 1.5 OR p.max_published IS NULL)' : '(MIN(q.chapter_sort_key) <= 1.5)'}
-        ORDER BY queued_count DESC, pending_jobs DESC
+        ORDER BY 
+          CASE WHEN $1::text[] IS NOT NULL THEN array_position($1::text[], q.source) ELSE 1 END ASC NULLS LAST,
+          queued_count DESC, 
+          pending_jobs DESC
         LIMIT 1;
       `;
             const res = await this.runQuery(query, [
