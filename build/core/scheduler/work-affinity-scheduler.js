@@ -883,13 +883,12 @@ export class WorkAffinityScheduler {
             COUNT(CASE WHEN q.status = 'QUEUED' AND s.enabled = true AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()))) THEN 1 END) as claimable_now,
             COUNT(CASE WHEN q.status = 'RETRY' AND q.next_run_at <= NOW() AND s.enabled = true AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()))) THEN 1 END) as retry_due,
             COUNT(CASE WHEN q.status = 'IMPORTING' THEN 1 END) as importing_cnt,
-            COUNT(CASE WHEN q.status = 'PAUSED_BY_STAFF' THEN 1 END) as paused_by_staff_cnt,
-            COUNT(DISTINCT CASE WHEN q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF') AND s.enabled = true AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()))) THEN (q.payload->>'workId') END) as valid_waiting_works,
-            COUNT(CASE WHEN q.status IN ('QUEUED', 'RETRY') AND (q.payload->>'workId') = ANY($1::text[]) THEN 1 END) as active_work_pending,
-            COUNT(DISTINCT CASE WHEN q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF') AND s.enabled = true AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()))) AND NOT ((q.payload->>'workId') = ANY($1::text[])) THEN (q.payload->>'workId') END) as admission_candidates
+            COUNT(DISTINCT CASE WHEN s.enabled = true AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW()))) THEN (q.payload->>'workId') END) as valid_waiting_works,
+            COUNT(CASE WHEN (q.payload->>'workId') = ANY($1::text[]) THEN 1 END) as active_work_pending
           FROM importer_queue q
           LEFT JOIN importer_sources s ON s.id = q.source
-          WHERE q.task_type = 'IMPORT_CHAPTER';
+          WHERE q.task_type = 'IMPORT_CHAPTER'
+            AND q.status IN ('QUEUED', 'RETRY', 'IMPORTING');
         `, [activeWorkIds.length > 0 ? activeWorkIds : ['00000000-0000-0000-0000-000000000000']]);
                 const stagedRes = await this.runQuery(this.pool, `SELECT COUNT(*) as staged_cnt FROM importer_chapter_mappings WHERE status = 'STAGED'`);
                 const row = statsRes.rows[0];
@@ -898,14 +897,13 @@ export class WorkAffinityScheduler {
                 const importingCnt = parseInt(row?.importing_cnt || '0', 10);
                 const validWaitingWorks = parseInt(row?.valid_waiting_works || '0', 10);
                 const activeWorkPending = parseInt(row?.active_work_pending || '0', 10);
-                const admissionCandidates = parseInt(row?.admission_candidates || '0', 10);
                 const stagedCnt = parseInt(stagedRes.rows[0]?.staged_cnt || '0', 10);
-                const hasSafeWork = claimableNow > 0 || retryDue > 0 || validWaitingWorks > 0 || activeWorkPending > 0 || admissionCandidates > 0 || stagedCnt > 0;
+                const hasSafeWork = claimableNow > 0 || retryDue > 0 || validWaitingWorks > 0 || activeWorkPending > 0 || stagedCnt > 0;
                 if (hasSafeWork) {
                     const elapsedPubMs = Date.now() - this.lastAnyPublicationTime;
                     if (elapsedPubMs >= 10 * 60 * 1000) {
                         this.logger.error(`🚨 [PUBLICATION_WATCHDOG] Pipeline stalled: 0 publications for ${(elapsedPubMs / 60000).toFixed(1)}m while safe backlog exists. ` +
-                            `[claimable=${claimableNow}, retry_due=${retryDue}, importing=${importingCnt}, waiting_works=${validWaitingWorks}, active_pending=${activeWorkPending}, candidates=${admissionCandidates}, staged=${stagedCnt}]. Triggering AUTO-RECOVERY TREE!`);
+                            `[claimable=${claimableNow}, retry_due=${retryDue}, importing=${importingCnt}, waiting_works=${validWaitingWorks}, active_pending=${activeWorkPending}, staged=${stagedCnt}]. Triggering AUTO-RECOVERY TREE!`);
                         // Auto-Recovery Action 1: Force admission cycle to unblock works and promote sliding window
                         await this.admissionController.runAdmissionCycle();
                         // Auto-Recovery Action 2: Recover stale leases
@@ -929,14 +927,14 @@ export class WorkAffinityScheduler {
                     }
                     else if (elapsedPubMs >= 5 * 60 * 1000) {
                         this.logger.warn(`⚠️ [PUBLICATION_WATCHDOG] Warning: 0 publications for ${(elapsedPubMs / 60000).toFixed(1)}m. ` +
-                            `[claimable=${claimableNow}, retry_due=${retryDue}, importing=${importingCnt}, waiting_works=${validWaitingWorks}, active_pending=${activeWorkPending}, candidates=${admissionCandidates}, staged=${stagedCnt}]. Observing...`);
+                            `[claimable=${claimableNow}, retry_due=${retryDue}, importing=${importingCnt}, waiting_works=${validWaitingWorks}, active_pending=${activeWorkPending}, staged=${stagedCnt}]. Observing...`);
                     }
                 }
             }
             catch (err) {
                 this.logger.warn('Error in Publication Watchdog loop', { error: err?.message });
             }
-        }, 30000);
+        }, 60000);
     }
     /**
      * Shadow Mode simulation: calculates what the intelligent scheduler would choose,
