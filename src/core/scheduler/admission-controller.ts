@@ -156,8 +156,7 @@ export class AdmissionController {
       const activeP2Works = activeWorks.filter((w) => {
         if (w.lane !== 'P2' || w.state !== 'FILLING') return false;
         const admittedTime = new Date(w.admittedAt).getTime();
-        const lastActTime = new Date(w.lastActivityAt || w.admittedAt).getTime();
-        if (w.publishedChapters === 0 && (nowMs - admittedTime >= 30 * 60 * 1000) && (nowMs - lastActTime >= 15 * 60 * 1000)) {
+        if (w.publishedChapters === 0 && (nowMs - admittedTime >= 30 * 60 * 1000)) {
           return false; // Stale cohort work does not block new admissions
         }
         return true;
@@ -368,9 +367,8 @@ export class AdmissionController {
             // Check if P2 new work is stale in cohort (admitted >= 30m ago with 0 in-flight and no progress)
             if (work.lane === 'P2') {
               const admittedMs = new Date(work.admittedAt).getTime();
-              const lastActMs = new Date(work.lastActivityAt || work.admittedAt).getTime();
               const nowMs = Date.now();
-              if (work.publishedChapters === 0 && importingCnt === 0 && (nowMs - admittedMs >= 30 * 60 * 1000) && (nowMs - lastActMs >= 15 * 60 * 1000)) {
+              if (work.publishedChapters === 0 && importingCnt === 0 && (nowMs - admittedMs >= 30 * 60 * 1000)) {
                 this.logger.warn(`[ACTIVE_SET_VACATED] Stale P2 work ${work.workTitle} (${work.workId}) vacated from active cohort (>30m with 0 in-flight) to allow new admissions.`);
                 this.stateStore.removeActiveWork(work.workId);
                 continue;
@@ -378,7 +376,9 @@ export class AdmissionController {
             }
 
             work.state = 'FILLING';
-            work.lastActivityAt = new Date().toISOString();
+            if (importingCnt > 0) {
+              work.lastActivityAt = new Date().toISOString();
+            }
             this.stateStore.setActiveWork(work);
           } catch (workErr: any) {
             this.logger.warn(`Failed to reconcile active work ${work.workId}`, { error: workErr?.message });
@@ -406,8 +406,7 @@ export class AdmissionController {
     const activeNewWorks = activeWorks.filter((w) => {
       if (w.lane !== 'P2' || w.state !== 'FILLING') return false;
       const admittedMs = new Date(w.admittedAt).getTime();
-      const lastActMs = new Date(w.lastActivityAt || w.admittedAt).getTime();
-      if (w.publishedChapters === 0 && (nowMs - admittedMs >= 30 * 60 * 1000) && (nowMs - lastActMs >= 15 * 60 * 1000)) {
+      if (w.publishedChapters === 0 && (nowMs - admittedMs >= 30 * 60 * 1000)) {
         return false;
       }
       return true;
