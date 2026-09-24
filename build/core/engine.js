@@ -1370,11 +1370,11 @@ export class ImporterEngine {
         const heartbeat = this.queue.startHeartbeat(job.id, this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS, () => {
             cancelSignalTriggered = true;
         });
-        // Dynamic safety timeout: scales with page count if available, with a minimum of 6 minutes and maximum of 15 minutes
+        // Dynamic safety timeout: scales with page count if available, with a minimum of 2.5 minutes and maximum of 4 minutes
         const pageCountHint = typeof job.payload?.pageCount === 'number' ? job.payload.pageCount : (job.progress_total || 40);
         const maxJobDurationMs = job.task_type === 'IMPORT_CHAPTER'
-            ? Math.min(15 * 60 * 1000, Math.max(6 * 60 * 1000, pageCountHint * 8 * 1000))
-            : 5 * 60 * 1000;
+            ? Math.min(4 * 60 * 1000, Math.max(150 * 1000, pageCountHint * 4 * 1000))
+            : 3 * 60 * 1000;
         let jobTimeoutTimer = null;
         const timeoutPromise = new Promise((_, reject) => {
             jobTimeoutTimer = setTimeout(() => {
