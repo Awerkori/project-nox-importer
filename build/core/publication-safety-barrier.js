@@ -7,8 +7,7 @@ export class PublicationSafetyBarrier {
     cacheTtlMs = 5000; // 5 second cache
     constructor(supabase) {
         this.supabase = supabase;
-        const isTest = typeof process !== 'undefined' && (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST));
-        this.cachedState = isTest ? 'OPEN' : 'CLOSED';
+        this.cachedState = 'OPEN';
     }
     /**
      * Returns current safety barrier state from database with short caching.
@@ -30,35 +29,25 @@ export class PublicationSafetyBarrier {
                     this.cachedState = val;
                 }
                 else {
-                    this.cachedState = 'CLOSED';
+                    this.cachedState = 'OPEN';
                 }
             }
             else if (!data) {
-                const isTest = typeof process !== 'undefined' && (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST));
-                if (isTest) {
-                    this.cachedState = 'OPEN';
-                }
-                else {
-                    // If row doesn't exist yet, insert CLOSED for emergency safety
-                    await this.supabase.from('settings').upsert({
-                        key: 'publication_safety_barrier',
-                        value: 'CLOSED',
-                    });
-                    this.cachedState = 'CLOSED';
-                }
+                await this.supabase.from('settings').upsert({
+                    key: 'publication_safety_barrier',
+                    value: 'OPEN',
+                });
+                this.cachedState = 'OPEN';
             }
             this.lastFetchMs = now;
         }
         catch (err) {
-            const isTest = typeof process !== 'undefined' && (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST));
-            if (isTest) {
+            this.logger.warn('Failed to read publication_safety_barrier setting, retaining current cached state', {
+                error: err?.message,
+                currentState: this.cachedState,
+            });
+            if (!this.cachedState) {
                 this.cachedState = 'OPEN';
-            }
-            else {
-                this.logger.warn('Failed to read publication_safety_barrier setting, defaulting to safe CLOSED', {
-                    error: err?.message,
-                });
-                this.cachedState = 'CLOSED';
             }
         }
         return this.cachedState;
@@ -77,11 +66,11 @@ export class PublicationSafetyBarrier {
     }
     /**
      * Checks whether worker slots should acquire IMPORT_CHAPTER jobs.
-     * If CLOSED or RECOVERING, returns false so 0 worker slots and 0 semaphores are held.
+     * Allows OPEN, CAUTION, and RECOVERING so workers can fill gaps and drain backlog.
      */
     async canAcquireChapters() {
         const st = await this.getState();
-        return st === 'OPEN' || st === 'CAUTION';
+        return st === 'OPEN' || st === 'CAUTION' || st === 'RECOVERING';
     }
     async canProcessChapter(workId, sortKey) {
         if (await this.canAcquireChapters())
@@ -111,7 +100,7 @@ export class PublicationSafetyBarrier {
      */
     evaluatePublicationStall(metrics, currentState) {
         const { publicationThroughput, readyBacklog, producerActive } = metrics;
-        // Condition 1: Detect publication stall while producer continues
+        // Condition 1: Detect publication stall while producer continues (only on sustained 15m stall)
         if ((currentState === 'OPEN' || currentState === 'CAUTION') && publicationThroughput === 0 && readyBacklog > 0 && producerActive) {
             return {
                 isStalled: true,
@@ -119,13 +108,13 @@ export class PublicationSafetyBarrier {
                 readyBacklog,
                 producerActive,
                 currentState,
-                nextState: 'CLOSED',
-                action: 'AUTO_CLOSE',
-                reason: `PUBLICATION_STALL: Throughput=0 with readyBacklog=${readyBacklog} while producer is active. Auto-closing barrier to prevent buffer bloat.`,
+                nextState: 'CAUTION',
+                action: 'NONE',
+                reason: `PUBLICATION_STALL: Throughput=0 with readyBacklog=${readyBacklog} while producer is active. Holding in CAUTION to allow gap resolution.`,
             };
         }
-        // Condition 2: Publisher restored while in CLOSED state -> transition to RECOVERING
-        if (currentState === 'CLOSED' && (publicationThroughput > 0 || readyBacklog > 0)) {
+        // Condition 2: Publisher active or recovering while in CLOSED state -> transition to RECOVERING
+        if (currentState === 'CLOSED') {
             return {
                 isStalled: false,
                 publicationThroughput,
@@ -134,11 +123,11 @@ export class PublicationSafetyBarrier {
                 currentState,
                 nextState: 'RECOVERING',
                 action: 'AUTO_RECOVER',
-                reason: `PUBLICATION_RECOVERY_STARTED: Publisher active (throughput=${publicationThroughput}), beginning controlled recovery drain.`,
+                reason: `PUBLICATION_RECOVERY_STARTED: Transitioning to RECOVERING to allow workers to fill gaps and drain backlog.`,
             };
         }
-        // Condition 3: Recovery complete -> transition to OPEN
-        if (currentState === 'RECOVERING' && (readyBacklog === 0 || publicationThroughput > 0)) {
+        // Condition 3: Recovery active -> transition to OPEN
+        if (currentState === 'RECOVERING') {
             return {
                 isStalled: false,
                 publicationThroughput,
@@ -147,7 +136,7 @@ export class PublicationSafetyBarrier {
                 currentState,
                 nextState: 'OPEN',
                 action: 'AUTO_OPEN',
-                reason: `PUBLICATION_RECOVERED: Backlog normalized (readyBacklog=${readyBacklog}), reopening barrier for normal operation.`,
+                reason: `PUBLICATION_RECOVERED: Reopening barrier for normal operation.`,
             };
         }
         return {
@@ -171,12 +160,12 @@ export class PublicationSafetyBarrier {
             metrics = injectedMetrics;
         }
         else {
-            // 1. Throughput: chapters published in last 2 minutes
-            const twoMinutesAgo = new Date(Date.now() - 120_000).toISOString();
+            // 1. Throughput: chapters published in last 15 minutes
+            const fifteenMinutesAgo = new Date(Date.now() - 900_000).toISOString();
             const { count: pubCount } = await this.supabase
                 .from('chapters')
                 .select('id', { count: 'exact', head: true })
-                .gt('published_at', twoMinutesAgo);
+                .gt('published_at', fifteenMinutesAgo);
             // 2. Ready backlog: chapters in STAGED status awaiting publication
             const { count: stagedCount } = await this.supabase
                 .from('importer_chapter_mappings')

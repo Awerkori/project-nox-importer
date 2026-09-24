@@ -308,6 +308,13 @@ export class PublicationBarrier {
             const check = await this.checkBarrier(workId, candidate.chapter_sort_key);
             if (!check.canPublish) {
                 // Next chapter still has unfulfilled dependencies
+                if (check.reason.includes('GAP') || check.reason.includes('WAITING') || check.blockingCount > 0) {
+                    await this.supabase
+                        .from('importer_chapter_mappings')
+                        .update({ status: 'WAITING_FOR_GAP', updated_at: new Date().toISOString() })
+                        .eq('chapter_id', candidate.chapter_id)
+                        .eq('status', 'STAGED');
+                }
                 break;
             }
             cascadeCount++;
@@ -388,13 +395,35 @@ export class PublicationBarrier {
             let distinctWorkIds = [];
             try {
                 const pool = getYugabytePool();
+                // Priority 1: Works with STAGED/WAITING_FOR_GAP chapters that are immediately publishable
                 const res = await pool.query(`
-          SELECT DISTINCT work_id
-          FROM importer_chapter_mappings
-          WHERE status = 'STAGED' AND work_id IS NOT NULL
+          WITH staged_works AS (
+            SELECT work_id, MIN(chapter_sort_key) as min_staged
+            FROM importer_chapter_mappings
+            WHERE status IN ('STAGED', 'WAITING_FOR_GAP') AND work_id IS NOT NULL
+            GROUP BY work_id
+          )
+          SELECT sw.work_id
+          FROM staged_works sw
+          WHERE sw.min_staged <= COALESCE((
+            SELECT MAX(number) FROM chapters c WHERE c.work_id = sw.work_id AND c.published_at IS NOT NULL
+          ), -1) + 1.05
+          OR NOT EXISTS (
+            SELECT 1 FROM chapters c WHERE c.work_id = sw.work_id AND c.published_at IS NOT NULL
+          )
           LIMIT 40;
         `);
                 distinctWorkIds = res.rows.map((r) => r.work_id);
+                // Fallback: If no directly publishable works found via fast filter, check newly STAGED works
+                if (distinctWorkIds.length === 0) {
+                    const fallbackRes = await pool.query(`
+            SELECT DISTINCT work_id
+            FROM importer_chapter_mappings
+            WHERE status = 'STAGED' AND work_id IS NOT NULL
+            LIMIT 40;
+          `);
+                    distinctWorkIds = fallbackRes.rows.map((r) => r.work_id);
+                }
             }
             catch (poolErr) {
                 const { data: stagedWorks, error } = await this.supabase
