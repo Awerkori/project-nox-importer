@@ -73,6 +73,49 @@ export function computeCanonicalChapterKey(chapterNumber: number | string, chapt
   };
 }
 
+export interface EditorialValidationResult {
+  valid: boolean;
+  reason?: string;
+}
+
+export function validateEditorialTitle(rawTitle: string): EditorialValidationResult {
+  if (!rawTitle || typeof rawTitle !== 'string') {
+    return { valid: false, reason: 'Title is empty or not a string' };
+  }
+
+  const clean = decodeHtmlEntities(rawTitle).trim();
+  if (clean.length < 2) {
+    return { valid: false, reason: `Title is too short (${clean.length} chars)` };
+  }
+  if (clean.length > 250) {
+    return { valid: false, reason: `Title exceeds maximum length (${clean.length} chars)` };
+  }
+
+  const lower = clean.toLowerCase();
+
+  // Authentication & session prompts
+  if (/^(entrar(\s+na\s+conta)?|login|log\s*in|sign\s*in|fazer\s+login|cadastre-se|minha\s+conta|criar\s+conta|autentica[çc][ãa]o)$/i.test(lower)) {
+    return { valid: false, reason: 'Title is an authentication or login prompt' };
+  }
+
+  // Cloudflare and bot challenge indicators
+  if (/cloudflare|just a moment|attention required|checking your browser|ray id|turnstile|verify you are human|bot detection|ddos-guard/i.test(lower)) {
+    return { valid: false, reason: 'Title contains Cloudflare or bot protection text' };
+  }
+
+  // HTTP status codes or generic server errors
+  if (/^(40[0-9]|50[0-9])(\s+.*)?$/i.test(lower) || /^(erro\s*(40[0-9]|50[0-9])?|not found|forbidden|access denied|bad gateway|internal server error|page not found|p[aá]gina n[aã]o encontrada)$/i.test(lower)) {
+    return { valid: false, reason: 'Title is an HTTP error status code or server error message' };
+  }
+
+  // Generic placeholder / dummy titles
+  if (/^(untitled|sem t[ií]tulo|unknown title|undefined|null|nan)$/i.test(lower)) {
+    return { valid: false, reason: 'Title is a placeholder or undefined value' };
+  }
+
+  return { valid: true };
+}
+
 export class DeduplicationEngine {
   private logger = new Logger('Deduplication');
 
@@ -84,6 +127,24 @@ export class DeduplicationEngine {
    */
   async resolveWork(candidate: CandidateWork): Promise<DeduplicationResult> {
     const { source, sourceWorkId, title, slug } = candidate;
+
+    // Validate title against non-editorial garbage (Cloudflare, login walls, HTTP errors)
+    const titleVal = validateEditorialTitle(title);
+    if (!titleVal.valid) {
+      this.logger.warn('Rejected candidate work due to non-editorial title', {
+        source,
+        sourceWorkId,
+        title,
+        reason: titleVal.reason,
+      });
+      return {
+        workId: null,
+        mappingId: '',
+        status: 'FAILED',
+        slug: this.sanitizeSlug(slug || title || 'invalid-title'),
+        reason: `INVALID_EDITORIAL_TITLE: ${titleVal.reason}`,
+      };
+    }
 
     // 1. Check existing mapping for this exact source + source_work_id
     const { data: existingMapping, error: mapErr } = await this.supabase

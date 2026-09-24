@@ -467,17 +467,33 @@ export class PublicationBarrier {
    */
   async sweepStagedPublications(maxTotalPublications: number = 40, perWorkBurst: number = 6): Promise<number> {
     try {
-      const { data: stagedWorks, error } = await this.supabase
-        .from('importer_chapter_mappings')
-        .select('work_id')
-        .eq('status', 'STAGED')
-        .not('work_id', 'is', null);
+      let distinctWorkIds: string[] = [];
+      try {
+        const pool = getYugabytePool();
+        const res = await pool.query<{ work_id: string }>(`
+          SELECT DISTINCT work_id
+          FROM importer_chapter_mappings
+          WHERE status = 'STAGED' AND work_id IS NOT NULL
+          LIMIT 40;
+        `);
+        distinctWorkIds = res.rows.map((r) => r.work_id);
+      } catch (poolErr) {
+        const { data: stagedWorks, error } = await this.supabase
+          .from('importer_chapter_mappings')
+          .select('work_id')
+          .eq('status', 'STAGED')
+          .not('work_id', 'is', null)
+          .limit(200);
 
-      if (error || !stagedWorks || stagedWorks.length === 0) {
-        return 0;
+        if (error || !stagedWorks || stagedWorks.length === 0) {
+          return 0;
+        }
+        distinctWorkIds = Array.from(new Set(stagedWorks.map((r) => r.work_id)));
       }
 
-      const distinctWorkIds = Array.from(new Set(stagedWorks.map((r) => r.work_id)));
+      if (distinctWorkIds.length === 0) {
+        return 0;
+      }
       let publishedTotal = 0;
       let activeWorkIds = [...distinctWorkIds];
 
