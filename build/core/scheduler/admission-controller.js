@@ -240,6 +240,7 @@ export class AdmissionController {
                COUNT(CASE WHEN status = 'QUEUED' THEN 1 END) as queued_cnt,
                COUNT(CASE WHEN status = 'IMPORTING' THEN 1 END) as importing_cnt,
                COUNT(CASE WHEN status = 'PAUSED_BY_STAFF' THEN 1 END) as paused_cnt,
+               MIN(CASE WHEN status = 'QUEUED' THEN chapter_sort_key END) as min_queued,
                MIN(CASE WHEN status IN ('QUEUED', 'PAUSED_BY_STAFF') THEN chapter_sort_key END) as min_sort_key
              FROM importer_queue
              WHERE task_type = 'IMPORT_CHAPTER' AND (payload->>'workId') = $1`, [work.workId]);
@@ -257,6 +258,7 @@ export class AdmissionController {
                     const importingCnt = parseInt(qRow?.importing_cnt || '0', 10);
                     const pausedCnt = parseInt(qRow?.paused_cnt || '0', 10);
                     const minSortKey = qRow?.min_sort_key ? parseFloat(qRow.min_sort_key) : null;
+                    const minQueued = qRow?.min_queued ? parseFloat(qRow.min_queued) : minSortKey;
                     const pubCnt = parseInt(pubRes.rows[0]?.pub_cnt || '0', 10);
                     const rawMaxPub = pubRes.rows[0]?.max_pub;
                     const maxPub = rawMaxPub !== undefined && rawMaxPub !== null ? parseFloat(rawMaxPub) : (pubCnt > 0 ? pubCnt : -1);
@@ -267,24 +269,25 @@ export class AdmissionController {
                     work.inFlightChapters = importingCnt;
                     work.publishedChapters = pubCnt;
                     work.totalChapters = pubCnt + queuedCnt + importingCnt + pausedCnt;
-                    work.frontierSortKey = minSortKey;
+                    work.frontierSortKey = queuedCnt > 0 && minQueued !== null ? minQueued : minSortKey;
                     // Promote P2 work to P1 if it has published chapters
                     if (pubCnt > 0 && work.lane === 'P2') {
                         this.logger.info(`Work ${work.workTitle} (${work.workId}) promoted from P2 to P1 (${pubCnt} published chapters).`);
                         work.lane = 'P1';
                     }
-                    // Critical gap detection
-                    if (stagedCnt > 0 && minSortKey !== null && minStaged !== null && minSortKey < minStaged) {
-                        work.criticalGapSortKey = minSortKey;
+                    // Critical gap detection: only an actually queued job can unblock the barrier
+                    if (stagedCnt > 0 && minQueued !== null && minStaged !== null && minQueued < minStaged) {
+                        work.criticalGapSortKey = minQueued;
                         work.criticalGapUnblockCount = stagedCnt;
                     }
                     else {
                         work.criticalGapSortKey = null;
                         work.criticalGapUnblockCount = 0;
                     }
-                    // Gap blocking check
+                    // Gap blocking check: for works with queued chapters, check if the queued frontier is ahead of expected frontier
+                    const effectiveFrontier = queuedCnt > 0 && minQueued !== null ? minQueued : minSortKey;
                     const expectedFrontier = maxPub >= 0 ? maxPub + 1.5 : 1.5;
-                    const isGapBlocked = minSortKey !== null && minSortKey > expectedFrontier;
+                    const isGapBlocked = effectiveFrontier !== null && effectiveFrontier > expectedFrontier;
                     if (isGapBlocked) {
                         this.logger.warn(`Work ${work.workTitle} (${work.workId}) marked BLOCKED due to unresolvable gap. Vacating active slot.`);
                         work.state = 'BLOCKED';
