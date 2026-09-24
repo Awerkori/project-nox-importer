@@ -36,6 +36,26 @@ export class ImporterQueue {
                         (existing.status === 'FAILED' ||
                             existing.status === 'CANCELLED' ||
                             (existing.status === 'RETRY' && existing.source !== source))) {
+                        let revPrio = Math.max(existing.priority || 10, priority);
+                        const wId = payload?.workId;
+                        if (wId) {
+                            try {
+                                const { data: staffReq } = await this.supabase
+                                    .from('importer_staff_requests')
+                                    .select('id')
+                                    .eq('work_id', wId)
+                                    .eq('status', 'ACTIVE')
+                                    .maybeSingle();
+                                if (staffReq) {
+                                    if (revPrio < 1000 && payload.originalPriority === undefined) {
+                                        payload.originalPriority = revPrio;
+                                    }
+                                    revPrio = 1000;
+                                    payload.staffForced = true;
+                                }
+                            }
+                            catch { }
+                        }
                         const updateData = {
                             source,
                             status: 'QUEUED',
@@ -44,7 +64,7 @@ export class ImporterQueue {
                             locked_by: null,
                             locked_at: null,
                             lease_expires_at: null,
-                            priority: Math.max(existing.priority || 10, priority),
+                            priority: revPrio,
                             payload,
                             next_run_at: new Date().toISOString(),
                             updated_at: new Date().toISOString(),

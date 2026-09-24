@@ -5,6 +5,7 @@
  * persistent watermarks, admission configuration, and explainability telemetry.
  */
 export declare enum SchedulerLane {
+    STAFF_FORCED = "STAFF_FORCED",// Priority >= 1000 / staffForced: true: Absolute Staff Priority
     P0_FRESH_RELEASE = "P0_FRESH_RELEASE",// Priority >= 100: Fresh release of tracked/existing work
     P1_CRITICAL_GAP = "P1_CRITICAL_GAP",// Priority 90-95: Missing chapter unblocking STAGED barrier cascade
     P1_BACKFILL = "P1_BACKFILL",// Priority 70-80: Existing work backfill/internal gaps

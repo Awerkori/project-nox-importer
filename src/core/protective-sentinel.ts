@@ -301,6 +301,7 @@ export class ProtectiveSentinel {
           SELECT count(*) as total,
                  count(*) FILTER (WHERE state = 'active') as active
           FROM pg_stat_activity
+          WHERE datname = current_database()
         `);
         totalConns = parseInt(cRes.rows[0]?.total || '0', 10);
         activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
@@ -436,6 +437,7 @@ export class ProtectiveSentinel {
           SELECT count(*) as total,
                  count(*) FILTER (WHERE state = 'active') as active
           FROM pg_stat_activity
+          WHERE datname = current_database()
         `);
         totalConns = parseInt(cRes.rows[0]?.total || '0', 10);
         activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
@@ -558,6 +560,7 @@ export class ProtectiveSentinel {
         SELECT count(*) as total,
                count(*) FILTER (WHERE state = 'active') as active
         FROM pg_stat_activity
+        WHERE datname = current_database()
       `);
       totalConns = parseInt(cRes.rows[0]?.total || '0', 10);
       activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
@@ -658,6 +661,7 @@ export class ProtectiveSentinel {
         SELECT count(*) as total,
                count(*) FILTER (WHERE state = 'active') as active
         FROM pg_stat_activity
+        WHERE datname = current_database()
       `);
       totalConns = parseInt(cRes.rows[0]?.total || '0', 10);
       activeConns = parseInt(cRes.rows[0]?.active || '0', 10);

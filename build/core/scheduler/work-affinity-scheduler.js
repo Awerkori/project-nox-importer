@@ -223,10 +223,44 @@ export class WorkAffinityScheduler {
         const client = await this.pool.connect();
         try {
             // -------------------------------------------------------------
+            // LANE STAFF_FORCED: Explicit Absolute Staff Priority
+            // Any eligible STAFF_FORCED job (priority >= 1000, staffForced=true,
+            // or active staff request) ALWAYS preempts P0, P1, P2, P3.
+            // Next free worker slot MUST be allocated to this work.
+            // Preserves manual priority ordering via importer_staff_requests.
+            // -------------------------------------------------------------
+            const fullWorkIds = this.getFullInFlightWorkIds(config.maxInflightPerWork);
+            const staffForcedJob = await this.claimStaffForcedJob(client, {
+                workerId: options.workerId,
+                leaseMin,
+                allowedSources,
+                disallowedWorkIds: fullWorkIds,
+            });
+            if (staffForcedJob) {
+                const waitTimeMs = performance.now() - t0;
+                const workId = staffForcedJob.payload?.workId || '';
+                this.onJobStarted(workId, staffForcedJob.chapter_sort_key);
+                this.lastClaimTime = Date.now();
+                const decision = {
+                    jobId: staffForcedJob.id,
+                    workId,
+                    workTitle: staffForcedJob.payload?.chapterTitle || 'Staff Forced Job',
+                    chapterNumber: staffForcedJob.payload?.chapterNumber ?? 0,
+                    chapterSortKey: staffForcedJob.chapter_sort_key ?? 0,
+                    lane: SchedulerLane.STAFF_FORCED,
+                    reason: 'STAFF_FORCED_ABSOLUTE_PRIORITY',
+                    workState: 'FILLING',
+                    source: staffForcedJob.source,
+                    waitTimeMs: Math.round(waitTimeMs * 10) / 10,
+                    decisionTime: new Date().toISOString(),
+                };
+                this.logDecision(decision);
+                return staffForcedJob;
+            }
+            // -------------------------------------------------------------
             // LANE P0: Fresh New Releases (Priority >= 100) - ABSOLUTE PRIORITY
             // Next free slot ALWAYS goes to P0 if claimable. Never skipped.
             // -------------------------------------------------------------
-            const fullWorkIds = this.getFullInFlightWorkIds(config.maxInflightPerWork);
             const p0Job = await this.claimSingleJob(client, {
                 workerId: options.workerId,
                 leaseMin,
@@ -598,6 +632,116 @@ export class WorkAffinityScheduler {
         return null;
     }
     /**
+     * Helper to atomically claim 1 STAFF_FORCED job with SKIP LOCKED.
+     * Priority >= 1000 or payload.staffForced = true or work with active importer_staff_requests.
+     * Strictly prioritizes staff requests by priority_boost DESC, created_at ASC (manual ordering),
+     * then canonical chapter_sort_key ASC.
+     */
+    async claimStaffForcedJob(client, opts) {
+        const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
+        const query = `
+      WITH to_lock AS (
+        SELECT q.id
+        FROM importer_queue q
+        JOIN importer_sources s ON s.id = q.source
+        LEFT JOIN importer_staff_requests sr 
+          ON sr.work_id = (q.payload->>'workId')::uuid AND sr.status = 'ACTIVE'
+        WHERE (
+          q.status = 'QUEUED'
+          OR (q.status = 'RETRY' AND q.next_run_at <= NOW())
+        )
+          AND q.task_type = 'IMPORT_CHAPTER'
+          AND q.attempts < COALESCE(q.max_attempts, 7)
+          AND s.enabled = true
+          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
+          AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
+          AND (
+            (q.payload->>'staffForced')::boolean = true 
+            OR q.priority >= 1000 
+            OR sr.id IS NOT NULL
+          )
+          AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
+          AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
+          AND NOT EXISTS (
+            SELECT 1 FROM chapters c
+            WHERE c.work_id = (q.payload->>'workId')::uuid
+              AND c.number = q.chapter_sort_key
+              AND c.published_at IS NOT NULL
+          )
+        ORDER BY 
+          COALESCE(sr.priority_boost, 0) DESC,
+          COALESCE(sr.created_at, '9999-12-31'::timestamptz) ASC,
+          q.priority DESC, 
+          q.chapter_sort_key ASC NULLS LAST, 
+          q.next_run_at ASC
+        FOR UPDATE OF q SKIP LOCKED
+        LIMIT 1
+      )
+      UPDATE importer_queue q
+      SET status = 'IMPORTING',
+          locked_by = $4,
+          locked_at = NOW(),
+          lease_expires_at = NOW() + ($5::text || ' minutes')::interval,
+          attempts = q.attempts + 1,
+          updated_at = NOW()
+      FROM to_lock
+      WHERE q.id = to_lock.id
+      RETURNING q.id, q.task_type, q.source, q.priority, q.payload, q.dedupe_key,
+                q.status, q.attempts, q.max_attempts, q.locked_by, q.locked_at,
+                q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
+    `;
+        for (let drainAttempt = 0; drainAttempt < 10; drainAttempt++) {
+            const res = await client.query(query, [
+                opts.allowedSources,
+                opts.disallowedWorkIds || null,
+                disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
+                opts.workerId,
+                opts.leaseMin,
+            ]);
+            if (res.rows.length === 0)
+                return null;
+            const r = res.rows[0];
+            const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
+            const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
+            const workId = payload?.workId;
+            const chapterNumber = payload?.chapterNumber;
+            // Pre-flight check: is this chapter already published canonically in chapters table?
+            if (workId && (chapterNumber !== undefined || sortKey !== null)) {
+                const pubCheck = await client.query(`
+          SELECT id FROM chapters 
+          WHERE work_id = $1::uuid 
+            AND (number = $2::numeric OR ($3::numeric IS NOT NULL AND number = $3::numeric))
+            AND published_at IS NOT NULL
+          LIMIT 1;
+        `, [workId, chapterNumber !== undefined ? chapterNumber : sortKey, sortKey]);
+                if (pubCheck.rows.length > 0) {
+                    const publishedChapterId = pubCheck.rows[0].id;
+                    this.logger.info(`Claimed STAFF_FORCED job ${r.id} for work ${workId} ch ${chapterNumber} is already canonically published. Auto-completing.`);
+                    await client.query(`
+            UPDATE importer_queue 
+            SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
+            WHERE id = $1;
+          `, [r.id]);
+                    if (sortKey !== null) {
+                        await client.query(`
+              UPDATE importer_chapter_mappings
+              SET status = 'COMPLETED', is_page_provider = false, chapter_id = $3, updated_at = NOW()
+              WHERE work_id = $1::uuid AND chapter_sort_key = $2 AND status IN ('PENDING', 'QUEUED');
+            `, [workId, sortKey, publishedChapterId]);
+                    }
+                    continue;
+                }
+            }
+            this.lastClaimTime = Date.now();
+            return {
+                ...r,
+                payload,
+                chapter_sort_key: sortKey,
+            };
+        }
+        return null;
+    }
+    /**
      * Helper to atomically claim 1 job with SKIP LOCKED.
      * Ensures the source is enabled, active, and not in cooldown.
      */
@@ -635,7 +779,14 @@ export class WorkAffinityScheduler {
               AND sm.status = 'STAGED'
               AND sm.chapter_sort_key <= q.chapter_sort_key
           ))
-        ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
+        ORDER BY 
+          CASE 
+            WHEN (q.payload->>'staffForced')::boolean = true OR q.priority >= 1000 THEN 0 
+            ELSE 1 
+          END ASC,
+          q.priority DESC, 
+          q.chapter_sort_key ASC NULLS LAST, 
+          q.next_run_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
       )
