@@ -427,46 +427,9 @@ export class WorkAffinityScheduler {
       }
 
       // -------------------------------------------------------------
-      // LANE P1: Catalog Backfill Dynamic Claim (Any Existing Published Work)
-      // When currently tracked active P1 works cannot supply a job (e.g. at
-      // max in-flight per work, or primary source temporarily down), claim
-      // directly from ANY existing catalog work (w.published = true) in the database.
-      // 
-      // STRICT RULE: Workers NEVER drop to P2 while ANY claimable P1 job exists!
-      // -------------------------------------------------------------
-      const catalogP1Job = await this.claimCatalogP1Job(client, {
-        workerId: options.workerId,
-        leaseMin,
-        allowedSources,
-        disallowedWorkIds: fullWorkIds,
-      });
-
-      if (catalogP1Job) {
-        const waitTimeMs = performance.now() - t0;
-        const workId = catalogP1Job.payload?.workId || '';
-        this.onJobStarted(workId, catalogP1Job.chapter_sort_key);
-        this.p1Count1h++;
-
-        const decision: SchedulerDecision = {
-          jobId: catalogP1Job.id,
-          workId,
-          workTitle: catalogP1Job.payload?.chapterTitle || 'Catalog P1 Backfill',
-          chapterNumber: catalogP1Job.payload?.chapterNumber ?? 0,
-          chapterSortKey: catalogP1Job.chapter_sort_key ?? 0,
-          lane: SchedulerLane.P1_BACKFILL,
-          reason: 'CATALOG_P1_BACKFILL_CLAIM',
-          workState: 'FILLING',
-          source: catalogP1Job.source,
-          waitTimeMs: Math.round(waitTimeMs * 10) / 10,
-          decisionTime: new Date().toISOString(),
-        };
-        this.logDecision(decision);
-        return catalogP1Job;
-      }
-
-      // -------------------------------------------------------------
       // LANE P2: Active New Works (Fair Round-Robin with Affinity)
-      // Only executes when ALL P1 catalog work is exhausted or source-blocked!
+      // Evaluated after active P1 works, but BEFORE generic untracked catalog backfills,
+      // guaranteeing newly admitted works are not starved by massive backlog.
       // -------------------------------------------------------------
       const eligibleP2Works = p2Works.filter(
         (w) => (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork
@@ -509,6 +472,42 @@ export class WorkAffinityScheduler {
             return p2Job;
           }
         }
+      }
+
+      // -------------------------------------------------------------
+      // LANE P1: Catalog Backfill Dynamic Claim (Any Existing Published Work)
+      // When currently tracked active P1 and P2 works cannot supply a job (e.g. at
+      // max in-flight per work, or primary source temporarily down), claim
+      // directly from ANY existing catalog work (w.published = true) in the database.
+      // -------------------------------------------------------------
+      const catalogP1Job = await this.claimCatalogP1Job(client, {
+        workerId: options.workerId,
+        leaseMin,
+        allowedSources,
+        disallowedWorkIds: fullWorkIds,
+      });
+
+      if (catalogP1Job) {
+        const waitTimeMs = performance.now() - t0;
+        const workId = catalogP1Job.payload?.workId || '';
+        this.onJobStarted(workId, catalogP1Job.chapter_sort_key);
+        this.p1Count1h++;
+
+        const decision: SchedulerDecision = {
+          jobId: catalogP1Job.id,
+          workId,
+          workTitle: catalogP1Job.payload?.chapterTitle || 'Catalog P1 Backfill',
+          chapterNumber: catalogP1Job.payload?.chapterNumber ?? 0,
+          chapterSortKey: catalogP1Job.chapter_sort_key ?? 0,
+          lane: SchedulerLane.P1_BACKFILL,
+          reason: 'CATALOG_P1_BACKFILL_CLAIM',
+          workState: 'FILLING',
+          source: catalogP1Job.source,
+          waitTimeMs: Math.round(waitTimeMs * 10) / 10,
+          decisionTime: new Date().toISOString(),
+        };
+        this.logDecision(decision);
+        return catalogP1Job;
       }
 
       // -------------------------------------------------------------
