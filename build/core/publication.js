@@ -385,15 +385,32 @@ export class PublicationBarrier {
      */
     async sweepStagedPublications(maxTotalPublications = 40, perWorkBurst = 6) {
         try {
-            const { data: stagedWorks, error } = await this.supabase
-                .from('importer_chapter_mappings')
-                .select('work_id')
-                .eq('status', 'STAGED')
-                .not('work_id', 'is', null);
-            if (error || !stagedWorks || stagedWorks.length === 0) {
+            let distinctWorkIds = [];
+            try {
+                const pool = getYugabytePool();
+                const res = await pool.query(`
+          SELECT DISTINCT work_id
+          FROM importer_chapter_mappings
+          WHERE status = 'STAGED' AND work_id IS NOT NULL
+          LIMIT 40;
+        `);
+                distinctWorkIds = res.rows.map((r) => r.work_id);
+            }
+            catch (poolErr) {
+                const { data: stagedWorks, error } = await this.supabase
+                    .from('importer_chapter_mappings')
+                    .select('work_id')
+                    .eq('status', 'STAGED')
+                    .not('work_id', 'is', null)
+                    .limit(200);
+                if (error || !stagedWorks || stagedWorks.length === 0) {
+                    return 0;
+                }
+                distinctWorkIds = Array.from(new Set(stagedWorks.map((r) => r.work_id)));
+            }
+            if (distinctWorkIds.length === 0) {
                 return 0;
             }
-            const distinctWorkIds = Array.from(new Set(stagedWorks.map((r) => r.work_id)));
             let publishedTotal = 0;
             let activeWorkIds = [...distinctWorkIds];
             // Round-robin iteration across distinct works (one round per sweep)

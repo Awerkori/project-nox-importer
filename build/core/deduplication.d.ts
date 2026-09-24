@@ -31,6 +31,11 @@ export declare function computeCanonicalChapterKey(chapterNumber: number | strin
     isSpecial: boolean;
     specialCategory?: 'prologue' | 'extra' | 'special' | 'side';
 };
+export interface EditorialValidationResult {
+    valid: boolean;
+    reason?: string;
+}
+export declare function validateEditorialTitle(rawTitle: string): EditorialValidationResult;
 export declare class DeduplicationEngine {
     private supabase;
     private logger;
