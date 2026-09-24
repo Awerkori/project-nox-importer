@@ -89,10 +89,18 @@ export class PublicationBarrier {
      * Try to publish a chapter if the barrier is cleared.
      * If publication succeeds, immediately triggers cascade to publish any consecutive STAGED chapters.
      */
+    /**
+     * Try to publish a chapter if the barrier is cleared.
+     * If publication succeeds, immediately triggers cascade to publish any consecutive STAGED chapters.
+     */
     async tryPublish(workId, sortKey, chapterId, isFreshRelease = false) {
         const lock = this.getWorkLock(workId);
+        const lockWaitStart = performance.now();
         return lock.runExclusive(async () => {
+            const lockWaitMs = Math.round(performance.now() - lockWaitStart);
+            const t0 = performance.now();
             const check = await this.checkBarrier(workId, sortKey);
+            const barrierCheckMs = Math.round(performance.now() - t0);
             if (!check.canPublish) {
                 this.logger.info('Chapter publication blocked by barrier', {
                     workId,
@@ -108,74 +116,92 @@ export class PublicationBarrier {
                         .eq('chapter_id', chapterId)
                         .eq('status', 'STAGED');
                 }
-                return { published: false, reason: check.reason };
+                return {
+                    published: false,
+                    reason: check.reason,
+                    timings: { barrierCheckMs, publishUpdateMs: 0, cascadeMs: 0, lockWaitMs },
+                };
             }
             // Barrier cleared! Publish this chapter
+            const t1 = performance.now();
             await this.executePublish(workId, chapterId, new Date().toISOString(), sortKey, isFreshRelease);
+            const publishUpdateMs = Math.round(performance.now() - t1);
             this.logger.info('Chapter published via barrier', { workId, sortKey, chapterId, isFreshRelease });
             // Run immediate cascade for subsequent STAGED chapters of this work
+            const t2 = performance.now();
             await this.runCascadeUnderLock(workId);
-            return { published: true };
+            const cascadeMs = Math.round(performance.now() - t2);
+            return {
+                published: true,
+                timings: { barrierCheckMs, publishUpdateMs, cascadeMs, lockWaitMs },
+            };
         });
     }
     /**
      * Executes atomic DB publication for a single chapter.
      */
     async executePublish(workId, chapterId, publishedAtIso, sortKey, isFreshRelease = false) {
-        // 0. Query current work status and latest_chapter_published_at
-        const { data: workInfo } = await this.supabase
-            .from('works')
-            .select('latest_chapter_published_at, slug')
-            .eq('id', workId)
-            .maybeSingle();
-        const existingLatest = workInfo?.latest_chapter_published_at;
-        // 1. Mark public.chapters.published_at (preserving existing published_at if already published)
-        const { data: existingCh } = await this.supabase
-            .from('chapters')
-            .select('published_at')
-            .eq('id', chapterId)
-            .maybeSingle();
+        // 0. Query current work status and existing chapter concurrently in a single round-trip
+        const [workRes, chRes] = await Promise.all([
+            this.supabase
+                .from('works')
+                .select('id, title, slug, cover_id, published, latest_chapter_published_at')
+                .eq('id', workId)
+                .maybeSingle(),
+            this.supabase
+                .from('chapters')
+                .select('published_at')
+                .eq('id', chapterId)
+                .maybeSingle(),
+        ]);
+        const currentWork = workRes?.data;
+        const existingLatest = currentWork?.latest_chapter_published_at;
+        const existingCh = chRes?.data;
         const finalPublishedAt = existingCh?.published_at || publishedAtIso;
-        const { error: chErr } = await this.supabase
-            .from('chapters')
-            .update({
-            published_at: finalPublishedAt,
-            is_fresh_release: isFreshRelease,
-        })
-            .eq('id', chapterId);
-        if (chErr)
-            throw chErr;
-        // 2. Mark public.importer_chapter_mappings.status = 'COMPLETED'
-        const { error: mapErr } = await this.supabase
-            .from('importer_chapter_mappings')
-            .update({ status: 'COMPLETED', updated_at: new Date().toISOString() })
-            .eq('chapter_id', chapterId);
-        if (mapErr)
-            throw mapErr;
-        // 2b. Cancel / auto-complete any remaining QUEUED/RETRY jobs in importer_queue for this chapter
+        // 1. Mark public.chapters.published_at and public.importer_chapter_mappings.status = 'COMPLETED' concurrently
+        const [chUpdateRes, mapUpdateRes] = await Promise.all([
+            this.supabase
+                .from('chapters')
+                .update({
+                published_at: finalPublishedAt,
+                is_fresh_release: isFreshRelease,
+            })
+                .eq('id', chapterId),
+            this.supabase
+                .from('importer_chapter_mappings')
+                .update({ status: 'COMPLETED', updated_at: new Date().toISOString() })
+                .eq('chapter_id', chapterId),
+        ]);
+        if (chUpdateRes.error)
+            throw chUpdateRes.error;
+        if (mapUpdateRes.error)
+            throw mapUpdateRes.error;
+        // 2. Cancel / auto-complete any remaining QUEUED/RETRY jobs in importer_queue for this chapter concurrently
         try {
             if (sortKey !== undefined && sortKey !== null) {
                 const pool = getYugabytePool();
-                await pool.query(`
-          UPDATE importer_queue
-          SET status = 'COMPLETED',
-              updated_at = NOW(),
-              last_error = 'CANONICAL_ALREADY_SATISFIED'
-          WHERE task_type = 'IMPORT_CHAPTER'
-            AND status IN ('QUEUED', 'RETRY')
-            AND chapter_sort_key = $1
-            AND (payload->>'workId') = $2;
-        `, [sortKey, workId]);
-                await pool.query(`
-          UPDATE importer_chapter_mappings
-          SET status = 'COMPLETED',
-              is_page_provider = false,
-              chapter_id = $1,
-              updated_at = NOW()
-          WHERE work_id = $2::uuid
-            AND chapter_sort_key = $3
-            AND status IN ('PENDING', 'QUEUED');
-        `, [chapterId, workId, sortKey]);
+                await Promise.all([
+                    pool.query(`
+            UPDATE importer_queue
+            SET status = 'COMPLETED',
+                updated_at = NOW(),
+                last_error = 'CANONICAL_ALREADY_SATISFIED'
+            WHERE task_type = 'IMPORT_CHAPTER'
+              AND status IN ('QUEUED', 'RETRY')
+              AND chapter_sort_key = $1
+              AND (payload->>'workId') = $2;
+          `, [sortKey, workId]),
+                    pool.query(`
+            UPDATE importer_chapter_mappings
+            SET status = 'COMPLETED',
+                is_page_provider = false,
+                chapter_id = $1,
+                updated_at = NOW()
+            WHERE work_id = $2::uuid
+              AND chapter_sort_key = $3
+              AND status IN ('PENDING', 'QUEUED');
+          `, [chapterId, workId, sortKey]),
+                ]);
             }
         }
         catch (cancelErr) {
@@ -183,13 +209,12 @@ export class PublicationBarrier {
         }
         // 3. Update public.works: enforce publication barrier (valid metadata + valid cover)
         let shouldPublishWork = false;
-        try {
-            const { data: currentWork } = await this.supabase
-                .from('works')
-                .select('id, title, slug, cover_id, published')
-                .eq('id', workId)
-                .maybeSingle();
-            if (currentWork?.cover_id && currentWork.title && currentWork.slug) {
+        if (currentWork?.published === true) {
+            // Work is already confirmed published, avoid redundant media checks
+            shouldPublishWork = true;
+        }
+        else if (currentWork?.cover_id && currentWork.title && currentWork.slug) {
+            try {
                 const { data: coverMedia } = await this.supabase
                     .from('media')
                     .select('id, storage_ready, bytes')
@@ -206,17 +231,17 @@ export class PublicationBarrier {
                     });
                 }
             }
-            else {
-                this.logger.warn('Work missing cover_id or canonical metadata, publication barrier withheld published=true', {
-                    workId,
-                    hasCover: Boolean(currentWork?.cover_id),
-                    hasTitle: Boolean(currentWork?.title),
-                    hasSlug: Boolean(currentWork?.slug),
-                });
+            catch (barrierErr) {
+                this.logger.warn('Error checking publication barrier for work', { workId, error: barrierErr?.message });
             }
         }
-        catch (barrierErr) {
-            this.logger.warn('Error checking publication barrier for work', { workId, error: barrierErr?.message });
+        else {
+            this.logger.warn('Work missing cover_id or canonical metadata, publication barrier withheld published=true', {
+                workId,
+                hasCover: Boolean(currentWork?.cover_id),
+                hasTitle: Boolean(currentWork?.title),
+                hasSlug: Boolean(currentWork?.slug),
+            });
         }
         const workUpdate = {
             updated_at: new Date().toISOString(),
@@ -236,7 +261,7 @@ export class PublicationBarrier {
             this.onPublished?.(isFreshRelease);
         }
         catch { }
-        // 4. Invalidate edge cache (ALWAYS invalidate Home & Lançamentos whenever ANY chapter is published)
+        // 4. Invalidate edge cache (fire and forget asynchronously)
         try {
             const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
             const token = process.env.NOX_STORAGE_BRIDGE_TOKEN;
@@ -249,7 +274,7 @@ export class PublicationBarrier {
                 body: JSON.stringify({
                     type: 'CHAPTER_PUBLISHED',
                     workId,
-                    workSlug: workInfo?.slug,
+                    workSlug: currentWork?.slug,
                     chapterId,
                 }),
                 signal: AbortSignal.timeout(2000),

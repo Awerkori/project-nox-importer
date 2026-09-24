@@ -16,6 +16,16 @@ export interface BarrierCheckResult {
     blockingCount: number;
     blockingSortKeys: number[];
 }
+export interface PublishResult {
+    published: boolean;
+    reason?: string;
+    timings?: {
+        barrierCheckMs: number;
+        publishUpdateMs: number;
+        cascadeMs: number;
+        lockWaitMs: number;
+    };
+}
 export declare class PublicationBarrier {
     private supabase;
     private logger;
@@ -37,10 +47,11 @@ export declare class PublicationBarrier {
      * Try to publish a chapter if the barrier is cleared.
      * If publication succeeds, immediately triggers cascade to publish any consecutive STAGED chapters.
      */
-    tryPublish(workId: string, sortKey: number, chapterId: string, isFreshRelease?: boolean): Promise<{
-        published: boolean;
-        reason?: string;
-    }>;
+    /**
+     * Try to publish a chapter if the barrier is cleared.
+     * If publication succeeds, immediately triggers cascade to publish any consecutive STAGED chapters.
+     */
+    tryPublish(workId: string, sortKey: number, chapterId: string, isFreshRelease?: boolean): Promise<PublishResult>;
     /**
      * Executes atomic DB publication for a single chapter.
      */
