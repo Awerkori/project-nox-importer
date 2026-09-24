@@ -168,6 +168,8 @@ export class AdmissionController {
     const nowMs = Date.now();
     const activeP2Works = activeWorks.filter((w) => {
       if (w.lane !== 'P2' || w.state !== 'FILLING') return false;
+      // If work has no queued or in-flight chapters, it has completed its initial batch and does not block new admissions
+      if (w.queuedChapters === 0 && (w.inFlightChapters || 0) === 0) return false;
       const admittedTime = new Date(w.admittedAt).getTime();
       if (w.publishedChapters === 0 && (nowMs - admittedTime >= 30 * 60 * 1000)) {
         return false; // Stale cohort work does not block new admissions
@@ -353,6 +355,7 @@ export class AdmissionController {
           const isSourceBlocked = srcRow && (
             srcRow.status === 'DISABLED' ||
             srcRow.status === 'PAUSED' ||
+            srcRow.status === 'DEGRADED' ||
             (srcRow.status === 'COOLDOWN' && srcRow.cooldown_until && new Date(srcRow.cooldown_until) > new Date())
           );
 
@@ -721,7 +724,9 @@ export class AdmissionController {
       .filter(([src, cnt]) => cnt >= (src === 'mangaflix' ? 2 : 3))
       .map(([src]) => src);
 
-    const lanesToTry = preferredLane ? [preferredLane] : (['P1', 'P2'] as const);
+    const lanesToTry = preferredLane === 'P1'
+      ? (['P1', 'P2'] as const)
+      : (preferredLane ? [preferredLane] : (['P1', 'P2'] as const));
 
     for (const lane of lanesToTry) {
       if (lane === 'P2') {
