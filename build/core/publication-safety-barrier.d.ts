@@ -37,7 +37,7 @@ export declare class PublicationSafetyBarrier {
     setState(newState: BarrierState, reason?: string): Promise<void>;
     /**
      * Checks whether worker slots should acquire IMPORT_CHAPTER jobs.
-     * If CLOSED or RECOVERING, returns false so 0 worker slots and 0 semaphores are held.
+     * Allows OPEN, CAUTION, and RECOVERING so workers can fill gaps and drain backlog.
      */
     canAcquireChapters(): Promise<boolean>;
     canProcessChapter(workId?: string, sortKey?: number): Promise<boolean>;
