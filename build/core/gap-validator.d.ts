@@ -37,3 +37,26 @@ export declare function validatePermanentGapCandidate(params: {
         hasChapter: boolean;
     }>;
 }): Promise<GapValidationResult>;
+export interface MarkGapParams {
+    workId: string;
+    chapterNumber: number | string;
+    chapterSortKey: number;
+    source: string;
+    httpStatus?: number | string;
+    errorMessage?: string;
+    alternativeSources?: Array<{
+        source: string;
+        hasChapter: boolean;
+    }>;
+}
+export interface MarkGapResult {
+    mutated: boolean;
+    validation: GapValidationResult;
+    error?: string;
+}
+/**
+ * The ONLY safe, authorized pathway to mark a permanent gap (is_gap = true) in the database.
+ * Enforces pre-validation via validatePermanentGapCandidate.
+ * If safeToMarkGap !== true, mutation is strictly forbidden and rejected.
+ */
+export declare function markPermanentGapSafely(client: any, params: MarkGapParams): Promise<MarkGapResult>;

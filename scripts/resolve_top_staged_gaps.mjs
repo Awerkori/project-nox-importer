@@ -1,7 +1,7 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
 import fs from 'fs';
-import { isTransientError, validatePermanentGapCandidate } from '../build/core/gap-validator.js';
+import { isTransientError, validatePermanentGapCandidate, markPermanentGapSafely } from '../build/core/gap-validator.js';
 
 dotenv.config();
 
@@ -119,8 +119,20 @@ async function main() {
       if (confirmedCount === 0) {
         console.log('\n✅ LIVE RUN: 0 candidates have confirmed permanent absence. All candidates are protected from false gap marking.');
       } else {
-        console.log(`\n⚠️ LIVE RUN: Processing ${confirmedCount} confirmed items.`);
-        // Only mutate items where permanentAbsenceConfirmed is YES!
+        console.log(`\n⚠️ LIVE RUN: Processing ${confirmedCount} confirmed items through markPermanentGapSafely...`);
+        for (const item of auditResults) {
+          if (item.permanentAbsenceConfirmed === 'YES') {
+            const markRes = await markPermanentGapSafely(client, {
+              workId: item.workId,
+              chapterNumber: item.chapter,
+              chapterSortKey: item.chapter,
+              source: item.source,
+              httpStatus: 404,
+              errorMessage: item.httpResult,
+            });
+            console.log(`Mark gap result for ${item.work} ch ${item.chapter}:`, markRes);
+          }
+        }
       }
     }
 
