@@ -307,8 +307,8 @@ export class ProtectiveSentinel {
         activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
       } catch {}
 
-      // Must have calm DB (<10 total, <5 active)
-      if (totalConns >= 10 || activeConns >= 5) {
+      // Must have calm DB (<12 total, <4 active). Baseline idle pools (Hyperdrive + Importer) hold ~9-10 idle connections.
+      if (totalConns >= 12 || activeConns >= 4) {
         this.logger.warn(`[Auto-Resume] YSQL not calm yet: total=${totalConns}/13, active=${activeConns}`);
         return;
       }

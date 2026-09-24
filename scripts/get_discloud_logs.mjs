@@ -3,6 +3,7 @@ import puppeteer from 'puppeteer-core';
 const PUPPETEER_OPTS = {
   executablePath: '/usr/bin/chromium',
   headless: true,
+  ignoreHTTPSErrors: true,
   args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--ignore-certificate-errors']
 };
 
