@@ -17,7 +17,9 @@ export class QueryBuilder {
         this.table = table;
     }
     select(columns = '*') {
-        this.op = 'SELECT';
+        if (this.op !== 'INSERT' && this.op !== 'UPSERT' && this.op !== 'UPDATE' && this.op !== 'DELETE') {
+            this.op = 'SELECT';
+        }
         this.selectedCols = columns;
         return this;
     }
