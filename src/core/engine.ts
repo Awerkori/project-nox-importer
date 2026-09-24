@@ -3441,15 +3441,19 @@ export class ImporterEngine {
         throw new Error(`Failed to import chapter ${chapterNumber} across all candidates${lastRescuedError ? ': ' + lastRescuedError : ''}`);
       }
 
-      const db0 = Date.now();
-
-      // Ensure work has a valid cover with storage_ready = true before publishing chapter
+      // Ensure work has a valid cover with storage_ready = true before publishing chapter (measured separately)
+      const cover0 = performance.now();
+      let tCoverCheck = 0;
       if (!this.knownCoveredWorks.has(workId)) {
         try {
           const botUserId = await this.resolveBotUserId();
           const coverId = await this.ensureWorkHasCover(workId, botUserId);
           if (coverId) {
             this.knownCoveredWorks.add(workId);
+          } else {
+            // Cooldown so subsequent chapters of this work don't repeatedly crawl sibling sources
+            this.knownCoveredWorks.add(workId);
+            setTimeout(() => this.knownCoveredWorks.delete(workId), 10 * 60 * 1000);
           }
         } catch (coverCheckErr: any) {
           this.logger.warn('Non-fatal error verifying work cover before chapter publish', {
@@ -3458,8 +3462,12 @@ export class ImporterEngine {
           });
         }
       }
+      tCoverCheck = Math.round(performance.now() - cover0);
 
-      // Find or create chapter record in public.chapters
+      const db0 = Date.now();
+
+      // Step 1: Find or create chapter record in public.chapters
+      const chUpsert0 = performance.now();
       let chapterId: string;
       if (existingChapter) {
         chapterId = existingChapter.id;
@@ -3496,6 +3504,7 @@ export class ImporterEngine {
           }
         }
       }
+      const tChapterUpsert = Math.round(performance.now() - chUpsert0);
 
       // SAFEGUARD 0: Re-check if published by another worker during download (only possible if existing chapter)
       if (existingChapter) {
@@ -3526,7 +3535,8 @@ export class ImporterEngine {
         }
       }
 
-      // SAFEGUARD 1: Batch upsert into public.pages ONLY after ALL pages are verified
+      // Step 2: SAFEGUARD 1: Batch upsert into public.pages ONLY after ALL pages are verified
+      const pagesRpc0 = performance.now();
       if (!skipDownloadDueToExistingPages) {
         const pagesToUpsert = validPages.map((p, idx) => ({
           chapter_id: chapterId,
@@ -3543,8 +3553,10 @@ export class ImporterEngine {
 
         if (pageErr) throw pageErr;
       }
+      const tPagesRpc = Math.round(performance.now() - pagesRpc0);
 
-      // SAFEGUARD 2: Stage chapter with published_at = NULL and update queue concurrently
+      // Step 3: SAFEGUARD 2: Stage chapter with published_at = NULL and update queue concurrently
+      const stage0 = performance.now();
       const chKey = this.computeCanonicalChapterKey(chapterNumber, chapterTitle);
       const queueProgressUpdate: Record<string, any> = {
         progress_current: validPages.length,
@@ -3586,12 +3598,18 @@ export class ImporterEngine {
           .eq('work_id', workId)
           .eq('chapter_number', chapterNumber);
       }
+      const tStage = Math.round(performance.now() - stage0);
 
-      // SAFEGUARD 3: Try to publish immediately 1x via barrier. If blocked, release worker slot immediately!
+      // Step 4: SAFEGUARD 3: Try to publish immediately 1x via barrier. If blocked, release worker slot immediately!
       const isFreshRelease = Boolean(job.payload?.isFreshRelease);
       const pubResult = await this.publicationBarrier.tryPublish(workId, chKey.sortKey, chapterId, isFreshRelease);
 
       tDb = Date.now() - db0;
+      const tBarrierCheck = Math.round(pubResult.timings?.barrierCheckMs || 0);
+      const tPublishUpdate = Math.round(pubResult.timings?.publishUpdateMs || 0);
+      const tCascade = Math.round(pubResult.timings?.cascadeMs || 0);
+
+      this.logger.info(`[DB_DIAGNOSTIC] ${effectiveSource} ch ${chapterNumber}: db_total=${tDb}ms (cover=${tCoverCheck}ms, ch_upsert=${tChapterUpsert}ms, pages_rpc=${tPagesRpc}ms, stage=${tStage}ms, barrier=${tBarrierCheck}ms, pub_update=${tPublishUpdate}ms, cascade=${tCascade}ms)`);
 
       // Record fine-grained chapter job metric asynchronously
       void this.recordJobMetric({
