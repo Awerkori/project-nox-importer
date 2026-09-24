@@ -29,7 +29,9 @@ export class QueryBuilder<T = any> implements PromiseLike<PostgrestResponse<T>> 
   ) {}
 
   select(columns: string = '*'): this {
-    this.op = 'SELECT';
+    if (this.op !== 'INSERT' && this.op !== 'UPSERT' && this.op !== 'UPDATE' && this.op !== 'DELETE') {
+      this.op = 'SELECT';
+    }
     this.selectedCols = columns;
     return this;
   }
