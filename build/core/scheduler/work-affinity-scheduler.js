@@ -340,6 +340,14 @@ export class WorkAffinityScheduler {
         // and works marked BLOCKED.
         // -------------------------------------------------------------
         const eligibleP1Works = p1Works.filter((w) => w.state === 'FILLING' && w.criticalGapSortKey === null && (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork);
+        // Prioritize works whose primary source is currently ready/unconstrained (READY NOW priority)
+        if (allowedSources && allowedSources.length > 0) {
+            eligibleP1Works.sort((a, b) => {
+                const aReady = allowedSources.includes(a.primarySource) ? 1 : 0;
+                const bReady = allowedSources.includes(b.primarySource) ? 1 : 0;
+                return bReady - aReady;
+            });
+        }
         if (eligibleP1Works.length > 0) {
             const startIdx = this.rrIndexP1 % eligibleP1Works.length;
             for (let i = 0; i < eligibleP1Works.length; i++) {
@@ -381,6 +389,14 @@ export class WorkAffinityScheduler {
         // guaranteeing newly admitted works are not starved by massive backlog.
         // -------------------------------------------------------------
         const eligibleP2Works = p2Works.filter((w) => (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork);
+        // Prioritize works whose primary source is currently ready/unconstrained (READY NOW priority)
+        if (allowedSources && allowedSources.length > 0) {
+            eligibleP2Works.sort((a, b) => {
+                const aReady = allowedSources.includes(a.primarySource) ? 1 : 0;
+                const bReady = allowedSources.includes(b.primarySource) ? 1 : 0;
+                return bReady - aReady;
+            });
+        }
         if (eligibleP2Works.length > 0) {
             const startIdx = this.rrIndexP2 % eligibleP2Works.length;
             for (let i = 0; i < eligibleP2Works.length; i++) {

@@ -24,7 +24,7 @@ export class SchedulerStateStore {
   private configCache: SchedulerConfig = {
     enabled: true,
     shadowMode: false,
-    maxActiveNewWorks: 4,
+    maxActiveNewWorks: 8,
     maxActiveBackfillWorks: 24,
     maxInflightPerWork: 2,
     slidingWindowSize: 12,

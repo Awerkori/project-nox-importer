@@ -996,6 +996,12 @@ export class ImporterEngine {
                 continue;
             eligible.push(src);
         }
+        // Sort eligible sources by available permits descending to prioritize highest available headroom
+        eligible.sort((a, b) => {
+            const availA = this.autotuner.getSourceSemaphore(a).available;
+            const availB = this.autotuner.getSourceSemaphore(b).available;
+            return availB - availA;
+        });
         return eligible;
     }
     async checkSourceAvailability(source, taskType = 'IMPORT_CHAPTER') {

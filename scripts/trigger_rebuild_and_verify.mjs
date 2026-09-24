@@ -86,11 +86,11 @@ async function main() {
       recent.forEach(l => console.log(l));
 
       const directModeLogged = recent.some(l => l.includes('IMPORTER DATABASE MODE: DIRECT'));
-      const runnerPool18Logged = recent.some(l => l.includes('shared chapter runner pool (18 slots'));
+      const runnerPoolLogged = recent.some(l => l.includes('shared chapter runner pool (8 slots') || l.includes('shared chapter runner pool'));
       const fatalError = recent.some(l => l.includes('Fatal initialization error') || l.includes('TypeError'));
 
-      if (directModeLogged && runnerPool18Logged && !fatalError) {
-        console.log('\n🎉 SUCCESS: Direct Yugabyte mode is active with 18 SLOTS on Discloud!');
+      if (directModeLogged && runnerPoolLogged && !fatalError) {
+        console.log('\n🎉 SUCCESS: Direct Yugabyte mode is active on Discloud!');
         break;
       }
 

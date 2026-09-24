@@ -176,7 +176,7 @@ export class AdmissionController {
       }
       return true;
     });
-    const maxP2Cohort = config.maxActiveNewWorks || 4;
+    const maxP2Cohort = config.maxActiveNewWorks || 8;
 
     if (activeP2Works.length >= maxP2Cohort) {
       return {
@@ -439,20 +439,20 @@ export class AdmissionController {
         `SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`
       );
       const importingCnt = parseInt(qAct.rows[0]?.cnt || '0', 10);
-      idleWorkers = Math.max(0, 18 - importingCnt);
+      idleWorkers = Math.max(0, 8 - importingCnt);
     } catch {}
 
     // Elastic backfill: if workers are idle, allow expanding active P1 up to 36 works
     // to guarantee full worker utilization without violating maxInflightPerWork = 2.
     const targetBackfillLimit = idleWorkers >= 2
-      ? Math.min(36, Math.max(config.maxActiveBackfillWorks, 18 + idleWorkers))
+      ? Math.min(36, Math.max(config.maxActiveBackfillWorks, 8 + idleWorkers))
       : config.maxActiveBackfillWorks;
     const backfillSlotsAvailable = Math.max(0, targetBackfillLimit - activeBackfills.length);
 
     // P2 uses spare capacity when P1 cannot occupy available workers
-    // Strictly restrict active P2 cohort to <= config.maxActiveNewWorks (default 4).
-    const maxP2Cohort = config.maxActiveNewWorks || 4;
-    const targetNewWorksLimit = idleWorkers >= 1 ? maxP2Cohort : 0;
+    // Strictly restrict active P2 cohort to <= config.maxActiveNewWorks (default 8).
+    const maxP2Cohort = config.maxActiveNewWorks || 8;
+    const targetNewWorksLimit = idleWorkers >= 1 ? maxP2Cohort : 4;
     const newWorkSlotsAvailable = Math.max(0, targetNewWorksLimit - activeNewWorks.length);
 
     // Track active sources for source diversity (Section 81)
@@ -500,7 +500,7 @@ export class AdmissionController {
         if (admitted >= backfillSlotsAvailable) break;
 
         const srcCount = sourceCounts.get(cand.source) || 0;
-        const maxWorksPerSource = idleWorkers >= 4 ? 4 : (cand.source === 'mangaflix' ? 2 : 3);
+        const maxWorksPerSource = idleWorkers >= 2 ? 4 : 3;
         const otherSourceCandidates = candidatesRes.rows.filter((r: any) => (sourceCounts.get(r.source) || 0) < maxWorksPerSource);
         if (srcCount >= maxWorksPerSource && otherSourceCandidates.length > 0) {
           continue;
@@ -571,8 +571,8 @@ export class AdmissionController {
         if (admitted >= newWorkSlotsAvailable) break;
 
         const srcCount = sourceCounts.get(cand.source) || 0;
-        const maxWorksPerSource = cand.source === 'mangaflix' ? 2 : 3;
-        const otherSourceCandidates = candidatesRes.rows.filter((r: any) => (sourceCounts.get(r.source) || 0) < (r.source === 'mangaflix' ? 2 : 3));
+        const maxWorksPerSource = idleWorkers >= 2 ? 4 : 3;
+        const otherSourceCandidates = candidatesRes.rows.filter((r: any) => (sourceCounts.get(r.source) || 0) < maxWorksPerSource);
         if (srcCount >= maxWorksPerSource && otherSourceCandidates.length > 0) {
           continue;
         }
@@ -721,7 +721,7 @@ export class AdmissionController {
       sourceCounts.set(w.primarySource, (sourceCounts.get(w.primarySource) || 0) + 1);
     }
     const saturatedSources = Array.from(sourceCounts.entries())
-      .filter(([src, cnt]) => cnt >= (src === 'mangaflix' ? 2 : 3))
+      .filter(([src, cnt]) => cnt >= 4)
       .map(([src]) => src);
 
     const lanesToTry = preferredLane === 'P1'

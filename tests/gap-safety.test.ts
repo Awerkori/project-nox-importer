@@ -145,24 +145,65 @@ describe('Project Nox — Gap Safety & Permanent Absence Invariant Tests', () =>
       expect(result.alternativeSourcesAvailable).toContain('source_b');
     });
 
-    it('permits PERMANENT_GAP ONLY when structural 404 confirmed AND no alternatives possess chapter', async () => {
+    it('rejects permanent gap for single isolated 404 without repeated or upstream catalog proof', async () => {
       const result = await validatePermanentGapCandidate({
-        workId: dummyWorkId,
-        chapterNumber: 999,
-        chapterSortKey: 999,
-        source: 'primary_source',
-        httpStatus: 404,
-        errorMessage: '404 Chapter Not Found on upstream catalog',
-        alternativeSources: [
-          { source: 'secondary_source', hasChapter: false },
-        ],
+          workId: dummyWorkId,
+          chapterNumber: 15,
+          chapterSortKey: 15,
+          source: 'mangaflix',
+          httpStatus: 404,
+          errorMessage: '404 Chapter Not Found',
+          alternativeSources: [],
+          // No Proof A or Proof B provided
+        });
+
+        expect(result.isPermanentGap).toBe(false);
+        expect(result.safeToMarkGap).toBe(false);
+        expect(result.classification).toBe('UNVERIFIED');
+        expect(result.reason).toContain('Single isolated 404 is insufficient');
       });
 
-      expect(result.isPermanentGap).toBe(true);
-      expect(result.safeToMarkGap).toBe(true);
-      expect(result.classification).toBe('PERMANENT_GAP');
+      it('permits PERMANENT_GAP with Proof A: chapter confirmed absent from upstream catalog listing', async () => {
+        const result = await validatePermanentGapCandidate({
+          workId: dummyWorkId,
+          chapterNumber: 999,
+          chapterSortKey: 999,
+          source: 'primary_source',
+          httpStatus: 404,
+          errorMessage: '404 Chapter Not Found',
+          chapterAbsentFromUpstreamCatalog: true,
+          alternativeSources: [
+            { source: 'secondary_source', hasChapter: false },
+          ],
+        });
+
+        expect(result.isPermanentGap).toBe(true);
+        expect(result.safeToMarkGap).toBe(true);
+        expect(result.classification).toBe('PERMANENT_GAP');
+        expect(result.reason).toContain('confirmed absent from upstream catalog');
+      });
+
+      it('permits PERMANENT_GAP with Proof B: 404 confirmed repeatedly across independent probes', async () => {
+        const result = await validatePermanentGapCandidate({
+          workId: dummyWorkId,
+          chapterNumber: 999,
+          chapterSortKey: 999,
+          source: 'primary_source',
+          httpStatus: 404,
+          errorMessage: '404 Chapter Not Found',
+          consecutiveNotFoundCount: 2,
+          repeatedNotFoundConfirmed: true,
+          alternativeSources: [
+            { source: 'secondary_source', hasChapter: false },
+          ],
+        });
+
+        expect(result.isPermanentGap).toBe(true);
+        expect(result.safeToMarkGap).toBe(true);
+        expect(result.classification).toBe('PERMANENT_GAP');
+        expect(result.reason).toContain('confirmed 404 across repeated probes');
+      });
     });
-  });
 
   describe('markPermanentGapSafely Authorization Gate', () => {
     it('refuses to execute database mutation when transient error is passed', async () => {
@@ -180,7 +221,65 @@ describe('Project Nox — Gap Safety & Permanent Absence Invariant Tests', () =>
 
       expect(res.mutated).toBe(false);
       expect(res.validation.safeToMarkGap).toBe(false);
-      // Ensure NO UPDATE query was ever executed
+      expect(mockQuery).not.toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE importer_chapter_mappings'),
+        expect.anything()
+      );
+    });
+
+    it('STRICT FAIL-CLOSED: refuses mutation and sets UNVERIFIED when alternative source DB query throws', async () => {
+      // Mock client that throws an unexpected database error when checking alternative sources
+      const mockQuery = vi.fn().mockImplementation(async (sql: string) => {
+        if (sql.includes('importer_work_mappings')) {
+          throw new Error('Connection terminated unexpectedly / deadlock');
+        }
+        return { rows: [] };
+      });
+      const mockClient = { query: mockQuery };
+
+      const res = await markPermanentGapSafely(mockClient, {
+        workId: 'dummy-work',
+        chapterNumber: 50,
+        chapterSortKey: 50,
+        source: 'primary_source',
+        httpStatus: 404,
+        errorMessage: '404 Not Found',
+        chapterAbsentFromUpstreamCatalog: true,
+      });
+
+      expect(res.mutated).toBe(false);
+      expect(res.validation.safeToMarkGap).toBe(false);
+      expect(res.validation.classification).toBe('UNVERIFIED');
+      expect(res.validation.reason).toContain('ALTERNATIVE_SOURCE_CHECK_FAILED');
+      expect(res.error).toContain('ALTERNATIVE_SOURCE_CHECK_FAILED');
+      expect(mockQuery).not.toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE importer_chapter_mappings'),
+        expect.anything()
+      );
+    });
+
+    it('refuses mutation when single 404 lacks structural or repeated probe confirmation', async () => {
+      const mockQuery = vi.fn().mockImplementation(async (sql: string) => {
+        if (sql.includes('importer_work_mappings')) {
+          return { rows: [{ source: 'alt_source', has_chapter: false }] };
+        }
+        return { rows: [] };
+      });
+      const mockClient = { query: mockQuery };
+
+      const res = await markPermanentGapSafely(mockClient, {
+        workId: 'dummy-work',
+        chapterNumber: 126,
+        chapterSortKey: 126,
+        source: 'mangalivreto',
+        httpStatus: 404,
+        errorMessage: '404 Not Found',
+        // single isolated 404: no chapterAbsentFromUpstreamCatalog and consecutiveNotFoundCount = 1
+      });
+
+      expect(res.mutated).toBe(false);
+      expect(res.validation.safeToMarkGap).toBe(false);
+      expect(res.validation.classification).toBe('UNVERIFIED');
       expect(mockQuery).not.toHaveBeenCalledWith(
         expect.stringContaining('UPDATE importer_chapter_mappings'),
         expect.anything()
@@ -188,7 +287,6 @@ describe('Project Nox — Gap Safety & Permanent Absence Invariant Tests', () =>
     });
 
     it('refuses to execute database mutation when alternative source has chapter in DB', async () => {
-      // Mock client that returns has_chapter = true for an alternative source
       const mockQuery = vi.fn().mockImplementation(async (sql: string) => {
         if (sql.includes('importer_work_mappings')) {
           return {
@@ -208,6 +306,7 @@ describe('Project Nox — Gap Safety & Permanent Absence Invariant Tests', () =>
         source: 'mangalivreto',
         httpStatus: 404,
         errorMessage: '404 Not Found',
+        chapterAbsentFromUpstreamCatalog: true,
       });
 
       expect(res.mutated).toBe(false);
@@ -239,6 +338,7 @@ describe('Project Nox — Gap Safety & Permanent Absence Invariant Tests', () =>
         source: 'primary_source',
         httpStatus: 404,
         errorMessage: '404 Not Found on catalog',
+        chapterAbsentFromUpstreamCatalog: true,
       });
 
       expect(res.mutated).toBe(true);

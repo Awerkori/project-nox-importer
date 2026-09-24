@@ -67,9 +67,9 @@ export interface SchedulerDecision {
 export interface SchedulerConfig {
   enabled: boolean;
   shadowMode: boolean;
-  maxActiveNewWorks: number;       // Default: 4 (strict cohort limit)
-  maxActiveBackfillWorks: number;  // Default: 10 (controls horizontal fragmentation in P1)
-  maxInflightPerWork: number;      // Default: 2 (guarantees >= 9 works concurrently across 18 workers)
+  maxActiveNewWorks: number;       // Default: 8 (expanded ready pool across distinct sources)
+  maxActiveBackfillWorks: number;  // Default: 16 (broad ready work pool prevents worker starvation)
+  maxInflightPerWork: number;      // Default: 2 (strictly preserved: guarantees >= 4 concurrent works across 8 workers)
   slidingWindowSize: number;       // Default: 8 chapters admitted to QUEUED per active work
   slidingWindowMin: number;        // Default: 3 chapters low watermark before promoting next batch
   antiStarvationRatio: number;     // Default: 4 (after 4 P0 claims, allow 1 P1/P2 if eligible)

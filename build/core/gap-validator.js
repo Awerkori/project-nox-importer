@@ -71,7 +71,7 @@ export function isTransientError(errorOrStatus) {
  * Validates whether a missing chapter can safely be considered a permanent gap.
  */
 export async function validatePermanentGapCandidate(params) {
-    const { workId, chapterNumber, chapterSortKey, source, httpStatus, errorMessage, alternativeSources = [] } = params;
+    const { workId, chapterNumber, chapterSortKey, source, httpStatus, errorMessage, alternativeSources = [], chapterAbsentFromUpstreamCatalog = false, repeatedNotFoundConfirmed = false, consecutiveNotFoundCount = 1, } = params;
     // 1. Guard against transient errors: 403, Cloudflare, Turnstile, timeouts, 5xx
     const errorCombined = `${httpStatus || ''} ${errorMessage || ''}`.trim();
     if (isTransientError(httpStatus) || isTransientError(errorMessage) || isTransientError(errorCombined)) {
@@ -96,24 +96,42 @@ export async function validatePermanentGapCandidate(params) {
             safeToMarkGap: false,
         };
     }
-    // 3. For permanent gap confirmation, require explicit 404 Not Found on canonical chapter endpoint
-    // AND non-transient status
+    // 3. Structural Evidence Requirement:
+    // An automated permanent gap MUST prove structural absence via either:
+    // Proof A: Chapter explicitly confirmed absent in upstream catalog/listing
+    // Proof B: 404 confirmed repeatedly across independent probes (>= 2)
+    // A single isolated 404 is UNVERIFIED.
     const isExplicit404 = String(httpStatus).includes('404') || (errorMessage && /not found|404/i.test(errorMessage));
-    if (!isExplicit404) {
+    const hasProofA = chapterAbsentFromUpstreamCatalog === true;
+    const hasProofB = repeatedNotFoundConfirmed === true || consecutiveNotFoundCount >= 2;
+    if (!isExplicit404 && !hasProofA) {
         return {
             isPermanentGap: false,
             classification: 'UNVERIFIED',
-            reason: `No structural proof of permanent absence (status is not confirmed 404). Current info: ${errorCombined}`,
+            reason: `No structural proof of permanent absence (status is not confirmed 404 or absent). Current info: ${errorCombined}`,
             httpStatus,
             alternativeSourcesAvailable: [],
             safeToMarkGap: false,
         };
     }
-    // 4. Confirmed structural absence
+    if (isExplicit404 && !hasProofA && !hasProofB) {
+        return {
+            isPermanentGap: false,
+            classification: 'UNVERIFIED',
+            reason: `Single isolated 404 is insufficient for permanent gap. Requires repeated probe confirmation (>= 2) or upstream catalog absence proof.`,
+            httpStatus: 404,
+            alternativeSourcesAvailable: [],
+            safeToMarkGap: false,
+        };
+    }
+    // 4. Confirmed structural absence (Proof A or Proof B met, no alternatives possess chapter)
+    const proofDetail = hasProofA
+        ? 'confirmed absent from upstream catalog listing'
+        : `confirmed 404 across repeated probes (${consecutiveNotFoundCount} probes)`;
     return {
         isPermanentGap: true,
         classification: 'PERMANENT_GAP',
-        reason: `Structural absence confirmed: 404 Not Found on ${source}, no alternative sources have chapter ${chapterNumber}.`,
+        reason: `Structural absence confirmed (${proofDetail}) on ${source}, no alternative sources have chapter ${chapterNumber}.`,
         httpStatus: 404,
         alternativeSourcesAvailable: [],
         safeToMarkGap: true,
@@ -123,10 +141,13 @@ export async function validatePermanentGapCandidate(params) {
  * The ONLY safe, authorized pathway to mark a permanent gap (is_gap = true) in the database.
  * Enforces pre-validation via validatePermanentGapCandidate.
  * If safeToMarkGap !== true, mutation is strictly forbidden and rejected.
+ * FAILS CLOSED if alternative source query fails.
  */
 export async function markPermanentGapSafely(client, params) {
     // If alternativeSources wasn't explicitly supplied, check the database for actual alternative chapter mappings
     let alternatives = params.alternativeSources;
+    let alternativeLookupFailed = false;
+    let alternativeLookupError = '';
     if (!alternatives && client?.query) {
         try {
             const altRes = await client.query(`SELECT m.source,
@@ -145,9 +166,26 @@ export async function markPermanentGapSafely(client, params) {
                 hasChapter: Boolean(r.has_chapter),
             }));
         }
-        catch {
-            alternatives = [];
+        catch (err) {
+            alternativeLookupFailed = true;
+            alternativeLookupError = err?.message || String(err);
         }
+    }
+    // STRICT FAIL-CLOSED: If alternative source lookup failed, we CANNOT assume 0 alternatives!
+    if (alternativeLookupFailed) {
+        const unverifiedValidation = {
+            isPermanentGap: false,
+            classification: 'UNVERIFIED',
+            reason: `ALTERNATIVE_SOURCE_CHECK_FAILED: Query failed (${alternativeLookupError}). Cannot safely confirm permanent absence without reliable alternative verification.`,
+            httpStatus: params.httpStatus,
+            alternativeSourcesAvailable: [],
+            safeToMarkGap: false,
+        };
+        return {
+            mutated: false,
+            validation: unverifiedValidation,
+            error: `Mutation rejected by GapValidator: ${unverifiedValidation.reason}`,
+        };
     }
     const validation = await validatePermanentGapCandidate({
         ...params,
@@ -160,7 +198,7 @@ export async function markPermanentGapSafely(client, params) {
             error: `Mutation rejected by GapValidator: ${validation.reason}`,
         };
     }
-    // Permitted to mark permanent gap
+    // Permitted to mark permanent gap ONLY with confirmed structural absence
     try {
         await client.query(`UPDATE importer_chapter_mappings
        SET is_gap = true,
