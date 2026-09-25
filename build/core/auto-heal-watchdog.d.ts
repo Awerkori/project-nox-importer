@@ -29,6 +29,8 @@ export interface HealthPanelMetrics {
     publishableStaged: number;
     waitingPredecessorStaged: number;
     stuckStaged: number;
+    classifiedStaged?: number;
+    unclassifiedStaged?: number;
     recentCorrelatedBreakdown?: {
         alreadyCanonical: number;
         dedupeSource: number;
@@ -94,12 +96,15 @@ export declare class AutoHealWatchdog {
     private lastLevel2At;
     private lastRestartAt;
     private lastSweepAt;
-    private firstStuckDetectedAt;
+    private stuckIdentities;
     private circuitBreakerOpen;
     private cachedTelemetry;
     private lastTelemetryAt;
     private telemetryCacheTtlMs;
     constructor(options: AutoHealWatchdogOptions);
+    getStuckIdentityAge(key: string): number;
+    setStuckIdentity(key: string, detectedAtMs: number): void;
+    clearStuckIdentities(): void;
     /**
      * Starts the background evaluation loop.
      */
@@ -128,6 +133,7 @@ export declare class AutoHealWatchdog {
         publishableStaged?: number;
         waitingPredecessorStaged?: number;
         stuckStaged?: number;
+        unclassifiedStaged?: number;
         stuckStagedAgeSec?: number;
     }): {
         status: ImporterHealthStatus;
@@ -150,6 +156,7 @@ export declare class AutoHealWatchdog {
         publishableStaged?: number;
         waitingPredecessorStaged?: number;
         stuckStaged?: number;
+        unclassifiedStaged?: number;
         stuckStagedAgeSec?: number;
     }): ImporterHealthStatus;
     /**

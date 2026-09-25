@@ -48,6 +48,8 @@ export interface HealthPanelMetrics {
   publishableStaged: number;
   waitingPredecessorStaged: number;
   stuckStaged: number;
+  classifiedStaged?: number;
+  unclassifiedStaged?: number;
   recentCorrelatedBreakdown?: {
     alreadyCanonical: number;
     dedupeSource: number;
@@ -118,7 +120,7 @@ export class AutoHealWatchdog {
   private lastLevel2At = 0;
   private lastRestartAt = 0;
   private lastSweepAt = 0;
-  private firstStuckDetectedAt: number | null = null;
+  private stuckIdentities = new Map<string, number>();
   private circuitBreakerOpen = false;
 
   private cachedTelemetry: HealthPanelMetrics | null = null;
@@ -135,6 +137,20 @@ export class AutoHealWatchdog {
     this.onControlledRestart = options.onControlledRestart;
     this.intervalMs = options.intervalMs ?? 60_000;
     this.workerId = options.workerId ?? 'discloud-importer-1';
+  }
+
+  public getStuckIdentityAge(key: string): number {
+    const detectedAt = this.stuckIdentities.get(key);
+    if (!detectedAt) return 0;
+    return Math.floor((Date.now() - detectedAt) / 1000);
+  }
+
+  public setStuckIdentity(key: string, detectedAtMs: number): void {
+    this.stuckIdentities.set(key, detectedAtMs);
+  }
+
+  public clearStuckIdentities(): void {
+    this.stuckIdentities.clear();
   }
 
   /**
@@ -226,6 +242,11 @@ export class AutoHealWatchdog {
     let publishableStaged = 0;
     let waitingPredecessorStaged = 0;
     let stuckStaged = 0;
+    let classifiedStaged = 0;
+    let unclassifiedStaged = 0;
+    let stuckStagedAgeSec = 0;
+
+    const currentStuckKeys = new Set<string>();
 
     try {
       const mapRes = await this.pool.query(`
@@ -245,6 +266,7 @@ export class AutoHealWatchdog {
             FROM importer_chapter_mappings m
             WHERE m.status IN ('STAGED', 'WAITING_FOR_GAP') AND m.work_id IS NOT NULL
             GROUP BY m.work_id
+            ORDER BY MIN(m.chapter_sort_key) ASC, m.work_id ASC
             LIMIT 40
           ),
           works_with_published AS (
@@ -273,13 +295,7 @@ export class AutoHealWatchdog {
                   AND pq.task_type = 'IMPORT_CHAPTER'
                   AND pq.status IN ('QUEUED', 'RETRY', 'IMPORTING')
                   AND pq.chapter_sort_key < sw.frontier_sort_key
-              ) as has_predecessor_in_queue,
-              EXISTS (
-                SELECT 1 
-                FROM importer_queue aq
-                WHERE (aq.payload->>'workId') = sw.work_id::text
-                  AND aq.status IN ('QUEUED', 'RETRY', 'IMPORTING')
-              ) as has_active_queue
+              ) as has_predecessor_in_queue
             FROM staged_works sw
           )
           SELECT 
@@ -289,7 +305,6 @@ export class AutoHealWatchdog {
             max_published,
             has_predecessor_in_mapping,
             has_predecessor_in_queue,
-            has_active_queue,
             CASE
               WHEN (max_published IS NOT NULL AND frontier_sort_key <= max_published + 1.05 AND NOT has_predecessor_in_queue)
                 OR (max_published IS NULL AND NOT has_predecessor_in_mapping AND NOT has_predecessor_in_queue)
@@ -304,34 +319,70 @@ export class AutoHealWatchdog {
           publishableStaged = parseInt(pubStagedRes.rows[0]?.publishable_staged || '0', 10);
           waitingPredecessorStaged = parseInt(pubStagedRes.rows[0]?.waiting_predecessor_staged || '0', 10);
           stuckStaged = parseInt(pubStagedRes.rows[0]?.stuck_staged || '0', 10);
+          classifiedStaged = pubStagedRes.rows[0]?.classified_staged !== undefined
+            ? parseInt(pubStagedRes.rows[0]?.classified_staged, 10)
+            : publishableStaged + waitingPredecessorStaged + stuckStaged;
+          unclassifiedStaged = pubStagedRes.rows[0]?.unclassified_staged !== undefined
+            ? parseInt(pubStagedRes.rows[0]?.unclassified_staged, 10)
+            : Math.max(0, stagedUnique - classifiedStaged);
+
+          if (stuckStaged > 0) {
+            const stuckKey = pubStagedRes.rows[0]?.stuck_key || 'mock-stuck';
+            currentStuckKeys.add(stuckKey);
+            if (!this.stuckIdentities.has(stuckKey)) {
+              this.stuckIdentities.set(stuckKey, nowMs);
+            }
+          }
         } else if (pubStagedRes.rows[0]?.publishable_staged !== undefined) {
           publishableStaged = parseInt(pubStagedRes.rows[0]?.publishable_staged || '0', 10);
           waitingPredecessorStaged = Math.max(0, stagedUnique - publishableStaged);
           stuckStaged = 0;
+          classifiedStaged = publishableStaged + waitingPredecessorStaged;
+          unclassifiedStaged = Math.max(0, stagedUnique - classifiedStaged);
         } else {
           for (const row of pubStagedRes.rows) {
             const totalStaged = parseInt(row.total_staged_chapters || '1', 10);
-            const isPub = parseInt(row.is_frontier_publishable || '0', 10) === 1;
-            if (isPub) {
+            const isCandidatePub = parseInt(row.is_frontier_publishable || '0', 10) === 1;
+
+            let canActuallyPublish = isCandidatePub;
+
+            // Chapter barrier canonical alignment: if candidate is publishable and publicationBarrier is present
+            if (canActuallyPublish && this.publicationBarrier && row.work_id && row.frontier_sort_key !== undefined) {
+              try {
+                const check = await this.publicationBarrier.checkBarrier(row.work_id, parseFloat(row.frontier_sort_key));
+                if (!check.canPublish) {
+                  canActuallyPublish = false;
+                }
+              } catch (err: any) {
+                this.logger.warn('Error checking individual chapter publication barrier', { workId: row.work_id, error: err?.message });
+              }
+            }
+
+            if (canActuallyPublish) {
               publishableStaged += 1; // Only frontier chapter is actionable
               waitingPredecessorStaged += Math.max(0, totalStaged - 1);
             } else {
-              // Non-publishable work: check work-scoped active queue
-              if (row.has_active_queue) {
+              // Non-publishable work: WAITING_PREDECESSOR ONLY if there is a real predecessor in queue!
+              const hasPredecessor = Boolean(row.has_predecessor_in_queue);
+              if (hasPredecessor) {
                 waitingPredecessorStaged += totalStaged;
               } else {
                 stuckStaged += totalStaged;
+                const stuckKey = row.work_id ? `${row.work_id}:${row.frontier_sort_key}` : `mock-stuck-${stuckStaged}`;
+                currentStuckKeys.add(stuckKey);
+                if (!this.stuckIdentities.has(stuckKey)) {
+                  this.stuckIdentities.set(stuckKey, nowMs);
+                }
               }
             }
           }
 
-          const accounted = publishableStaged + waitingPredecessorStaged + stuckStaged;
-          if (accounted < stagedUnique) {
-            waitingPredecessorStaged += (stagedUnique - accounted);
-          }
+          classifiedStaged = publishableStaged + waitingPredecessorStaged + stuckStaged;
+          unclassifiedStaged = Math.max(0, stagedUnique - classifiedStaged);
+          // NOTE: Unclassified staged chapters are NEVER silently added to waitingPredecessorStaged!
         }
 
-        // Shared barrier semantics: If PublicationSafetyBarrier is CLOSED or RECOVERING, nothing is publishable
+        // Global Safety Barrier guard: If PublicationSafetyBarrier is CLOSED or RECOVERING, nothing is publishable globally
         if (this.safetyBarrier) {
           try {
             const barrierState = await this.safetyBarrier.getState();
@@ -348,17 +399,22 @@ export class AutoHealWatchdog {
       this.logger.warn('Failed querying staged classification', { error: err?.message });
     }
 
-    // Track duration of stuck staged chapters
-    if (stuckStaged > 0) {
-      if (this.firstStuckDetectedAt === null) {
-        this.firstStuckDetectedAt = nowMs;
+    // Evict identities that are no longer stuck in this cycle
+    for (const existingKey of Array.from(this.stuckIdentities.keys())) {
+      if (!currentStuckKeys.has(existingKey)) {
+        this.stuckIdentities.delete(existingKey);
       }
-    } else {
-      this.firstStuckDetectedAt = null;
     }
-    const stuckStagedAgeSec = this.firstStuckDetectedAt
-      ? Math.floor((nowMs - this.firstStuckDetectedAt) / 1000)
-      : 0;
+
+    // Compute max age among currently stuck identities
+    let maxStuckAgeMs = 0;
+    for (const detectedAt of this.stuckIdentities.values()) {
+      const age = nowMs - detectedAt;
+      if (age > maxStuckAgeMs) {
+        maxStuckAgeMs = age;
+      }
+    }
+    stuckStagedAgeSec = Math.floor(maxStuckAgeMs / 1000);
 
     // 4. Scheduler State (active_works, claimable_works)
     let activeWorks: any[] = [];
@@ -496,6 +552,7 @@ export class AutoHealWatchdog {
       publishableStaged,
       waitingPredecessorStaged,
       stuckStaged,
+      unclassifiedStaged,
       stuckStagedAgeSec,
     });
 
@@ -520,6 +577,8 @@ export class AutoHealWatchdog {
       publishableStaged,
       waitingPredecessorStaged,
       stuckStaged,
+      classifiedStaged,
+      unclassifiedStaged,
       recentCorrelatedBreakdown,
       lastAutoHealAt: this.lastAutoHealAt,
       autoRestartCount1h,
@@ -553,6 +612,7 @@ export class AutoHealWatchdog {
     publishableStaged?: number;
     waitingPredecessorStaged?: number;
     stuckStaged?: number;
+    unclassifiedStaged?: number;
     stuckStagedAgeSec?: number;
   }): {
     status: ImporterHealthStatus;
@@ -562,6 +622,7 @@ export class AutoHealWatchdog {
     const publishableStaged = params.publishableStaged ?? (params.hasStagedPublications ? 1 : 0);
     const waitingPredecessorStaged = params.waitingPredecessorStaged ?? 0;
     const stuckStaged = params.stuckStaged ?? 0;
+    const unclassifiedStaged = params.unclassifiedStaged ?? 0;
 
     // 1. Processing Health Dimension (based on chapter completions)
     let processingHealth: ProcessingHealth;
@@ -581,16 +642,17 @@ export class AutoHealWatchdog {
       publicationHealth = 'HEALTHY';
     } else if (params.lastFreshVisibleAgeSec <= 15 * 60) {
       publicationHealth = 'DEGRADED';
-    } else if (params.recentCompletionsAreDedupeOnly && publishableStaged === 0 && stuckStaged === 0) {
-      // Completed chapters were deduplicated/canonical-only and no publishable or stuck staged backlog exists
+    } else if (params.recentCompletionsAreDedupeOnly && publishableStaged === 0 && stuckStaged === 0 && unclassifiedStaged === 0) {
+      // Completed chapters were deduplicated/canonical-only and no publishable, stuck, or unclassified staged backlog exists
       publicationHealth = 'NO_FRESH_EXPECTED';
     } else if (
       params.eligibleJobs === 0 &&
       params.importingCount === 0 &&
       publishableStaged === 0 &&
-      stuckStaged === 0
+      stuckStaged === 0 &&
+      unclassifiedStaged === 0
     ) {
-      // No active work and zero actionable or stuck chapters waiting -> legitimate idle / no fresh expected
+      // No active work and zero actionable, stuck, or unclassified chapters waiting -> legitimate idle / no fresh expected
       publicationHealth = 'NO_FRESH_EXPECTED';
     } else if (params.lastFreshVisibleAgeSec < 30 * 60) {
       publicationHealth = 'STALLED';
@@ -602,13 +664,14 @@ export class AutoHealWatchdog {
     let status: ImporterHealthStatus;
 
     // IDLE is ONLY allowed when:
-    // eligibleJobs === 0 AND importingCount === 0 AND publishableStaged === 0 AND stuckStaged === 0
-    // (Meaning: no processable work AND no actionable publication AND no stuck chapters)
+    // eligibleJobs === 0 AND importingCount === 0 AND publishableStaged === 0 AND stuckStaged === 0 AND unclassifiedStaged === 0
+    // (Meaning: no processable work AND no actionable publication AND no stuck chapters AND no unclassified staged chapters)
     const isTrulyIdle =
       params.eligibleJobs === 0 &&
       params.importingCount === 0 &&
       publishableStaged === 0 &&
-      stuckStaged === 0;
+      stuckStaged === 0 &&
+      unclassifiedStaged === 0;
 
     if (isTrulyIdle) {
       status = 'IDLE';
@@ -628,8 +691,8 @@ export class AutoHealWatchdog {
           status = 'STALLED';
         }
       }
-    } else if (params.eligibleJobs === 0 && params.importingCount === 0 && (publishableStaged > 0 || stuckStaged > 0)) {
-      // Eligible = 0, Importing = 0, BUT publishable or stuck staged backlog exists!
+    } else if (params.eligibleJobs === 0 && params.importingCount === 0 && (publishableStaged > 0 || stuckStaged > 0 || unclassifiedStaged > 0)) {
+      // Eligible = 0, Importing = 0, BUT publishable, stuck, or unclassified staged backlog exists!
       // This is NEVER IDLE!
       if (publishableStaged > 0) {
         if (publicationHealth === 'CRITICAL_STALL') {
@@ -641,9 +704,9 @@ export class AutoHealWatchdog {
         } else {
           status = 'HEALTHY';
         }
-      } else {
+      } else if (stuckStaged > 0) {
         // stuckStaged > 0 (publishable = 0)
-        // Stuck staged must be handled based on duration
+        // Stuck staged must be handled based on duration of the specific stuck identity
         const effectiveStuckAge = params.stuckStagedAgeSec ?? params.lastFreshVisibleAgeSec;
         if (effectiveStuckAge >= 30 * 60) {
           status = 'CRITICAL_STALL';
@@ -651,6 +714,19 @@ export class AutoHealWatchdog {
         } else if (effectiveStuckAge >= 15 * 60) {
           status = 'STALLED';
           publicationHealth = 'STALLED';
+        } else {
+          status = 'DEGRADED';
+          if (publicationHealth === 'NO_FRESH_EXPECTED' || publicationHealth === 'HEALTHY') {
+            publicationHealth = 'DEGRADED';
+          }
+        }
+      } else {
+        // unclassifiedStaged > 0 (publishable = 0, stuck = 0)
+        // Cannot be IDLE because unclassified staged work exists
+        if (publicationHealth === 'CRITICAL_STALL') {
+          status = 'CRITICAL_STALL';
+        } else if (publicationHealth === 'STALLED') {
+          status = 'STALLED';
         } else {
           status = 'DEGRADED';
           if (publicationHealth === 'NO_FRESH_EXPECTED' || publicationHealth === 'HEALTHY') {
@@ -689,6 +765,7 @@ export class AutoHealWatchdog {
     publishableStaged?: number;
     waitingPredecessorStaged?: number;
     stuckStaged?: number;
+    unclassifiedStaged?: number;
     stuckStagedAgeSec?: number;
   }): ImporterHealthStatus {
     return this.evaluateMultidimensionalHealth(params).status;

@@ -879,6 +879,8 @@ export class ImporterEngine {
             publishableStaged: healthMetrics.publishableStaged,
             waitingPredecessorStaged: healthMetrics.waitingPredecessorStaged,
             stuckStaged: healthMetrics.stuckStaged,
+            classifiedStaged: healthMetrics.classifiedStaged,
+            unclassifiedStaged: healthMetrics.unclassifiedStaged,
             lastAutoHeal: healthMetrics.lastAutoHealAt,
             autoRestartCount1h: healthMetrics.autoRestartCount1h,
             circuitBreakerOpen: healthMetrics.circuitBreakerOpen,
