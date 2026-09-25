@@ -340,33 +340,19 @@ export class WorkAffinityScheduler {
         // and works marked BLOCKED.
         // -------------------------------------------------------------
         const eligibleP1Works = p1Works.filter((w) => w.state === 'FILLING' && w.criticalGapSortKey === null && (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork);
-        // Prioritize works whose primary source has highest available headroom (REAL READY NOW rank)
+        // Prioritize works whose primary source is currently ready/unconstrained (READY NOW priority)
         if (allowedSources && allowedSources.length > 0) {
-            // Group works by source headroom rank (lower index in allowedSources = higher available headroom)
-            const rankMap = new Map();
-            for (const w of eligibleP1Works) {
-                const r = allowedSources.indexOf(w.primarySource);
-                const rank = r >= 0 ? r : 999999;
-                const list = rankMap.get(rank) || [];
-                list.push(w);
-                rankMap.set(rank, list);
-            }
-            const sortedRanks = Array.from(rankMap.keys()).sort((a, b) => a - b);
-            const reordered = [];
-            for (const rank of sortedRanks) {
-                const bucket = rankMap.get(rank);
-                // Apply round-robin within the same rank bucket for fair work sharing
-                const bucketStart = (this.rrIndexP1 % bucket.length);
-                for (let i = 0; i < bucket.length; i++) {
-                    reordered.push(bucket[(bucketStart + i) % bucket.length]);
-                }
-            }
-            eligibleP1Works.length = 0;
-            eligibleP1Works.push(...reordered);
+            eligibleP1Works.sort((a, b) => {
+                const aReady = allowedSources.includes(a.primarySource) ? 1 : 0;
+                const bReady = allowedSources.includes(b.primarySource) ? 1 : 0;
+                return bReady - aReady;
+            });
         }
         if (eligibleP1Works.length > 0) {
+            const startIdx = this.rrIndexP1 % eligibleP1Works.length;
             for (let i = 0; i < eligibleP1Works.length; i++) {
-                const targetWork = eligibleP1Works[i];
+                const idx = (startIdx + i) % eligibleP1Works.length;
+                const targetWork = eligibleP1Works[idx];
                 const p1Job = await this.claimSingleJob(this.pool, {
                     workerId: options.workerId,
                     leaseMin,
@@ -375,7 +361,7 @@ export class WorkAffinityScheduler {
                     disallowedWorkIds: fullWorkIds,
                 });
                 if (p1Job) {
-                    this.rrIndexP1++;
+                    this.rrIndexP1 = idx + 1;
                     const waitTimeMs = performance.now() - t0;
                     this.onJobStarted(targetWork.workId, p1Job.chapter_sort_key);
                     this.p1Count1h++;
@@ -403,33 +389,19 @@ export class WorkAffinityScheduler {
         // guaranteeing newly admitted works are not starved by massive backlog.
         // -------------------------------------------------------------
         const eligibleP2Works = p2Works.filter((w) => (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork);
-        // Prioritize works whose primary source has highest available headroom (REAL READY NOW rank)
+        // Prioritize works whose primary source is currently ready/unconstrained (READY NOW priority)
         if (allowedSources && allowedSources.length > 0) {
-            // Group works by source headroom rank (lower index in allowedSources = higher available headroom)
-            const rankMap = new Map();
-            for (const w of eligibleP2Works) {
-                const r = allowedSources.indexOf(w.primarySource);
-                const rank = r >= 0 ? r : 999999;
-                const list = rankMap.get(rank) || [];
-                list.push(w);
-                rankMap.set(rank, list);
-            }
-            const sortedRanks = Array.from(rankMap.keys()).sort((a, b) => a - b);
-            const reordered = [];
-            for (const rank of sortedRanks) {
-                const bucket = rankMap.get(rank);
-                // Apply round-robin within the same rank bucket for fair work sharing
-                const bucketStart = (this.rrIndexP2 % bucket.length);
-                for (let i = 0; i < bucket.length; i++) {
-                    reordered.push(bucket[(bucketStart + i) % bucket.length]);
-                }
-            }
-            eligibleP2Works.length = 0;
-            eligibleP2Works.push(...reordered);
+            eligibleP2Works.sort((a, b) => {
+                const aReady = allowedSources.includes(a.primarySource) ? 1 : 0;
+                const bReady = allowedSources.includes(b.primarySource) ? 1 : 0;
+                return bReady - aReady;
+            });
         }
         if (eligibleP2Works.length > 0) {
+            const startIdx = this.rrIndexP2 % eligibleP2Works.length;
             for (let i = 0; i < eligibleP2Works.length; i++) {
-                const targetWork = eligibleP2Works[i];
+                const idx = (startIdx + i) % eligibleP2Works.length;
+                const targetWork = eligibleP2Works[idx];
                 const p2Job = await this.claimSingleJob(this.pool, {
                     workerId: options.workerId,
                     leaseMin,
@@ -438,7 +410,7 @@ export class WorkAffinityScheduler {
                     disallowedWorkIds: fullWorkIds,
                 });
                 if (p2Job) {
-                    this.rrIndexP2++;
+                    this.rrIndexP2 = idx + 1;
                     const waitTimeMs = performance.now() - t0;
                     this.onJobStarted(targetWork.workId, p2Job.chapter_sort_key);
                     this.p2Count1h++;
@@ -588,11 +560,7 @@ export class WorkAffinityScheduler {
               AND sm.status = 'STAGED'
               AND sm.chapter_sort_key <= q.chapter_sort_key
           )
-        ORDER BY 
-          q.priority DESC, 
-          CASE WHEN $1::text[] IS NOT NULL THEN array_position($1::text[], q.source) ELSE 1 END ASC NULLS LAST,
-          q.chapter_sort_key ASC NULLS LAST, 
-          q.next_run_at ASC
+        ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
       )
@@ -719,7 +687,6 @@ export class WorkAffinityScheduler {
           COALESCE(sr.created_at, '9999-12-31'::timestamptz) ASC,
           q.priority DESC, 
           q.chapter_sort_key ASC NULLS LAST, 
-          CASE WHEN $1::text[] IS NOT NULL THEN array_position($1::text[], q.source) ELSE 1 END ASC NULLS LAST,
           q.next_run_at ASC
         FOR UPDATE OF q SKIP LOCKED
         LIMIT 1
@@ -833,7 +800,6 @@ export class WorkAffinityScheduler {
           END ASC,
           q.priority DESC, 
           q.chapter_sort_key ASC NULLS LAST, 
-          CASE WHEN $1::text[] IS NOT NULL THEN array_position($1::text[], q.source) ELSE 1 END ASC NULLS LAST,
           q.next_run_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
