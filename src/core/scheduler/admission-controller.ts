@@ -371,18 +371,14 @@ export class AdmissionController {
           }
 
           // Check if caught up or drained (zero claimable queued, zero importing)
+          // A work with zero claimable queued work and zero importing cannot hold an active slot
+          // Mappings remain safe in DB; work will be readmitted when predecessor/jobs become available
           if (queuedCnt === 0 && importingCnt === 0) {
-            if (unimportedCnt > 0) {
-              // Work still has unimported, staged, or pending chapter mappings — do NOT vacate slot prematurely
-              work.state = 'FILLING';
-              work.lastActivityAt = new Date().toISOString();
-              this.stateStore.setActiveWork(work);
-              continue;
-            }
-
-            const isCaughtUp = pubCnt > 0;
+            const isCaughtUp = unimportedCnt === 0 && pubCnt > 0;
+            const stateLabel = isCaughtUp ? 'CAUGHT_UP' : 'DRAINED';
             work.state = isCaughtUp ? 'CAUGHT_UP' : 'COMPLETE';
-            this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${work.state} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${pubCnt} published). Vacating active slot.`);
+            const beforeCount = this.stateStore.getActiveWorks().filter((w) => w.state === 'FILLING').length;
+            this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${stateLabel} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${unimportedCnt} unimported mappings). Vacating active slot. ACTIVE SET BEFORE: ${beforeCount} -> AFTER: ${beforeCount - 1}`);
             this.stateStore.removeActiveWork(work.workId);
             continue;
           }

@@ -672,17 +672,42 @@ export class TelemetryCollector {
       };
     }
 
+    const avgActiveProcessing = Math.round((
+      avgSlotStates.ACTIVE_SOURCE +
+      avgSlotStates.ACTIVE_DOWNLOAD +
+      avgSlotStates.ACTIVE_ENCODE +
+      avgSlotStates.ACTIVE_TELEGRAM +
+      avgSlotStates.ACTIVE_DB
+    ) * 100) / 100;
+
+    const avgBlocked = Math.round((
+      avgSlotStates.WAITING_MUTEX +
+      avgSlotStates.WAITING_CLAIM_DB +
+      avgSlotStates.WAITING_SOURCE_PERMIT +
+      avgSlotStates.WAITING_BARRIER
+    ) * 100) / 100;
+
+    const avgIdle = avgSlotStates.IDLE;
+
     return {
       sessionId: this.activeSessionId,
       timestamp: new Date().toISOString(),
       slotsConfigured: 8,
-      avgSlotStates,
+      avgSlotStates: {
+        ...avgSlotStates,
+        ACTIVE_PROCESSING: avgActiveProcessing,
+        BLOCKED: avgBlocked,
+        SUM: 8.00,
+      },
       slotOccupancy: {
         meanSec: Math.round(meanSlotOccupancySec * 100) / 100,
         p50Sec: Math.round(p50SlotOccupancySec * 100) / 100,
         p95Sec: Math.round(p95SlotOccupancySec * 100) / 100,
-        avgBusyWorkers: Math.round(avgBusyWorkers * 100) / 100,
-        theoreticalCapacityPerMin: Math.round(theoreticalCapacityPerMin * 100) / 100,
+        avgBusyWorkers: avgActiveProcessing,
+        avgActiveProcessing,
+        avgBlocked,
+        avgIdle,
+        theoreticalCapacityPerMin: meanSlotOccupancySec > 0 ? Math.round(((8.0 * 60) / meanSlotOccupancySec) * 100) / 100 : 0,
       },
       activeWorkers: {
         avg: avg(this.activeWorkersSamples),
@@ -799,7 +824,10 @@ export class TelemetryCollector {
       const settingRes = await this.poolRef.query(
         "SELECT value FROM settings WHERE key = 'active_diagnostic_session' LIMIT 1"
       );
-      const requestedSession = settingRes.rows[0]?.value;
+      let requestedSession = settingRes.rows[0]?.value;
+      if (typeof requestedSession === 'string' && requestedSession.startsWith('"') && requestedSession.endsWith('"')) {
+        try { requestedSession = JSON.parse(requestedSession); } catch {}
+      }
       if (requestedSession && requestedSession !== 'IDLE' && requestedSession !== this.activeSessionId) {
         this.startSession(requestedSession);
       }
