@@ -1,5 +1,5 @@
 import type pg from 'pg';
-export type SlotStateType = 'ACTIVE_PROCESSING' | 'IDLE' | 'WAITING_FOR_JOB' | 'WAITING_FOR_SOURCE' | 'WAITING_FOR_SOURCE_RATE_LIMIT' | 'WAITING_FOR_DOWNLOAD' | 'WAITING_FOR_TELEGRAM' | 'WAITING_FOR_DATABASE' | 'WAITING_FOR_DB_POOL' | 'WAITING_FOR_PUBLICATION_BARRIER' | 'WAITING_FOR_RETRY_BACKOFF' | 'WAITING_FOR_MUTEX' | 'PROTECTIVE_STOP';
+export type SlotStateType = 'WAITING_MUTEX' | 'WAITING_CLAIM_DB' | 'WAITING_SOURCE_PERMIT' | 'ACTIVE_SOURCE' | 'ACTIVE_DOWNLOAD' | 'ACTIVE_ENCODE' | 'ACTIVE_TELEGRAM' | 'ACTIVE_DB' | 'WAITING_BARRIER' | 'IDLE';
 export interface ChapterMetricRecord {
     jobId: string;
     source: string;
@@ -7,17 +7,22 @@ export interface ChapterMetricRecord {
     pageCount: number;
     totalBytes: number;
     totalDurationMs: number;
+    totalSlotOccupancyMs: number;
     claim_acquire_ms: number;
+    mutex_wait_ms: number;
+    claim_db_ms: number;
     metadata_load_ms: number;
     source_fetch_ms: number;
     page_resolution_ms: number;
     download_ms: number;
+    encode_ms: number;
     telegram_upload_ms: number;
     db_wait_ms: number;
     db_publish_ms: number;
     rate_limit_wait_ms: number;
     semaphore_wait_ms: number;
     other_wait_ms: number;
+    barrier_wait_ms?: number;
     slowReason?: string;
     timestamp: string;
 }
@@ -47,6 +52,7 @@ export declare class TelemetryCollector {
     private activeWorkersSamples;
     private activeWorkersDistribution;
     private sourceActiveSamples;
+    private slotStateDistributionSamples;
     private samplerTimer;
     private dbPoolWaitSamples;
     private dbPoolQueuedSamples;
@@ -83,7 +89,7 @@ export declare class TelemetryCollector {
     startSession(sessionId: string): void;
     getSessionId(): string | null;
     registerSlot(slotIndex: number): void;
-    setSlotState(slotIndex: number, newState: SlotStateType, context?: string): void;
+    setSlotState(slotIndex: number, newState: SlotStateType | string, context?: string): void;
     recordDbPoolWait(waitMs: number, waitingCount: number): void;
     trackActiveDbQuery(delta: number): void;
     trackActiveTelegramUpload(delta: number): void;
@@ -104,6 +110,14 @@ export declare class TelemetryCollector {
         sessionId: string | null;
         timestamp: string;
         slotsConfigured: number;
+        avgSlotStates: Record<SlotStateType, number>;
+        slotOccupancy: {
+            meanSec: number;
+            p50Sec: number;
+            p95Sec: number;
+            avgBusyWorkers: number;
+            theoreticalCapacityPerMin: number;
+        };
         activeWorkers: {
             avg: number;
             p50: number;
@@ -143,6 +157,20 @@ export declare class TelemetryCollector {
                 max: number;
             };
             stages: {
+                mutexWait: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    p99: number;
+                    max: number;
+                };
+                claimDb: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    p99: number;
+                    max: number;
+                };
                 claim: {
                     avg: number;
                     p50: number;
@@ -175,7 +203,15 @@ export declare class TelemetryCollector {
                     p99: number;
                     max: number;
                 };
-                imageDownload: {
+                download: {
+                    avg: number;
+                    p50: number;
+                    p75: number;
+                    p95: number;
+                    p99: number;
+                    max: number;
+                };
+                encode: {
                     avg: number;
                     p50: number;
                     p75: number;
@@ -241,17 +277,22 @@ export declare class TelemetryCollector {
             pageCount: number;
             totalBytes: number;
             totalDurationMs: number;
+            totalSlotOccupancyMs: number;
             claim_acquire_ms: number;
+            mutex_wait_ms: number;
+            claim_db_ms: number;
             metadata_load_ms: number;
             source_fetch_ms: number;
             page_resolution_ms: number;
             download_ms: number;
+            encode_ms: number;
             telegram_upload_ms: number;
             db_wait_ms: number;
             db_publish_ms: number;
             rate_limit_wait_ms: number;
             semaphore_wait_ms: number;
             other_wait_ms: number;
+            barrier_wait_ms?: number;
             timestamp: string;
         }[];
         sourceDistribution: Record<string, {

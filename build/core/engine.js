@@ -1184,8 +1184,9 @@ export class ImporterEngine {
                 telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 const claimJitterMs = 10 + Math.floor(Math.random() * 20);
                 await this.sleep(claimJitterMs);
-                telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_JOB');
+                telemetryCollector.setSlotState(slotIndex, 'WAITING_MUTEX');
                 const claimT0 = performance.now();
+                let claimDbMs = 0;
                 const claimResult = await this.chapterClaimMutex.runExclusive(async () => {
                     // A. Check global chapter semaphore capacity first
                     if (!globalSem.tryAcquire()) {
@@ -1198,7 +1199,9 @@ export class ImporterEngine {
                         return null;
                     }
                     // C. Query Yugabyte for the highest priority job among ELIGIBLE sources via WorkAffinityScheduler
+                    telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
                     let candidateJob = null;
+                    const tDb0 = performance.now();
                     try {
                         candidateJob = await this.scheduler.acquireNextChapterJob({
                             workerId: this.config.WORKER_ID,
@@ -1211,17 +1214,20 @@ export class ImporterEngine {
                         globalSem.release();
                         return null;
                     }
+                    claimDbMs = performance.now() - tDb0;
                     if (!candidateJob) {
                         globalSem.release();
                         return null;
                     }
                     // D. Atomically acquire the source permit
+                    telemetryCollector.setSlotState(slotIndex, 'WAITING_SOURCE_PERMIT');
                     const sourceSem = this.autotuner.getSourceSemaphore(candidateJob.source);
                     if (sourceSem.tryAcquire()) {
                         return {
                             job: candidateJob,
                             sourcePermitAcquired: true,
                             globalPermitAcquired: true,
+                            claimDbMs,
                         };
                     }
                     else {
@@ -1236,19 +1242,41 @@ export class ImporterEngine {
                     }
                 });
                 if (!claimResult || !claimResult.job) {
-                    telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_SOURCE', 'waiting_for_eligible_source');
+                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
                     const emptyBackoffMs = 100 + Math.floor(Math.random() * 150);
                     await this.sleep(emptyBackoffMs);
                     continue;
                 }
-                const job = claimResult.job;
-                const sourcePermitAcquired = claimResult.sourcePermitAcquired;
-                const globalPermitAcquired = claimResult.globalPermitAcquired;
+                const { job, sourcePermitAcquired, globalPermitAcquired } = claimResult;
+                const mutexWaitMs = this.chapterClaimMutex.getLastWaitMs?.() || 0;
+                // Post-Mutex Concurrent Validation (runs concurrently, zero blocking of other workers!)
+                telemetryCollector.setSlotState(slotIndex, 'ACTIVE_DB', `validating ch ${job.payload?.chapterNumber}`);
+                const validation = await this.scheduler.validateClaimedJobPostMutex(job);
+                if (!validation.valid) {
+                    if (job.payload?.workId) {
+                        this.scheduler.onJobFinished(job.payload.workId, job.chapter_sort_key);
+                    }
+                    if (sourcePermitAcquired) {
+                        this.autotuner.getSourceSemaphore(job.source).release();
+                    }
+                    if (globalPermitAcquired) {
+                        globalSem.release();
+                    }
+                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
+                    await this.sleep(15);
+                    continue;
+                }
                 const claimDurationMs = performance.now() - claimT0;
                 const sourceSem = this.autotuner.getSourceSemaphore(job.source);
-                telemetryCollector.setSlotState(slotIndex, 'ACTIVE_PROCESSING', `${job.source} ch ${job.payload?.chapterNumber}`);
+                telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', `${job.source} ch ${job.payload?.chapterNumber}`);
                 try {
-                    await this.executeJobDirectly(job, { claimDurationMs, semWaitMs: 0 });
+                    await this.executeJobDirectly(job, {
+                        claimDurationMs,
+                        semWaitMs: 0,
+                        slotIndex,
+                        mutexWaitMs,
+                        claimDbMs,
+                    });
                 }
                 finally {
                     if (job.payload?.workId) {
@@ -2840,6 +2868,9 @@ export class ImporterEngine {
                         notifyConsumer();
                     }
                 };
+                if (extraTiming?.slotIndex !== undefined) {
+                    telemetryCollector.setSlotState(extraTiming.slotIndex, 'ACTIVE_DOWNLOAD', `${effectiveSource} ch ${chapterNumber}`);
+                }
                 telemetry.tDownloadStart = Date.now();
                 const producerPromises = Array.from({ length: downloadConcurrency }, () => producer());
                 telemetry.tUploadStart = Date.now();
@@ -2849,6 +2880,9 @@ export class ImporterEngine {
                     telemetry.tDownloadEnd = Date.now();
                     allDownloadsFinished = true;
                     notifyConsumer();
+                    if (extraTiming?.slotIndex !== undefined) {
+                        telemetryCollector.setSlotState(extraTiming.slotIndex, 'ACTIVE_TELEGRAM', `${effectiveSource} ch ${chapterNumber}`);
+                    }
                     await Promise.all(consumerPromises);
                     telemetry.tUploadEnd = Date.now();
                     telemetry.totalBytesDown = totalBytes;
@@ -3071,6 +3105,9 @@ export class ImporterEngine {
                 }
             }
             // Step 2: SAFEGUARD 1: Batch upsert into public.pages ONLY after ALL pages are verified
+            if (extraTiming?.slotIndex !== undefined) {
+                telemetryCollector.setSlotState(extraTiming.slotIndex, 'ACTIVE_DB', `${effectiveSource} ch ${chapterNumber}`);
+            }
             const pagesRpc0 = performance.now();
             if (!skipDownloadDueToExistingPages) {
                 const pagesToUpsert = validPages.map((p, idx) => ({
@@ -3133,6 +3170,9 @@ export class ImporterEngine {
             // Step 4: SAFEGUARD 3: Try to publish immediately 1x via barrier. If blocked, release worker slot immediately!
             const isFreshRelease = Boolean(job.payload?.isFreshRelease);
             const pubResult = await this.publicationBarrier.tryPublish(workId, chKey.sortKey, chapterId, isFreshRelease);
+            if (!pubResult.published && extraTiming?.slotIndex !== undefined) {
+                telemetryCollector.setSlotState(extraTiming.slotIndex, 'WAITING_BARRIER', `${effectiveSource} ch ${chapterNumber}`);
+            }
             tDb = Date.now() - db0;
             const tBarrierCheck = Math.round(pubResult.timings?.barrierCheckMs || 0);
             const tPublishUpdate = Math.round(pubResult.timings?.publishUpdateMs || 0);
@@ -3154,6 +3194,7 @@ export class ImporterEngine {
                 status: pubResult.published ? 'COMPLETED' : 'STAGED',
             });
             const chTotalDuration = performance.now() - jobStart;
+            const totalSlotOccupancyMs = Math.round(chTotalDuration + (extraTiming?.claimDurationMs || 0));
             telemetryCollector.recordChapterMetric({
                 jobId: job.id,
                 source: effectiveSource,
@@ -3161,17 +3202,22 @@ export class ImporterEngine {
                 pageCount: validPages.length,
                 totalBytes,
                 totalDurationMs: Math.round(chTotalDuration),
+                totalSlotOccupancyMs,
                 claim_acquire_ms: Math.round(extraTiming?.claimDurationMs || 0),
+                mutex_wait_ms: Math.round(extraTiming?.mutexWaitMs || 0),
+                claim_db_ms: Math.round(extraTiming?.claimDbMs || 0),
                 metadata_load_ms: Math.round(metadataLoadMs),
                 source_fetch_ms: Math.round(sourceFetchMs),
                 page_resolution_ms: Math.round(pageResolutionMs),
                 download_ms: Math.round(chDownloadMs),
+                encode_ms: 0,
                 telegram_upload_ms: Math.round(chTelegramUploadMs),
                 db_wait_ms: 0,
                 db_publish_ms: Math.round(tDb),
                 rate_limit_wait_ms: Math.round(chRateLimitWaitMs),
                 semaphore_wait_ms: Math.round(extraTiming?.semWaitMs || 0) + Math.round(chDownloadSemWaitMs) + Math.round(chTelegramSemWaitMs),
                 other_wait_ms: Math.max(0, Math.round(chTotalDuration - (sourceFetchMs + chDownloadMs + chTelegramUploadMs + tDb))),
+                barrier_wait_ms: pubResult.published ? 0 : 0,
                 timestamp: new Date().toISOString(),
             });
             this.lastProgressTimestamp = Date.now();

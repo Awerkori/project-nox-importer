@@ -93,6 +93,9 @@ export class AsyncSemaphore {
             samples: this.waitSamples.length
         };
     }
+    getLastWaitMs() {
+        return this.waitSamples.length ? this.waitSamples[this.waitSamples.length - 1] : 0;
+    }
     setCapacity(newCapacity) {
         const target = Math.max(1, newCapacity);
         this.maxPermits = target;

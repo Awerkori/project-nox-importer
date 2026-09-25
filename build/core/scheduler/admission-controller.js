@@ -317,6 +317,13 @@ export class AdmissionController {
                     }
                     // Check if caught up or drained (zero claimable queued, zero importing)
                     if (queuedCnt === 0 && importingCnt === 0) {
+                        if (unimportedCnt > 0) {
+                            // Work still has unimported, staged, or pending chapter mappings — do NOT vacate slot prematurely
+                            work.state = 'FILLING';
+                            work.lastActivityAt = new Date().toISOString();
+                            this.stateStore.setActiveWork(work);
+                            continue;
+                        }
                         const isCaughtUp = pubCnt > 0;
                         work.state = isCaughtUp ? 'CAUGHT_UP' : 'COMPLETE';
                         this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${work.state} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${pubCnt} published). Vacating active slot.`);
