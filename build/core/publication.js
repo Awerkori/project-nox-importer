@@ -469,6 +469,7 @@ export class PublicationBarrier {
             FROM importer_chapter_mappings m
             WHERE m.status IN ('STAGED', 'WAITING_FOR_GAP') AND m.work_id IS NOT NULL
             GROUP BY m.work_id
+            ORDER BY MIN(m.chapter_sort_key) ASC, m.work_id ASC
             LIMIT 40
           ),
           works_with_published AS (
