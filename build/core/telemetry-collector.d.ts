@@ -217,7 +217,19 @@ export declare class TelemetryCollector {
                     p95: number;
                     max: number;
                 };
+                schedulerSqlTotal: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    max: number;
+                };
                 claimSql: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    max: number;
+                };
+                claimLockSql: {
                     avg: number;
                     p50: number;
                     p95: number;

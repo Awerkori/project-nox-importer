@@ -95,6 +95,7 @@ export interface AcquireTelemetry {
     catalogFallbackMs: number;
     poolWaitTotalMs: number;
     sqlExecTotalMs: number;
+    claimLockSqlMs: number;
     totalQueries: number;
     totalAcquireMs: number;
     worksTested: number;

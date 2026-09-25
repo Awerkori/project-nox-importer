@@ -1460,7 +1460,7 @@ export class ImporterEngine {
             schedulerAcquireTotalMs,
             poolWaitMs: acqTelem?.poolWaitTotalMs || 0,
             sqlExecMs: acqTelem?.sqlExecTotalMs || 0,
-            claimSingleJobSqlMs: acqTelem?.sqlExecTotalMs || 0,
+            claimSingleJobSqlMs: acqTelem?.claimLockSqlMs || acqTelem?.sqlExecTotalMs || 0,
             totalQueries: acqTelem?.totalQueries || 1,
             worksTested: acqTelem?.worksTested || 1,
             acquireTelemetry: acqTelem,
