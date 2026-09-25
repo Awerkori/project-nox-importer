@@ -133,7 +133,8 @@ export class AutoHealWatchdog {
 
   private cachedTelemetry: HealthPanelMetrics | null = null;
   private lastTelemetryAt = 0;
-  private telemetryCacheTtlMs = 20_000;
+  private telemetryCacheTtlMs = 45_000;
+  private lastDeepStagedAt = 0;
 
   private classificationCursor: {
     lastFrontierSortKey: number | null;
@@ -237,13 +238,13 @@ export class AutoHealWatchdog {
     const mem = diagnostics.getMemorySnapshot();
     const now = new Date();
 
-    // 1. Publication, Completion, and Started Timestamps
+    // 1. Publication, Completion, and Started Timestamps (Index-Optimized)
     const timeRes = await this.pool.query(`
       SELECT 
-        (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(locked_at))) FROM importer_queue WHERE locked_at IS NOT NULL) as started_age,
+        (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(locked_at))) FROM importer_queue WHERE status = 'IMPORTING' AND locked_at IS NOT NULL) as started_age,
         (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(updated_at))) FROM importer_queue WHERE status = 'COMPLETED' AND task_type = 'IMPORT_CHAPTER') as completed_age,
         (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(published_at))) FROM chapters WHERE published_at IS NOT NULL) as fresh_age,
-        (SELECT count(*) FROM importer_queue WHERE locked_at >= NOW() - INTERVAL '15 minutes') as started_15m,
+        (SELECT count(*) FROM importer_queue WHERE status = 'IMPORTING') as started_15m,
         (SELECT count(*) FROM importer_queue WHERE status = 'COMPLETED' AND task_type = 'IMPORT_CHAPTER' AND updated_at >= NOW() - INTERVAL '15 minutes') as completed_15m,
         (SELECT count(*) FROM chapters WHERE published_at >= NOW() - INTERVAL '15 minutes') as fresh_15m
     `);
@@ -251,9 +252,10 @@ export class AutoHealWatchdog {
     const lastStartedAgeSec = Math.round(parseFloat(times.started_age || '99999'));
     const lastCompletedAgeSec = Math.round(parseFloat(times.completed_age || '99999'));
     const lastFreshVisibleAgeSec = Math.round(parseFloat(times.fresh_age || '99999'));
-    const startedLast15m = parseInt(times.started_15m || '0', 10);
     const completedLast15m = parseInt(times.completed_15m || '0', 10);
     const freshLast15m = parseInt(times.fresh_15m || '0', 10);
+    const rawStarted15m = parseInt(times.started_15m || '0', 10);
+    const startedLast15m = rawStarted15m > completedLast15m ? rawStarted15m : rawStarted15m + completedLast15m;
 
     // 2. Queue Status Counts
     const qRes = await this.pool.query(`
@@ -282,13 +284,35 @@ export class AutoHealWatchdog {
 
     const currentStuckKeys = new Set<string>();
 
-    try {
-      const mapRes = await this.pool.query(`
-        SELECT count(DISTINCT (work_id || ':' || chapter_sort_key::text)) as staged_unique
-        FROM importer_chapter_mappings
-        WHERE status IN ('STAGED', 'WAITING_FOR_GAP')
-      `);
-      stagedUnique = parseInt(mapRes.rows[0]?.staged_unique || '0', 10);
+    const isHealthyState = !forceFresh &&
+      this.cachedTelemetry !== null &&
+      lastCompletedAgeSec <= 600 &&
+      lastFreshVisibleAgeSec <= 1800 &&
+      (nowMs - this.lastDeepStagedAt < 300_000);
+
+    if (isHealthyState && this.cachedTelemetry) {
+      // Lightweight Healthy Path: pipeline actively processing and publishing, skip heavy keyset pagination and stuck audits
+      stagedUnique = this.cachedTelemetry.stagedUnique;
+      publishableStaged = this.cachedTelemetry.publishableStaged;
+      waitingPredecessorStaged = this.cachedTelemetry.waitingPredecessorStaged;
+      stuckStaged = this.cachedTelemetry.stuckStaged;
+      classifiedStaged = this.cachedTelemetry.classifiedStaged ?? 0;
+      unclassifiedStaged = this.cachedTelemetry.unclassifiedStaged ?? 0;
+      classifiedThisCycle = this.cachedTelemetry.classifiedThisCycle ?? 0;
+      oldestUnclassifiedAge = this.cachedTelemetry.oldestUnclassifiedAge ?? 0;
+      stuckStagedAgeSec = this.cachedTelemetry.stuckStagedAgeSec ?? 0;
+    } else {
+      this.lastDeepStagedAt = nowMs;
+      try {
+        const mapRes = await this.pool.query(`
+          SELECT count(*) as staged_unique
+          FROM (
+            SELECT DISTINCT work_id, chapter_sort_key
+            FROM importer_chapter_mappings
+            WHERE status IN ('STAGED', 'WAITING_FOR_GAP')
+          ) sub
+        `);
+        stagedUnique = parseInt(mapRes.rows[0]?.staged_unique || '0', 10);
 
       if (stagedUnique > 0) {
         const cursorSortKey = this.classificationCursor?.lastFrontierSortKey ?? null;
@@ -509,6 +533,7 @@ export class AutoHealWatchdog {
     }
     stuckStagedAgeSec = Math.floor(maxStuckAgeMs / 1000);
     stuckStaged = Math.max(stuckStaged, this.stuckIdentities.size);
+    }
 
     // 4. Scheduler State (active_works, claimable_works)
     let activeWorks: any[] = [];

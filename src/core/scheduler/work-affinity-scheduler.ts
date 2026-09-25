@@ -1618,14 +1618,19 @@ export class WorkAffinityScheduler {
   async runControlledRedundantJobCleanup(batchSize: number = 200): Promise<{ cleaned: number }> {
     try {
       const res = await this.runQuery(this.pool, `
-        WITH redundant AS (
+        WITH recent_works AS (
+          SELECT DISTINCT work_id 
+          FROM chapters 
+          WHERE published_at >= NOW() - INTERVAL '60 minutes'
+        ),
+        redundant AS (
           SELECT q.id, (q.payload->>'workId')::uuid as work_id, q.chapter_sort_key, q.source, c.id as chapter_id
-          FROM importer_queue q
-          JOIN chapters c ON c.work_id = (q.payload->>'workId')::uuid
-                         AND c.number = q.chapter_sort_key
-                         AND c.published_at IS NOT NULL
-          WHERE q.status IN ('QUEUED', 'RETRY')
-            AND q.task_type = 'IMPORT_CHAPTER'
+          FROM recent_works rw
+          JOIN chapters c ON c.work_id = rw.work_id AND c.published_at IS NOT NULL
+          JOIN importer_queue q ON (q.payload->>'workId') = rw.work_id::text
+                               AND q.chapter_sort_key = c.number
+                               AND q.status IN ('QUEUED', 'RETRY')
+                               AND q.task_type = 'IMPORT_CHAPTER'
           LIMIT $1
         ),
         updated_q AS (
