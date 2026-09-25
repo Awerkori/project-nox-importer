@@ -37,7 +37,8 @@ export class AutoHealWatchdog {
     circuitBreakerOpen = false;
     cachedTelemetry = null;
     lastTelemetryAt = 0;
-    telemetryCacheTtlMs = 20_000;
+    telemetryCacheTtlMs = 45_000;
+    lastDeepStagedAt = 0;
     classificationCursor = null;
     lastCoverageResetAt = Date.now();
     classifiedSinceReset = 0;
@@ -127,13 +128,13 @@ export class AutoHealWatchdog {
         }
         const mem = diagnostics.getMemorySnapshot();
         const now = new Date();
-        // 1. Publication, Completion, and Started Timestamps
+        // 1. Publication, Completion, and Started Timestamps (Index-Optimized)
         const timeRes = await this.pool.query(`
       SELECT 
-        (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(locked_at))) FROM importer_queue WHERE locked_at IS NOT NULL) as started_age,
+        (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(locked_at))) FROM importer_queue WHERE status = 'IMPORTING' AND locked_at IS NOT NULL) as started_age,
         (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(updated_at))) FROM importer_queue WHERE status = 'COMPLETED' AND task_type = 'IMPORT_CHAPTER') as completed_age,
         (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(published_at))) FROM chapters WHERE published_at IS NOT NULL) as fresh_age,
-        (SELECT count(*) FROM importer_queue WHERE locked_at >= NOW() - INTERVAL '15 minutes') as started_15m,
+        (SELECT count(*) FROM importer_queue WHERE status = 'IMPORTING') as started_15m,
         (SELECT count(*) FROM importer_queue WHERE status = 'COMPLETED' AND task_type = 'IMPORT_CHAPTER' AND updated_at >= NOW() - INTERVAL '15 minutes') as completed_15m,
         (SELECT count(*) FROM chapters WHERE published_at >= NOW() - INTERVAL '15 minutes') as fresh_15m
     `);
@@ -141,9 +142,10 @@ export class AutoHealWatchdog {
         const lastStartedAgeSec = Math.round(parseFloat(times.started_age || '99999'));
         const lastCompletedAgeSec = Math.round(parseFloat(times.completed_age || '99999'));
         const lastFreshVisibleAgeSec = Math.round(parseFloat(times.fresh_age || '99999'));
-        const startedLast15m = parseInt(times.started_15m || '0', 10);
         const completedLast15m = parseInt(times.completed_15m || '0', 10);
         const freshLast15m = parseInt(times.fresh_15m || '0', 10);
+        const rawStarted15m = parseInt(times.started_15m || '0', 10);
+        const startedLast15m = rawStarted15m > completedLast15m ? rawStarted15m : rawStarted15m + completedLast15m;
         // 2. Queue Status Counts
         const qRes = await this.pool.query(`
       SELECT 
@@ -168,17 +170,39 @@ export class AutoHealWatchdog {
         let oldestUnclassifiedAge = 0;
         let stuckStagedAgeSec = 0;
         const currentStuckKeys = new Set();
-        try {
-            const mapRes = await this.pool.query(`
-        SELECT count(DISTINCT (work_id || ':' || chapter_sort_key::text)) as staged_unique
-        FROM importer_chapter_mappings
-        WHERE status IN ('STAGED', 'WAITING_FOR_GAP')
-      `);
-            stagedUnique = parseInt(mapRes.rows[0]?.staged_unique || '0', 10);
-            if (stagedUnique > 0) {
-                const cursorSortKey = this.classificationCursor?.lastFrontierSortKey ?? null;
-                const cursorWorkId = this.classificationCursor?.lastWorkId ?? null;
-                const pubStagedRes = await this.pool.query(`
+        const isHealthyState = !forceFresh &&
+            this.cachedTelemetry !== null &&
+            lastCompletedAgeSec <= 600 &&
+            lastFreshVisibleAgeSec <= 1800 &&
+            (nowMs - this.lastDeepStagedAt < 300_000);
+        if (isHealthyState && this.cachedTelemetry) {
+            // Lightweight Healthy Path: pipeline actively processing and publishing, skip heavy keyset pagination and stuck audits
+            stagedUnique = this.cachedTelemetry.stagedUnique;
+            publishableStaged = this.cachedTelemetry.publishableStaged;
+            waitingPredecessorStaged = this.cachedTelemetry.waitingPredecessorStaged;
+            stuckStaged = this.cachedTelemetry.stuckStaged;
+            classifiedStaged = this.cachedTelemetry.classifiedStaged ?? 0;
+            unclassifiedStaged = this.cachedTelemetry.unclassifiedStaged ?? 0;
+            classifiedThisCycle = this.cachedTelemetry.classifiedThisCycle ?? 0;
+            oldestUnclassifiedAge = this.cachedTelemetry.oldestUnclassifiedAge ?? 0;
+            stuckStagedAgeSec = this.cachedTelemetry.stuckStagedAgeSec ?? 0;
+        }
+        else {
+            this.lastDeepStagedAt = nowMs;
+            try {
+                const mapRes = await this.pool.query(`
+          SELECT count(*) as staged_unique
+          FROM (
+            SELECT DISTINCT work_id, chapter_sort_key
+            FROM importer_chapter_mappings
+            WHERE status IN ('STAGED', 'WAITING_FOR_GAP')
+          ) sub
+        `);
+                stagedUnique = parseInt(mapRes.rows[0]?.staged_unique || '0', 10);
+                if (stagedUnique > 0) {
+                    const cursorSortKey = this.classificationCursor?.lastFrontierSortKey ?? null;
+                    const cursorWorkId = this.classificationCursor?.lastWorkId ?? null;
+                    const pubStagedRes = await this.pool.query(`
           WITH staged_works AS (
             SELECT 
               m.work_id,
@@ -235,161 +259,162 @@ export class AutoHealWatchdog {
             END as is_frontier_publishable
           FROM works_with_published;
         `, [cursorSortKey, cursorWorkId]);
-                // Check if query returned old-style publishable_staged (from test mock)
-                if (pubStagedRes.rows[0]?.waiting_predecessor_staged !== undefined || pubStagedRes.rows[0]?.stuck_staged !== undefined) {
-                    publishableStaged = parseInt(pubStagedRes.rows[0]?.publishable_staged || '0', 10);
-                    waitingPredecessorStaged = parseInt(pubStagedRes.rows[0]?.waiting_predecessor_staged || '0', 10);
-                    stuckStaged = parseInt(pubStagedRes.rows[0]?.stuck_staged || '0', 10);
-                    classifiedStaged = pubStagedRes.rows[0]?.classified_staged !== undefined
-                        ? parseInt(pubStagedRes.rows[0]?.classified_staged, 10)
-                        : publishableStaged + waitingPredecessorStaged + stuckStaged;
-                    unclassifiedStaged = pubStagedRes.rows[0]?.unclassified_staged !== undefined
-                        ? parseInt(pubStagedRes.rows[0]?.unclassified_staged, 10)
-                        : Math.max(0, stagedUnique - classifiedStaged);
-                    classifiedThisCycle = pubStagedRes.rows.length;
-                    if (stuckStaged > 0) {
-                        const stuckKey = pubStagedRes.rows[0]?.stuck_key || 'mock-stuck';
-                        currentStuckKeys.add(stuckKey);
-                        if (!this.stuckIdentities.has(stuckKey)) {
-                            this.stuckIdentities.set(stuckKey, nowMs);
+                    // Check if query returned old-style publishable_staged (from test mock)
+                    if (pubStagedRes.rows[0]?.waiting_predecessor_staged !== undefined || pubStagedRes.rows[0]?.stuck_staged !== undefined) {
+                        publishableStaged = parseInt(pubStagedRes.rows[0]?.publishable_staged || '0', 10);
+                        waitingPredecessorStaged = parseInt(pubStagedRes.rows[0]?.waiting_predecessor_staged || '0', 10);
+                        stuckStaged = parseInt(pubStagedRes.rows[0]?.stuck_staged || '0', 10);
+                        classifiedStaged = pubStagedRes.rows[0]?.classified_staged !== undefined
+                            ? parseInt(pubStagedRes.rows[0]?.classified_staged, 10)
+                            : publishableStaged + waitingPredecessorStaged + stuckStaged;
+                        unclassifiedStaged = pubStagedRes.rows[0]?.unclassified_staged !== undefined
+                            ? parseInt(pubStagedRes.rows[0]?.unclassified_staged, 10)
+                            : Math.max(0, stagedUnique - classifiedStaged);
+                        classifiedThisCycle = pubStagedRes.rows.length;
+                        if (stuckStaged > 0) {
+                            const stuckKey = pubStagedRes.rows[0]?.stuck_key || 'mock-stuck';
+                            currentStuckKeys.add(stuckKey);
+                            if (!this.stuckIdentities.has(stuckKey)) {
+                                this.stuckIdentities.set(stuckKey, nowMs);
+                            }
                         }
                     }
-                }
-                else if (pubStagedRes.rows[0]?.publishable_staged !== undefined) {
-                    publishableStaged = parseInt(pubStagedRes.rows[0]?.publishable_staged || '0', 10);
-                    waitingPredecessorStaged = Math.max(0, stagedUnique - publishableStaged);
-                    stuckStaged = 0;
-                    classifiedStaged = publishableStaged + waitingPredecessorStaged;
-                    unclassifiedStaged = Math.max(0, stagedUnique - classifiedStaged);
-                    classifiedThisCycle = pubStagedRes.rows.length;
-                }
-                else {
-                    for (const row of pubStagedRes.rows) {
-                        const totalStaged = parseInt(row.total_staged_chapters || '1', 10);
-                        const isCandidatePub = parseInt(row.is_frontier_publishable || '0', 10) === 1;
-                        let canActuallyPublish = isCandidatePub;
-                        // Chapter barrier canonical alignment: if candidate is publishable and publicationBarrier is present
-                        if (canActuallyPublish && this.publicationBarrier && row.work_id && row.frontier_sort_key !== undefined) {
-                            try {
-                                const check = await this.publicationBarrier.checkBarrier(row.work_id, parseFloat(row.frontier_sort_key));
-                                if (!check.canPublish) {
-                                    canActuallyPublish = false;
+                    else if (pubStagedRes.rows[0]?.publishable_staged !== undefined) {
+                        publishableStaged = parseInt(pubStagedRes.rows[0]?.publishable_staged || '0', 10);
+                        waitingPredecessorStaged = Math.max(0, stagedUnique - publishableStaged);
+                        stuckStaged = 0;
+                        classifiedStaged = publishableStaged + waitingPredecessorStaged;
+                        unclassifiedStaged = Math.max(0, stagedUnique - classifiedStaged);
+                        classifiedThisCycle = pubStagedRes.rows.length;
+                    }
+                    else {
+                        for (const row of pubStagedRes.rows) {
+                            const totalStaged = parseInt(row.total_staged_chapters || '1', 10);
+                            const isCandidatePub = parseInt(row.is_frontier_publishable || '0', 10) === 1;
+                            let canActuallyPublish = isCandidatePub;
+                            // Chapter barrier canonical alignment: if candidate is publishable and publicationBarrier is present
+                            if (canActuallyPublish && this.publicationBarrier && row.work_id && row.frontier_sort_key !== undefined) {
+                                try {
+                                    const check = await this.publicationBarrier.checkBarrier(row.work_id, parseFloat(row.frontier_sort_key));
+                                    if (!check.canPublish) {
+                                        canActuallyPublish = false;
+                                    }
+                                }
+                                catch (err) {
+                                    this.logger.warn('Error checking individual chapter publication barrier', { workId: row.work_id, error: err?.message });
                                 }
                             }
-                            catch (err) {
-                                this.logger.warn('Error checking individual chapter publication barrier', { workId: row.work_id, error: err?.message });
-                            }
-                        }
-                        if (canActuallyPublish) {
-                            publishableStaged += 1; // Only frontier chapter is actionable
-                            waitingPredecessorStaged += Math.max(0, totalStaged - 1);
-                            if (row.work_id && row.frontier_sort_key !== undefined) {
-                                this.stuckIdentities.delete(`${row.work_id}:${row.frontier_sort_key}`);
-                            }
-                        }
-                        else {
-                            // Non-publishable work: WAITING_PREDECESSOR ONLY if there is a real predecessor in queue!
-                            const hasPredecessor = Boolean(row.has_predecessor_in_queue);
-                            if (hasPredecessor) {
-                                waitingPredecessorStaged += totalStaged;
+                            if (canActuallyPublish) {
+                                publishableStaged += 1; // Only frontier chapter is actionable
+                                waitingPredecessorStaged += Math.max(0, totalStaged - 1);
                                 if (row.work_id && row.frontier_sort_key !== undefined) {
                                     this.stuckIdentities.delete(`${row.work_id}:${row.frontier_sort_key}`);
                                 }
                             }
                             else {
-                                stuckStaged += totalStaged;
-                                const stuckKey = row.work_id ? `${row.work_id}:${row.frontier_sort_key}` : `mock-stuck-${stuckStaged}`;
-                                currentStuckKeys.add(stuckKey);
-                                if (!this.stuckIdentities.has(stuckKey)) {
-                                    this.stuckIdentities.set(stuckKey, nowMs);
+                                // Non-publishable work: WAITING_PREDECESSOR ONLY if there is a real predecessor in queue!
+                                const hasPredecessor = Boolean(row.has_predecessor_in_queue);
+                                if (hasPredecessor) {
+                                    waitingPredecessorStaged += totalStaged;
+                                    if (row.work_id && row.frontier_sort_key !== undefined) {
+                                        this.stuckIdentities.delete(`${row.work_id}:${row.frontier_sort_key}`);
+                                    }
+                                }
+                                else {
+                                    stuckStaged += totalStaged;
+                                    const stuckKey = row.work_id ? `${row.work_id}:${row.frontier_sort_key}` : `mock-stuck-${stuckStaged}`;
+                                    currentStuckKeys.add(stuckKey);
+                                    if (!this.stuckIdentities.has(stuckKey)) {
+                                        this.stuckIdentities.set(stuckKey, nowMs);
+                                    }
                                 }
                             }
                         }
-                    }
-                    classifiedStaged = publishableStaged + waitingPredecessorStaged + stuckStaged;
-                    unclassifiedStaged = Math.max(0, stagedUnique - classifiedStaged);
-                    classifiedThisCycle = pubStagedRes.rows.length;
-                    // Keyset pagination progression & wrap logic
-                    if (pubStagedRes.rows.length > 0) {
-                        const lastRow = pubStagedRes.rows[pubStagedRes.rows.length - 1];
-                        if (pubStagedRes.rows.length === 40 && lastRow.work_id && lastRow.frontier_sort_key !== undefined) {
-                            this.classificationCursor = {
-                                lastFrontierSortKey: parseFloat(lastRow.frontier_sort_key),
-                                lastWorkId: String(lastRow.work_id),
-                            };
+                        classifiedStaged = publishableStaged + waitingPredecessorStaged + stuckStaged;
+                        unclassifiedStaged = Math.max(0, stagedUnique - classifiedStaged);
+                        classifiedThisCycle = pubStagedRes.rows.length;
+                        // Keyset pagination progression & wrap logic
+                        if (pubStagedRes.rows.length > 0) {
+                            const lastRow = pubStagedRes.rows[pubStagedRes.rows.length - 1];
+                            if (pubStagedRes.rows.length === 40 && lastRow.work_id && lastRow.frontier_sort_key !== undefined) {
+                                this.classificationCursor = {
+                                    lastFrontierSortKey: parseFloat(lastRow.frontier_sort_key),
+                                    lastWorkId: String(lastRow.work_id),
+                                };
+                            }
+                            else {
+                                // Reached end of staged works, wrap back to start
+                                this.classificationCursor = null;
+                                this.lastCoverageResetAt = nowMs;
+                                this.classifiedSinceReset = 0;
+                            }
                         }
                         else {
-                            // Reached end of staged works, wrap back to start
                             this.classificationCursor = null;
                             this.lastCoverageResetAt = nowMs;
                             this.classifiedSinceReset = 0;
                         }
                     }
-                    else {
-                        this.classificationCursor = null;
-                        this.lastCoverageResetAt = nowMs;
-                        this.classifiedSinceReset = 0;
-                    }
-                }
-                // Global Safety Barrier guard: If PublicationSafetyBarrier is CLOSED or RECOVERING, nothing is publishable globally
-                if (this.safetyBarrier) {
-                    try {
-                        const barrierState = await this.safetyBarrier.getState();
-                        if (barrierState === 'CLOSED' || barrierState === 'RECOVERING') {
-                            if (publishableStaged > 0) {
-                                waitingPredecessorStaged += publishableStaged;
-                                publishableStaged = 0;
+                    // Global Safety Barrier guard: If PublicationSafetyBarrier is CLOSED or RECOVERING, nothing is publishable globally
+                    if (this.safetyBarrier) {
+                        try {
+                            const barrierState = await this.safetyBarrier.getState();
+                            if (barrierState === 'CLOSED' || barrierState === 'RECOVERING') {
+                                if (publishableStaged > 0) {
+                                    waitingPredecessorStaged += publishableStaged;
+                                    publishableStaged = 0;
+                                }
                             }
                         }
+                        catch { }
                     }
-                    catch { }
                 }
             }
-        }
-        catch (err) {
-            this.logger.warn('Failed querying staged classification', { error: err?.message });
-        }
-        // Manage stuck identities across paginated cycles:
-        // Audit tracked stuck keys against database to check if any have published or left STAGED status
-        if (this.stuckIdentities.size > 0) {
-            try {
-                const trackedKeys = Array.from(this.stuckIdentities.keys()).filter((k) => !k.startsWith('mock-'));
-                if (trackedKeys.length > 0) {
-                    const checkRes = await this.pool.query(`
+            catch (err) {
+                this.logger.warn('Failed querying staged classification', { error: err?.message });
+            }
+            // Manage stuck identities across paginated cycles:
+            // Audit tracked stuck keys against database to check if any have published or left STAGED status
+            if (this.stuckIdentities.size > 0) {
+                try {
+                    const trackedKeys = Array.from(this.stuckIdentities.keys()).filter((k) => !k.startsWith('mock-'));
+                    if (trackedKeys.length > 0) {
+                        const checkRes = await this.pool.query(`
             SELECT (work_id || ':' || chapter_sort_key::text) as key
             FROM importer_chapter_mappings
             WHERE status IN ('STAGED', 'WAITING_FOR_GAP')
               AND (work_id || ':' || chapter_sort_key::text) = ANY($1::text[])
           `, [trackedKeys]);
-                    const stillStagedKeys = new Set(checkRes.rows.map((r) => r.key));
-                    for (const k of trackedKeys) {
-                        if (!stillStagedKeys.has(k)) {
-                            // Evidence: chapter published, was deleted, or left staged status!
+                        const stillStagedKeys = new Set(checkRes.rows.map((r) => r.key));
+                        for (const k of trackedKeys) {
+                            if (!stillStagedKeys.has(k)) {
+                                // Evidence: chapter published, was deleted, or left staged status!
+                                this.stuckIdentities.delete(k);
+                            }
+                        }
+                    }
+                    // Evict mock keys if not present in current cycle mock
+                    for (const k of Array.from(this.stuckIdentities.keys())) {
+                        if (k.startsWith('mock-') && !currentStuckKeys.has(k)) {
                             this.stuckIdentities.delete(k);
                         }
                     }
                 }
-                // Evict mock keys if not present in current cycle mock
-                for (const k of Array.from(this.stuckIdentities.keys())) {
-                    if (k.startsWith('mock-') && !currentStuckKeys.has(k)) {
-                        this.stuckIdentities.delete(k);
-                    }
+                catch (err) {
+                    this.logger.warn('Failed auditing resolved stuck identities', { error: err?.message });
                 }
             }
-            catch (err) {
-                this.logger.warn('Failed auditing resolved stuck identities', { error: err?.message });
+            // Compute max age among currently stuck identities
+            let maxStuckAgeMs = 0;
+            for (const detectedAt of this.stuckIdentities.values()) {
+                const age = nowMs - detectedAt;
+                if (age > maxStuckAgeMs) {
+                    maxStuckAgeMs = age;
+                }
             }
+            stuckStagedAgeSec = Math.floor(maxStuckAgeMs / 1000);
+            stuckStaged = Math.max(stuckStaged, this.stuckIdentities.size);
         }
-        // Compute max age among currently stuck identities
-        let maxStuckAgeMs = 0;
-        for (const detectedAt of this.stuckIdentities.values()) {
-            const age = nowMs - detectedAt;
-            if (age > maxStuckAgeMs) {
-                maxStuckAgeMs = age;
-            }
-        }
-        stuckStagedAgeSec = Math.floor(maxStuckAgeMs / 1000);
-        stuckStaged = Math.max(stuckStaged, this.stuckIdentities.size);
         // 4. Scheduler State (active_works, claimable_works)
         let activeWorks = [];
         let claimableWorks = 0;

@@ -660,7 +660,7 @@ export class ImporterEngine {
       } catch (err: any) {
         this.logger.warn('Error during redundant job cleanup loop', { error: err?.message });
       }
-      await this.sleep(30_000);
+      await this.sleep(300_000);
     }
   }
 
@@ -768,22 +768,24 @@ export class ImporterEngine {
         const activeJobsCount = diagnostics.getActiveJobsCount();
         const isStopActive = await this.protectiveSentinel.isProtectiveStopActive();
 
-        // Query queue for eligible and importing work counts
+        // Query watchdog telemetry first (shared cache, lightweight in HEALTHY)
+        const healthMetrics = await this.autoHealWatchdog.collectTelemetry();
+        const eligibleCount = healthMetrics.eligibleJobs;
+        const importingCount = healthMetrics.importingCount;
+
+        // Query only active IMPORTING jobs to detect stale leases in <50ms (avoid scanning 30k queued rows)
         const pool = getYugabytePool();
-        const qRes = await pool.query(
-          `SELECT 
-             COUNT(CASE WHEN status IN ('QUEUED', 'RETRY') AND (next_run_at IS NULL OR next_run_at <= NOW()) THEN 1 END) as eligible_cnt,
-             COUNT(CASE WHEN status = 'IMPORTING' THEN 1 END) as importing_cnt,
-             COUNT(CASE WHEN status = 'IMPORTING' AND (
+        const staleRes = await pool.query(
+          `SELECT COUNT(*) as stale_importing_cnt
+           FROM importer_queue 
+           WHERE status = 'IMPORTING'
+             AND (
                lease_expires_at <= NOW()
                OR (lease_expires_at IS NULL AND (locked_at <= NOW() - INTERVAL '5 minutes' OR updated_at <= NOW() - INTERVAL '5 minutes'))
                OR (locked_at <= NOW() - INTERVAL '15 minutes' AND updated_at <= NOW() - INTERVAL '15 minutes')
-             ) THEN 1 END) as stale_importing_cnt
-           FROM importer_queue WHERE task_type = 'IMPORT_CHAPTER'`
+             )`
         );
-        const eligibleCount = parseInt(qRes.rows[0]?.eligible_cnt || '0', 10);
-        const importingCount = parseInt(qRes.rows[0]?.importing_cnt || '0', 10);
-        const staleImportingCount = parseInt(qRes.rows[0]?.stale_importing_cnt || '0', 10);
+        const staleImportingCount = parseInt(staleRes.rows[0]?.stale_importing_cnt || '0', 10);
 
         const timeSinceProgressMs = now - this.lastProgressTimestamp;
         const minutesSinceProgress = Math.floor(timeSinceProgressMs / 60_000);
@@ -852,7 +854,6 @@ export class ImporterEngine {
 
         // Write atomic heartbeat and health panel to settings table for external watchdog / supervisor monitoring
         try {
-          const healthMetrics = await this.autoHealWatchdog.collectTelemetry();
           const hbPayload = JSON.stringify({
             state: healthMetrics.status,
             status: healthMetrics.status,
