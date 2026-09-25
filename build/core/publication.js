@@ -113,6 +113,7 @@ export class PublicationBarrier {
                     await this.supabase
                         .from('importer_chapter_mappings')
                         .update({ status: 'WAITING_FOR_GAP', updated_at: new Date().toISOString() })
+                        .eq('work_id', workId)
                         .eq('chapter_id', chapterId)
                         .eq('status', 'STAGED');
                 }
@@ -141,7 +142,144 @@ export class PublicationBarrier {
      * Executes atomic DB publication for a single chapter.
      */
     async executePublish(workId, chapterId, publishedAtIso, sortKey, isFreshRelease = false) {
-        // 0. Query current work status and existing chapter concurrently in a single round-trip
+        const pool = typeof this.supabase?.getPool === 'function' ? this.supabase.getPool() : null;
+        if (pool) {
+            // Direct YSQL atomic fast-path (production)
+            const client = await pool.connect();
+            let publishedSlug;
+            try {
+                await client.query('BEGIN');
+                // 1. Fetch current work details for cover/publication verification
+                const workRes = await client.query('SELECT id, title, slug, cover_id, published, latest_chapter_published_at FROM works WHERE id = $1::uuid', [workId]);
+                const currentWork = workRes.rows[0];
+                // 2. Determine shouldPublishWork
+                let shouldPublishWork = false;
+                if (currentWork?.published === true) {
+                    shouldPublishWork = true;
+                }
+                else if (currentWork?.cover_id && currentWork.title && currentWork.slug) {
+                    const coverRes = await client.query('SELECT id, storage_ready, bytes FROM media WHERE id = $1::uuid', [currentWork.cover_id]);
+                    const coverMedia = coverRes.rows[0];
+                    if (coverMedia && coverMedia.storage_ready && (coverMedia.bytes || 0) >= 1500) {
+                        shouldPublishWork = true;
+                    }
+                    else {
+                        this.logger.warn('Work cover is not storage_ready or too small, publication barrier withheld published=true', {
+                            workId,
+                            coverId: currentWork.cover_id,
+                            bytes: coverMedia?.bytes,
+                        });
+                    }
+                }
+                else {
+                    this.logger.warn('Work missing cover_id or canonical metadata, publication barrier withheld published=true', {
+                        workId,
+                        hasCover: Boolean(currentWork?.cover_id),
+                        hasTitle: Boolean(currentWork?.title),
+                        hasSlug: Boolean(currentWork?.slug),
+                    });
+                }
+                // 3. Mark public.chapters.published_at and set is_fresh_release
+                await client.query(`UPDATE chapters
+           SET published_at = COALESCE(published_at, $2::timestamptz),
+               is_fresh_release = $3
+           WHERE id = $1::uuid`, [chapterId, publishedAtIso, isFreshRelease]);
+                // 4. Mark importer_chapter_mappings status = 'COMPLETED'
+                await client.query(`UPDATE importer_chapter_mappings
+           SET status = 'COMPLETED', updated_at = NOW()
+           WHERE work_id = $1::uuid AND chapter_id = $2::uuid`, [workId, chapterId]);
+                // 5. Cancel / auto-complete redundant QUEUED/RETRY jobs in importer_queue
+                if (sortKey !== undefined && sortKey !== null) {
+                    await client.query(`UPDATE importer_queue
+             SET status = 'COMPLETED',
+                 updated_at = NOW(),
+                 last_error = 'CANONICAL_ALREADY_SATISFIED'
+             WHERE task_type = 'IMPORT_CHAPTER'
+               AND status IN ('QUEUED', 'RETRY')
+               AND chapter_sort_key = $1
+               AND (payload->>'workId') = $2`, [sortKey, workId]);
+                    await client.query(`UPDATE importer_chapter_mappings
+             SET status = 'COMPLETED',
+                 is_page_provider = false,
+                 chapter_id = $1::uuid,
+                 updated_at = NOW()
+             WHERE work_id = $2::uuid
+               AND chapter_sort_key = $3
+               AND status IN ('PENDING', 'QUEUED')`, [chapterId, workId, sortKey]);
+                }
+                // 6. Update public.works: published and latest_chapter_published_at
+                const worksUpdateRes = await client.query(`UPDATE works
+           SET published = (CASE WHEN $2::boolean THEN true ELSE published END),
+               latest_chapter_published_at = GREATEST(COALESCE(latest_chapter_published_at, $3::timestamptz), $3::timestamptz),
+               updated_at = NOW()
+           WHERE id = $1::uuid
+           RETURNING slug`, [workId, shouldPublishWork, publishedAtIso]);
+                publishedSlug = worksUpdateRes.rows[0]?.slug || currentWork?.slug;
+                await client.query('COMMIT');
+            }
+            catch (txErr) {
+                await client.query('ROLLBACK').catch(() => { });
+                throw txErr;
+            }
+            finally {
+                client.release();
+            }
+            try {
+                this.onPublished?.(isFreshRelease);
+            }
+            catch { }
+            // Invalidate edge cache (fire and forget asynchronously)
+            try {
+                const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
+                const token = process.env.NOX_STORAGE_BRIDGE_TOKEN;
+                fetch(`${siteUrl}/api/internal/cache/invalidate`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                    },
+                    body: JSON.stringify({
+                        type: 'CHAPTER_PUBLISHED',
+                        workId,
+                        workSlug: publishedSlug,
+                        chapterId,
+                    }),
+                    signal: AbortSignal.timeout(2000),
+                }).catch(() => { });
+            }
+            catch { }
+            // Update importer_chapter_manifest status to PUBLISHED if available (asynchronously)
+            void (async () => {
+                try {
+                    const manQuery = this.supabase.from('importer_chapter_manifest');
+                    if (manQuery && typeof manQuery.update === 'function') {
+                        let sKey = sortKey;
+                        if (sKey === undefined) {
+                            const { data: chInfo } = await this.supabase
+                                .from('chapters')
+                                .select('number')
+                                .eq('id', chapterId)
+                                .maybeSingle();
+                            if (chInfo?.number !== undefined) {
+                                sKey = computeCanonicalChapterKey(chInfo.number).sortKey;
+                            }
+                        }
+                        if (sKey !== undefined) {
+                            await manQuery
+                                .update({
+                                status: 'PUBLISHED',
+                                last_checked_at: new Date().toISOString(),
+                            })
+                                .eq('work_id', workId)
+                                .eq('chapter_sort_key', sKey);
+                        }
+                    }
+                }
+                catch { }
+            })();
+            return;
+        }
+        // Fallback path for unit tests / mock clients without direct pool
         const [workRes, chRes] = await Promise.all([
             this.supabase
                 .from('works')
@@ -158,7 +296,6 @@ export class PublicationBarrier {
         const existingLatest = currentWork?.latest_chapter_published_at;
         const existingCh = chRes?.data;
         const finalPublishedAt = existingCh?.published_at || publishedAtIso;
-        // 1. Mark public.chapters.published_at and public.importer_chapter_mappings.status = 'COMPLETED' concurrently
         const [chUpdateRes, mapUpdateRes] = await Promise.all([
             this.supabase
                 .from('chapters')
@@ -170,47 +307,15 @@ export class PublicationBarrier {
             this.supabase
                 .from('importer_chapter_mappings')
                 .update({ status: 'COMPLETED', updated_at: new Date().toISOString() })
+                .eq('work_id', workId)
                 .eq('chapter_id', chapterId),
         ]);
         if (chUpdateRes.error)
             throw chUpdateRes.error;
         if (mapUpdateRes.error)
             throw mapUpdateRes.error;
-        // 2. Cancel / auto-complete any remaining QUEUED/RETRY jobs in importer_queue for this chapter concurrently
-        try {
-            if (sortKey !== undefined && sortKey !== null) {
-                const pool = getYugabytePool();
-                await Promise.all([
-                    pool.query(`
-            UPDATE importer_queue
-            SET status = 'COMPLETED',
-                updated_at = NOW(),
-                last_error = 'CANONICAL_ALREADY_SATISFIED'
-            WHERE task_type = 'IMPORT_CHAPTER'
-              AND status IN ('QUEUED', 'RETRY')
-              AND chapter_sort_key = $1
-              AND (payload->>'workId') = $2;
-          `, [sortKey, workId]),
-                    pool.query(`
-            UPDATE importer_chapter_mappings
-            SET status = 'COMPLETED',
-                is_page_provider = false,
-                chapter_id = $1,
-                updated_at = NOW()
-            WHERE work_id = $2::uuid
-              AND chapter_sort_key = $3
-              AND status IN ('PENDING', 'QUEUED');
-          `, [chapterId, workId, sortKey]),
-                ]);
-            }
-        }
-        catch (cancelErr) {
-            this.logger.warn('Failed to auto-cancel redundant queue jobs on publish', { error: cancelErr?.message });
-        }
-        // 3. Update public.works: enforce publication barrier (valid metadata + valid cover)
         let shouldPublishWork = false;
         if (currentWork?.published === true) {
-            // Work is already confirmed published, avoid redundant media checks
             shouldPublishWork = true;
         }
         else if (currentWork?.cover_id && currentWork.title && currentWork.slug) {
@@ -223,25 +328,8 @@ export class PublicationBarrier {
                 if (coverMedia && coverMedia.storage_ready && (coverMedia.bytes || 0) >= 1500) {
                     shouldPublishWork = true;
                 }
-                else {
-                    this.logger.warn('Work cover is not storage_ready or too small, publication barrier withheld published=true', {
-                        workId,
-                        coverId: currentWork.cover_id,
-                        bytes: coverMedia?.bytes,
-                    });
-                }
             }
-            catch (barrierErr) {
-                this.logger.warn('Error checking publication barrier for work', { workId, error: barrierErr?.message });
-            }
-        }
-        else {
-            this.logger.warn('Work missing cover_id or canonical metadata, publication barrier withheld published=true', {
-                workId,
-                hasCover: Boolean(currentWork?.cover_id),
-                hasTitle: Boolean(currentWork?.title),
-                hasSlug: Boolean(currentWork?.slug),
-            });
+            catch { }
         }
         const workUpdate = {
             updated_at: new Date().toISOString(),
@@ -261,55 +349,6 @@ export class PublicationBarrier {
             this.onPublished?.(isFreshRelease);
         }
         catch { }
-        // 4. Invalidate edge cache (fire and forget asynchronously)
-        try {
-            const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
-            const token = process.env.NOX_STORAGE_BRIDGE_TOKEN;
-            fetch(`${siteUrl}/api/internal/cache/invalidate`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                },
-                body: JSON.stringify({
-                    type: 'CHAPTER_PUBLISHED',
-                    workId,
-                    workSlug: currentWork?.slug,
-                    chapterId,
-                }),
-                signal: AbortSignal.timeout(2000),
-            }).catch(() => { });
-        }
-        catch { }
-        // 4. Update importer_chapter_manifest status to PUBLISHED if available
-        try {
-            const manQuery = this.supabase.from('importer_chapter_manifest');
-            if (manQuery && typeof manQuery.update === 'function') {
-                let sKey = sortKey;
-                if (sKey === undefined) {
-                    const { data: chInfo } = await this.supabase
-                        .from('chapters')
-                        .select('number')
-                        .eq('id', chapterId)
-                        .maybeSingle();
-                    if (chInfo?.number !== undefined) {
-                        sKey = computeCanonicalChapterKey(chInfo.number).sortKey;
-                    }
-                }
-                if (sKey !== undefined) {
-                    await manQuery
-                        .update({
-                        status: 'PUBLISHED',
-                        last_checked_at: new Date().toISOString(),
-                    })
-                        .eq('work_id', workId)
-                        .eq('chapter_sort_key', sKey);
-                }
-            }
-        }
-        catch {
-            // Non-blocking telemetry
-        }
     }
     /**
      * Cascading publication of all consecutive STAGED chapters for a work.
@@ -337,6 +376,7 @@ export class PublicationBarrier {
                     await this.supabase
                         .from('importer_chapter_mappings')
                         .update({ status: 'WAITING_FOR_GAP', updated_at: new Date().toISOString() })
+                        .eq('work_id', workId)
                         .eq('chapter_id', candidate.chapter_id)
                         .eq('status', 'STAGED');
                 }

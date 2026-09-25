@@ -15,6 +15,8 @@ export interface ChapterMetricRecord {
     pool_wait_ms?: number;
     sql_exec_ms?: number;
     claim_sql_ms?: number;
+    claim_lock_pool_wait_ms?: number;
+    claim_lock_sql_exec_ms?: number;
     total_queries?: number;
     works_tested?: number;
     staff_check_ms?: number;
@@ -235,6 +237,18 @@ export declare class TelemetryCollector {
                     p95: number;
                     max: number;
                 };
+                claimLockPoolWait: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    max: number;
+                };
+                claimLockSqlExec: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    max: number;
+                };
                 queriesPerClaim: {
                     avg: number;
                     p50: number;
@@ -366,6 +380,16 @@ export declare class TelemetryCollector {
                 p50: number;
                 p95: number;
             };
+            claimLockPoolWaitMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            claimLockSqlExecMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
             queriesCount: {
                 avg: number;
                 p50: number;
@@ -433,6 +457,8 @@ export declare class TelemetryCollector {
             pool_wait_ms?: number;
             sql_exec_ms?: number;
             claim_sql_ms?: number;
+            claim_lock_pool_wait_ms?: number;
+            claim_lock_sql_exec_ms?: number;
             total_queries?: number;
             works_tested?: number;
             staff_check_ms?: number;

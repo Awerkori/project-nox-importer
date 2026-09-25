@@ -29,6 +29,8 @@ export interface ChapterMetricRecord {
   pool_wait_ms?: number;
   sql_exec_ms?: number;
   claim_sql_ms?: number;
+  claim_lock_pool_wait_ms?: number;
+  claim_lock_sql_exec_ms?: number;
   total_queries?: number;
   works_tested?: number;
   staff_check_ms?: number;
@@ -586,6 +588,8 @@ export class TelemetryCollector {
     const poolWaitTimes = this.chapters.map(c => c.pool_wait_ms ?? 0);
     const sqlExecTimes = this.chapters.map(c => c.sql_exec_ms ?? 0);
     const claimSqlTimes = this.chapters.map(c => c.claim_sql_ms ?? c.sql_exec_ms ?? 0);
+    const claimLockPoolWaitTimes = this.chapters.map(c => c.claim_lock_pool_wait_ms ?? 0);
+    const claimLockSqlExecTimes = this.chapters.map(c => c.claim_lock_sql_exec_ms ?? c.claim_sql_ms ?? 0);
     const queriesPerClaim = this.chapters.map(c => c.total_queries ?? 1);
     const worksTestedList = this.chapters.map(c => c.works_tested ?? 1);
     const staffCheckTimes = this.chapters.map(c => c.staff_check_ms ?? 0);
@@ -785,7 +789,9 @@ export class TelemetryCollector {
           sqlExec: { avg: avg(sqlExecTimes), p50: percentile(sqlExecTimes, 0.50), p95: percentile(sqlExecTimes, 0.95), max: sqlExecTimes.length ? Math.max(...sqlExecTimes) : 0 },
           schedulerSqlTotal: { avg: avg(sqlExecTimes), p50: percentile(sqlExecTimes, 0.50), p95: percentile(sqlExecTimes, 0.95), max: sqlExecTimes.length ? Math.max(...sqlExecTimes) : 0 },
           claimSql: { avg: avg(claimSqlTimes), p50: percentile(claimSqlTimes, 0.50), p95: percentile(claimSqlTimes, 0.95), max: claimSqlTimes.length ? Math.max(...claimSqlTimes) : 0 },
-          claimLockSql: { avg: avg(claimSqlTimes), p50: percentile(claimSqlTimes, 0.50), p95: percentile(claimSqlTimes, 0.95), max: claimSqlTimes.length ? Math.max(...claimSqlTimes) : 0 },
+          claimLockSql: { avg: avg(claimLockSqlExecTimes), p50: percentile(claimLockSqlExecTimes, 0.50), p95: percentile(claimLockSqlExecTimes, 0.95), max: claimLockSqlExecTimes.length ? Math.max(...claimLockSqlExecTimes) : 0 },
+          claimLockPoolWait: { avg: avg(claimLockPoolWaitTimes), p50: percentile(claimLockPoolWaitTimes, 0.50), p95: percentile(claimLockPoolWaitTimes, 0.95), max: claimLockPoolWaitTimes.length ? Math.max(...claimLockPoolWaitTimes) : 0 },
+          claimLockSqlExec: { avg: avg(claimLockSqlExecTimes), p50: percentile(claimLockSqlExecTimes, 0.50), p95: percentile(claimLockSqlExecTimes, 0.95), max: claimLockSqlExecTimes.length ? Math.max(...claimLockSqlExecTimes) : 0 },
           queriesPerClaim: { avg: avg(queriesPerClaim), p50: percentile(queriesPerClaim, 0.50), p95: percentile(queriesPerClaim, 0.95) },
           worksTested: { avg: avg(worksTestedList), p50: percentile(worksTestedList, 0.50), p95: percentile(worksTestedList, 0.95) },
           mutexWait: { avg: avg(mutexWaitTimes), p50: percentile(mutexWaitTimes, 0.50), p95: percentile(mutexWaitTimes, 0.95), p99: percentile(mutexWaitTimes, 0.99), max: mutexWaitTimes.length ? Math.max(...mutexWaitTimes) : 0 },
@@ -807,6 +813,8 @@ export class TelemetryCollector {
         totalMs: { avg: avg(schedulerAcquireTimes), p50: percentile(schedulerAcquireTimes, 0.50), p95: percentile(schedulerAcquireTimes, 0.95) },
         poolWaitMs: { avg: avg(poolWaitTimes), p50: percentile(poolWaitTimes, 0.50), p95: percentile(poolWaitTimes, 0.95) },
         sqlExecMs: { avg: avg(sqlExecTimes), p50: percentile(sqlExecTimes, 0.50), p95: percentile(sqlExecTimes, 0.95) },
+        claimLockPoolWaitMs: { avg: avg(claimLockPoolWaitTimes), p50: percentile(claimLockPoolWaitTimes, 0.50), p95: percentile(claimLockPoolWaitTimes, 0.95) },
+        claimLockSqlExecMs: { avg: avg(claimLockSqlExecTimes), p50: percentile(claimLockSqlExecTimes, 0.50), p95: percentile(claimLockSqlExecTimes, 0.95) },
         queriesCount: { avg: avg(queriesPerClaim), p50: percentile(queriesPerClaim, 0.50), p95: percentile(queriesPerClaim, 0.95) },
         worksTestedCount: { avg: avg(worksTestedList), p50: percentile(worksTestedList, 0.50), p95: percentile(worksTestedList, 0.95) },
         staffCheckMs: { avg: avg(staffCheckTimes), p50: percentile(staffCheckTimes, 0.50), p95: percentile(staffCheckTimes, 0.95) },

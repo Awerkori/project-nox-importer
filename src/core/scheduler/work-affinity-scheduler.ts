@@ -384,6 +384,8 @@ export class WorkAffinityScheduler {
       poolWaitTotalMs: 0,
       sqlExecTotalMs: 0,
       claimLockSqlMs: 0,
+      claimLockPoolWaitMs: 0,
+      claimLockSqlExecMs: 0,
       totalQueries: 0,
       totalAcquireMs: 0,
       worksTested: 0,
@@ -1182,21 +1184,38 @@ export class WorkAffinityScheduler {
                 q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
     `;
 
-    const tLockSql0 = performance.now();
-    const res = await this.runQuery(client, query, [
-      opts.allowedSources,
-      opts.minPriority || null,
-      opts.workId || null,
-      opts.sortKey || null,
-      opts.workerId,
-      opts.leaseMin,
-      opts.allowedWorkIds || null,
-      opts.disallowedWorkIds || null,
-      disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
-    ], opts.telemetry);
-
+    const targetPool = client?.connect ? client : this.pool;
+    const tConn0 = performance.now();
+    const dbClient = await targetPool.connect();
+    const poolWaitMs = performance.now() - tConn0;
     if (opts.telemetry) {
-      opts.telemetry.claimLockSqlMs = Math.round((performance.now() - tLockSql0) * 10) / 10;
+      opts.telemetry.poolWaitTotalMs += poolWaitMs;
+      opts.telemetry.claimLockPoolWaitMs = Math.round(poolWaitMs * 10) / 10;
+    }
+
+    let res: any;
+    try {
+      const tLockSql0 = performance.now();
+      res = await dbClient.query(query, [
+        opts.allowedSources,
+        opts.minPriority || null,
+        opts.workId || null,
+        opts.sortKey || null,
+        opts.workerId,
+        opts.leaseMin,
+        opts.allowedWorkIds || null,
+        opts.disallowedWorkIds || null,
+        disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
+      ]);
+      const sqlMs = performance.now() - tLockSql0;
+      if (opts.telemetry) {
+        opts.telemetry.sqlExecTotalMs += sqlMs;
+        opts.telemetry.claimLockSqlExecMs = Math.round(sqlMs * 10) / 10;
+        opts.telemetry.claimLockSqlMs = Math.round(sqlMs * 10) / 10;
+        opts.telemetry.totalQueries++;
+      }
+    } finally {
+      if (typeof dbClient?.release === 'function') dbClient.release();
     }
 
     if (res.rows.length === 0) return null;
