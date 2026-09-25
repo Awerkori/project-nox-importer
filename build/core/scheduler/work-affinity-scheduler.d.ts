@@ -42,6 +42,23 @@ export declare class WorkAffinityScheduler {
     private lastFreshReleaseTime;
     private lastBackfillPublicationTime;
     private watchdogRunning;
+    specificClaimAttempts: number;
+    specificClaimSuccesses: number;
+    genericClaimAttempts: number;
+    genericClaimSuccesses: number;
+    emptyClaimAttempts: number;
+    private lastP0ProbeAt;
+    private hasP0InQueue;
+    private hasP0Candidate;
+    getClaimStats(): {
+        specificAttempts: number;
+        specificSuccesses: number;
+        genericAttempts: number;
+        genericSuccesses: number;
+        emptyAttempts: number;
+        specificSuccessRate: number;
+        genericSuccessRate: number;
+    };
     constructor(stateStore: SchedulerStateStore, admissionController: AdmissionController, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
     /**

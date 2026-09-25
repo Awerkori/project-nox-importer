@@ -687,6 +687,8 @@ export class ImporterEngine {
                         importingCount,
                         staleImportingCount,
                         minutesSinceProgress,
+                        claimStats: this.scheduler.getClaimStats ? this.scheduler.getClaimStats() : null,
+                        mutexStats: this.chapterClaimMutex.getMetrics ? this.chapterClaimMutex.getMetrics() : null,
                     });
                     await pool.query(`INSERT INTO settings (key, value)
              VALUES ('importer_heartbeat', $1)
@@ -1235,7 +1237,7 @@ export class ImporterEngine {
                 });
                 if (!claimResult || !claimResult.job) {
                     telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_SOURCE', 'waiting_for_eligible_source');
-                    const emptyBackoffMs = 1000 + Math.floor(Math.random() * 1000);
+                    const emptyBackoffMs = 100 + Math.floor(Math.random() * 150);
                     await this.sleep(emptyBackoffMs);
                     continue;
                 }

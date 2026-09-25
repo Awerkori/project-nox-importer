@@ -777,6 +777,8 @@ export class ImporterEngine {
             importingCount,
             staleImportingCount,
             minutesSinceProgress,
+            claimStats: (this.scheduler as any).getClaimStats ? (this.scheduler as any).getClaimStats() : null,
+            mutexStats: (this.chapterClaimMutex as any).getMetrics ? (this.chapterClaimMutex as any).getMetrics() : null,
           });
           await pool.query(
             `INSERT INTO settings (key, value)
@@ -1402,7 +1404,7 @@ export class ImporterEngine {
 
         if (!claimResult || !claimResult.job) {
           telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_SOURCE', 'waiting_for_eligible_source');
-          const emptyBackoffMs = 1000 + Math.floor(Math.random() * 1000);
+          const emptyBackoffMs = 100 + Math.floor(Math.random() * 150);
           await this.sleep(emptyBackoffMs);
           continue;
         }
