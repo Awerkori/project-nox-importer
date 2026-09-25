@@ -165,8 +165,38 @@ export class AutoHealWatchdog {
         const restartsLast1h = recentRestarts.filter((r) => nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000);
         const autoRestartCount1h = restartsLast1h.length;
         this.circuitBreakerOpen = autoRestartCount1h >= 3;
-        // 7. Compute Health Status
-        const status = this.determineHealthStatus({
+        // 7. Check if recent completed jobs were deduplication / canonical-only
+        let recentCompletionsAreDedupeOnly = false;
+        try {
+            const dedupeRes = await this.pool.query(`
+        SELECT 
+          COUNT(*) as recent_total,
+          COUNT(CASE WHEN last_error IN ('CANONICAL_ALREADY_SATISFIED', 'ALREADY_CANONICAL') THEN 1 END) as recent_dedupe
+        FROM importer_queue
+        WHERE status = 'COMPLETED'
+          AND task_type = 'IMPORT_CHAPTER'
+          AND updated_at >= NOW() - INTERVAL '30 minutes'
+      `);
+            const recentTotal = parseInt(dedupeRes.rows[0]?.recent_total || '0', 10);
+            const recentDedupe = parseInt(dedupeRes.rows[0]?.recent_dedupe || '0', 10);
+            let recentPageProviders = 0;
+            if (recentTotal > 0 && recentDedupe < recentTotal) {
+                const provRes = await this.pool.query(`
+          SELECT COUNT(*) as recent_providers
+          FROM importer_chapter_mappings
+          WHERE status = 'COMPLETED'
+            AND is_page_provider = true
+            AND updated_at >= NOW() - INTERVAL '30 minutes'
+        `);
+                recentPageProviders = parseInt(provRes.rows[0]?.recent_providers || '0', 10);
+            }
+            if (recentTotal > 0 && (recentDedupe === recentTotal || recentPageProviders === 0) && stagedUnique === 0) {
+                recentCompletionsAreDedupeOnly = true;
+            }
+        }
+        catch { }
+        // 8. Compute Multidimensional Health Status
+        const health = this.evaluateMultidimensionalHealth({
             eligibleJobs,
             importingCount,
             lastCompletedAgeSec,
@@ -174,10 +204,14 @@ export class AutoHealWatchdog {
             protectiveStopActive,
             protectiveStopReason,
             protectiveStopTriggeredAt,
+            recentCompletionsAreDedupeOnly,
+            hasStagedPublications: stagedUnique > 0,
         });
         return {
-            status,
+            status: health.status,
             autoHealState: this.circuitBreakerOpen ? 'CIRCUIT_OPEN' : this.autoHealState,
+            processingHealth: health.processingHealth,
+            publicationHealth: health.publicationHealth,
             lastStartedAgeSec,
             lastCompletedAgeSec,
             lastFreshVisibleAgeSec,
@@ -202,46 +236,86 @@ export class AutoHealWatchdog {
         };
     }
     /**
-     * Deterministic Health Status evaluation based on REAL PROGRESS.
+     * Deterministic Multidimensional Health evaluation separating processing and publication health.
      */
-    determineHealthStatus(params) {
-        // 1. If no eligible work exists in the entire queue, importer is IDLE (never STALLED)
-        if (params.eligibleJobs === 0 && params.importingCount === 0) {
-            return 'IDLE';
+    evaluateMultidimensionalHealth(params) {
+        // 1. Processing Health Dimension (based on chapter completions)
+        let processingHealth;
+        if (params.lastCompletedAgeSec <= 10 * 60) {
+            processingHealth = 'HEALTHY';
         }
-        // 2. Protective Stop Check
-        if (params.protectiveStopActive) {
+        else if (params.lastCompletedAgeSec <= 15 * 60) {
+            processingHealth = 'DEGRADED';
+        }
+        else if (params.lastCompletedAgeSec < 30 * 60) {
+            processingHealth = 'STALLED';
+        }
+        else {
+            processingHealth = 'CRITICAL_STALL';
+        }
+        // 2. Publication Health Dimension (based on fresh visible chapters)
+        let publicationHealth;
+        if (params.lastFreshVisibleAgeSec <= 10 * 60) {
+            publicationHealth = 'HEALTHY';
+        }
+        else if (params.lastFreshVisibleAgeSec <= 15 * 60) {
+            publicationHealth = 'DEGRADED';
+        }
+        else if (params.recentCompletionsAreDedupeOnly && !params.hasStagedPublications) {
+            // Completed chapters were deduplicated/canonical-only; no new chapter publication expected
+            publicationHealth = 'NO_FRESH_EXPECTED';
+        }
+        else if (params.lastFreshVisibleAgeSec < 30 * 60) {
+            publicationHealth = 'STALLED';
+        }
+        else {
+            publicationHealth = 'CRITICAL_STALL';
+        }
+        // 3. Resolve Overall Status
+        let status;
+        if (params.eligibleJobs === 0 && params.importingCount === 0) {
+            status = 'IDLE';
+        }
+        else if (params.protectiveStopActive) {
             const isManual = params.protectiveStopReason?.toLowerCase().includes('manual') ||
                 params.protectiveStopReason?.toLowerCase().includes('staff');
             if (isManual) {
-                return 'PAUSED_BY_PROTECTION';
+                status = 'PAUSED_BY_PROTECTION';
             }
-            // Check how long it has been stopped
-            const stoppedAgeSec = params.protectiveStopTriggeredAt
-                ? Math.floor((Date.now() - new Date(params.protectiveStopTriggeredAt).getTime()) / 1000)
-                : 0;
-            // If stopped for < 15m, it is legitimate protective pause
-            if (stoppedAgeSec < 15 * 60) {
-                return 'PAUSED_BY_PROTECTION';
+            else {
+                const stoppedAgeSec = params.protectiveStopTriggeredAt
+                    ? Math.floor((Date.now() - new Date(params.protectiveStopTriggeredAt).getTime()) / 1000)
+                    : 0;
+                if (stoppedAgeSec < 15 * 60) {
+                    status = 'PAUSED_BY_PROTECTION';
+                }
+                else {
+                    status = 'STALLED';
+                }
             }
-            // If stopped for >= 15m while eligible jobs exist, it is a STALL that must be auto-healed!
         }
-        // 3. Real Progress Evaluation (based on completed or fresh visible)
-        const progressAgeSec = Math.min(params.lastCompletedAgeSec, params.lastFreshVisibleAgeSec);
-        // HEALTHY: recent progress within 10 minutes
-        if (progressAgeSec <= 10 * 60) {
-            return 'HEALTHY';
+        else if (publicationHealth === 'NO_FRESH_EXPECTED') {
+            status = processingHealth;
         }
-        // DEGRADED: >10 minutes without progress
-        if (progressAgeSec <= 15 * 60) {
-            return 'DEGRADED';
+        else if (processingHealth === 'CRITICAL_STALL' || publicationHealth === 'CRITICAL_STALL') {
+            status = 'CRITICAL_STALL';
         }
-        // STALLED: >15 minutes without progress
-        if (progressAgeSec < 30 * 60) {
-            return 'STALLED';
+        else if (processingHealth === 'STALLED' || publicationHealth === 'STALLED') {
+            status = 'STALLED';
         }
-        // CRITICAL STALL: >=30 minutes without progress
-        return 'CRITICAL_STALL';
+        else if (processingHealth === 'DEGRADED' || publicationHealth === 'DEGRADED') {
+            status = 'DEGRADED';
+        }
+        else {
+            status = 'HEALTHY';
+        }
+        return { status, processingHealth, publicationHealth };
+    }
+    /**
+     * Deterministic Health Status evaluation based on REAL PROGRESS (backward-compatible).
+     */
+    determineHealthStatus(params) {
+        return this.evaluateMultidimensionalHealth(params).status;
     }
     /**
      * Executes a single evaluation cycle:
@@ -261,7 +335,7 @@ export class AutoHealWatchdog {
         // If progress is healthy
         if (metrics.status === 'HEALTHY') {
             if (this.autoHealState !== 'MONITORING' && this.autoHealState !== 'RECOVERED') {
-                this.logger.info(`✨ [AUTO-HEAL SUCCESS] Real progress verified (${metrics.completedLast15m} completed, ${metrics.freshLast15m} fresh in last 15m). Pipeline RECOVERED!`);
+                this.logger.info(`✨ [AUTO-HEAL SUCCESS] Real progress verified (${metrics.completedLast15m} completed, ${metrics.freshLast15m} fresh in last 15m, processing: ${metrics.processingHealth}, publication: ${metrics.publicationHealth}). Pipeline RECOVERED!`);
                 this.autoHealState = 'RECOVERED';
                 this.lastAutoHealAt = new Date().toISOString();
             }
@@ -270,7 +344,7 @@ export class AutoHealWatchdog {
             return metrics;
         }
         if (metrics.status === 'DEGRADED') {
-            this.logger.warn(`⚠️ [AUTO-HEAL WARNING] Importer DEGRADED: 0 completions for ${Math.round(Math.min(metrics.lastCompletedAgeSec, metrics.lastFreshVisibleAgeSec) / 60)}m while ${metrics.eligibleJobs} jobs eligible. Monitoring closely.`);
+            this.logger.warn(`⚠️ [AUTO-HEAL WARNING] Importer DEGRADED: Processing: ${metrics.processingHealth} (${Math.round(metrics.lastCompletedAgeSec / 60)}m), Publication: ${metrics.publicationHealth} (${Math.round(metrics.lastFreshVisibleAgeSec / 60)}m) while ${metrics.eligibleJobs} jobs eligible. Monitoring closely.`);
             await this.persistHealthMetrics(metrics);
             return metrics;
         }
@@ -290,13 +364,19 @@ export class AutoHealWatchdog {
      */
     async executeRecoveryLadder(metrics) {
         const nowMs = Date.now();
-        const progressAgeSec = Math.min(metrics.lastCompletedAgeSec, metrics.lastFreshVisibleAgeSec);
+        // Determine the relevant stall duration driving the recovery ladder
+        let effectiveStallAgeSec = metrics.lastCompletedAgeSec;
+        if (metrics.publicationHealth !== 'NO_FRESH_EXPECTED') {
+            if (metrics.publicationHealth === 'CRITICAL_STALL' || metrics.publicationHealth === 'STALLED') {
+                effectiveStallAgeSec = Math.max(effectiveStallAgeSec, metrics.lastFreshVisibleAgeSec);
+            }
+        }
         // NÍVEL 1 — RECONCILIAÇÃO LEVE (>= 15m stall)
-        if (progressAgeSec >= 15 * 60 && nowMs - this.lastLevel1At >= 3 * 60 * 1000) {
+        if (effectiveStallAgeSec >= 15 * 60 && nowMs - this.lastLevel1At >= 3 * 60 * 1000) {
             this.lastLevel1At = nowMs;
             this.autoHealState = 'LEVEL_1_LIGHT_RECONCILIATION';
             this.lastAutoHealAt = new Date().toISOString();
-            this.logger.warn(`🔧 [AUTO-HEAL NÍVEL 1] Initiating Light Reconciliation (Stall age: ${Math.round(progressAgeSec / 60)}m, Eligible: ${metrics.eligibleJobs})...`);
+            this.logger.warn(`🔧 [AUTO-HEAL NÍVEL 1] Initiating Light Reconciliation (Stall age: ${Math.round(effectiveStallAgeSec / 60)}m, Eligible: ${metrics.eligibleJobs})...`);
             try {
                 await this.runLevel1LightReconciliation(metrics);
                 this.logger.info('✅ [AUTO-HEAL NÍVEL 1] Light reconciliation executed. Awaiting progress...');
@@ -307,11 +387,11 @@ export class AutoHealWatchdog {
             return;
         }
         // NÍVEL 2 — ESTADO PRESO (>= 20m stall, after Level 1 attempted)
-        if (progressAgeSec >= 20 * 60 && nowMs - this.lastLevel2At >= 5 * 60 * 1000) {
+        if (effectiveStallAgeSec >= 20 * 60 && nowMs - this.lastLevel2At >= 5 * 60 * 1000) {
             this.lastLevel2At = nowMs;
             this.autoHealState = 'LEVEL_2_STUCK_STATE_AUDIT';
             this.lastAutoHealAt = new Date().toISOString();
-            this.logger.warn(`🔧 [AUTO-HEAL NÍVEL 2] Initiating Stuck State Audit (Stall age: ${Math.round(progressAgeSec / 60)}m, Eligible: ${metrics.eligibleJobs})...`);
+            this.logger.warn(`🔧 [AUTO-HEAL NÍVEL 2] Initiating Stuck State Audit (Stall age: ${Math.round(effectiveStallAgeSec / 60)}m, Eligible: ${metrics.eligibleJobs})...`);
             try {
                 await this.runLevel2StuckStateAudit(metrics);
                 this.logger.info('✅ [AUTO-HEAL NÍVEL 2] Stuck state audit executed. Awaiting progress...');
@@ -322,19 +402,31 @@ export class AutoHealWatchdog {
             return;
         }
         // NÍVEL 3 — RESTART CONTROLADO (>= 30m stall / CRITICAL_STALL)
-        if (progressAgeSec >= 30 * 60 && metrics.status === 'CRITICAL_STALL') {
+        if (effectiveStallAgeSec >= 30 * 60 && metrics.status === 'CRITICAL_STALL') {
             if (metrics.protectiveStopActive && metrics.protectiveStopReason?.toLowerCase().includes('manual')) {
                 this.logger.info('[AUTO-HEAL NÍVEL 3] Manual staff stop active; skipping self-restart.');
                 return;
             }
-            // Check Circuit Breaker: max 1 per 15 min, max 3 per 1 hour
-            if (this.circuitBreakerOpen || metrics.autoRestartCount1h >= 3) {
+            // Check Circuit Breaker & Persistent Cooldown from DB
+            const recentRestarts = await this.getRecentAutoRestarts();
+            const restartsLast1h = recentRestarts.filter((r) => nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000);
+            if (this.circuitBreakerOpen || restartsLast1h.length >= 3) {
+                this.circuitBreakerOpen = true;
                 this.autoHealState = 'CIRCUIT_OPEN';
-                this.logger.error(`🚨 [AUTO-RECOVERY CIRCUIT OPEN] Reached max 3 auto-restarts in 1h (Current count: ${metrics.autoRestartCount1h}). Halting automatic restarts to prevent loop. ROOT CAUSE REQUIRED.`);
+                this.logger.error(`🚨 [AUTO-RECOVERY CIRCUIT OPEN] Reached max 3 auto-restarts in 1h (Current count: ${restartsLast1h.length}). Halting automatic restarts to prevent loop. ROOT CAUSE REQUIRED.`);
                 return;
             }
-            const timeSinceLastRestartMs = nowMs - this.lastRestartAt;
-            if (this.lastRestartAt > 0 && timeSinceLastRestartMs < 15 * 60 * 1000) {
+            // Persistent 15-minute cooldown check across processes
+            let latestPersistedRestartMs = 0;
+            for (const r of recentRestarts) {
+                const t = new Date(r.timestamp).getTime();
+                if (!isNaN(t) && t > latestPersistedRestartMs) {
+                    latestPersistedRestartMs = t;
+                }
+            }
+            const effectiveLastRestartMs = Math.max(this.lastRestartAt, latestPersistedRestartMs);
+            const timeSinceLastRestartMs = nowMs - effectiveLastRestartMs;
+            if (effectiveLastRestartMs > 0 && timeSinceLastRestartMs < 15 * 60 * 1000) {
                 this.logger.warn(`⏳ [AUTO-HEAL NÍVEL 3] Throttle active: Last restart was ${Math.round(timeSinceLastRestartMs / 60000)}m ago (min 15m cooldown). Waiting...`);
                 return;
             }
@@ -342,13 +434,13 @@ export class AutoHealWatchdog {
             this.autoHealState = 'LEVEL_3_RESTART_PENDING';
             this.lastRestartAt = nowMs;
             this.lastAutoHealAt = new Date().toISOString();
-            const reason = `CRITICAL_STALL: 0 completions/fresh for ${Math.round(progressAgeSec / 60)}m while ${metrics.eligibleJobs} jobs eligible`;
+            const reason = `CRITICAL_STALL: 0 completions/fresh for ${Math.round(effectiveStallAgeSec / 60)}m while ${metrics.eligibleJobs} jobs eligible (processing: ${metrics.processingHealth}, publication: ${metrics.publicationHealth})`;
             this.logger.error(`🚨 [AUTO-HEAL NÍVEL 3] ${reason}. Initiating controlled graceful self-restart...`);
             // Record restart event in DB before process exits
             await this.recordAutoRestart({
                 timestamp: new Date().toISOString(),
                 reason,
-                progressAgeSec,
+                progressAgeSec: effectiveStallAgeSec,
                 eligibleJobs: metrics.eligibleJobs,
             });
             if (this.onControlledRestart) {
@@ -489,6 +581,8 @@ export class AutoHealWatchdog {
         const payload = JSON.stringify({
             status: metrics.status,
             autoHealState: metrics.autoHealState,
+            processingHealth: metrics.processingHealth,
+            publicationHealth: metrics.publicationHealth,
             lastStartedAge: metrics.lastStartedAgeSec,
             lastCompletedAge: metrics.lastCompletedAgeSec,
             lastFreshVisibleAge: metrics.lastFreshVisibleAgeSec,
