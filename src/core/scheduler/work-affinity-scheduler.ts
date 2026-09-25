@@ -286,7 +286,7 @@ export class WorkAffinityScheduler {
   /**
    * Synchronizes in-flight job counts per work from DB at startup.
    */
-  private async syncInFlightCountsFromDb(): Promise<void> {
+  public async syncInFlightCountsFromDb(): Promise<void> {
     try {
       const res = await this.runQuery(this.pool, `
         SELECT (payload->>'workId') as work_id, COUNT(*) as cnt
