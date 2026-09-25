@@ -7,7 +7,7 @@ import {
 import { ImporterEngine } from '../src/core/engine.js';
 import { diagnostics } from '../src/core/diagnostics.js';
 
-describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a J)', () => {
+describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)', () => {
   let mockPool: any;
   let mockScheduler: any;
   let mockAdmissionController: any;
@@ -581,8 +581,13 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
           ],
         };
       }
-      if (sql.includes('recent_total')) {
-        return { rows: [{ recent_total: '10', recent_dedupe: '10' }] };
+      if (sql.includes('recent_completed_jobs') || sql.includes('recent_total')) {
+        return {
+          rows: [
+            { classification: 'ALREADY_CANONICAL', cnt: '10' },
+            { recent_total: '10', recent_dedupe: '10' },
+          ],
+        };
       }
       if (sql.includes('recent_providers')) {
         return { rows: [{ recent_providers: '0' }] };
@@ -693,5 +698,266 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
     expect(exitCode).toBe(1);
     // 4. Hard safety limit: total shutdown elapsed time MUST be <= 10000ms
     expect(elapsedMs).toBeLessThanOrEqual(10000);
+  });
+
+  // =========================================================================
+  // CASO K: Zero eligible, zero importing, zero staged => status === 'IDLE'
+  // =========================================================================
+  it('Caso K: zero eligible, zero importing, zero staged => status IDLE, zero falso alarme e zero restart', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    // 5 hours without progress (18000s) but queue and staged are completely empty
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '18000',
+              completed_age: '18000',
+              fresh_age: '18000',
+              started_15m: '0',
+              completed_15m: '0',
+              fresh_15m: '0',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '0', importing_cnt: '0', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '0' }] };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.evaluateCycle();
+
+    expect(metrics.status).toBe('IDLE');
+    expect(metrics.publicationHealth).toBe('NO_FRESH_EXPECTED');
+    expect(metrics.autoHealState).toBe('IDLE');
+    expect(metrics.publishableStaged).toBe(0);
+    expect(onControlledRestart).not.toHaveBeenCalled();
+
+    // Verify evaluateMultidimensionalHealth directly
+    const evalResult = watchdog.evaluateMultidimensionalHealth({
+      eligibleJobs: 0,
+      importingCount: 0,
+      publishableStaged: 0,
+      lastCompletedAgeSec: 18000,
+      lastFreshVisibleAgeSec: 18000,
+      protectiveStopActive: false,
+    });
+    expect(evalResult.status).toBe('IDLE');
+    expect(evalResult.publicationHealth).toBe('NO_FRESH_EXPECTED');
+  });
+
+  // =========================================================================
+  // CASO L: Eligible=0, importing=0, staged publishable=5, freshAge=2100s (>30m) => CRITICAL_STALL (NÃO IDLE)
+  // =========================================================================
+  it('Caso L: eligible=0, importing=0, staged publishable=5, freshAge > 30m => status CRITICAL_STALL (NÃO IDLE) e sweep acionado', async () => {
+    const mockPublicationBarrier: any = {
+      sweepStagedPublications: vi.fn().mockResolvedValue(3),
+    };
+
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      publicationBarrier: mockPublicationBarrier,
+      onControlledRestart,
+    });
+
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '120',
+              completed_age: '120',
+              fresh_age: '2100', // 35m > 30m
+              started_15m: '0',
+              completed_15m: '0',
+              fresh_15m: '0',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '0', importing_cnt: '0', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '5' }] };
+      }
+      if (sql.includes('publishable_staged') || sql.includes('staged_works')) {
+        return { rows: [{ publishable_staged: '5' }] };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.evaluateCycle();
+
+    // MUST NOT be IDLE because publishable staged chapters exist!
+    expect(metrics.status).not.toBe('IDLE');
+    expect(metrics.status).toBe('CRITICAL_STALL');
+    expect(metrics.publicationHealth).toBe('CRITICAL_STALL');
+    expect(metrics.publishableStaged).toBe(5);
+
+    // Verify Level 1 recovery triggered sweepStagedPublications safely
+    expect(mockPublicationBarrier.sweepStagedPublications).toHaveBeenCalledWith(40, 6);
+  });
+
+  // =========================================================================
+  // CASO M: Eligible=0, importing=0, publishable=0, waitingPredecessor=5 => publicationHealth='NO_FRESH_EXPECTED', status='IDLE'
+  // =========================================================================
+  it('Caso M: eligible=0, importing=0, publishable=0, waitingPredecessor=5 => publicationHealth NO_FRESH_EXPECTED, status IDLE, sem restart', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    // Fresh age > 30m, but all staged chapters are blocked waiting for predecessors (publishable = 0)
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '2400',
+              completed_age: '2400',
+              fresh_age: '2400', // 40m
+              started_15m: '0',
+              completed_15m: '0',
+              fresh_15m: '0',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '0', importing_cnt: '0', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '5' }] };
+      }
+      if (sql.includes('publishable_staged') || sql.includes('staged_works')) {
+        return { rows: [{ publishable_staged: '0' }] }; // 0 publishable!
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.evaluateCycle();
+
+    // Since publishable = 0, no publication stall can be attributed to watchdog:
+    expect(metrics.publishableStaged).toBe(0);
+    expect(metrics.publicationHealth).toBe('NO_FRESH_EXPECTED');
+    expect(metrics.status).toBe('IDLE');
+    expect(metrics.autoHealState).toBe('IDLE');
+    expect(onControlledRestart).not.toHaveBeenCalled();
+  });
+
+  // =========================================================================
+  // CASO N: Correlated dedupe classification with mixed jobs (Work 1 dedupe + Work 2 fresh expected)
+  // =========================================================================
+  it('Caso N: correlated dedupe com jobs mistos (dedupe + fresh_expected) => não silencia stall legítimo, publicationHealth STALLED', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    // Processing active (completed 120s ago), but fresh age is 1200s (20m, degraded/stalled)
+    // Mixed completions: 30 jobs dedupe/canonical, but 20 jobs FRESH_EXPECTED (not published yet)
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '120',
+              completed_age: '120',
+              fresh_age: '1200', // 20m
+              started_15m: '10',
+              completed_15m: '10',
+              fresh_15m: '0',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '50', importing_cnt: '2', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '0' }] };
+      }
+      if (sql.includes('recent_completed_jobs') || sql.includes('correlated')) {
+        return {
+          rows: [
+            { classification: 'ALREADY_CANONICAL', cnt: '20' },
+            { classification: 'DEDUPE_SOURCE', cnt: '10' },
+            { classification: 'FRESH_EXPECTED', cnt: '20' },
+          ],
+        };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.evaluateCycle();
+
+    // Correlated breakdown must identify freshExpected > 0
+    expect(metrics.recentCorrelatedBreakdown).toBeDefined();
+    expect(metrics.recentCorrelatedBreakdown!.alreadyCanonical).toBe(20);
+    expect(metrics.recentCorrelatedBreakdown!.dedupeSource).toBe(10);
+    expect(metrics.recentCorrelatedBreakdown!.freshExpected).toBe(20);
+
+    // Because freshExpected > 0, dedupe-only protection MUST NOT apply!
+    expect(metrics.publicationHealth).toBe('STALLED');
+    expect(metrics.status).toBe('STALLED');
+    expect(metrics.autoHealState).toMatch(/LEVEL_1_LIGHT_RECONCILIATION|LEVEL_2_STUCK_STATE_AUDIT/);
   });
 });

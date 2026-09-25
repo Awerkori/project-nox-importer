@@ -154,6 +154,7 @@ export class ImporterEngine {
             scheduler: this.scheduler,
             admissionController: this.admissionController,
             protectiveSentinel: this.protectiveSentinel,
+            publicationBarrier: this.publicationBarrier,
             workerId: config.WORKER_ID,
             onControlledRestart: async (reason, metrics) => {
                 await this.initiateControlledSelfRestart(reason, metrics);

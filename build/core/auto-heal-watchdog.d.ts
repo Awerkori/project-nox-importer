@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import type { WorkAffinityScheduler } from './scheduler/work-affinity-scheduler.js';
 import type { AdmissionController } from './scheduler/admission-controller.js';
 import type { ProtectiveSentinel } from './protective-sentinel.js';
+import type { PublicationBarrier } from './publication.js';
 export type ImporterHealthStatus = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL' | 'IDLE' | 'PAUSED_BY_PROTECTION';
 export type ProcessingHealth = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL';
 export type PublicationHealth = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL' | 'NO_FRESH_EXPECTED';
@@ -24,6 +25,15 @@ export interface HealthPanelMetrics {
     importingCount: number;
     retryCount: number;
     stagedUnique: number;
+    publishableStaged: number;
+    waitingPredecessorStaged: number;
+    stuckStaged: number;
+    recentCorrelatedBreakdown?: {
+        alreadyCanonical: number;
+        dedupeSource: number;
+        freshPublished: number;
+        freshExpected: number;
+    };
     lastAutoHealAt: string | null;
     autoRestartCount1h: number;
     circuitBreakerOpen: boolean;
@@ -44,6 +54,7 @@ export interface AutoHealWatchdogOptions {
     scheduler?: WorkAffinityScheduler;
     admissionController?: AdmissionController;
     protectiveSentinel?: ProtectiveSentinel;
+    publicationBarrier?: PublicationBarrier;
     onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<void>;
     intervalMs?: number;
     workerId?: string;
@@ -55,7 +66,7 @@ export interface AutoHealWatchdogOptions {
  * - Real-progress based health classification (HEALTHY, DEGRADED, STALLED, CRITICAL_STALL, IDLE, PAUSED_BY_PROTECTION)
  * - Silent stall detection (workers alive + eligible > 0 but 0 completions => STALL)
  * - Escalated recovery ladder:
- *     Level 1: Light reconciliation (scheduler state, active works, cooldowns, caches, in-flight, admission)
+ *     Level 1: Light reconciliation (scheduler state, active works, cooldowns, caches, in-flight, admission, publication sweep)
  *     Level 2: Stuck state reconciliation (expired leases >15m, zombie active works eviction)
  *     Level 3: Controlled graceful self-restart (circuit breaker protected: max 1/15m, max 3/1h)
  * - Circuit breaker protection to prevent restart loops
@@ -67,6 +78,7 @@ export declare class AutoHealWatchdog {
     private scheduler?;
     private admissionController?;
     private protectiveSentinel?;
+    private publicationBarrier?;
     private onControlledRestart?;
     private intervalMs;
     private workerId;
@@ -105,6 +117,9 @@ export declare class AutoHealWatchdog {
         protectiveStopTriggeredAt?: string | null;
         recentCompletionsAreDedupeOnly?: boolean;
         hasStagedPublications?: boolean;
+        publishableStaged?: number;
+        waitingPredecessorStaged?: number;
+        stuckStaged?: number;
     }): {
         status: ImporterHealthStatus;
         processingHealth: ProcessingHealth;
@@ -123,6 +138,9 @@ export declare class AutoHealWatchdog {
         protectiveStopTriggeredAt?: string | null;
         recentCompletionsAreDedupeOnly?: boolean;
         hasStagedPublications?: boolean;
+        publishableStaged?: number;
+        waitingPredecessorStaged?: number;
+        stuckStaged?: number;
     }): ImporterHealthStatus;
     /**
      * Executes a single evaluation cycle:
