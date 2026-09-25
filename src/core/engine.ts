@@ -3749,7 +3749,9 @@ export class ImporterEngine {
         scheduler_acquire_ms: Math.round(extraTiming?.schedulerAcquireTotalMs ?? extraTiming?.claimDbMs ?? 0),
         pool_wait_ms: Math.round(extraTiming?.poolWaitMs || 0),
         sql_exec_ms: Math.round(extraTiming?.sqlExecMs || 0),
-        claim_sql_ms: Math.round(extraTiming?.claimSingleJobSqlMs || 0),
+        claim_sql_ms: Math.round(extraTiming?.acquireTelemetry?.claimLockSqlExecMs || extraTiming?.claimSingleJobSqlMs || 0),
+        claim_lock_pool_wait_ms: Math.round(extraTiming?.acquireTelemetry?.claimLockPoolWaitMs || 0),
+        claim_lock_sql_exec_ms: Math.round(extraTiming?.acquireTelemetry?.claimLockSqlExecMs || extraTiming?.claimSingleJobSqlMs || 0),
         total_queries: extraTiming?.totalQueries || 1,
         works_tested: extraTiming?.worksTested || 1,
         staff_check_ms: Math.round(extraTiming?.acquireTelemetry?.staffCheckMs || 0),
@@ -4280,13 +4282,16 @@ export class ImporterEngine {
   public async ensureWorkHasCover(workId: string, botUserId: string): Promise<string | null> {
     const { data: work } = await this.supabase
       .from('works')
-      .select('id, cover_id, title, slug, metadata_provenance')
+      .select('id, cover_id, title, slug, metadata_provenance, published')
       .eq('id', workId)
       .maybeSingle();
 
     if (!work) return null;
 
     if (work.cover_id) {
+      if (work.published) {
+        return work.cover_id;
+      }
       const { data: m } = await this.supabase
         .from('media')
         .select('id, storage_ready, bytes, width, height')
