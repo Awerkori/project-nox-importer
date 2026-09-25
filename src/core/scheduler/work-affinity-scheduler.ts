@@ -383,6 +383,7 @@ export class WorkAffinityScheduler {
       catalogFallbackMs: 0,
       poolWaitTotalMs: 0,
       sqlExecTotalMs: 0,
+      claimLockSqlMs: 0,
       totalQueries: 0,
       totalAcquireMs: 0,
       worksTested: 0,
@@ -1181,6 +1182,7 @@ export class WorkAffinityScheduler {
                 q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
     `;
 
+    const tLockSql0 = performance.now();
     const res = await this.runQuery(client, query, [
       opts.allowedSources,
       opts.minPriority || null,
@@ -1192,6 +1194,10 @@ export class WorkAffinityScheduler {
       opts.disallowedWorkIds || null,
       disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
     ], opts.telemetry);
+
+    if (opts.telemetry) {
+      opts.telemetry.claimLockSqlMs = Math.round((performance.now() - tLockSql0) * 10) / 10;
+    }
 
     if (res.rows.length === 0) return null;
     const r = res.rows[0];
