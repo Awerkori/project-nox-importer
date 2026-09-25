@@ -23,6 +23,11 @@ jobs:
       - name: Rebuild Project
         run: npm run build
 
+      - name: Run Liveness & Auto-Heal Test Suite
+        env:
+          YUGABYTE_PASSWORD: test-ci-placeholder-password
+        run: npx vitest run tests/auto-heal-watchdog.test.ts
+
       - name: Check for stale build artifacts
         run: |
           if [ -n "$(git status --porcelain build/ ':!build/BUILD_ID')" ]; then

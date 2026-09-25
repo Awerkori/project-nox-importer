@@ -48,8 +48,16 @@ export interface HealthPanelMetrics {
   publishableStaged: number;
   waitingPredecessorStaged: number;
   stuckStaged: number;
+  stuckStagedAgeSec?: number;
   classifiedStaged?: number;
   unclassifiedStaged?: number;
+  classificationCursor?: {
+    lastFrontierSortKey: number | null;
+    lastWorkId: string | null;
+  } | null;
+  classifiedThisCycle?: number;
+  classificationCoverageEstimate?: number;
+  oldestUnclassifiedAge?: number;
   recentCorrelatedBreakdown?: {
     alreadyCanonical: number;
     dedupeSource: number;
@@ -127,6 +135,13 @@ export class AutoHealWatchdog {
   private lastTelemetryAt = 0;
   private telemetryCacheTtlMs = 20_000;
 
+  private classificationCursor: {
+    lastFrontierSortKey: number | null;
+    lastWorkId: string | null;
+  } | null = null;
+  private lastCoverageResetAt = Date.now();
+  private classifiedSinceReset = 0;
+
   constructor(options: AutoHealWatchdogOptions) {
     this.pool = options.pool;
     this.scheduler = options.scheduler;
@@ -151,6 +166,22 @@ export class AutoHealWatchdog {
 
   public clearStuckIdentities(): void {
     this.stuckIdentities.clear();
+  }
+
+  public getClassificationCursor(): { lastFrontierSortKey: number | null; lastWorkId: string | null } | null {
+    return this.classificationCursor;
+  }
+
+  public setClassificationCursor(cursor: { lastFrontierSortKey: number | null; lastWorkId: string | null } | null): void {
+    this.classificationCursor = cursor;
+  }
+
+  public removeStuckIdentity(key: string): void {
+    this.stuckIdentities.delete(key);
+  }
+
+  public getTrackedStuckKeys(): string[] {
+    return Array.from(this.stuckIdentities.keys());
   }
 
   /**
@@ -244,6 +275,9 @@ export class AutoHealWatchdog {
     let stuckStaged = 0;
     let classifiedStaged = 0;
     let unclassifiedStaged = 0;
+    let classifiedThisCycle = 0;
+    let classificationCoverageEstimate = 100;
+    let oldestUnclassifiedAge = 0;
     let stuckStagedAgeSec = 0;
 
     const currentStuckKeys = new Set<string>();
@@ -257,6 +291,9 @@ export class AutoHealWatchdog {
       stagedUnique = parseInt(mapRes.rows[0]?.staged_unique || '0', 10);
 
       if (stagedUnique > 0) {
+        const cursorSortKey = this.classificationCursor?.lastFrontierSortKey ?? null;
+        const cursorWorkId = this.classificationCursor?.lastWorkId ?? null;
+
         const pubStagedRes = await this.pool.query(`
           WITH staged_works AS (
             SELECT 
@@ -266,6 +303,7 @@ export class AutoHealWatchdog {
             FROM importer_chapter_mappings m
             WHERE m.status IN ('STAGED', 'WAITING_FOR_GAP') AND m.work_id IS NOT NULL
             GROUP BY m.work_id
+            HAVING ($1::numeric IS NULL OR (MIN(m.chapter_sort_key) > $1::numeric OR (MIN(m.chapter_sort_key) = $1::numeric AND m.work_id::text > $2::text)))
             ORDER BY MIN(m.chapter_sort_key) ASC, m.work_id ASC
             LIMIT 40
           ),
@@ -312,7 +350,7 @@ export class AutoHealWatchdog {
               ELSE 0
             END as is_frontier_publishable
           FROM works_with_published;
-        `);
+        `, [cursorSortKey, cursorWorkId]);
 
         // Check if query returned old-style publishable_staged (from test mock)
         if (pubStagedRes.rows[0]?.waiting_predecessor_staged !== undefined || pubStagedRes.rows[0]?.stuck_staged !== undefined) {
@@ -325,6 +363,7 @@ export class AutoHealWatchdog {
           unclassifiedStaged = pubStagedRes.rows[0]?.unclassified_staged !== undefined
             ? parseInt(pubStagedRes.rows[0]?.unclassified_staged, 10)
             : Math.max(0, stagedUnique - classifiedStaged);
+          classifiedThisCycle = pubStagedRes.rows.length;
 
           if (stuckStaged > 0) {
             const stuckKey = pubStagedRes.rows[0]?.stuck_key || 'mock-stuck';
@@ -339,6 +378,7 @@ export class AutoHealWatchdog {
           stuckStaged = 0;
           classifiedStaged = publishableStaged + waitingPredecessorStaged;
           unclassifiedStaged = Math.max(0, stagedUnique - classifiedStaged);
+          classifiedThisCycle = pubStagedRes.rows.length;
         } else {
           for (const row of pubStagedRes.rows) {
             const totalStaged = parseInt(row.total_staged_chapters || '1', 10);
@@ -361,11 +401,17 @@ export class AutoHealWatchdog {
             if (canActuallyPublish) {
               publishableStaged += 1; // Only frontier chapter is actionable
               waitingPredecessorStaged += Math.max(0, totalStaged - 1);
+              if (row.work_id && row.frontier_sort_key !== undefined) {
+                this.stuckIdentities.delete(`${row.work_id}:${row.frontier_sort_key}`);
+              }
             } else {
               // Non-publishable work: WAITING_PREDECESSOR ONLY if there is a real predecessor in queue!
               const hasPredecessor = Boolean(row.has_predecessor_in_queue);
               if (hasPredecessor) {
                 waitingPredecessorStaged += totalStaged;
+                if (row.work_id && row.frontier_sort_key !== undefined) {
+                  this.stuckIdentities.delete(`${row.work_id}:${row.frontier_sort_key}`);
+                }
               } else {
                 stuckStaged += totalStaged;
                 const stuckKey = row.work_id ? `${row.work_id}:${row.frontier_sort_key}` : `mock-stuck-${stuckStaged}`;
@@ -379,7 +425,27 @@ export class AutoHealWatchdog {
 
           classifiedStaged = publishableStaged + waitingPredecessorStaged + stuckStaged;
           unclassifiedStaged = Math.max(0, stagedUnique - classifiedStaged);
-          // NOTE: Unclassified staged chapters are NEVER silently added to waitingPredecessorStaged!
+          classifiedThisCycle = pubStagedRes.rows.length;
+
+          // Keyset pagination progression & wrap logic
+          if (pubStagedRes.rows.length > 0) {
+            const lastRow = pubStagedRes.rows[pubStagedRes.rows.length - 1];
+            if (pubStagedRes.rows.length === 40 && lastRow.work_id && lastRow.frontier_sort_key !== undefined) {
+              this.classificationCursor = {
+                lastFrontierSortKey: parseFloat(lastRow.frontier_sort_key),
+                lastWorkId: String(lastRow.work_id),
+              };
+            } else {
+              // Reached end of staged works, wrap back to start
+              this.classificationCursor = null;
+              this.lastCoverageResetAt = nowMs;
+              this.classifiedSinceReset = 0;
+            }
+          } else {
+            this.classificationCursor = null;
+            this.lastCoverageResetAt = nowMs;
+            this.classifiedSinceReset = 0;
+          }
         }
 
         // Global Safety Barrier guard: If PublicationSafetyBarrier is CLOSED or RECOVERING, nothing is publishable globally
@@ -399,10 +465,37 @@ export class AutoHealWatchdog {
       this.logger.warn('Failed querying staged classification', { error: err?.message });
     }
 
-    // Evict identities that are no longer stuck in this cycle
-    for (const existingKey of Array.from(this.stuckIdentities.keys())) {
-      if (!currentStuckKeys.has(existingKey)) {
-        this.stuckIdentities.delete(existingKey);
+    // Manage stuck identities across paginated cycles:
+    // Audit tracked stuck keys against database to check if any have published or left STAGED status
+    if (this.stuckIdentities.size > 0) {
+      try {
+        const trackedKeys = Array.from(this.stuckIdentities.keys()).filter((k) => !k.startsWith('mock-'));
+        if (trackedKeys.length > 0) {
+          const checkRes = await this.pool.query(
+            `
+            SELECT (work_id || ':' || chapter_sort_key::text) as key
+            FROM importer_chapter_mappings
+            WHERE status IN ('STAGED', 'WAITING_FOR_GAP')
+              AND (work_id || ':' || chapter_sort_key::text) = ANY($1::text[])
+          `,
+            [trackedKeys]
+          );
+          const stillStagedKeys = new Set<string>(checkRes.rows.map((r: any) => r.key));
+          for (const k of trackedKeys) {
+            if (!stillStagedKeys.has(k)) {
+              // Evidence: chapter published, was deleted, or left staged status!
+              this.stuckIdentities.delete(k);
+            }
+          }
+        }
+        // Evict mock keys if not present in current cycle mock
+        for (const k of Array.from(this.stuckIdentities.keys())) {
+          if (k.startsWith('mock-') && !currentStuckKeys.has(k)) {
+            this.stuckIdentities.delete(k);
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn('Failed auditing resolved stuck identities', { error: err?.message });
       }
     }
 
@@ -415,6 +508,7 @@ export class AutoHealWatchdog {
       }
     }
     stuckStagedAgeSec = Math.floor(maxStuckAgeMs / 1000);
+    stuckStaged = Math.max(stuckStaged, this.stuckIdentities.size);
 
     // 4. Scheduler State (active_works, claimable_works)
     let activeWorks: any[] = [];
@@ -577,8 +671,13 @@ export class AutoHealWatchdog {
       publishableStaged,
       waitingPredecessorStaged,
       stuckStaged,
+      stuckStagedAgeSec,
       classifiedStaged,
       unclassifiedStaged,
+      classificationCursor: this.classificationCursor,
+      classifiedThisCycle,
+      classificationCoverageEstimate,
+      oldestUnclassifiedAge,
       recentCorrelatedBreakdown,
       lastAutoHealAt: this.lastAutoHealAt,
       autoRestartCount1h,
@@ -721,18 +820,11 @@ export class AutoHealWatchdog {
           }
         }
       } else {
-        // unclassifiedStaged > 0 (publishable = 0, stuck = 0)
-        // Cannot be IDLE because unclassified staged work exists
-        if (publicationHealth === 'CRITICAL_STALL') {
-          status = 'CRITICAL_STALL';
-        } else if (publicationHealth === 'STALLED') {
-          status = 'STALLED';
-        } else {
-          status = 'DEGRADED';
-          if (publicationHealth === 'NO_FRESH_EXPECTED' || publicationHealth === 'HEALTHY') {
-            publicationHealth = 'DEGRADED';
-          }
-        }
+        // unclassifiedStaged > 0 alone (publishable = 0, stuck = 0)
+        // CONCEPTUAL STATE: CLASSIFICATION_PENDING / UNKNOWN_STAGED
+        // Pipeline cannot be IDLE, but unclassified staged ALONE MUST NEVER trigger CRITICAL_STALL or process restart!
+        status = 'DEGRADED';
+        publicationHealth = 'DEGRADED';
       }
     } else if (publicationHealth === 'NO_FRESH_EXPECTED') {
       status = processingHealth;
@@ -825,6 +917,16 @@ export class AutoHealWatchdog {
    */
   async executeRecoveryLadder(metrics: HealthPanelMetrics): Promise<void> {
     const nowMs = Date.now();
+
+    // Unclassified staged alone MUST NEVER trigger recovery ladder or process restart
+    if (
+      metrics.eligibleJobs === 0 &&
+      metrics.importingCount === 0 &&
+      metrics.publishableStaged === 0 &&
+      metrics.stuckStaged === 0
+    ) {
+      return;
+    }
 
     // Determine the relevant stall duration driving the recovery ladder
     let effectiveStallAgeSec = metrics.lastCompletedAgeSec;
