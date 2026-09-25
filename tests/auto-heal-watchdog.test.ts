@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+process.env.YUGABYTE_PASSWORD = process.env.YUGABYTE_PASSWORD || 'mock-ci-password';
+
 import {
   AutoHealWatchdog,
   type HealthPanelMetrics,
