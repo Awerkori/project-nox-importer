@@ -66,13 +66,37 @@ export class AsyncSemaphore {
     }
   }
 
+  public waitSamples: number[] = [];
+  public holdSamples: number[] = [];
+
   async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const t0Wait = performance.now();
     await this.acquire();
+    const waitMs = performance.now() - t0Wait;
+    this.waitSamples.push(waitMs);
+    if (this.waitSamples.length > 300) this.waitSamples.shift();
+
+    const t0Hold = performance.now();
     try {
       return await fn();
     } finally {
+      const holdMs = performance.now() - t0Hold;
+      this.holdSamples.push(holdMs);
+      if (this.holdSamples.length > 300) this.holdSamples.shift();
       this.release();
     }
+  }
+
+  getMetrics() {
+    const sortedWait = [...this.waitSamples].sort((a, b) => a - b);
+    const sortedHold = [...this.holdSamples].sort((a, b) => a - b);
+    return {
+      waitP50: sortedWait.length ? Math.round(sortedWait[Math.floor(sortedWait.length * 0.5)] * 10) / 10 : 0,
+      waitP95: sortedWait.length ? Math.round(sortedWait[Math.floor(sortedWait.length * 0.95)] * 10) / 10 : 0,
+      holdP50: sortedHold.length ? Math.round(sortedHold[Math.floor(sortedHold.length * 0.5)] * 10) / 10 : 0,
+      holdP95: sortedHold.length ? Math.round(sortedHold[Math.floor(sortedHold.length * 0.95)] * 10) / 10 : 0,
+      samples: this.waitSamples.length
+    };
   }
 
   setCapacity(newCapacity: number): void {

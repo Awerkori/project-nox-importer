@@ -8,7 +8,16 @@ export declare class AsyncSemaphore {
     acquire(signal?: AbortSignal): Promise<void>;
     release(): void;
     private drain;
+    waitSamples: number[];
+    holdSamples: number[];
     runExclusive<T>(fn: () => Promise<T>): Promise<T>;
+    getMetrics(): {
+        waitP50: number;
+        waitP95: number;
+        holdP50: number;
+        holdP95: number;
+        samples: number;
+    };
     setCapacity(newCapacity: number): void;
     get capacity(): number;
     get available(): number;

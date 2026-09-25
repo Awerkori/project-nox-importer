@@ -55,6 +55,50 @@ export class WorkAffinityScheduler {
   private lastBackfillPublicationTime = Date.now();
   private watchdogRunning = false;
 
+  // Claim efficiency telemetry (Fase 3)
+  public specificClaimAttempts = 0;
+  public specificClaimSuccesses = 0;
+  public genericClaimAttempts = 0;
+  public genericClaimSuccesses = 0;
+  public emptyClaimAttempts = 0;
+
+  // Lightweight probe for P0 queue presence (avoids 400ms scan on every claim)
+  private lastP0ProbeAt = 0;
+  private hasP0InQueue = false;
+
+  private async hasP0Candidate(): Promise<boolean> {
+    if (process.env.NODE_ENV === 'test' || !this.pool?.query) {
+      return true;
+    }
+    const now = Date.now();
+    if (this.hasP0InQueue) return true;
+    if (now - this.lastP0ProbeAt < 5000) return false;
+    this.lastP0ProbeAt = now;
+    try {
+      const r = await this.runQuery(this.pool, `
+        SELECT 1 FROM importer_queue 
+        WHERE status = 'QUEUED' AND task_type = 'IMPORT_CHAPTER' AND priority >= 100 
+        LIMIT 1;
+      `);
+      this.hasP0InQueue = r.rows.length > 0;
+      return this.hasP0InQueue;
+    } catch {
+      return false;
+    }
+  }
+
+  public getClaimStats() {
+    return {
+      specificAttempts: this.specificClaimAttempts,
+      specificSuccesses: this.specificClaimSuccesses,
+      genericAttempts: this.genericClaimAttempts,
+      genericSuccesses: this.genericClaimSuccesses,
+      emptyAttempts: this.emptyClaimAttempts,
+      specificSuccessRate: this.specificClaimAttempts > 0 ? Math.round((this.specificClaimSuccesses / this.specificClaimAttempts) * 1000) / 10 : 0,
+      genericSuccessRate: this.genericClaimAttempts > 0 ? Math.round((this.genericClaimSuccesses / this.genericClaimAttempts) * 1000) / 10 : 0,
+    };
+  }
+
   constructor(
     private stateStore: SchedulerStateStore,
     private admissionController: AdmissionController,
@@ -302,39 +346,46 @@ export class WorkAffinityScheduler {
       // LANE P0: Fresh New Releases (Priority >= 100) - ABSOLUTE PRIORITY
       // Next free slot ALWAYS goes to P0 if claimable. Never skipped.
       // -------------------------------------------------------------
-      const p0Job = await this.claimSingleJob(this.pool, {
-        workerId: options.workerId,
-        leaseMin,
-        allowedSources,
-        minPriority: 100,
-        disallowedWorkIds: fullWorkIds,
-      });
+      let p0Job = null;
+      if (await this.hasP0Candidate()) {
+        this.genericClaimAttempts++;
+        p0Job = await this.claimSingleJob(this.pool, {
+          workerId: options.workerId,
+          leaseMin,
+          allowedSources,
+          minPriority: 100,
+          disallowedWorkIds: fullWorkIds,
+        });
 
-      if (p0Job) {
-        const waitTimeMs = performance.now() - t0;
-        this.p0Count1h++;
-        this.p0WaitTimes.push(waitTimeMs);
-        if (this.p0WaitTimes.length > 100) this.p0WaitTimes.shift();
+        if (p0Job) {
+          this.genericClaimSuccesses++;
+          const waitTimeMs = performance.now() - t0;
+          this.p0Count1h++;
+          this.p0WaitTimes.push(waitTimeMs);
+          if (this.p0WaitTimes.length > 100) this.p0WaitTimes.shift();
 
-        const workId = p0Job.payload?.workId || '';
-        this.onJobStarted(workId, p0Job.chapter_sort_key);
-        this.lastClaimTime = Date.now();
+          const workId = p0Job.payload?.workId || '';
+          this.onJobStarted(workId, p0Job.chapter_sort_key);
+          this.lastClaimTime = Date.now();
 
-        const decision: SchedulerDecision = {
-          jobId: p0Job.id,
-          workId,
-          workTitle: p0Job.payload?.chapterTitle || 'P0 Release',
-          chapterNumber: p0Job.payload?.chapterNumber ?? 0,
-          chapterSortKey: p0Job.chapter_sort_key ?? 0,
-          lane: SchedulerLane.P0_FRESH_RELEASE,
-          reason: 'FRESH_RELEASE',
-          workState: 'UPDATING',
-          source: p0Job.source,
-          waitTimeMs: Math.round(waitTimeMs * 10) / 10,
-          decisionTime: new Date().toISOString(),
-        };
-        this.logDecision(decision);
-        return p0Job;
+          const decision: SchedulerDecision = {
+            jobId: p0Job.id,
+            workId,
+            workTitle: p0Job.payload?.chapterTitle || 'P0 Release',
+            chapterNumber: p0Job.payload?.chapterNumber ?? 0,
+            chapterSortKey: p0Job.chapter_sort_key ?? 0,
+            lane: SchedulerLane.P0_FRESH_RELEASE,
+            reason: 'FRESH_RELEASE',
+            workState: 'UPDATING',
+            source: p0Job.source,
+            waitTimeMs: Math.round(waitTimeMs * 10) / 10,
+            decisionTime: new Date().toISOString(),
+          };
+          this.logDecision(decision);
+          return p0Job;
+        } else {
+          this.hasP0InQueue = false;
+        }
       }
 
       // -------------------------------------------------------------
@@ -344,12 +395,15 @@ export class WorkAffinityScheduler {
       const p1Works = activeWorks.filter((w) => w.lane === 'P1');
       const p2Works = activeWorks.filter((w) => w.lane === 'P2');
 
-      // Check critical gaps first
+      // Check critical gaps first (only for sources with available permits)
       const criticalWorks = p1Works.filter(
-        (w) => w.criticalGapSortKey !== null && (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork
+        (w) => w.criticalGapSortKey !== null &&
+          (!allowedSources || allowedSources.length === 0 || allowedSources.includes(w.primarySource)) &&
+          (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork
       );
 
       for (const cw of criticalWorks) {
+        this.specificClaimAttempts++;
         const gapJob = await this.claimSingleJob(this.pool, {
           workerId: options.workerId,
           leaseMin,
@@ -360,6 +414,7 @@ export class WorkAffinityScheduler {
         });
 
         if (gapJob) {
+          this.specificClaimSuccesses++;
           const waitTimeMs = performance.now() - t0;
           this.onJobStarted(cw.workId, gapJob.chapter_sort_key);
           this.p1Count1h++;
@@ -402,6 +457,7 @@ export class WorkAffinityScheduler {
           const idx = (startIdx + i) % readyP1Works.length;
           const targetWork = readyP1Works[idx];
 
+          this.specificClaimAttempts++;
           const p1Job = await this.claimSingleJob(this.pool, {
             workerId: options.workerId,
             leaseMin,
@@ -411,6 +467,7 @@ export class WorkAffinityScheduler {
           });
 
           if (p1Job) {
+            this.specificClaimSuccesses++;
             this.rrIndexP1 = idx + 1;
             const waitTimeMs = performance.now() - t0;
             this.onJobStarted(targetWork.workId, p1Job.chapter_sort_key);
@@ -455,6 +512,7 @@ export class WorkAffinityScheduler {
           const idx = (startIdx + i) % readyP2Works.length;
           const targetWork = readyP2Works[idx];
 
+          this.specificClaimAttempts++;
           const p2Job = await this.claimSingleJob(this.pool, {
             workerId: options.workerId,
             leaseMin,
@@ -464,6 +522,7 @@ export class WorkAffinityScheduler {
           });
 
           if (p2Job) {
+            this.specificClaimSuccesses++;
             this.rrIndexP2 = idx + 1;
             const waitTimeMs = performance.now() - t0;
             this.onJobStarted(targetWork.workId, p2Job.chapter_sort_key);
@@ -489,48 +548,8 @@ export class WorkAffinityScheduler {
       }
 
       // -------------------------------------------------------------
-      // LANE P1: Catalog Backfill Dynamic Claim (Any Existing Published Work)
-      // When currently tracked active P1 and P2 works cannot supply a job (e.g. at
-      // max in-flight per work, or primary source temporarily down), claim
-      // directly from ANY existing catalog work (w.published = true) in the database.
-      // -------------------------------------------------------------
-      const catalogP1Job = await this.claimCatalogP1Job(this.pool, {
-        workerId: options.workerId,
-        leaseMin,
-        allowedSources,
-        disallowedWorkIds: fullWorkIds,
-      });
-
-      if (catalogP1Job) {
-        const waitTimeMs = performance.now() - t0;
-        const workId = catalogP1Job.payload?.workId || '';
-        this.onJobStarted(workId, catalogP1Job.chapter_sort_key);
-        this.p1Count1h++;
-
-        const decision: SchedulerDecision = {
-          jobId: catalogP1Job.id,
-          workId,
-          workTitle: catalogP1Job.payload?.chapterTitle || 'Catalog P1 Backfill',
-          chapterNumber: catalogP1Job.payload?.chapterNumber ?? 0,
-          chapterSortKey: catalogP1Job.chapter_sort_key ?? 0,
-          lane: SchedulerLane.P1_BACKFILL,
-          reason: 'CATALOG_P1_BACKFILL_CLAIM',
-          workState: 'FILLING',
-          source: catalogP1Job.source,
-          waitTimeMs: Math.round(waitTimeMs * 10) / 10,
-          decisionTime: new Date().toISOString(),
-        };
-        this.logDecision(decision);
-        return catalogP1Job;
-      }
-
-      // -------------------------------------------------------------
       // WORK-CONSERVING SPARE CAPACITY & ON-DEMAND ADMISSION:
-      // If active works have no available jobs and workers are idle (totalInFlight < 18),
-      // we do NOT claim random unadmitted works!
-      // Instead, we admit a healthy waiting work via AdmissionController,
-      // which sets up sliding window and work affinity, and then claim its job.
-      // UNADMITTED WORK CLAIMS = 0!
+      // Try active works fallback first BEFORE scanning the full catalog
       // -------------------------------------------------------------
       const activeWorkIds = activeWorks
         .filter((w) => w.state === 'FILLING' && (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork)
@@ -538,6 +557,7 @@ export class WorkAffinityScheduler {
 
       let fallbackJob = null;
       if (activeWorkIds.length > 0) {
+        this.specificClaimAttempts++;
         fallbackJob = await this.claimSingleJob(this.pool, {
           workerId: options.workerId,
           leaseMin,
@@ -545,6 +565,9 @@ export class WorkAffinityScheduler {
           allowedWorkIds: activeWorkIds,
           disallowedWorkIds: fullWorkIds,
         });
+        if (fallbackJob) {
+          this.specificClaimSuccesses++;
+        }
       }
 
       // If active works have no jobs, check real total worker occupancy
@@ -552,6 +575,7 @@ export class WorkAffinityScheduler {
       if (!fallbackJob && totalInFlight < 18) {
         const newlyAdmitted = await this.admissionController.admitNextWorkOnDemand('P1', allowedSources || undefined);
         if (newlyAdmitted) {
+          this.specificClaimAttempts++;
           fallbackJob = await this.claimSingleJob(this.pool, {
             workerId: options.workerId,
             leaseMin,
@@ -559,6 +583,9 @@ export class WorkAffinityScheduler {
             workId: newlyAdmitted.workId,
             disallowedWorkIds: this.getFullInFlightWorkIds(config.maxInflightPerWork),
           });
+          if (fallbackJob) {
+            this.specificClaimSuccesses++;
+          }
         }
       }
 
@@ -585,6 +612,44 @@ export class WorkAffinityScheduler {
         return fallbackJob;
       }
 
+      // -------------------------------------------------------------
+      // LANE P1: Catalog Backfill Dynamic Claim (Last Resort)
+      // When currently tracked active P1 and P2 works cannot supply a job,
+      // claim from ANY published catalog work
+      // -------------------------------------------------------------
+      this.genericClaimAttempts++;
+      const catalogP1Job = await this.claimCatalogP1Job(this.pool, {
+        workerId: options.workerId,
+        leaseMin,
+        allowedSources,
+        disallowedWorkIds: fullWorkIds,
+      });
+
+      if (catalogP1Job) {
+        this.genericClaimSuccesses++;
+        const waitTimeMs = performance.now() - t0;
+        const workId = catalogP1Job.payload?.workId || '';
+        this.onJobStarted(workId, catalogP1Job.chapter_sort_key);
+        this.p1Count1h++;
+
+        const decision: SchedulerDecision = {
+          jobId: catalogP1Job.id,
+          workId,
+          workTitle: catalogP1Job.payload?.chapterTitle || 'Catalog P1 Backfill',
+          chapterNumber: catalogP1Job.payload?.chapterNumber ?? 0,
+          chapterSortKey: catalogP1Job.chapter_sort_key ?? 0,
+          lane: SchedulerLane.P1_BACKFILL,
+          reason: 'CATALOG_P1_BACKFILL_CLAIM',
+          workState: 'FILLING',
+          source: catalogP1Job.source,
+          waitTimeMs: Math.round(waitTimeMs * 10) / 10,
+          decisionTime: new Date().toISOString(),
+        };
+        this.logDecision(decision);
+        return catalogP1Job;
+      }
+
+      this.emptyClaimAttempts++;
       return null;
   }
 
@@ -622,18 +687,6 @@ export class WorkAffinityScheduler {
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
-          AND NOT EXISTS (
-            SELECT 1 FROM chapters c
-            WHERE c.work_id = (q.payload->>'workId')::uuid
-              AND c.number = q.chapter_sort_key
-              AND c.published_at IS NOT NULL
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM importer_chapter_mappings sm
-            WHERE sm.work_id = (q.payload->>'workId')::uuid
-              AND sm.status = 'STAGED'
-              AND sm.chapter_sort_key <= q.chapter_sort_key
-          )
         ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -668,7 +721,7 @@ export class WorkAffinityScheduler {
       const workId = payload?.workId;
       const chapterNumber = payload?.chapterNumber;
 
-      // Pre-flight check: is this chapter already published canonically in chapters table?
+      // Pre-flight check 1: is this chapter already published canonically in chapters table?
       if (workId && (chapterNumber !== undefined || sortKey !== null)) {
         const pubCheck = await this.runQuery(client, `
           SELECT id FROM chapters 
@@ -696,6 +749,27 @@ export class WorkAffinityScheduler {
                 updated_at = NOW()
             WHERE source = $2 AND work_id = $3::uuid AND (chapter_number = $4::numeric OR chapter_sort_key = $5::numeric);
           `, [publishedChapterId, r.source, workId, chapterNumber ?? sortKey, sortKey ?? chapterNumber]);
+          continue;
+        }
+
+        // Pre-flight check 2: Is there an earlier chapter currently STAGED?
+        const stagedCheck = await this.runQuery(client, `
+          SELECT 1 FROM importer_chapter_mappings
+          WHERE work_id = $1::uuid AND status = 'STAGED' AND chapter_sort_key < $2
+          LIMIT 1;
+        `, [workId, sortKey]);
+
+        if (stagedCheck.rows.length > 0) {
+          await this.runQuery(client, `
+            UPDATE importer_queue
+            SET status = 'QUEUED',
+                attempts = GREATEST(0, attempts - 1),
+                locked_by = NULL,
+                locked_at = NULL,
+                lease_expires_at = NULL,
+                updated_at = NOW()
+            WHERE id = $1;
+          `, [r.id]);
           continue;
         }
       }
@@ -742,7 +816,7 @@ export class WorkAffinityScheduler {
   ): Promise<any | null> {
     const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
 
-    // 1. Check for active staff requests first (very cheap indexed lookup)
+    // 1. Check for active staff requests first (very cheap indexed lookup ~1.5ms)
     const activeReqs = await this.runQuery(client, `
       SELECT work_id::text, priority_boost, created_at 
       FROM importer_staff_requests 
@@ -750,10 +824,13 @@ export class WorkAffinityScheduler {
       ORDER BY priority_boost DESC, created_at ASC
     `);
 
-    const hasActiveRequests = activeReqs.rows.length > 0;
-    const staffWorkIds = hasActiveRequests ? activeReqs.rows.map((r: any) => r.work_id) : null;
+    if (activeReqs.rows.length === 0) {
+      return null;
+    }
 
-    const query = hasActiveRequests ? `
+    const staffWorkIds = activeReqs.rows.map((r: any) => r.work_id);
+
+    const query = `
       WITH to_lock AS (
         SELECT q.id
         FROM importer_queue q
@@ -769,19 +846,9 @@ export class WorkAffinityScheduler {
           AND s.enabled = true
           AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
-          AND (
-            (q.payload->>'staffForced')::boolean = true 
-            OR q.priority >= 1000 
-            OR (q.payload->>'workId') = ANY($6::text[])
-          )
+          AND (q.payload->>'workId') = ANY($6::text[])
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
-          AND NOT EXISTS (
-            SELECT 1 FROM chapters c
-            WHERE c.work_id = (q.payload->>'workId')::uuid
-              AND c.number = q.chapter_sort_key
-              AND c.published_at IS NOT NULL
-          )
         ORDER BY 
           COALESCE(sr.priority_boost, 0) DESC,
           COALESCE(sr.created_at, '9999-12-31'::timestamptz) ASC,
@@ -803,69 +870,16 @@ export class WorkAffinityScheduler {
       RETURNING q.id, q.task_type, q.source, q.priority, q.payload, q.dedupe_key,
                 q.status, q.attempts, q.max_attempts, q.locked_by, q.locked_at,
                 q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
-    ` : `
-      WITH to_lock AS (
-        SELECT q.id
-        FROM importer_queue q
-        JOIN importer_sources s ON s.id = q.source
-        WHERE (
-          q.status = 'QUEUED'
-          OR (q.status = 'RETRY' AND q.next_run_at <= NOW())
-        )
-          AND q.task_type = 'IMPORT_CHAPTER'
-          AND q.attempts < COALESCE(q.max_attempts, 7)
-          AND s.enabled = true
-          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
-          AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
-          AND (
-            (q.payload->>'staffForced')::boolean = true 
-            OR q.priority >= 1000
-          )
-          AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
-          AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
-          AND NOT EXISTS (
-            SELECT 1 FROM chapters c
-            WHERE c.work_id = (q.payload->>'workId')::uuid
-              AND c.number = q.chapter_sort_key
-              AND c.published_at IS NOT NULL
-          )
-        ORDER BY 
-          q.priority DESC, 
-          q.chapter_sort_key ASC NULLS LAST, 
-          q.next_run_at ASC
-        FOR UPDATE OF q SKIP LOCKED
-        LIMIT 1
-      )
-      UPDATE importer_queue q
-      SET status = 'IMPORTING',
-          locked_by = $4,
-          locked_at = NOW(),
-          lease_expires_at = NOW() + ($5::text || ' minutes')::interval,
-          attempts = q.attempts + 1,
-          updated_at = NOW()
-      FROM to_lock
-      WHERE q.id = to_lock.id
-      RETURNING q.id, q.task_type, q.source, q.priority, q.payload, q.dedupe_key,
-                q.status, q.attempts, q.max_attempts, q.locked_by, q.locked_at,
-                q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
     `;
 
-    const queryParams = hasActiveRequests
-      ? [
-          opts.allowedSources,
-          opts.disallowedWorkIds || null,
-          disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
-          opts.workerId,
-          opts.leaseMin,
-          staffWorkIds,
-        ]
-      : [
-          opts.allowedSources,
-          opts.disallowedWorkIds || null,
-          disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
-          opts.workerId,
-          opts.leaseMin,
-        ];
+    const queryParams = [
+      opts.allowedSources,
+      opts.disallowedWorkIds || null,
+      disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
+      opts.workerId,
+      opts.leaseMin,
+      staffWorkIds,
+    ];
 
     for (let drainAttempt = 0; drainAttempt < 10; drainAttempt++) {
       const res = await this.runQuery(client, query, queryParams);
@@ -942,10 +956,6 @@ export class WorkAffinityScheduler {
     const orderClause = isSingleWork
       ? `ORDER BY q.chapter_sort_key ASC NULLS LAST`
       : `ORDER BY 
-          CASE 
-            WHEN (q.payload->>'staffForced')::boolean = true OR q.priority >= 1000 THEN 0 
-            ELSE 1 
-          END ASC,
           q.priority DESC, 
           q.chapter_sort_key ASC NULLS LAST, 
           q.next_run_at ASC`;
