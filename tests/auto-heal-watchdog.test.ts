@@ -1573,4 +1573,372 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
     expect(metrics.publishableStaged).toBe(0);
     expect(metrics.stuckStaged).toBe(1);
   });
+
+  // =========================================================================
+  // CASO X: Keyset pagination determinística progride entre ciclos e faz wrap
+  // =========================================================================
+  it('Caso X: keyset pagination determinística progride entre ciclos (LIMIT 40) e faz wrap ao final', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    // 120 works in total across 3 pages: 1-40, 41-80, 81-120
+    const generateWorkRows = (start: number, count: number) => {
+      const rows = [];
+      for (let i = 0; i < count; i++) {
+        const idx = start + i;
+        rows.push({
+          work_id: `work-${idx.toString().padStart(3, '0')}`,
+          frontier_sort_key: `${idx}.0000`,
+          total_staged_chapters: '1',
+          max_published: `${idx - 1}.0000`,
+          has_predecessor_in_mapping: false,
+          has_predecessor_in_queue: false,
+          is_frontier_publishable: 1,
+        });
+      }
+      return rows;
+    };
+
+    mockPool.query.mockImplementation((sql: string, params?: any[]) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '60',
+              completed_age: '60',
+              fresh_age: '60',
+              started_15m: '10',
+              completed_15m: '10',
+              fresh_15m: '10',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '0', importing_cnt: '0', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '120' }] };
+      }
+      if (sql.includes('staged_works')) {
+        const cursorSortKey = params?.[0];
+        const cursorWorkId = params?.[1];
+
+        if (cursorSortKey === null || cursorSortKey === undefined) {
+          // Page 1: works 1 to 40
+          return { rows: generateWorkRows(1, 40) };
+        } else if (cursorSortKey === 40) {
+          // Page 2: works 41 to 80
+          return { rows: generateWorkRows(41, 40) };
+        } else if (cursorSortKey === 80) {
+          // Page 3: works 81 to 120
+          return { rows: generateWorkRows(81, 40) };
+        } else {
+          // End: 0 rows
+          return { rows: [] };
+        }
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    // Cycle 1: initial null cursor -> classifies 1-40 -> advances cursor to (40, 'work-040')
+    expect(watchdog.getClassificationCursor()).toBeNull();
+    const m1 = await watchdog.collectTelemetry(true);
+    expect(m1.classifiedThisCycle).toBe(40);
+    expect(m1.unclassifiedStaged).toBe(80);
+    const c1 = watchdog.getClassificationCursor();
+    expect(c1).toEqual({ lastFrontierSortKey: 40, lastWorkId: 'work-040' });
+
+    // Cycle 2: passes cursor (40, 'work-040') -> classifies 41-80 -> advances cursor to (80, 'work-080')
+    const m2 = await watchdog.collectTelemetry(true);
+    expect(m2.classifiedThisCycle).toBe(40);
+    const c2 = watchdog.getClassificationCursor();
+    expect(c2).toEqual({ lastFrontierSortKey: 80, lastWorkId: 'work-080' });
+
+    // Cycle 3: passes cursor (80, 'work-080') -> classifies 81-120 -> advances cursor to (120, 'work-120')
+    const m3 = await watchdog.collectTelemetry(true);
+    expect(m3.classifiedThisCycle).toBe(40);
+    const c3 = watchdog.getClassificationCursor();
+    expect(c3).toEqual({ lastFrontierSortKey: 120, lastWorkId: 'work-120' });
+
+    // Cycle 4: reaches end (<40 rows) -> wraps cursor back to null
+    const m4 = await watchdog.collectTelemetry(true);
+    expect(m4.classifiedThisCycle).toBe(0);
+    expect(watchdog.getClassificationCursor()).toBeNull();
+  });
+
+  // =========================================================================
+  // CASO Y: unclassifiedStaged isolado NÃO pode causar restart (DEGRADED / CLASSIFICATION_PENDING)
+  // =========================================================================
+  it('Caso Y: unclassifiedStaged isolado com publishable=0 e stuck=0 NÃO causa restart (status DEGRADED, publicationHealth DEGRADED)', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    // Simulating 500 staged unique, but 0 publishable, 0 stuck, 0 eligible, 0 importing
+    // and lastFreshVisibleAge > 30 min (e.g. 7200s = 2h)
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '7200',
+              completed_age: '7200',
+              fresh_age: '7200',
+              started_15m: '0',
+              completed_15m: '0',
+              fresh_15m: '0',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '0', importing_cnt: '0', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '500' }] };
+      }
+      if (sql.includes('staged_works')) {
+        // Page 1 returns 40 works all waiting predecessor (has_predecessor_in_queue = true)
+        // publishable = 0, stuck = 0, waiting = 40, unclassified = 460
+        const rows = [];
+        for (let i = 1; i <= 40; i++) {
+          rows.push({
+            work_id: `work-wait-${i}`,
+            frontier_sort_key: `${i}.0000`,
+            total_staged_chapters: '1',
+            max_published: `${i - 2}.0000`,
+            has_predecessor_in_mapping: true,
+            has_predecessor_in_queue: true,
+            is_frontier_publishable: 0,
+          });
+        }
+        return { rows };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.evaluateCycle();
+
+    expect(metrics.publishableStaged).toBe(0);
+    expect(metrics.stuckStaged).toBe(0);
+    expect(metrics.unclassifiedStaged).toBe(460);
+    expect(metrics.status).toBe('DEGRADED');
+    expect(metrics.publicationHealth).toBe('DEGRADED');
+    expect(onControlledRestart).not.toHaveBeenCalled();
+  });
+
+  // =========================================================================
+  // CASO Z: stuckAge sobrevive à paginação (off-page persistence)
+  // =========================================================================
+  it('Caso Z: stuckAge sobrevive à paginação — identidade de obra presa continua com relógio acumulado mesmo fora da página atual', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    let currentCycle = 1;
+
+    mockPool.query.mockImplementation((sql: string, params?: any[]) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '60',
+              completed_age: '60',
+              fresh_age: '60',
+              started_15m: '5',
+              completed_15m: '5',
+              fresh_15m: '5',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '0', importing_cnt: '0', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '80' }] };
+      }
+      if (sql.includes('importer_chapter_mappings') && sql.includes('ANY')) {
+        // DB confirms work-stuck-a is still staged in DB!
+        return { rows: [{ key: 'work-stuck-a:10.0000' }] };
+      }
+      if (sql.includes('staged_works')) {
+        if (currentCycle === 1) {
+          // Cycle 1: work-stuck-a is on page 1 and is stuck
+          return {
+            rows: [
+              {
+                work_id: 'work-stuck-a',
+                frontier_sort_key: '10.0000',
+                total_staged_chapters: '1',
+                max_published: '8.0000',
+                has_predecessor_in_mapping: false,
+                has_predecessor_in_queue: false,
+                is_frontier_publishable: 0,
+              },
+            ],
+          };
+        } else {
+          // Cycle 2: page 2 has other works, work-stuck-a is NOT on page 2
+          return {
+            rows: [
+              {
+                work_id: 'work-page-2',
+                frontier_sort_key: '50.0000',
+                total_staged_chapters: '1',
+                max_published: '49.0000',
+                has_predecessor_in_mapping: false,
+                has_predecessor_in_queue: false,
+                is_frontier_publishable: 1,
+              },
+            ],
+          };
+        }
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    // Cycle 1: work-stuck-a detected
+    currentCycle = 1;
+    await watchdog.collectTelemetry(true);
+    expect(watchdog.getTrackedStuckKeys()).toContain('work-stuck-a:10.0000');
+
+    // Simulate 25 minutes elapsed
+    const originalDetectedAt = Date.now() - 25 * 60 * 1000;
+    (watchdog as any).stuckIdentities.set('work-stuck-a:10.0000', originalDetectedAt);
+
+    // Cycle 2: cursor advanced, work-stuck-a is NOT in the 40 works of this cycle
+    currentCycle = 2;
+    const m2 = await watchdog.collectTelemetry(true);
+
+    // work-stuck-a survived because it's still staged in DB!
+    expect(watchdog.getTrackedStuckKeys()).toContain('work-stuck-a:10.0000');
+    const age = watchdog.getStuckIdentityAge('work-stuck-a:10.0000');
+    expect(age).toBeGreaterThanOrEqual(25 * 60);
+    expect(m2.stuckStagedAgeSec).toBeGreaterThanOrEqual(25 * 60);
+  });
+
+  // =========================================================================
+  // CASO AA: Eviction de stuck acontece apenas com comprovação
+  // =========================================================================
+  it('Caso AA: Eviction de stuck acontece apenas com comprovação (quando Mapping deixa de ser STAGED no DB)', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    let workAIsStagedInDb = true;
+
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '60',
+              completed_age: '60',
+              fresh_age: '60',
+              started_15m: '5',
+              completed_15m: '5',
+              fresh_15m: '5',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '0', importing_cnt: '0', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: workAIsStagedInDb ? '1' : '0' }] };
+      }
+      if (sql.includes('importer_chapter_mappings') && sql.includes('ANY')) {
+        // If still staged, returns key. If published/resolved, returns empty!
+        return { rows: workAIsStagedInDb ? [{ key: 'work-resolved-a:10.0000' }] : [] };
+      }
+      if (sql.includes('staged_works')) {
+        if (workAIsStagedInDb) {
+          return {
+            rows: [
+              {
+                work_id: 'work-resolved-a',
+                frontier_sort_key: '10.0000',
+                total_staged_chapters: '1',
+                max_published: '8.0000',
+                has_predecessor_in_mapping: false,
+                has_predecessor_in_queue: false,
+                is_frontier_publishable: 0,
+              },
+            ],
+          };
+        } else {
+          return { rows: [] };
+        }
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    // Step 1: Work is stuck
+    await watchdog.collectTelemetry(true);
+    expect(watchdog.getTrackedStuckKeys()).toContain('work-resolved-a:10.0000');
+
+    // Step 2: Work gets published (leaves STAGED status in DB)
+    workAIsStagedInDb = false;
+
+    // Step 3: Next telemetry cycle audits tracked stuck keys against DB -> finds work is no longer staged -> evicts it!
+    await watchdog.collectTelemetry(true);
+    expect(watchdog.getTrackedStuckKeys()).not.toContain('work-resolved-a:10.0000');
+    expect(watchdog.getStuckIdentityAge('work-resolved-a:10.0000')).toBe(0);
+  });
 });

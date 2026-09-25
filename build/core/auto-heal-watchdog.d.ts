@@ -29,8 +29,16 @@ export interface HealthPanelMetrics {
     publishableStaged: number;
     waitingPredecessorStaged: number;
     stuckStaged: number;
+    stuckStagedAgeSec?: number;
     classifiedStaged?: number;
     unclassifiedStaged?: number;
+    classificationCursor?: {
+        lastFrontierSortKey: number | null;
+        lastWorkId: string | null;
+    } | null;
+    classifiedThisCycle?: number;
+    classificationCoverageEstimate?: number;
+    oldestUnclassifiedAge?: number;
     recentCorrelatedBreakdown?: {
         alreadyCanonical: number;
         dedupeSource: number;
@@ -101,10 +109,23 @@ export declare class AutoHealWatchdog {
     private cachedTelemetry;
     private lastTelemetryAt;
     private telemetryCacheTtlMs;
+    private classificationCursor;
+    private lastCoverageResetAt;
+    private classifiedSinceReset;
     constructor(options: AutoHealWatchdogOptions);
     getStuckIdentityAge(key: string): number;
     setStuckIdentity(key: string, detectedAtMs: number): void;
     clearStuckIdentities(): void;
+    getClassificationCursor(): {
+        lastFrontierSortKey: number | null;
+        lastWorkId: string | null;
+    } | null;
+    setClassificationCursor(cursor: {
+        lastFrontierSortKey: number | null;
+        lastWorkId: string | null;
+    } | null): void;
+    removeStuckIdentity(key: string): void;
+    getTrackedStuckKeys(): string[];
     /**
      * Starts the background evaluation loop.
      */

@@ -23,6 +23,9 @@ jobs:
       - name: Rebuild Project
         run: npm run build
 
+      - name: Run Liveness & Auto-Heal Test Suite
+        run: npx vitest run tests/auto-heal-watchdog.test.ts
+
       - name: Check for stale build artifacts
         run: |
           if [ -n "$(git status --porcelain build/ ':!build/BUILD_ID')" ]; then
