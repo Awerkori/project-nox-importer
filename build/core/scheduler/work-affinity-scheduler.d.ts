@@ -59,6 +59,10 @@ export declare class WorkAffinityScheduler {
         specificSuccessRate: number;
         genericSuccessRate: number;
     };
+    private stagedBlockedWorks;
+    markWorkStagedBlocked(workId: string, ttlMs?: number): void;
+    isWorkStagedBlocked(workId: string): boolean;
+    clearWorkStagedBlocked(workId: string): void;
     constructor(stateStore: SchedulerStateStore, admissionController: AdmissionController, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
     /**
@@ -116,6 +120,15 @@ export declare class WorkAffinityScheduler {
      * Ensures the source is enabled, active, and not in cooldown.
      */
     private claimSingleJob;
+    /**
+     * Concurrently validates a claimed job outside the global chapterClaimMutex.
+     * Checks for already-published canonical chapters and STAGED barriers.
+     * If invalid, sanitizes database records and reverts the job to QUEUED.
+     */
+    validateClaimedJobPostMutex(job: any): Promise<{
+        valid: boolean;
+        reason?: string;
+    }>;
     /**
      * Publication Watchdog & Auto-Recovery Tree (Sections 6, 7, 8, 16).
      * Monitors elapsed time since last publication and real backlog.

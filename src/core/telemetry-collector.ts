@@ -3,19 +3,16 @@ import type pg from 'pg';
 import { Logger } from './logger.js';
 
 export type SlotStateType =
-  | 'ACTIVE_PROCESSING'
-  | 'IDLE'
-  | 'WAITING_FOR_JOB'
-  | 'WAITING_FOR_SOURCE'
-  | 'WAITING_FOR_SOURCE_RATE_LIMIT'
-  | 'WAITING_FOR_DOWNLOAD'
-  | 'WAITING_FOR_TELEGRAM'
-  | 'WAITING_FOR_DATABASE'
-  | 'WAITING_FOR_DB_POOL'
-  | 'WAITING_FOR_PUBLICATION_BARRIER'
-  | 'WAITING_FOR_RETRY_BACKOFF'
-  | 'WAITING_FOR_MUTEX'
-  | 'PROTECTIVE_STOP';
+  | 'WAITING_MUTEX'
+  | 'WAITING_CLAIM_DB'
+  | 'WAITING_SOURCE_PERMIT'
+  | 'ACTIVE_SOURCE'
+  | 'ACTIVE_DOWNLOAD'
+  | 'ACTIVE_ENCODE'
+  | 'ACTIVE_TELEGRAM'
+  | 'ACTIVE_DB'
+  | 'WAITING_BARRIER'
+  | 'IDLE';
 
 export interface ChapterMetricRecord {
   jobId: string;
@@ -24,17 +21,22 @@ export interface ChapterMetricRecord {
   pageCount: number;
   totalBytes: number;
   totalDurationMs: number;
+  totalSlotOccupancyMs: number;
   claim_acquire_ms: number;
+  mutex_wait_ms: number;
+  claim_db_ms: number;
   metadata_load_ms: number;
   source_fetch_ms: number;
   page_resolution_ms: number;
   download_ms: number;
+  encode_ms: number;
   telegram_upload_ms: number;
   db_wait_ms: number;
   db_publish_ms: number;
   rate_limit_wait_ms: number;
   semaphore_wait_ms: number;
   other_wait_ms: number;
+  barrier_wait_ms?: number;
   slowReason?: string;
   timestamp: string;
 }
@@ -85,6 +87,7 @@ export class TelemetryCollector {
     0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0
   };
   private sourceActiveSamples = new Map<string, number[]>();
+  private slotStateDistributionSamples: Array<Record<SlotStateType, number>> = [];
   private samplerTimer: NodeJS.Timeout | null = null;
 
   // 2. DB Pool Telemetry
@@ -175,24 +178,23 @@ export class TelemetryCollector {
     this.cpuPercentSamples = [];
     this.sourceActiveSamples.clear();
 
+    this.slotStateDistributionSamples = [];
+
     // Reset slot timers
     const now = performance.now();
     for (const [_, slot] of this.slots.entries()) {
       slot.stateEnteredAt = now;
       slot.stateDurationMs = {
-        ACTIVE_PROCESSING: 0,
+        WAITING_MUTEX: 0,
+        WAITING_CLAIM_DB: 0,
+        WAITING_SOURCE_PERMIT: 0,
+        ACTIVE_SOURCE: 0,
+        ACTIVE_DOWNLOAD: 0,
+        ACTIVE_ENCODE: 0,
+        ACTIVE_TELEGRAM: 0,
+        ACTIVE_DB: 0,
+        WAITING_BARRIER: 0,
         IDLE: 0,
-        WAITING_FOR_JOB: 0,
-        WAITING_FOR_SOURCE: 0,
-        WAITING_FOR_SOURCE_RATE_LIMIT: 0,
-        WAITING_FOR_DOWNLOAD: 0,
-        WAITING_FOR_TELEGRAM: 0,
-        WAITING_FOR_DATABASE: 0,
-        WAITING_FOR_DB_POOL: 0,
-        WAITING_FOR_PUBLICATION_BARRIER: 0,
-        WAITING_FOR_RETRY_BACKOFF: 0,
-        WAITING_FOR_MUTEX: 0,
-        PROTECTIVE_STOP: 0,
       };
     }
 
@@ -211,35 +213,42 @@ export class TelemetryCollector {
         currentState: 'IDLE',
         stateEnteredAt: performance.now(),
         stateDurationMs: {
-          ACTIVE_PROCESSING: 0,
+          WAITING_MUTEX: 0,
+          WAITING_CLAIM_DB: 0,
+          WAITING_SOURCE_PERMIT: 0,
+          ACTIVE_SOURCE: 0,
+          ACTIVE_DOWNLOAD: 0,
+          ACTIVE_ENCODE: 0,
+          ACTIVE_TELEGRAM: 0,
+          ACTIVE_DB: 0,
+          WAITING_BARRIER: 0,
           IDLE: 0,
-          WAITING_FOR_JOB: 0,
-          WAITING_FOR_SOURCE: 0,
-          WAITING_FOR_SOURCE_RATE_LIMIT: 0,
-          WAITING_FOR_DOWNLOAD: 0,
-          WAITING_FOR_TELEGRAM: 0,
-          WAITING_FOR_DATABASE: 0,
-          WAITING_FOR_DB_POOL: 0,
-          WAITING_FOR_PUBLICATION_BARRIER: 0,
-          WAITING_FOR_RETRY_BACKOFF: 0,
-          WAITING_FOR_MUTEX: 0,
-          PROTECTIVE_STOP: 0,
         },
       });
     }
   }
 
-  public setSlotState(slotIndex: number, newState: SlotStateType, context?: string) {
+  public setSlotState(slotIndex: number, newState: SlotStateType | string, context?: string) {
     let slot = this.slots.get(slotIndex);
     if (!slot) {
       this.registerSlot(slotIndex);
       slot = this.slots.get(slotIndex)!;
     }
 
+    // Normalize legacy state names to guaranteed 10 mutually exclusive states
+    let normalizedState = newState as SlotStateType;
+    if ((newState as string) === 'WAITING_FOR_JOB') normalizedState = 'WAITING_MUTEX';
+    else if ((newState as string) === 'WAITING_FOR_SOURCE' || (newState as string) === 'WAITING_FOR_SOURCE_RATE_LIMIT') normalizedState = 'WAITING_SOURCE_PERMIT';
+    else if ((newState as string) === 'WAITING_FOR_DOWNLOAD') normalizedState = 'ACTIVE_DOWNLOAD';
+    else if ((newState as string) === 'WAITING_FOR_TELEGRAM') normalizedState = 'ACTIVE_TELEGRAM';
+    else if ((newState as string) === 'WAITING_FOR_DATABASE' || (newState as string) === 'WAITING_FOR_DB_POOL') normalizedState = 'ACTIVE_DB';
+    else if ((newState as string) === 'WAITING_FOR_PUBLICATION_BARRIER' || (newState as string) === 'PROTECTIVE_STOP') normalizedState = 'WAITING_BARRIER';
+    else if ((newState as string) === 'ACTIVE_PROCESSING') normalizedState = 'ACTIVE_SOURCE';
+
     const now = performance.now();
     const elapsed = now - slot.stateEnteredAt;
     slot.stateDurationMs[slot.currentState] = (slot.stateDurationMs[slot.currentState] || 0) + elapsed;
-    slot.currentState = newState;
+    slot.currentState = normalizedState;
     slot.context = context;
     slot.stateEnteredAt = now;
   }
@@ -356,21 +365,38 @@ export class TelemetryCollector {
   // --- Background Sampling ---
   private startRuntimeSampling() {
     this.samplerTimer = setInterval(() => {
-      // 1. Sample Active Workers
+      // 1. Sample 8 Chapter Worker Slots (mutually exclusive across 10 states)
       let activeCount = 0;
       const sourceCounts = new Map<string, number>();
-      const now = performance.now();
-      for (const [_, slot] of this.slots.entries()) {
-        if (slot.currentState === 'ACTIVE_PROCESSING') {
+      const currentStatesCount: Record<SlotStateType, number> = {
+        WAITING_MUTEX: 0,
+        WAITING_CLAIM_DB: 0,
+        WAITING_SOURCE_PERMIT: 0,
+        ACTIVE_SOURCE: 0,
+        ACTIVE_DOWNLOAD: 0,
+        ACTIVE_ENCODE: 0,
+        ACTIVE_TELEGRAM: 0,
+        ACTIVE_DB: 0,
+        WAITING_BARRIER: 0,
+        IDLE: 0,
+      };
+
+      for (let i = 0; i < 8; i++) {
+        const slot = this.slots.get(i);
+        const st = (slot?.currentState as SlotStateType) || 'IDLE';
+        currentStatesCount[st] = (currentStatesCount[st] || 0) + 1;
+        if (st !== 'IDLE') {
           activeCount++;
-          if (slot.context) {
-            const src = slot.context.split(' ')[0];
-            if (src) {
-              sourceCounts.set(src, (sourceCounts.get(src) || 0) + 1);
-            }
+        }
+        if (slot?.context) {
+          const src = slot.context.split(' ')[0];
+          if (src) {
+            sourceCounts.set(src, (sourceCounts.get(src) || 0) + 1);
           }
         }
       }
+
+      this.slotStateDistributionSamples.push(currentStatesCount);
       this.activeWorkersSamples.push(activeCount);
       const bucket = Math.min(8, Math.max(0, activeCount));
       this.activeWorkersDistribution[bucket] = (this.activeWorkersDistribution[bucket] || 0) + 1;
@@ -456,27 +482,62 @@ export class TelemetryCollector {
     const timeWith8ActivePercent = Math.round((timeWith8ActiveCount / totalSlotSamples) * 1000) / 10;
     const timeWithLessThan6Percent = Math.round((timeWithLessThan6Count / totalSlotSamples) * 1000) / 10;
 
-    // Slot breakdown across all slots
+    // Slot breakdown across all 8 chapter slots (mutually exclusive)
+    const totalSlotDistributionSamples = this.slotStateDistributionSamples.length || 1;
+    const rawSums: Record<SlotStateType, number> = {
+      WAITING_MUTEX: 0,
+      WAITING_CLAIM_DB: 0,
+      WAITING_SOURCE_PERMIT: 0,
+      ACTIVE_SOURCE: 0,
+      ACTIVE_DOWNLOAD: 0,
+      ACTIVE_ENCODE: 0,
+      ACTIVE_TELEGRAM: 0,
+      ACTIVE_DB: 0,
+      WAITING_BARRIER: 0,
+      IDLE: 0,
+    };
+    for (const sample of this.slotStateDistributionSamples) {
+      for (const [st, count] of Object.entries(sample) as [SlotStateType, number][]) {
+        rawSums[st] = (rawSums[st] || 0) + count;
+      }
+    }
+    const avgSlotStates: Record<SlotStateType, number> = {
+      WAITING_MUTEX: Math.round((rawSums.WAITING_MUTEX / totalSlotDistributionSamples) * 100) / 100,
+      WAITING_CLAIM_DB: Math.round((rawSums.WAITING_CLAIM_DB / totalSlotDistributionSamples) * 100) / 100,
+      WAITING_SOURCE_PERMIT: Math.round((rawSums.WAITING_SOURCE_PERMIT / totalSlotDistributionSamples) * 100) / 100,
+      ACTIVE_SOURCE: Math.round((rawSums.ACTIVE_SOURCE / totalSlotDistributionSamples) * 100) / 100,
+      ACTIVE_DOWNLOAD: Math.round((rawSums.ACTIVE_DOWNLOAD / totalSlotDistributionSamples) * 100) / 100,
+      ACTIVE_ENCODE: Math.round((rawSums.ACTIVE_ENCODE / totalSlotDistributionSamples) * 100) / 100,
+      ACTIVE_TELEGRAM: Math.round((rawSums.ACTIVE_TELEGRAM / totalSlotDistributionSamples) * 100) / 100,
+      ACTIVE_DB: Math.round((rawSums.ACTIVE_DB / totalSlotDistributionSamples) * 100) / 100,
+      WAITING_BARRIER: Math.round((rawSums.WAITING_BARRIER / totalSlotDistributionSamples) * 100) / 100,
+      IDLE: Math.round((rawSums.IDLE / totalSlotDistributionSamples) * 100) / 100,
+    };
+
+    // Guarantee SUM is strictly 8.00 by balancing rounding drift on IDLE
+    const sumStates = Object.values(avgSlotStates).reduce((a, b) => a + b, 0);
+    const roundingDiff = Math.round((8.00 - sumStates) * 100) / 100;
+    if (roundingDiff !== 0) {
+      avgSlotStates.IDLE = Math.max(0, Math.round((avgSlotStates.IDLE + roundingDiff) * 100) / 100);
+    }
+
+    const slotStatesAggregated: Record<SlotStateType, number> = {
+      WAITING_MUTEX: 0,
+      WAITING_CLAIM_DB: 0,
+      WAITING_SOURCE_PERMIT: 0,
+      ACTIVE_SOURCE: 0,
+      ACTIVE_DOWNLOAD: 0,
+      ACTIVE_ENCODE: 0,
+      ACTIVE_TELEGRAM: 0,
+      ACTIVE_DB: 0,
+      WAITING_BARRIER: 0,
+      IDLE: 0,
+    };
+
     let totalBusyMs = 0;
     let totalIdleMs = 0;
     let totalBlockedMs = 0;
     let totalAllMs = 0;
-
-    const slotStatesAggregated: Record<SlotStateType, number> = {
-      ACTIVE_PROCESSING: 0,
-      IDLE: 0,
-      WAITING_FOR_JOB: 0,
-      WAITING_FOR_SOURCE: 0,
-      WAITING_FOR_SOURCE_RATE_LIMIT: 0,
-      WAITING_FOR_DOWNLOAD: 0,
-      WAITING_FOR_TELEGRAM: 0,
-      WAITING_FOR_DATABASE: 0,
-      WAITING_FOR_DB_POOL: 0,
-      WAITING_FOR_PUBLICATION_BARRIER: 0,
-      WAITING_FOR_RETRY_BACKOFF: 0,
-      WAITING_FOR_MUTEX: 0,
-      PROTECTIVE_STOP: 0,
-    };
 
     const now = performance.now();
     for (const [_, slot] of this.slots.entries()) {
@@ -484,13 +545,13 @@ export class TelemetryCollector {
       for (const st of Object.keys(slot.stateDurationMs) as SlotStateType[]) {
         let ms = slot.stateDurationMs[st] || 0;
         if (st === slot.currentState) ms += currentElapsed;
-        slotStatesAggregated[st] += ms;
+        slotStatesAggregated[st] = (slotStatesAggregated[st] || 0) + ms;
         totalAllMs += ms;
 
-        if (st === 'ACTIVE_PROCESSING') {
-          totalBusyMs += ms;
-        } else if (st === 'IDLE' || st === 'WAITING_FOR_JOB') {
+        if (st === 'IDLE') {
           totalIdleMs += ms;
+        } else if (st.startsWith('ACTIVE_')) {
+          totalBusyMs += ms;
         } else {
           totalBlockedMs += ms;
         }
@@ -503,11 +564,14 @@ export class TelemetryCollector {
     const workerBlockedPercent = Math.round((totalBlockedMs / safeTotalAll) * 1000) / 10;
 
     // Chapter stages stats
+    const mutexWaitTimes = this.chapters.map(c => c.mutex_wait_ms || 0);
+    const claimDbTimes = this.chapters.map(c => c.claim_db_ms || 0);
     const claimTimes = this.chapters.map(c => c.claim_acquire_ms);
     const metadataTimes = this.chapters.map(c => c.metadata_load_ms);
     const sourceFetchTimes = this.chapters.map(c => c.source_fetch_ms);
     const pageResTimes = this.chapters.map(c => c.page_resolution_ms);
     const downloadTimes = this.chapters.map(c => c.download_ms);
+    const encodeTimes = this.chapters.map(c => c.encode_ms || 0);
     const telegramTimes = this.chapters.map(c => c.telegram_upload_ms);
     const dbWaitTimes = this.chapters.map(c => c.db_wait_ms);
     const dbPublishTimes = this.chapters.map(c => c.db_publish_ms);
@@ -515,6 +579,15 @@ export class TelemetryCollector {
     const semWaitTimes = this.chapters.map(c => c.semaphore_wait_ms);
     const otherWaitTimes = this.chapters.map(c => c.other_wait_ms);
     const totalJobTimes = this.chapters.map(c => c.totalDurationMs);
+    const totalSlotOccupancyTimes = this.chapters.map(c => c.totalSlotOccupancyMs || (c.totalDurationMs + c.claim_acquire_ms));
+
+    // Service time & theoretical capacity
+    const occupancyTimesSec = totalSlotOccupancyTimes.map(ms => ms / 1000);
+    const meanSlotOccupancySec = avg(occupancyTimesSec);
+    const p50SlotOccupancySec = percentile(occupancyTimesSec, 0.50);
+    const p95SlotOccupancySec = percentile(occupancyTimesSec, 0.95);
+    const avgBusyWorkers = avg(this.activeWorkersSamples);
+    const theoreticalCapacityPerMin = meanSlotOccupancySec > 0 ? (avgBusyWorkers * 60) / meanSlotOccupancySec : 0;
 
     // Source distributions
     const sourceDist: Record<string, {
@@ -603,6 +676,14 @@ export class TelemetryCollector {
       sessionId: this.activeSessionId,
       timestamp: new Date().toISOString(),
       slotsConfigured: 8,
+      avgSlotStates,
+      slotOccupancy: {
+        meanSec: Math.round(meanSlotOccupancySec * 100) / 100,
+        p50Sec: Math.round(p50SlotOccupancySec * 100) / 100,
+        p95Sec: Math.round(p95SlotOccupancySec * 100) / 100,
+        avgBusyWorkers: Math.round(avgBusyWorkers * 100) / 100,
+        theoreticalCapacityPerMin: Math.round(theoreticalCapacityPerMin * 100) / 100,
+      },
       activeWorkers: {
         avg: avg(this.activeWorkersSamples),
         p50: percentile(this.activeWorkersSamples, 0.50),
@@ -642,11 +723,14 @@ export class TelemetryCollector {
           max: totalJobTimes.length ? Math.max(...totalJobTimes) : 0,
         },
         stages: {
+          mutexWait: { avg: avg(mutexWaitTimes), p50: percentile(mutexWaitTimes, 0.50), p95: percentile(mutexWaitTimes, 0.95), p99: percentile(mutexWaitTimes, 0.99), max: mutexWaitTimes.length ? Math.max(...mutexWaitTimes) : 0 },
+          claimDb: { avg: avg(claimDbTimes), p50: percentile(claimDbTimes, 0.50), p95: percentile(claimDbTimes, 0.95), p99: percentile(claimDbTimes, 0.99), max: claimDbTimes.length ? Math.max(...claimDbTimes) : 0 },
           claim: { avg: avg(claimTimes), p50: percentile(claimTimes, 0.50), p75: percentile(claimTimes, 0.75), p95: percentile(claimTimes, 0.95), p99: percentile(claimTimes, 0.99), max: claimTimes.length ? Math.max(...claimTimes) : 0 },
           metadata: { avg: avg(metadataTimes), p50: percentile(metadataTimes, 0.50), p75: percentile(metadataTimes, 0.75), p95: percentile(metadataTimes, 0.95), p99: percentile(metadataTimes, 0.99), max: metadataTimes.length ? Math.max(...metadataTimes) : 0 },
           sourceFetch: { avg: avg(sourceFetchTimes), p50: percentile(sourceFetchTimes, 0.50), p75: percentile(sourceFetchTimes, 0.75), p95: percentile(sourceFetchTimes, 0.95), p99: percentile(sourceFetchTimes, 0.99), max: sourceFetchTimes.length ? Math.max(...sourceFetchTimes) : 0 },
           pageResolution: { avg: avg(pageResTimes), p50: percentile(pageResTimes, 0.50), p75: percentile(pageResTimes, 0.75), p95: percentile(pageResTimes, 0.95), p99: percentile(pageResTimes, 0.99), max: pageResTimes.length ? Math.max(...pageResTimes) : 0 },
-          imageDownload: { avg: avg(downloadTimes), p50: percentile(downloadTimes, 0.50), p75: percentile(downloadTimes, 0.75), p95: percentile(downloadTimes, 0.95), p99: percentile(downloadTimes, 0.99), max: downloadTimes.length ? Math.max(...downloadTimes) : 0 },
+          download: { avg: avg(downloadTimes), p50: percentile(downloadTimes, 0.50), p75: percentile(downloadTimes, 0.75), p95: percentile(downloadTimes, 0.95), p99: percentile(downloadTimes, 0.99), max: downloadTimes.length ? Math.max(...downloadTimes) : 0 },
+          encode: { avg: avg(encodeTimes), p50: percentile(encodeTimes, 0.50), p75: percentile(encodeTimes, 0.75), p95: percentile(encodeTimes, 0.95), p99: percentile(encodeTimes, 0.99), max: encodeTimes.length ? Math.max(...encodeTimes) : 0 },
           telegramUpload: { avg: avg(telegramTimes), p50: percentile(telegramTimes, 0.50), p75: percentile(telegramTimes, 0.75), p95: percentile(telegramTimes, 0.95), p99: percentile(telegramTimes, 0.99), max: telegramTimes.length ? Math.max(...telegramTimes) : 0 },
           dbWait: { avg: avg(dbWaitTimes), p50: percentile(dbWaitTimes, 0.50), p75: percentile(dbWaitTimes, 0.75), p95: percentile(dbWaitTimes, 0.95), p99: percentile(dbWaitTimes, 0.99), max: dbWaitTimes.length ? Math.max(...dbWaitTimes) : 0 },
           dbPublish: { avg: avg(dbPublishTimes), p50: percentile(dbPublishTimes, 0.50), p75: percentile(dbPublishTimes, 0.75), p95: percentile(dbPublishTimes, 0.95), p99: percentile(dbPublishTimes, 0.99), max: dbPublishTimes.length ? Math.max(...dbPublishTimes) : 0 },

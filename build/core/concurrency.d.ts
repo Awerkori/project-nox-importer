@@ -18,6 +18,7 @@ export declare class AsyncSemaphore {
         holdP95: number;
         samples: number;
     };
+    getLastWaitMs(): number;
     setCapacity(newCapacity: number): void;
     get capacity(): number;
     get available(): number;

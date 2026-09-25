@@ -81,6 +81,23 @@ export class WorkAffinityScheduler {
             genericSuccessRate: this.genericClaimAttempts > 0 ? Math.round((this.genericClaimSuccesses / this.genericClaimAttempts) * 1000) / 10 : 0,
         };
     }
+    stagedBlockedWorks = new Map();
+    markWorkStagedBlocked(workId, ttlMs = 15000) {
+        this.stagedBlockedWorks.set(workId, Date.now() + ttlMs);
+    }
+    isWorkStagedBlocked(workId) {
+        const until = this.stagedBlockedWorks.get(workId);
+        if (!until)
+            return false;
+        if (Date.now() > until) {
+            this.stagedBlockedWorks.delete(workId);
+            return false;
+        }
+        return true;
+    }
+    clearWorkStagedBlocked(workId) {
+        this.stagedBlockedWorks.delete(workId);
+    }
     constructor(stateStore, admissionController, protectiveSentinel, pool) {
         this.stateStore = stateStore;
         this.admissionController = admissionController;
@@ -392,9 +409,9 @@ export class WorkAffinityScheduler {
         // -------------------------------------------------------------
         // LANE P1: Active Backfill Works (Fair Round-Robin)
         // Strictly excludes works with pending critical gaps (to avoid downloading ahead)
-        // and works marked BLOCKED.
+        // and works marked BLOCKED or STAGED_BLOCKED.
         // -------------------------------------------------------------
-        const eligibleP1Works = p1Works.filter((w) => w.state === 'FILLING' && w.criticalGapSortKey === null && (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork);
+        const eligibleP1Works = p1Works.filter((w) => w.state === 'FILLING' && w.criticalGapSortKey === null && !this.isWorkStagedBlocked(w.workId) && (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork);
         // Filter and prioritize works whose primary source is currently ready/unconstrained
         const readyP1Works = allowedSources && allowedSources.length > 0
             ? eligibleP1Works.filter((w) => allowedSources.includes(w.primarySource))
@@ -441,7 +458,7 @@ export class WorkAffinityScheduler {
         // Evaluated after active P1 works, but BEFORE generic untracked catalog backfills,
         // guaranteeing newly admitted works are not starved by massive backlog.
         // -------------------------------------------------------------
-        const eligibleP2Works = p2Works.filter((w) => (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork);
+        const eligibleP2Works = p2Works.filter((w) => !this.isWorkStagedBlocked(w.workId) && (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork);
         // Filter and prioritize works whose primary source is currently ready/unconstrained
         const readyP2Works = allowedSources && allowedSources.length > 0
             ? eligibleP2Works.filter((w) => allowedSources.includes(w.primarySource))
@@ -488,7 +505,7 @@ export class WorkAffinityScheduler {
         // Try active works fallback first BEFORE scanning the full catalog
         // -------------------------------------------------------------
         const activeWorkIds = activeWorks
-            .filter((w) => w.state === 'FILLING' && (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork)
+            .filter((w) => w.state === 'FILLING' && !this.isWorkStagedBlocked(w.workId) && (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork)
             .map((w) => w.workId);
         let fallbackJob = null;
         if (activeWorkIds.length > 0) {
@@ -622,92 +639,44 @@ export class WorkAffinityScheduler {
                 q.status, q.attempts, q.max_attempts, q.locked_by, q.locked_at,
                 q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
     `;
-        for (let drainAttempt = 0; drainAttempt < 10; drainAttempt++) {
-            const res = await this.runQuery(client, query, [
-                opts.allowedSources,
-                opts.disallowedWorkIds || null,
-                disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
-                opts.workerId,
-                opts.leaseMin,
-            ]);
-            if (res.rows.length === 0)
-                return null;
-            const r = res.rows[0];
-            const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
-            const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
-            const workId = payload?.workId;
-            const chapterNumber = payload?.chapterNumber;
-            // Pre-flight check 1: is this chapter already published canonically in chapters table?
-            if (workId && (chapterNumber !== undefined || sortKey !== null)) {
-                const pubCheck = await this.runQuery(client, `
-          SELECT id FROM chapters 
-          WHERE work_id = $1::uuid 
-            AND (number = $2::numeric OR ($3::numeric IS NOT NULL AND number = $3::numeric))
-            AND published_at IS NOT NULL
-          LIMIT 1;
-        `, [workId, chapterNumber !== undefined ? chapterNumber : sortKey, sortKey]);
-                if (pubCheck.rows.length > 0) {
-                    const publishedChapterId = pubCheck.rows[0].id;
-                    this.logger.info(`Claimed catalog P1 job ${r.id} for work ${workId} ch ${chapterNumber} is already published. Auto-completing.`);
-                    await this.runQuery(client, `
-            UPDATE importer_queue
-            SET status = 'COMPLETED',
-                locked_by = NULL,
-                locked_at = NULL,
-                updated_at = NOW()
-            WHERE id = $1;
-          `, [r.id]);
-                    await this.runQuery(client, `
-            UPDATE importer_chapter_mappings
-            SET status = 'COMPLETED',
-                chapter_id = $1::uuid,
-                updated_at = NOW()
-            WHERE source = $2 AND work_id = $3::uuid AND (chapter_number = $4::numeric OR chapter_sort_key = $5::numeric);
-          `, [publishedChapterId, r.source, workId, chapterNumber ?? sortKey, sortKey ?? chapterNumber]);
-                    continue;
-                }
-                // Pre-flight check 2: Is there an earlier chapter currently STAGED?
-                const stagedCheck = await this.runQuery(client, `
-          SELECT 1 FROM importer_chapter_mappings
-          WHERE work_id = $1::uuid AND status = 'STAGED' AND chapter_sort_key < $2
-          LIMIT 1;
-        `, [workId, sortKey]);
-                if (stagedCheck.rows.length > 0) {
-                    await this.runQuery(client, `
-            UPDATE importer_queue
-            SET status = 'QUEUED',
-                attempts = GREATEST(0, attempts - 1),
-                locked_by = NULL,
-                locked_at = NULL,
-                lease_expires_at = NULL,
-                updated_at = NOW()
-            WHERE id = $1;
-          `, [r.id]);
-                    continue;
-                }
-            }
-            // If work not in stateStore, add it to activeWorks as P1
-            if (workId && !this.stateStore.getActiveWork(workId)) {
-                this.stateStore.setActiveWork({
-                    workId,
-                    workTitle: payload?.chapterTitle || 'Catalog Work',
-                    lane: 'P1',
-                    state: 'FILLING',
-                    primarySource: r.source,
-                    admittedAt: new Date().toISOString(),
-                    lastActivityAt: new Date().toISOString(),
-                    totalChapters: 50,
-                    publishedChapters: 0,
-                    queuedChapters: 5,
-                    inFlightChapters: 1,
-                    frontierSortKey: sortKey,
-                    criticalGapSortKey: null,
-                    criticalGapUnblockCount: 0,
-                });
-            }
-            return r;
+        const res = await this.runQuery(client, query, [
+            opts.allowedSources,
+            opts.disallowedWorkIds || null,
+            disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
+            opts.workerId,
+            opts.leaseMin,
+        ]);
+        if (res.rows.length === 0)
+            return null;
+        const r = res.rows[0];
+        const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
+        const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
+        const workId = payload?.workId;
+        // If work not in stateStore, add it to activeWorks as P1
+        if (workId && !this.stateStore.getActiveWork(workId)) {
+            this.stateStore.setActiveWork({
+                workId,
+                workTitle: payload?.chapterTitle || 'Catalog Work',
+                lane: 'P1',
+                state: 'FILLING',
+                primarySource: r.source,
+                admittedAt: new Date().toISOString(),
+                lastActivityAt: new Date().toISOString(),
+                totalChapters: 50,
+                publishedChapters: 0,
+                queuedChapters: 5,
+                inFlightChapters: 1,
+                frontierSortKey: sortKey,
+                criticalGapSortKey: null,
+                criticalGapUnblockCount: 0,
+            });
         }
-        return null;
+        this.lastClaimTime = Date.now();
+        return {
+            ...r,
+            payload,
+            chapter_sort_key: sortKey,
+        };
     }
     /**
      * Helper to atomically claim 1 STAFF_FORCED job with SKIP LOCKED.
@@ -777,50 +746,18 @@ export class WorkAffinityScheduler {
             opts.leaseMin,
             staffWorkIds,
         ];
-        for (let drainAttempt = 0; drainAttempt < 10; drainAttempt++) {
-            const res = await this.runQuery(client, query, queryParams);
-            if (res.rows.length === 0)
-                return null;
-            const r = res.rows[0];
-            const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
-            const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
-            const workId = payload?.workId;
-            const chapterNumber = payload?.chapterNumber;
-            // Pre-flight check: is this chapter already published canonically in chapters table?
-            if (workId && (chapterNumber !== undefined || sortKey !== null)) {
-                const pubCheck = await this.runQuery(client, `
-          SELECT id FROM chapters 
-          WHERE work_id = $1::uuid 
-            AND (number = $2::numeric OR ($3::numeric IS NOT NULL AND number = $3::numeric))
-            AND published_at IS NOT NULL
-          LIMIT 1;
-        `, [workId, chapterNumber !== undefined ? chapterNumber : sortKey, sortKey]);
-                if (pubCheck.rows.length > 0) {
-                    const publishedChapterId = pubCheck.rows[0].id;
-                    this.logger.info(`Claimed STAFF_FORCED job ${r.id} for work ${workId} ch ${chapterNumber} is already canonically published. Auto-completing.`);
-                    await this.runQuery(client, `
-            UPDATE importer_queue 
-            SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
-            WHERE id = $1;
-          `, [r.id]);
-                    if (sortKey !== null) {
-                        await this.runQuery(client, `
-              UPDATE importer_chapter_mappings
-              SET status = 'COMPLETED', is_page_provider = false, chapter_id = $3, updated_at = NOW()
-              WHERE work_id = $1::uuid AND chapter_sort_key = $2 AND status IN ('PENDING', 'QUEUED');
-            `, [workId, sortKey, publishedChapterId]);
-                    }
-                    continue;
-                }
-            }
-            this.lastClaimTime = Date.now();
-            return {
-                ...r,
-                payload,
-                chapter_sort_key: sortKey,
-            };
-        }
-        return null;
+        const res = await this.runQuery(client, query, queryParams);
+        if (res.rows.length === 0)
+            return null;
+        const r = res.rows[0];
+        const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
+        const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
+        this.lastClaimTime = Date.now();
+        return {
+            ...r,
+            payload,
+            chapter_sort_key: sortKey,
+        };
     }
     /**
      * Helper to atomically claim 1 job with SKIP LOCKED.
@@ -872,100 +809,130 @@ export class WorkAffinityScheduler {
                 q.status, q.attempts, q.max_attempts, q.locked_by, q.locked_at,
                 q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
     `;
-        for (let drainAttempt = 0; drainAttempt < 10; drainAttempt++) {
-            const res = await this.runQuery(client, query, [
-                opts.allowedSources,
-                opts.minPriority || null,
-                opts.workId || null,
-                opts.sortKey || null,
-                opts.workerId,
-                opts.leaseMin,
-                opts.allowedWorkIds || null,
-                opts.disallowedWorkIds || null,
-                disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
-            ]);
-            if (res.rows.length === 0)
-                return null;
-            const r = res.rows[0];
-            const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
-            const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
-            const workId = payload?.workId;
-            const chapterNumber = payload?.chapterNumber;
-            // Pre-flight check: is this chapter already published canonically in chapters table?
-            if (workId && (chapterNumber !== undefined || sortKey !== null)) {
-                const pubCheck = await this.runQuery(client, `
-          SELECT id FROM chapters 
-          WHERE work_id = $1::uuid 
-            AND (number = $2::numeric OR ($3::numeric IS NOT NULL AND number = $3::numeric))
-            AND published_at IS NOT NULL
-          LIMIT 1;
-        `, [workId, chapterNumber !== undefined ? chapterNumber : sortKey, sortKey]);
-                if (pubCheck.rows.length > 0) {
-                    const publishedChapterId = pubCheck.rows[0].id;
-                    this.logger.info(`Claimed job ${r.id} for work ${workId} ch ${chapterNumber} is already canonically published. Auto-completing immediately without worker execution.`);
-                    await this.runQuery(client, `
-            UPDATE importer_queue 
-            SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
-            WHERE id = $1;
-          `, [r.id]);
-                    if (sortKey !== null) {
-                        await this.runQuery(client, `
-              UPDATE importer_queue
-              SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
-              WHERE (payload->>'workId') = $1
-                AND chapter_sort_key = $2
-                AND status IN ('QUEUED', 'RETRY')
-                AND task_type = 'IMPORT_CHAPTER';
-            `, [workId, sortKey]);
-                        await this.runQuery(client, `
-              UPDATE importer_chapter_mappings
-              SET status = 'COMPLETED', is_page_provider = false, chapter_id = $3, updated_at = NOW()
-              WHERE work_id = $1::uuid AND chapter_sort_key = $2 AND status IN ('PENDING', 'QUEUED');
-            `, [workId, sortKey, publishedChapterId]);
-                    }
-                    // Continue loop to claim next genuine job
-                    continue;
-                }
-                // Safety check: is there an un-published STAGED chapter behind this one?
-                if (sortKey !== null && opts.sortKey === undefined) {
-                    const stagedCheck = await this.runQuery(client, `
-            SELECT id, chapter_sort_key 
-            FROM importer_chapter_mappings
-            WHERE work_id = $1::uuid
-              AND status = 'STAGED'
-              AND chapter_sort_key < $2::numeric
-            LIMIT 1;
-          `, [workId, sortKey]);
-                    if (stagedCheck.rows.length > 0) {
-                        const barrierKey = stagedCheck.rows[0].chapter_sort_key;
-                        this.logger.info(`Claimed job ${r.id} for work ${workId} ch ${sortKey} is ahead of STAGED chapter ${barrierKey}. Releasing back to QUEUED to preserve canonical barrier.`);
-                        await this.runQuery(client, `
-              UPDATE importer_queue
-              SET status = 'QUEUED',
-                  locked_by = NULL,
-                  locked_at = NULL,
-                  lease_expires_at = NULL,
-                  attempts = GREATEST(0, attempts - 1),
-                  updated_at = NOW()
-              WHERE id = $1;
-            `, [r.id]);
-                        // Update active work critical gap so scheduler focuses on unblocking
-                        const activeWork = this.stateStore.getActiveWork(workId);
-                        if (activeWork && activeWork.criticalGapSortKey === null) {
-                            activeWork.criticalGapSortKey = parseFloat(barrierKey);
-                        }
-                        continue;
-                    }
-                }
-            }
-            this.lastClaimTime = Date.now();
-            return {
-                ...r,
-                payload,
-                chapter_sort_key: sortKey,
-            };
+        const res = await this.runQuery(client, query, [
+            opts.allowedSources,
+            opts.minPriority || null,
+            opts.workId || null,
+            opts.sortKey || null,
+            opts.workerId,
+            opts.leaseMin,
+            opts.allowedWorkIds || null,
+            opts.disallowedWorkIds || null,
+            disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
+        ]);
+        if (res.rows.length === 0)
+            return null;
+        const r = res.rows[0];
+        const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
+        const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
+        this.lastClaimTime = Date.now();
+        return {
+            ...r,
+            payload,
+            chapter_sort_key: sortKey,
+        };
+    }
+    /**
+     * Concurrently validates a claimed job outside the global chapterClaimMutex.
+     * Checks for already-published canonical chapters and STAGED barriers.
+     * If invalid, sanitizes database records and reverts the job to QUEUED.
+     */
+    async validateClaimedJobPostMutex(job) {
+        const payload = typeof job.payload === 'string' ? JSON.parse(job.payload) : (job.payload || {});
+        const workId = payload?.workId;
+        const chapterNumber = payload?.chapterNumber;
+        const sortKey = job.chapter_sort_key ?? (chapterNumber !== undefined ? parseFloat(chapterNumber) : null);
+        if (!workId || (chapterNumber === undefined && sortKey === null)) {
+            return { valid: true };
         }
-        return null;
+        // 1. Check: is this chapter already published canonically in chapters table?
+        const pubCheck = await this.runQuery(this.pool, `
+      SELECT id FROM chapters 
+      WHERE work_id = $1::uuid 
+        AND (number = $2::numeric OR ($3::numeric IS NOT NULL AND number = $3::numeric))
+        AND published_at IS NOT NULL
+      LIMIT 1;
+    `, [workId, chapterNumber !== undefined ? chapterNumber : sortKey, sortKey]);
+        if (pubCheck.rows.length > 0) {
+            const publishedChapterId = pubCheck.rows[0].id;
+            this.logger.info(`Claimed job ${job.id} for work ${workId} ch ${chapterNumber} is already canonically published. Auto-completing immediately.`);
+            await this.runQuery(this.pool, `
+        UPDATE importer_queue 
+        SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
+        WHERE id = $1;
+      `, [job.id]);
+            if (sortKey !== null) {
+                await this.runQuery(this.pool, `
+          UPDATE importer_queue
+          SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
+          WHERE (payload->>'workId') = $1
+            AND chapter_sort_key = $2
+            AND status IN ('QUEUED', 'RETRY')
+            AND task_type = 'IMPORT_CHAPTER';
+        `, [workId, sortKey]);
+                await this.runQuery(this.pool, `
+          UPDATE importer_chapter_mappings
+          SET status = 'COMPLETED', is_page_provider = false, chapter_id = $3, updated_at = NOW()
+          WHERE work_id = $1::uuid AND chapter_sort_key = $2 AND status IN ('PENDING', 'QUEUED');
+        `, [workId, sortKey, publishedChapterId]);
+            }
+            return { valid: false, reason: 'ALREADY_PUBLISHED' };
+        }
+        // 2. Safety check: is there an un-published STAGED chapter behind this one?
+        if (sortKey !== null) {
+            const stagedCheck = await this.runQuery(this.pool, `
+        SELECT id, chapter_sort_key 
+        FROM importer_chapter_mappings
+        WHERE work_id = $1::uuid
+          AND status = 'STAGED'
+          AND chapter_sort_key < $2::numeric
+        ORDER BY chapter_sort_key ASC
+        LIMIT 1;
+      `, [workId, sortKey]);
+            if (stagedCheck.rows.length > 0) {
+                const barrierKey = parseFloat(stagedCheck.rows[0].chapter_sort_key);
+                this.logger.info(`Claimed job ${job.id} for work ${workId} ch ${sortKey} is ahead of STAGED chapter ${barrierKey}. Releasing back to QUEUED to preserve canonical barrier.`);
+                await this.runQuery(this.pool, `
+          UPDATE importer_queue
+          SET status = 'QUEUED',
+              attempts = GREATEST(0, attempts - 1),
+              locked_by = NULL,
+              locked_at = NULL,
+              lease_expires_at = NULL,
+              updated_at = NOW()
+          WHERE id = $1;
+        `, [job.id]);
+                // Mark work as staged-blocked so other backfill workers don't spin on it
+                this.markWorkStagedBlocked(workId, 15000);
+                // Resolve true missing predecessor for critical gap resolution:
+                // Query for the lowest queued chapter strictly below barrierKey
+                const predCheck = await this.runQuery(this.pool, `
+          SELECT chapter_sort_key
+          FROM importer_queue
+          WHERE (payload->>'workId') = $1
+            AND chapter_sort_key < $2::numeric
+            AND status IN ('QUEUED', 'RETRY')
+            AND task_type = 'IMPORT_CHAPTER'
+          ORDER BY chapter_sort_key ASC
+          LIMIT 1;
+        `, [workId, barrierKey]);
+                const activeWork = this.stateStore.getActiveWork(workId);
+                if (activeWork) {
+                    if (predCheck.rows.length > 0) {
+                        const trueMissingKey = parseFloat(predCheck.rows[0].chapter_sort_key);
+                        activeWork.criticalGapSortKey = trueMissingKey;
+                        activeWork.criticalGapUnblockCount = 1;
+                        this.logger.info(`Work ${workId} critical gap resolved to true missing queued predecessor ch ${trueMissingKey} (unblocks STAGED ch ${barrierKey})`);
+                    }
+                    else {
+                        // No queued predecessor below barrierKey; do not set criticalGapSortKey to barrierKey (which is STAGED, not QUEUED)
+                        activeWork.criticalGapSortKey = null;
+                    }
+                }
+                return { valid: false, reason: 'BLOCKED_BY_STAGED' };
+            }
+        }
+        return { valid: true };
     }
     /**
      * Publication Watchdog & Auto-Recovery Tree (Sections 6, 7, 8, 16).
