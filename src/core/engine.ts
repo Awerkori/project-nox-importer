@@ -1402,7 +1402,8 @@ export class ImporterEngine {
 
         if (!claimResult || !claimResult.job) {
           telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_SOURCE', 'waiting_for_eligible_source');
-          await this.sleep(150);
+          const emptyBackoffMs = 1000 + Math.floor(Math.random() * 1000);
+          await this.sleep(emptyBackoffMs);
           continue;
         }
 

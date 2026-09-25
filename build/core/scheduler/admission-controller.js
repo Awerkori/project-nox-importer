@@ -80,7 +80,7 @@ export class AdmissionController {
                 this.logger.error('Error during admission cycle', { error: err?.message });
             }
             finally {
-                this.scheduleNextCycle(5000);
+                this.scheduleNextCycle(25000);
             }
         }, delayMs);
     }
@@ -238,13 +238,13 @@ export class AdmissionController {
         try {
             for (const work of activeWorks) {
                 try {
-                    // A. Count queued & importing jobs for this work
+                    // A. Count claimable queued & importing jobs for this work
                     const queueRes = await this.runQuery(`SELECT 
-               COUNT(CASE WHEN status = 'QUEUED' THEN 1 END) as queued_cnt,
+               COUNT(CASE WHEN status = 'QUEUED' AND attempts < COALESCE(max_attempts, 7) THEN 1 END) as queued_cnt,
                COUNT(CASE WHEN status = 'IMPORTING' THEN 1 END) as importing_cnt,
                COUNT(CASE WHEN status = 'PAUSED_BY_STAFF' THEN 1 END) as paused_cnt,
-               MIN(CASE WHEN status = 'QUEUED' THEN chapter_sort_key END) as min_queued,
-               MIN(CASE WHEN status IN ('QUEUED', 'PAUSED_BY_STAFF') THEN chapter_sort_key END) as min_sort_key
+               MIN(CASE WHEN status = 'QUEUED' AND attempts < COALESCE(max_attempts, 7) THEN chapter_sort_key END) as min_queued,
+               MIN(CASE WHEN status IN ('QUEUED', 'PAUSED_BY_STAFF') AND attempts < COALESCE(max_attempts, 7) THEN chapter_sort_key END) as min_sort_key
              FROM importer_queue
              WHERE task_type = 'IMPORT_CHAPTER' AND (payload->>'workId') = $1`, [work.workId]);
                     // B. Count published chapters
@@ -315,15 +315,8 @@ export class AdmissionController {
                         work.state = 'FILLING';
                         this.stateStore.setActiveWork(work);
                     }
-                    // Check if caught up or drained (zero queued, zero importing, zero paused)
-                    if (queuedCnt === 0 && importingCnt === 0 && pausedCnt === 0) {
-                        if (unimportedCnt > 0) {
-                            // Work still has unimported, staged, or pending chapter mappings — do NOT vacate slot prematurely
-                            work.state = 'FILLING';
-                            work.lastActivityAt = new Date().toISOString();
-                            this.stateStore.setActiveWork(work);
-                            continue;
-                        }
+                    // Check if caught up or drained (zero claimable queued, zero importing)
+                    if (queuedCnt === 0 && importingCnt === 0) {
                         const isCaughtUp = pubCnt > 0;
                         work.state = isCaughtUp ? 'CAUGHT_UP' : 'COMPLETE';
                         this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${work.state} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${pubCnt} published). Vacating active slot.`);
@@ -411,25 +404,37 @@ export class AdmissionController {
          FROM importer_queue q
          JOIN works w ON w.id = (q.payload->>'workId')::uuid
          JOIN importer_sources s ON s.id = q.source
-         LEFT JOIN (
-           SELECT work_id, COALESCE(MAX(number), -1) as max_published
-           FROM chapters
-           WHERE published_at IS NOT NULL
-           GROUP BY work_id
-         ) p ON p.work_id = w.id
          WHERE q.task_type = 'IMPORT_CHAPTER'
-           AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
+           AND q.status = 'QUEUED'
+           AND q.attempts < COALESCE(q.max_attempts, 7)
            AND w.published = true
            AND w.latest_chapter_published_at IS NOT NULL
            AND s.enabled = true
            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
            AND NOT ((q.payload->>'workId') = ANY($1::text[]))
-         GROUP BY (q.payload->>'workId'), w.title, q.source, p.max_published
-         HAVING (MIN(q.chapter_sort_key) <= COALESCE(p.max_published, -1) + 1.5 OR p.max_published IS NULL)
-         ORDER BY queued_count DESC, pending_jobs DESC
+         GROUP BY (q.payload->>'workId'), w.title, q.source
+         ORDER BY queued_count DESC
          LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], Math.max(50, backfillSlotsAvailable * 5)]);
+            // Fast frontier check: query max_published for candidate works only
+            const candidateWorkIds = candidatesRes.rows.map((r) => r.work_id);
+            const pubMap = new Map();
+            if (candidateWorkIds.length > 0) {
+                const pubRes = await this.runQuery(`SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
+           FROM chapters
+           WHERE work_id = ANY($1::uuid[]) AND published_at IS NOT NULL
+           GROUP BY work_id`, [candidateWorkIds]);
+                for (const pr of pubRes.rows) {
+                    pubMap.set(pr.work_id, parseFloat(pr.max_pub));
+                }
+            }
+            // Keep only contiguous candidates
+            const contiguousCandidates = candidatesRes.rows.filter((cand) => {
+                const maxPub = pubMap.get(cand.work_id) ?? -1;
+                const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
+                return maxPub === -1 || minSort <= maxPub + 1.5;
+            });
             let admitted = 0;
-            for (const cand of candidatesRes.rows) {
+            for (const cand of contiguousCandidates) {
                 if (admitted >= backfillSlotsAvailable)
                     break;
                 const srcCount = sourceCounts.get(cand.source) || 0;
@@ -653,32 +658,44 @@ export class AdmissionController {
         FROM importer_queue q
         JOIN works w ON w.id = (q.payload->>'workId')::uuid
         JOIN importer_sources s ON s.id = q.source
-        LEFT JOIN (
-          SELECT work_id, COALESCE(MAX(number), -1) as max_published
-          FROM chapters
-          WHERE published_at IS NOT NULL
-          GROUP BY work_id
-        ) p ON p.work_id = w.id
         WHERE q.task_type = 'IMPORT_CHAPTER'
-          AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
+          AND q.status = 'QUEUED'
+          AND q.attempts < COALESCE(q.max_attempts, 7)
           AND ${isP1 ? 'w.published = true AND w.latest_chapter_published_at IS NOT NULL' : '(w.published IS FALSE OR w.latest_chapter_published_at IS NULL)'}
           AND s.enabled = true
           AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND NOT ((q.payload->>'workId') = ANY($2::text[]))
           AND ($3::text[] IS NULL OR NOT (q.source = ANY($3::text[])))
-        GROUP BY (q.payload->>'workId'), w.title, q.source, p.max_published
-        HAVING ${isP1 ? '(MIN(q.chapter_sort_key) <= COALESCE(p.max_published, -1) + 1.5 OR p.max_published IS NULL)' : '(MIN(q.chapter_sort_key) <= 1.5)'}
-        ORDER BY queued_count DESC, pending_jobs DESC
-        LIMIT 1;
+        GROUP BY (q.payload->>'workId'), w.title, q.source
+        ORDER BY queued_count DESC
+        LIMIT 10;
       `;
             const res = await this.runQuery(query, [
                 allowedSources && allowedSources.length > 0 ? allowedSources : null,
                 activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
                 saturatedSources.length > 0 ? saturatedSources : null,
             ]);
-            if (res.rows.length > 0) {
-                const cand = res.rows[0];
+            if (res.rows.length === 0)
+                continue;
+            const candWorkIds = res.rows.map((r) => r.work_id);
+            const pubMap = new Map();
+            if (candWorkIds.length > 0) {
+                const pubRes = await this.runQuery(`SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
+           FROM chapters
+           WHERE work_id = ANY($1::uuid[]) AND published_at IS NOT NULL
+           GROUP BY work_id`, [candWorkIds]);
+                for (const pr of pubRes.rows) {
+                    pubMap.set(pr.work_id, parseFloat(pr.max_pub));
+                }
+            }
+            const match = res.rows.find((cand) => {
+                const maxPub = pubMap.get(cand.work_id) ?? -1;
+                const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
+                return isP1 ? (maxPub === -1 || minSort <= maxPub + 1.5) : (minSort <= 1.5);
+            });
+            if (match) {
+                const cand = match;
                 const newWork = {
                     workId: cand.work_id,
                     workTitle: cand.title || 'Unknown Title',
