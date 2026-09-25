@@ -3,10 +3,14 @@ import type { WorkAffinityScheduler } from './scheduler/work-affinity-scheduler.
 import type { AdmissionController } from './scheduler/admission-controller.js';
 import type { ProtectiveSentinel } from './protective-sentinel.js';
 export type ImporterHealthStatus = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL' | 'IDLE' | 'PAUSED_BY_PROTECTION';
+export type ProcessingHealth = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL';
+export type PublicationHealth = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL' | 'NO_FRESH_EXPECTED';
 export type AutoHealState = 'IDLE' | 'MONITORING' | 'LEVEL_1_LIGHT_RECONCILIATION' | 'LEVEL_2_STUCK_STATE_AUDIT' | 'LEVEL_3_RESTART_PENDING' | 'CIRCUIT_OPEN' | 'RECOVERED';
 export interface HealthPanelMetrics {
     status: ImporterHealthStatus;
     autoHealState: AutoHealState;
+    processingHealth: ProcessingHealth;
+    publicationHealth: PublicationHealth;
     lastStartedAgeSec: number;
     lastCompletedAgeSec: number;
     lastFreshVisibleAgeSec: number;
@@ -89,7 +93,25 @@ export declare class AutoHealWatchdog {
      */
     collectTelemetry(): Promise<HealthPanelMetrics>;
     /**
-     * Deterministic Health Status evaluation based on REAL PROGRESS.
+     * Deterministic Multidimensional Health evaluation separating processing and publication health.
+     */
+    evaluateMultidimensionalHealth(params: {
+        eligibleJobs: number;
+        importingCount: number;
+        lastCompletedAgeSec: number;
+        lastFreshVisibleAgeSec: number;
+        protectiveStopActive: boolean;
+        protectiveStopReason?: string | null;
+        protectiveStopTriggeredAt?: string | null;
+        recentCompletionsAreDedupeOnly?: boolean;
+        hasStagedPublications?: boolean;
+    }): {
+        status: ImporterHealthStatus;
+        processingHealth: ProcessingHealth;
+        publicationHealth: PublicationHealth;
+    };
+    /**
+     * Deterministic Health Status evaluation based on REAL PROGRESS (backward-compatible).
      */
     determineHealthStatus(params: {
         eligibleJobs: number;
@@ -99,6 +121,8 @@ export declare class AutoHealWatchdog {
         protectiveStopActive: boolean;
         protectiveStopReason?: string | null;
         protectiveStopTriggeredAt?: string | null;
+        recentCompletionsAreDedupeOnly?: boolean;
+        hasStagedPublications?: boolean;
     }): ImporterHealthStatus;
     /**
      * Executes a single evaluation cycle:

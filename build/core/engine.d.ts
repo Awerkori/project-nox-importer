@@ -73,9 +73,15 @@ export declare class ImporterEngine {
     private isRestarting;
     static activeBufferedBytes: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
+    private exitHandler;
+    setExitHandlerForTest(handler: (code: number) => void): void;
     /**
-     * Initiates a controlled graceful self-restart when an unresolvable critical stall occurs.
-     * Drains in-flight operations with a grace period, then exits with code 1 for supervisor restart.
+     * Initiates a truly graceful bounded controlled self-restart when an unresolvable critical stall occurs:
+     * 1. Halts new claims and aborts background loops immediately.
+     * 2. Bounded drain of in-flight jobs (up to 6s).
+     * 3. Safely closes DB pool and system resources (bounded <=2s).
+     * 4. Enforces hard maximum total restart duration <= 10s.
+     * 5. Exits cleanly with code 1 for supervisor / container restart.
      */
     initiateControlledSelfRestart(reason: string, metrics?: any): Promise<void>;
     getAutotuner(): AdaptiveAutotuner;

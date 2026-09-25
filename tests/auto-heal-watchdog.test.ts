@@ -4,8 +4,10 @@ import {
   type HealthPanelMetrics,
   type AutoRestartRecord,
 } from '../src/core/auto-heal-watchdog.js';
+import { ImporterEngine } from '../src/core/engine.js';
+import { diagnostics } from '../src/core/diagnostics.js';
 
-describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a F)', () => {
+describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a J)', () => {
   let mockPool: any;
   let mockScheduler: any;
   let mockAdmissionController: any;
@@ -411,5 +413,285 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
       protectiveStopActive: false,
     });
     expect(status4h).toBe('CRITICAL_STALL');
+  });
+
+  // =========================================================================
+  // CASO G: Persistent cross-process 15m cooldown (DB has restart 3m ago -> restart blocked)
+  // =========================================================================
+  it('Caso G: persistent cross-process 15m cooldown => restart bloqueado mesmo em novo processo', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    const now = Date.now();
+    // Simulate restart recorded in DB 3 minutes ago by previous process
+    const pastRestarts: AutoRestartRecord[] = [
+      {
+        timestamp: new Date(now - 3 * 60 * 1000).toISOString(),
+        reason: 'CRITICAL_STALL',
+        progressAgeSec: 2100,
+        eligibleJobs: 100,
+      },
+    ];
+
+    // Stall condition: 35 minutes without progress, 100 eligible jobs
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '2100',
+              completed_age: '2100',
+              fresh_age: '2100',
+              started_15m: '0',
+              completed_15m: '0',
+              fresh_15m: '0',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '100', importing_cnt: '0', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '0' }] };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify(pastRestarts) }] };
+      }
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.evaluateCycle();
+
+    // Verify:
+    // 1. Status is CRITICAL_STALL
+    expect(metrics.status).toBe('CRITICAL_STALL');
+    // 2. Controlled restart was BLOCKED by persistent 15m cooldown
+    expect(onControlledRestart).not.toHaveBeenCalled();
+    // 3. Auto-heal state did NOT transition to LEVEL_3_RESTART_PENDING
+    expect(metrics.autoHealState).not.toBe('LEVEL_3_RESTART_PENDING');
+  });
+
+  // =========================================================================
+  // CASO H: Processing saudável mas publicação travada (>30m) com novos capítulos
+  // =========================================================================
+  it('Caso H: processing saudável mas publicação travada (>30m) com novos capítulos => detecta PUBLICATION_STALL / CRITICAL_STALL', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    // Completed 120s ago (2m ago - healthy processing)
+    // Fresh visible 2100s ago (35m ago - stalled publication)
+    // Recent completions are NOT dedupe only (actual new chapters completed)
+    // Staged backlog exists (5 staged chapters stuck)
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '120',
+              completed_age: '120',
+              fresh_age: '2100',
+              started_15m: '10',
+              completed_15m: '10',
+              fresh_15m: '0',
+            },
+          ],
+        };
+      }
+      if (sql.includes('recent_total')) {
+        return { rows: [{ recent_total: '10', recent_dedupe: '0' }] };
+      }
+      if (sql.includes('recent_providers')) {
+        return { rows: [{ recent_providers: '10' }] };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '50', importing_cnt: '2', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '5' }] };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      return { rows: [] };
+    });
+
+    // Simulate that Level 1 and Level 2 reconciliations were already attempted during previous cycles of the 35m stall
+    const now = Date.now();
+    (watchdog as any).lastLevel1At = now;
+    (watchdog as any).lastLevel2At = now;
+
+    const metrics = await watchdog.evaluateCycle();
+
+    // Verify multidimensional health detection:
+    expect(metrics.processingHealth).toBe('HEALTHY');
+    expect(metrics.publicationHealth).toBe('CRITICAL_STALL');
+    expect(metrics.status).toBe('CRITICAL_STALL');
+    // Publication stall was NOT masked by active chapter completions!
+    expect(onControlledRestart).toHaveBeenCalled();
+  });
+
+  // =========================================================================
+  // CASO I: Dedupe false-positive protection (ALREADY_CANONICAL => NO_FRESH_EXPECTED)
+  // =========================================================================
+  it('Caso I: processamento ativo com conclusões ALREADY_CANONICAL / dedupe => NO_FRESH_EXPECTED, status HEALTHY sem falso alarme', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    // Completed 120s ago (2m ago - healthy processing)
+    // Fresh visible 2100s ago (35m ago)
+    // BUT all recent completions were CANONICAL_ALREADY_SATISFIED / dedupe
+    // Staged backlog is 0
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '120',
+              completed_age: '120',
+              fresh_age: '2100',
+              started_15m: '10',
+              completed_15m: '10',
+              fresh_15m: '0',
+            },
+          ],
+        };
+      }
+      if (sql.includes('recent_total')) {
+        return { rows: [{ recent_total: '10', recent_dedupe: '10' }] };
+      }
+      if (sql.includes('recent_providers')) {
+        return { rows: [{ recent_providers: '0' }] };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '50', importing_cnt: '2', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '0' }] };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.evaluateCycle();
+
+    // Verify dedupe false-positive protection:
+    expect(metrics.processingHealth).toBe('HEALTHY');
+    expect(metrics.publicationHealth).toBe('NO_FRESH_EXPECTED');
+    expect(metrics.status).toBe('HEALTHY');
+    expect(metrics.autoHealState).toMatch(/MONITORING|RECOVERED/);
+    expect(onControlledRestart).not.toHaveBeenCalled();
+  });
+
+  // =========================================================================
+  // CASO J: Truly graceful bounded restart (drain, pool close, timeout <=10s, exit)
+  // =========================================================================
+  it('Caso J: graceful bounded restart => drain de in-flight, pool fechado, timeout <=10s, exit(1)', async () => {
+    const mockSupabase: any = {
+      from: vi.fn(),
+      rpc: vi.fn(),
+      query: vi.fn(),
+      getPool: vi.fn().mockReturnValue(mockPool),
+    };
+    const mockStorage: any = {
+      uploadFile: vi.fn(),
+      getPublicUrl: vi.fn(),
+    };
+    const mockRegistry: any = {};
+    const mockRateLimiter: any = {};
+    const mockConfig: any = {
+      WORKER_ID: 'test-worker',
+      MAX_CONCURRENT_CHAPTERS: 8,
+      TESTED_CONCURRENCY_CEILING: 18,
+    };
+    const mockQueue: any = {};
+    const mockDedupe: any = {};
+    const mockCheckpoint: any = {};
+    const mockReconciler: any = {};
+    const mockPublicationBarrier: any = {};
+    const mockSafetyBarrier: any = {};
+    const mockSentinel: any = {
+      evaluateAutoResume: vi.fn(),
+    };
+
+    const engine = new ImporterEngine(
+      mockSupabase,
+      mockStorage,
+      mockRegistry,
+      mockRateLimiter,
+      mockConfig,
+      mockQueue,
+      mockDedupe,
+      mockCheckpoint,
+      mockReconciler,
+      mockPublicationBarrier,
+      mockSafetyBarrier,
+      mockSentinel
+    );
+
+    let exitCode: number | null = null;
+    engine.setExitHandlerForTest((code) => {
+      exitCode = code;
+    });
+
+    // Simulate in-flight active jobs in diagnostics that drain quickly
+    diagnostics.registerJob({
+      jobId: 'drain-test-job-1',
+      taskType: 'IMPORT_CHAPTER',
+      source: 'test-src',
+    });
+    expect(diagnostics.getActiveJobsCount()).toBeGreaterThan(0);
+
+    // Simulate draining the job after 300ms
+    setTimeout(() => {
+      diagnostics.unregisterJob('drain-test-job-1');
+    }, 300);
+
+    const t0 = Date.now();
+    await engine.initiateControlledSelfRestart('Test graceful shutdown');
+    const elapsedMs = Date.now() - t0;
+
+    // Verify graceful bounded sequence:
+    // 1. In-flight jobs drained to 0
+    expect(diagnostics.getActiveJobsCount()).toBe(0);
+    // 2. Loops stopped
+    expect((engine as any).stopSignal).toBe(true);
+    expect((engine as any).abortController.signal.aborted).toBe(true);
+    // 3. Exit code 1
+    expect(exitCode).toBe(1);
+    // 4. Hard safety limit: total shutdown elapsed time MUST be <= 10000ms
+    expect(elapsedMs).toBeLessThanOrEqual(10000);
   });
 });

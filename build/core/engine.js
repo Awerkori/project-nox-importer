@@ -1,5 +1,5 @@
 import { callProvider } from './retry-policy.js';
-import { getYugabytePool, recoverStalledLeasesDirect } from '../db/yugabyte-direct.js';
+import { getYugabytePool, recoverStalledLeasesDirect, closeYugabytePool } from '../db/yugabyte-direct.js';
 import { ImporterQueue } from './queue.js';
 import { DeduplicationEngine, computeCanonicalChapterKey, ADULT_SOURCES } from './deduplication.js';
 import { CheckpointManager } from './checkpoint.js';
@@ -175,26 +175,67 @@ export class ImporterEngine {
             maxBufferedBytes: 64 * 1024 * 1024,
         });
     }
+    exitHandler = (code) => process.exit(code);
+    setExitHandlerForTest(handler) {
+        this.exitHandler = handler;
+    }
     /**
-     * Initiates a controlled graceful self-restart when an unresolvable critical stall occurs.
-     * Drains in-flight operations with a grace period, then exits with code 1 for supervisor restart.
+     * Initiates a truly graceful bounded controlled self-restart when an unresolvable critical stall occurs:
+     * 1. Halts new claims and aborts background loops immediately.
+     * 2. Bounded drain of in-flight jobs (up to 6s).
+     * 3. Safely closes DB pool and system resources (bounded <=2s).
+     * 4. Enforces hard maximum total restart duration <= 10s.
+     * 5. Exits cleanly with code 1 for supervisor / container restart.
      */
     async initiateControlledSelfRestart(reason, metrics) {
         if (this.isRestarting)
             return;
         this.isRestarting = true;
+        const shutdownStartTime = Date.now();
         this.logger.error(`🚨 [CONTROLLED SELF-RESTART] Initiating graceful self-restart. Reason: ${reason}`, {
             reason,
             pid: process.pid,
             uptimeSeconds: Math.floor(process.uptime()),
             metrics,
         });
+        // 1. Halt new claims and loops immediately
         try {
             this.stop();
+            this.admissionController.stop();
         }
-        catch { }
-        await new Promise((r) => setTimeout(r, 4000));
-        process.exit(1);
+        catch (err) {
+            this.logger.warn('[CONTROLLED SELF-RESTART] Error halting loops', { error: err?.message });
+        }
+        // 2. Bounded drain of in-flight jobs (max 6s)
+        const maxDrainTimeoutMs = 6000;
+        while (Date.now() - shutdownStartTime < maxDrainTimeoutMs) {
+            const activeCount = diagnostics.getActiveJobsCount();
+            if (activeCount === 0) {
+                this.logger.info(`[CONTROLLED SELF-RESTART] In-flight jobs successfully drained in ${Date.now() - shutdownStartTime}ms.`);
+                break;
+            }
+            await new Promise((r) => setTimeout(r, 200));
+        }
+        const remainingActive = diagnostics.getActiveJobsCount();
+        if (remainingActive > 0) {
+            this.logger.warn(`[CONTROLLED SELF-RESTART] Drain timeout reached with ${remainingActive} active job(s) remaining. Proceeding with resource shutdown.`);
+        }
+        // 3. Safely close database pool and shared resources (bounded <=2s)
+        try {
+            this.logger.info('[CONTROLLED SELF-RESTART] Closing database pool and shared resources...');
+            await Promise.race([
+                closeYugabytePool(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Pool close timeout')), 2000)),
+            ]);
+            this.logger.info('[CONTROLLED SELF-RESTART] Database pool closed successfully.');
+        }
+        catch (err) {
+            this.logger.warn('[CONTROLLED SELF-RESTART] Database pool closure completed or timed out', { error: err?.message });
+        }
+        // 4. Hard safety limit: entire restart sequence MUST take <= 10s
+        const totalElapsedMs = Date.now() - shutdownStartTime;
+        this.logger.info(`[CONTROLLED SELF-RESTART] Bounded shutdown completed in ${totalElapsedMs}ms (limit: 10000ms). Exiting process...`);
+        this.exitHandler(1);
     }
     getAutotuner() {
         return this.autotuner;
