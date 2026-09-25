@@ -7,7 +7,7 @@ import { diagnostics } from './diagnostics.js';
  * - Real-progress based health classification (HEALTHY, DEGRADED, STALLED, CRITICAL_STALL, IDLE, PAUSED_BY_PROTECTION)
  * - Silent stall detection (workers alive + eligible > 0 but 0 completions => STALL)
  * - Escalated recovery ladder:
- *     Level 1: Light reconciliation (scheduler state, active works, cooldowns, caches, in-flight, admission)
+ *     Level 1: Light reconciliation (scheduler state, active works, cooldowns, caches, in-flight, admission, publication sweep)
  *     Level 2: Stuck state reconciliation (expired leases >15m, zombie active works eviction)
  *     Level 3: Controlled graceful self-restart (circuit breaker protected: max 1/15m, max 3/1h)
  * - Circuit breaker protection to prevent restart loops
@@ -19,6 +19,7 @@ export class AutoHealWatchdog {
     scheduler;
     admissionController;
     protectiveSentinel;
+    publicationBarrier;
     onControlledRestart;
     intervalMs;
     workerId;
@@ -36,6 +37,7 @@ export class AutoHealWatchdog {
         this.scheduler = options.scheduler;
         this.admissionController = options.admissionController;
         this.protectiveSentinel = options.protectiveSentinel;
+        this.publicationBarrier = options.publicationBarrier;
         this.onControlledRestart = options.onControlledRestart;
         this.intervalMs = options.intervalMs ?? 60_000;
         this.workerId = options.workerId ?? 'discloud-importer-1';
@@ -116,13 +118,60 @@ export class AutoHealWatchdog {
         const eligibleJobs = parseInt(qRow.eligible_cnt || '0', 10);
         const importingCount = parseInt(qRow.importing_cnt || '0', 10);
         const retryCount = parseInt(qRow.retry_cnt || '0', 10);
-        // 3. Staged Unique Chapters
-        const mapRes = await this.pool.query(`
-      SELECT count(DISTINCT (work_id || ':' || chapter_sort_key::text)) as staged_unique
-      FROM importer_chapter_mappings
-      WHERE status = 'STAGED'
-    `);
-        const stagedUnique = parseInt(mapRes.rows[0]?.staged_unique || '0', 10);
+        // 3. Staged Unique & Publishable Staged Chapters
+        let stagedUnique = 0;
+        let publishableStaged = 0;
+        let waitingPredecessorStaged = 0;
+        let stuckStaged = 0;
+        try {
+            const mapRes = await this.pool.query(`
+        SELECT count(DISTINCT (work_id || ':' || chapter_sort_key::text)) as staged_unique
+        FROM importer_chapter_mappings
+        WHERE status IN ('STAGED', 'WAITING_FOR_GAP')
+      `);
+            stagedUnique = parseInt(mapRes.rows[0]?.staged_unique || '0', 10);
+            if (stagedUnique > 0) {
+                const pubStagedRes = await this.pool.query(`
+          WITH staged_works AS (
+            SELECT work_id, MIN(chapter_sort_key) as min_staged
+            FROM importer_chapter_mappings
+            WHERE status IN ('STAGED', 'WAITING_FOR_GAP') AND work_id IS NOT NULL
+            GROUP BY work_id
+          ),
+          publishable_works AS (
+            SELECT sw.work_id, COALESCE((
+              SELECT MAX(number) FROM chapters c WHERE c.work_id = sw.work_id AND c.published_at IS NOT NULL
+            ), -1) as max_published
+            FROM staged_works sw
+            WHERE sw.min_staged <= COALESCE((
+              SELECT MAX(number) FROM chapters c WHERE c.work_id = sw.work_id AND c.published_at IS NOT NULL
+            ), -1) + 1.05
+            OR NOT EXISTS (
+              SELECT 1 FROM chapters c WHERE c.work_id = sw.work_id AND c.published_at IS NOT NULL
+            )
+            LIMIT 40
+          )
+          SELECT COUNT(*) as publishable_staged
+          FROM importer_chapter_mappings m
+          JOIN publishable_works pw ON m.work_id = pw.work_id
+          WHERE m.status IN ('STAGED', 'WAITING_FOR_GAP')
+            AND (m.chapter_sort_key <= pw.max_published + 1.05 OR pw.max_published = -1);
+        `);
+                publishableStaged = parseInt(pubStagedRes.rows[0]?.publishable_staged || '0', 10);
+                const remainingNonPublishable = Math.max(0, stagedUnique - publishableStaged);
+                if (remainingNonPublishable > 0) {
+                    if (eligibleJobs > 0 || importingCount > 0 || retryCount > 0) {
+                        waitingPredecessorStaged = remainingNonPublishable;
+                    }
+                    else {
+                        stuckStaged = remainingNonPublishable;
+                    }
+                }
+            }
+        }
+        catch (err) {
+            this.logger.warn('Failed querying staged classification', { error: err?.message });
+        }
         // 4. Scheduler State (active_works, claimable_works)
         let activeWorks = [];
         let claimableWorks = 0;
@@ -165,36 +214,83 @@ export class AutoHealWatchdog {
         const restartsLast1h = recentRestarts.filter((r) => nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000);
         const autoRestartCount1h = restartsLast1h.length;
         this.circuitBreakerOpen = autoRestartCount1h >= 3;
-        // 7. Check if recent completed jobs were deduplication / canonical-only
+        // 7. Correlated dedupe classification of recent completed jobs
+        let recentCorrelatedBreakdown = {
+            alreadyCanonical: 0,
+            dedupeSource: 0,
+            freshPublished: 0,
+            freshExpected: 0,
+        };
         let recentCompletionsAreDedupeOnly = false;
         try {
-            const dedupeRes = await this.pool.query(`
+            const correlatedRes = await this.pool.query(`
+        WITH recent_completed_jobs AS (
+          SELECT 
+            q.id,
+            q.source,
+            q.chapter_sort_key,
+            (q.payload->>'workId')::uuid as work_id,
+            (q.payload->>'chapterId')::uuid as chapter_id,
+            q.last_error,
+            q.updated_at
+          FROM importer_queue q
+          WHERE q.status = 'COMPLETED'
+            AND q.task_type = 'IMPORT_CHAPTER'
+            AND q.updated_at >= NOW() - INTERVAL '30 minutes'
+          ORDER BY q.updated_at DESC
+          LIMIT 50
+        ),
+        correlated AS (
+          SELECT DISTINCT ON (j.id)
+            j.id as job_id,
+            j.work_id,
+            j.chapter_sort_key,
+            j.source,
+            CASE
+              WHEN j.last_error IN ('CANONICAL_ALREADY_SATISFIED', 'ALREADY_CANONICAL') THEN 'ALREADY_CANONICAL'
+              WHEN m.is_page_provider IS FALSE THEN 'DEDUPE_SOURCE'
+              WHEN c.published_at IS NOT NULL AND c.is_fresh_release IS TRUE THEN 'FRESH_PUBLISHED'
+              WHEN c.published_at IS NOT NULL THEN 'ALREADY_CANONICAL'
+              ELSE 'FRESH_EXPECTED'
+            END as classification
+          FROM recent_completed_jobs j
+          LEFT JOIN importer_chapter_mappings m 
+            ON m.work_id = j.work_id 
+           AND m.source = j.source 
+           AND m.chapter_sort_key = j.chapter_sort_key
+          LEFT JOIN chapters c 
+            ON c.id = COALESCE(j.chapter_id, m.chapter_id)
+        )
         SELECT 
-          COUNT(*) as recent_total,
-          COUNT(CASE WHEN last_error IN ('CANONICAL_ALREADY_SATISFIED', 'ALREADY_CANONICAL') THEN 1 END) as recent_dedupe
-        FROM importer_queue
-        WHERE status = 'COMPLETED'
-          AND task_type = 'IMPORT_CHAPTER'
-          AND updated_at >= NOW() - INTERVAL '30 minutes'
+          classification,
+          count(*) as cnt
+        FROM correlated
+        GROUP BY classification;
       `);
-            const recentTotal = parseInt(dedupeRes.rows[0]?.recent_total || '0', 10);
-            const recentDedupe = parseInt(dedupeRes.rows[0]?.recent_dedupe || '0', 10);
-            let recentPageProviders = 0;
-            if (recentTotal > 0 && recentDedupe < recentTotal) {
-                const provRes = await this.pool.query(`
-          SELECT COUNT(*) as recent_providers
-          FROM importer_chapter_mappings
-          WHERE status = 'COMPLETED'
-            AND is_page_provider = true
-            AND updated_at >= NOW() - INTERVAL '30 minutes'
-        `);
-                recentPageProviders = parseInt(provRes.rows[0]?.recent_providers || '0', 10);
+            for (const row of correlatedRes.rows) {
+                const cnt = parseInt(row.cnt, 10);
+                if (row.classification === 'ALREADY_CANONICAL')
+                    recentCorrelatedBreakdown.alreadyCanonical = cnt;
+                else if (row.classification === 'DEDUPE_SOURCE')
+                    recentCorrelatedBreakdown.dedupeSource = cnt;
+                else if (row.classification === 'FRESH_PUBLISHED')
+                    recentCorrelatedBreakdown.freshPublished = cnt;
+                else if (row.classification === 'FRESH_EXPECTED')
+                    recentCorrelatedBreakdown.freshExpected = cnt;
             }
-            if (recentTotal > 0 && (recentDedupe === recentTotal || recentPageProviders === 0) && stagedUnique === 0) {
+            const totalRecentJobs = recentCorrelatedBreakdown.alreadyCanonical +
+                recentCorrelatedBreakdown.dedupeSource +
+                recentCorrelatedBreakdown.freshPublished +
+                recentCorrelatedBreakdown.freshExpected;
+            if (totalRecentJobs > 0 &&
+                recentCorrelatedBreakdown.freshExpected === 0 &&
+                publishableStaged === 0) {
                 recentCompletionsAreDedupeOnly = true;
             }
         }
-        catch { }
+        catch (err) {
+            this.logger.warn('Failed querying correlated dedupe breakdown', { error: err?.message });
+        }
         // 8. Compute Multidimensional Health Status
         const health = this.evaluateMultidimensionalHealth({
             eligibleJobs,
@@ -206,6 +302,9 @@ export class AutoHealWatchdog {
             protectiveStopTriggeredAt,
             recentCompletionsAreDedupeOnly,
             hasStagedPublications: stagedUnique > 0,
+            publishableStaged,
+            waitingPredecessorStaged,
+            stuckStaged,
         });
         return {
             status: health.status,
@@ -225,6 +324,10 @@ export class AutoHealWatchdog {
             importingCount,
             retryCount,
             stagedUnique,
+            publishableStaged,
+            waitingPredecessorStaged,
+            stuckStaged,
+            recentCorrelatedBreakdown,
             lastAutoHealAt: this.lastAutoHealAt,
             autoRestartCount1h,
             circuitBreakerOpen: this.circuitBreakerOpen,
@@ -239,6 +342,8 @@ export class AutoHealWatchdog {
      * Deterministic Multidimensional Health evaluation separating processing and publication health.
      */
     evaluateMultidimensionalHealth(params) {
+        const publishableStaged = params.publishableStaged ?? (params.hasStagedPublications ? 1 : 0);
+        const waitingPredecessorStaged = params.waitingPredecessorStaged ?? 0;
         // 1. Processing Health Dimension (based on chapter completions)
         let processingHealth;
         if (params.lastCompletedAgeSec <= 10 * 60) {
@@ -253,7 +358,7 @@ export class AutoHealWatchdog {
         else {
             processingHealth = 'CRITICAL_STALL';
         }
-        // 2. Publication Health Dimension (based on fresh visible chapters)
+        // 2. Publication Health Dimension (based on fresh visible chapters and staged backlog)
         let publicationHealth;
         if (params.lastFreshVisibleAgeSec <= 10 * 60) {
             publicationHealth = 'HEALTHY';
@@ -261,8 +366,14 @@ export class AutoHealWatchdog {
         else if (params.lastFreshVisibleAgeSec <= 15 * 60) {
             publicationHealth = 'DEGRADED';
         }
-        else if (params.recentCompletionsAreDedupeOnly && !params.hasStagedPublications) {
-            // Completed chapters were deduplicated/canonical-only; no new chapter publication expected
+        else if (params.recentCompletionsAreDedupeOnly && publishableStaged === 0) {
+            // Completed chapters were deduplicated/canonical-only and no publishable staged backlog exists
+            publicationHealth = 'NO_FRESH_EXPECTED';
+        }
+        else if (params.eligibleJobs === 0 &&
+            params.importingCount === 0 &&
+            publishableStaged === 0) {
+            // No active work and zero publishable chapters waiting -> no fresh chapters expected
             publicationHealth = 'NO_FRESH_EXPECTED';
         }
         else if (params.lastFreshVisibleAgeSec < 30 * 60) {
@@ -273,7 +384,13 @@ export class AutoHealWatchdog {
         }
         // 3. Resolve Overall Status
         let status;
-        if (params.eligibleJobs === 0 && params.importingCount === 0) {
+        // IDLE is ONLY allowed when:
+        // eligibleJobs === 0 AND importingCount === 0 AND publishableStaged === 0
+        // (Meaning: no processable work AND no actionable publication)
+        const isTrulyIdle = params.eligibleJobs === 0 &&
+            params.importingCount === 0 &&
+            publishableStaged === 0;
+        if (isTrulyIdle) {
             status = 'IDLE';
         }
         else if (params.protectiveStopActive) {
@@ -292,6 +409,22 @@ export class AutoHealWatchdog {
                 else {
                     status = 'STALLED';
                 }
+            }
+        }
+        else if (params.eligibleJobs === 0 && params.importingCount === 0 && publishableStaged > 0) {
+            // Eligible = 0, Importing = 0, BUT publishableStaged > 0!
+            // This is NEVER IDLE! It is driven strictly by publicationHealth!
+            if (publicationHealth === 'CRITICAL_STALL') {
+                status = 'CRITICAL_STALL';
+            }
+            else if (publicationHealth === 'STALLED') {
+                status = 'STALLED';
+            }
+            else if (publicationHealth === 'DEGRADED') {
+                status = 'DEGRADED';
+            }
+            else {
+                status = 'HEALTHY';
             }
         }
         else if (publicationHealth === 'NO_FRESH_EXPECTED') {
@@ -496,6 +629,21 @@ export class AutoHealWatchdog {
                 this.logger.warn('[Level 1] Admission cycle failed', { error: e?.message });
             }
         }
+        // 5. If publication is stalled or publishable staged chapters exist, trigger safe bounded sweep
+        if (this.publicationBarrier &&
+            (metrics.publicationHealth === 'STALLED' ||
+                metrics.publicationHealth === 'CRITICAL_STALL' ||
+                (metrics.publishableStaged || 0) > 0)) {
+            try {
+                const swept = await this.publicationBarrier.sweepStagedPublications(40, 6);
+                if (swept > 0) {
+                    this.logger.info(`[Level 1] Publication recovery sweep: published ${swept} staged chapter(s) safely through barrier.`);
+                }
+            }
+            catch (e) {
+                this.logger.warn('[Level 1] Publication recovery sweep failed', { error: e?.message });
+            }
+        }
     }
     /**
      * NÍVEL 2 — ESTADO PRESO
@@ -596,6 +744,9 @@ export class AutoHealWatchdog {
             importing: metrics.importingCount,
             retry: metrics.retryCount,
             stagedUnique: metrics.stagedUnique,
+            publishableStaged: metrics.publishableStaged,
+            waitingPredecessorStaged: metrics.waitingPredecessorStaged,
+            stuckStaged: metrics.stuckStaged,
             lastAutoHeal: metrics.lastAutoHealAt,
             autoRestartCount1h: metrics.autoRestartCount1h,
             circuitBreakerOpen: metrics.circuitBreakerOpen,
