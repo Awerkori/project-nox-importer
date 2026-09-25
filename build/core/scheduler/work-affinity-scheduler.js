@@ -653,7 +653,16 @@ export class WorkAffinityScheduler {
      */
     async claimStaffForcedJob(client, opts) {
         const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
-        const query = `
+        // 1. Check for active staff requests first (very cheap indexed lookup)
+        const activeReqs = await this.runQuery(client, `
+      SELECT work_id::text, priority_boost, created_at 
+      FROM importer_staff_requests 
+      WHERE status = 'ACTIVE' 
+      ORDER BY priority_boost DESC, created_at ASC
+    `);
+        const hasActiveRequests = activeReqs.rows.length > 0;
+        const staffWorkIds = hasActiveRequests ? activeReqs.rows.map((r) => r.work_id) : null;
+        const query = hasActiveRequests ? `
       WITH to_lock AS (
         SELECT q.id
         FROM importer_queue q
@@ -672,7 +681,7 @@ export class WorkAffinityScheduler {
           AND (
             (q.payload->>'staffForced')::boolean = true 
             OR q.priority >= 1000 
-            OR sr.id IS NOT NULL
+            OR (q.payload->>'workId') = ANY($6::text[])
           )
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
@@ -703,15 +712,70 @@ export class WorkAffinityScheduler {
       RETURNING q.id, q.task_type, q.source, q.priority, q.payload, q.dedupe_key,
                 q.status, q.attempts, q.max_attempts, q.locked_by, q.locked_at,
                 q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
+    ` : `
+      WITH to_lock AS (
+        SELECT q.id
+        FROM importer_queue q
+        JOIN importer_sources s ON s.id = q.source
+        WHERE (
+          q.status = 'QUEUED'
+          OR (q.status = 'RETRY' AND q.next_run_at <= NOW())
+        )
+          AND q.task_type = 'IMPORT_CHAPTER'
+          AND q.attempts < COALESCE(q.max_attempts, 7)
+          AND s.enabled = true
+          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
+          AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
+          AND (
+            (q.payload->>'staffForced')::boolean = true 
+            OR q.priority >= 1000
+          )
+          AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
+          AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
+          AND NOT EXISTS (
+            SELECT 1 FROM chapters c
+            WHERE c.work_id = (q.payload->>'workId')::uuid
+              AND c.number = q.chapter_sort_key
+              AND c.published_at IS NOT NULL
+          )
+        ORDER BY 
+          q.priority DESC, 
+          q.chapter_sort_key ASC NULLS LAST, 
+          q.next_run_at ASC
+        FOR UPDATE OF q SKIP LOCKED
+        LIMIT 1
+      )
+      UPDATE importer_queue q
+      SET status = 'IMPORTING',
+          locked_by = $4,
+          locked_at = NOW(),
+          lease_expires_at = NOW() + ($5::text || ' minutes')::interval,
+          attempts = q.attempts + 1,
+          updated_at = NOW()
+      FROM to_lock
+      WHERE q.id = to_lock.id
+      RETURNING q.id, q.task_type, q.source, q.priority, q.payload, q.dedupe_key,
+                q.status, q.attempts, q.max_attempts, q.locked_by, q.locked_at,
+                q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
     `;
-        for (let drainAttempt = 0; drainAttempt < 10; drainAttempt++) {
-            const res = await this.runQuery(client, query, [
+        const queryParams = hasActiveRequests
+            ? [
                 opts.allowedSources,
                 opts.disallowedWorkIds || null,
                 disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
                 opts.workerId,
                 opts.leaseMin,
-            ]);
+                staffWorkIds,
+            ]
+            : [
+                opts.allowedSources,
+                opts.disallowedWorkIds || null,
+                disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
+                opts.workerId,
+                opts.leaseMin,
+            ];
+        for (let drainAttempt = 0; drainAttempt < 10; drainAttempt++) {
+            const res = await this.runQuery(client, query, queryParams);
             if (res.rows.length === 0)
                 return null;
             const r = res.rows[0];
@@ -1047,7 +1111,7 @@ export class WorkAffinityScheduler {
                 await this.stateStore.saveMetrics(metrics);
             }
             catch { }
-        }, 15000);
+        }, 60000);
     }
     async collectMetrics() {
         const activeWorks = this.stateStore.getActiveWorks();
