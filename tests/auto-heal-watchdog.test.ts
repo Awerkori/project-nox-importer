@@ -960,4 +960,318 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
     expect(metrics.status).toBe('STALLED');
     expect(metrics.autoHealState).toMatch(/LEVEL_1_LIGHT_RECONCILIATION|LEVEL_2_STUCK_STATE_AUDIT/);
   });
+
+  // =========================================================================
+  // CASO O: eligible=0, importing=0, publishable=0, waiting=0, stuck=5 => NÃO IDLE
+  // =========================================================================
+  it('Caso O: eligible=0, importing=0, publishable=0, waiting=0, stuck=5 => status NÃO é IDLE', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    const res = watchdog.evaluateMultidimensionalHealth({
+      eligibleJobs: 0,
+      importingCount: 0,
+      lastCompletedAgeSec: 1800,
+      lastFreshVisibleAgeSec: 1800,
+      protectiveStopActive: false,
+      publishableStaged: 0,
+      waitingPredecessorStaged: 0,
+      stuckStaged: 5,
+    });
+
+    expect(res.status).not.toBe('IDLE');
+    expect(['DEGRADED', 'STALLED', 'CRITICAL_STALL']).toContain(res.status);
+  });
+
+  // =========================================================================
+  // CASO P: Work A staged aguardando predecessor inexistente; Work B possui 50 RETRY => Work A continua STUCK
+  // =========================================================================
+  it('Caso P: Work A staged sem predecessor ativo; Work B possui 50 RETRY => Work A continua STUCK, retries de B não mascaram A', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '60',
+              completed_age: '60',
+              fresh_age: '1200',
+              started_15m: '10',
+              completed_15m: '10',
+              fresh_15m: '0',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '50', importing_cnt: '0', retry_cnt: '50' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '2' }] };
+      }
+      // Staged classification CTE
+      if (sql.includes('staged_works')) {
+        // Work A has staged chapter 2, no active queue, predecessor not satisfied
+        return {
+          rows: [
+            {
+              work_id: 'work-a',
+              frontier_sort_key: '2.0000',
+              total_staged_chapters: '2',
+              max_published: null,
+              has_predecessor_in_mapping: true,
+              has_predecessor_in_queue: false,
+              has_active_queue: false, // Work A has ZERO active queue jobs!
+              is_frontier_publishable: 0,
+            },
+          ],
+        };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.collectTelemetry(true);
+
+    expect(metrics.publishableStaged).toBe(0);
+    expect(metrics.stuckStaged).toBe(2);
+    expect(metrics.waitingPredecessorStaged).toBe(0);
+  });
+
+  // =========================================================================
+  // CASO Q: Obra sem capítulos publicados, staged = 1, 2, 3, 4 => somente frontier (1) é ACTIONABLE
+  // =========================================================================
+  it('Caso Q: obra nova sem publicados com staged 1,2,3,4 => apenas frontier inicial é ACTIONABLE (1 publishable, 3 waiting)', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '60',
+              completed_age: '60',
+              fresh_age: '60',
+              started_15m: '10',
+              completed_15m: '10',
+              fresh_15m: '10',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '0', importing_cnt: '0', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '4' }] };
+      }
+      // Staged classification CTE
+      if (sql.includes('staged_works')) {
+        // Work has 4 staged chapters, frontier is 1, max_published is null, no predecessor in mapping/queue
+        return {
+          rows: [
+            {
+              work_id: 'work-new',
+              frontier_sort_key: '1.0000',
+              total_staged_chapters: '4',
+              max_published: null,
+              has_predecessor_in_mapping: false,
+              has_predecessor_in_queue: false,
+              has_active_queue: false,
+              is_frontier_publishable: 1, // Only frontier is publishable!
+            },
+          ],
+        };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.collectTelemetry(true);
+
+    expect(metrics.publishableStaged).toBe(1); // ONLY 1! Not 4!
+    expect(metrics.waitingPredecessorStaged).toBe(3); // 2, 3, 4 waiting for frontier
+    expect(metrics.stuckStaged).toBe(0);
+  });
+
+  // =========================================================================
+  // CASO R: heurística max+1 permitiria candidato, mas PublicationSafetyBarrier real bloqueia => PUBLISHABLE = 0, sem falso restart
+  // =========================================================================
+  it('Caso R: barreira real bloqueia (state=CLOSED) => PUBLISHABLE = 0, sem falso restart', async () => {
+    const mockSafetyBarrier = {
+      getState: vi.fn().mockResolvedValue('CLOSED'),
+    };
+
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      safetyBarrier: mockSafetyBarrier as any,
+      onControlledRestart,
+    });
+
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '120',
+              completed_age: '120',
+              fresh_age: '2000',
+              started_15m: '5',
+              completed_15m: '5',
+              fresh_15m: '0',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '0', importing_cnt: '0', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '1' }] };
+      }
+      if (sql.includes('staged_works')) {
+        // Query heuristic would consider frontier publishable
+        return {
+          rows: [
+            {
+              work_id: 'work-blocked',
+              frontier_sort_key: '5.0000',
+              total_staged_chapters: '1',
+              max_published: '4.0000',
+              has_predecessor_in_mapping: false,
+              has_predecessor_in_queue: false,
+              has_active_queue: false,
+              is_frontier_publishable: 1,
+            },
+          ],
+        };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.collectTelemetry(true);
+
+    // Because safetyBarrier state is CLOSED, publishableStaged is forced to 0!
+    expect(metrics.publishableStaged).toBe(0);
+    expect(metrics.waitingPredecessorStaged).toBe(1);
+
+    // Evaluate cycle should NOT initiate restart because publishable = 0, eligible = 0, stuck = 0
+    await watchdog.evaluateCycle();
+    expect(onControlledRestart).not.toHaveBeenCalled();
+  });
+
+  // =========================================================================
+  // CASO S: waiting predecessor verdadeiro na mesma obra com job RETRY válido => WAITING_PREDECESSOR, não STUCK
+  // =========================================================================
+  it('Caso S: waiting predecessor verdadeiro na mesma obra com job RETRY ativo => WAITING_PREDECESSOR, não STUCK', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '60',
+              completed_age: '60',
+              fresh_age: '60',
+              started_15m: '5',
+              completed_15m: '5',
+              fresh_15m: '5',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '1', importing_cnt: '0', retry_cnt: '1' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '1' }] };
+      }
+      if (sql.includes('staged_works')) {
+        // Work has staged chapter 5, but predecessor chapter 4 is active in queue with RETRY
+        return {
+          rows: [
+            {
+              work_id: 'work-s',
+              frontier_sort_key: '5.0000',
+              total_staged_chapters: '1',
+              max_published: '3.0000',
+              has_predecessor_in_mapping: true,
+              has_predecessor_in_queue: true, // Chapter 4 in queue with RETRY!
+              has_active_queue: true, // Work S has active queue jobs!
+              is_frontier_publishable: 0,
+            },
+          ],
+        };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.collectTelemetry(true);
+
+    expect(metrics.publishableStaged).toBe(0);
+    expect(metrics.waitingPredecessorStaged).toBe(1);
+    expect(metrics.stuckStaged).toBe(0);
+  });
 });

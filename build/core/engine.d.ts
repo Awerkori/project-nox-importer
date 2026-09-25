@@ -112,7 +112,7 @@ export declare class ImporterEngine {
     private runCatalogBackfillLoop;
     private scheduleCatalogBackfill;
     /**
-     * Periodic publication sweep loop (every 10s) to unblock STAGED chapters
+     * Periodic publication sweep loop: 10s when active progress, backed off to 30s when no chapters are published
      */
     private runPublicationSweepLoop;
     /**

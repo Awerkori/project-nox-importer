@@ -155,6 +155,7 @@ export class ImporterEngine {
             admissionController: this.admissionController,
             protectiveSentinel: this.protectiveSentinel,
             publicationBarrier: this.publicationBarrier,
+            safetyBarrier: this.safetyBarrier,
             workerId: config.WORKER_ID,
             onControlledRestart: async (reason, metrics) => {
                 await this.initiateControlledSelfRestart(reason, metrics);
@@ -488,21 +489,23 @@ export class ImporterEngine {
         }
     }
     /**
-     * Periodic publication sweep loop (every 10s) to unblock STAGED chapters
+     * Periodic publication sweep loop: 10s when active progress, backed off to 30s when no chapters are published
      */
     async runPublicationSweepLoop() {
         while (!this.stopSignal) {
-            await this.sleep(10_000);
-            if (this.stopSignal)
-                break;
             try {
                 const count = await this.publicationBarrier.sweepStagedPublications();
                 if (count > 0) {
                     this.lastProgressTimestamp = Date.now();
+                    await this.sleep(10_000);
+                }
+                else {
+                    await this.sleep(30_000);
                 }
             }
             catch (err) {
                 this.logger.error('Error during publication sweep loop', { error: err?.message });
+                await this.sleep(30_000);
             }
         }
     }
@@ -756,6 +759,8 @@ export class ImporterEngine {
                         state: healthMetrics.status,
                         status: healthMetrics.status,
                         autoHealState: healthMetrics.autoHealState,
+                        processingHealth: healthMetrics.processingHealth,
+                        publicationHealth: healthMetrics.publicationHealth,
                         chapterPipeline: healthMetrics.status === 'STALLED' || healthMetrics.status === 'CRITICAL_STALL' ? 'STALLED' : 'WORKING',
                         newWorkPipeline,
                         minutesSinceLastNewWork,
@@ -773,6 +778,9 @@ export class ImporterEngine {
                         importing: healthMetrics.importingCount,
                         retry: healthMetrics.retryCount,
                         stagedUnique: healthMetrics.stagedUnique,
+                        publishableStaged: healthMetrics.publishableStaged,
+                        waitingPredecessorStaged: healthMetrics.waitingPredecessorStaged,
+                        stuckStaged: healthMetrics.stuckStaged,
                         lastAutoHeal: healthMetrics.lastAutoHealAt,
                         autoRestartCount1h: healthMetrics.autoRestartCount1h,
                         circuitBreakerOpen: healthMetrics.circuitBreakerOpen,
