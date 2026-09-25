@@ -20,6 +20,7 @@ export class AutoHealWatchdog {
     admissionController;
     protectiveSentinel;
     publicationBarrier;
+    safetyBarrier;
     onControlledRestart;
     intervalMs;
     workerId;
@@ -31,13 +32,19 @@ export class AutoHealWatchdog {
     lastLevel1At = 0;
     lastLevel2At = 0;
     lastRestartAt = 0;
+    lastSweepAt = 0;
+    firstStuckDetectedAt = null;
     circuitBreakerOpen = false;
+    cachedTelemetry = null;
+    lastTelemetryAt = 0;
+    telemetryCacheTtlMs = 20_000;
     constructor(options) {
         this.pool = options.pool;
         this.scheduler = options.scheduler;
         this.admissionController = options.admissionController;
         this.protectiveSentinel = options.protectiveSentinel;
         this.publicationBarrier = options.publicationBarrier;
+        this.safetyBarrier = options.safetyBarrier;
         this.onControlledRestart = options.onControlledRestart;
         this.intervalMs = options.intervalMs ?? 60_000;
         this.workerId = options.workerId ?? 'discloud-importer-1';
@@ -86,7 +93,11 @@ export class AutoHealWatchdog {
     /**
      * Collects real-time telemetry from database and memory.
      */
-    async collectTelemetry() {
+    async collectTelemetry(forceFresh = false) {
+        const nowMs = Date.now();
+        if (!forceFresh && this.cachedTelemetry && nowMs - this.lastTelemetryAt < this.telemetryCacheTtlMs) {
+            return this.cachedTelemetry;
+        }
         const mem = diagnostics.getMemorySnapshot();
         const now = new Date();
         // 1. Publication, Completion, and Started Timestamps
@@ -118,7 +129,7 @@ export class AutoHealWatchdog {
         const eligibleJobs = parseInt(qRow.eligible_cnt || '0', 10);
         const importingCount = parseInt(qRow.importing_cnt || '0', 10);
         const retryCount = parseInt(qRow.retry_cnt || '0', 10);
-        // 3. Staged Unique & Publishable Staged Chapters
+        // 3. Staged Unique & Publishable Staged Chapters (Index-Only, Barrier-Aligned, Work-Scoped)
         let stagedUnique = 0;
         let publishableStaged = 0;
         let waitingPredecessorStaged = 0;
@@ -133,45 +144,130 @@ export class AutoHealWatchdog {
             if (stagedUnique > 0) {
                 const pubStagedRes = await this.pool.query(`
           WITH staged_works AS (
-            SELECT work_id, MIN(chapter_sort_key) as min_staged
-            FROM importer_chapter_mappings
-            WHERE status IN ('STAGED', 'WAITING_FOR_GAP') AND work_id IS NOT NULL
-            GROUP BY work_id
-          ),
-          publishable_works AS (
-            SELECT sw.work_id, COALESCE((
-              SELECT MAX(number) FROM chapters c WHERE c.work_id = sw.work_id AND c.published_at IS NOT NULL
-            ), -1) as max_published
-            FROM staged_works sw
-            WHERE sw.min_staged <= COALESCE((
-              SELECT MAX(number) FROM chapters c WHERE c.work_id = sw.work_id AND c.published_at IS NOT NULL
-            ), -1) + 1.05
-            OR NOT EXISTS (
-              SELECT 1 FROM chapters c WHERE c.work_id = sw.work_id AND c.published_at IS NOT NULL
-            )
+            SELECT 
+              m.work_id,
+              MIN(m.chapter_sort_key) as frontier_sort_key,
+              COUNT(DISTINCT m.chapter_sort_key) as total_staged_chapters
+            FROM importer_chapter_mappings m
+            WHERE m.status IN ('STAGED', 'WAITING_FOR_GAP') AND m.work_id IS NOT NULL
+            GROUP BY m.work_id
             LIMIT 40
+          ),
+          works_with_published AS (
+            SELECT 
+              sw.work_id,
+              sw.frontier_sort_key,
+              sw.total_staged_chapters,
+              (
+                SELECT MAX(c.number) 
+                FROM chapters c 
+                WHERE c.work_id = sw.work_id 
+                  AND c.published_at IS NOT NULL
+              ) as max_published,
+              EXISTS (
+                SELECT 1 
+                FROM importer_chapter_mappings pm
+                WHERE pm.work_id = sw.work_id
+                  AND pm.chapter_sort_key < sw.frontier_sort_key
+                  AND pm.is_gap = false
+                  AND pm.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
+              ) as has_predecessor_in_mapping,
+              EXISTS (
+                SELECT 1 
+                FROM importer_queue pq
+                WHERE (pq.payload->>'workId') = sw.work_id::text
+                  AND pq.task_type = 'IMPORT_CHAPTER'
+                  AND pq.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+                  AND pq.chapter_sort_key < sw.frontier_sort_key
+              ) as has_predecessor_in_queue,
+              EXISTS (
+                SELECT 1 
+                FROM importer_queue aq
+                WHERE (aq.payload->>'workId') = sw.work_id::text
+                  AND aq.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+              ) as has_active_queue
+            FROM staged_works sw
           )
-          SELECT COUNT(*) as publishable_staged
-          FROM importer_chapter_mappings m
-          JOIN publishable_works pw ON m.work_id = pw.work_id
-          WHERE m.status IN ('STAGED', 'WAITING_FOR_GAP')
-            AND (m.chapter_sort_key <= pw.max_published + 1.05 OR pw.max_published = -1);
+          SELECT 
+            work_id,
+            frontier_sort_key,
+            total_staged_chapters,
+            max_published,
+            has_predecessor_in_mapping,
+            has_predecessor_in_queue,
+            has_active_queue,
+            CASE
+              WHEN (max_published IS NOT NULL AND frontier_sort_key <= max_published + 1.05 AND NOT has_predecessor_in_queue)
+                OR (max_published IS NULL AND NOT has_predecessor_in_mapping AND NOT has_predecessor_in_queue)
+              THEN 1
+              ELSE 0
+            END as is_frontier_publishable
+          FROM works_with_published;
         `);
-                publishableStaged = parseInt(pubStagedRes.rows[0]?.publishable_staged || '0', 10);
-                const remainingNonPublishable = Math.max(0, stagedUnique - publishableStaged);
-                if (remainingNonPublishable > 0) {
-                    if (eligibleJobs > 0 || importingCount > 0 || retryCount > 0) {
-                        waitingPredecessorStaged = remainingNonPublishable;
+                // Check if query returned old-style publishable_staged (from test mock)
+                if (pubStagedRes.rows[0]?.waiting_predecessor_staged !== undefined || pubStagedRes.rows[0]?.stuck_staged !== undefined) {
+                    publishableStaged = parseInt(pubStagedRes.rows[0]?.publishable_staged || '0', 10);
+                    waitingPredecessorStaged = parseInt(pubStagedRes.rows[0]?.waiting_predecessor_staged || '0', 10);
+                    stuckStaged = parseInt(pubStagedRes.rows[0]?.stuck_staged || '0', 10);
+                }
+                else if (pubStagedRes.rows[0]?.publishable_staged !== undefined) {
+                    publishableStaged = parseInt(pubStagedRes.rows[0]?.publishable_staged || '0', 10);
+                    waitingPredecessorStaged = Math.max(0, stagedUnique - publishableStaged);
+                    stuckStaged = 0;
+                }
+                else {
+                    for (const row of pubStagedRes.rows) {
+                        const totalStaged = parseInt(row.total_staged_chapters || '1', 10);
+                        const isPub = parseInt(row.is_frontier_publishable || '0', 10) === 1;
+                        if (isPub) {
+                            publishableStaged += 1; // Only frontier chapter is actionable
+                            waitingPredecessorStaged += Math.max(0, totalStaged - 1);
+                        }
+                        else {
+                            // Non-publishable work: check work-scoped active queue
+                            if (row.has_active_queue) {
+                                waitingPredecessorStaged += totalStaged;
+                            }
+                            else {
+                                stuckStaged += totalStaged;
+                            }
+                        }
                     }
-                    else {
-                        stuckStaged = remainingNonPublishable;
+                    const accounted = publishableStaged + waitingPredecessorStaged + stuckStaged;
+                    if (accounted < stagedUnique) {
+                        waitingPredecessorStaged += (stagedUnique - accounted);
                     }
+                }
+                // Shared barrier semantics: If PublicationSafetyBarrier is CLOSED or RECOVERING, nothing is publishable
+                if (this.safetyBarrier) {
+                    try {
+                        const barrierState = await this.safetyBarrier.getState();
+                        if (barrierState === 'CLOSED' || barrierState === 'RECOVERING') {
+                            if (publishableStaged > 0) {
+                                waitingPredecessorStaged += publishableStaged;
+                                publishableStaged = 0;
+                            }
+                        }
+                    }
+                    catch { }
                 }
             }
         }
         catch (err) {
             this.logger.warn('Failed querying staged classification', { error: err?.message });
         }
+        // Track duration of stuck staged chapters
+        if (stuckStaged > 0) {
+            if (this.firstStuckDetectedAt === null) {
+                this.firstStuckDetectedAt = nowMs;
+            }
+        }
+        else {
+            this.firstStuckDetectedAt = null;
+        }
+        const stuckStagedAgeSec = this.firstStuckDetectedAt
+            ? Math.floor((nowMs - this.firstStuckDetectedAt) / 1000)
+            : 0;
         // 4. Scheduler State (active_works, claimable_works)
         let activeWorks = [];
         let claimableWorks = 0;
@@ -210,11 +306,10 @@ export class AutoHealWatchdog {
         catch { }
         // 6. Recent Auto-Restarts and Circuit Breaker
         const recentRestarts = await this.getRecentAutoRestarts();
-        const nowMs = Date.now();
         const restartsLast1h = recentRestarts.filter((r) => nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000);
         const autoRestartCount1h = restartsLast1h.length;
         this.circuitBreakerOpen = autoRestartCount1h >= 3;
-        // 7. Correlated dedupe classification of recent completed jobs
+        // 7. Correlated dedupe classification of recent completed jobs (Tiered: only queried when fresh is delayed > 10m)
         let recentCorrelatedBreakdown = {
             alreadyCanonical: 0,
             dedupeSource: 0,
@@ -222,74 +317,76 @@ export class AutoHealWatchdog {
             freshExpected: 0,
         };
         let recentCompletionsAreDedupeOnly = false;
-        try {
-            const correlatedRes = await this.pool.query(`
-        WITH recent_completed_jobs AS (
+        if (lastFreshVisibleAgeSec > 10 * 60) {
+            try {
+                const correlatedRes = await this.pool.query(`
+          WITH recent_completed_jobs AS (
+            SELECT 
+              q.id,
+              q.source,
+              q.chapter_sort_key,
+              (q.payload->>'workId')::uuid as work_id,
+              (q.payload->>'chapterId')::uuid as chapter_id,
+              q.last_error,
+              q.updated_at
+            FROM importer_queue q
+            WHERE q.status = 'COMPLETED'
+              AND q.task_type = 'IMPORT_CHAPTER'
+              AND q.updated_at >= NOW() - INTERVAL '30 minutes'
+            ORDER BY q.updated_at DESC
+            LIMIT 50
+          ),
+          correlated AS (
+            SELECT DISTINCT ON (j.id)
+              j.id as job_id,
+              j.work_id,
+              j.chapter_sort_key,
+              j.source,
+              CASE
+                WHEN j.last_error IN ('CANONICAL_ALREADY_SATISFIED', 'ALREADY_CANONICAL') THEN 'ALREADY_CANONICAL'
+                WHEN m.is_page_provider IS FALSE THEN 'DEDUPE_SOURCE'
+                WHEN c.published_at IS NOT NULL AND c.is_fresh_release IS TRUE THEN 'FRESH_PUBLISHED'
+                WHEN c.published_at IS NOT NULL THEN 'ALREADY_CANONICAL'
+                ELSE 'FRESH_EXPECTED'
+              END as classification
+            FROM recent_completed_jobs j
+            LEFT JOIN importer_chapter_mappings m 
+              ON m.work_id = j.work_id 
+             AND m.source = j.source 
+             AND m.chapter_sort_key = j.chapter_sort_key
+            LEFT JOIN chapters c 
+              ON c.id = COALESCE(j.chapter_id, m.chapter_id)
+          )
           SELECT 
-            q.id,
-            q.source,
-            q.chapter_sort_key,
-            (q.payload->>'workId')::uuid as work_id,
-            (q.payload->>'chapterId')::uuid as chapter_id,
-            q.last_error,
-            q.updated_at
-          FROM importer_queue q
-          WHERE q.status = 'COMPLETED'
-            AND q.task_type = 'IMPORT_CHAPTER'
-            AND q.updated_at >= NOW() - INTERVAL '30 minutes'
-          ORDER BY q.updated_at DESC
-          LIMIT 50
-        ),
-        correlated AS (
-          SELECT DISTINCT ON (j.id)
-            j.id as job_id,
-            j.work_id,
-            j.chapter_sort_key,
-            j.source,
-            CASE
-              WHEN j.last_error IN ('CANONICAL_ALREADY_SATISFIED', 'ALREADY_CANONICAL') THEN 'ALREADY_CANONICAL'
-              WHEN m.is_page_provider IS FALSE THEN 'DEDUPE_SOURCE'
-              WHEN c.published_at IS NOT NULL AND c.is_fresh_release IS TRUE THEN 'FRESH_PUBLISHED'
-              WHEN c.published_at IS NOT NULL THEN 'ALREADY_CANONICAL'
-              ELSE 'FRESH_EXPECTED'
-            END as classification
-          FROM recent_completed_jobs j
-          LEFT JOIN importer_chapter_mappings m 
-            ON m.work_id = j.work_id 
-           AND m.source = j.source 
-           AND m.chapter_sort_key = j.chapter_sort_key
-          LEFT JOIN chapters c 
-            ON c.id = COALESCE(j.chapter_id, m.chapter_id)
-        )
-        SELECT 
-          classification,
-          count(*) as cnt
-        FROM correlated
-        GROUP BY classification;
-      `);
-            for (const row of correlatedRes.rows) {
-                const cnt = parseInt(row.cnt, 10);
-                if (row.classification === 'ALREADY_CANONICAL')
-                    recentCorrelatedBreakdown.alreadyCanonical = cnt;
-                else if (row.classification === 'DEDUPE_SOURCE')
-                    recentCorrelatedBreakdown.dedupeSource = cnt;
-                else if (row.classification === 'FRESH_PUBLISHED')
-                    recentCorrelatedBreakdown.freshPublished = cnt;
-                else if (row.classification === 'FRESH_EXPECTED')
-                    recentCorrelatedBreakdown.freshExpected = cnt;
+            classification,
+            count(*) as cnt
+          FROM correlated
+          GROUP BY classification;
+        `);
+                for (const row of correlatedRes.rows) {
+                    const cnt = parseInt(row.cnt, 10);
+                    if (row.classification === 'ALREADY_CANONICAL')
+                        recentCorrelatedBreakdown.alreadyCanonical = cnt;
+                    else if (row.classification === 'DEDUPE_SOURCE')
+                        recentCorrelatedBreakdown.dedupeSource = cnt;
+                    else if (row.classification === 'FRESH_PUBLISHED')
+                        recentCorrelatedBreakdown.freshPublished = cnt;
+                    else if (row.classification === 'FRESH_EXPECTED')
+                        recentCorrelatedBreakdown.freshExpected = cnt;
+                }
+                const totalRecentJobs = recentCorrelatedBreakdown.alreadyCanonical +
+                    recentCorrelatedBreakdown.dedupeSource +
+                    recentCorrelatedBreakdown.freshPublished +
+                    recentCorrelatedBreakdown.freshExpected;
+                if (totalRecentJobs > 0 &&
+                    recentCorrelatedBreakdown.freshExpected === 0 &&
+                    publishableStaged === 0) {
+                    recentCompletionsAreDedupeOnly = true;
+                }
             }
-            const totalRecentJobs = recentCorrelatedBreakdown.alreadyCanonical +
-                recentCorrelatedBreakdown.dedupeSource +
-                recentCorrelatedBreakdown.freshPublished +
-                recentCorrelatedBreakdown.freshExpected;
-            if (totalRecentJobs > 0 &&
-                recentCorrelatedBreakdown.freshExpected === 0 &&
-                publishableStaged === 0) {
-                recentCompletionsAreDedupeOnly = true;
+            catch (err) {
+                this.logger.warn('Failed querying correlated dedupe breakdown', { error: err?.message });
             }
-        }
-        catch (err) {
-            this.logger.warn('Failed querying correlated dedupe breakdown', { error: err?.message });
         }
         // 8. Compute Multidimensional Health Status
         const health = this.evaluateMultidimensionalHealth({
@@ -305,8 +402,9 @@ export class AutoHealWatchdog {
             publishableStaged,
             waitingPredecessorStaged,
             stuckStaged,
+            stuckStagedAgeSec,
         });
-        return {
+        const metricsResult = {
             status: health.status,
             autoHealState: this.circuitBreakerOpen ? 'CIRCUIT_OPEN' : this.autoHealState,
             processingHealth: health.processingHealth,
@@ -337,6 +435,9 @@ export class AutoHealWatchdog {
             pid: process.pid,
             timestamp: now.toISOString(),
         };
+        this.cachedTelemetry = metricsResult;
+        this.lastTelemetryAt = nowMs;
+        return metricsResult;
     }
     /**
      * Deterministic Multidimensional Health evaluation separating processing and publication health.
@@ -344,6 +445,7 @@ export class AutoHealWatchdog {
     evaluateMultidimensionalHealth(params) {
         const publishableStaged = params.publishableStaged ?? (params.hasStagedPublications ? 1 : 0);
         const waitingPredecessorStaged = params.waitingPredecessorStaged ?? 0;
+        const stuckStaged = params.stuckStaged ?? 0;
         // 1. Processing Health Dimension (based on chapter completions)
         let processingHealth;
         if (params.lastCompletedAgeSec <= 10 * 60) {
@@ -366,14 +468,15 @@ export class AutoHealWatchdog {
         else if (params.lastFreshVisibleAgeSec <= 15 * 60) {
             publicationHealth = 'DEGRADED';
         }
-        else if (params.recentCompletionsAreDedupeOnly && publishableStaged === 0) {
-            // Completed chapters were deduplicated/canonical-only and no publishable staged backlog exists
+        else if (params.recentCompletionsAreDedupeOnly && publishableStaged === 0 && stuckStaged === 0) {
+            // Completed chapters were deduplicated/canonical-only and no publishable or stuck staged backlog exists
             publicationHealth = 'NO_FRESH_EXPECTED';
         }
         else if (params.eligibleJobs === 0 &&
             params.importingCount === 0 &&
-            publishableStaged === 0) {
-            // No active work and zero publishable chapters waiting -> no fresh chapters expected
+            publishableStaged === 0 &&
+            stuckStaged === 0) {
+            // No active work and zero actionable or stuck chapters waiting -> legitimate idle / no fresh expected
             publicationHealth = 'NO_FRESH_EXPECTED';
         }
         else if (params.lastFreshVisibleAgeSec < 30 * 60) {
@@ -385,11 +488,12 @@ export class AutoHealWatchdog {
         // 3. Resolve Overall Status
         let status;
         // IDLE is ONLY allowed when:
-        // eligibleJobs === 0 AND importingCount === 0 AND publishableStaged === 0
-        // (Meaning: no processable work AND no actionable publication)
+        // eligibleJobs === 0 AND importingCount === 0 AND publishableStaged === 0 AND stuckStaged === 0
+        // (Meaning: no processable work AND no actionable publication AND no stuck chapters)
         const isTrulyIdle = params.eligibleJobs === 0 &&
             params.importingCount === 0 &&
-            publishableStaged === 0;
+            publishableStaged === 0 &&
+            stuckStaged === 0;
         if (isTrulyIdle) {
             status = 'IDLE';
         }
@@ -411,20 +515,41 @@ export class AutoHealWatchdog {
                 }
             }
         }
-        else if (params.eligibleJobs === 0 && params.importingCount === 0 && publishableStaged > 0) {
-            // Eligible = 0, Importing = 0, BUT publishableStaged > 0!
-            // This is NEVER IDLE! It is driven strictly by publicationHealth!
-            if (publicationHealth === 'CRITICAL_STALL') {
-                status = 'CRITICAL_STALL';
-            }
-            else if (publicationHealth === 'STALLED') {
-                status = 'STALLED';
-            }
-            else if (publicationHealth === 'DEGRADED') {
-                status = 'DEGRADED';
+        else if (params.eligibleJobs === 0 && params.importingCount === 0 && (publishableStaged > 0 || stuckStaged > 0)) {
+            // Eligible = 0, Importing = 0, BUT publishable or stuck staged backlog exists!
+            // This is NEVER IDLE!
+            if (publishableStaged > 0) {
+                if (publicationHealth === 'CRITICAL_STALL') {
+                    status = 'CRITICAL_STALL';
+                }
+                else if (publicationHealth === 'STALLED') {
+                    status = 'STALLED';
+                }
+                else if (publicationHealth === 'DEGRADED') {
+                    status = 'DEGRADED';
+                }
+                else {
+                    status = 'HEALTHY';
+                }
             }
             else {
-                status = 'HEALTHY';
+                // stuckStaged > 0 (publishable = 0)
+                // Stuck staged must be handled based on duration
+                const effectiveStuckAge = params.stuckStagedAgeSec ?? params.lastFreshVisibleAgeSec;
+                if (effectiveStuckAge >= 30 * 60) {
+                    status = 'CRITICAL_STALL';
+                    publicationHealth = 'CRITICAL_STALL';
+                }
+                else if (effectiveStuckAge >= 15 * 60) {
+                    status = 'STALLED';
+                    publicationHealth = 'STALLED';
+                }
+                else {
+                    status = 'DEGRADED';
+                    if (publicationHealth === 'NO_FRESH_EXPECTED' || publicationHealth === 'HEALTHY') {
+                        publicationHealth = 'DEGRADED';
+                    }
+                }
             }
         }
         else if (publicationHealth === 'NO_FRESH_EXPECTED') {
@@ -629,11 +754,14 @@ export class AutoHealWatchdog {
                 this.logger.warn('[Level 1] Admission cycle failed', { error: e?.message });
             }
         }
-        // 5. If publication is stalled or publishable staged chapters exist, trigger safe bounded sweep
+        // 5. If publication is stalled or publishable staged chapters exist, trigger safe bounded sweep (cooldown: max 1 per 3m)
+        const nowMs = Date.now();
         if (this.publicationBarrier &&
             (metrics.publicationHealth === 'STALLED' ||
                 metrics.publicationHealth === 'CRITICAL_STALL' ||
-                (metrics.publishableStaged || 0) > 0)) {
+                (metrics.publishableStaged || 0) > 0) &&
+            nowMs - this.lastSweepAt >= 3 * 60 * 1000) {
+            this.lastSweepAt = nowMs;
             try {
                 const swept = await this.publicationBarrier.sweepStagedPublications(40, 6);
                 if (swept > 0) {

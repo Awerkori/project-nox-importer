@@ -3,6 +3,7 @@ import type { WorkAffinityScheduler } from './scheduler/work-affinity-scheduler.
 import type { AdmissionController } from './scheduler/admission-controller.js';
 import type { ProtectiveSentinel } from './protective-sentinel.js';
 import type { PublicationBarrier } from './publication.js';
+import type { PublicationSafetyBarrier } from './publication-safety-barrier.js';
 export type ImporterHealthStatus = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL' | 'IDLE' | 'PAUSED_BY_PROTECTION';
 export type ProcessingHealth = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL';
 export type PublicationHealth = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL' | 'NO_FRESH_EXPECTED';
@@ -55,6 +56,7 @@ export interface AutoHealWatchdogOptions {
     admissionController?: AdmissionController;
     protectiveSentinel?: ProtectiveSentinel;
     publicationBarrier?: PublicationBarrier;
+    safetyBarrier?: PublicationSafetyBarrier;
     onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<void>;
     intervalMs?: number;
     workerId?: string;
@@ -79,6 +81,7 @@ export declare class AutoHealWatchdog {
     private admissionController?;
     private protectiveSentinel?;
     private publicationBarrier?;
+    private safetyBarrier?;
     private onControlledRestart?;
     private intervalMs;
     private workerId;
@@ -90,7 +93,12 @@ export declare class AutoHealWatchdog {
     private lastLevel1At;
     private lastLevel2At;
     private lastRestartAt;
+    private lastSweepAt;
+    private firstStuckDetectedAt;
     private circuitBreakerOpen;
+    private cachedTelemetry;
+    private lastTelemetryAt;
+    private telemetryCacheTtlMs;
     constructor(options: AutoHealWatchdogOptions);
     /**
      * Starts the background evaluation loop.
@@ -103,7 +111,7 @@ export declare class AutoHealWatchdog {
     /**
      * Collects real-time telemetry from database and memory.
      */
-    collectTelemetry(): Promise<HealthPanelMetrics>;
+    collectTelemetry(forceFresh?: boolean): Promise<HealthPanelMetrics>;
     /**
      * Deterministic Multidimensional Health evaluation separating processing and publication health.
      */
@@ -120,6 +128,7 @@ export declare class AutoHealWatchdog {
         publishableStaged?: number;
         waitingPredecessorStaged?: number;
         stuckStaged?: number;
+        stuckStagedAgeSec?: number;
     }): {
         status: ImporterHealthStatus;
         processingHealth: ProcessingHealth;
@@ -141,6 +150,7 @@ export declare class AutoHealWatchdog {
         publishableStaged?: number;
         waitingPredecessorStaged?: number;
         stuckStaged?: number;
+        stuckStagedAgeSec?: number;
     }): ImporterHealthStatus;
     /**
      * Executes a single evaluation cycle:
