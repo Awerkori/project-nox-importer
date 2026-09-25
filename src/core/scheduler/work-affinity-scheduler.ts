@@ -1234,6 +1234,10 @@ export class WorkAffinityScheduler {
     return this.inFlightByWork.get(workId) || 0;
   }
 
+  getMaxInflightPerWork(): number {
+    return this.stateStore.getConfig().maxInflightPerWork || 2;
+  }
+
   // --- Watermarks ---
 
   async getWatermark(workId: string, source: string) {

@@ -1403,7 +1403,7 @@ export class ImporterEngine {
           const workId = candidateJob!.payload?.workId;
           if (workId) {
             const inFlight = this.scheduler.getInFlightCount(workId);
-            const maxInflight = this.stateStore.getConfig().maxInflightPerWork || 2;
+            const maxInflight = this.scheduler.getMaxInflightPerWork();
             if (inFlight > maxInflight) {
               sourceSem.release();
               return { reserved: false, reason: 'WORK_MAX_INFLIGHT_EXCEEDED', sourceSem: null };
