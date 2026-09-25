@@ -1216,7 +1216,7 @@ export class ImporterEngine {
                     await this.sleep(100);
                     continue;
                 }
-                const claimDbMs = performance.now() - tDb0;
+                const schedulerAcquireTotalMs = performance.now() - tDb0;
                 if (!candidateJob) {
                     globalSem.release();
                     telemetryCollector.setSlotState(slotIndex, 'IDLE');
@@ -1273,7 +1273,8 @@ export class ImporterEngine {
                     await this.sleep(15);
                     continue;
                 }
-                const claimDurationMs = claimDbMs + mutexWaitMs;
+                const claimDurationMs = schedulerAcquireTotalMs + mutexWaitMs;
+                const acqTelem = job._acquireTelemetry;
                 telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', `${job.source} ch ${job.payload?.chapterNumber}`);
                 try {
                     await this.executeJobDirectly(job, {
@@ -1281,7 +1282,14 @@ export class ImporterEngine {
                         semWaitMs: 0,
                         slotIndex,
                         mutexWaitMs,
-                        claimDbMs,
+                        claimDbMs: schedulerAcquireTotalMs,
+                        schedulerAcquireTotalMs,
+                        poolWaitMs: acqTelem?.poolWaitTotalMs || 0,
+                        sqlExecMs: acqTelem?.sqlExecTotalMs || 0,
+                        claimSingleJobSqlMs: acqTelem?.sqlExecTotalMs || 0,
+                        totalQueries: acqTelem?.totalQueries || 1,
+                        worksTested: acqTelem?.worksTested || 1,
+                        acquireTelemetry: acqTelem,
                     });
                 }
                 finally {
@@ -3207,6 +3215,23 @@ export class ImporterEngine {
                 claim_acquire_ms: Math.round(extraTiming?.claimDurationMs || 0),
                 mutex_wait_ms: Math.round(extraTiming?.mutexWaitMs || 0),
                 claim_db_ms: Math.round(extraTiming?.claimDbMs || 0),
+                scheduler_acquire_ms: Math.round(extraTiming?.schedulerAcquireTotalMs ?? extraTiming?.claimDbMs ?? 0),
+                pool_wait_ms: Math.round(extraTiming?.poolWaitMs || 0),
+                sql_exec_ms: Math.round(extraTiming?.sqlExecMs || 0),
+                claim_sql_ms: Math.round(extraTiming?.claimSingleJobSqlMs || 0),
+                total_queries: extraTiming?.totalQueries || 1,
+                works_tested: extraTiming?.worksTested || 1,
+                staff_check_ms: Math.round(extraTiming?.acquireTelemetry?.staffCheckMs || 0),
+                p0_probe_ms: Math.round(extraTiming?.acquireTelemetry?.p0ProbeMs || 0),
+                critical_work_attempts: extraTiming?.acquireTelemetry?.criticalWorkAttempts || 0,
+                critical_work_time_ms: Math.round(extraTiming?.acquireTelemetry?.criticalWorkTimeMs || 0),
+                p1_work_attempts: extraTiming?.acquireTelemetry?.p1WorkAttempts || 0,
+                p1_work_time_ms: Math.round(extraTiming?.acquireTelemetry?.p1WorkTimeMs || 0),
+                p2_work_attempts: extraTiming?.acquireTelemetry?.p2WorkAttempts || 0,
+                p2_work_time_ms: Math.round(extraTiming?.acquireTelemetry?.p2WorkTimeMs || 0),
+                active_fallback_ms: Math.round(extraTiming?.acquireTelemetry?.activeFallbackMs || 0),
+                admission_on_demand_ms: Math.round(extraTiming?.acquireTelemetry?.admissionOnDemandMs || 0),
+                catalog_fallback_ms: Math.round(extraTiming?.acquireTelemetry?.catalogFallbackMs || 0),
                 metadata_load_ms: Math.round(metadataLoadMs),
                 source_fetch_ms: Math.round(sourceFetchMs),
                 page_resolution_ms: Math.round(pageResolutionMs),

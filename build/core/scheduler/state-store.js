@@ -77,10 +77,24 @@ export class SchedulerStateStore {
                 }
                 catch { }
             }, 10000);
-            // Load active works
+            // Load active works (importer_scheduler_state with fallback to settings)
+            let rawWorks = [];
             const worksRes = await this.pool.query(`SELECT value FROM importer_scheduler_state WHERE key = 'active_works'`);
-            if (worksRes.rows.length > 0 && Array.isArray(worksRes.rows[0].value)) {
-                for (const item of worksRes.rows[0].value) {
+            if (worksRes.rows.length > 0 && Array.isArray(worksRes.rows[0].value) && worksRes.rows[0].value.length > 0) {
+                rawWorks = worksRes.rows[0].value;
+            }
+            else {
+                try {
+                    const settRes = await this.pool.query(`SELECT value FROM settings WHERE key = 'active_works'`);
+                    if (settRes.rows.length > 0) {
+                        const v = settRes.rows[0].value;
+                        rawWorks = typeof v === 'string' ? JSON.parse(v) : v;
+                    }
+                }
+                catch { }
+            }
+            if (Array.isArray(rawWorks)) {
+                for (const item of rawWorks) {
                     if (item?.workId) {
                         this.activeWorksCache.set(item.workId, item);
                     }
@@ -203,6 +217,16 @@ export class SchedulerStateStore {
          ON CONFLICT (key) DO UPDATE SET
            value = EXCLUDED.value,
            updated_at = NOW()`, [key, JSON.stringify(value)]);
+            if (key === 'active_works') {
+                try {
+                    await this.pool.query(`INSERT INTO settings (key, value, updated_at)
+             VALUES ('active_works', $1, NOW())
+             ON CONFLICT (key) DO UPDATE SET
+               value = EXCLUDED.value,
+               updated_at = NOW()`, [JSON.stringify(value)]);
+                }
+                catch { }
+            }
         }
         catch (err) {
             this.logger.warn(`Failed to persist scheduler state key '${key}'`, { error: err?.message });

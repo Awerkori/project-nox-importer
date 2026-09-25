@@ -81,3 +81,21 @@ export interface SchedulerMetrics {
     p0P95WaitMs: number;
     lastUpdated: string;
 }
+export interface AcquireTelemetry {
+    staffCheckMs: number;
+    p0ProbeMs: number;
+    criticalWorkAttempts: number;
+    criticalWorkTimeMs: number;
+    p1WorkAttempts: number;
+    p1WorkTimeMs: number;
+    p2WorkAttempts: number;
+    p2WorkTimeMs: number;
+    activeFallbackMs: number;
+    admissionOnDemandMs: number;
+    catalogFallbackMs: number;
+    poolWaitTotalMs: number;
+    sqlExecTotalMs: number;
+    totalQueries: number;
+    totalAcquireMs: number;
+    worksTested: number;
+}

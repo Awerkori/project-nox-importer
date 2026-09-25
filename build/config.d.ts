@@ -24,7 +24,7 @@ declare const ConfigSchema: z.ZodObject<{
     YUGABYTE_HOST: z.ZodDefault<z.ZodString>;
     YUGABYTE_PORT: z.ZodDefault<z.ZodNumber>;
     YUGABYTE_USER: z.ZodDefault<z.ZodString>;
-    YUGABYTE_PASSWORD: z.ZodDefault<z.ZodString>;
+    YUGABYTE_PASSWORD: z.ZodString;
     YUGABYTE_DATABASE: z.ZodDefault<z.ZodString>;
     YUGABYTE_SSL_CERT: z.ZodDefault<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
@@ -56,6 +56,7 @@ declare const ConfigSchema: z.ZodObject<{
     TELEGRAM_CHAT_ID?: string | undefined;
     IMPORTER_USER_ID?: string | undefined;
 }, {
+    YUGABYTE_PASSWORD: string;
     SUPABASE_URL?: string | undefined;
     SUPABASE_SERVICE_ROLE_KEY?: string | undefined;
     STORAGE_PROVIDER?: "worker" | "telegram" | "mock" | "direct_telegram" | undefined;
@@ -80,7 +81,6 @@ declare const ConfigSchema: z.ZodObject<{
     YUGABYTE_HOST?: string | undefined;
     YUGABYTE_PORT?: number | undefined;
     YUGABYTE_USER?: string | undefined;
-    YUGABYTE_PASSWORD?: string | undefined;
     YUGABYTE_DATABASE?: string | undefined;
     YUGABYTE_SSL_CERT?: string | undefined;
 }>;

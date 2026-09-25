@@ -463,7 +463,21 @@ export class TelemetryCollector {
         const workerBlockedPercent = Math.round((totalBlockedMs / safeTotalAll) * 1000) / 10;
         // Chapter stages stats
         const mutexWaitTimes = this.chapters.map(c => c.mutex_wait_ms || 0);
-        const claimDbTimes = this.chapters.map(c => c.claim_db_ms || 0);
+        const schedulerAcquireTimes = this.chapters.map(c => c.scheduler_acquire_ms ?? c.claim_db_ms ?? 0);
+        const poolWaitTimes = this.chapters.map(c => c.pool_wait_ms ?? 0);
+        const sqlExecTimes = this.chapters.map(c => c.sql_exec_ms ?? 0);
+        const claimSqlTimes = this.chapters.map(c => c.claim_sql_ms ?? c.sql_exec_ms ?? 0);
+        const queriesPerClaim = this.chapters.map(c => c.total_queries ?? 1);
+        const worksTestedList = this.chapters.map(c => c.works_tested ?? 1);
+        const staffCheckTimes = this.chapters.map(c => c.staff_check_ms ?? 0);
+        const p0ProbeTimes = this.chapters.map(c => c.p0_probe_ms ?? 0);
+        const criticalWorkTimes = this.chapters.map(c => c.critical_work_time_ms ?? 0);
+        const p1WorkTimes = this.chapters.map(c => c.p1_work_time_ms ?? 0);
+        const p2WorkTimes = this.chapters.map(c => c.p2_work_time_ms ?? 0);
+        const activeFallbackTimes = this.chapters.map(c => c.active_fallback_ms ?? 0);
+        const admissionOnDemandTimes = this.chapters.map(c => c.admission_on_demand_ms ?? 0);
+        const catalogFallbackTimes = this.chapters.map(c => c.catalog_fallback_ms ?? 0);
+        const claimDbTimes = schedulerAcquireTimes;
         const claimTimes = this.chapters.map(c => c.claim_acquire_ms);
         const metadataTimes = this.chapters.map(c => c.metadata_load_ms);
         const sourceFetchTimes = this.chapters.map(c => c.source_fetch_ms);
@@ -625,8 +639,14 @@ export class TelemetryCollector {
                     max: totalJobTimes.length ? Math.max(...totalJobTimes) : 0,
                 },
                 stages: {
+                    schedulerAcquire: { avg: avg(schedulerAcquireTimes), p50: percentile(schedulerAcquireTimes, 0.50), p95: percentile(schedulerAcquireTimes, 0.95), p99: percentile(schedulerAcquireTimes, 0.99), max: schedulerAcquireTimes.length ? Math.max(...schedulerAcquireTimes) : 0 },
+                    claimDb: { avg: avg(schedulerAcquireTimes), p50: percentile(schedulerAcquireTimes, 0.50), p95: percentile(schedulerAcquireTimes, 0.95), p99: percentile(schedulerAcquireTimes, 0.99), max: schedulerAcquireTimes.length ? Math.max(...schedulerAcquireTimes) : 0 },
+                    poolWait: { avg: avg(poolWaitTimes), p50: percentile(poolWaitTimes, 0.50), p95: percentile(poolWaitTimes, 0.95), max: poolWaitTimes.length ? Math.max(...poolWaitTimes) : 0 },
+                    sqlExec: { avg: avg(sqlExecTimes), p50: percentile(sqlExecTimes, 0.50), p95: percentile(sqlExecTimes, 0.95), max: sqlExecTimes.length ? Math.max(...sqlExecTimes) : 0 },
+                    claimSql: { avg: avg(claimSqlTimes), p50: percentile(claimSqlTimes, 0.50), p95: percentile(claimSqlTimes, 0.95), max: claimSqlTimes.length ? Math.max(...claimSqlTimes) : 0 },
+                    queriesPerClaim: { avg: avg(queriesPerClaim), p50: percentile(queriesPerClaim, 0.50), p95: percentile(queriesPerClaim, 0.95) },
+                    worksTested: { avg: avg(worksTestedList), p50: percentile(worksTestedList, 0.50), p95: percentile(worksTestedList, 0.95) },
                     mutexWait: { avg: avg(mutexWaitTimes), p50: percentile(mutexWaitTimes, 0.50), p95: percentile(mutexWaitTimes, 0.95), p99: percentile(mutexWaitTimes, 0.99), max: mutexWaitTimes.length ? Math.max(...mutexWaitTimes) : 0 },
-                    claimDb: { avg: avg(claimDbTimes), p50: percentile(claimDbTimes, 0.50), p95: percentile(claimDbTimes, 0.95), p99: percentile(claimDbTimes, 0.99), max: claimDbTimes.length ? Math.max(...claimDbTimes) : 0 },
                     claim: { avg: avg(claimTimes), p50: percentile(claimTimes, 0.50), p75: percentile(claimTimes, 0.75), p95: percentile(claimTimes, 0.95), p99: percentile(claimTimes, 0.99), max: claimTimes.length ? Math.max(...claimTimes) : 0 },
                     metadata: { avg: avg(metadataTimes), p50: percentile(metadataTimes, 0.50), p75: percentile(metadataTimes, 0.75), p95: percentile(metadataTimes, 0.95), p99: percentile(metadataTimes, 0.99), max: metadataTimes.length ? Math.max(...metadataTimes) : 0 },
                     sourceFetch: { avg: avg(sourceFetchTimes), p50: percentile(sourceFetchTimes, 0.50), p75: percentile(sourceFetchTimes, 0.75), p95: percentile(sourceFetchTimes, 0.95), p99: percentile(sourceFetchTimes, 0.99), max: sourceFetchTimes.length ? Math.max(...sourceFetchTimes) : 0 },
@@ -640,6 +660,21 @@ export class TelemetryCollector {
                     semaphoreWait: { avg: avg(semWaitTimes), p50: percentile(semWaitTimes, 0.50), p75: percentile(semWaitTimes, 0.75), p95: percentile(semWaitTimes, 0.95), p99: percentile(semWaitTimes, 0.99), max: semWaitTimes.length ? Math.max(...semWaitTimes) : 0 },
                     otherWait: { avg: avg(otherWaitTimes), p50: percentile(otherWaitTimes, 0.50), p75: percentile(otherWaitTimes, 0.75), p95: percentile(otherWaitTimes, 0.95), p99: percentile(otherWaitTimes, 0.99), max: otherWaitTimes.length ? Math.max(...otherWaitTimes) : 0 },
                 },
+            },
+            schedulerAcquireBreakdown: {
+                totalMs: { avg: avg(schedulerAcquireTimes), p50: percentile(schedulerAcquireTimes, 0.50), p95: percentile(schedulerAcquireTimes, 0.95) },
+                poolWaitMs: { avg: avg(poolWaitTimes), p50: percentile(poolWaitTimes, 0.50), p95: percentile(poolWaitTimes, 0.95) },
+                sqlExecMs: { avg: avg(sqlExecTimes), p50: percentile(sqlExecTimes, 0.50), p95: percentile(sqlExecTimes, 0.95) },
+                queriesCount: { avg: avg(queriesPerClaim), p50: percentile(queriesPerClaim, 0.50), p95: percentile(queriesPerClaim, 0.95) },
+                worksTestedCount: { avg: avg(worksTestedList), p50: percentile(worksTestedList, 0.50), p95: percentile(worksTestedList, 0.95) },
+                staffCheckMs: { avg: avg(staffCheckTimes), p50: percentile(staffCheckTimes, 0.50), p95: percentile(staffCheckTimes, 0.95) },
+                p0ProbeMs: { avg: avg(p0ProbeTimes), p50: percentile(p0ProbeTimes, 0.50), p95: percentile(p0ProbeTimes, 0.95) },
+                criticalWorkTimeMs: { avg: avg(criticalWorkTimes), p50: percentile(criticalWorkTimes, 0.50), p95: percentile(criticalWorkTimes, 0.95) },
+                p1WorkTimeMs: { avg: avg(p1WorkTimes), p50: percentile(p1WorkTimes, 0.50), p95: percentile(p1WorkTimes, 0.95) },
+                p2WorkTimeMs: { avg: avg(p2WorkTimes), p50: percentile(p2WorkTimes, 0.50), p95: percentile(p2WorkTimes, 0.95) },
+                activeFallbackMs: { avg: avg(activeFallbackTimes), p50: percentile(activeFallbackTimes, 0.50), p95: percentile(activeFallbackTimes, 0.95) },
+                admissionOnDemandMs: { avg: avg(admissionOnDemandTimes), p50: percentile(admissionOnDemandTimes, 0.50), p95: percentile(admissionOnDemandTimes, 0.95) },
+                catalogFallbackMs: { avg: avg(catalogFallbackTimes), p50: percentile(catalogFallbackTimes, 0.50), p95: percentile(catalogFallbackTimes, 0.95) },
             },
             slowestChapters,
             sourceDistribution: sourceDist,
