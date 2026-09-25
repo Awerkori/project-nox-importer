@@ -158,8 +158,8 @@ describe('Liveness Watchdog & Anti-Starvation Edge Cases (Casos A a G)', () => {
     // Run active works reconciliation
     await (admission as any).reconcileActiveWorks();
 
-    // Verify: Work was NOT removed because unimported mappings exist
-    expect(mockStateStore.getActiveWork('work-pending-mappings')).toBeDefined();
-    expect(mockStateStore.getActiveWork('work-pending-mappings')?.state).toBe('FILLING');
+    // Verify: Work with zero claimable queued and zero importing MUST vacate active slot
+    // to prevent zombie active works from blocking admission of healthy works
+    expect(mockStateStore.getActiveWork('work-pending-mappings')).toBeUndefined();
   });
 });

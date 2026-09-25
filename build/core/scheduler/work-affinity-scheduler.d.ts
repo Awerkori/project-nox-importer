@@ -144,6 +144,7 @@ export declare class WorkAffinityScheduler {
     onJobStarted(workId: string, chapterSortKey?: number | null): void;
     onJobFinished(workId: string, chapterSortKey?: number | null): void;
     getInFlightCount(workId: string): number;
+    getMaxInflightPerWork(): number;
     getWatermark(workId: string, source: string): Promise<import("./types.js").WorkWatermark | undefined>;
     setWatermark(watermark: any): Promise<void>;
     private logDecision;

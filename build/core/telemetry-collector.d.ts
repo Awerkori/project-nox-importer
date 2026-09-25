@@ -110,12 +110,29 @@ export declare class TelemetryCollector {
         sessionId: string | null;
         timestamp: string;
         slotsConfigured: number;
-        avgSlotStates: Record<SlotStateType, number>;
+        avgSlotStates: {
+            ACTIVE_PROCESSING: number;
+            BLOCKED: number;
+            SUM: number;
+            WAITING_MUTEX: number;
+            WAITING_CLAIM_DB: number;
+            WAITING_SOURCE_PERMIT: number;
+            ACTIVE_SOURCE: number;
+            ACTIVE_DOWNLOAD: number;
+            ACTIVE_ENCODE: number;
+            ACTIVE_TELEGRAM: number;
+            ACTIVE_DB: number;
+            WAITING_BARRIER: number;
+            IDLE: number;
+        };
         slotOccupancy: {
             meanSec: number;
             p50Sec: number;
             p95Sec: number;
             avgBusyWorkers: number;
+            avgActiveProcessing: number;
+            avgBlocked: number;
+            avgIdle: number;
             theoreticalCapacityPerMin: number;
         };
         activeWorkers: {

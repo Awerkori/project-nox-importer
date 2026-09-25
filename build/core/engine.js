@@ -1184,71 +1184,80 @@ export class ImporterEngine {
                 telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 const claimJitterMs = 10 + Math.floor(Math.random() * 20);
                 await this.sleep(claimJitterMs);
-                telemetryCollector.setSlotState(slotIndex, 'WAITING_MUTEX');
-                const claimT0 = performance.now();
-                let claimDbMs = 0;
-                const claimResult = await this.chapterClaimMutex.runExclusive(async () => {
-                    // A. Check global chapter semaphore capacity first
-                    if (!globalSem.tryAcquire()) {
-                        return null;
-                    }
-                    // B. Find sources that currently have available capacity
-                    const eligibleSources = await this.getEligibleChapterSources();
-                    if (eligibleSources.length === 0) {
-                        globalSem.release();
-                        return null;
-                    }
-                    // C. Query Yugabyte for the highest priority job among ELIGIBLE sources via WorkAffinityScheduler
-                    telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
-                    let candidateJob = null;
-                    const tDb0 = performance.now();
-                    try {
-                        candidateJob = await this.scheduler.acquireNextChapterJob({
-                            workerId: this.config.WORKER_ID,
-                            leaseDurationMinutes: Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
-                            allowedSources: eligibleSources,
-                        });
-                    }
-                    catch (acquireErr) {
-                        this.logger.warn(`Error acquiring chapter job: ${acquireErr?.message}`);
-                        globalSem.release();
-                        return null;
-                    }
-                    claimDbMs = performance.now() - tDb0;
-                    if (!candidateJob) {
-                        globalSem.release();
-                        return null;
-                    }
-                    // D. Atomically acquire the source permit
-                    telemetryCollector.setSlotState(slotIndex, 'WAITING_SOURCE_PERMIT');
-                    const sourceSem = this.autotuner.getSourceSemaphore(candidateJob.source);
-                    if (sourceSem.tryAcquire()) {
-                        return {
-                            job: candidateJob,
-                            sourcePermitAcquired: true,
-                            globalPermitAcquired: true,
-                            claimDbMs,
-                        };
-                    }
-                    else {
-                        // In the rare race where source filled, immediately release back to QUEUED (zero blocking)
-                        this.logger.warn(`Source ${candidateJob.source} filled concurrently, releasing job ${candidateJob.id} back to QUEUED`);
-                        if (candidateJob.payload?.workId) {
-                            this.scheduler.onJobFinished(candidateJob.payload.workId, candidateJob.chapter_sort_key);
-                        }
-                        await this.queue.releaseJob(candidateJob.id, 'QUEUED', 'Source concurrency full, released immediately', 0);
-                        globalSem.release();
-                        return null;
-                    }
-                });
-                if (!claimResult || !claimResult.job) {
+                // A. Check global chapter semaphore capacity first (slot-level concurrency)
+                if (!globalSem.tryAcquire()) {
+                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
+                    await this.sleep(25);
+                    continue;
+                }
+                // B. Find sources that currently have available capacity (outside mutex)
+                const eligibleSources = await this.getEligibleChapterSources();
+                if (eligibleSources.length === 0) {
+                    globalSem.release();
+                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
+                    await this.sleep(100);
+                    continue;
+                }
+                // C. Concurrent Database Claim OUTSIDE Mutex (YSQL FOR UPDATE SKIP LOCKED)
+                telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
+                let candidateJob = null;
+                const tDb0 = performance.now();
+                try {
+                    candidateJob = await this.scheduler.acquireNextChapterJob({
+                        workerId: this.config.WORKER_ID,
+                        leaseDurationMinutes: Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
+                        allowedSources: eligibleSources,
+                    });
+                }
+                catch (acquireErr) {
+                    this.logger.warn(`Error acquiring chapter job: ${acquireErr?.message}`);
+                    globalSem.release();
+                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
+                    await this.sleep(100);
+                    continue;
+                }
+                const claimDbMs = performance.now() - tDb0;
+                if (!candidateJob) {
+                    globalSem.release();
                     telemetryCollector.setSlotState(slotIndex, 'IDLE');
                     const emptyBackoffMs = 100 + Math.floor(Math.random() * 150);
                     await this.sleep(emptyBackoffMs);
                     continue;
                 }
-                const { job, sourcePermitAcquired, globalPermitAcquired } = claimResult;
+                // D. Short In-Memory Reservation Mutex (< 0.05ms, ZERO DB I/O, ZERO Network, ZERO Await)
+                telemetryCollector.setSlotState(slotIndex, 'WAITING_MUTEX');
+                const reservation = await this.chapterClaimMutex.runExclusive(async () => {
+                    // 1. Check & acquire source semaphore permit
+                    const sourceSem = this.autotuner.getSourceSemaphore(candidateJob.source);
+                    if (!sourceSem.tryAcquire()) {
+                        return { reserved: false, reason: 'SOURCE_CONCURRENCY_FULL', sourceSem: null };
+                    }
+                    // 2. Check work in-flight limit across concurrent claims
+                    const workId = candidateJob.payload?.workId;
+                    if (workId) {
+                        const inFlight = this.scheduler.getInFlightCount(workId);
+                        const maxInflight = this.scheduler.getMaxInflightPerWork();
+                        if (inFlight > maxInflight) {
+                            sourceSem.release();
+                            return { reserved: false, reason: 'WORK_MAX_INFLIGHT_EXCEEDED', sourceSem: null };
+                        }
+                    }
+                    return { reserved: true, reason: null, sourceSem };
+                });
                 const mutexWaitMs = this.chapterClaimMutex.getLastWaitMs?.() || 0;
+                if (!reservation.reserved) {
+                    this.logger.warn(`Concurrent claim check failed for job ${candidateJob.id} (${reservation.reason}), safely releasing back to QUEUED`);
+                    if (candidateJob.payload?.workId) {
+                        this.scheduler.onJobFinished(candidateJob.payload.workId, candidateJob.chapter_sort_key);
+                    }
+                    globalSem.release();
+                    await this.queue.releaseJob(candidateJob.id, 'QUEUED', `Concurrent reservation limit: ${reservation.reason}`, 0);
+                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
+                    await this.sleep(25);
+                    continue;
+                }
+                const { sourceSem } = reservation;
+                const job = candidateJob;
                 // Post-Mutex Concurrent Validation (runs concurrently, zero blocking of other workers!)
                 telemetryCollector.setSlotState(slotIndex, 'ACTIVE_DB', `validating ch ${job.payload?.chapterNumber}`);
                 const validation = await this.scheduler.validateClaimedJobPostMutex(job);
@@ -1256,18 +1265,15 @@ export class ImporterEngine {
                     if (job.payload?.workId) {
                         this.scheduler.onJobFinished(job.payload.workId, job.chapter_sort_key);
                     }
-                    if (sourcePermitAcquired) {
-                        this.autotuner.getSourceSemaphore(job.source).release();
+                    if (sourceSem) {
+                        sourceSem.release();
                     }
-                    if (globalPermitAcquired) {
-                        globalSem.release();
-                    }
+                    globalSem.release();
                     telemetryCollector.setSlotState(slotIndex, 'IDLE');
                     await this.sleep(15);
                     continue;
                 }
-                const claimDurationMs = performance.now() - claimT0;
-                const sourceSem = this.autotuner.getSourceSemaphore(job.source);
+                const claimDurationMs = claimDbMs + mutexWaitMs;
                 telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', `${job.source} ch ${job.payload?.chapterNumber}`);
                 try {
                     await this.executeJobDirectly(job, {
@@ -1283,14 +1289,12 @@ export class ImporterEngine {
                         this.scheduler.onJobFinished(job.payload.workId, job.chapter_sort_key);
                     }
                     this.scheduler.recordJobCompletion();
-                    if (sourcePermitAcquired) {
+                    if (sourceSem) {
                         sourceSem.release();
                     }
-                    if (globalPermitAcquired) {
-                        globalSem.release();
-                    }
-                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
+                    globalSem.release();
                 }
+                telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 await this.sleep(30);
             }
             catch (err) {
@@ -3170,9 +3174,6 @@ export class ImporterEngine {
             // Step 4: SAFEGUARD 3: Try to publish immediately 1x via barrier. If blocked, release worker slot immediately!
             const isFreshRelease = Boolean(job.payload?.isFreshRelease);
             const pubResult = await this.publicationBarrier.tryPublish(workId, chKey.sortKey, chapterId, isFreshRelease);
-            if (!pubResult.published && extraTiming?.slotIndex !== undefined) {
-                telemetryCollector.setSlotState(extraTiming.slotIndex, 'WAITING_BARRIER', `${effectiveSource} ch ${chapterNumber}`);
-            }
             tDb = Date.now() - db0;
             const tBarrierCheck = Math.round(pubResult.timings?.barrierCheckMs || 0);
             const tPublishUpdate = Math.round(pubResult.timings?.publishUpdateMs || 0);
@@ -3217,7 +3218,7 @@ export class ImporterEngine {
                 rate_limit_wait_ms: Math.round(chRateLimitWaitMs),
                 semaphore_wait_ms: Math.round(extraTiming?.semWaitMs || 0) + Math.round(chDownloadSemWaitMs) + Math.round(chTelegramSemWaitMs),
                 other_wait_ms: Math.max(0, Math.round(chTotalDuration - (sourceFetchMs + chDownloadMs + chTelegramUploadMs + tDb))),
-                barrier_wait_ms: pubResult.published ? 0 : 0,
+                barrier_wait_ms: 0,
                 timestamp: new Date().toISOString(),
             });
             this.lastProgressTimestamp = Date.now();
@@ -3298,10 +3299,10 @@ export class ImporterEngine {
                 chapter_number: metric.chapterNumber,
                 page_count: metric.pageCount,
                 total_bytes: metric.totalBytes,
-                duration_ms: metric.durationMs,
-                download_ms: metric.downloadMs,
-                upload_ms: metric.uploadMs,
-                db_ms: metric.dbMs,
+                duration_ms: Math.round(metric.durationMs),
+                download_ms: Math.round(metric.downloadMs),
+                upload_ms: Math.round(metric.uploadMs),
+                db_ms: Math.round(metric.dbMs),
                 status: metric.status,
                 error_message: metric.errorMessage ? this.sanitizeErrorMessage(metric.errorMessage) : null,
             });

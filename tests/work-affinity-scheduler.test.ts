@@ -582,4 +582,78 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     // Old chapter 150 checked against watermark (200) cannot become P0!
     expect(150 > (reloadedWatermark?.lastSeenSortKey || 0)).toBe(false);
   });
+
+  // =========================================================================
+  // TEST I: Zombie Active Works Prevention (Overnight Degradation Guard)
+  // Work with unimported/staged mappings but 0 queued and 0 importing MUST vacate
+  // active slot immediately so healthy works with queued chapters can enter.
+  // =========================================================================
+  it('TEST I: Zombie Active Works Prevention — work with unimported chapters but 0 queued vacates active slot', async () => {
+    const admission = new AdmissionController(mockStateStore, mockSentinel);
+
+    // Set up active work that has zero queued and zero importing, but has unimported/staged mappings
+    mockStateStore.setActiveWork({
+      workId: 'work-zombie-candidate',
+      workTitle: 'Zombie Work With Blocked Frontier',
+      lane: 'P1',
+      state: 'FILLING',
+      primarySource: 'mangaflix',
+      admittedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+      totalChapters: 100,
+      publishedChapters: 10,
+      queuedChapters: 0,
+      inFlightChapters: 0,
+      frontierSortKey: null,
+      criticalGapSortKey: null,
+      criticalGapUnblockCount: 0,
+    });
+
+    expect(mockStateStore.getActiveWorks().length).toBe(1);
+
+    // Mock DB queries: work has 0 queued, 0 importing, 0 paused, but unimported = 10
+    const mockClient = {
+      query: vi.fn().mockImplementation((queryText: string, params: any[]) => {
+        // Work queue reconciliation query: 0 queued, 0 importing
+        if (queryText.includes('queued_cnt') || queryText.includes('paused_cnt')) {
+          return { rows: [{ queued_cnt: '0', importing_cnt: '0', paused_cnt: '0', min_sort_key: null }] };
+        }
+        if (queryText.includes('FROM chapters')) {
+          return { rows: [{ pub_cnt: '10' }] };
+        }
+        // Work has 10 unimported mappings (e.g. STAGED or waiting)
+        if (queryText.includes('FROM importer_chapter_mappings')) {
+          return { rows: [{ unimported: '10' }] };
+        }
+        // Healthy candidate work query
+        if (queryText.includes('w.published IS FALSE') || queryText.includes('w.published = true')) {
+          return {
+            rows: [
+              { work_id: 'work-healthy-1', title: 'Healthy Admitted Work', source: 'kuro', pending_jobs: '50', queued_count: '10', paused_count: '40', min_sort_key: '1' },
+            ],
+          };
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+
+    (admission as any).pool = {
+      connect: vi.fn().mockResolvedValue(mockClient),
+      query: mockClient.query,
+    };
+
+    // Run full admission cycle (reconciliation + admission)
+    await admission.runAdmissionCycle();
+
+    // The zombie work MUST be vacated from active works despite unimported > 0
+    const activeAfterCycle = mockStateStore.getActiveWorks();
+    const zombieStillActive = activeAfterCycle.some((w) => w.workId === 'work-zombie-candidate');
+    expect(zombieStillActive).toBe(false);
+
+    // Healthy work was admitted into the vacated slot
+    const healthyAdmitted = activeAfterCycle.some((w) => w.workId === 'work-healthy-1');
+    expect(healthyAdmitted).toBe(true);
+    expect(activeAfterCycle.length).toBe(1);
+  });
 });
