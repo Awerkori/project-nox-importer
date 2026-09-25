@@ -340,19 +340,15 @@ export class WorkAffinityScheduler {
         // and works marked BLOCKED.
         // -------------------------------------------------------------
         const eligibleP1Works = p1Works.filter((w) => w.state === 'FILLING' && w.criticalGapSortKey === null && (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork);
-        // Prioritize works whose primary source is currently ready/unconstrained (READY NOW priority)
-        if (allowedSources && allowedSources.length > 0) {
-            eligibleP1Works.sort((a, b) => {
-                const aReady = allowedSources.includes(a.primarySource) ? 1 : 0;
-                const bReady = allowedSources.includes(b.primarySource) ? 1 : 0;
-                return bReady - aReady;
-            });
-        }
-        if (eligibleP1Works.length > 0) {
-            const startIdx = this.rrIndexP1 % eligibleP1Works.length;
-            for (let i = 0; i < eligibleP1Works.length; i++) {
-                const idx = (startIdx + i) % eligibleP1Works.length;
-                const targetWork = eligibleP1Works[idx];
+        // Filter and prioritize works whose primary source is currently ready/unconstrained
+        const readyP1Works = allowedSources && allowedSources.length > 0
+            ? eligibleP1Works.filter((w) => allowedSources.includes(w.primarySource))
+            : eligibleP1Works;
+        if (readyP1Works.length > 0) {
+            const startIdx = this.rrIndexP1 % readyP1Works.length;
+            for (let i = 0; i < readyP1Works.length; i++) {
+                const idx = (startIdx + i) % readyP1Works.length;
+                const targetWork = readyP1Works[idx];
                 const p1Job = await this.claimSingleJob(this.pool, {
                     workerId: options.workerId,
                     leaseMin,
@@ -389,19 +385,15 @@ export class WorkAffinityScheduler {
         // guaranteeing newly admitted works are not starved by massive backlog.
         // -------------------------------------------------------------
         const eligibleP2Works = p2Works.filter((w) => (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork);
-        // Prioritize works whose primary source is currently ready/unconstrained (READY NOW priority)
-        if (allowedSources && allowedSources.length > 0) {
-            eligibleP2Works.sort((a, b) => {
-                const aReady = allowedSources.includes(a.primarySource) ? 1 : 0;
-                const bReady = allowedSources.includes(b.primarySource) ? 1 : 0;
-                return bReady - aReady;
-            });
-        }
-        if (eligibleP2Works.length > 0) {
-            const startIdx = this.rrIndexP2 % eligibleP2Works.length;
-            for (let i = 0; i < eligibleP2Works.length; i++) {
-                const idx = (startIdx + i) % eligibleP2Works.length;
-                const targetWork = eligibleP2Works[idx];
+        // Filter and prioritize works whose primary source is currently ready/unconstrained
+        const readyP2Works = allowedSources && allowedSources.length > 0
+            ? eligibleP2Works.filter((w) => allowedSources.includes(w.primarySource))
+            : eligibleP2Works;
+        if (readyP2Works.length > 0) {
+            const startIdx = this.rrIndexP2 % readyP2Works.length;
+            for (let i = 0; i < readyP2Works.length; i++) {
+                const idx = (startIdx + i) % readyP2Works.length;
+                const targetWork = readyP2Works[idx];
                 const p2Job = await this.claimSingleJob(this.pool, {
                     workerId: options.workerId,
                     leaseMin,
@@ -825,6 +817,17 @@ export class WorkAffinityScheduler {
      */
     async claimSingleJob(client, opts) {
         const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
+        const isSingleWork = Boolean(opts.workId);
+        const orderClause = isSingleWork
+            ? `ORDER BY q.chapter_sort_key ASC NULLS LAST`
+            : `ORDER BY 
+          CASE 
+            WHEN (q.payload->>'staffForced')::boolean = true OR q.priority >= 1000 THEN 0 
+            ELSE 1 
+          END ASC,
+          q.priority DESC, 
+          q.chapter_sort_key ASC NULLS LAST, 
+          q.next_run_at ASC`;
         const query = `
       WITH to_lock AS (
         SELECT q.id
@@ -845,26 +848,7 @@ export class WorkAffinityScheduler {
           AND ($7::text[] IS NULL OR (q.payload->>'workId') = ANY($7::text[]))
           AND ($8::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($8::text[])))
           AND ($9::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($9::text[])))
-          AND NOT EXISTS (
-            SELECT 1 FROM chapters c
-            WHERE c.work_id = (q.payload->>'workId')::uuid
-              AND c.number = q.chapter_sort_key
-              AND c.published_at IS NOT NULL
-          )
-          AND ($4::numeric IS NOT NULL OR NOT EXISTS (
-            SELECT 1 FROM importer_chapter_mappings sm
-            WHERE sm.work_id = (q.payload->>'workId')::uuid
-              AND sm.status = 'STAGED'
-              AND sm.chapter_sort_key <= q.chapter_sort_key
-          ))
-        ORDER BY 
-          CASE 
-            WHEN (q.payload->>'staffForced')::boolean = true OR q.priority >= 1000 THEN 0 
-            ELSE 1 
-          END ASC,
-          q.priority DESC, 
-          q.chapter_sort_key ASC NULLS LAST, 
-          q.next_run_at ASC
+        ${orderClause}
         FOR UPDATE SKIP LOCKED
         LIMIT 1
       )
@@ -934,6 +918,37 @@ export class WorkAffinityScheduler {
                     }
                     // Continue loop to claim next genuine job
                     continue;
+                }
+                // Safety check: is there an un-published STAGED chapter behind this one?
+                if (sortKey !== null && opts.sortKey === undefined) {
+                    const stagedCheck = await this.runQuery(client, `
+            SELECT id, chapter_sort_key 
+            FROM importer_chapter_mappings
+            WHERE work_id = $1::uuid
+              AND status = 'STAGED'
+              AND chapter_sort_key < $2::numeric
+            LIMIT 1;
+          `, [workId, sortKey]);
+                    if (stagedCheck.rows.length > 0) {
+                        const barrierKey = stagedCheck.rows[0].chapter_sort_key;
+                        this.logger.info(`Claimed job ${r.id} for work ${workId} ch ${sortKey} is ahead of STAGED chapter ${barrierKey}. Releasing back to QUEUED to preserve canonical barrier.`);
+                        await this.runQuery(client, `
+              UPDATE importer_queue
+              SET status = 'QUEUED',
+                  locked_by = NULL,
+                  locked_at = NULL,
+                  lease_expires_at = NULL,
+                  attempts = GREATEST(0, attempts - 1),
+                  updated_at = NOW()
+              WHERE id = $1;
+            `, [r.id]);
+                        // Update active work critical gap so scheduler focuses on unblocking
+                        const activeWork = this.stateStore.getActiveWork(workId);
+                        if (activeWork && activeWork.criticalGapSortKey === null) {
+                            activeWork.criticalGapSortKey = parseFloat(barrierKey);
+                        }
+                        continue;
+                    }
                 }
             }
             this.lastClaimTime = Date.now();
