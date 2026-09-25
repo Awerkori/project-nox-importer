@@ -52,7 +52,7 @@ const ConfigSchema = z.object({
   YUGABYTE_HOST: z.string().default('sa-east-1.b49305ea-8536-43e6-936e-b2fd77fc07b0.aws.yugabyte.cloud'),
   YUGABYTE_PORT: z.coerce.number().default(5433),
   YUGABYTE_USER: z.string().default('admin'),
-  YUGABYTE_PASSWORD: z.string().default('rxpJQWQ3bVNHfv68K_4RkvgOgRv0zF'),
+  YUGABYTE_PASSWORD: z.string().min(1, 'YUGABYTE_PASSWORD environment variable is required'),
   YUGABYTE_DATABASE: z.string().default('project_nox_prod'),
   YUGABYTE_SSL_CERT: z.string().default('certs/yugabyte-root.crt'),
 });

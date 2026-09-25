@@ -11,6 +11,23 @@ export interface ChapterMetricRecord {
     claim_acquire_ms: number;
     mutex_wait_ms: number;
     claim_db_ms: number;
+    scheduler_acquire_ms?: number;
+    pool_wait_ms?: number;
+    sql_exec_ms?: number;
+    claim_sql_ms?: number;
+    total_queries?: number;
+    works_tested?: number;
+    staff_check_ms?: number;
+    p0_probe_ms?: number;
+    critical_work_attempts?: number;
+    critical_work_time_ms?: number;
+    p1_work_attempts?: number;
+    p1_work_time_ms?: number;
+    p2_work_attempts?: number;
+    p2_work_time_ms?: number;
+    active_fallback_ms?: number;
+    admission_on_demand_ms?: number;
+    catalog_fallback_ms?: number;
     metadata_load_ms: number;
     source_fetch_ms: number;
     page_resolution_ms: number;
@@ -174,7 +191,7 @@ export declare class TelemetryCollector {
                 max: number;
             };
             stages: {
-                mutexWait: {
+                schedulerAcquire: {
                     avg: number;
                     p50: number;
                     p95: number;
@@ -182,6 +199,41 @@ export declare class TelemetryCollector {
                     max: number;
                 };
                 claimDb: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    p99: number;
+                    max: number;
+                };
+                poolWait: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    max: number;
+                };
+                sqlExec: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    max: number;
+                };
+                claimSql: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    max: number;
+                };
+                queriesPerClaim: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                };
+                worksTested: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                };
+                mutexWait: {
                     avg: number;
                     p50: number;
                     p95: number;
@@ -286,6 +338,73 @@ export declare class TelemetryCollector {
                 };
             };
         };
+        schedulerAcquireBreakdown: {
+            totalMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            poolWaitMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            sqlExecMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            queriesCount: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            worksTestedCount: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            staffCheckMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            p0ProbeMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            criticalWorkTimeMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            p1WorkTimeMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            p2WorkTimeMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            activeFallbackMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            admissionOnDemandMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            catalogFallbackMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+        };
         slowestChapters: {
             slowReason: string;
             jobId: string;
@@ -298,6 +417,23 @@ export declare class TelemetryCollector {
             claim_acquire_ms: number;
             mutex_wait_ms: number;
             claim_db_ms: number;
+            scheduler_acquire_ms?: number;
+            pool_wait_ms?: number;
+            sql_exec_ms?: number;
+            claim_sql_ms?: number;
+            total_queries?: number;
+            works_tested?: number;
+            staff_check_ms?: number;
+            p0_probe_ms?: number;
+            critical_work_attempts?: number;
+            critical_work_time_ms?: number;
+            p1_work_attempts?: number;
+            p1_work_time_ms?: number;
+            p2_work_attempts?: number;
+            p2_work_time_ms?: number;
+            active_fallback_ms?: number;
+            admission_on_demand_ms?: number;
+            catalog_fallback_ms?: number;
             metadata_load_ms: number;
             source_fetch_ms: number;
             page_resolution_ms: number;

@@ -32,6 +32,12 @@ export declare class WorkAffinityScheduler {
     private p0ConsecutiveClaims;
     private rrIndexP1;
     private rrIndexP2;
+    private lastStaffCheckTime;
+    private cachedStaffWorkIds;
+    private unclaimableWorksCooldown;
+    markWorkUnclaimable(workId: string, ttlMs?: number): void;
+    isWorkUnclaimable(workId: string): boolean;
+    clearWorkUnclaimable(workId: string): void;
     private p0WaitTimes;
     private p0Count1h;
     private p1Count1h;
