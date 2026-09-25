@@ -20,6 +20,7 @@ import { PublicationSafetyBarrier } from './publication-safety-barrier.js';
 import { ProtectiveSentinel } from './protective-sentinel.js';
 import { telemetryCollector } from './telemetry-collector.js';
 import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from './scheduler/index.js';
+import { AutoHealWatchdog } from './auto-heal-watchdog.js';
 import { performance } from 'node:perf_hooks';
 export { computeCanonicalChapterKey };
 export function computeInternalLivenessState(params) {
@@ -113,6 +114,8 @@ export class ImporterEngine {
     lastProgressTimestamp = Date.now();
     lastAutoRecoveryTimestamp = 0;
     lastNewWorkAutoRecoveryTimestamp = 0;
+    autoHealWatchdog;
+    isRestarting = false;
     // Actual retained image bytes; bounded globally by page permits and per-image size.
     static activeBufferedBytes = 0;
     constructor(supabase, storage, registry, rateLimiter, config) {
@@ -145,6 +148,17 @@ export class ImporterEngine {
         this.publicationBarrier.onPublished = (isFreshRelease) => {
             this.scheduler.recordPublication(isFreshRelease);
         };
+        const effectivePool = (dbPool && typeof dbPool.query === 'function') ? dbPool : getYugabytePool();
+        this.autoHealWatchdog = new AutoHealWatchdog({
+            pool: effectivePool,
+            scheduler: this.scheduler,
+            admissionController: this.admissionController,
+            protectiveSentinel: this.protectiveSentinel,
+            workerId: config.WORKER_ID,
+            onControlledRestart: async (reason, metrics) => {
+                await this.initiateControlledSelfRestart(reason, metrics);
+            },
+        });
         const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 8, config.TESTED_CONCURRENCY_CEILING || 18);
         this.autotuner = new AdaptiveAutotuner({
             initialConcurrency: Math.min(requestedMax, 8),
@@ -160,6 +174,27 @@ export class ImporterEngine {
             rssEmergencyLimitMb: 410,
             maxBufferedBytes: 64 * 1024 * 1024,
         });
+    }
+    /**
+     * Initiates a controlled graceful self-restart when an unresolvable critical stall occurs.
+     * Drains in-flight operations with a grace period, then exits with code 1 for supervisor restart.
+     */
+    async initiateControlledSelfRestart(reason, metrics) {
+        if (this.isRestarting)
+            return;
+        this.isRestarting = true;
+        this.logger.error(`🚨 [CONTROLLED SELF-RESTART] Initiating graceful self-restart. Reason: ${reason}`, {
+            reason,
+            pid: process.pid,
+            uptimeSeconds: Math.floor(process.uptime()),
+            metrics,
+        });
+        try {
+            this.stop();
+        }
+        catch { }
+        await new Promise((r) => setTimeout(r, 4000));
+        process.exit(1);
     }
     getAutotuner() {
         return this.autotuner;
@@ -200,7 +235,9 @@ export class ImporterEngine {
         this.runUpstreamHealthLoop();
         // 8. Launch Pre-SLA Sentinel watchdog loop (every 15s)
         this.protectiveSentinel.startWatchdogLoop();
-        // 9. Launch Liveness Watchdog and Auto-Recovery loop (every 30s)
+        // 9. Launch Auto-Heal Watchdog loop (every 60s)
+        this.autoHealWatchdog.start();
+        // 9b. Launch Liveness Watchdog telemetry loop (every 30s)
         this.runLivenessWatchdogLoop();
         // A bounded shared runner pool claims by queue priority. Per-source semaphores
         // still enforce source limits, without hundreds of idle claimers ahead of fresh jobs.
@@ -287,6 +324,7 @@ export class ImporterEngine {
     stop() {
         this.stopSignal = true;
         this.abortController.abort();
+        this.autoHealWatchdog.stop();
     }
     discoveryAllowedCache = false;
     discoveryAllowedCachedAt = 0;
@@ -669,16 +707,35 @@ export class ImporterEngine {
                 else {
                     newWorkPipeline = 'NEW_WORK_PIPELINE_HEALTHY';
                 }
-                // Write atomic heartbeat to database settings table for external watchdog / supervisor monitoring
+                // Write atomic heartbeat and health panel to settings table for external watchdog / supervisor monitoring
                 try {
+                    const healthMetrics = await this.autoHealWatchdog.collectTelemetry();
                     const hbPayload = JSON.stringify({
-                        state: livenessState,
-                        chapterPipeline: livenessState === 'STALLED' ? 'STALLED' : 'WORKING',
+                        state: healthMetrics.status,
+                        status: healthMetrics.status,
+                        autoHealState: healthMetrics.autoHealState,
+                        chapterPipeline: healthMetrics.status === 'STALLED' || healthMetrics.status === 'CRITICAL_STALL' ? 'STALLED' : 'WORKING',
                         newWorkPipeline,
                         minutesSinceLastNewWork,
                         waitingAdmissionCount,
                         lastNewWorkCreatedAt: lastNewWorkCreatedAt ? lastNewWorkCreatedAt.toISOString() : null,
                         lastNewWorkAdmittedAt: lastNewWorkAdmittedAt ? lastNewWorkAdmittedAt.toISOString() : null,
+                        lastStartedAge: healthMetrics.lastStartedAgeSec,
+                        lastCompletedAge: healthMetrics.lastCompletedAgeSec,
+                        lastFreshVisibleAge: healthMetrics.lastFreshVisibleAgeSec,
+                        startedLast15m: healthMetrics.startedLast15m,
+                        completedLast15m: healthMetrics.completedLast15m,
+                        freshLast15m: healthMetrics.freshLast15m,
+                        eligibleJobs: healthMetrics.eligibleJobs,
+                        claimableWorks: healthMetrics.claimableWorks,
+                        importing: healthMetrics.importingCount,
+                        retry: healthMetrics.retryCount,
+                        stagedUnique: healthMetrics.stagedUnique,
+                        lastAutoHeal: healthMetrics.lastAutoHealAt,
+                        autoRestartCount1h: healthMetrics.autoRestartCount1h,
+                        circuitBreakerOpen: healthMetrics.circuitBreakerOpen,
+                        protectiveStop: healthMetrics.protectiveStopActive,
+                        protectiveStopReason: healthMetrics.protectiveStopReason,
                         timestamp: new Date().toISOString(),
                         pid: process.pid,
                         workerId: this.config.WORKER_ID,

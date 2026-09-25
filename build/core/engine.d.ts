@@ -7,6 +7,7 @@ import { Config } from '../config.js';
 import { AdaptiveAutotuner, BufferReservation } from './concurrency.js';
 import { PublicationSafetyBarrier } from './publication-safety-barrier.js';
 import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from './scheduler/index.js';
+import { AutoHealWatchdog } from './auto-heal-watchdog.js';
 export { computeCanonicalChapterKey };
 export type InternalLivenessState = 'HEALTHY_IDLE' | 'HEALTHY_WORKING' | 'BACKPRESSURED' | 'STALLED';
 export type ExternalLivenessState = InternalLivenessState | 'DEAD';
@@ -68,8 +69,15 @@ export declare class ImporterEngine {
     private lastProgressTimestamp;
     private lastAutoRecoveryTimestamp;
     private lastNewWorkAutoRecoveryTimestamp;
+    autoHealWatchdog: AutoHealWatchdog;
+    private isRestarting;
     static activeBufferedBytes: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
+    /**
+     * Initiates a controlled graceful self-restart when an unresolvable critical stall occurs.
+     * Drains in-flight operations with a grace period, then exits with code 1 for supervisor restart.
+     */
+    initiateControlledSelfRestart(reason: string, metrics?: any): Promise<void>;
     getAutotuner(): AdaptiveAutotuner;
     getSafetyBarrier(): PublicationSafetyBarrier;
     start(): Promise<void>;

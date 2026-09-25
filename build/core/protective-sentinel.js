@@ -228,9 +228,16 @@ export class ProtectiveSentinel {
                 return;
             }
             // Check current infrastructure
+            if (global.gc) {
+                try {
+                    global.gc();
+                }
+                catch { }
+            }
             const mem = diagnostics.getMemorySnapshot();
-            if (mem.rssMb >= this.thresholds.maxRssMb - 40) {
-                this.logger.warn(`[Auto-Resume] RAM too high for auto-resume: ${mem.rssMb}MB >= ${this.thresholds.maxRssMb - 40}MB`);
+            // Only block auto-resume on RAM if RSS exceeds the actual tripwire (440MB) or heap is severely bloated (>280MB)
+            if (mem.rssMb >= this.thresholds.maxRssMb || mem.heapUsedMb >= 280) {
+                this.logger.warn(`[Auto-Resume] RAM too high for auto-resume: ${mem.rssMb}MB rss (limit: ${this.thresholds.maxRssMb}MB), ${mem.heapUsedMb}MB heap`);
                 return;
             }
             let activeConns = 0;
@@ -252,18 +259,30 @@ export class ProtectiveSentinel {
                 this.logger.warn(`[Auto-Resume] YSQL not calm yet: total=${totalConns}/13, active=${activeConns}`);
                 return;
             }
+            // Check if stop was triggered by transient local pressure (lag/RAM) that has now resolved
+            const stoppedAgeSec = stopInfo.triggered_at
+                ? Math.floor((Date.now() - new Date(stopInfo.triggered_at).getTime()) / 1000)
+                : 0;
+            if (stoppedAgeSec >= 15 * 60 && stopInfo.classification === 'IMPORTER_PRESSURE') {
+                const lagMetrics = diagnostics.lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
+                if (lagMetrics.avgLagMs < 150 && mem.rssMb < this.thresholds.maxRssMb) {
+                    this.logger.info(`🛡️ [AUTO-HEAL / AUTO-RESUME] Stale protective stop (>15m) with resolved local pressure (lag=${lagMetrics.avgLagMs}ms, RSS=${mem.rssMb}MB, YSQL=${totalConns}/13). Auto-resuming claims immediately!`);
+                    await this.resumeProtectiveStop('auto_healing_sentinel_recovery');
+                    return;
+                }
+            }
             // Quick latency probes
             if (this.siteUrl) {
                 // WAN-adjusted TTFB ceilings for remote container probes:
-                // Home SSR document is ~180KB (up to 400ms WAN TTFB is healthy)
-                // Reader is ~40KB (up to 350ms WAN TTFB is healthy)
-                const homeMaxTtfb = 600;
-                const readerMaxTtfb = 450;
+                // Home SSR document is ~180KB (remote container over WAN can take up to 2000ms when cold)
+                // Reader is ~40KB (up to 750ms WAN TTFB is healthy)
+                const homeMaxTtfb = 2000;
+                const readerMaxTtfb = 750;
                 // Sample 1
                 const homeProbe1 = await this.measureRoute(`${this.siteUrl}/`, homeMaxTtfb, 'home');
                 const readerProbe1 = await this.measureRoute(`${this.siteUrl}/ler/46b7538b-fcb8-40ec-b3ee-cdadd2edb04c`, readerMaxTtfb, 'reader');
-                const isSample1Healthy = Boolean(homeProbe1 && homeProbe1.statusCode >= 200 && homeProbe1.statusCode < 400 && homeProbe1.ttfbMs <= homeMaxTtfb &&
-                    readerProbe1 && readerProbe1.statusCode >= 200 && readerProbe1.statusCode < 400 && readerProbe1.ttfbMs <= readerMaxTtfb);
+                const isSample1Healthy = Boolean((readerProbe1 && readerProbe1.statusCode >= 200 && readerProbe1.statusCode < 400 && readerProbe1.ttfbMs <= readerMaxTtfb) &&
+                    (!homeProbe1 || (homeProbe1.statusCode >= 200 && homeProbe1.statusCode < 400 && homeProbe1.ttfbMs <= homeMaxTtfb)));
                 if (!isSample1Healthy) {
                     this.logger.warn(`[Auto-Resume] Sample 1 unhealthy: Home=${homeProbe1?.ttfbMs}ms [${homeProbe1?.statusCode}], Reader=${readerProbe1?.ttfbMs}ms [${readerProbe1?.statusCode}]`);
                     return;
@@ -273,10 +292,10 @@ export class ProtectiveSentinel {
                 // Sample 2
                 const homeProbe2 = await this.measureRoute(`${this.siteUrl}/`, homeMaxTtfb, 'home');
                 const readerProbe2 = await this.measureRoute(`${this.siteUrl}/ler/46b7538b-fcb8-40ec-b3ee-cdadd2edb04c`, readerMaxTtfb, 'reader');
-                const isSample2Healthy = Boolean(homeProbe2 && homeProbe2.statusCode >= 200 && homeProbe2.statusCode < 400 && homeProbe2.ttfbMs <= homeMaxTtfb &&
-                    readerProbe2 && readerProbe2.statusCode >= 200 && readerProbe2.statusCode < 400 && readerProbe2.ttfbMs <= readerMaxTtfb);
+                const isSample2Healthy = Boolean((readerProbe2 && readerProbe2.statusCode >= 200 && readerProbe2.statusCode < 400 && readerProbe2.ttfbMs <= readerMaxTtfb) &&
+                    (!homeProbe2 || (homeProbe2.statusCode >= 200 && homeProbe2.statusCode < 400 && homeProbe2.ttfbMs <= homeMaxTtfb)));
                 if (isSample2Healthy) {
-                    this.logger.info(`🛡️ [AUTO-HEAL / AUTO-RESUME] Transient edge oscillation resolved. 2 consecutive healthy samples verified (Home: ${homeProbe2.ttfbMs}ms [${homeProbe2.statusCode}], Reader: ${readerProbe2.ttfbMs}ms [${readerProbe2.statusCode}], YSQL: ${totalConns}/13 total [${activeConns} active]). Auto-resuming claims immediately!`);
+                    this.logger.info(`🛡️ [AUTO-HEAL / AUTO-RESUME] Transient edge oscillation resolved. 2 consecutive healthy samples verified (Home: ${homeProbe2?.ttfbMs}ms [${homeProbe2?.statusCode}], Reader: ${readerProbe2.ttfbMs}ms [${readerProbe2.statusCode}], YSQL: ${totalConns}/13 total [${activeConns} active]). Auto-resuming claims immediately!`);
                     await this.resumeProtectiveStop('auto_healing_sentinel_recovery');
                 }
                 else {

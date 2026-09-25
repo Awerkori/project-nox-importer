@@ -95,7 +95,7 @@ export declare class WorkAffinityScheduler {
     /**
      * Synchronizes in-flight job counts per work from DB at startup.
      */
-    private syncInFlightCountsFromDb;
+    syncInFlightCountsFromDb(): Promise<void>;
     /**
      * Main entry point for worker slots claiming IMPORT_CHAPTER jobs.
      */
