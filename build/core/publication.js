@@ -182,8 +182,8 @@ export class PublicationBarrier {
                 // 3. Mark public.chapters.published_at and set is_fresh_release
                 await client.query(`UPDATE chapters
            SET published_at = COALESCE(published_at, $2::timestamptz),
-               is_fresh_release = $3
-           WHERE id = $1::uuid`, [chapterId, publishedAtIso, isFreshRelease]);
+               is_fresh_release = true
+           WHERE id = $1::uuid`, [chapterId, publishedAtIso]);
                 // 4. Mark importer_chapter_mappings status = 'COMPLETED'
                 await client.query(`UPDATE importer_chapter_mappings
            SET status = 'COMPLETED', updated_at = NOW()
@@ -225,7 +225,7 @@ export class PublicationBarrier {
                 client.release();
             }
             try {
-                this.onPublished?.(isFreshRelease);
+                this.onPublished?.(true);
             }
             catch { }
             // Invalidate edge cache (fire and forget asynchronously)
@@ -346,7 +346,7 @@ export class PublicationBarrier {
             .update(workUpdate)
             .eq('id', workId);
         try {
-            this.onPublished?.(isFreshRelease);
+            this.onPublished?.(true);
         }
         catch { }
     }
