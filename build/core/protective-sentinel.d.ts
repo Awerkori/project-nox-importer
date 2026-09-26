@@ -1,5 +1,33 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-export type IncidentClassification = 'TRANSIENT_EDGE_INCIDENT' | 'REAL_SYSTEM_PRESSURE' | 'YSQL_PRESSURE' | 'IMPORTER_PRESSURE' | 'MANUAL_STOP';
+export type IncidentClassification = 'MANUAL_STOP' | 'TRANSIENT_EDGE_INCIDENT' | 'REAL_SYSTEM_PRESSURE' | 'YSQL_PRESSURE' | 'IMPORTER_PRESSURE';
+export type SiteHealthState = 'GREEN' | 'YELLOW' | 'ORANGE' | 'RED';
+export interface PressureSnapshot {
+    timestamp: number;
+    siteHealth: SiteHealthState;
+    homeP50: number;
+    homeP95: number;
+    readerP50: number;
+    readerP95: number;
+    consecutive5xx: number;
+    lastHttp5xx: number | null;
+    ysqlTotal: number;
+    ysqlActive: number;
+    poolWait: number;
+    rssMb: number;
+    heapUsedMb: number;
+    eventLoopLagMs: number;
+    pressureScore: number;
+    pressureBreakdown: {
+        sitePressure: number;
+        dbPressure: number;
+        memoryPressure: number;
+        eventLoopPressure: number;
+        storagePressure: number;
+        sourcePressure: number;
+        publicationPressure: number;
+    };
+    pressureReason: string;
+}
 export interface ProtectiveStopInfo {
     active: boolean;
     reason?: string | null;
@@ -29,16 +57,22 @@ export declare class ProtectiveSentinel {
     private cacheTtlMs;
     private isRunning;
     private stopSignal;
-    private consecutive5xxErrors;
-    private consecutiveLatencyViolations;
-    private consecutiveProbeErrors;
+    private homeSamples;
+    private readerSamples;
+    private consecutive5xxCount;
+    private last5xxTimestamp;
+    private consecutiveProbeFailures;
+    private cachedReaderChapterId;
+    private cachedReaderChapterAt;
+    private latestSnapshot;
     private homeAgent;
     private readerAgent;
     private httpAgent;
     constructor(supabase: SupabaseClient, thresholds?: SentinelThresholds, siteUrl?: string | undefined);
     /**
-     * Checks whether the protective stop is currently active.
-     * Reads from database 'settings' table with a 3s TTL cache.
+     * Checks whether a MANUAL staff protective stop is active.
+     * STRICT INVARIANT: Automatic performance stops CANNOT make this return true.
+     * If a legacy automatic stop exists in DB, it is auto-cleared on discovery.
      */
     isProtectiveStopActive(): Promise<boolean>;
     /**
@@ -46,51 +80,50 @@ export declare class ProtectiveSentinel {
      */
     getProtectiveStopInfo(forceFresh?: boolean): Promise<ProtectiveStopInfo>;
     /**
-     * Triggers a persistent PROTECTIVE STOP with incident classification.
-     * Halts all new job claims, allows in-flight jobs to safely drain,
-     * keeps publication barrier alive.
+     * On startup, auto-clears any legacy automatic protective stop if active.
+     */
+    clearLegacyProtectiveStopOnStartup(): Promise<void>;
+    /**
+     * Triggers a MANUAL staff protective stop.
+     * AUTOMATIC PERFORMANCE STOPS ARE STRICTLY FORBIDDEN.
+     * If called with classification != 'MANUAL_STOP', it is rejected and forwarded to adaptive pressure.
      */
     triggerProtectiveStop(reason: string, details: any, classification?: IncidentClassification): Promise<void>;
     /**
-     * Resumes normal operation.
+     * Resumes normal operation after manual stop.
      */
     resumeProtectiveStop(resumedBy?: string): Promise<void>;
     /**
-     * Background sentinel watchdog loop.
-     * Probes metrics every 15s. If stopped, triggers rapid auto-heal checks.
+     * Returns the current computed pressure snapshot for AdaptiveAutotuner.
+     */
+    getPressureSnapshot(): PressureSnapshot;
+    /**
+     * Background sentinel monitoring loop.
+     * Periodically measures site latency and system metrics to update PressureSnapshot.
      */
     startWatchdogLoop(): void;
     stop(): void;
     /**
-     * Evaluates whether a currently stopped importer can safely auto-resume.
-     * Distinguishes transient edge incidents from sustained pressure.
-     * Checks 2 consecutive healthy samples with 5s debounce for rapid recovery (15-30s).
-     * NEVER auto-resumes manual staff stops or active ongoing degradation.
+     * Resolves a valid published chapter ID dynamically to probe the reader.
+     * Avoids querying on dead hardcoded chapters.
      */
-    evaluateAutoResume(): Promise<void>;
-    private measureRoute;
+    private getValidReaderChapterId;
     /**
-     * Evaluates all Pre-SLA guard rails.
+     * Evaluates all Pre-SLA guard rails and updates PressureSnapshot.
+     * Does NOT trigger global stops.
      */
     evaluatePreSlaGuardRails(): Promise<void>;
+    private getPercentile;
     /**
      * Probes site route latency using keep-alive connection.
      */
     private probeSiteLatency;
+    private recordProbeResult;
+    private recordProbeFailure;
+    private updatePressureState;
     /**
-     * Evaluates probe responses, strictly distinguishing:
-     * A) TRANSIENT EDGE INCIDENTS:
-     *    - 1 isolated 5xx
-     *    - normal WAN latency jitter
-     *    - healthy DB and importer
-     *    => DO NOT STOP, log warning and observe.
-     *
-     * B) REAL SYSTEM PRESSURE:
-     *    - >= 3 consecutive 5xx errors (sustained edge/Worker failure)
-     *    - >= 2 consecutive 5xx errors WITH confirmed infra pressure
-     *    - Sustained severe latency (>= 3000ms) for 3+ consecutive probes
-     *    => Trip PROTECTIVE_STOP with appropriate classification.
+     * Compatibility method for auto-heal watchdog
      */
-    handleProbeResult(label: 'home' | 'reader' | 'media', url: string, ttfbMs: number, thresholdMs: number, slaTargetMs: number, statusCode: number): Promise<void>;
-    handleProbeError(label: 'home' | 'reader' | 'media', url: string, err: any): Promise<void>;
+    evaluateAutoResume(): Promise<void>;
 }
+export { ProtectiveSentinel as AdaptivePressureMonitor };

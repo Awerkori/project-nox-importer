@@ -1,8 +1,9 @@
+/**
+ * WriteBudget: Deprecated and neutralized.
+ * YugabyteDB does not impose Turso SQLite write limits.
+ * All operations are non-blocking no-ops.
+ */
 export declare class WriteBudget {
-    private static MAX_WRITES_PER_DAY;
-    private static MAX_WRITES_PER_MINUTE;
-    private static writesThisMinute;
-    private static currentMinute;
-    static requestBudget(estimatedWrites: number): Promise<boolean>;
-    static reportWrites(writes: number): void;
+    static requestBudget(_estimatedWrites: number): Promise<boolean>;
+    static reportWrites(_writes: number): void;
 }

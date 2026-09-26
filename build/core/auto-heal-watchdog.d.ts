@@ -4,6 +4,7 @@ import type { AdmissionController } from './scheduler/admission-controller.js';
 import type { ProtectiveSentinel } from './protective-sentinel.js';
 import type { PublicationBarrier } from './publication.js';
 import type { PublicationSafetyBarrier } from './publication-safety-barrier.js';
+import type { AdaptiveAutotuner } from './concurrency.js';
 export type ImporterHealthStatus = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL' | 'IDLE' | 'PAUSED_BY_PROTECTION';
 export type ProcessingHealth = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL';
 export type PublicationHealth = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL' | 'NO_FRESH_EXPECTED';
@@ -50,6 +51,7 @@ export interface HealthPanelMetrics {
     circuitBreakerOpen: boolean;
     protectiveStopActive: boolean;
     protectiveStopReason?: string | null;
+    noProgressReason?: string | null;
     rssMb: number;
     pid: number;
     timestamp: string;
@@ -67,6 +69,7 @@ export interface AutoHealWatchdogOptions {
     protectiveSentinel?: ProtectiveSentinel;
     publicationBarrier?: PublicationBarrier;
     safetyBarrier?: PublicationSafetyBarrier;
+    autotuner?: AdaptiveAutotuner;
     onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<void>;
     intervalMs?: number;
     workerId?: string;
@@ -92,6 +95,7 @@ export declare class AutoHealWatchdog {
     private protectiveSentinel?;
     private publicationBarrier?;
     private safetyBarrier?;
+    private autotuner?;
     private onControlledRestart?;
     private intervalMs;
     private workerId;

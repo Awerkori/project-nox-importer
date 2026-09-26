@@ -1944,4 +1944,78 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
     expect(watchdog.getTrackedStuckKeys()).not.toContain('work-resolved-a:10.0000');
     expect(watchdog.getStuckIdentityAge('work-resolved-a:10.0000')).toBe(0);
   });
+
+  // =========================================================================
+  // CASO BB: Circuit breaker tripwire transitions autotuner to SURVIVAL mode (concurrency = 1)
+  // =========================================================================
+  it('Caso BB: circuit breaker tripwire transitions autotuner to SURVIVAL mode (concurrency = 1)', async () => {
+    const mockAutotuner: any = {
+      setCapacity: vi.fn(),
+    };
+
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      autotuner: mockAutotuner,
+      onControlledRestart,
+    });
+
+    const now = Date.now();
+    const pastRestarts: AutoRestartRecord[] = [
+      { timestamp: new Date(now - 35 * 60 * 1000).toISOString(), reason: 'CRITICAL_STALL', progressAgeSec: 1800, eligibleJobs: 100 },
+      { timestamp: new Date(now - 20 * 60 * 1000).toISOString(), reason: 'CRITICAL_STALL', progressAgeSec: 1800, eligibleJobs: 100 },
+      { timestamp: new Date(now - 5 * 60 * 1000).toISOString(), reason: 'CRITICAL_STALL', progressAgeSec: 1800, eligibleJobs: 100 },
+    ];
+
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return {
+          rows: [
+            {
+              started_age: '2000',
+              completed_age: '2000',
+              fresh_age: '2000',
+              started_15m: '0',
+              completed_15m: '0',
+              fresh_15m: '0',
+            },
+          ],
+        };
+      }
+      if (sql.includes('eligible_cnt')) {
+        return { rows: [{ eligible_cnt: '100', importing_cnt: '0', retry_cnt: '0' }] };
+      }
+      if (sql.includes('staged_unique')) {
+        return { rows: [{ staged_unique: '0' }] };
+      }
+      if (sql.includes("key = 'active_works'")) {
+        return { rows: [{ value: JSON.stringify([]) }] };
+      }
+      if (sql.includes("key = 'importer_protective_stop'")) {
+        return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      }
+      if (sql.includes("key = 'importer_auto_restarts'")) {
+        return { rows: [{ value: JSON.stringify(pastRestarts) }] };
+      }
+      return { rows: [] };
+    });
+
+    // Simulate prior level attempts so Level 3 evaluates
+    (watchdog as any).lastLevel1At = now;
+
+    const metrics = await watchdog.evaluateCycle();
+
+    expect(metrics.status).toBe('CRITICAL_STALL');
+    expect(metrics.circuitBreakerOpen).toBe(true);
+    expect(metrics.autoHealState).toBe('CIRCUIT_OPEN');
+    expect(metrics.noProgressReason).toBe('RESTART_CIRCUIT_BREAKER_OPEN');
+    expect(onControlledRestart).not.toHaveBeenCalled();
+    expect(mockAutotuner.setCapacity).toHaveBeenCalledWith(
+      1,
+      'SURVIVAL',
+      expect.stringContaining('Restart storm circuit breaker open')
+    );
+  });
 });

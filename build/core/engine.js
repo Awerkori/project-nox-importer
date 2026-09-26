@@ -21,6 +21,7 @@ import { ProtectiveSentinel } from './protective-sentinel.js';
 import { telemetryCollector } from './telemetry-collector.js';
 import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from './scheduler/index.js';
 import { AutoHealWatchdog } from './auto-heal-watchdog.js';
+import { RateBucketTracker } from './rate-bucket-tracker.js';
 import { performance } from 'node:perf_hooks';
 export { computeCanonicalChapterKey };
 export function computeInternalLivenessState(params) {
@@ -115,6 +116,7 @@ export class ImporterEngine {
     lastAutoRecoveryTimestamp = 0;
     lastNewWorkAutoRecoveryTimestamp = 0;
     autoHealWatchdog;
+    rateBucketTracker;
     isRestarting = false;
     // Actual retained image bytes; bounded globally by page permits and per-image size.
     static activeBufferedBytes = 0;
@@ -145,22 +147,14 @@ export class ImporterEngine {
         }
         this.admissionController = new AdmissionController(this.schedulerStateStore, this.protectiveSentinel, dbPool);
         this.scheduler = new WorkAffinityScheduler(this.schedulerStateStore, this.admissionController, this.protectiveSentinel, dbPool);
+        const effectivePool = (dbPool && typeof dbPool.query === 'function') ? dbPool : getYugabytePool();
+        this.rateBucketTracker = new RateBucketTracker(effectivePool);
         this.publicationBarrier.onPublished = (isFreshRelease) => {
             this.scheduler.recordPublication(isFreshRelease);
+            if (isFreshRelease) {
+                this.rateBucketTracker.recordFreshPublication();
+            }
         };
-        const effectivePool = (dbPool && typeof dbPool.query === 'function') ? dbPool : getYugabytePool();
-        this.autoHealWatchdog = new AutoHealWatchdog({
-            pool: effectivePool,
-            scheduler: this.scheduler,
-            admissionController: this.admissionController,
-            protectiveSentinel: this.protectiveSentinel,
-            publicationBarrier: this.publicationBarrier,
-            safetyBarrier: this.safetyBarrier,
-            workerId: config.WORKER_ID,
-            onControlledRestart: async (reason, metrics) => {
-                await this.initiateControlledSelfRestart(reason, metrics);
-            },
-        });
         const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 8, config.TESTED_CONCURRENCY_CEILING || 18);
         this.autotuner = new AdaptiveAutotuner({
             initialConcurrency: Math.min(requestedMax, 8),
@@ -175,6 +169,19 @@ export class ImporterEngine {
             rssHardLimitMb: 380,
             rssEmergencyLimitMb: 410,
             maxBufferedBytes: 64 * 1024 * 1024,
+        });
+        this.autoHealWatchdog = new AutoHealWatchdog({
+            pool: effectivePool,
+            scheduler: this.scheduler,
+            admissionController: this.admissionController,
+            protectiveSentinel: this.protectiveSentinel,
+            publicationBarrier: this.publicationBarrier,
+            safetyBarrier: this.safetyBarrier,
+            autotuner: this.autotuner,
+            workerId: config.WORKER_ID,
+            onControlledRestart: async (reason, metrics) => {
+                await this.initiateControlledSelfRestart(reason, metrics);
+            },
         });
     }
     exitHandler = (code) => process.exit(code);
@@ -282,6 +289,10 @@ export class ImporterEngine {
         this.autoHealWatchdog.start();
         // 9b. Launch Liveness Watchdog telemetry loop (every 30s)
         this.runLivenessWatchdogLoop();
+        // 9c. Start periodic rate bucket flush (every 15s)
+        this.rateBucketTracker.startPeriodicFlush(15_000);
+        // 9d. Launch Bounded Hygiene Sweep loop (every 5 min)
+        this.runHygieneSweepLoop();
         // A bounded shared runner pool claims by queue priority. Per-source semaphores
         // still enforce source limits, without hundreds of idle claimers ahead of fresh jobs.
         const activeWorkers = [];
@@ -293,6 +304,8 @@ export class ImporterEngine {
         activeWorkers.push(this.runGeneralWorker());
         // Wait until all workers finish upon stop signal
         await Promise.all(activeWorkers);
+        this.rateBucketTracker.stop();
+        await this.rateBucketTracker.flush();
         this.admissionController.stop();
         this.isRunning = false;
         this.logger.info('Importer Engine stopped gracefully');
@@ -368,6 +381,8 @@ export class ImporterEngine {
         this.stopSignal = true;
         this.abortController.abort();
         this.autoHealWatchdog.stop();
+        this.rateBucketTracker.stop();
+        void this.rateBucketTracker.flush();
     }
     discoveryAllowedCache = false;
     discoveryAllowedCachedAt = 0;
@@ -522,6 +537,71 @@ export class ImporterEngine {
             }
             catch (err) {
                 this.logger.warn('Error during periodic lease recovery loop', { error: err?.message });
+            }
+        }
+    }
+    /**
+     * Periodic bounded hygiene sweep (~5 min):
+     * 1. Reclaims expired job leases
+     * 2. Cleans stale source cooldowns in importer_sources
+     * 3. Prunes rate buckets older than 48h
+     * 4. Prunes old autotuner telemetry
+     */
+    async runHygieneSweepLoop() {
+        while (!this.stopSignal) {
+            await this.sleep(5 * 60_000);
+            if (this.stopSignal)
+                break;
+            try {
+                this.logger.info('🧹 [HYGIENE SWEEP] Starting bounded hygiene sweep...');
+                // 1. Reclaim expired job leases
+                try {
+                    const { recovered } = await this.queue.recoverExpiredLeases();
+                    if (recovered > 0) {
+                        this.logger.info(`🧹 [HYGIENE SWEEP] Reclaimed ${recovered} expired job leases.`);
+                    }
+                }
+                catch (e) {
+                    this.logger.warn('Hygiene sweep lease recovery failed', { error: e?.message });
+                }
+                // 2. Clean stale source cooldowns in importer_sources
+                try {
+                    const pool = getYugabytePool();
+                    const cleanRes = await pool.query(`
+            UPDATE importer_sources
+            SET status = 'ACTIVE', cooldown_until = NULL, blocked_reason = NULL
+            WHERE status IN ('DEGRADED', 'COOLDOWN')
+              AND cooldown_until IS NOT NULL
+              AND cooldown_until < NOW()
+          `);
+                    if ((cleanRes.rowCount ?? 0) > 0) {
+                        this.logger.info(`🧹 [HYGIENE SWEEP] Cleared ${cleanRes.rowCount} expired source cooldowns.`);
+                    }
+                }
+                catch (e) {
+                    this.logger.warn('Hygiene sweep source cooldown cleanup failed', { error: e?.message });
+                }
+                // 3. Prune rate buckets older than 48 hours
+                try {
+                    const deletedBuckets = await this.rateBucketTracker.pruneOldBuckets();
+                    if (deletedBuckets > 0) {
+                        this.logger.info(`🧹 [HYGIENE SWEEP] Pruned ${deletedBuckets} rate buckets older than 48h.`);
+                    }
+                }
+                catch (e) {
+                    this.logger.warn('Hygiene sweep rate bucket pruning failed', { error: e?.message });
+                }
+                // 4. Prune telemetry older than 24h
+                try {
+                    await this.pruneTelemetry();
+                }
+                catch (e) {
+                    this.logger.warn('Hygiene sweep telemetry pruning failed', { error: e?.message });
+                }
+                this.logger.info('✅ [HYGIENE SWEEP] Bounded hygiene sweep complete.');
+            }
+            catch (err) {
+                this.logger.warn('Error during hygiene sweep loop', { error: err?.message });
             }
         }
     }
@@ -753,6 +833,12 @@ export class ImporterEngine {
                 else {
                     newWorkPipeline = 'NEW_WORK_PIPELINE_HEALTHY';
                 }
+                // Fetch persistent throughput rates from importer_rate_buckets
+                let rateMetrics = { rate5m: 0, rate30m: 0, fresh5m: 0, fresh30m: 0, completedRate5m: 0, completedRate30m: 0, completed5m: 0, completed30m: 0 };
+                try {
+                    rateMetrics = await this.rateBucketTracker.getRecentRates();
+                }
+                catch { }
                 // Write atomic heartbeat and health panel to settings table for external watchdog / supervisor monitoring
                 try {
                     const hbPayload = JSON.stringify({
@@ -761,6 +847,22 @@ export class ImporterEngine {
                         autoHealState: healthMetrics.autoHealState,
                         processingHealth: healthMetrics.processingHealth,
                         publicationHealth: healthMetrics.publicationHealth,
+                        noProgressReason: healthMetrics.noProgressReason || null,
+                        rate5m: rateMetrics.rate5m,
+                        rate30m: rateMetrics.rate30m,
+                        fresh5m: rateMetrics.fresh5m,
+                        fresh30m: rateMetrics.fresh30m,
+                        completedRate5m: rateMetrics.completedRate5m,
+                        completedRate30m: rateMetrics.completedRate30m,
+                        completed5m: rateMetrics.completed5m,
+                        completed30m: rateMetrics.completed30m,
+                        capacity: {
+                            concurrency: this.autotuner.getCurrentConcurrency(),
+                            state: this.autotuner.getState(),
+                            maxConcurrency: this.autotuner.getMaxConcurrency(),
+                            pressureScore: this.protectiveSentinel.getPressureSnapshot().pressureScore,
+                            siteHealth: this.protectiveSentinel.getPressureSnapshot().siteHealth,
+                        },
                         chapterPipeline: healthMetrics.status === 'STALLED' || healthMetrics.status === 'CRITICAL_STALL' ? 'STALLED' : 'WORKING',
                         newWorkPipeline,
                         minutesSinceLastNewWork,
@@ -1021,12 +1123,26 @@ export class ImporterEngine {
             try {
                 this.autotunerCycleCount++;
                 const mem = diagnostics.getMemorySnapshot();
-                const evaluation = this.autotuner.evaluateCycle();
+                const pressureSnapshot = this.protectiveSentinel.getPressureSnapshot();
+                const manualStopActive = await this.protectiveSentinel.isProtectiveStopActive();
+                const candidateSources = this.activeSourcesCache.sources.length > 0
+                    ? this.activeSourcesCache.sources
+                    : Object.keys(SOURCE_CONCURRENCY_LIMITS);
+                const allSourcesBlocked = !candidateSources.some((src) => this.circuitBreaker.canExecute(src));
+                const evaluation = this.autotuner.evaluateCycle(pressureSnapshot, {
+                    manualStopActive,
+                    dbUnavailable: (pressureSnapshot.pressureBreakdown?.dbPressure ?? 0) >= 90,
+                    storageUnavailable: false,
+                    allSourcesBlocked,
+                });
                 const activeJobs = diagnostics.getActiveJobsCount();
                 const uploads = this.autotuner.getGlobalMediaSemaphore();
                 const buffers = this.autotuner.getBufferedPageSemaphore();
                 this.logger.info('Pipeline capacity', {
                     chapterConcurrency: evaluation.concurrency,
+                    capacityState: evaluation.state,
+                    pressureScore: evaluation.pressureScore,
+                    siteHealth: evaluation.siteHealth,
                     testedChapterCeiling: this.config.TESTED_CONCURRENCY_CEILING || 32,
                     mediaConcurrency: uploads.capacity,
                     activeMediaUploads: uploads.active,
@@ -1040,7 +1156,7 @@ export class ImporterEngine {
                     rssMb: mem.rssMb,
                 });
                 const lagMetrics = diagnostics.lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
-                this.logger.info(`[Autotuner Telemetry] Action: ${evaluation.action} | Concurrency: ${evaluation.concurrency} | Active Jobs: ${activeJobs} | Mem: ${mem.heapUsedMb}MB heap / ${mem.rssMb}MB rss (512MB RAM) | Reason: ${evaluation.reason}`);
+                this.logger.info(`[Autotuner Telemetry] State: ${evaluation.state} | Action: ${evaluation.action} | Concurrency: ${evaluation.concurrency} | Pressure: ${evaluation.pressureScore} | Site: ${evaluation.siteHealth} | Active Jobs: ${activeJobs} | Mem: ${mem.heapUsedMb}MB heap / ${mem.rssMb}MB rss (512MB RAM) | Reason: ${evaluation.reason}`);
                 // Record async telemetry snapshot without blocking the loop
                 void this.recordTelemetrySnapshot({
                     workerId: this.config.WORKER_ID,
@@ -1410,6 +1526,7 @@ export class ImporterEngine {
                         this.scheduler.onJobFinished(job.payload.workId, job.chapter_sort_key);
                     }
                     this.scheduler.recordJobCompletion();
+                    this.rateBucketTracker.recordJobCompletion();
                     if (sourceSem) {
                         sourceSem.release();
                     }
