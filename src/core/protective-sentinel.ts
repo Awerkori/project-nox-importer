@@ -86,6 +86,11 @@ export const DEFAULT_SENTINEL_THRESHOLDS: SentinelThresholds = {
   maxTelegramFloodWaitSec: 60,
 };
 
+export interface LatencySample {
+  ttfbMs: number;
+  timestamp: number;
+}
+
 export class ProtectiveSentinel {
   private logger = new Logger('ProtectiveSentinel');
   private cachedInfo: ProtectiveStopInfo = { active: false };
@@ -94,9 +99,10 @@ export class ProtectiveSentinel {
   private isRunning = false;
   private stopSignal = false;
   
-  // Rolling latency windows for p50/p95 (max 20 samples)
-  private homeSamples: number[] = [];
-  private readerSamples: number[] = [];
+  // Rolling latency windows for p50/p95 with 75s expiration window (max 20 samples)
+  private homeSamples: LatencySample[] = [];
+  private readerSamples: LatencySample[] = [];
+  private readonly LATENCY_SAMPLE_WINDOW_MS = 75_000;
   private consecutive5xxCount = 0;
   private last5xxTimestamp: number | null = null;
   private consecutiveProbeFailures = 0;
@@ -155,7 +161,8 @@ export class ProtectiveSentinel {
   constructor(
     private supabase: SupabaseClient,
     private thresholds: SentinelThresholds = DEFAULT_SENTINEL_THRESHOLDS,
-    private siteUrl?: string
+    private siteUrl?: string,
+    private dbPool?: any
   ) {}
 
   setOnAutoResume(fn: () => void): void {
@@ -282,6 +289,87 @@ export class ProtectiveSentinel {
   }
 
   /**
+   * On startup, hydrates auto emergency pause state from settings table.
+   * If an active emergency pause is found:
+   * - Restores in-memory state so claims remain gated immediately
+   * - Validates timestamp and format
+   * - Re-evaluates site health immediately
+   * - If site is still catastrophic, keeps claims gated
+   * - If site is already healthy, starts auto-resume recovery window
+   */
+  async hydrateAutoEmergencyPauseOnStartup(stateOverride?: AutoEmergencyPauseState): Promise<void> {
+    if (stateOverride) {
+      this.autoEmergencyPause = { ...stateOverride };
+      if (this.autoEmergencyPause.active) {
+        this.latestSnapshot.siteHealth = 'RED';
+        this.latestSnapshot.pressureReason = `AUTO_EMERGENCY_PAUSE: ${this.autoEmergencyPause.reason}`;
+        if (this.siteUrl) {
+          await this.evaluatePreSlaGuardRails();
+        }
+      }
+      return;
+    }
+
+    try {
+      let raw: any = null;
+      try {
+        const pool = this.dbPool !== undefined ? this.dbPool : getYugabytePool();
+        if (pool && typeof pool.query === 'function') {
+          const res = await pool.query("SELECT value FROM settings WHERE key = 'importer_auto_emergency_pause'");
+          if (res.rows.length > 0 && res.rows[0].value) {
+            raw = res.rows[0].value;
+          }
+        }
+      } catch {}
+
+      if (!raw) {
+        const { data, error } = await this.supabase
+          .from('settings')
+          .select('value')
+          .eq('key', 'importer_auto_emergency_pause')
+          .maybeSingle();
+        if (!error && data?.value) {
+          raw = data.value;
+        }
+      }
+
+      if (raw) {
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (parsed && typeof parsed === 'object' && parsed.active === true) {
+          const parsedPausedAt = parsed.pausedAt && !isNaN(Date.parse(parsed.pausedAt))
+            ? parsed.pausedAt
+            : new Date().toISOString();
+
+          this.autoEmergencyPause = {
+            active: true,
+            pausedAt: parsedPausedAt,
+            reason: parsed.reason || 'Restored active auto emergency pause from settings on boot',
+            siteP95: typeof parsed.siteP95 === 'number' ? parsed.siteP95 : null,
+            consecutiveCatastrophicCycles: typeof parsed.consecutiveCatastrophicCycles === 'number' ? parsed.consecutiveCatastrophicCycles : 3,
+            nextRecheckAt: parsed.nextRecheckAt || new Date(Date.now() + 15_000).toISOString(),
+            resumedAt: null,
+            healthyCyclesCount: 0,
+          };
+
+          this.logger.warn(
+            `🚨 [AUTO_EMERGENCY_PAUSE HYDRATED] Loaded active emergency pause on boot (pausedAt: ${this.autoEmergencyPause.pausedAt}, reason: ${this.autoEmergencyPause.reason}). Claims remain gated until site health is verified.`
+          );
+
+          this.latestSnapshot.siteHealth = 'RED';
+          this.latestSnapshot.pressureReason = `AUTO_EMERGENCY_PAUSE: ${this.autoEmergencyPause.reason}`;
+
+          // Re-evaluate site health immediately if siteUrl is configured
+          if (this.siteUrl) {
+            await this.evaluatePreSlaGuardRails();
+          }
+        }
+      }
+    } catch (err: any) {
+      this.logger.warn('Failed to hydrate importer_auto_emergency_pause on startup', { error: err?.message });
+    }
+  }
+
+  /**
    * Triggers a MANUAL staff protective stop.
    * AUTOMATIC PERFORMANCE STOPS ARE STRICTLY FORBIDDEN.
    * If called with classification != 'MANUAL_STOP', it is rejected and forwarded to adaptive pressure.
@@ -394,6 +482,9 @@ export class ProtectiveSentinel {
       // Clear legacy automatic stop on startup
       await this.clearLegacyProtectiveStopOnStartup();
 
+      // Hydrate auto emergency pause state on startup
+      await this.hydrateAutoEmergencyPauseOnStartup();
+
       // Grace period (10s)
       await new Promise((r) => setTimeout(r, 10_000));
 
@@ -480,7 +571,11 @@ export class ProtectiveSentinel {
       }
     }
 
-    // Compute rolling percentiles
+    // Compute rolling percentiles with time eviction (75s window)
+    const now = Date.now();
+    this.homeSamples = this.homeSamples.filter((s) => now - s.timestamp <= this.LATENCY_SAMPLE_WINDOW_MS);
+    this.readerSamples = this.readerSamples.filter((s) => now - s.timestamp <= this.LATENCY_SAMPLE_WINDOW_MS);
+
     const homeP50 = this.getPercentile(this.homeSamples, 0.50);
     const homeP95 = this.getPercentile(this.homeSamples, 0.95);
     const readerP50 = this.getPercentile(this.readerSamples, 0.50);
@@ -624,9 +719,11 @@ export class ProtectiveSentinel {
     };
   }
 
-  private getPercentile(samples: number[], p: number): number {
-    if (samples.length === 0) return 0;
-    const sorted = [...samples].sort((a, b) => a - b);
+  private getPercentile(samples: LatencySample[], p: number): number {
+    const now = Date.now();
+    const valid = samples.filter((s) => now - s.timestamp <= this.LATENCY_SAMPLE_WINDOW_MS);
+    if (valid.length === 0) return 0;
+    const sorted = valid.map((s) => s.ttfbMs).sort((a, b) => a - b);
     const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * p));
     return sorted[idx];
   }
@@ -687,10 +784,15 @@ export class ProtectiveSentinel {
     });
   }
 
-  public recordProbeResult(label: 'home' | 'reader', ttfbMs: number, statusCode: number = 200): void {
+  public recordProbeResult(
+    label: 'home' | 'reader',
+    ttfbMs: number,
+    statusCode: number = 200,
+    timestamp: number = Date.now()
+  ): void {
     if (statusCode >= 500) {
       this.consecutive5xxCount++;
-      this.last5xxTimestamp = Date.now();
+      this.last5xxTimestamp = timestamp;
       this.logger.warn(`[Site Probe 5xx] ${label.toUpperCase()} returned HTTP ${statusCode} (consecutive: ${this.consecutive5xxCount})`);
     } else {
       if (this.consecutive5xxCount > 0) {
@@ -699,11 +801,16 @@ export class ProtectiveSentinel {
       this.consecutive5xxCount = 0;
     }
 
+    const sample: LatencySample = { ttfbMs, timestamp };
+    const cutoff = timestamp - this.LATENCY_SAMPLE_WINDOW_MS;
+
     if (label === 'home') {
-      this.homeSamples.push(ttfbMs);
+      this.homeSamples.push(sample);
+      this.homeSamples = this.homeSamples.filter((s) => s.timestamp >= cutoff);
       if (this.homeSamples.length > 20) this.homeSamples.shift();
     } else {
-      this.readerSamples.push(ttfbMs);
+      this.readerSamples.push(sample);
+      this.readerSamples = this.readerSamples.filter((s) => s.timestamp >= cutoff);
       if (this.readerSamples.length > 20) this.readerSamples.shift();
     }
     this.consecutiveProbeFailures = 0;

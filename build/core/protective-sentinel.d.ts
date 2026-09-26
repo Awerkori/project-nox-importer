@@ -57,10 +57,15 @@ export interface SentinelThresholds {
     maxTelegramFloodWaitSec: number;
 }
 export declare const DEFAULT_SENTINEL_THRESHOLDS: SentinelThresholds;
+export interface LatencySample {
+    ttfbMs: number;
+    timestamp: number;
+}
 export declare class ProtectiveSentinel {
     private supabase;
     private thresholds;
     private siteUrl?;
+    private dbPool?;
     private logger;
     private cachedInfo;
     private lastFetchMs;
@@ -69,6 +74,7 @@ export declare class ProtectiveSentinel {
     private stopSignal;
     private homeSamples;
     private readerSamples;
+    private readonly LATENCY_SAMPLE_WINDOW_MS;
     private consecutive5xxCount;
     private last5xxTimestamp;
     private consecutiveProbeFailures;
@@ -82,7 +88,7 @@ export declare class ProtectiveSentinel {
     private healthyCyclesCount;
     private autoEmergencyPause;
     private onAutoResume?;
-    constructor(supabase: SupabaseClient, thresholds?: SentinelThresholds, siteUrl?: string | undefined);
+    constructor(supabase: SupabaseClient, thresholds?: SentinelThresholds, siteUrl?: string | undefined, dbPool?: any | undefined);
     setOnAutoResume(fn: () => void): void;
     isEmergencyPaused(): boolean;
     getEmergencyPauseState(): AutoEmergencyPauseState;
@@ -100,6 +106,16 @@ export declare class ProtectiveSentinel {
      * On startup, auto-clears any legacy automatic protective stop if active.
      */
     clearLegacyProtectiveStopOnStartup(): Promise<void>;
+    /**
+     * On startup, hydrates auto emergency pause state from settings table.
+     * If an active emergency pause is found:
+     * - Restores in-memory state so claims remain gated immediately
+     * - Validates timestamp and format
+     * - Re-evaluates site health immediately
+     * - If site is still catastrophic, keeps claims gated
+     * - If site is already healthy, starts auto-resume recovery window
+     */
+    hydrateAutoEmergencyPauseOnStartup(stateOverride?: AutoEmergencyPauseState): Promise<void>;
     /**
      * Triggers a MANUAL staff protective stop.
      * AUTOMATIC PERFORMANCE STOPS ARE STRICTLY FORBIDDEN.
@@ -135,7 +151,7 @@ export declare class ProtectiveSentinel {
      * Probes site route latency using keep-alive connection.
      */
     private probeSiteLatency;
-    recordProbeResult(label: 'home' | 'reader', ttfbMs: number, statusCode?: number): void;
+    recordProbeResult(label: 'home' | 'reader', ttfbMs: number, statusCode?: number, timestamp?: number): void;
     private recordProbeFailure;
     private updatePressureState;
     private persistAutoEmergencyPause;

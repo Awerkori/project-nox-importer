@@ -428,7 +428,11 @@ export class AdaptiveAutotuner {
         else {
             const mem = diagnostics.getMemorySnapshot();
             const lag = diagnostics.lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
-            if (rate5m === 0 && completed5m === 0 && (context?.eligibleJobs ?? 1) > 0) {
+            if (context?.allSourcesBlocked) {
+                status = 'THROUGHPUT_CONSTRAINED';
+                limitingFactor = 'ALL_SOURCES_IN_COOLDOWN';
+            }
+            else if (rate5m === 0 && completed5m === 0 && (context?.eligibleJobs ?? 1) > 0) {
                 status = 'STALL';
                 limitingFactor = 'ZERO_PROGRESS_STALL';
             }
@@ -443,7 +447,7 @@ export class AdaptiveAutotuner {
                 else if (context?.eligibleJobs === 0)
                     limitingFactor = 'NO_ELIGIBLE_WORK';
                 else
-                    limitingFactor = 'SOURCE_RATE_PACING';
+                    limitingFactor = 'SCALE_UP_PACING';
             }
         }
         return {

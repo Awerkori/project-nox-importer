@@ -172,4 +172,130 @@ describe('Definitive Throughput Governor & Auto-Emergency Pause Policy', () => {
     expect(sentinel.isEmergencyPaused()).toBe(false);
     expect(sentinel.getEmergencyPauseState().resumedAt).not.toBeNull();
   });
+
+  it('Requirement 1: AUTO_EMERGENCY_PAUSE survives process restart, keeps claims gated, and auto-resumes upon site recovery', async () => {
+    const persistedState = {
+      active: true,
+      pausedAt: '2026-09-26T17:00:00.000Z',
+      reason: 'Catastrophic site latency breach sustained for 3 cycles (Home p95: 11500ms)',
+      siteP95: 11500,
+      consecutiveCatastrophicCycles: 3,
+      nextRecheckAt: '2026-09-26T17:00:15.000Z',
+      resumedAt: null,
+      healthyCyclesCount: 0,
+    };
+
+    const mockSupabase: any = {
+      from: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            maybeSingle: vi.fn().mockResolvedValue({
+              data: { value: JSON.stringify(persistedState) },
+              error: null,
+            }),
+          }),
+        }),
+      }),
+    };
+
+    // 1. Process starts up fresh: sentinel initializes with active=false in memory
+    const restartedSentinel = new ProtectiveSentinel(mockSupabase, undefined, undefined, null);
+    expect(restartedSentinel.isEmergencyPaused()).toBe(false);
+
+    // 2. Hydration runs on boot: state is restored from settings table
+    await restartedSentinel.hydrateAutoEmergencyPauseOnStartup();
+    expect(restartedSentinel.isEmergencyPaused()).toBe(true);
+    expect(restartedSentinel.getEmergencyPauseState().active).toBe(true);
+    expect(restartedSentinel.getEmergencyPauseState().reason).toContain('Catastrophic site latency breach');
+
+    // 3. Claims remain strictly gated in autotuner
+    const gatedResult = autotuner.evaluateCycle(restartedSentinel.getPressureSnapshot(), {
+      emergencyPauseActive: restartedSentinel.isEmergencyPaused(),
+      emergencyPauseReason: restartedSentinel.getEmergencyPauseState().reason || undefined,
+    });
+    expect(gatedResult.state).toBe('AUTO_EMERGENCY_PAUSE');
+    expect(gatedResult.concurrency).toBe(1); // Never 0, strictly minimum 1
+
+    // 4. Site recovers: feed healthy latencies (< 1500ms) for 8 cycles
+    for (let i = 1; i <= 8; i++) {
+      restartedSentinel.recordProbeResult('home', 320, 200);
+      restartedSentinel.recordProbeResult('reader', 280, 200);
+      await restartedSentinel.evaluatePreSlaGuardRails();
+    }
+
+    // 5. Sentinel auto-resumes after stabilization window
+    expect(restartedSentinel.isEmergencyPaused()).toBe(false);
+    expect(restartedSentinel.getEmergencyPauseState().active).toBe(false);
+    expect(restartedSentinel.getEmergencyPauseState().resumedAt).not.toBeNull();
+  });
+
+  it('Requirement 2: STRESS_DETECTED clears automatically when latency rolling window recovers without staying stale', async () => {
+    const mockSupabase: any = {
+      from: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnValue({
+            maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+          }),
+        }),
+      }),
+    };
+
+    const sentinel = new ProtectiveSentinel(mockSupabase, undefined, undefined);
+    const now = Date.now();
+
+    // Simulate transient latency spike that occurred 80 seconds ago (> 75s window)
+    sentinel.recordProbeResult('home', 1202, 200, now - 80_000);
+
+    // Subsequent recent healthy probes within the last 30 seconds
+    sentinel.recordProbeResult('home', 250, 200, now - 20_000);
+    sentinel.recordProbeResult('home', 280, 200, now - 10_000);
+    sentinel.recordProbeResult('reader', 310, 200, now - 10_000);
+
+    await sentinel.evaluatePreSlaGuardRails();
+
+    const snapshot = sentinel.getPressureSnapshot();
+
+    // Stale 1202ms spike was pruned from the 75s window!
+    expect(snapshot.homeP95).toBeLessThanOrEqual(280);
+    expect(snapshot.siteHealth).toBe('GREEN');
+
+    // Autotuner evaluates cycle: transitions cleanly without phantom stress
+    const result = autotuner.evaluateCycle(snapshot);
+    expect(result.action).not.toBe('STRESS_DETECTED');
+    expect(result.state).not.toBe('RUNNING_THROTTLED');
+  });
+
+  it('Requirement 3: Source cooldowns are strictly local and do not throttle global capacity or set global limiting factor when other sources are healthy', () => {
+    const initialGlobalCapacity = autotuner.getCurrentConcurrency();
+    expect(initialGlobalCapacity).toBe(4);
+
+    // Record failures for a specific source: mangalivreto (default capacity 3)
+    const fail1 = autotuner.recordSourceFailure('mangalivreto');
+    const fail2 = autotuner.recordSourceFailure('mangalivreto');
+
+    // Local source capacity was throttled (3 -> 2)
+    expect(fail2.throttled).toBe(true);
+    expect(fail2.newCapacity).toBe(2);
+
+    // BUT global concurrency and global semaphore capacity remain COMPLETELY UNCHANGED
+    expect(autotuner.getCurrentConcurrency()).toBe(initialGlobalCapacity);
+    expect(autotuner.getGlobalChapterSemaphore().capacity).toBe(initialGlobalCapacity);
+
+    // When some sources are in cooldown but others are healthy (allSourcesBlocked: false):
+    const telem = autotuner.getThroughputTelemetry({
+      allSourcesBlocked: false,
+      eligibleJobs: 28912,
+    });
+    expect(telem.limitingFactor).not.toBe('ALL_SOURCES_IN_COOLDOWN');
+
+    // ONLY when all viable sources are blocked (allSourcesBlocked: true):
+    const blockedTelem = autotuner.getThroughputTelemetry({
+      allSourcesBlocked: true,
+      eligibleJobs: 28912,
+    });
+    expect(blockedTelem.limitingFactor).toBe('ALL_SOURCES_IN_COOLDOWN');
+
+    const blockedCycle = autotuner.evaluateCycle(undefined, { allSourcesBlocked: true });
+    expect(blockedCycle.state).toBe('WAITING_SOURCES');
+  });
 });
