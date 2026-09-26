@@ -142,6 +142,7 @@ export declare class AdaptiveAutotuner {
     private cycleErrors;
     private cycleRateLimits;
     private cycleTimeouts;
+    private visibleChapterTimestamps;
     private freshChapterTimestamps;
     private completedJobTimestamps;
     private emaRate;
@@ -151,11 +152,14 @@ export declare class AdaptiveAutotuner {
     getGlobalMediaSemaphore(): AsyncSemaphore;
     getGlobalInflightRequestSemaphore(): AsyncSemaphore;
     getBufferedPageSemaphore(): AsyncSemaphore;
+    recordVisibleChapterPublished(count?: number): void;
     recordFreshChapterPublished(count?: number): void;
     recordJobCompleted(): void;
     getRate1m(): number;
     getRate3m(): number;
     getRate5m(): number;
+    getFreshRate1m(): number;
+    getFreshRate5m(): number;
     getCompletedRate1m(): number;
     getCompletedRate5m(): number;
     getEmaRate(): number;

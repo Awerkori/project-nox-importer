@@ -422,6 +422,7 @@ export class AdaptiveAutotuner {
   private cycleTimeouts = 0;
 
   // Real-time Throughput tracking (Sliding timestamps & EMA)
+  private visibleChapterTimestamps: number[] = [];
   private freshChapterTimestamps: number[] = [];
   private completedJobTimestamps: number[] = [];
   private emaRate = 0;
@@ -457,7 +458,7 @@ export class AdaptiveAutotuner {
     );
     this.lastStableConcurrency = this.currentConcurrency;
 
-    const mediaConcurrency = parseInt(process.env.TELEGRAM_MEDIA_CONCURRENCY || '12', 10);
+    const mediaConcurrency = parseInt(process.env.TELEGRAM_MEDIA_CONCURRENCY || '24', 10);
     const inflightConcurrency = parseInt(process.env.DOWNLOAD_INFLIGHT_CONCURRENCY || '16', 10);
     const bufferedConcurrency = parseInt(process.env.BUFFERED_PAGE_CONCURRENCY || '32', 10);
     this.bufferedPageSemaphore = new AsyncSemaphore(bufferedConcurrency, 'buffered_page_semaphore');
@@ -482,7 +483,19 @@ export class AdaptiveAutotuner {
     return this.bufferedPageSemaphore;
   }
 
+  recordVisibleChapterPublished(count = 1): void {
+    const now = Date.now();
+    for (let i = 0; i < count; i++) {
+      this.visibleChapterTimestamps.push(now);
+    }
+    const cutoff = now - 10 * 60 * 1000;
+    while (this.visibleChapterTimestamps.length > 0 && this.visibleChapterTimestamps[0] < cutoff) {
+      this.visibleChapterTimestamps.shift();
+    }
+  }
+
   recordFreshChapterPublished(count = 1): void {
+    this.recordVisibleChapterPublished(count);
     const now = Date.now();
     for (let i = 0; i < count; i++) {
       this.freshChapterTimestamps.push(now);
@@ -505,17 +518,30 @@ export class AdaptiveAutotuner {
   getRate1m(): number {
     const now = Date.now();
     const cutoff = now - 60 * 1000;
-    return this.freshChapterTimestamps.filter((t) => t >= cutoff).length;
+    return this.visibleChapterTimestamps.filter((t) => t >= cutoff).length;
   }
 
   getRate3m(): number {
     const now = Date.now();
     const cutoff = now - 3 * 60 * 1000;
-    const count = this.freshChapterTimestamps.filter((t) => t >= cutoff).length;
+    const count = this.visibleChapterTimestamps.filter((t) => t >= cutoff).length;
     return Math.round((count / 3) * 10) / 10;
   }
 
   getRate5m(): number {
+    const now = Date.now();
+    const cutoff = now - 5 * 60 * 1000;
+    const count = this.visibleChapterTimestamps.filter((t) => t >= cutoff).length;
+    return Math.round((count / 5) * 10) / 10;
+  }
+
+  getFreshRate1m(): number {
+    const now = Date.now();
+    const cutoff = now - 60 * 1000;
+    return this.freshChapterTimestamps.filter((t) => t >= cutoff).length;
+  }
+
+  getFreshRate5m(): number {
     const now = Date.now();
     const cutoff = now - 5 * 60 * 1000;
     const count = this.freshChapterTimestamps.filter((t) => t >= cutoff).length;
