@@ -31,7 +31,11 @@ describe('Persistent Jobs & Absolute Priority Guarantees', () => {
     for (const f of files) {
       const sql = readFileSync(resolve(mangaMigrationsDir, f), 'utf8')
         .replace('create extension if not exists pgcrypto;', '')
-        .replace(/create\s+index\s+concurrently/gi, 'create index');
+        .replace(/create\s+index\s+concurrently/gi, 'create index')
+        .replace(
+          'RETURNING id, task_type, source, priority, payload, dedupe_key, status, attempts, max_attempts, locked_by, locked_at, lease_expires_at, next_run_at, last_error, chapter_sort_key;',
+          'RETURNING public.importer_queue.id, public.importer_queue.task_type, public.importer_queue.source, public.importer_queue.priority, public.importer_queue.payload, public.importer_queue.dedupe_key, public.importer_queue.status, public.importer_queue.attempts, public.importer_queue.max_attempts, public.importer_queue.locked_by, public.importer_queue.locked_at, public.importer_queue.lease_expires_at, public.importer_queue.next_run_at, public.importer_queue.last_error, public.importer_queue.chapter_sort_key;'
+        );
       await db.exec(sql);
     }
 
