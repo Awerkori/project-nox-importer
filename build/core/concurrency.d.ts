@@ -1,3 +1,4 @@
+import type { PressureSnapshot, SiteHealthState } from './protective-sentinel.js';
 export declare class AsyncSemaphore {
     private activePermits;
     private maxPermits;
@@ -19,6 +20,11 @@ export declare class AsyncSemaphore {
         samples: number;
     };
     getLastWaitMs(): number;
+    /**
+     * Updates semaphore capacity.
+     * ABSOLUTE INVARIANT: capacity cannot be set lower than 1.
+     * In-flight holders drain naturally; never reissue their permits.
+     */
     setCapacity(newCapacity: number): void;
     get capacity(): number;
     get available(): number;
@@ -32,6 +38,7 @@ export interface SourceConcurrencyConfig {
 }
 export declare const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig>;
 export declare const DEFAULT_SOURCE_LIMIT: SourceConcurrencyConfig;
+export declare const TESTED_CONCURRENCY_CEILING = 32;
 export interface AutotunerConfig {
     minConcurrency: number;
     maxConcurrency: number;
@@ -46,6 +53,29 @@ export interface AutotunerConfig {
     rssHardLimitMb: number;
     rssEmergencyLimitMb: number;
     maxBufferedBytes: number;
+    adaptiveEnabled: boolean;
+    scaleUpDwellTimeMs: number;
+}
+export type AdaptiveCapacityState = 'RUNNING_ACCELERATING' | 'RUNNING_STABLE' | 'RUNNING_THROTTLED' | 'SURVIVAL' | 'WAITING_DEPENDENCY' | 'WAITING_SOURCES' | 'RECOVERING' | 'MANUAL_STOP';
+export interface AutotunerCycleResult {
+    concurrency: number;
+    targetConcurrency?: number;
+    action: 'SCALED_UP' | 'SCALED_DOWN' | 'STABLE' | 'HOLD' | 'COOLDOWN' | 'STRESS_DETECTED' | 'SURVIVAL';
+    state: AdaptiveCapacityState;
+    reason: string;
+    pressureScore: number;
+    pressureBreakdown: PressureSnapshot['pressureBreakdown'];
+    siteHealth: SiteHealthState;
+}
+export interface AutotunerEvaluationContext {
+    allSourcesBlocked?: boolean;
+    dbUnavailable?: boolean;
+    manualStopActive?: boolean;
+    stagedDebt?: number;
+    storageUnavailable?: boolean;
+}
+export declare class WorkCostEstimator {
+    static estimateCost(pageCount?: number | null, historicalBytes?: number | null): number;
 }
 export declare class BufferReservation {
     private autotuner;
@@ -56,20 +86,15 @@ export declare class BufferReservation {
     get reservedBytes(): number;
     get isCommitted(): boolean;
     get isReleased(): boolean;
-    /**
-     * Upgrades the reserved byte budget if Content-Length exceeds initial reservation.
-     */
     upgrade(newBytes: number, signal?: AbortSignal): Promise<void>;
-    /**
-     * Commits actual downloaded bytes into activeBufferedBytes and frees the reserved budget.
-     * Defensive invariant: actualBytes must NOT exceed reservedBytes.
-     */
     commit(actualBytes: number): void;
-    /**
-     * Releases the reserved budget on failure, cancellation, or skip without committing.
-     */
     release(): void;
 }
+/**
+ * AdaptiveAutotuner: The SINGLE Authority for Global Chapter Concurrency.
+ * INVARIANT: GLOBAL_CONCURRENCY_WRITERS = 1.
+ * Automatic performance stop is strictly prohibited; capacity never drops below 1.
+ */
 export declare class AdaptiveAutotuner {
     private logger;
     private globalChapterSemaphore;
@@ -81,6 +106,10 @@ export declare class AdaptiveAutotuner {
     private stableCycleCount;
     private cooldownUntil;
     private config;
+    private currentState;
+    private lastCapacityChangeAt;
+    private lastStableConcurrency;
+    private lastStableAt;
     private activeBufferedBytes;
     private reservedBufferedBytes;
     private maxCommittedBytesObserved;
@@ -88,6 +117,7 @@ export declare class AdaptiveAutotuner {
     private cycleErrors;
     private cycleRateLimits;
     private cycleTimeouts;
+    private latestResult;
     constructor(config?: Partial<AutotunerConfig>);
     getGlobalChapterSemaphore(): AsyncSemaphore;
     getGlobalMediaSemaphore(): AsyncSemaphore;
@@ -122,10 +152,17 @@ export declare class AdaptiveAutotuner {
         newCapacity: number;
     };
     recordError(type: 'error' | 'ratelimit' | 'timeout'): void;
-    evaluateCycle(): {
-        concurrency: number;
-        action: 'SCALED_UP' | 'SCALED_DOWN' | 'STABLE' | 'COOLDOWN' | 'STRESS_DETECTED';
-        reason: string;
-    };
+    /**
+     * Evaluates system pressure and adjusts global chapter concurrency.
+     * Single authority: FAST DOWN, SLOW UP, HYSTERESIS, DWELL TIME, MIN_CONCURRENCY = 1.
+     */
+    evaluateCycle(pressureSnapshot?: PressureSnapshot, context?: AutotunerEvaluationContext): AutotunerCycleResult;
+    private applyCapacityChange;
     getCurrentConcurrency(): number;
+    getAdaptiveState(): AdaptiveCapacityState;
+    getState(): AdaptiveCapacityState;
+    getMaxConcurrency(): number;
+    getLatestResult(): AutotunerCycleResult;
+    getLastStableConcurrency(): number;
+    setCapacity(newCapacity: number, stateOrReason?: AdaptiveCapacityState | string, optionalReason?: string): void;
 }

@@ -8,6 +8,7 @@ import { AdaptiveAutotuner, BufferReservation } from './concurrency.js';
 import { PublicationSafetyBarrier } from './publication-safety-barrier.js';
 import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from './scheduler/index.js';
 import { AutoHealWatchdog } from './auto-heal-watchdog.js';
+import { RateBucketTracker } from './rate-bucket-tracker.js';
 export { computeCanonicalChapterKey };
 export type InternalLivenessState = 'HEALTHY_IDLE' | 'HEALTHY_WORKING' | 'BACKPRESSURED' | 'STALLED';
 export type ExternalLivenessState = InternalLivenessState | 'DEAD';
@@ -70,6 +71,7 @@ export declare class ImporterEngine {
     private lastAutoRecoveryTimestamp;
     private lastNewWorkAutoRecoveryTimestamp;
     autoHealWatchdog: AutoHealWatchdog;
+    rateBucketTracker: RateBucketTracker;
     private isRestarting;
     static activeBufferedBytes: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
@@ -119,6 +121,14 @@ export declare class ImporterEngine {
      * Periodic lease recovery loop (every 60s) to rescue stalled jobs from crashed instances
      */
     private runLeaseRecoveryLoop;
+    /**
+     * Periodic bounded hygiene sweep (~5 min):
+     * 1. Reclaims expired job leases
+     * 2. Cleans stale source cooldowns in importer_sources
+     * 3. Prunes rate buckets older than 48h
+     * 4. Prunes old autotuner telemetry
+     */
+    private runHygieneSweepLoop;
     /**
      * Periodic auto-probe and auto-healing loop for sources in COOLDOWN / DEGRADED (runs every 30s).
      * Restores expired cooldowns immediately through production admission probe.

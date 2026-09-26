@@ -96,10 +96,14 @@ export class AsyncSemaphore {
     getLastWaitMs() {
         return this.waitSamples.length ? this.waitSamples[this.waitSamples.length - 1] : 0;
     }
+    /**
+     * Updates semaphore capacity.
+     * ABSOLUTE INVARIANT: capacity cannot be set lower than 1.
+     * In-flight holders drain naturally; never reissue their permits.
+     */
     setCapacity(newCapacity) {
         const target = Math.max(1, newCapacity);
         this.maxPermits = target;
-        // Existing holders drain naturally after a downscale; never reissue their permits.
         this.drain();
     }
     get capacity() {
@@ -190,9 +194,10 @@ export const DEFAULT_SOURCE_LIMIT = {
     maxChapters: 2,
     maxPagesPerChapter: 4,
 };
+export const TESTED_CONCURRENCY_CEILING = 32;
 const DEFAULT_AUTOTUNER_CONFIG = {
     minConcurrency: 1,
-    maxConcurrency: 18,
+    maxConcurrency: Math.min(TESTED_CONCURRENCY_CEILING, parseInt(process.env.ADAPTIVE_MAX_CONCURRENCY || '18', 10)),
     initialConcurrency: 8,
     requiredStableCycles: 3,
     cooldownPeriodMs: 25 * 1000,
@@ -204,7 +209,21 @@ const DEFAULT_AUTOTUNER_CONFIG = {
     rssHardLimitMb: parseInt(process.env.RSS_HARD_LIMIT_MB || '380', 10),
     rssEmergencyLimitMb: parseInt(process.env.RSS_EMERGENCY_LIMIT_MB || '410', 10),
     maxBufferedBytes: parseInt(process.env.MAX_BUFFERED_BYTES || String(64 * 1024 * 1024), 10),
+    adaptiveEnabled: true,
+    scaleUpDwellTimeMs: 0, // Controlled by requiredStableCycles (3 cycles = 90s in prod)
 };
+// Cost-aware load weighting
+export class WorkCostEstimator {
+    static estimateCost(pageCount, historicalBytes) {
+        if (!pageCount || pageCount <= 0)
+            return 1;
+        if (pageCount <= 25)
+            return 1; // Light
+        if (pageCount <= 60)
+            return 2; // Medium
+        return 3; // Heavy
+    }
+}
 // RAII Token representing an atomic slice of the memory buffer budget.
 export class BufferReservation {
     autotuner;
@@ -224,9 +243,6 @@ export class BufferReservation {
     get isReleased() {
         return this._released;
     }
-    /**
-     * Upgrades the reserved byte budget if Content-Length exceeds initial reservation.
-     */
     async upgrade(newBytes, signal) {
         if (this._released || this._committed)
             return;
@@ -236,10 +252,6 @@ export class BufferReservation {
         await this.autotuner.upgradeReservation(additional, signal);
         this._reservedBytes = newBytes;
     }
-    /**
-     * Commits actual downloaded bytes into activeBufferedBytes and frees the reserved budget.
-     * Defensive invariant: actualBytes must NOT exceed reservedBytes.
-     */
     commit(actualBytes) {
         if (this._released || this._committed)
             return;
@@ -249,9 +261,6 @@ export class BufferReservation {
         this._committed = true;
         this.autotuner.commitReservation(this._reservedBytes, actualBytes);
     }
-    /**
-     * Releases the reserved budget on failure, cancellation, or skip without committing.
-     */
     release() {
         if (this._released || this._committed)
             return;
@@ -259,6 +268,11 @@ export class BufferReservation {
         this.autotuner.releaseReservation(this._reservedBytes);
     }
 }
+/**
+ * AdaptiveAutotuner: The SINGLE Authority for Global Chapter Concurrency.
+ * INVARIANT: GLOBAL_CONCURRENCY_WRITERS = 1.
+ * Automatic performance stop is strictly prohibited; capacity never drops below 1.
+ */
 export class AdaptiveAutotuner {
     logger = new Logger('Autotuner');
     globalChapterSemaphore;
@@ -270,6 +284,11 @@ export class AdaptiveAutotuner {
     stableCycleCount = 0;
     cooldownUntil = 0;
     config;
+    // Single authority and hysteresis state
+    currentState = 'RUNNING_STABLE';
+    lastCapacityChangeAt = Date.now();
+    lastStableConcurrency = 8;
+    lastStableAt = Date.now();
     // Active and reserved buffer tracking & backpressure waiters
     activeBufferedBytes = 0;
     reservedBufferedBytes = 0;
@@ -279,9 +298,31 @@ export class AdaptiveAutotuner {
     cycleErrors = 0;
     cycleRateLimits = 0;
     cycleTimeouts = 0;
+    // Cache latest result
+    latestResult = {
+        concurrency: 8,
+        action: 'STABLE',
+        state: 'RUNNING_STABLE',
+        reason: 'Initial boot state',
+        pressureScore: 0,
+        pressureBreakdown: {
+            sitePressure: 0,
+            dbPressure: 0,
+            memoryPressure: 0,
+            eventLoopPressure: 0,
+            storagePressure: 0,
+            sourcePressure: 0,
+            publicationPressure: 0,
+        },
+        siteHealth: 'GREEN',
+    };
     constructor(config = {}) {
         this.config = { ...DEFAULT_AUTOTUNER_CONFIG, ...config };
-        this.currentConcurrency = this.config.initialConcurrency;
+        this.config.maxConcurrency = Math.min(TESTED_CONCURRENCY_CEILING, this.config.maxConcurrency);
+        this.config.minConcurrency = Math.max(1, this.config.minConcurrency);
+        // Warm start from configured initial concurrency (minimum 1, maximum maxConcurrency)
+        this.currentConcurrency = Math.max(this.config.minConcurrency, Math.min(this.config.maxConcurrency, this.config.initialConcurrency));
+        this.lastStableConcurrency = this.currentConcurrency;
         const mediaConcurrency = parseInt(process.env.TELEGRAM_MEDIA_CONCURRENCY || '12', 10);
         const inflightConcurrency = parseInt(process.env.DOWNLOAD_INFLIGHT_CONCURRENCY || '16', 10);
         const bufferedConcurrency = parseInt(process.env.BUFFERED_PAGE_CONCURRENCY || '32', 10);
@@ -299,24 +340,18 @@ export class AdaptiveAutotuner {
     getGlobalInflightRequestSemaphore() {
         return this.globalInflightRequestSemaphore;
     }
-    // Hold a slot from before downloading until the page has finished uploading.
     getBufferedPageSemaphore() {
         return this.bufferedPageSemaphore;
     }
     canAdmitReservation(requestedBytes) {
         const mem = diagnostics.getMemorySnapshot();
         const totalCommitted = this.activeBufferedBytes + this.reservedBufferedBytes;
-        // Hard ceiling: ACTIVE + RESERVED + REQUESTED <= MAX_BUFFERED_BYTES
         if (totalCommitted + requestedBytes > this.config.maxBufferedBytes) {
             return false;
         }
-        // Memory headroom: RSS below soft limit
         if (mem.rssMb >= this.config.rssSoftLimitMb) {
-            // Forward progress exception: If ZERO active and ZERO reserved buffers exist,
-            // allow single-slot progress to prevent permanent deadlock
-            // when baseline Node process RSS is warm without buffers.
             if (totalCommitted === 0) {
-                return true;
+                return true; // Forward progress exception
             }
             return false;
         }
@@ -324,8 +359,6 @@ export class AdaptiveAutotuner {
     }
     async reserveBufferBudget(requestedBytes = 2 * 1024 * 1024, signal) {
         signal?.throwIfAborted();
-        // Fast-path: Synchronously admit if no queue and headroom exists.
-        // Node.js single-threaded event loop guarantees check-and-increment is atomic.
         if (this.reservationWaiters.length === 0 && this.canAdmitReservation(requestedBytes)) {
             this.reservedBufferedBytes += requestedBytes;
             this.updateMaxCommittedObserved();
@@ -366,7 +399,6 @@ export class AdaptiveAutotuner {
             };
             signal?.addEventListener('abort', onAbort, { once: true });
             this.reservationWaiters.push(waiter);
-            // Periodically check if conditions became favorable (e.g. RSS dropped or GC ran)
             intervalTimer = setInterval(() => {
                 this.drainReservationWaiters();
             }, 200);
@@ -446,7 +478,7 @@ export class AdaptiveAutotuner {
                 next.resolve(reservation);
             }
             else {
-                break; // FIFO barrier: if next cannot fit, keep waiting
+                break;
             }
         }
     }
@@ -510,7 +542,6 @@ export class AdaptiveAutotuner {
         }
         health.consecutiveFailures++;
         health.consecutiveSuccesses = 0;
-        // After 2 consecutive failures on a source, throttle concurrency by 1 (minimum 1)
         if (health.consecutiveFailures >= 2 && health.currentCapacity > 1) {
             health.currentCapacity = Math.max(1, health.currentCapacity - 1);
             const sem = this.getSourceSemaphore(source);
@@ -529,7 +560,6 @@ export class AdaptiveAutotuner {
         }
         health.consecutiveFailures = 0;
         health.consecutiveSuccesses++;
-        // After 5 consecutive successes, restore capacity gradually
         if (health.consecutiveSuccesses >= 5 && health.currentCapacity < limits.maxChapters) {
             health.currentCapacity = Math.min(limits.maxChapters, health.currentCapacity + 1);
             health.consecutiveSuccesses = 0;
@@ -548,173 +578,400 @@ export class AdaptiveAutotuner {
         else
             this.cycleErrors++;
     }
-    evaluateCycle() {
+    /**
+     * Evaluates system pressure and adjusts global chapter concurrency.
+     * Single authority: FAST DOWN, SLOW UP, HYSTERESIS, DWELL TIME, MIN_CONCURRENCY = 1.
+     */
+    evaluateCycle(pressureSnapshot, context = {}) {
+        const now = Date.now();
         const mem = diagnostics.getMemorySnapshot();
-        const lag = diagnostics.lagMonitor.getMetrics();
-        // Node includes arrayBuffers in external; adding both double-counts image buffers.
+        const lag = diagnostics.lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
         const totalExternal = mem.externalMb;
         const errors = this.cycleErrors;
         const rateLimits = this.cycleRateLimits;
         const timeouts = this.cycleTimeouts;
-        // Reset window counters for next cycle
+        // Reset cycle window counters
         this.cycleErrors = 0;
         this.cycleRateLimits = 0;
         this.cycleTimeouts = 0;
-        const now = Date.now();
-        // Check for stress condition (requiring scale-down or cooldown)
-        let stressReason = null;
-        let isMemoryStress = false;
-        let isEmergency = false;
-        let isSevere = false;
-        if (mem.rssMb >= this.config.rssEmergencyLimitMb) {
-            stressReason = `Emergency RSS: ${mem.rssMb}MB >= limit ${this.config.rssEmergencyLimitMb}MB`;
-            isEmergency = true;
-            isMemoryStress = true;
+        // 0. Manual Staff Stop check
+        if (context.manualStopActive) {
+            this.currentState = 'MANUAL_STOP';
+            return {
+                concurrency: this.currentConcurrency,
+                targetConcurrency: this.currentConcurrency,
+                action: 'HOLD',
+                state: 'MANUAL_STOP',
+                reason: 'Staff manual stop active',
+                pressureScore: pressureSnapshot?.pressureScore || 0,
+                pressureBreakdown: pressureSnapshot?.pressureBreakdown || {
+                    sitePressure: 0,
+                    dbPressure: 0,
+                    memoryPressure: 0,
+                    eventLoopPressure: 0,
+                    storagePressure: 0,
+                    sourcePressure: 0,
+                    publicationPressure: 0,
+                },
+                siteHealth: pressureSnapshot?.siteHealth || 'GREEN',
+            };
         }
-        else if (mem.rssMb >= this.config.rssHardLimitMb) {
-            stressReason = `Hard RSS: ${mem.rssMb}MB >= limit ${this.config.rssHardLimitMb}MB`;
-            isSevere = true;
-            isMemoryStress = true;
+        // 0b. Dependency Outage check (DB or Storage down)
+        if (context.dbUnavailable || context.storageUnavailable) {
+            this.currentState = 'WAITING_DEPENDENCY';
+            return {
+                concurrency: this.currentConcurrency,
+                targetConcurrency: this.currentConcurrency,
+                action: 'HOLD',
+                state: 'WAITING_DEPENDENCY',
+                reason: context.dbUnavailable ? 'Database unavailable (waiting with backoff)' : 'Storage provider unavailable',
+                pressureScore: 80,
+                pressureBreakdown: pressureSnapshot?.pressureBreakdown || {
+                    sitePressure: 0,
+                    dbPressure: 50,
+                    memoryPressure: 0,
+                    eventLoopPressure: 0,
+                    storagePressure: 30,
+                    sourcePressure: 0,
+                    publicationPressure: 0,
+                },
+                siteHealth: pressureSnapshot?.siteHealth || 'YELLOW',
+            };
         }
-        else if (mem.rssMb >= this.config.rssSoftLimitMb || mem.rssMb >= this.config.maxRssMb) {
-            const limit = Math.min(this.config.rssSoftLimitMb, this.config.maxRssMb);
-            stressReason = `High RSS: ${mem.rssMb}MB >= limit ${limit}MB`;
-            isMemoryStress = true;
+        // 0c. Sources state check
+        if (context.allSourcesBlocked) {
+            this.currentState = 'WAITING_SOURCES';
+            return {
+                concurrency: this.currentConcurrency,
+                targetConcurrency: this.currentConcurrency,
+                action: 'HOLD',
+                state: 'WAITING_SOURCES',
+                reason: 'All sources in cooldown/blocked (waiting for automatic reprobe)',
+                pressureScore: 50,
+                pressureBreakdown: pressureSnapshot?.pressureBreakdown || {
+                    sitePressure: 0,
+                    dbPressure: 0,
+                    memoryPressure: 0,
+                    eventLoopPressure: 0,
+                    storagePressure: 0,
+                    sourcePressure: 50,
+                    publicationPressure: 0,
+                },
+                siteHealth: pressureSnapshot?.siteHealth || 'GREEN',
+            };
         }
-        else if (mem.heapUsedMb >= this.config.maxHeapMb) {
-            stressReason = `High Heap: ${mem.heapUsedMb}MB >= limit ${this.config.maxHeapMb}MB`;
-            isMemoryStress = true;
+        // 1. Ingest pressure signals
+        const siteHealth = pressureSnapshot?.siteHealth || 'GREEN';
+        let pressureScore = pressureSnapshot?.pressureScore || 0;
+        let pressureReason = pressureSnapshot?.pressureReason || '';
+        // Local process checks
+        const hasEmergencyRss = mem.rssMb >= this.config.rssEmergencyLimitMb;
+        const hasHardRss = mem.rssMb >= this.config.rssHardLimitMb;
+        const hasSoftRss = mem.rssMb >= this.config.rssSoftLimitMb || mem.rssMb >= this.config.maxRssMb;
+        const hasHeapStress = mem.heapUsedMb >= this.config.maxHeapMb;
+        const hasLagStress = lag.avgLagMs >= this.config.maxEventLoopLagMs;
+        const hasStagedDebt = context.stagedDebt && context.stagedDebt >= 100;
+        if (hasEmergencyRss) {
+            pressureScore = Math.max(pressureScore, 85);
+            pressureReason = `Emergency RSS: ${mem.rssMb}MB >= limit ${this.config.rssEmergencyLimitMb}MB`;
         }
-        else if (totalExternal >= this.config.maxExternalAndBuffersMb) {
-            stressReason = `High External/Buffers: ${totalExternal}MB >= limit ${this.config.maxExternalAndBuffersMb}MB`;
-            isMemoryStress = true;
+        else if (hasHardRss) {
+            pressureScore = Math.max(pressureScore, 65);
+            pressureReason = `Hard RSS: ${mem.rssMb}MB >= limit ${this.config.rssHardLimitMb}MB`;
         }
-        else if (lag.avgLagMs >= this.config.maxEventLoopLagMs) {
-            stressReason = `High Event Loop Lag: ${lag.avgLagMs}ms >= limit ${this.config.maxEventLoopLagMs}ms`;
+        else if (hasSoftRss) {
+            pressureScore = Math.max(pressureScore, 40);
+            pressureReason = `High RSS: ${mem.rssMb}MB >= limit ${this.config.rssSoftLimitMb}MB`;
+        }
+        else if (hasHeapStress) {
+            pressureScore = Math.max(pressureScore, 35);
+            pressureReason = `High Heap: ${mem.heapUsedMb}MB >= limit ${this.config.maxHeapMb}MB`;
+        }
+        else if (hasLagStress) {
+            pressureScore = Math.max(pressureScore, 50);
+            pressureReason = `High Event Loop Lag: ${lag.avgLagMs}ms >= limit ${this.config.maxEventLoopLagMs}ms`;
         }
         else if (rateLimits > 0) {
-            stressReason = `Detected ${rateLimits} HTTP 429 Rate Limits in cycle`;
+            pressureScore = Math.max(pressureScore, 30);
+            pressureReason = `Detected ${rateLimits} HTTP 429 Rate Limits in cycle`;
         }
         else if (errors >= 2) {
-            stressReason = `Detected error pattern: ${errors} errors in cycle`;
+            pressureScore = Math.max(pressureScore, 25);
+            pressureReason = `Detected error pattern: ${errors} errors in cycle`;
         }
         else if (timeouts >= 2) {
-            stressReason = `Detected timeout pattern: ${timeouts} network timeouts in cycle`;
+            pressureScore = Math.max(pressureScore, 25);
+            pressureReason = `Detected timeout pattern: ${timeouts} network timeouts in cycle`;
         }
         else if (errors + timeouts >= 2) {
-            stressReason = `Detected repeated failures: ${errors} errors, ${timeouts} timeouts in cycle`;
+            pressureScore = Math.max(pressureScore, 25);
+            pressureReason = `Detected repeated failures: ${errors} errors, ${timeouts} timeouts in cycle`;
         }
-        if (stressReason) {
+        else if (hasStagedDebt) {
+            pressureScore = Math.max(pressureScore, 20);
+            pressureReason = `Elevated STAGED backlog: ${context.stagedDebt} chapters awaiting publication`;
+        }
+        const previous = this.currentConcurrency;
+        let target = previous;
+        let action = 'STABLE';
+        let state = this.currentState;
+        // 2. Decide Capacity Adjustment (AIMD)
+        // CASE A: SURVIVAL / EMERGENCY (concurrency = 1)
+        if (hasEmergencyRss || siteHealth === 'RED' || pressureScore >= 75) {
+            target = this.config.minConcurrency; // strictly 1
+            state = 'SURVIVAL';
+            action = target < previous ? 'SCALED_DOWN' : 'STRESS_DETECTED';
+            if (!pressureReason)
+                pressureReason = 'Extreme system pressure; running in SURVIVAL mode (concurrency = 1)';
+            if (typeof global.gc === 'function') {
+                try {
+                    global.gc();
+                }
+                catch { }
+            }
+            this.applyCapacityChange(target, state, action, pressureReason, siteHealth, mem, lag, pressureSnapshot);
+            return this.latestResult;
+        }
+        // CASE B: SEVERE PRESSURE (~50% reduction or at least 3 steps down)
+        if (hasHardRss || siteHealth === 'ORANGE' || pressureScore >= 50) {
+            target = Math.max(this.config.minConcurrency, Math.min(Math.round(previous * 0.50), previous - 3));
+            state = 'RUNNING_THROTTLED';
+            action = target < previous ? 'SCALED_DOWN' : 'STRESS_DETECTED';
+            if (!pressureReason)
+                pressureReason = 'Severe pressure detected; downscaling 50%';
+            if (typeof global.gc === 'function') {
+                try {
+                    global.gc();
+                }
+                catch { }
+            }
+            this.applyCapacityChange(target, state, action, pressureReason, siteHealth, mem, lag, pressureSnapshot);
+            return this.latestResult;
+        }
+        // CASE C: MODERATE PRESSURE (~20% reduction)
+        if (siteHealth === 'YELLOW' || (pressureScore >= 30 && rateLimits === 0)) {
+            target = Math.max(this.config.minConcurrency, Math.round(previous * 0.80));
+            state = 'RUNNING_THROTTLED';
+            action = target < previous ? 'SCALED_DOWN' : 'STRESS_DETECTED';
+            if (!pressureReason)
+                pressureReason = 'Moderate pressure detected; downscaling 20%';
+            this.applyCapacityChange(target, state, action, pressureReason, siteHealth, mem, lag, pressureSnapshot);
+            return this.latestResult;
+        }
+        // CASE C2: Provider Rate Limits (429) without system stress: maintain concurrency, apply cooldown
+        if (rateLimits > 0) {
             this.stableCycleCount = 0;
             this.cooldownUntil = now + this.config.cooldownPeriodMs;
-            const previous = this.currentConcurrency;
-            let target = previous;
-            let action = 'STRESS_DETECTED';
-            if (isMemoryStress) {
-                if (isEmergency) {
-                    target = this.config.minConcurrency;
-                    if (typeof global.gc === 'function') {
-                        try {
-                            global.gc();
-                        }
-                        catch { }
-                    }
-                }
-                else if (isSevere) {
-                    target = Math.max(this.config.minConcurrency, previous - 3);
-                    if (typeof global.gc === 'function') {
-                        try {
-                            global.gc();
-                        }
-                        catch { }
-                    }
-                }
-                else {
-                    target = Math.max(this.config.minConcurrency, previous - 1);
-                }
-                action = target < previous ? 'SCALED_DOWN' : 'STRESS_DETECTED';
-                this.currentConcurrency = target;
-                this.globalChapterSemaphore.setCapacity(target);
-                this.logger.warn(`[Autotuner STRESS] Memory stress detected: ${stressReason}. Scaled down: ${previous} -> ${target}`, {
-                    previous,
-                    target,
-                    stressReason,
-                    isEmergency,
-                    cooldownSeconds: Math.round(this.config.cooldownPeriodMs / 1000),
-                    memory: mem,
-                    lag,
-                });
-            }
-            else {
-                // Network/error pattern stress: maintain concurrency while applying cooldown
-                this.logger.warn(`[Autotuner STRESS] Stress detected: ${stressReason}. Concurrency maintained at ${this.currentConcurrency} during cooldown.`, {
-                    concurrency: this.currentConcurrency,
-                    stressReason,
-                    cooldownSeconds: Math.round(this.config.cooldownPeriodMs / 1000),
-                    memory: mem,
-                    lag,
-                });
-            }
-            return { concurrency: target, action, reason: stressReason };
+            action = 'STRESS_DETECTED';
+            state = 'RUNNING_STABLE';
+            const reason = `Detected ${rateLimits} HTTP 429 Rate Limits in cycle (concurrency ${previous} maintained during cooldown)`;
+            this.logger.warn(`[Autotuner RateLimit] ${reason}`);
+            this.latestResult = {
+                concurrency: previous,
+                targetConcurrency: previous,
+                action: 'STRESS_DETECTED',
+                state,
+                reason,
+                pressureScore,
+                pressureBreakdown: pressureSnapshot?.pressureBreakdown || this.latestResult.pressureBreakdown,
+                siteHealth,
+            };
+            return this.latestResult;
         }
-        // Isolated error handling: cycleErrors === 1 or cycleTimeouts === 1
-        // Do NOT scale down; do NOT enter cooldown; maintain concurrency and pause ramp-up
+        // CASE C3: Error / Timeout pattern without system degradation: maintain concurrency, apply cooldown
+        if (errors >= 2 || timeouts >= 2 || (errors + timeouts >= 2)) {
+            this.stableCycleCount = 0;
+            this.cooldownUntil = now + this.config.cooldownPeriodMs;
+            action = 'STRESS_DETECTED';
+            state = 'RUNNING_STABLE';
+            let patternReason = pressureReason;
+            if (!patternReason) {
+                if (errors >= 2)
+                    patternReason = `Detected error pattern: ${errors} errors in cycle`;
+                else if (timeouts >= 2)
+                    patternReason = `Detected timeout pattern: ${timeouts} network timeouts in cycle`;
+                else
+                    patternReason = `Detected repeated failures: ${errors} errors, ${timeouts} timeouts in cycle`;
+            }
+            this.logger.warn(`[Autotuner ErrorPattern] ${patternReason} (concurrency ${previous} maintained during cooldown)`);
+            this.latestResult = {
+                concurrency: previous,
+                targetConcurrency: previous,
+                action: 'STRESS_DETECTED',
+                state,
+                reason: patternReason,
+                pressureScore,
+                pressureBreakdown: pressureSnapshot?.pressureBreakdown || this.latestResult.pressureBreakdown,
+                siteHealth,
+            };
+            return this.latestResult;
+        }
+        // CASE C4: Isolated error or timeout without system stress: maintain concurrency, no cooldown
         if (errors === 1 || timeouts === 1) {
             this.stableCycleCount = 0;
-            this.logger.info(`[Autotuner ISOLATED] Single error/timeout in cycle (errors: ${errors}, timeouts: ${timeouts}). Maintaining concurrency at ${this.currentConcurrency} without cooldown.`);
-            return {
-                concurrency: this.currentConcurrency,
+            state = previous === 1 ? 'RECOVERING' : 'RUNNING_STABLE';
+            action = 'STABLE';
+            const reason = `Isolated ${errors === 1 ? 'error' : 'timeout'} in cycle; concurrency ${previous} maintained`;
+            this.latestResult = {
+                concurrency: previous,
+                targetConcurrency: previous,
                 action: 'STABLE',
-                reason: `Isolated failure handled: concurrency ${this.currentConcurrency} preserved`,
+                state,
+                reason,
+                pressureScore,
+                pressureBreakdown: pressureSnapshot?.pressureBreakdown || this.latestResult.pressureBreakdown,
+                siteHealth,
             };
+            return this.latestResult;
         }
-        // No stress: check if in cooldown
+        // CASE D: MILD PRESSURE (-1)
+        if (hasSoftRss || (pressureScore >= 15 && rateLimits === 0 && errors === 0 && timeouts === 0)) {
+            target = Math.max(this.config.minConcurrency, previous - 1);
+            state = 'RUNNING_THROTTLED';
+            action = target < previous ? 'SCALED_DOWN' : 'STRESS_DETECTED';
+            if (!pressureReason)
+                pressureReason = 'Mild pressure detected; downscaling -1';
+            this.applyCapacityChange(target, state, action, pressureReason, siteHealth, mem, lag, pressureSnapshot);
+            return this.latestResult;
+        }
+        // CASE E: COOLDOWN ACTIVE
         if (now < this.cooldownUntil) {
             const remainingSeconds = Math.ceil((this.cooldownUntil - now) / 1000);
+            state = previous === 1 ? 'RECOVERING' : 'RUNNING_STABLE';
             return {
                 concurrency: this.currentConcurrency,
+                targetConcurrency: this.currentConcurrency,
                 action: 'COOLDOWN',
-                reason: `In cooldown for ${remainingSeconds}s`,
+                state,
+                reason: `In stabilization cooldown for ${remainingSeconds}s`,
+                pressureScore,
+                pressureBreakdown: pressureSnapshot?.pressureBreakdown || this.latestResult.pressureBreakdown,
+                siteHealth,
             };
         }
-        // System is healthy: increment stable cycle counter
+        // CASE F: SYSTEM HEALTHY — SLOW UP (+1 step, dwell time enforced)
         this.stableCycleCount++;
-        if (this.stableCycleCount >= this.config.requiredStableCycles &&
-            this.currentConcurrency < this.config.maxConcurrency) {
+        const dwellTimeSatisfied = now - this.lastCapacityChangeAt >= this.config.scaleUpDwellTimeMs;
+        const stableCyclesSatisfied = this.stableCycleCount >= this.config.requiredStableCycles;
+        if (stableCyclesSatisfied && dwellTimeSatisfied && this.currentConcurrency < this.config.maxConcurrency) {
             // Memory proximity hold: do NOT scale up if close to soft limit or committed buffers are high
             const totalCommitted = this.activeBufferedBytes + this.reservedBufferedBytes;
             if (mem.rssMb >= (this.config.rssSoftLimitMb - 20) || totalCommitted > (this.config.maxBufferedBytes * 0.7)) {
-                this.logger.info(`[Autotuner HOLD] Concurrency maintained at ${this.currentConcurrency} due to memory proximity (RSS: ${mem.rssMb}MB, Committed: ${Math.round(totalCommitted / 1024 / 1024)}MB)`);
+                state = 'RUNNING_STABLE';
                 return {
                     concurrency: this.currentConcurrency,
+                    targetConcurrency: this.currentConcurrency,
                     action: 'STABLE',
-                    reason: `Holding concurrency at ${this.currentConcurrency} (RSS: ${mem.rssMb}MB, Committed: ${Math.round(totalCommitted / 1024 / 1024)}MB)`,
+                    state,
+                    reason: `Holding concurrency at ${this.currentConcurrency} due to memory proximity (RSS: ${mem.rssMb}MB, Committed: ${Math.round(totalCommitted / 1024 / 1024)}MB)`,
+                    pressureScore,
+                    pressureBreakdown: pressureSnapshot?.pressureBreakdown || this.latestResult.pressureBreakdown,
+                    siteHealth,
                 };
             }
-            const previous = this.currentConcurrency;
-            const target = Math.min(this.config.maxConcurrency, previous + 1);
-            this.currentConcurrency = target;
-            this.globalChapterSemaphore.setCapacity(target);
-            this.stableCycleCount = 0; // Reset counter for the next tier
-            this.logger.info(`[Autotuner SCALE UP] System stable for ${this.config.requiredStableCycles} consecutive cycles. Scaled up: ${previous} -> ${target}`, {
-                previous,
-                target,
-                memory: mem,
-                lag,
-            });
-            return {
-                concurrency: target,
-                action: 'SCALED_UP',
-                reason: `Stable across ${this.config.requiredStableCycles} cycles`,
-            };
+            target = Math.min(this.config.maxConcurrency, previous + 1);
+            state = previous === 1 ? 'RECOVERING' : 'RUNNING_ACCELERATING';
+            action = 'SCALED_UP';
+            const reason = `System healthy across ${this.stableCycleCount} cycles and dwell window satisfied. Scaled up: ${previous} -> ${target}`;
+            this.applyCapacityChange(target, state, action, reason, siteHealth, mem, lag, pressureSnapshot);
+            return this.latestResult;
         }
-        return {
+        // Stable holding
+        state = previous === 1 ? 'RECOVERING' : 'RUNNING_STABLE';
+        action = 'STABLE';
+        const reason = `Stable (${this.stableCycleCount}/${this.config.requiredStableCycles} cycles, dwell: ${Math.round((now - this.lastCapacityChangeAt) / 1000)}s/${Math.round(this.config.scaleUpDwellTimeMs / 1000)}s)`;
+        this.latestResult = {
             concurrency: this.currentConcurrency,
-            action: 'STABLE',
-            reason: `Stable (${this.stableCycleCount}/${this.config.requiredStableCycles} cycles towards scale-up)`,
+            targetConcurrency: this.currentConcurrency,
+            action,
+            state,
+            reason,
+            pressureScore,
+            pressureBreakdown: pressureSnapshot?.pressureBreakdown || this.latestResult.pressureBreakdown,
+            siteHealth,
+        };
+        return this.latestResult;
+    }
+    applyCapacityChange(target, state, action, reason, siteHealth, mem, lag, pressureSnapshot) {
+        const previous = this.currentConcurrency;
+        const clampedTarget = Math.max(this.config.minConcurrency, Math.min(this.config.maxConcurrency, target));
+        this.currentConcurrency = clampedTarget;
+        this.currentState = state;
+        this.lastCapacityChangeAt = Date.now();
+        this.stableCycleCount = 0;
+        if (action === 'SCALED_DOWN' || action === 'STRESS_DETECTED' || action === 'SURVIVAL') {
+            this.cooldownUntil = Date.now() + this.config.cooldownPeriodMs;
+        }
+        if (state === 'RUNNING_STABLE' || action === 'SCALED_UP') {
+            this.lastStableConcurrency = clampedTarget;
+            this.lastStableAt = Date.now();
+        }
+        // SINGLE AUTHORITY: Update the global chapter semaphore
+        this.globalChapterSemaphore.setCapacity(clampedTarget);
+        // STRUCTURED DECISION LOG
+        if (clampedTarget !== previous) {
+            this.logger.warn(`[CAPACITY_DECISION] Concurrency changed from ${previous} to ${clampedTarget} | State: ${state} | Action: ${action} | Reason: ${reason} | Site: ${siteHealth} | RSS: ${mem.rssMb}MB | Lag: ${lag.avgLagMs}ms | YSQL: ${pressureSnapshot?.ysqlTotal ?? '?'}/${pressureSnapshot?.ysqlActive ?? '?'}`);
+        }
+        this.latestResult = {
+            concurrency: clampedTarget,
+            targetConcurrency: clampedTarget,
+            action,
+            state,
+            reason,
+            pressureScore: pressureSnapshot?.pressureScore || 0,
+            pressureBreakdown: pressureSnapshot?.pressureBreakdown || {
+                sitePressure: 0,
+                dbPressure: 0,
+                memoryPressure: 0,
+                eventLoopPressure: 0,
+                storagePressure: 0,
+                sourcePressure: 0,
+                publicationPressure: 0,
+            },
+            siteHealth,
         };
     }
     getCurrentConcurrency() {
         return this.currentConcurrency;
+    }
+    getAdaptiveState() {
+        return this.currentState;
+    }
+    getState() {
+        return this.currentState;
+    }
+    getMaxConcurrency() {
+        return this.config.maxConcurrency;
+    }
+    getLatestResult() {
+        return this.latestResult;
+    }
+    getLastStableConcurrency() {
+        return this.lastStableConcurrency;
+    }
+    setCapacity(newCapacity, stateOrReason, optionalReason) {
+        let state = 'RUNNING_STABLE';
+        let reason = 'Manual capacity adjustment';
+        if (stateOrReason) {
+            if (stateOrReason === 'RUNNING_ACCELERATING' ||
+                stateOrReason === 'RUNNING_STABLE' ||
+                stateOrReason === 'RUNNING_THROTTLED' ||
+                stateOrReason === 'SURVIVAL' ||
+                stateOrReason === 'WAITING_DEPENDENCY' ||
+                stateOrReason === 'WAITING_SOURCES' ||
+                stateOrReason === 'RECOVERING' ||
+                stateOrReason === 'MANUAL_STOP') {
+                state = stateOrReason;
+                reason = optionalReason || 'Manual state and capacity adjustment';
+            }
+            else {
+                reason = stateOrReason;
+            }
+        }
+        const target = Math.max(this.config.minConcurrency, Math.min(this.config.maxConcurrency, newCapacity));
+        const mem = diagnostics.getMemorySnapshot();
+        const lag = diagnostics.lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
+        const action = state === 'SURVIVAL' ? 'SURVIVAL' : (target < this.currentConcurrency ? 'SCALED_DOWN' : 'STABLE');
+        this.applyCapacityChange(target, state, action, reason, state === 'SURVIVAL' ? 'RED' : 'GREEN', mem, lag);
     }
 }

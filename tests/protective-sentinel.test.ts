@@ -18,6 +18,9 @@ const mockPool = {
         rows: [{ total: String(mockDbConns.total), active: String(mockDbConns.active) }],
       });
     }
+    if (sql.includes('SELECT id FROM chapters')) {
+      return Promise.resolve({ rows: [{ id: 'test-chapter-uuid-1' }] });
+    }
     return Promise.resolve({ rows: [] });
   }),
 };
@@ -29,7 +32,7 @@ vi.mock('../src/db/yugabyte-direct.js', () => ({
 import { ProtectiveSentinel } from '../src/core/protective-sentinel.js';
 import { diagnostics } from '../src/core/diagnostics.js';
 
-describe('ProtectiveSentinel Targeted Auto-Heal & Discrimination Tests', () => {
+describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
   const mockSupabase = {
     from: vi.fn().mockImplementation(() => ({
       select: vi.fn().mockImplementation(() => ({
@@ -56,119 +59,91 @@ describe('ProtectiveSentinel Targeted Auto-Heal & Discrimination Tests', () => {
       heapUsedMb: 120,
       heapTotalMb: 180,
       externalMb: 10,
+      arrayBuffersMb: 0,
     });
   });
 
-  it('Case A: Isolated 503 with healthy infra does NOT trigger PROTECTIVE_STOP and resets on 200', async () => {
+  it('Requirement 1 & 2: Automatic 5xx errors NEVER trigger global protective stop', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, 'https://test-site.workers.dev');
 
-    // Initially active should be false
+    // 1st, 2nd, 3rd probe 503
+    (sentinel as any).recordProbeResult('home', 90, 503);
+    (sentinel as any).recordProbeResult('home', 92, 503);
+    (sentinel as any).recordProbeResult('home', 94, 503);
+
+    // isProtectiveStopActive MUST remain FALSE (no global stop on 5xx)
     expect(await sentinel.isProtectiveStopActive()).toBe(false);
 
-    // 1st probe: 503 transient edge error
-    await sentinel.handleProbeResult('home', 'https://test-site.workers.dev/', 85, 250, 350, 503);
-
-    // Must NOT trip protective stop on a single isolated 503
-    expect(await sentinel.isProtectiveStopActive()).toBe(false);
-
-    // 2nd probe: 200 OK
-    await sentinel.handleProbeResult('home', 'https://test-site.workers.dev/', 95, 250, 350, 200);
-
-    expect(await sentinel.isProtectiveStopActive()).toBe(false);
+    // But pressure snapshot reports pressure to the autotuner
+    await sentinel.evaluatePreSlaGuardRails();
+    const snap = sentinel.getPressureSnapshot();
+    expect(snap.siteHealth).toBe('RED');
+    expect(snap.pressureScore).toBeGreaterThanOrEqual(60);
+    expect(snap.pressureReason).toContain('Sustained HTTP 5xx');
   });
 
-  it('Case B: Sustained 3x consecutive 503 errors trips PROTECTIVE_STOP with REAL_SYSTEM_PRESSURE', async () => {
-    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, 'https://test-site.workers.dev');
-
-    // 1st probe: 503 -> no stop
-    await sentinel.handleProbeResult('home', 'https://test-site.workers.dev/', 90, 250, 350, 503);
-    expect(await sentinel.isProtectiveStopActive()).toBe(false);
-
-    // 2nd probe: 503 -> no stop (infra healthy)
-    await sentinel.handleProbeResult('home', 'https://test-site.workers.dev/', 92, 250, 350, 503);
-    expect(await sentinel.isProtectiveStopActive()).toBe(false);
-
-    // 3rd probe: 503 -> MUST trip REAL_SYSTEM_PRESSURE
-    await sentinel.handleProbeResult('home', 'https://test-site.workers.dev/', 94, 250, 350, 503);
-    expect(await sentinel.isProtectiveStopActive()).toBe(true);
-
-    const info = await sentinel.getProtectiveStopInfo(true);
-    expect(info.active).toBe(true);
-    expect(info.classification).toBe('REAL_SYSTEM_PRESSURE');
-    expect(info.reason).toContain('Sustained HTTP 503');
-  });
-
-  it('Case C: YSQL pressure trips YSQL_PRESSURE immediately and blocks auto-resume', async () => {
+  it('Requirement 1 & 2: YSQL connection spikes NEVER trigger global protective stop', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
 
-    // Simulate DB connection spike (12 of 13)
     mockDbConns = { total: 12, active: 8 };
-
     await sentinel.evaluatePreSlaGuardRails();
+
+    // Must NEVER trigger global stop
+    expect(await sentinel.isProtectiveStopActive()).toBe(false);
+
+    // But pressure snapshot reports DB pressure to the autotuner
+    const snap = sentinel.getPressureSnapshot();
+    expect(snap.pressureBreakdown.dbPressure).toBe(30);
+    expect(snap.pressureReason).toContain('Elevated YSQL load');
+  });
+
+  it('Requirement 2: Legacy automatic protective stop in database is auto-cleared', async () => {
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
+
+    // Simulate an old automatic stop from 6 hours ago in DB
+    mockSettings['importer_protective_stop'] = JSON.stringify({
+      active: true,
+      reason: 'Sustained HTTP 503 on READER',
+      classification: 'REAL_SYSTEM_PRESSURE',
+      triggered_at: '2026-09-26T01:02:32.400Z',
+    });
+
+    // On check, must ignore legacy stop and auto-clear it
+    const isActive = await sentinel.isProtectiveStopActive();
+    expect(isActive).toBe(false);
+
+    // On startup check, explicitly clears
+    await sentinel.clearLegacyProtectiveStopOnStartup();
+    const info = await sentinel.getProtectiveStopInfo(true);
+    expect(info.active).toBe(false);
+  });
+
+  it('Requirement 2: Manual staff stop IS preserved and active', async () => {
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
+
+    await sentinel.triggerProtectiveStop('Manual maintenance by staff', {}, 'MANUAL_STOP');
 
     expect(await sentinel.isProtectiveStopActive()).toBe(true);
     const info = await sentinel.getProtectiveStopInfo(true);
-    expect(info.classification).toBe('YSQL_PRESSURE');
-    expect(info.reason).toContain('YSQL Connection Tripwire Exceeded');
+    expect(info.active).toBe(true);
+    expect(info.classification).toBe('MANUAL_STOP');
 
-    // evaluateAutoResume must refuse to resume while YSQL is elevated
-    await sentinel.evaluateAutoResume();
-    expect(await sentinel.isProtectiveStopActive()).toBe(true);
-  });
-
-  it('Case D: Auto-resume succeeds automatically without human intervention when edge recovers', async () => {
-    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, 'https://test-site.workers.dev');
-
-    // Start in PROTECTIVE_STOP due to edge incident
-    await sentinel.triggerProtectiveStop(
-      'Edge transient failure',
-      { status: 503 },
-      'REAL_SYSTEM_PRESSURE'
-    );
-    expect(await sentinel.isProtectiveStopActive()).toBe(true);
-
-    // Mock measureRoute returning 200 OK within WAN threshold
-    vi.spyOn(sentinel as any, 'measureRoute').mockResolvedValue({
-      statusCode: 200,
-      ttfbMs: 120,
-    });
-
-    // Mock timer so 5s debounce passes instantly
-    vi.useFakeTimers();
-    const resumePromise = sentinel.evaluateAutoResume();
-    await vi.advanceTimersByTimeAsync(5500);
-    await resumePromise;
-    vi.useRealTimers();
-
+    // Resuming manual stop
+    await sentinel.resumeProtectiveStop('staff_user');
     expect(await sentinel.isProtectiveStopActive()).toBe(false);
-    const stopInfo = await sentinel.getProtectiveStopInfo(true);
-    expect(stopInfo.active).toBe(false);
-    expect(stopInfo.resumed_by).toBe('auto_healing_sentinel_recovery');
   });
 
-  it('Case E: Manual staff stop is NEVER auto-resumed', async () => {
-    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, 'https://test-site.workers.dev');
+  it('Requirement 63: CI Anti-regression — Automatic performance stops cannot be triggered', async () => {
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
 
-    // Manual stop
-    await sentinel.triggerProtectiveStop(
-      'Manual maintenance by staff',
-      {},
-      'MANUAL_STOP'
-    );
-    expect(await sentinel.isProtectiveStopActive()).toBe(true);
+    // Attempting to trigger with non-MANUAL_STOP classification must be blocked
+    await sentinel.triggerProtectiveStop('High RAM', {}, 'IMPORTER_PRESSURE');
+    expect(await sentinel.isProtectiveStopActive()).toBe(false);
 
-    vi.spyOn(sentinel as any, 'measureRoute').mockResolvedValue({
-      statusCode: 200,
-      ttfbMs: 80,
-    });
+    await sentinel.triggerProtectiveStop('High latency', {}, 'REAL_SYSTEM_PRESSURE');
+    expect(await sentinel.isProtectiveStopActive()).toBe(false);
 
-    vi.useFakeTimers();
-    const resumePromise = sentinel.evaluateAutoResume();
-    await vi.advanceTimersByTimeAsync(6000);
-    await resumePromise;
-    vi.useRealTimers();
-
-    // Must still be stopped!
-    expect(await sentinel.isProtectiveStopActive()).toBe(true);
+    await sentinel.triggerProtectiveStop('DB tripwire', {}, 'YSQL_PRESSURE');
+    expect(await sentinel.isProtectiveStopActive()).toBe(false);
   });
 });

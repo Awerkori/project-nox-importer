@@ -5,6 +5,7 @@ import type { AdmissionController } from './scheduler/admission-controller.js';
 import type { ProtectiveSentinel } from './protective-sentinel.js';
 import type { PublicationBarrier } from './publication.js';
 import type { PublicationSafetyBarrier } from './publication-safety-barrier.js';
+import type { AdaptiveAutotuner } from './concurrency.js';
 import { diagnostics } from './diagnostics.js';
 
 export type ImporterHealthStatus =
@@ -69,6 +70,7 @@ export interface HealthPanelMetrics {
   circuitBreakerOpen: boolean;
   protectiveStopActive: boolean;
   protectiveStopReason?: string | null;
+  noProgressReason?: string | null;
   rssMb: number;
   pid: number;
   timestamp: string;
@@ -88,6 +90,7 @@ export interface AutoHealWatchdogOptions {
   protectiveSentinel?: ProtectiveSentinel;
   publicationBarrier?: PublicationBarrier;
   safetyBarrier?: PublicationSafetyBarrier;
+  autotuner?: AdaptiveAutotuner;
   onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<void>;
   intervalMs?: number;
   workerId?: string;
@@ -114,6 +117,7 @@ export class AutoHealWatchdog {
   private protectiveSentinel?: ProtectiveSentinel;
   private publicationBarrier?: PublicationBarrier;
   private safetyBarrier?: PublicationSafetyBarrier;
+  private autotuner?: AdaptiveAutotuner;
   private onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<void>;
   private intervalMs: number;
   private workerId: string;
@@ -150,6 +154,7 @@ export class AutoHealWatchdog {
     this.protectiveSentinel = options.protectiveSentinel;
     this.publicationBarrier = options.publicationBarrier;
     this.safetyBarrier = options.safetyBarrier;
+    this.autotuner = options.autotuner;
     this.onControlledRestart = options.onControlledRestart;
     this.intervalMs = options.intervalMs ?? 60_000;
     this.workerId = options.workerId ?? 'discloud-importer-1';
@@ -675,6 +680,27 @@ export class AutoHealWatchdog {
       stuckStagedAgeSec,
     });
 
+    let noProgressReason: string | null = null;
+    if (health.status !== 'HEALTHY' && health.status !== 'IDLE') {
+      if (protectiveStopActive) {
+        noProgressReason = protectiveStopReason || 'MANUAL_PROTECTIVE_STOP';
+      } else if (this.circuitBreakerOpen) {
+        noProgressReason = 'RESTART_CIRCUIT_BREAKER_OPEN';
+      } else if (stuckStaged > 0 && publishableStaged === 0) {
+        noProgressReason = 'STUCK_STAGED_BACKLOG';
+      } else if (publishableStaged > 0 && health.publicationHealth !== 'HEALTHY') {
+        noProgressReason = 'PUBLICATION_BARRIER_STALLED';
+      } else if (importingCount > 0 && health.processingHealth !== 'HEALTHY') {
+        noProgressReason = 'IN_FLIGHT_IMPORT_JOBS_STALLED';
+      } else if (eligibleJobs > 0 && health.processingHealth !== 'HEALTHY') {
+        noProgressReason = 'PROCESSING_STALLED_ON_ELIGIBLE';
+      } else if (health.status === 'CRITICAL_STALL') {
+        noProgressReason = 'CRITICAL_STALL_NO_PROGRESS';
+      } else {
+        noProgressReason = 'PIPELINE_DEGRADED';
+      }
+    }
+
     const metricsResult: HealthPanelMetrics = {
       status: health.status,
       autoHealState: this.circuitBreakerOpen ? 'CIRCUIT_OPEN' : this.autoHealState,
@@ -709,6 +735,7 @@ export class AutoHealWatchdog {
       circuitBreakerOpen: this.circuitBreakerOpen,
       protectiveStopActive,
       protectiveStopReason,
+      noProgressReason,
       rssMb: mem.rssMb,
       pid: process.pid,
       timestamp: now.toISOString(),
@@ -961,40 +988,16 @@ export class AutoHealWatchdog {
       }
     }
 
-    // NÍVEL 1 — RECONCILIAÇÃO LEVE (>= 15m stall)
-    if (effectiveStallAgeSec >= 15 * 60 && nowMs - this.lastLevel1At >= 3 * 60 * 1000) {
-      this.lastLevel1At = nowMs;
-      this.autoHealState = 'LEVEL_1_LIGHT_RECONCILIATION';
-      this.lastAutoHealAt = new Date().toISOString();
-      this.logger.warn(`🔧 [AUTO-HEAL NÍVEL 1] Initiating Light Reconciliation (Stall age: ${Math.round(effectiveStallAgeSec / 60)}m, Eligible: ${metrics.eligibleJobs})...`);
-
-      try {
-        await this.runLevel1LightReconciliation(metrics);
-        this.logger.info('✅ [AUTO-HEAL NÍVEL 1] Light reconciliation executed. Awaiting progress...');
-      } catch (err: any) {
-        this.logger.error('Failed executing Level 1 reconciliation', { error: err?.message });
-      }
-      return;
-    }
-
-    // NÍVEL 2 — ESTADO PRESO (>= 20m stall, after Level 1 attempted)
-    if (effectiveStallAgeSec >= 20 * 60 && nowMs - this.lastLevel2At >= 5 * 60 * 1000) {
-      this.lastLevel2At = nowMs;
-      this.autoHealState = 'LEVEL_2_STUCK_STATE_AUDIT';
-      this.lastAutoHealAt = new Date().toISOString();
-      this.logger.warn(`🔧 [AUTO-HEAL NÍVEL 2] Initiating Stuck State Audit (Stall age: ${Math.round(effectiveStallAgeSec / 60)}m, Eligible: ${metrics.eligibleJobs})...`);
-
-      try {
-        await this.runLevel2StuckStateAudit(metrics);
-        this.logger.info('✅ [AUTO-HEAL NÍVEL 2] Stuck state audit executed. Awaiting progress...');
-      } catch (err: any) {
-        this.logger.error('Failed executing Level 2 stuck state audit', { error: err?.message });
-      }
-      return;
-    }
-
     // NÍVEL 3 — RESTART CONTROLADO (>= 30m stall / CRITICAL_STALL)
-    if (effectiveStallAgeSec >= 30 * 60 && metrics.status === 'CRITICAL_STALL') {
+    // Only triggers if real eligible or importing jobs exist (never for staged backlog alone, which is handled by Level 1 sweep)
+    // and after prior reconciliation rungs (Level 1/2) have been attempted.
+    const hasAttemptedPriorLevels = this.lastLevel1At > 0 || this.lastLevel2At > 0;
+    if (
+      effectiveStallAgeSec >= 30 * 60 &&
+      metrics.status === 'CRITICAL_STALL' &&
+      (metrics.eligibleJobs > 0 || metrics.importingCount > 0) &&
+      hasAttemptedPriorLevels
+    ) {
       if (metrics.protectiveStopActive && metrics.protectiveStopReason?.toLowerCase().includes('manual')) {
         this.logger.info('[AUTO-HEAL NÍVEL 3] Manual staff stop active; skipping self-restart.');
         return;
@@ -1007,8 +1010,11 @@ export class AutoHealWatchdog {
         this.circuitBreakerOpen = true;
         this.autoHealState = 'CIRCUIT_OPEN';
         this.logger.error(
-          `🚨 [AUTO-RECOVERY CIRCUIT OPEN] Reached max 3 auto-restarts in 1h (Current count: ${restartsLast1h.length}). Halting automatic restarts to prevent loop. ROOT CAUSE REQUIRED.`
+          `🚨 [AUTO-RECOVERY CIRCUIT OPEN] Reached max 3 auto-restarts in 1h (Current count: ${restartsLast1h.length}). Halting automatic restarts to prevent loop. Setting SURVIVAL mode (concurrency = 1).`
         );
+        if (this.autotuner) {
+          this.autotuner.setCapacity(1, 'SURVIVAL', 'Restart storm circuit breaker open (>=3 restarts/1h)');
+        }
         return;
       }
 
@@ -1049,6 +1055,39 @@ export class AutoHealWatchdog {
       if (this.onControlledRestart) {
         await this.onControlledRestart(reason, metrics);
       }
+      return;
+    }
+
+    // NÍVEL 1 — RECONCILIAÇÃO LEVE (>= 15m stall)
+    if (effectiveStallAgeSec >= 15 * 60 && (this.lastLevel1At === 0 || nowMs - this.lastLevel1At >= 3 * 60 * 1000)) {
+      this.lastLevel1At = nowMs;
+      this.autoHealState = 'LEVEL_1_LIGHT_RECONCILIATION';
+      this.lastAutoHealAt = new Date().toISOString();
+      this.logger.warn(`🔧 [AUTO-HEAL NÍVEL 1] Initiating Light Reconciliation (Stall age: ${Math.round(effectiveStallAgeSec / 60)}m, Eligible: ${metrics.eligibleJobs})...`);
+
+      try {
+        await this.runLevel1LightReconciliation(metrics);
+        this.logger.info('✅ [AUTO-HEAL NÍVEL 1] Light reconciliation executed. Awaiting progress...');
+      } catch (err: any) {
+        this.logger.error('Failed executing Level 1 reconciliation', { error: err?.message });
+      }
+      return;
+    }
+
+    // NÍVEL 2 — ESTADO PRESO (>= 20m stall, after Level 1 attempted)
+    if (effectiveStallAgeSec >= 20 * 60 && nowMs - this.lastLevel2At >= 5 * 60 * 1000) {
+      this.lastLevel2At = nowMs;
+      this.autoHealState = 'LEVEL_2_STUCK_STATE_AUDIT';
+      this.lastAutoHealAt = new Date().toISOString();
+      this.logger.warn(`🔧 [AUTO-HEAL NÍVEL 2] Initiating Stuck State Audit (Stall age: ${Math.round(effectiveStallAgeSec / 60)}m, Eligible: ${metrics.eligibleJobs})...`);
+
+      try {
+        await this.runLevel2StuckStateAudit(metrics);
+        this.logger.info('✅ [AUTO-HEAL NÍVEL 2] Stuck state audit executed. Awaiting progress...');
+      } catch (err: any) {
+        this.logger.error('Failed executing Level 2 stuck state audit', { error: err?.message });
+      }
+      return;
     }
   }
 
@@ -1238,6 +1277,7 @@ export class AutoHealWatchdog {
       circuitBreakerOpen: metrics.circuitBreakerOpen,
       protectiveStop: metrics.protectiveStopActive,
       protectiveStopReason: metrics.protectiveStopReason,
+      noProgressReason: metrics.noProgressReason || null,
       rssMb: metrics.rssMb,
       pid: metrics.pid,
       workerId: this.workerId,
