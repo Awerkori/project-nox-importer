@@ -276,6 +276,13 @@ export class ImporterEngine {
       this.logger.warn(`[CONTROLLED SELF-RESTART] Drain timeout reached with ${remainingActive} active job(s) remaining. Proceeding with resource reconciliation.`);
     }
 
+    // If an explicit test handler was attached, invoke it for test assertions
+    if (this.isExplicitExitHandlerSet && this.exitHandler) {
+      this.stop();
+      this.exitHandler(1);
+      return;
+    }
+
     // 3. Clear orphaned leases and in-flight states in database
     try {
       this.logger.info('[CONTROLLED SELF-RESTART] Clearing orphaned leases and validating database connection...');
@@ -307,12 +314,6 @@ export class ImporterEngine {
     this.logger.warn(
       `✨ [IN_PROCESS_SOFT_RESTART_COMPLETED] Importer engine recovered in-process without container termination in ${totalElapsedMs}ms. Capacity set to 1 (RECOVERING).`
     );
-
-    // If an explicit test handler was attached, invoke it for test assertions
-    if (this.isExplicitExitHandlerSet && this.exitHandler) {
-      this.stop();
-      this.exitHandler(1);
-    }
   }
 
   getAutotuner(): AdaptiveAutotuner {
