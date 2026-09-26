@@ -73,17 +73,21 @@ export declare class ImporterEngine {
     autoHealWatchdog: AutoHealWatchdog;
     rateBucketTracker: RateBucketTracker;
     private isRestarting;
+    private dbPool;
     static activeBufferedBytes: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
+    private isExplicitExitHandlerSet;
     private exitHandler;
     setExitHandlerForTest(handler: (code: number) => void): void;
     /**
-     * Initiates a truly graceful bounded controlled self-restart when an unresolvable critical stall occurs:
-     * 1. Halts new claims and aborts background loops immediately.
+     * Initiates in-process soft restart when an unresolvable critical stall occurs:
+     * 1. Pauses acceptance of new claims (isRestarting = true).
      * 2. Bounded drain of in-flight jobs (up to 6s).
-     * 3. Safely closes DB pool and system resources (bounded <=2s).
-     * 4. Enforces hard maximum total restart duration <= 10s.
-     * 5. Exits cleanly with code 1 for supervisor / container restart.
+     * 3. Clears orphaned leases and in-flight jobs in database.
+     * 4. Validates Yugabyte database connectivity.
+     * 5. Re-initializes scheduler and admission controller state.
+     * 6. Resets AdaptiveAutotuner to capacity 1 in RECOVERING mode.
+     * 7. Resumes worker loops smoothly without process exit (protects Discloud uptime).
      */
     initiateControlledSelfRestart(reason: string, metrics?: any): Promise<void>;
     getAutotuner(): AdaptiveAutotuner;

@@ -62,10 +62,32 @@ export class ProtectiveSentinel {
     homeAgent = new https.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 60000 });
     readerAgent = new https.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 60000 });
     httpAgent = new http.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 60000 });
+    catastrophicCyclesCount = 0;
+    healthyCyclesCount = 0;
+    autoEmergencyPause = {
+        active: false,
+        pausedAt: null,
+        reason: null,
+        siteP95: null,
+        consecutiveCatastrophicCycles: 0,
+        nextRecheckAt: null,
+        resumedAt: null,
+        healthyCyclesCount: 0,
+    };
+    onAutoResume;
     constructor(supabase, thresholds = DEFAULT_SENTINEL_THRESHOLDS, siteUrl) {
         this.supabase = supabase;
         this.thresholds = thresholds;
         this.siteUrl = siteUrl;
+    }
+    setOnAutoResume(fn) {
+        this.onAutoResume = fn;
+    }
+    isEmergencyPaused() {
+        return this.autoEmergencyPause.active;
+    }
+    getEmergencyPauseState() {
+        return { ...this.autoEmergencyPause };
     }
     /**
      * Checks whether a MANUAL staff protective stop is active.
@@ -340,23 +362,79 @@ export class ProtectiveSentinel {
         const homeP95 = this.getPercentile(this.homeSamples, 0.95);
         const readerP50 = this.getPercentile(this.readerSamples, 0.50);
         const readerP95 = this.getPercentile(this.readerSamples, 0.95);
-        // Compute site health state
+        const maxP95 = Math.max(homeP95, readerP95);
+        // 1. CATASTROPHIC SITE DEGRADATION CHECK (Section 4)
+        // Criteria: Home OR Reader P95 >= 10,000ms sustained for >= 3 consecutive cycles,
+        // OR severe combo: Site P95 >= 8,000ms sustained + >= 3 consecutive 5xx errors.
+        const isCatastrophicSignal = homeP95 >= 10_000 ||
+            readerP95 >= 10_000 ||
+            (maxP95 >= 8_000 && this.consecutive5xxCount >= 3);
+        if (isCatastrophicSignal) {
+            this.catastrophicCyclesCount++;
+            if (this.catastrophicCyclesCount >= 3 && !this.autoEmergencyPause.active) {
+                this.autoEmergencyPause = {
+                    active: true,
+                    pausedAt: new Date().toISOString(),
+                    reason: `Catastrophic site latency breach sustained for ${this.catastrophicCyclesCount} cycles (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms, 5xx: ${this.consecutive5xxCount})`,
+                    siteP95: maxP95,
+                    consecutiveCatastrophicCycles: this.catastrophicCyclesCount,
+                    nextRecheckAt: new Date(Date.now() + 15_000).toISOString(),
+                    resumedAt: null,
+                    healthyCyclesCount: 0,
+                };
+                this.logger.error(`🚨 [AUTO_EMERGENCY_PAUSE] Catastrophic user-facing site degradation sustained for 3 cycles (Home: ${homeP95}ms, Reader: ${readerP95}ms, 5xx: ${this.consecutive5xxCount}). Halting new chapter claims while preserving engine, watchdog and telemetry.`);
+                void this.persistAutoEmergencyPause();
+            }
+        }
+        else {
+            this.catastrophicCyclesCount = 0;
+        }
+        // 2. AUTO-RESUME CHECK (Section 6)
+        // When emergency pause is active, auto-resume if site returns to healthy (< 1500ms and 0 5xx) for sustained ~2 minutes (8 cycles * 15s)
+        if (this.autoEmergencyPause.active) {
+            if (homeP95 < 1500 && readerP95 < 1200 && this.consecutive5xxCount === 0) {
+                this.healthyCyclesCount++;
+                if (this.healthyCyclesCount >= 8) {
+                    this.autoEmergencyPause.active = false;
+                    this.autoEmergencyPause.resumedAt = new Date().toISOString();
+                    this.autoEmergencyPause.reason = `Auto-resumed after site stabilization (Home: ${homeP95}ms, Reader: ${readerP95}ms sustained for 2m)`;
+                    this.healthyCyclesCount = 0;
+                    this.logger.info(`✅ [AUTO-RESUME] Site recovered to healthy state (Home: ${homeP95}ms, Reader: ${readerP95}ms). Auto-resuming claims at capacity 1.`);
+                    void this.persistAutoEmergencyPause();
+                    if (this.onAutoResume) {
+                        try {
+                            this.onAutoResume();
+                        }
+                        catch { }
+                    }
+                }
+            }
+            else {
+                this.healthyCyclesCount = 0;
+            }
+        }
+        // 3. SITE LATENCY TIERS (Section 19: GREEN, YELLOW, ORANGE, RED)
         let siteHealth = 'GREEN';
         let sitePressure = 0;
         let pressureReason = 'Site and infrastructure healthy';
-        if (this.consecutive5xxCount >= 3 || homeP95 >= 2500 || readerP95 >= 2000) {
+        if (this.autoEmergencyPause.active) {
+            siteHealth = 'RED';
+            sitePressure = 80;
+            pressureReason = `AUTO_EMERGENCY_PAUSE: ${this.autoEmergencyPause.reason}`;
+        }
+        else if (this.consecutive5xxCount >= 3 || homeP95 >= 3500 || readerP95 >= 3000) {
             siteHealth = 'RED';
             sitePressure = 60;
             pressureReason = this.consecutive5xxCount >= 3
                 ? `Sustained HTTP 5xx errors (${this.consecutive5xxCount} consecutive)`
                 : `Severe site latency breach (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
         }
-        else if (this.consecutive5xxCount >= 1 || homeP95 >= 1200 || readerP95 >= 1000) {
+        else if (this.consecutive5xxCount >= 1 || homeP95 >= 1500 || readerP95 >= 1200) {
             siteHealth = 'ORANGE';
             sitePressure = 35;
             pressureReason = `Confirmed site degradation (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
         }
-        else if (homeP95 >= 600 || readerP95 >= 500) {
+        else if (homeP95 >= 800 || readerP95 >= 700) {
             siteHealth = 'YELLOW';
             sitePressure = 15;
             pressureReason = `Mild site latency increase (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
@@ -437,7 +515,7 @@ export class ProtectiveSentinel {
                 headers: {
                     'User-Agent': 'Project-Nox-AdaptiveMonitor/2.0',
                 },
-                timeout: 4000,
+                timeout: 12000,
             }, (res) => {
                 let resolved = false;
                 const finish = () => {
@@ -469,7 +547,7 @@ export class ProtectiveSentinel {
             });
         });
     }
-    recordProbeResult(label, ttfbMs, statusCode) {
+    recordProbeResult(label, ttfbMs, statusCode = 200) {
         if (statusCode >= 500) {
             this.consecutive5xxCount++;
             this.last5xxTimestamp = Date.now();
@@ -499,6 +577,15 @@ export class ProtectiveSentinel {
     }
     updatePressureState(reason, classification, details) {
         this.latestSnapshot.pressureReason = reason;
+    }
+    async persistAutoEmergencyPause() {
+        try {
+            const pool = getYugabytePool();
+            await pool.query("INSERT INTO settings (key, value) VALUES ('importer_auto_emergency_pause', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", [JSON.stringify(this.autoEmergencyPause)]);
+        }
+        catch (err) {
+            this.logger.warn('Failed to persist importer_auto_emergency_pause', { error: err?.message });
+        }
     }
     /**
      * Compatibility method for auto-heal watchdog
