@@ -55,8 +55,30 @@ export interface AutotunerConfig {
     maxBufferedBytes: number;
     adaptiveEnabled: boolean;
     scaleUpDwellTimeMs: number;
+    desiredFloorFreshPerMin?: number;
+    optimalFreshPerMinLow?: number;
+    optimalFreshPerMinHigh?: number;
+    preferredFreshPerMin?: number;
+    maxFreshPerMin?: number;
+    catastrophicSiteLatencyMs?: number;
 }
-export type AdaptiveCapacityState = 'RUNNING_ACCELERATING' | 'RUNNING_STABLE' | 'RUNNING_THROTTLED' | 'SURVIVAL' | 'WAITING_DEPENDENCY' | 'WAITING_SOURCES' | 'RECOVERING' | 'MANUAL_STOP';
+export type AdaptiveCapacityState = 'RUNNING_ACCELERATING' | 'RUNNING_STABLE' | 'RUNNING_THROTTLED' | 'SURVIVAL' | 'WAITING_DEPENDENCY' | 'WAITING_SOURCES' | 'RECOVERING' | 'MANUAL_STOP' | 'AUTO_EMERGENCY_PAUSE' | 'THROUGHPUT_CONSTRAINED' | 'RUNNING_BELOW_TARGET' | 'RUNNING_OPTIMAL' | 'RUNNING_PREFERRED' | 'CEILING_REACHED';
+export type ThroughputStatus = 'STALL' | 'THROUGHPUT_CONSTRAINED' | 'RUNNING_BELOW_TARGET' | 'RUNNING_OPTIMAL' | 'RUNNING_PREFERRED' | 'CEILING_REACHED';
+export interface ThroughputTelemetry {
+    rate1m: number;
+    rate3m: number;
+    rate5m: number;
+    emaRate: number;
+    completedJobs1m: number;
+    completedJobs5m: number;
+    targetFloor: number;
+    optimalLow: number;
+    optimalHigh: number;
+    preferredHigh: number;
+    ceiling: number;
+    status: ThroughputStatus;
+    limitingFactor: string | null;
+}
 export interface AutotunerCycleResult {
     concurrency: number;
     targetConcurrency?: number;
@@ -71,8 +93,11 @@ export interface AutotunerEvaluationContext {
     allSourcesBlocked?: boolean;
     dbUnavailable?: boolean;
     manualStopActive?: boolean;
+    emergencyPauseActive?: boolean;
+    emergencyPauseReason?: string;
     stagedDebt?: number;
     storageUnavailable?: boolean;
+    eligibleJobs?: number;
 }
 export declare class WorkCostEstimator {
     static estimateCost(pageCount?: number | null, historicalBytes?: number | null): number;
@@ -117,12 +142,24 @@ export declare class AdaptiveAutotuner {
     private cycleErrors;
     private cycleRateLimits;
     private cycleTimeouts;
+    private freshChapterTimestamps;
+    private completedJobTimestamps;
+    private emaRate;
     private latestResult;
     constructor(config?: Partial<AutotunerConfig>);
     getGlobalChapterSemaphore(): AsyncSemaphore;
     getGlobalMediaSemaphore(): AsyncSemaphore;
     getGlobalInflightRequestSemaphore(): AsyncSemaphore;
     getBufferedPageSemaphore(): AsyncSemaphore;
+    recordFreshChapterPublished(count?: number): void;
+    recordJobCompleted(): void;
+    getRate1m(): number;
+    getRate3m(): number;
+    getRate5m(): number;
+    getCompletedRate1m(): number;
+    getCompletedRate5m(): number;
+    getEmaRate(): number;
+    getThroughputTelemetry(context?: AutotunerEvaluationContext): ThroughputTelemetry;
     canAdmitReservation(requestedBytes: number): boolean;
     reserveBufferBudget(requestedBytes?: number, signal?: AbortSignal): Promise<BufferReservation>;
     upgradeReservation(additionalBytes: number, signal?: AbortSignal): Promise<void>;

@@ -831,11 +831,15 @@ export class AutoHealWatchdog {
                 effectiveStallAgeSec = Math.max(effectiveStallAgeSec, metrics.lastFreshVisibleAgeSec);
             }
         }
-        // NÍVEL 3 — RESTART CONTROLADO (>= 30m stall / CRITICAL_STALL)
+        // LEVEL 0 — WARNING LOG (> 5m stall)
+        if (effectiveStallAgeSec >= 5 * 60 && effectiveStallAgeSec < 10 * 60) {
+            this.logger.warn(`⚠️ [AUTO-HEAL WARNING] No fresh chapters for ${Math.round(effectiveStallAgeSec / 60)}m (threshold: 5m). Processing: ${metrics.processingHealth}, Publication: ${metrics.publicationHealth}, Eligible: ${metrics.eligibleJobs}.`);
+        }
+        // NÍVEL 3 — RESTART CONTROLADO (>= 20m stall / CRITICAL_STALL)
         // Only triggers if real eligible or importing jobs exist (never for staged backlog alone, which is handled by Level 1 sweep)
         // and after prior reconciliation rungs (Level 1/2) have been attempted.
         const hasAttemptedPriorLevels = this.lastLevel1At > 0 || this.lastLevel2At > 0;
-        if (effectiveStallAgeSec >= 30 * 60 &&
+        if (effectiveStallAgeSec >= 20 * 60 &&
             metrics.status === 'CRITICAL_STALL' &&
             (metrics.eligibleJobs > 0 || metrics.importingCount > 0) &&
             hasAttemptedPriorLevels) {
@@ -887,8 +891,8 @@ export class AutoHealWatchdog {
             }
             return;
         }
-        // NÍVEL 1 — RECONCILIAÇÃO LEVE (>= 15m stall)
-        if (effectiveStallAgeSec >= 15 * 60 && (this.lastLevel1At === 0 || nowMs - this.lastLevel1At >= 3 * 60 * 1000)) {
+        // NÍVEL 1 — RECONCILIAÇÃO LEVE (>= 10m stall)
+        if (effectiveStallAgeSec >= 10 * 60 && (this.lastLevel1At === 0 || nowMs - this.lastLevel1At >= 3 * 60 * 1000)) {
             this.lastLevel1At = nowMs;
             this.autoHealState = 'LEVEL_1_LIGHT_RECONCILIATION';
             this.lastAutoHealAt = new Date().toISOString();
@@ -902,12 +906,11 @@ export class AutoHealWatchdog {
             }
             return;
         }
-        // NÍVEL 2 — ESTADO PRESO (>= 20m stall, after Level 1 attempted)
-        if (effectiveStallAgeSec >= 20 * 60 && nowMs - this.lastLevel2At >= 5 * 60 * 1000) {
+        // NÍVEL 2 — ESTADO PRESO (>= 15m stall, after Level 1 attempted)
+        if (effectiveStallAgeSec >= 15 * 60 && nowMs - this.lastLevel2At >= 5 * 60 * 1000) {
             this.lastLevel2At = nowMs;
             this.autoHealState = 'LEVEL_2_STUCK_STATE_AUDIT';
             this.lastAutoHealAt = new Date().toISOString();
-            this.logger.warn(`🔧 [AUTO-HEAL NÍVEL 2] Initiating Stuck State Audit (Stall age: ${Math.round(effectiveStallAgeSec / 60)}m, Eligible: ${metrics.eligibleJobs})...`);
             try {
                 await this.runLevel2StuckStateAudit(metrics);
                 this.logger.info('✅ [AUTO-HEAL NÍVEL 2] Stuck state audit executed. Awaiting progress...');

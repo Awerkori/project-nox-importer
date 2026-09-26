@@ -1,6 +1,16 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 export type IncidentClassification = 'MANUAL_STOP' | 'TRANSIENT_EDGE_INCIDENT' | 'REAL_SYSTEM_PRESSURE' | 'YSQL_PRESSURE' | 'IMPORTER_PRESSURE';
 export type SiteHealthState = 'GREEN' | 'YELLOW' | 'ORANGE' | 'RED';
+export interface AutoEmergencyPauseState {
+    active: boolean;
+    pausedAt: string | null;
+    reason: string | null;
+    siteP95: number | null;
+    consecutiveCatastrophicCycles: number;
+    nextRecheckAt: string | null;
+    resumedAt: string | null;
+    healthyCyclesCount: number;
+}
 export interface PressureSnapshot {
     timestamp: number;
     siteHealth: SiteHealthState;
@@ -68,7 +78,14 @@ export declare class ProtectiveSentinel {
     private homeAgent;
     private readerAgent;
     private httpAgent;
+    private catastrophicCyclesCount;
+    private healthyCyclesCount;
+    private autoEmergencyPause;
+    private onAutoResume?;
     constructor(supabase: SupabaseClient, thresholds?: SentinelThresholds, siteUrl?: string | undefined);
+    setOnAutoResume(fn: () => void): void;
+    isEmergencyPaused(): boolean;
+    getEmergencyPauseState(): AutoEmergencyPauseState;
     /**
      * Checks whether a MANUAL staff protective stop is active.
      * STRICT INVARIANT: Automatic performance stops CANNOT make this return true.
@@ -118,9 +135,10 @@ export declare class ProtectiveSentinel {
      * Probes site route latency using keep-alive connection.
      */
     private probeSiteLatency;
-    private recordProbeResult;
+    recordProbeResult(label: 'home' | 'reader', ttfbMs: number, statusCode?: number): void;
     private recordProbeFailure;
     private updatePressureState;
+    private persistAutoEmergencyPause;
     /**
      * Compatibility method for auto-heal watchdog
      */
