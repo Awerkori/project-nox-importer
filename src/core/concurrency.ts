@@ -229,6 +229,12 @@ export interface AutotunerConfig {
   maxBufferedBytes: number;
   adaptiveEnabled: boolean;
   scaleUpDwellTimeMs: number; // Minimum dwell time between scale-ups (60-90s)
+  desiredFloorFreshPerMin?: number; // 5
+  optimalFreshPerMinLow?: number;   // 7
+  optimalFreshPerMinHigh?: number;  // 9
+  preferredFreshPerMin?: number;    // 10
+  maxFreshPerMin?: number;          // 12
+  catastrophicSiteLatencyMs?: number; // 10000
 }
 
 const DEFAULT_AUTOTUNER_CONFIG: AutotunerConfig = {
@@ -240,13 +246,19 @@ const DEFAULT_AUTOTUNER_CONFIG: AutotunerConfig = {
   maxRssMb: 350,
   maxHeapMb: 200,
   maxExternalAndBuffersMb: 100,
-  maxEventLoopLagMs: 250,
+  maxEventLoopLagMs: 300,
   rssSoftLimitMb: parseInt(process.env.RSS_SOFT_LIMIT_MB || '330', 10),
   rssHardLimitMb: parseInt(process.env.RSS_HARD_LIMIT_MB || '380', 10),
   rssEmergencyLimitMb: parseInt(process.env.RSS_EMERGENCY_LIMIT_MB || '410', 10),
   maxBufferedBytes: parseInt(process.env.MAX_BUFFERED_BYTES || String(64 * 1024 * 1024), 10),
   adaptiveEnabled: true,
   scaleUpDwellTimeMs: 0, // Controlled by requiredStableCycles (3 cycles = 90s in prod)
+  desiredFloorFreshPerMin: 5,
+  optimalFreshPerMinLow: 7,
+  optimalFreshPerMinHigh: 9,
+  preferredFreshPerMin: 10,
+  maxFreshPerMin: 12,
+  catastrophicSiteLatencyMs: 10000,
 };
 
 export type AdaptiveCapacityState =
@@ -257,7 +269,37 @@ export type AdaptiveCapacityState =
   | 'WAITING_DEPENDENCY'
   | 'WAITING_SOURCES'
   | 'RECOVERING'
-  | 'MANUAL_STOP';
+  | 'MANUAL_STOP'
+  | 'AUTO_EMERGENCY_PAUSE'
+  | 'THROUGHPUT_CONSTRAINED'
+  | 'RUNNING_BELOW_TARGET'
+  | 'RUNNING_OPTIMAL'
+  | 'RUNNING_PREFERRED'
+  | 'CEILING_REACHED';
+
+export type ThroughputStatus =
+  | 'STALL'
+  | 'THROUGHPUT_CONSTRAINED'
+  | 'RUNNING_BELOW_TARGET'
+  | 'RUNNING_OPTIMAL'
+  | 'RUNNING_PREFERRED'
+  | 'CEILING_REACHED';
+
+export interface ThroughputTelemetry {
+  rate1m: number;
+  rate3m: number;
+  rate5m: number;
+  emaRate: number;
+  completedJobs1m: number;
+  completedJobs5m: number;
+  targetFloor: number;
+  optimalLow: number;
+  optimalHigh: number;
+  preferredHigh: number;
+  ceiling: number;
+  status: ThroughputStatus;
+  limitingFactor: string | null;
+}
 
 export interface AutotunerCycleResult {
   concurrency: number;
@@ -274,8 +316,11 @@ export interface AutotunerEvaluationContext {
   allSourcesBlocked?: boolean;
   dbUnavailable?: boolean;
   manualStopActive?: boolean;
+  emergencyPauseActive?: boolean;
+  emergencyPauseReason?: string;
   stagedDebt?: number;
   storageUnavailable?: boolean;
+  eligibleJobs?: number;
 }
 
 // Cost-aware load weighting
@@ -376,6 +421,11 @@ export class AdaptiveAutotuner {
   private cycleRateLimits = 0;
   private cycleTimeouts = 0;
 
+  // Real-time Throughput tracking (Sliding timestamps & EMA)
+  private freshChapterTimestamps: number[] = [];
+  private completedJobTimestamps: number[] = [];
+  private emaRate = 0;
+
   // Cache latest result
   private latestResult: AutotunerCycleResult = {
     concurrency: 8,
@@ -430,6 +480,117 @@ export class AdaptiveAutotuner {
 
   getBufferedPageSemaphore(): AsyncSemaphore {
     return this.bufferedPageSemaphore;
+  }
+
+  recordFreshChapterPublished(count = 1): void {
+    const now = Date.now();
+    for (let i = 0; i < count; i++) {
+      this.freshChapterTimestamps.push(now);
+    }
+    const cutoff = now - 10 * 60 * 1000;
+    while (this.freshChapterTimestamps.length > 0 && this.freshChapterTimestamps[0] < cutoff) {
+      this.freshChapterTimestamps.shift();
+    }
+  }
+
+  recordJobCompleted(): void {
+    const now = Date.now();
+    this.completedJobTimestamps.push(now);
+    const cutoff = now - 10 * 60 * 1000;
+    while (this.completedJobTimestamps.length > 0 && this.completedJobTimestamps[0] < cutoff) {
+      this.completedJobTimestamps.shift();
+    }
+  }
+
+  getRate1m(): number {
+    const now = Date.now();
+    const cutoff = now - 60 * 1000;
+    return this.freshChapterTimestamps.filter((t) => t >= cutoff).length;
+  }
+
+  getRate3m(): number {
+    const now = Date.now();
+    const cutoff = now - 3 * 60 * 1000;
+    const count = this.freshChapterTimestamps.filter((t) => t >= cutoff).length;
+    return Math.round((count / 3) * 10) / 10;
+  }
+
+  getRate5m(): number {
+    const now = Date.now();
+    const cutoff = now - 5 * 60 * 1000;
+    const count = this.freshChapterTimestamps.filter((t) => t >= cutoff).length;
+    return Math.round((count / 5) * 10) / 10;
+  }
+
+  getCompletedRate1m(): number {
+    const now = Date.now();
+    const cutoff = now - 60 * 1000;
+    return this.completedJobTimestamps.filter((t) => t >= cutoff).length;
+  }
+
+  getCompletedRate5m(): number {
+    const now = Date.now();
+    const cutoff = now - 5 * 60 * 1000;
+    const count = this.completedJobTimestamps.filter((t) => t >= cutoff).length;
+    return Math.round((count / 5) * 10) / 10;
+  }
+
+  getEmaRate(): number {
+    return Math.round(this.emaRate * 10) / 10;
+  }
+
+  getThroughputTelemetry(context?: AutotunerEvaluationContext): ThroughputTelemetry {
+    const rate1m = this.getRate1m();
+    const rate3m = this.getRate3m();
+    const rate5m = this.getRate5m();
+    const completed1m = this.getCompletedRate1m();
+    const completed5m = this.getCompletedRate5m();
+    const effectiveRate = this.emaRate > 0 ? this.emaRate : rate5m;
+    const currentRate = Math.max(rate1m, effectiveRate);
+
+    let status: ThroughputStatus = 'RUNNING_OPTIMAL';
+    let limitingFactor: string | null = null;
+
+    if (currentRate >= (this.config.maxFreshPerMin || 12)) {
+      status = 'CEILING_REACHED';
+      limitingFactor = 'CONCURRENCY_CEILING_ENFORCED';
+    } else if (currentRate >= (this.config.preferredFreshPerMin || 10)) {
+      status = 'RUNNING_PREFERRED';
+    } else if (currentRate >= (this.config.optimalFreshPerMinLow || 7)) {
+      status = 'RUNNING_OPTIMAL';
+    } else if (currentRate >= (this.config.desiredFloorFreshPerMin || 5)) {
+      status = 'RUNNING_BELOW_TARGET';
+    } else {
+      const mem = diagnostics.getMemorySnapshot();
+      const lag = (diagnostics as any).lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
+      if (rate5m === 0 && completed5m === 0 && (context?.eligibleJobs ?? 1) > 0) {
+        status = 'STALL';
+        limitingFactor = 'ZERO_PROGRESS_STALL';
+      } else {
+        status = 'THROUGHPUT_CONSTRAINED';
+        if (lag.avgLagMs >= 300) limitingFactor = `CPU_OR_EVENT_LOOP_LAG (${lag.avgLagMs}ms)`;
+        else if (mem.rssMb >= (this.config.rssSoftLimitMb - 20)) limitingFactor = `MEMORY_PROXIMITY (${mem.rssMb}MB)`;
+        else if (context?.stagedDebt && context.stagedDebt >= 30) limitingFactor = `WAITING_PREDECESSORS_STAGED (${context.stagedDebt})`;
+        else if (context?.eligibleJobs === 0) limitingFactor = 'NO_ELIGIBLE_WORK';
+        else limitingFactor = 'SOURCE_RATE_PACING';
+      }
+    }
+
+    return {
+      rate1m,
+      rate3m,
+      rate5m,
+      emaRate: Math.round(this.emaRate * 10) / 10,
+      completedJobs1m: completed1m,
+      completedJobs5m: completed5m,
+      targetFloor: this.config.desiredFloorFreshPerMin || 5,
+      optimalLow: this.config.optimalFreshPerMinLow || 7,
+      optimalHigh: this.config.optimalFreshPerMinHigh || 9,
+      preferredHigh: this.config.preferredFreshPerMin || 10,
+      ceiling: this.config.maxFreshPerMin || 12,
+      status,
+      limitingFactor,
+    };
   }
 
   canAdmitReservation(requestedBytes: number): boolean {
@@ -749,6 +910,33 @@ export class AdaptiveAutotuner {
       };
     }
 
+    // 0a. Catastrophic Emergency Auto-Pause Check (Section 4)
+    if (context.emergencyPauseActive) {
+      const target = this.config.minConcurrency; // strictly 1, never 0
+      this.currentState = 'AUTO_EMERGENCY_PAUSE';
+      const reason = context.emergencyPauseReason || 'Catastrophic site latency degradation (claims gated, capacity=1)';
+      this.latestResult = {
+        concurrency: target,
+        targetConcurrency: target,
+        action: 'HOLD',
+        state: 'AUTO_EMERGENCY_PAUSE',
+        reason,
+        pressureScore: 85,
+        pressureBreakdown: pressureSnapshot?.pressureBreakdown || {
+          sitePressure: 80,
+          dbPressure: 0,
+          memoryPressure: 0,
+          eventLoopPressure: 0,
+          storagePressure: 0,
+          sourcePressure: 0,
+          publicationPressure: 0,
+        },
+        siteHealth: 'RED',
+      };
+      this.applyCapacityChange(target, 'AUTO_EMERGENCY_PAUSE', 'HOLD', reason, 'RED', mem, lag, pressureSnapshot);
+      return this.latestResult;
+    }
+
     // 0b. Dependency Outage check (DB or Storage down)
     if (context.dbUnavailable || context.storageUnavailable) {
       this.currentState = 'WAITING_DEPENDENCY';
@@ -805,24 +993,38 @@ export class AdaptiveAutotuner {
     const hasHardRss = mem.rssMb >= this.config.rssHardLimitMb;
     const hasSoftRss = mem.rssMb >= this.config.rssSoftLimitMb || mem.rssMb >= this.config.maxRssMb;
     const hasHeapStress = mem.heapUsedMb >= this.config.maxHeapMb;
-    const hasLagStress = lag.avgLagMs >= this.config.maxEventLoopLagMs;
+
+    // Calibrated Event Loop Lag Tiers for 0.50 vCPU AMD EPYC (Section 18)
+    // Normal: <300ms (0 pressure, no penalty)
+    // Elevated: 300-450ms (15 pressure, hold scale-up, do not downscale to 1)
+    // High sustained: 450-700ms (35 pressure, downscale -1)
+    // Critical: >=700ms (85 pressure, downscale to 1)
+    const lagMs = lag.avgLagMs || 0;
+    const hasCriticalLag = lagMs >= 700;
+    const hasHighLag = lagMs >= 450 && lagMs < 700;
+    const hasElevatedLag = lagMs >= 300 && lagMs < 450;
     const hasStagedDebt = context.stagedDebt && context.stagedDebt >= 100;
 
-    if (hasEmergencyRss) {
+    if (hasEmergencyRss || hasCriticalLag) {
       pressureScore = Math.max(pressureScore, 85);
-      pressureReason = `Emergency RSS: ${mem.rssMb}MB >= limit ${this.config.rssEmergencyLimitMb}MB`;
+      pressureReason = hasEmergencyRss
+        ? `Emergency RSS: ${mem.rssMb}MB >= limit ${this.config.rssEmergencyLimitMb}MB`
+        : `Critical Event Loop Lag: ${lagMs}ms >= 700ms (downscaling to 1 permit)`;
     } else if (hasHardRss) {
       pressureScore = Math.max(pressureScore, 65);
       pressureReason = `Hard RSS: ${mem.rssMb}MB >= limit ${this.config.rssHardLimitMb}MB`;
+    } else if (hasHighLag) {
+      pressureScore = Math.max(pressureScore, 35);
+      pressureReason = `High Event Loop Lag: ${lagMs}ms (sustained 450-700ms range)`;
     } else if (hasSoftRss) {
       pressureScore = Math.max(pressureScore, 40);
       pressureReason = `High RSS: ${mem.rssMb}MB >= limit ${this.config.rssSoftLimitMb}MB`;
     } else if (hasHeapStress) {
       pressureScore = Math.max(pressureScore, 35);
       pressureReason = `High Heap: ${mem.heapUsedMb}MB >= limit ${this.config.maxHeapMb}MB`;
-    } else if (hasLagStress) {
-      pressureScore = Math.max(pressureScore, 50);
-      pressureReason = `High Event Loop Lag: ${lag.avgLagMs}ms >= limit ${this.config.maxEventLoopLagMs}ms`;
+    } else if (hasElevatedLag) {
+      pressureScore = Math.max(pressureScore, 15);
+      pressureReason = `Elevated Event Loop Lag: ${lagMs}ms (300-450ms range; holding scale-up)`;
     } else if (rateLimits > 0) {
       pressureScore = Math.max(pressureScore, 30);
       pressureReason = `Detected ${rateLimits} HTTP 429 Rate Limits in cycle`;
@@ -981,16 +1183,66 @@ export class AdaptiveAutotuner {
       };
     }
 
-    // CASE F: SYSTEM HEALTHY — SLOW UP (+1 step, dwell time enforced)
+    // CASE F: SYSTEM HEALTHY — AIMD WITH THROUGHPUT GOVERNOR
+    const throughput = this.getThroughputTelemetry(context);
+    const targetFloor = this.config.desiredFloorFreshPerMin || 5;
+    const optimalLow = this.config.optimalFreshPerMinLow || 7;
+    const preferredHigh = this.config.preferredFreshPerMin || 10;
+    const ceiling = this.config.maxFreshPerMin || 12;
+
+    // 1. Throughput Ceiling Enforcement (>= 12 cap/min)
+    if (throughput.status === 'CEILING_REACHED' || throughput.emaRate >= ceiling) {
+      state = 'CEILING_REACHED';
+      action = 'STABLE';
+      const reason = `Throughput ceiling reached (${throughput.emaRate} cap/min >= ${ceiling} cap/min); holding concurrency at ${previous}`;
+      this.latestResult = {
+        concurrency: previous,
+        targetConcurrency: previous,
+        action,
+        state,
+        reason,
+        pressureScore,
+        pressureBreakdown: pressureSnapshot?.pressureBreakdown || this.latestResult.pressureBreakdown,
+        siteHealth,
+      };
+      return this.latestResult;
+    }
+
+    // 2. Hardware / Resource constraints check
+    const totalCommitted = this.activeBufferedBytes + this.reservedBufferedBytes;
+    const isMemoryConstrained = mem.rssMb >= (this.config.rssSoftLimitMb - 20) || totalCommitted > (this.config.maxBufferedBytes * 0.7);
+    const isLagConstrained = lagMs >= 300;
+
+    // If throughput < 5 cap/min and system is constrained by hardware/signals, report THROUGHPUT_CONSTRAINED
+    if (throughput.emaRate < targetFloor && (isMemoryConstrained || isLagConstrained || (context.stagedDebt && context.stagedDebt >= 30))) {
+      state = 'THROUGHPUT_CONSTRAINED';
+      action = 'STABLE';
+      const factor = isMemoryConstrained
+        ? `MEMORY_PROXIMITY (RSS: ${mem.rssMb}MB, Committed: ${Math.round(totalCommitted / 1024 / 1024)}MB)`
+        : isLagConstrained
+        ? `ELEVATED_EVENT_LOOP_LAG (${lagMs}ms)`
+        : `WAITING_PREDECESSORS_STAGED (${context.stagedDebt} chapters)`;
+      const reason = `Throughput below floor (${throughput.emaRate} < ${targetFloor} cap/min) constrained by ${factor}`;
+      this.latestResult = {
+        concurrency: previous,
+        targetConcurrency: previous,
+        action,
+        state,
+        reason,
+        pressureScore,
+        pressureBreakdown: pressureSnapshot?.pressureBreakdown || this.latestResult.pressureBreakdown,
+        siteHealth,
+      };
+      return this.latestResult;
+    }
+
     this.stableCycleCount++;
 
     const dwellTimeSatisfied = now - this.lastCapacityChangeAt >= this.config.scaleUpDwellTimeMs;
     const stableCyclesSatisfied = this.stableCycleCount >= this.config.requiredStableCycles;
 
     if (stableCyclesSatisfied && dwellTimeSatisfied && this.currentConcurrency < this.config.maxConcurrency) {
-      // Memory proximity hold: do NOT scale up if close to soft limit or committed buffers are high
-      const totalCommitted = this.activeBufferedBytes + this.reservedBufferedBytes;
-      if (mem.rssMb >= (this.config.rssSoftLimitMb - 20) || totalCommitted > (this.config.maxBufferedBytes * 0.7)) {
+      if (isMemoryConstrained) {
         state = 'RUNNING_STABLE';
         return {
           concurrency: this.currentConcurrency,
@@ -1005,18 +1257,37 @@ export class AdaptiveAutotuner {
       }
 
       target = Math.min(this.config.maxConcurrency, previous + 1);
-      state = previous === 1 ? 'RECOVERING' : 'RUNNING_ACCELERATING';
+
+      if (throughput.emaRate >= preferredHigh) {
+        state = 'RUNNING_PREFERRED';
+      } else if (throughput.emaRate >= optimalLow) {
+        state = 'RUNNING_OPTIMAL';
+      } else if (throughput.emaRate >= targetFloor) {
+        state = 'RUNNING_BELOW_TARGET';
+      } else {
+        state = previous === 1 ? 'RECOVERING' : 'RUNNING_ACCELERATING';
+      }
+
       action = 'SCALED_UP';
-      const reason = `System healthy across ${this.stableCycleCount} cycles and dwell window satisfied. Scaled up: ${previous} -> ${target}`;
+      const reason = `System healthy across ${this.stableCycleCount} cycles, throughput: ${throughput.emaRate} cap/min. Scaled up: ${previous} -> ${target}`;
 
       this.applyCapacityChange(target, state, action, reason, siteHealth, mem, lag, pressureSnapshot);
       return this.latestResult;
     }
 
     // Stable holding
-    state = previous === 1 ? 'RECOVERING' : 'RUNNING_STABLE';
+    if (throughput.emaRate >= preferredHigh) {
+      state = 'RUNNING_PREFERRED';
+    } else if (throughput.emaRate >= optimalLow) {
+      state = 'RUNNING_OPTIMAL';
+    } else if (throughput.emaRate >= targetFloor) {
+      state = 'RUNNING_BELOW_TARGET';
+    } else {
+      state = previous === 1 ? 'RECOVERING' : 'RUNNING_STABLE';
+    }
+
     action = 'STABLE';
-    const reason = `Stable (${this.stableCycleCount}/${this.config.requiredStableCycles} cycles, dwell: ${Math.round((now - this.lastCapacityChangeAt) / 1000)}s/${Math.round(this.config.scaleUpDwellTimeMs / 1000)}s)`;
+    const reason = `Stable (${this.stableCycleCount}/${this.config.requiredStableCycles} cycles, throughput: ${throughput.emaRate} cap/min, dwell: ${Math.round((now - this.lastCapacityChangeAt) / 1000)}s/${Math.round(this.config.scaleUpDwellTimeMs / 1000)}s)`;
 
     this.latestResult = {
       concurrency: this.currentConcurrency,

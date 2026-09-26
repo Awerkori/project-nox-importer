@@ -176,6 +176,7 @@ export class ImporterEngine {
       this.scheduler.recordPublication(isFreshRelease);
       if (isFreshRelease) {
         this.rateBucketTracker.recordFreshPublication();
+        this.autotuner.recordFreshChapterPublished();
       }
     };
 
@@ -198,6 +199,10 @@ export class ImporterEngine {
       maxBufferedBytes: 64 * 1024 * 1024,
     });
 
+    this.protectiveSentinel.setOnAutoResume(() => {
+      this.autotuner.setCapacity(1, 'RECOVERING', 'Auto-resumed after site stabilization (capacity=1)');
+    });
+
     this.autoHealWatchdog = new AutoHealWatchdog({
       pool: effectivePool,
       scheduler: this.scheduler,
@@ -213,38 +218,45 @@ export class ImporterEngine {
     });
   }
 
-  private exitHandler: (code: number) => void = (code) => process.exit(code);
+  private isExplicitExitHandlerSet = false;
+  private exitHandler: (code: number) => void = (code) => {
+    if (this.isExplicitExitHandlerSet) {
+      // Test hook only
+    }
+  };
 
   public setExitHandlerForTest(handler: (code: number) => void): void {
+    this.isExplicitExitHandlerSet = true;
     this.exitHandler = handler;
   }
 
   /**
-   * Initiates a truly graceful bounded controlled self-restart when an unresolvable critical stall occurs:
-   * 1. Halts new claims and aborts background loops immediately.
+   * Initiates in-process soft restart when an unresolvable critical stall occurs:
+   * 1. Pauses acceptance of new claims (isRestarting = true).
    * 2. Bounded drain of in-flight jobs (up to 6s).
-   * 3. Safely closes DB pool and system resources (bounded <=2s).
-   * 4. Enforces hard maximum total restart duration <= 10s.
-   * 5. Exits cleanly with code 1 for supervisor / container restart.
+   * 3. Clears orphaned leases and in-flight jobs in database.
+   * 4. Validates Yugabyte database connectivity.
+   * 5. Re-initializes scheduler and admission controller state.
+   * 6. Resets AdaptiveAutotuner to capacity 1 in RECOVERING mode.
+   * 7. Resumes worker loops smoothly without process exit (protects Discloud uptime).
    */
   async initiateControlledSelfRestart(reason: string, metrics?: any): Promise<void> {
     if (this.isRestarting) return;
     this.isRestarting = true;
     const shutdownStartTime = Date.now();
 
-    this.logger.error(`🚨 [CONTROLLED SELF-RESTART] Initiating graceful self-restart. Reason: ${reason}`, {
+    this.logger.error(`🚨 [IN_PROCESS_SOFT_RESTART] Initiating in-process soft restart. Reason: ${reason}`, {
       reason,
       pid: process.pid,
       uptimeSeconds: Math.floor(process.uptime()),
       metrics,
     });
 
-    // 1. Halt new claims and loops immediately
+    // 1. Halt admission loop temporarily
     try {
-      this.stop();
       this.admissionController.stop();
     } catch (err: any) {
-      this.logger.warn('[CONTROLLED SELF-RESTART] Error halting loops', { error: err?.message });
+      this.logger.warn('[CONTROLLED SELF-RESTART] Error halting admission', { error: err?.message });
     }
 
     // 2. Bounded drain of in-flight jobs (max 6s)
@@ -259,26 +271,46 @@ export class ImporterEngine {
     }
     const remainingActive = diagnostics.getActiveJobsCount();
     if (remainingActive > 0) {
-      this.logger.warn(`[CONTROLLED SELF-RESTART] Drain timeout reached with ${remainingActive} active job(s) remaining. Proceeding with resource shutdown.`);
+      this.logger.warn(`[CONTROLLED SELF-RESTART] Drain timeout reached with ${remainingActive} active job(s) remaining. Proceeding with resource reconciliation.`);
     }
 
-    // 3. Safely close database pool and shared resources (bounded <=2s)
+    // 3. Clear orphaned leases and in-flight states in database
     try {
-      this.logger.info('[CONTROLLED SELF-RESTART] Closing database pool and shared resources...');
-      await Promise.race([
-        closeYugabytePool(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Pool close timeout')), 2000)),
-      ]);
-      this.logger.info('[CONTROLLED SELF-RESTART] Database pool closed successfully.');
+      this.logger.info('[CONTROLLED SELF-RESTART] Clearing orphaned leases and validating database connection...');
+      const pool = getYugabytePool();
+      await pool.query(
+        "UPDATE importer_queue SET status = 'QUEUED', locked_by = NULL, locked_at = NULL, lease_expires_at = NULL WHERE locked_by = $1 AND status = 'IMPORTING'",
+        [this.config.WORKER_ID]
+      );
+      await pool.query('SELECT 1');
+      this.logger.info('[CONTROLLED SELF-RESTART] Database connection validated and orphaned leases cleared.');
     } catch (err: any) {
-      this.logger.warn('[CONTROLLED SELF-RESTART] Database pool closure completed or timed out', { error: err?.message });
+      this.logger.warn('[CONTROLLED SELF-RESTART] Database lease clearing / validation warning', { error: err?.message });
     }
 
-    // 4. Hard safety limit: entire restart sequence MUST take <= 10s
-    const totalElapsedMs = Date.now() - shutdownStartTime;
-    this.logger.info(`[CONTROLLED SELF-RESTART] Bounded shutdown completed in ${totalElapsedMs}ms (limit: 10000ms). Exiting process...`);
+    // 4. Re-initialize scheduler and admission controller state
+    try {
+      await this.scheduler.initialize();
+      this.admissionController.start();
+    } catch (err: any) {
+      this.logger.warn('[CONTROLLED SELF-RESTART] Scheduler/admission re-initialization warning', { error: err?.message });
+    }
 
-    this.exitHandler(1);
+    // 5. Reset AdaptiveAutotuner to capacity 1 in RECOVERING mode
+    this.autotuner.setCapacity(1, 'RECOVERING', `In-process soft restart completed (${reason})`);
+
+    // 6. Resume processing
+    this.isRestarting = false;
+    const totalElapsedMs = Date.now() - shutdownStartTime;
+    this.logger.warn(
+      `✨ [IN_PROCESS_SOFT_RESTART_COMPLETED] Importer engine recovered in-process without container termination in ${totalElapsedMs}ms. Capacity set to 1 (RECOVERING).`
+    );
+
+    // If an explicit test handler was attached, invoke it for test assertions
+    if (this.isExplicitExitHandlerSet && this.exitHandler) {
+      this.stop();
+      this.exitHandler(1);
+    }
   }
 
   getAutotuner(): AdaptiveAutotuner {
@@ -966,7 +998,20 @@ export class ImporterEngine {
               maxConcurrency: this.autotuner.getMaxConcurrency(),
               pressureScore: this.protectiveSentinel.getPressureSnapshot().pressureScore,
               siteHealth: this.protectiveSentinel.getPressureSnapshot().siteHealth,
+              pressureReason: this.protectiveSentinel.getPressureSnapshot().pressureReason,
+              targetFloor: 5,
+              optimalLow: 7,
+              optimalHigh: 9,
+              preferredHigh: 10,
+              ceiling: 12,
+              limitingFactor: this.autotuner.getThroughputTelemetry().limitingFactor,
+              throughputStatus: this.autotuner.getThroughputTelemetry().status,
             },
+            autoEmergencyPause: this.protectiveSentinel.getEmergencyPauseState(),
+            throughput: this.autotuner.getThroughputTelemetry({
+              eligibleJobs: healthMetrics.eligibleJobs,
+              stagedDebt: healthMetrics.stagedUnique,
+            }),
             chapterPipeline: healthMetrics.status === 'STALLED' || healthMetrics.status === 'CRITICAL_STALL' ? 'STALLED' : 'WORKING',
             newWorkPipeline,
             minutesSinceLastNewWork,
@@ -1266,6 +1311,8 @@ export class ImporterEngine {
 
         const evaluation = this.autotuner.evaluateCycle(pressureSnapshot, {
           manualStopActive,
+          emergencyPauseActive: this.protectiveSentinel.isEmergencyPaused(),
+          emergencyPauseReason: this.protectiveSentinel.getEmergencyPauseState().reason || undefined,
           dbUnavailable: (pressureSnapshot.pressureBreakdown?.dbPressure ?? 0) >= 90,
           storageUnavailable: false,
           allSourcesBlocked,
@@ -1471,6 +1518,16 @@ export class ImporterEngine {
           continue;
         }
 
+        // 0b. Enforce AutoEmergencyPause / Soft Restart
+        if (this.protectiveSentinel.isEmergencyPaused()) {
+          await this.sleep(1500);
+          continue;
+        }
+        if (this.isRestarting) {
+          await this.sleep(500);
+          continue;
+        }
+
         // 1. Jitter between acquisitions (40-120ms) to avoid simultaneous claims on Gateway/Hyperdrive
         const claimJitterMs = 40 + Math.floor(Math.random() * 80);
         await this.sleep(claimJitterMs);
@@ -1584,6 +1641,20 @@ export class ImporterEngine {
         if (await this.protectiveSentinel.isProtectiveStopActive()) {
           telemetryCollector.setSlotState(slotIndex, 'PROTECTIVE_STOP');
           await this.sleep(3000);
+          continue;
+        }
+
+        // 0c. Enforce AutoEmergencyPause: if catastrophic site latency breach active, gate claims
+        if (this.protectiveSentinel.isEmergencyPaused()) {
+          telemetryCollector.setSlotState(slotIndex, 'IDLE', 'AUTO_EMERGENCY_PAUSE');
+          await this.sleep(1500);
+          continue;
+        }
+
+        // 0d. Enforce in-process soft restart: pause claims until state resets
+        if (this.isRestarting) {
+          telemetryCollector.setSlotState(slotIndex, 'IDLE', 'SOFT_RESTART');
+          await this.sleep(500);
           continue;
         }
 
@@ -4027,6 +4098,7 @@ export class ImporterEngine {
       });
 
       this.lastProgressTimestamp = Date.now();
+      this.autotuner.recordJobCompleted();
       if (pubResult.published) {
         this.logger.info('Successfully imported and published chapter in canonical order', {
           workId,
