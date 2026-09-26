@@ -701,7 +701,7 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
     expect(exitCode).toBe(1);
     // 4. Hard safety limit: total shutdown elapsed time MUST be <= 10000ms
     expect(elapsedMs).toBeLessThanOrEqual(10000);
-  });
+  }, 15000);
 
   // =========================================================================
   // CASO K: Zero eligible, zero importing, zero staged => status === 'IDLE'

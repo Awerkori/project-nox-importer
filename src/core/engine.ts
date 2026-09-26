@@ -136,6 +136,7 @@ export class ImporterEngine {
   public autoHealWatchdog: AutoHealWatchdog;
   public rateBucketTracker: RateBucketTracker;
   private isRestarting = false;
+  private dbPool: any = null;
 
   // Actual retained image bytes; bounded globally by page permits and per-image size.
   public static activeBufferedBytes = 0;
@@ -170,6 +171,7 @@ export class ImporterEngine {
     this.scheduler = new WorkAffinityScheduler(this.schedulerStateStore, this.admissionController, this.protectiveSentinel, dbPool);
 
     const effectivePool = (dbPool && typeof dbPool.query === 'function') ? dbPool : getYugabytePool();
+    this.dbPool = effectivePool;
     this.rateBucketTracker = new RateBucketTracker(effectivePool);
 
     this.publicationBarrier.onPublished = (isFreshRelease: boolean) => {
@@ -277,7 +279,7 @@ export class ImporterEngine {
     // 3. Clear orphaned leases and in-flight states in database
     try {
       this.logger.info('[CONTROLLED SELF-RESTART] Clearing orphaned leases and validating database connection...');
-      const pool = getYugabytePool();
+      const pool = (this.dbPool && typeof this.dbPool.query === 'function') ? this.dbPool : getYugabytePool();
       await pool.query(
         "UPDATE importer_queue SET status = 'QUEUED', locked_by = NULL, locked_at = NULL, lease_expires_at = NULL WHERE locked_by = $1 AND status = 'IMPORTING'",
         [this.config.WORKER_ID]
