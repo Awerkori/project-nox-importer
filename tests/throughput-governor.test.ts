@@ -240,7 +240,11 @@ describe('Definitive Throughput Governor & Auto-Emergency Pause Policy', () => {
       }),
     };
 
-    const sentinel = new ProtectiveSentinel(mockSupabase, undefined, undefined);
+    const mockPool: any = {
+      query: vi.fn().mockResolvedValue({ rows: [{ total_connections: 3, active_connections: 1 }] }),
+    };
+
+    const sentinel = new ProtectiveSentinel(mockSupabase, mockPool, undefined);
     const now = Date.now();
 
     // Simulate transient latency spike that occurred 80 seconds ago (> 75s window)

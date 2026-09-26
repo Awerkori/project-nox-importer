@@ -153,24 +153,22 @@ export class ImporterEngine {
         this.rateBucketTracker = new RateBucketTracker(effectivePool);
         this.publicationBarrier.onPublished = (isFreshRelease) => {
             this.scheduler.recordPublication(isFreshRelease);
-            if (isFreshRelease) {
-                this.rateBucketTracker.recordFreshPublication();
-                this.autotuner.recordFreshChapterPublished();
-            }
+            this.rateBucketTracker.recordFreshPublication();
+            this.autotuner.recordFreshChapterPublished();
         };
         const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 8, config.TESTED_CONCURRENCY_CEILING || 18);
         this.autotuner = new AdaptiveAutotuner({
             initialConcurrency: Math.min(requestedMax, 8),
             maxConcurrency: requestedMax,
-            maxRssMb: 350,
-            maxHeapMb: 200,
-            maxExternalAndBuffersMb: 100,
-            maxEventLoopLagMs: 250,
-            requiredStableCycles: 3,
+            maxRssMb: 420,
+            maxHeapMb: 240,
+            maxExternalAndBuffersMb: 120,
+            maxEventLoopLagMs: 300,
+            requiredStableCycles: 2,
             cooldownPeriodMs: 15 * 1000,
-            rssSoftLimitMb: 330,
-            rssHardLimitMb: 380,
-            rssEmergencyLimitMb: 410,
+            rssSoftLimitMb: 390,
+            rssHardLimitMb: 430,
+            rssEmergencyLimitMb: 460,
             maxBufferedBytes: 64 * 1024 * 1024,
         });
         this.protectiveSentinel.setOnAutoResume(() => {
@@ -875,7 +873,7 @@ export class ImporterEngine {
                 const allSourcesBlocked = !candidateSources.some((src) => this.circuitBreaker.canExecute(src));
                 const throughputContext = {
                     eligibleJobs: healthMetrics.eligibleJobs,
-                    stagedDebt: healthMetrics.stagedUnique,
+                    stagedDebt: healthMetrics.publishableStaged,
                     allSourcesBlocked,
                 };
                 const throughputData = this.autotuner.getThroughputTelemetry(throughputContext);

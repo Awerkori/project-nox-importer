@@ -617,7 +617,7 @@ export class AutoHealWatchdog {
               CASE
                 WHEN j.last_error IN ('CANONICAL_ALREADY_SATISFIED', 'ALREADY_CANONICAL') THEN 'ALREADY_CANONICAL'
                 WHEN m.is_page_provider IS FALSE THEN 'DEDUPE_SOURCE'
-                WHEN c.published_at IS NOT NULL AND c.is_fresh_release IS TRUE THEN 'FRESH_PUBLISHED'
+                WHEN c.published_at IS NOT NULL AND (c.is_fresh_release IS TRUE OR c.published_at >= NOW() - INTERVAL '30 minutes') THEN 'FRESH_PUBLISHED'
                 WHEN c.published_at IS NOT NULL THEN 'ALREADY_CANONICAL'
                 ELSE 'FRESH_EXPECTED'
               END as classification
