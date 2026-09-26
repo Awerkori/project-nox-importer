@@ -563,7 +563,10 @@ export class AdaptiveAutotuner {
     } else {
       const mem = diagnostics.getMemorySnapshot();
       const lag = (diagnostics as any).lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
-      if (rate5m === 0 && completed5m === 0 && (context?.eligibleJobs ?? 1) > 0) {
+      if (context?.allSourcesBlocked) {
+        status = 'THROUGHPUT_CONSTRAINED';
+        limitingFactor = 'ALL_SOURCES_IN_COOLDOWN';
+      } else if (rate5m === 0 && completed5m === 0 && (context?.eligibleJobs ?? 1) > 0) {
         status = 'STALL';
         limitingFactor = 'ZERO_PROGRESS_STALL';
       } else {
@@ -572,7 +575,7 @@ export class AdaptiveAutotuner {
         else if (mem.rssMb >= (this.config.rssSoftLimitMb - 20)) limitingFactor = `MEMORY_PROXIMITY (${mem.rssMb}MB)`;
         else if (context?.stagedDebt && context.stagedDebt >= 30) limitingFactor = `WAITING_PREDECESSORS_STAGED (${context.stagedDebt})`;
         else if (context?.eligibleJobs === 0) limitingFactor = 'NO_ELIGIBLE_WORK';
-        else limitingFactor = 'SOURCE_RATE_PACING';
+        else limitingFactor = 'SCALE_UP_PACING';
       }
     }
 

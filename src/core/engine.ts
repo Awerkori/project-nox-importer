@@ -13,7 +13,7 @@ import { Config } from '../config.js';
 import { withSourceChapterPermits } from './concurrency.js';
 import { readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
-import { AdaptiveAutotuner, AsyncSemaphore, BufferReservation, SOURCE_CONCURRENCY_LIMITS } from './concurrency.js';
+import { AdaptiveAutotuner, AsyncSemaphore, BufferReservation, SOURCE_CONCURRENCY_LIMITS, AutotunerEvaluationContext } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
 import { NoxWorkerStorageError } from '../storage/worker.js';
 import { RetryPolicy, ProviderDownloadError, InvalidMediaError } from './retry-policy.js';
@@ -340,6 +340,9 @@ export class ImporterEngine {
 
     // 1b. Initialize WorkAffinityScheduler & AdmissionController
     await this.scheduler.initialize();
+
+    // 1c. Hydrate auto emergency pause state on boot to ensure pause persists across restarts
+    await this.protectiveSentinel.hydrateAutoEmergencyPauseOnStartup();
 
     // 2. Launch background autotuner telemetry loop (every 30s)
     this.runAutotunerLoop();
@@ -978,6 +981,18 @@ export class ImporterEngine {
           rateMetrics = await this.rateBucketTracker.getRecentRates();
         } catch {}
 
+        const candidateSources = this.activeSourcesCache.sources.length > 0
+          ? this.activeSourcesCache.sources
+          : Object.keys(SOURCE_CONCURRENCY_LIMITS);
+        const allSourcesBlocked = !candidateSources.some((src) => this.circuitBreaker.canExecute(src));
+
+        const throughputContext: AutotunerEvaluationContext = {
+          eligibleJobs: healthMetrics.eligibleJobs,
+          stagedDebt: healthMetrics.stagedUnique,
+          allSourcesBlocked,
+        };
+        const throughputData = this.autotuner.getThroughputTelemetry(throughputContext);
+
         // Write atomic heartbeat and health panel to settings table for external watchdog / supervisor monitoring
         try {
           const hbPayload = JSON.stringify({
@@ -995,6 +1010,7 @@ export class ImporterEngine {
             completedRate30m: rateMetrics.completedRate30m,
             completed5m: rateMetrics.completed5m,
             completed30m: rateMetrics.completed30m,
+
             capacity: {
               concurrency: this.autotuner.getCurrentConcurrency(),
               state: this.autotuner.getState(),
@@ -1007,14 +1023,11 @@ export class ImporterEngine {
               optimalHigh: 9,
               preferredHigh: 10,
               ceiling: 12,
-              limitingFactor: this.autotuner.getThroughputTelemetry().limitingFactor,
-              throughputStatus: this.autotuner.getThroughputTelemetry().status,
+              limitingFactor: throughputData.limitingFactor,
+              throughputStatus: throughputData.status,
             },
             autoEmergencyPause: this.protectiveSentinel.getEmergencyPauseState(),
-            throughput: this.autotuner.getThroughputTelemetry({
-              eligibleJobs: healthMetrics.eligibleJobs,
-              stagedDebt: healthMetrics.stagedUnique,
-            }),
+            throughput: throughputData,
             chapterPipeline: healthMetrics.status === 'STALLED' || healthMetrics.status === 'CRITICAL_STALL' ? 'STALLED' : 'WORKING',
             newWorkPipeline,
             minutesSinceLastNewWork,
