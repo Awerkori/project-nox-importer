@@ -935,7 +935,7 @@ export class AdaptiveAutotuner {
             return this.latestResult;
         }
         // CASE C: MODERATE PRESSURE (~20% reduction)
-        if (siteHealth === 'YELLOW' || (pressureScore >= 30 && rateLimits === 0)) {
+        if (pressureScore >= 30 && rateLimits === 0) {
             target = Math.max(this.config.minConcurrency, Math.round(previous * 0.80));
             state = 'RUNNING_THROTTLED';
             action = target < previous ? 'SCALED_DOWN' : 'STRESS_DETECTED';

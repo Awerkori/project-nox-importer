@@ -516,6 +516,22 @@ export class ProtectiveSentinel {
     }
 
     try {
+      if (this.supabase) {
+        const { data, error } = await this.supabase
+          .from('chapters')
+          .select('id')
+          .not('published_at', 'is', null)
+          .limit(1)
+          .maybeSingle();
+        if (!error && data?.id) {
+          this.cachedReaderChapterId = data.id;
+          this.cachedReaderChapterAt = now;
+          return this.cachedReaderChapterId;
+        }
+      }
+    } catch {}
+
+    try {
       const pool = getYugabytePool();
       const res = await pool.query(
         "SELECT id FROM chapters WHERE published_at IS NOT NULL ORDER BY published_at DESC LIMIT 1"
@@ -565,9 +581,11 @@ export class ProtectiveSentinel {
       await this.probeSiteLatency('home', `${this.siteUrl}/`);
       
       const chapterId = await this.getValidReaderChapterId();
+      await new Promise((r) => setTimeout(r, 1000));
       if (chapterId) {
-        await new Promise((r) => setTimeout(r, 1000));
         await this.probeSiteLatency('reader', `${this.siteUrl}/ler/${chapterId}`);
+      } else {
+        await this.probeSiteLatency('reader', `${this.siteUrl}/api/health`);
       }
     }
 
@@ -799,6 +817,12 @@ export class ProtectiveSentinel {
         this.logger.info(`[Site Probe Recovered] ${label.toUpperCase()} returned HTTP ${statusCode} (5xx cleared)`);
       }
       this.consecutive5xxCount = 0;
+    }
+
+    if (label === 'reader' && statusCode === 404) {
+      this.cachedReaderChapterId = null;
+      this.logger.warn('[Site Probe] Reader returned 404 for probed chapter; invalidating cache and ignoring sample');
+      return;
     }
 
     const sample: LatencySample = { ttfbMs, timestamp };

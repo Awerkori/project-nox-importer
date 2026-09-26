@@ -159,7 +159,7 @@ export class ImporterEngine {
                 this.autotuner.recordFreshChapterPublished();
             }
         };
-        const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 8, config.TESTED_CONCURRENCY_CEILING || 18);
+        const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 10, config.TESTED_CONCURRENCY_CEILING || 18);
         this.autotuner = new AdaptiveAutotuner({
             initialConcurrency: Math.min(requestedMax, 8),
             maxConcurrency: requestedMax,

@@ -14,8 +14,10 @@ describe('RateBucketTracker', () => {
           return {
             rows: [
               {
+                visible_5m: 10,
                 fresh_5m: 10,
                 completed_5m: 15,
+                visible_30m: 45,
                 fresh_30m: 45,
                 completed_30m: 60,
               },
@@ -46,8 +48,8 @@ describe('RateBucketTracker', () => {
     const insertQuery = queries[0];
     expect(insertQuery.sql).toContain('INSERT INTO importer_rate_buckets');
     expect(insertQuery.sql).toContain('ON CONFLICT (bucket_minute) DO UPDATE');
-    // params: [completed_jobs, fresh_visible]
-    expect(insertQuery.params).toEqual([3, 2]);
+    // params: [completed_jobs, fresh_visible, visible_published]
+    expect(insertQuery.params).toEqual([3, 2, 2]);
 
     // Subsequent flush with 0 pending should not execute query
     await tracker.flush();
