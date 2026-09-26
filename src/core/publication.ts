@@ -252,9 +252,9 @@ export class PublicationBarrier {
         await client.query(
           `UPDATE chapters
            SET published_at = COALESCE(published_at, $2::timestamptz),
-               is_fresh_release = true
+               is_fresh_release = $3
            WHERE id = $1::uuid`,
-          [chapterId, publishedAtIso]
+          [chapterId, publishedAtIso, Boolean(isFreshRelease)]
         );
 
         // 4. Mark importer_chapter_mappings status = 'COMPLETED'
@@ -313,7 +313,7 @@ export class PublicationBarrier {
       }
 
       try {
-        this.onPublished?.(true);
+        this.onPublished?.(Boolean(isFreshRelease));
       } catch {}
 
       // Invalidate edge cache (fire and forget asynchronously)
@@ -440,7 +440,7 @@ export class PublicationBarrier {
       .eq('id', workId);
 
     try {
-      this.onPublished?.(true);
+      this.onPublished?.(Boolean(isFreshRelease));
     } catch {}
   }
 

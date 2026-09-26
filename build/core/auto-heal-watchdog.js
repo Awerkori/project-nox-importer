@@ -1104,7 +1104,13 @@ export class AutoHealWatchdog {
         try {
             await this.pool.query(`INSERT INTO settings (key, value)
          VALUES ('importer_heartbeat', $1)
-         ON CONFLICT (key) DO UPDATE SET value = $1`, [payload]);
+         ON CONFLICT (key) DO UPDATE SET value = (
+           CASE
+             WHEN settings.value IS NOT NULL AND jsonb_typeof(settings.value::jsonb) = 'object'
+             THEN (settings.value::jsonb || $1::jsonb)::text
+             ELSE $1
+           END
+         )`, [payload]);
         }
         catch (err) {
             this.logger.warn('Failed persisting importer_heartbeat to settings', { error: err?.message });

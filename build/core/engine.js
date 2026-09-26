@@ -153,8 +153,11 @@ export class ImporterEngine {
         this.rateBucketTracker = new RateBucketTracker(effectivePool);
         this.publicationBarrier.onPublished = (isFreshRelease) => {
             this.scheduler.recordPublication(isFreshRelease);
-            this.rateBucketTracker.recordFreshPublication();
-            this.autotuner.recordFreshChapterPublished();
+            this.rateBucketTracker.recordVisiblePublication(isFreshRelease);
+            this.autotuner.recordVisibleChapterPublished();
+            if (isFreshRelease) {
+                this.autotuner.recordFreshChapterPublished();
+            }
         };
         const requestedMax = Math.min(config.MAX_CONCURRENT_CHAPTERS || 8, config.TESTED_CONCURRENCY_CEILING || 18);
         this.autotuner = new AdaptiveAutotuner({
@@ -1804,10 +1807,12 @@ export class ImporterEngine {
             if (src.status !== 'ACTIVE') {
                 continue;
             }
-            if (src.base_url && src.rate_limit_per_second) {
+            if (src.base_url) {
                 try {
                     const host = new URL(src.base_url).host;
-                    this.rateLimiter.setHostRate(host, Number(src.rate_limit_per_second) || 2.0);
+                    const rps = Number(src.rate_limit_per_second);
+                    const effectiveRps = (rps && rps > 0) ? Math.max(3.5, rps) : 4.0;
+                    this.rateLimiter.setHostRate(host, effectiveRps, Math.max(8, Math.ceil(effectiveRps * 2.5)));
                 }
                 catch { }
             }
@@ -2885,8 +2890,8 @@ export class ImporterEngine {
                 const downloadConcurrency = isPriority
                     ? Math.min(12, Math.max(8, baseSourcePageConcurrency * 2))
                     : Math.min(baseSourcePageConcurrency, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY || 8);
-                // Upload pool concurrency: up to 6, bounded by autotuner and globalMediaSemaphore
-                const uploadConcurrency = Math.min(6, Math.max(2, Math.floor(this.autotuner.getCurrentConcurrency() / 2)));
+                // Upload pool concurrency: up to 8, bounded by autotuner and globalMediaSemaphore
+                const uploadConcurrency = Math.min(8, Math.max(3, Math.floor(this.autotuner.getCurrentConcurrency() * 0.75)));
                 const globalMediaSemaphore = this.autotuner.getGlobalMediaSemaphore();
                 const globalInflightRequestSemaphore = this.autotuner.getGlobalInflightRequestSemaphore();
                 const bufferedPageSemaphore = this.autotuner.getBufferedPageSemaphore();
@@ -3488,6 +3493,14 @@ export class ImporterEngine {
             const tPublishUpdate = Math.round(pubResult.timings?.publishUpdateMs || 0);
             const tCascade = Math.round(pubResult.timings?.cascadeMs || 0);
             this.logger.info(`[DB_DIAGNOSTIC] ${effectiveSource} ch ${chapterNumber}: db_total=${tDb}ms (cover=${tCoverCheck}ms, ch_upsert=${tChapterUpsert}ms, pages_rpc=${tPagesRpc}ms, stage=${tStage}ms, barrier=${tBarrierCheck}ms, pub_update=${tPublishUpdate}ms, cascade=${tCascade}ms)`);
+            const downloadWallTimeMs = Math.max(0, (telemetry.tDownloadEnd || Date.now()) - (telemetry.tDownloadStart || Date.now()));
+            const uploadWallTimeMs = Math.max(0, (telemetry.tUploadEnd || Date.now()) - (telemetry.tUploadStart || Date.now()));
+            const mediaWallTimeMs = Math.max(0, (telemetry.tUploadEnd || Date.now()) - (telemetry.tDownloadStart || Date.now()));
+            const overlapMs = Math.max(0, (downloadWallTimeMs + uploadWallTimeMs) - mediaWallTimeMs);
+            const overlapRatio = (downloadWallTimeMs > 0 && uploadWallTimeMs > 0)
+                ? Math.min(1.0, Math.round((overlapMs / Math.min(downloadWallTimeMs, uploadWallTimeMs)) * 100) / 100)
+                : 0;
+            this.logger.info(`[MEDIA_DIAGNOSTIC] ${effectiveSource} ch ${chapterNumber}: media_wall=${mediaWallTimeMs}ms, dl_wall=${downloadWallTimeMs}ms, up_wall=${uploadWallTimeMs}ms, overlap_ratio=${overlapRatio}`);
             // Record fine-grained chapter job metric asynchronously
             void this.recordJobMetric({
                 workerId: this.config.WORKER_ID,
@@ -3498,8 +3511,8 @@ export class ImporterEngine {
                 pageCount: validPages.length,
                 totalBytes,
                 durationMs: Date.now() - tStart,
-                downloadMs: tDownload,
-                uploadMs: tUpload,
+                downloadMs: downloadWallTimeMs || Math.round(tDownload),
+                uploadMs: uploadWallTimeMs || Math.round(tUpload),
                 dbMs: tDb,
                 status: pubResult.published ? 'COMPLETED' : 'STAGED',
             });

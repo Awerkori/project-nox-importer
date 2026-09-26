@@ -9,9 +9,9 @@ export class BandwidthLimiter {
     tokens;
     lastRefill = Date.now();
     waitChain = Promise.resolve();
-    constructor(bytesPerSec = 4.0 * 1024 * 1024, maxBurst) {
+    constructor(bytesPerSec = 25.0 * 1024 * 1024, maxBurst) {
         this.bytesPerSec = bytesPerSec;
-        this.maxBurst = maxBurst || Math.max(bytesPerSec, 2 * 1024 * 1024);
+        this.maxBurst = maxBurst || Math.max(bytesPerSec, 8 * 1024 * 1024);
         this.tokens = this.maxBurst;
     }
     async acquire(bytes) {
@@ -55,8 +55,8 @@ export class DirectTelegramStorageProvider {
     currentGlobalActive = 0;
     waitingQueue = [];
     constructor(checkpointPath, rateLimitBytesPerSec) {
-        const rate = rateLimitBytesPerSec || (process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC ? parseInt(process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC, 10) : 4.0 * 1024 * 1024);
-        this.bandwidthLimiter = new BandwidthLimiter(rate, Math.max(rate, 2 * 1024 * 1024));
+        const rate = rateLimitBytesPerSec || (process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC ? parseInt(process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC, 10) : 25.0 * 1024 * 1024);
+        this.bandwidthLimiter = new BandwidthLimiter(rate, Math.max(rate, 8 * 1024 * 1024));
         this.logger.info(`DirectTelegramStorage BandwidthLimiter configured: ${(rate / (1024 * 1024)).toFixed(1)} MB/s`);
         this.httpsAgent = new https.Agent({
             keepAlive: true,
@@ -375,16 +375,12 @@ export class DirectTelegramStorageProvider {
                 reject(err);
             });
             const writeAsync = async () => {
+                await this.bandwidthLimiter.acquire(payloadBuffer.length);
                 if (!req.write(headerPart)) {
                     await new Promise((r) => req.once('drain', r));
                 }
-                const chunkSize = 64 * 1024;
-                for (let i = 0; i < payloadBuffer.length; i += chunkSize) {
-                    const chunk = payloadBuffer.subarray(i, i + chunkSize);
-                    await this.bandwidthLimiter.acquire(chunk.length);
-                    if (!req.write(chunk)) {
-                        await new Promise((r) => req.once('drain', r));
-                    }
+                if (!req.write(payloadBuffer)) {
+                    await new Promise((r) => req.once('drain', r));
                 }
                 if (!req.write(footerPart)) {
                     await new Promise((r) => req.once('drain', r));
