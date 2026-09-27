@@ -12,7 +12,8 @@
  * - Explainable scheduler: Detailed telemetry on why each job was selected.
  * - Shadow mode & live cutover toggle.
  */
-import { getYugabytePool, acquireJobsDirect } from '../../db/yugabyte-direct.js';
+import { getYugabytePool, acquireJobsDirect, recoverStalledLeasesDirect } from '../../db/yugabyte-direct.js';
+import { maintenanceScheduler } from '../maintenance-scheduler.js';
 import { Logger } from '../logger.js';
 import { confirmUpstreamGapInterval } from '../gap-validator.js';
 import { SchedulerLane, } from './types.js';
@@ -68,7 +69,6 @@ export class WorkAffinityScheduler {
     lastAnyPublicationTime = Date.now();
     lastFreshReleaseTime = Date.now();
     lastBackfillPublicationTime = Date.now();
-    watchdogRunning = false;
     // Claim efficiency telemetry (Fase 3)
     specificClaimAttempts = 0;
     specificClaimSuccesses = 0;
@@ -1291,11 +1291,12 @@ export class WorkAffinityScheduler {
      * If no publication occurs for 10m -> Triggers AUTO-RECOVERY routine!
      */
     startPublicationWatchdog() {
-        if (this.watchdogRunning)
-            return;
-        this.watchdogRunning = true;
-        setInterval(async () => {
+        maintenanceScheduler.register('publication-watchdog', 60000, 17000, async () => {
             try {
+                // Publication itself proves liveness. Do not scan the entire queue every minute
+                // while it is progressing; still check before the existing 5m warning threshold.
+                if (Date.now() - this.lastAnyPublicationTime < 3 * 60_000)
+                    return;
                 const activeWorkIds = this.stateStore.getActiveWorks().map((w) => w.workId);
                 const statsRes = await this.runQuery(this.pool, `
           SELECT 
@@ -1326,17 +1327,7 @@ export class WorkAffinityScheduler {
                         // Auto-Recovery Action 1: Force admission cycle to unblock works and promote sliding window
                         await this.admissionController.runAdmissionCycle();
                         // Auto-Recovery Action 2: Recover stale leases
-                        await this.runQuery(this.pool, `
-              UPDATE importer_queue
-              SET status = 'RETRY',
-                  attempts = attempts + 1,
-                  locked_by = NULL,
-                  locked_at = NULL,
-                  lease_expires_at = NULL,
-                  next_run_at = NOW(),
-                  updated_at = NOW()
-              WHERE status = 'IMPORTING' AND lease_expires_at < NOW();
-            `);
+                        await recoverStalledLeasesDirect();
                         // Auto-Recovery Action 3: Sentinel auto-resume evaluation
                         if (await this.protectiveSentinel.isProtectiveStopActive()) {
                             await this.protectiveSentinel.evaluateAutoResume();
@@ -1353,7 +1344,7 @@ export class WorkAffinityScheduler {
             catch (err) {
                 this.logger.warn('Error in Publication Watchdog loop', { error: err?.message });
             }
-        }, 60000);
+        });
     }
     /**
      * Shadow Mode simulation: calculates what the intelligent scheduler would choose,
@@ -1447,13 +1438,18 @@ export class WorkAffinityScheduler {
     }
     // --- Metrics & Telemetry ---
     startMetricsReporter() {
-        setInterval(async () => {
+        maintenanceScheduler.register('scheduler-metrics', 60000, 31000, async () => {
             try {
+                for (const map of [this.unclaimableWorksCooldown, this.stagedBlockedWorks]) {
+                    for (const [id, until] of map)
+                        if (until <= Date.now())
+                            map.delete(id);
+                }
                 const metrics = await this.collectMetrics();
                 await this.stateStore.saveMetrics(metrics);
             }
             catch { }
-        }, 60000);
+        });
     }
     async collectMetrics() {
         const activeWorks = this.stateStore.getActiveWorks();

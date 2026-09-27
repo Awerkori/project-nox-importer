@@ -22,6 +22,7 @@ export class AdmissionController {
     loopTimer = null;
     sourcePermitProvider;
     admissionInFlight = null;
+    demandFlights = new Map();
     setSourcePermitProvider(provider) {
         this.sourcePermitProvider = provider;
     }
@@ -484,25 +485,29 @@ export class AdmissionController {
         // 1. Replenish P1 Backfill Works
         if (backfillSlotsAvailable > 0) {
             const activeIds = activeWorks.map((w) => w.workId);
-            const candidatesRes = await this.runQuery(`SELECT (q.payload->>'workId') as work_id,
+            const candidatesRes = await this.runQuery(`WITH queue_candidates AS MATERIALIZED (
+           SELECT payload->>'workId' AS work_id, source, COUNT(*) AS pending_jobs,
+             MIN(chapter_sort_key) AS min_sort_key
+           FROM importer_queue
+           WHERE task_type='IMPORT_CHAPTER' AND status='QUEUED'
+             AND attempts < COALESCE(max_attempts,7)
+             AND NOT ((payload->>'workId') = ANY($1::text[]))
+           GROUP BY payload->>'workId', source
+         )
+         SELECT q.work_id,
                 w.title,
                 q.source,
-                COUNT(*) as pending_jobs,
-                COUNT(CASE WHEN q.status = 'QUEUED' THEN 1 END) as queued_count,
-                COUNT(CASE WHEN q.status = 'PAUSED_BY_STAFF' THEN 1 END) as paused_count,
-                MIN(q.chapter_sort_key) as min_sort_key
-         FROM importer_queue q
-         JOIN works w ON w.id = (q.payload->>'workId')::uuid
+                q.pending_jobs,
+                q.pending_jobs AS queued_count,
+                0 AS paused_count,
+                q.min_sort_key
+         FROM queue_candidates q
+         JOIN works w ON w.id = q.work_id::uuid
          JOIN importer_sources s ON s.id = q.source
-         WHERE q.task_type = 'IMPORT_CHAPTER'
-           AND q.status = 'QUEUED'
-           AND q.attempts < COALESCE(q.max_attempts, 7)
-           AND w.published = true
+         WHERE w.published = true
            AND w.latest_chapter_published_at IS NOT NULL
            AND s.enabled = true
            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
-           AND NOT ((q.payload->>'workId') = ANY($1::text[]))
-         GROUP BY (q.payload->>'workId'), w.title, q.source
          ORDER BY queued_count DESC
          LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], Math.max(50, backfillSlotsAvailable * 5)]);
             // Fast frontier check: query max_published for candidate works only
@@ -825,7 +830,17 @@ export class AdmissionController {
      * when workers are idle and currently active works cannot supply jobs.
      * Work-conserving and strictly controlled: preserves work-affinity, fairness, and sliding window.
      */
-    async admitNextWorkOnDemand(preferredLane, allowedSources) {
+    admitNextWorkOnDemand(preferredLane, allowedSources) {
+        const key = `${preferredLane || 'all'}:${[...(allowedSources || [])].sort().join(',')}`;
+        const existing = this.demandFlights.get(key);
+        if (existing)
+            return existing;
+        const flight = this.executeOnDemandAdmission(preferredLane, allowedSources)
+            .finally(() => { this.demandFlights.delete(key); });
+        this.demandFlights.set(key, flight);
+        return flight;
+    }
+    async executeOnDemandAdmission(preferredLane, allowedSources) {
         const config = this.stateStore.getConfig();
         if (!config.enabled && !config.shadowMode)
             return null;
@@ -853,25 +868,29 @@ export class AdmissionController {
             }
             const isP1 = lane === 'P1';
             const query = `
-        SELECT (q.payload->>'workId') as work_id,
+        WITH queue_candidates AS MATERIALIZED (
+          SELECT payload->>'workId' AS work_id, source, COUNT(*) AS pending_jobs,
+            MIN(chapter_sort_key) AS min_sort_key
+          FROM importer_queue
+          WHERE task_type='IMPORT_CHAPTER' AND status='QUEUED'
+            AND attempts < COALESCE(max_attempts,7)
+            AND ($1::text[] IS NULL OR source = ANY($1::text[]))
+            AND NOT ((payload->>'workId') = ANY($2::text[]))
+            AND ($3::text[] IS NULL OR NOT (source = ANY($3::text[])))
+          GROUP BY payload->>'workId', source
+        )
+        SELECT q.work_id,
                w.title,
                q.source,
-               COUNT(*) as pending_jobs,
-               COUNT(CASE WHEN q.status = 'QUEUED' THEN 1 END) as queued_count,
-               MIN(q.chapter_sort_key) as min_sort_key
-        FROM importer_queue q
-        JOIN works w ON w.id = (q.payload->>'workId')::uuid
+               q.pending_jobs,
+               q.pending_jobs AS queued_count,
+               q.min_sort_key
+        FROM queue_candidates q
+        JOIN works w ON w.id = q.work_id::uuid
         JOIN importer_sources s ON s.id = q.source
-        WHERE q.task_type = 'IMPORT_CHAPTER'
-          AND q.status = 'QUEUED'
-          AND q.attempts < COALESCE(q.max_attempts, 7)
-          AND ${isP1 ? 'w.published = true AND w.latest_chapter_published_at IS NOT NULL' : '(w.published IS FALSE OR w.latest_chapter_published_at IS NULL)'}
+        WHERE ${isP1 ? 'w.published = true AND w.latest_chapter_published_at IS NOT NULL' : '(w.published IS FALSE OR w.latest_chapter_published_at IS NULL)'}
           AND s.enabled = true
           AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
-          AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
-          AND NOT ((q.payload->>'workId') = ANY($2::text[]))
-          AND ($3::text[] IS NULL OR NOT (q.source = ANY($3::text[])))
-        GROUP BY (q.payload->>'workId'), w.title, q.source
         ORDER BY queued_count DESC
         LIMIT 10;
       `;

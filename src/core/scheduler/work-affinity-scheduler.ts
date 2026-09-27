@@ -13,7 +13,8 @@
  * - Shadow mode & live cutover toggle.
  */
 
-import { getYugabytePool, acquireJobsDirect } from '../../db/yugabyte-direct.js';
+import { getYugabytePool, acquireJobsDirect, recoverStalledLeasesDirect } from '../../db/yugabyte-direct.js';
+import { maintenanceScheduler } from '../maintenance-scheduler.js';
 import { Logger } from '../logger.js';
 import { ProtectiveSentinel } from '../protective-sentinel.js';
 import { AdmissionController } from './admission-controller.js';
@@ -93,7 +94,6 @@ export class WorkAffinityScheduler {
   private lastAnyPublicationTime = Date.now();
   private lastFreshReleaseTime = Date.now();
   private lastBackfillPublicationTime = Date.now();
-  private watchdogRunning = false;
 
   // Claim efficiency telemetry (Fase 3)
   public specificClaimAttempts = 0;
@@ -1485,11 +1485,11 @@ export class WorkAffinityScheduler {
    * If no publication occurs for 10m -> Triggers AUTO-RECOVERY routine!
    */
   private startPublicationWatchdog(): void {
-    if (this.watchdogRunning) return;
-    this.watchdogRunning = true;
-
-    setInterval(async () => {
+    maintenanceScheduler.register('publication-watchdog', 60000, 17000, async () => {
       try {
+        // Publication itself proves liveness. Do not scan the entire queue every minute
+        // while it is progressing; still check before the existing 5m warning threshold.
+        if (Date.now() - this.lastAnyPublicationTime < 3 * 60_000) return;
         const activeWorkIds = this.stateStore.getActiveWorks().map((w) => w.workId);
         const statsRes = await this.runQuery(this.pool, `
           SELECT 
@@ -1528,17 +1528,7 @@ export class WorkAffinityScheduler {
             await this.admissionController.runAdmissionCycle();
 
             // Auto-Recovery Action 2: Recover stale leases
-            await this.runQuery(this.pool, `
-              UPDATE importer_queue
-              SET status = 'RETRY',
-                  attempts = attempts + 1,
-                  locked_by = NULL,
-                  locked_at = NULL,
-                  lease_expires_at = NULL,
-                  next_run_at = NOW(),
-                  updated_at = NOW()
-              WHERE status = 'IMPORTING' AND lease_expires_at < NOW();
-            `);
+            await recoverStalledLeasesDirect();
 
             // Auto-Recovery Action 3: Sentinel auto-resume evaluation
             if (await this.protectiveSentinel.isProtectiveStopActive()) {
@@ -1557,7 +1547,7 @@ export class WorkAffinityScheduler {
       } catch (err: any) {
         this.logger.warn('Error in Publication Watchdog loop', { error: err?.message });
       }
-    }, 60000);
+    });
   }
 
   /**
@@ -1667,12 +1657,15 @@ export class WorkAffinityScheduler {
   // --- Metrics & Telemetry ---
 
   private startMetricsReporter(): void {
-    setInterval(async () => {
+    maintenanceScheduler.register('scheduler-metrics', 60000, 31000, async () => {
       try {
+        for (const map of [this.unclaimableWorksCooldown, this.stagedBlockedWorks]) {
+          for (const [id, until] of map) if (until <= Date.now()) map.delete(id);
+        }
         const metrics = await this.collectMetrics();
         await this.stateStore.saveMetrics(metrics);
       } catch {}
-    }, 60000);
+    });
   }
 
   async collectMetrics(): Promise<SchedulerMetrics> {
@@ -1800,4 +1793,3 @@ export class WorkAffinityScheduler {
     }
   }
 }
-

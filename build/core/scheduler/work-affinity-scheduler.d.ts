@@ -52,7 +52,6 @@ export declare class WorkAffinityScheduler {
     private lastAnyPublicationTime;
     private lastFreshReleaseTime;
     private lastBackfillPublicationTime;
-    private watchdogRunning;
     specificClaimAttempts: number;
     specificClaimSuccesses: number;
     genericClaimAttempts: number;

@@ -78,6 +78,9 @@ export declare class TelemetryCollector {
     private lastFlushWarningAt;
     private gcObserver;
     private runtimeFingerprint;
+    private cpuProfile;
+    private profiledSession;
+    private captureBoundedCpuProfile;
     setRuntimeFingerprint(value: Record<string, unknown>): void;
     private limiterProviders;
     configureChapterSlots(count: number, effectiveCapacity?: () => number): void;
@@ -174,6 +177,18 @@ export declare class TelemetryCollector {
         timestamp: string;
         telemetryMode: string;
         runtimeFingerprint: Record<string, unknown>;
+        maintenance: {
+            [k: string]: {
+                lastStarted: number | null;
+                lastFinished: number | null;
+                durationMs: number;
+                rowsTouched: number | null;
+                nextRun: number;
+                currentlyRunning: boolean;
+                failures: number;
+            };
+        };
+        boundedCpuProfile: Record<string, unknown> | null;
         diagnosticExpiresAt: string | null;
         sampleCapacity: number;
         slotsConfigured: number;
