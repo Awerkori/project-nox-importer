@@ -19,7 +19,7 @@ const envMap = {
   NODE_ENV: 'production',
   STORAGE_PROVIDER: 'direct_telegram',
   UPLOAD_RATE_LIMIT_BYTES_PER_SEC: '50000000',
-  MAX_CONCURRENT_CHAPTERS: '8',
+  MAX_CONCURRENT_CHAPTERS: '10',
   BATCH_PAGE_DOWNLOAD_CONCURRENCY: '8',
   POLL_INTERVAL_SECONDS: '5',
   QUEUE_LEASE_DURATION_SECONDS: '300',
@@ -163,10 +163,10 @@ async function main() {
       lines.forEach(l => console.log(l));
 
       const directModeLogged = lines.some(l => l.includes('IMPORTER DATABASE MODE: DIRECT'));
-      const runnerPoolLogged = lines.some(l => l.includes('shared chapter runner pool (8 slots'));
+      const runnerPoolLogged = lines.some(l => l.includes('shared chapter runner pool (10 slots'));
 
       if (directModeLogged && runnerPoolLogged) {
-        console.log('\n✅ DIRECT RUNTIME AND 8 RUNNER SLOTS CONFIRMED ON DISCLOUD!');
+        console.log('\n✅ DIRECT RUNTIME AND 10 RUNNER SLOTS CONFIRMED ON DISCLOUD!');
         break;
       }
 
