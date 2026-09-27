@@ -170,6 +170,16 @@ export class ProtectiveSentinel {
   }
 
   isEmergencyPaused(): boolean {
+    if (this.autoEmergencyPause.active) {
+      const pausedMs = this.autoEmergencyPause.pausedAt ? Date.parse(this.autoEmergencyPause.pausedAt) : 0;
+      if (pausedMs > 0 && Date.now() - pausedMs > 180_000) {
+        this.autoEmergencyPause.active = false;
+        this.autoEmergencyPause.resumedAt = new Date().toISOString();
+        this.autoEmergencyPause.reason = 'Auto-expired after 3-minute safety limit';
+        this.logger.info('✅ [AUTO_EMERGENCY_PAUSE EXPIRED] Auto-emergency pause reached 3-minute safety limit. Resuming pipeline.');
+        void this.persistAutoEmergencyPause();
+      }
+    }
     return this.autoEmergencyPause.active;
   }
 
@@ -339,6 +349,15 @@ export class ProtectiveSentinel {
           const parsedPausedAt = parsed.pausedAt && !isNaN(Date.parse(parsed.pausedAt))
             ? parsed.pausedAt
             : new Date().toISOString();
+
+          // Do NOT restore emergency pauses older than 3 minutes (stale from prior incidents)
+          const pauseAgeMs = Date.now() - Date.parse(parsedPausedAt);
+          if (pauseAgeMs > 180_000) {
+            this.logger.info(`[AUTO_EMERGENCY_PAUSE EXPIRED ON BOOT] Stale pause from ${parsedPausedAt} (${Math.round(pauseAgeMs / 1000)}s ago) ignored and cleared.`);
+            this.autoEmergencyPause.active = false;
+            void this.persistAutoEmergencyPause();
+            return;
+          }
 
           this.autoEmergencyPause = {
             active: true,
@@ -533,9 +552,15 @@ export class ProtectiveSentinel {
 
     try {
       const pool = getYugabytePool();
-      const res = await pool.query(
-        "SELECT id FROM chapters WHERE published_at IS NOT NULL ORDER BY published_at DESC LIMIT 1"
-      );
+      const res = await pool.query(`
+        SELECT c.id
+        FROM chapters c
+        JOIN works w ON c.work_id = w.id
+        WHERE c.published_at IS NOT NULL
+          AND w.published IS TRUE
+        ORDER BY c.published_at DESC
+        LIMIT 1;
+      `);
       if (res.rows.length > 0 && res.rows[0].id) {
         this.cachedReaderChapterId = res.rows[0].id;
         this.cachedReaderChapterAt = now;
@@ -632,17 +657,18 @@ export class ProtectiveSentinel {
     }
 
     // 2. AUTO-RESUME CHECK (Section 6)
-    // When emergency pause is active, auto-resume if site returns to healthy (< 1500ms and 0 5xx) for sustained ~2 minutes (8 cycles * 15s)
+    // When emergency pause is active, auto-resume if site returns to healthy (< 2000ms and 0 5xx) for sustained ~1 minute (4 cycles * 15s)
     if (this.autoEmergencyPause.active) {
-      if (homeP95 < 1500 && readerP95 < 1200 && this.consecutive5xxCount === 0) {
+      const isReaderHealthy = this.readerSamples.length === 0 || readerP95 < 1500;
+      if (homeP95 < 2000 && isReaderHealthy && this.consecutive5xxCount === 0) {
         this.healthyCyclesCount++;
-        if (this.healthyCyclesCount >= 8) {
+        if (this.healthyCyclesCount >= 4) {
           this.autoEmergencyPause.active = false;
           this.autoEmergencyPause.resumedAt = new Date().toISOString();
-          this.autoEmergencyPause.reason = `Auto-resumed after site stabilization (Home: ${homeP95}ms, Reader: ${readerP95}ms sustained for 2m)`;
+          this.autoEmergencyPause.reason = `Auto-resumed after site stabilization (Home: ${homeP95}ms, Reader: ${readerP95}ms sustained for 60s)`;
           this.healthyCyclesCount = 0;
           this.logger.info(
-            `✅ [AUTO-RESUME] Site recovered to healthy state (Home: ${homeP95}ms, Reader: ${readerP95}ms). Auto-resuming claims at capacity 1.`
+            `✅ [AUTO-RESUME] Site recovered to healthy state (Home: ${homeP95}ms, Reader: ${readerP95}ms). Auto-resuming claims.`
           );
           void this.persistAutoEmergencyPause();
           if (this.onAutoResume) {
