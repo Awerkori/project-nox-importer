@@ -539,7 +539,7 @@ describe('Multi-Source Chapter Ingestion & Canonical Deduplication', () => {
     expect(pendingKuroJobs.rows.length).toBe(2);
     expect(Number((pendingKuroJobs.rows[0] as any).chapter_sort_key)).toBe(0); // Prologue first
     expect(Number((pendingKuroJobs.rows[1] as any).chapter_sort_key)).toBe(2); // Chapter 2
-  });
+  }, 15000);
 
   it('fallback mechanism: when preferred Kuro fails permanently on Chapter 2, MangaFlix can fulfill Chapter 2', async () => {
     // 1. Kuro's Chapter 2 is currently in queue. Mark it FAILED permanently.

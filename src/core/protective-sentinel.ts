@@ -545,22 +545,6 @@ export class ProtectiveSentinel {
     }
 
     try {
-      if (this.supabase) {
-        const { data, error } = await this.supabase
-          .from('chapters')
-          .select('id')
-          .not('published_at', 'is', null)
-          .limit(1)
-          .maybeSingle();
-        if (!error && data?.id) {
-          this.cachedReaderChapterId = data.id;
-          this.cachedReaderChapterAt = now;
-          return this.cachedReaderChapterId;
-        }
-      }
-    } catch {}
-
-    try {
       const pool = this.getPool();
       if (pool && typeof pool.query === 'function') {
         const res = await pool.query(`
@@ -574,6 +558,23 @@ export class ProtectiveSentinel {
         `);
         if (res.rows.length > 0 && res.rows[0].id) {
           this.cachedReaderChapterId = res.rows[0].id;
+          this.cachedReaderChapterAt = now;
+          return this.cachedReaderChapterId;
+        }
+      }
+    } catch {}
+
+    try {
+      if (this.supabase) {
+        const { data, error } = await this.supabase
+          .from('chapters')
+          .select('id')
+          .not('published_at', 'is', null)
+          .order('published_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (!error && data?.id) {
+          this.cachedReaderChapterId = data.id;
           this.cachedReaderChapterAt = now;
           return this.cachedReaderChapterId;
         }
@@ -699,17 +700,21 @@ export class ProtectiveSentinel {
     let sitePressure = 0;
     let pressureReason = 'Site and infrastructure healthy';
 
+    const hasReaderSamples = this.readerSamples.length > 0;
+    const isReaderDegraded = hasReaderSamples ? readerP95 >= 2500 : false;
+    const isReaderSevere = hasReaderSamples ? readerP95 >= 5000 : false;
+
     if (this.autoEmergencyPause.active) {
       siteHealth = 'RED';
       sitePressure = 80;
       pressureReason = `AUTO_EMERGENCY_PAUSE: ${this.autoEmergencyPause.reason}`;
-    } else if (this.consecutive5xxCount >= 3 || (homeP95 >= 8000 && (this.readerSamples.length === 0 || readerP95 >= 5000))) {
+    } else if (this.consecutive5xxCount >= 3 || homeP95 >= 10000 || (homeP95 >= 8000 && (!hasReaderSamples || isReaderSevere))) {
       siteHealth = 'RED';
       sitePressure = 60;
       pressureReason = this.consecutive5xxCount >= 3
         ? `Sustained HTTP 5xx errors (${this.consecutive5xxCount} consecutive)`
         : `Severe site latency breach (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
-    } else if (this.consecutive5xxCount >= 1 || (homeP95 >= 5000 && (this.readerSamples.length === 0 || readerP95 >= 2500))) {
+    } else if (this.consecutive5xxCount >= 1 || (homeP95 >= 5000 && isReaderDegraded) || (homeP95 >= 8000 && !hasReaderSamples)) {
       siteHealth = 'ORANGE';
       sitePressure = 35;
       pressureReason = this.consecutive5xxCount >= 1

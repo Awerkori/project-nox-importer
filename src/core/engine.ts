@@ -321,14 +321,18 @@ export class ImporterEngine {
       this.logger.warn('[CONTROLLED SELF-RESTART] Scheduler/admission re-initialization warning', { error: err?.message });
     }
 
-    // 5. Reset AdaptiveAutotuner to capacity 1 in RECOVERING mode
-    this.autotuner.setCapacity(1, 'RECOVERING', `In-process soft restart completed (${reason})`);
+    // 5. Reset AdaptiveAutotuner capacity
+    const pressureSnapshot = this.protectiveSentinel.getPressureSnapshot();
+    const hasRealPressure = pressureSnapshot.siteHealth !== 'GREEN' || pressureSnapshot.pressureScore > 0;
+    const restartCapacity = hasRealPressure ? 1 : this.autotuner.getHealthyConcurrencyFloor();
+    const restartState = hasRealPressure ? 'RECOVERING' : 'RUNNING_STABLE';
+    this.autotuner.setCapacity(restartCapacity, restartState, `In-process soft restart completed (${reason})`);
 
     // 6. Resume processing
     this.isRestarting = false;
     const totalElapsedMs = Date.now() - shutdownStartTime;
     this.logger.warn(
-      `✨ [IN_PROCESS_SOFT_RESTART_COMPLETED] Importer engine recovered in-process without container termination in ${totalElapsedMs}ms. Capacity set to 1 (RECOVERING).`
+      `✨ [IN_PROCESS_SOFT_RESTART_COMPLETED] Importer engine recovered in-process without container termination in ${totalElapsedMs}ms. Capacity set to ${restartCapacity} (${restartState}).`
     );
   }
 

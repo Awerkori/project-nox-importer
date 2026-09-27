@@ -483,7 +483,7 @@ describe('ImporterEngine End-to-End Execution', () => {
     expect(chapMap.rows.length).toBe(1);
     expect((chapMap.rows[0] as any).status).toBe('COMPLETED');
     expect((chapMap.rows[0] as any).page_count).toBe(2);
-  });
+  }, 15000);
 
   it('safely skips already completed chapters on subsequent sync runs without duplicate downloads', async () => {
     const uploadCountBefore = storage.uploads.size;

@@ -18,7 +18,7 @@ const mockPool = {
         rows: [{ total: String(mockDbConns.total), active: String(mockDbConns.active) }],
       });
     }
-    if (sql.includes('SELECT id FROM chapters')) {
+    if (sql.includes('FROM chapters')) {
       return Promise.resolve({ rows: [{ id: 'test-chapter-uuid-1' }] });
     }
     return Promise.resolve({ rows: [] });
