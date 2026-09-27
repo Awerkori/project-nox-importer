@@ -74,6 +74,8 @@ export class AdmissionController {
             this.loopTimer = null;
         }
     }
+    immediateReplenishTimer = null;
+    isReplenishingCycle = false;
     scheduleNextCycle(delayMs) {
         if (!this.isRunning)
             return;
@@ -85,9 +87,34 @@ export class AdmissionController {
                 this.logger.error('Error during admission cycle', { error: err?.message });
             }
             finally {
-                this.scheduleNextCycle(25000);
+                this.scheduleNextCycle(4000);
             }
         }, delayMs);
+    }
+    /**
+     * Triggers immediate admission reconciliation and replenishment.
+     * Debounced with 50ms trailing window to collapse concurrent vacate events.
+     */
+    triggerImmediateReplenishment(reason) {
+        if (!this.isRunning || this.isReplenishingCycle)
+            return;
+        if (this.immediateReplenishTimer)
+            return;
+        this.immediateReplenishTimer = setTimeout(async () => {
+            this.immediateReplenishTimer = null;
+            if (!this.isRunning || this.isReplenishingCycle)
+                return;
+            this.isReplenishingCycle = true;
+            try {
+                await this.runAdmissionCycle();
+            }
+            catch (err) {
+                this.logger.warn(`Error during immediate replenishment (${reason}): ${err?.message}`);
+            }
+            finally {
+                this.isReplenishingCycle = false;
+            }
+        }, 50);
     }
     /**
      * Section 5: Admission Gate Obrigatório
@@ -330,6 +357,7 @@ export class AdmissionController {
                         this.logger.warn(`Work ${work.workTitle} (${work.workId}) marked BLOCKED due to unresolvable gap. Vacating active slot.`);
                         work.state = 'BLOCKED';
                         this.stateStore.removeActiveWork(work.workId);
+                        this.triggerImmediateReplenishment('WORK_GAP_BLOCKED_VACATED');
                         continue;
                     }
                     // Check primary source health
@@ -343,6 +371,7 @@ export class AdmissionController {
                         this.logger.info(`Work ${work.workTitle} (${work.workId}) marked BLOCKED (source ${work.primarySource} in cooldown/blocked). Vacating active slot.`);
                         work.state = 'BLOCKED';
                         this.stateStore.removeActiveWork(work.workId);
+                        this.triggerImmediateReplenishment('WORK_SOURCE_BLOCKED_VACATED');
                         continue;
                     }
                     else if (work.state === 'BLOCKED') {
@@ -360,6 +389,7 @@ export class AdmissionController {
                         const beforeCount = this.stateStore.getActiveWorks().filter((w) => w.state === 'FILLING').length;
                         this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${stateLabel} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${unimportedCnt} unimported mappings). Vacating active slot. ACTIVE SET BEFORE: ${beforeCount} -> AFTER: ${beforeCount - 1}`);
                         this.stateStore.removeActiveWork(work.workId);
+                        this.triggerImmediateReplenishment('WORK_DRAINED_VACATED');
                         continue;
                     }
                     // Check if P2 new work is stale in cohort (admitted >= 30m ago with 0 in-flight and no progress)
@@ -369,6 +399,7 @@ export class AdmissionController {
                         if (work.publishedChapters === 0 && importingCnt === 0 && (nowMs - admittedMs >= 30 * 60 * 1000)) {
                             this.logger.warn(`[ACTIVE_SET_VACATED] Stale P2 work ${work.workTitle} (${work.workId}) vacated from active cohort (>30m with 0 in-flight) to allow new admissions.`);
                             this.stateStore.removeActiveWork(work.workId);
+                            this.triggerImmediateReplenishment('STALE_P2_VACATED');
                             continue;
                         }
                     }

@@ -32,6 +32,7 @@ export declare class WorkAffinityScheduler {
     private p0ConsecutiveClaims;
     private rrIndexP1;
     private rrIndexP2;
+    private rrCatalogSourceIndex;
     private publicationBarrier?;
     private sourcePermitProvider?;
     setPublicationBarrier(barrier: any): void;
@@ -116,6 +117,13 @@ export declare class WorkAffinityScheduler {
      * Helper to atomically claim 1 P1 job for ANY existing catalog work with SKIP LOCKED.
      * Strictly restricts to published works (w.published = true) on active, enabled sources.
      * Enforces that P1 work across the catalog is processed before ANY P2 work!
+     */
+    private executeClaimCatalogQuery;
+    /**
+     * Helper to atomically claim 1 P1 job for ANY existing catalog work with SKIP LOCKED.
+     * Strictly restricts to published works (w.published = true) on active, enabled sources.
+     * Enforces that P1 work across the catalog is processed before ANY P2 work!
+     * Distributes concurrent worker claims across multiple available sources to prevent lock-step saturation.
      */
     private claimCatalogP1Job;
     /**

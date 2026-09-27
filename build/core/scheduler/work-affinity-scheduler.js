@@ -27,6 +27,7 @@ export class WorkAffinityScheduler {
     p0ConsecutiveClaims = 0;
     rrIndexP1 = 0;
     rrIndexP2 = 0;
+    rrCatalogSourceIndex = 0;
     publicationBarrier;
     sourcePermitProvider;
     setPublicationBarrier(barrier) {
@@ -844,8 +845,8 @@ export class WorkAffinityScheduler {
      * Strictly restricts to published works (w.published = true) on active, enabled sources.
      * Enforces that P1 work across the catalog is processed before ANY P2 work!
      */
-    async claimCatalogP1Job(client, opts) {
-        const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
+    async executeClaimCatalogQuery(client, opts) {
+        const disallowedChapterKeys = opts.disallowedChapterKeys || Array.from(this.inFlightChapterKeys);
         const query = `
       WITH to_lock AS (
         SELECT q.id
@@ -919,6 +920,38 @@ export class WorkAffinityScheduler {
             payload,
             chapter_sort_key: sortKey,
         };
+    }
+    /**
+     * Helper to atomically claim 1 P1 job for ANY existing catalog work with SKIP LOCKED.
+     * Strictly restricts to published works (w.published = true) on active, enabled sources.
+     * Enforces that P1 work across the catalog is processed before ANY P2 work!
+     * Distributes concurrent worker claims across multiple available sources to prevent lock-step saturation.
+     */
+    async claimCatalogP1Job(client, opts) {
+        const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
+        let candidateSources = opts.allowedSources;
+        if (this.sourcePermitProvider && candidateSources && candidateSources.length > 0) {
+            const permitted = candidateSources.filter((s) => this.sourcePermitProvider(s) > 0);
+            if (permitted.length > 0)
+                candidateSources = permitted;
+        }
+        // Try fair single-source claim first across concurrent runners to eliminate source lock-step contention
+        if (candidateSources && candidateSources.length > 1) {
+            const offset = (this.rrCatalogSourceIndex++) % candidateSources.length;
+            const targetSource = candidateSources[offset];
+            const singleRes = await this.executeClaimCatalogQuery(client, {
+                ...opts,
+                allowedSources: [targetSource],
+                disallowedChapterKeys,
+            });
+            if (singleRes)
+                return singleRes;
+        }
+        return this.executeClaimCatalogQuery(client, {
+            ...opts,
+            allowedSources: candidateSources,
+            disallowedChapterKeys,
+        });
     }
     /**
      * Helper to atomically claim 1 STAFF_FORCED job with SKIP LOCKED.
@@ -1240,6 +1273,7 @@ export class WorkAffinityScheduler {
                 this.markWorkStagedBlocked(workId, 30000);
                 // Immediate on-demand admission replenishment
                 try {
+                    this.admissionController.triggerImmediateReplenishment('WORK_STAGED_BLOCKED_VACATED');
                     await this.admissionController.admitNextWorkOnDemand('P1');
                 }
                 catch { }

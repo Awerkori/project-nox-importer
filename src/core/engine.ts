@@ -1718,8 +1718,14 @@ export class ImporterEngine {
           continue;
         }
 
-        // B. Find sources that currently have available capacity (outside mutex)
-        const eligibleSources = await this.getEligibleChapterSources();
+        // B. Check productive slots and trigger replenishment if starved
+        const prodSnap = telemetryCollector.getSlotProductivitySnapshot();
+        if (prodSnap.productiveSlots < 7) {
+          this.admissionController.triggerImmediateReplenishment('PRODUCTIVE_SLOTS_UNDER_7');
+        }
+
+        // C. Find sources that currently have available capacity (outside mutex)
+        let eligibleSources = await this.getEligibleChapterSources();
         if (eligibleSources.length === 0) {
           globalSem.release();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
@@ -1727,66 +1733,83 @@ export class ImporterEngine {
           continue;
         }
 
-        // C. Concurrent Database Claim OUTSIDE Mutex (YSQL FOR UPDATE SKIP LOCKED)
-        telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
         let candidateJob: QueueJob | null = null;
-        const tDb0 = performance.now();
-        try {
-          candidateJob = await this.scheduler.acquireNextChapterJob({
-            workerId: this.config.WORKER_ID,
-            leaseDurationMinutes: Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
-            allowedSources: eligibleSources,
-          });
-        } catch (acquireErr: any) {
-          this.logger.warn(`Error acquiring chapter job: ${acquireErr?.message}`);
-          globalSem.release();
-          telemetryCollector.setSlotState(slotIndex, 'IDLE');
-          await this.sleep(100);
-          continue;
-        }
-        const schedulerAcquireTotalMs = performance.now() - tDb0;
+        let reservation: { reserved: boolean; reason: string | null; sourceSem: any } = { reserved: false, reason: null, sourceSem: null };
+        let schedulerAcquireTotalMs = 0;
+        let mutexWaitMs = 0;
 
-        if (!candidateJob) {
-          globalSem.release();
-          telemetryCollector.setSlotState(slotIndex, 'IDLE');
-          const emptyBackoffMs = 100 + Math.floor(Math.random() * 150);
-          await this.sleep(emptyBackoffMs);
-          continue;
-        }
+        for (let claimAttempt = 0; claimAttempt < 3; claimAttempt++) {
+          if (eligibleSources.length === 0) break;
 
-        // D. Short In-Memory Reservation Mutex (< 0.05ms, ZERO DB I/O, ZERO Network, ZERO Await)
-        telemetryCollector.setSlotState(slotIndex, 'WAITING_MUTEX');
-        const reservation = await this.chapterClaimMutex.runExclusive(async () => {
-          // 1. Check & acquire source semaphore permit
-          const sourceSem = this.autotuner.getSourceSemaphore(candidateJob!.source);
-          if (!sourceSem.tryAcquire()) {
-            return { reserved: false, reason: 'SOURCE_CONCURRENCY_FULL', sourceSem: null };
+          telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
+          const tDb0 = performance.now();
+          try {
+            candidateJob = await this.scheduler.acquireNextChapterJob({
+              workerId: this.config.WORKER_ID,
+              leaseDurationMinutes: Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
+              allowedSources: eligibleSources,
+            });
+          } catch (acquireErr: any) {
+            this.logger.warn(`Error acquiring chapter job: ${acquireErr?.message}`);
+            break;
+          }
+          schedulerAcquireTotalMs = performance.now() - tDb0;
+
+          if (!candidateJob) {
+            break;
           }
 
-          // 2. Check work in-flight limit across concurrent claims
-          const workId = candidateJob!.payload?.workId;
-          if (workId) {
-            const inFlight = this.scheduler.getInFlightCount(workId);
-            const maxInflight = this.scheduler.getMaxInflightPerWork();
-            if (inFlight > maxInflight) {
-              sourceSem.release();
-              return { reserved: false, reason: 'WORK_MAX_INFLIGHT_EXCEEDED', sourceSem: null };
+          // D. Short In-Memory Reservation Mutex (< 0.05ms, ZERO DB I/O, ZERO Network, ZERO Await)
+          telemetryCollector.setSlotState(slotIndex, 'WAITING_MUTEX');
+          reservation = await this.chapterClaimMutex.runExclusive(async () => {
+            // 1. Check & acquire source semaphore permit
+            const sourceSem = this.autotuner.getSourceSemaphore(candidateJob!.source);
+            if (!sourceSem.tryAcquire()) {
+              return { reserved: false, reason: 'SOURCE_CONCURRENCY_FULL', sourceSem: null };
             }
+
+            // 2. Check work in-flight limit across concurrent claims
+            const workId = candidateJob!.payload?.workId;
+            if (workId) {
+              const inFlight = this.scheduler.getInFlightCount(workId);
+              const maxInflight = this.scheduler.getMaxInflightPerWork();
+              if (inFlight > maxInflight) {
+                sourceSem.release();
+                return { reserved: false, reason: 'WORK_MAX_INFLIGHT_EXCEEDED', sourceSem: null };
+              }
+            }
+
+            return { reserved: true, reason: null, sourceSem };
+          });
+          mutexWaitMs = (this.chapterClaimMutex as any).getLastWaitMs?.() || 0;
+
+          if (reservation.reserved) {
+            break;
           }
 
-          return { reserved: true, reason: null, sourceSem };
-        });
-        const mutexWaitMs = (this.chapterClaimMutex as any).getLastWaitMs?.() || 0;
-
-        if (!reservation.reserved) {
+          // Concurrent claim check failed: safely release back to QUEUED
           this.logger.warn(`Concurrent claim check failed for job ${candidateJob.id} (${reservation.reason}), safely releasing back to QUEUED`);
           if (candidateJob.payload?.workId) {
             this.scheduler.onJobFinished(candidateJob.payload.workId, candidateJob.chapter_sort_key);
           }
-          globalSem.release();
           await this.queue.releaseJob(candidateJob.id, 'QUEUED', `Concurrent reservation limit: ${reservation.reason}`, 0);
+
+          if (reservation.reason === 'SOURCE_CONCURRENCY_FULL') {
+            // Select another source with permit available immediately without releasing global slot permit
+            eligibleSources = eligibleSources.filter((s) => s !== candidateJob!.source);
+            candidateJob = null;
+            continue;
+          } else {
+            candidateJob = null;
+            break;
+          }
+        }
+
+        if (!candidateJob || !reservation.reserved) {
+          globalSem.release();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
-          await this.sleep(25);
+          const emptyBackoffMs = 50 + Math.floor(Math.random() * 100);
+          await this.sleep(emptyBackoffMs);
           continue;
         }
 

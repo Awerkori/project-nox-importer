@@ -29,7 +29,14 @@ export declare class AdmissionController {
      */
     start(): void;
     stop(): void;
+    private immediateReplenishTimer;
+    private isReplenishingCycle;
     private scheduleNextCycle;
+    /**
+     * Triggers immediate admission reconciliation and replenishment.
+     * Debounced with 50ms trailing window to collapse concurrent vacate events.
+     */
+    triggerImmediateReplenishment(reason: string): void;
     /**
      * Section 5: Admission Gate Obrigatório
      *
