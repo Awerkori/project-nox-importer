@@ -150,7 +150,7 @@ describe('Definitive Throughput Governor & Auto-Emergency Pause Policy', () => {
       }),
     };
 
-    const sentinel = new ProtectiveSentinel(mockSupabase, undefined, undefined);
+    const sentinel = new ProtectiveSentinel(mockSupabase, undefined, undefined, null);
 
     // Feed catastrophic latencies (P95 >= 10,000ms)
     for (let cycle = 1; cycle <= 3; cycle++) {
@@ -176,7 +176,7 @@ describe('Definitive Throughput Governor & Auto-Emergency Pause Policy', () => {
   it('Requirement 1: AUTO_EMERGENCY_PAUSE survives process restart, keeps claims gated, and auto-resumes upon site recovery', async () => {
     const persistedState = {
       active: true,
-      pausedAt: '2026-09-26T17:00:00.000Z',
+      pausedAt: new Date().toISOString(),
       reason: 'Catastrophic site latency breach sustained for 3 cycles (Home p95: 11500ms)',
       siteP95: 11500,
       consecutiveCatastrophicCycles: 3,
@@ -241,10 +241,10 @@ describe('Definitive Throughput Governor & Auto-Emergency Pause Policy', () => {
     };
 
     const mockPool: any = {
-      query: vi.fn().mockResolvedValue({ rows: [{ total_connections: 3, active_connections: 1 }] }),
+      query: vi.fn().mockResolvedValue({ rows: [{ total: '3', active: '1' }] }),
     };
 
-    const sentinel = new ProtectiveSentinel(mockSupabase, mockPool, undefined);
+    const sentinel = new ProtectiveSentinel(mockSupabase, undefined, undefined, mockPool);
     const now = Date.now();
 
     // Simulate transient latency spike that occurred 80 seconds ago (> 75s window)

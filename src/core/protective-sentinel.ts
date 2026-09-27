@@ -165,6 +165,10 @@ export class ProtectiveSentinel {
     private dbPool?: any
   ) {}
 
+  private getPool(): any {
+    return this.dbPool !== undefined ? this.dbPool : getYugabytePool();
+  }
+
   setOnAutoResume(fn: () => void): void {
     this.onAutoResume = fn;
   }
@@ -224,22 +228,24 @@ export class ProtectiveSentinel {
 
     try {
       try {
-        const pool = getYugabytePool();
-        const res = await pool.query("SELECT value FROM settings WHERE key = 'importer_protective_stop'");
-        if (res.rows.length > 0 && res.rows[0].value) {
-          const raw = res.rows[0].value;
-          const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          this.cachedInfo = {
-            active: Boolean(parsed.active),
-            reason: parsed.reason || null,
-            classification: parsed.classification || null,
-            details: parsed.details || null,
-            triggered_at: parsed.triggered_at || null,
-            resumed_at: parsed.resumed_at || null,
-            resumed_by: parsed.resumed_by || null,
-          };
-          this.lastFetchMs = now;
-          return this.cachedInfo;
+        const pool = this.getPool();
+        if (pool && typeof pool.query === 'function') {
+          const res = await pool.query("SELECT value FROM settings WHERE key = 'importer_protective_stop'");
+          if (res.rows.length > 0 && res.rows[0].value) {
+            const raw = res.rows[0].value;
+            const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            this.cachedInfo = {
+              active: Boolean(parsed.active),
+              reason: parsed.reason || null,
+              classification: parsed.classification || null,
+              details: parsed.details || null,
+              triggered_at: parsed.triggered_at || null,
+              resumed_at: parsed.resumed_at || null,
+              resumed_by: parsed.resumed_by || null,
+            };
+            this.lastFetchMs = now;
+            return this.cachedInfo;
+          }
         }
       } catch {}
 
@@ -424,11 +430,13 @@ export class ProtectiveSentinel {
     );
 
     try {
-      const pool = getYugabytePool();
-      await pool.query(
-        "INSERT INTO settings (key, value) VALUES ('importer_protective_stop', $1) ON CONFLICT (key) DO UPDATE SET value = $1",
-        [JSON.stringify(payload)]
-      );
+      const pool = this.getPool();
+      if (pool && typeof pool.query === 'function') {
+        await pool.query(
+          "INSERT INTO settings (key, value) VALUES ('importer_protective_stop', $1) ON CONFLICT (key) DO UPDATE SET value = $1",
+          [JSON.stringify(payload)]
+        );
+      }
     } catch {
       try {
         await this.supabase.from('settings').upsert({
@@ -460,11 +468,13 @@ export class ProtectiveSentinel {
     this.logger.info(`[PROTECTIVE_STOP RESUMED] Importer resumed by ${resumedBy}.`, { resumed_at: nowIso });
 
     try {
-      const pool = getYugabytePool();
-      await pool.query(
-        "INSERT INTO settings (key, value) VALUES ('importer_protective_stop', $1) ON CONFLICT (key) DO UPDATE SET value = $1",
-        [JSON.stringify(payload)]
-      );
+      const pool = this.getPool();
+      if (pool && typeof pool.query === 'function') {
+        await pool.query(
+          "INSERT INTO settings (key, value) VALUES ('importer_protective_stop', $1) ON CONFLICT (key) DO UPDATE SET value = $1",
+          [JSON.stringify(payload)]
+        );
+      }
     } catch {
       try {
         await this.supabase.from('settings').upsert({
@@ -551,20 +561,22 @@ export class ProtectiveSentinel {
     } catch {}
 
     try {
-      const pool = getYugabytePool();
-      const res = await pool.query(`
-        SELECT c.id
-        FROM chapters c
-        JOIN works w ON c.work_id = w.id
-        WHERE c.published_at IS NOT NULL
-          AND w.published IS TRUE
-        ORDER BY c.published_at DESC
-        LIMIT 1;
-      `);
-      if (res.rows.length > 0 && res.rows[0].id) {
-        this.cachedReaderChapterId = res.rows[0].id;
-        this.cachedReaderChapterAt = now;
-        return this.cachedReaderChapterId;
+      const pool = this.getPool();
+      if (pool && typeof pool.query === 'function') {
+        const res = await pool.query(`
+          SELECT c.id
+          FROM chapters c
+          JOIN works w ON c.work_id = w.id
+          WHERE c.published_at IS NOT NULL
+            AND w.published IS TRUE
+          ORDER BY c.published_at DESC
+          LIMIT 1;
+        `);
+        if (res.rows.length > 0 && res.rows[0].id) {
+          this.cachedReaderChapterId = res.rows[0].id;
+          this.cachedReaderChapterAt = now;
+          return this.cachedReaderChapterId;
+        }
       }
     } catch {}
 
@@ -582,15 +594,17 @@ export class ProtectiveSentinel {
     let totalConns = 0;
     let activeConns = 0;
     try {
-      const pool = getYugabytePool();
-      const cRes = await pool.query(`
-        SELECT count(*) as total,
-               count(*) FILTER (WHERE state = 'active') as active
-        FROM pg_stat_activity
-        WHERE datname = current_database()
-      `);
-      totalConns = parseInt(cRes.rows[0]?.total || '0', 10);
-      activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
+      const pool = this.getPool();
+      if (pool && typeof pool.query === 'function') {
+        const cRes = await pool.query(`
+          SELECT count(*) as total,
+                 count(*) FILTER (WHERE state = 'active') as active
+          FROM pg_stat_activity
+          WHERE datname = current_database()
+        `);
+        totalConns = parseInt(cRes.rows[0]?.total || '0', 10);
+        activeConns = parseInt(cRes.rows[0]?.active || '0', 10);
+      }
     } catch {
       try {
         const { data: connData, error: connErr } = await this.supabase.rpc('importer_active_connections_count');
@@ -689,17 +703,19 @@ export class ProtectiveSentinel {
       siteHealth = 'RED';
       sitePressure = 80;
       pressureReason = `AUTO_EMERGENCY_PAUSE: ${this.autoEmergencyPause.reason}`;
-    } else if (this.consecutive5xxCount >= 3 || homeP95 >= 3500 || readerP95 >= 3000) {
+    } else if (this.consecutive5xxCount >= 3 || (homeP95 >= 8000 && (this.readerSamples.length === 0 || readerP95 >= 5000))) {
       siteHealth = 'RED';
       sitePressure = 60;
       pressureReason = this.consecutive5xxCount >= 3
         ? `Sustained HTTP 5xx errors (${this.consecutive5xxCount} consecutive)`
         : `Severe site latency breach (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
-    } else if (this.consecutive5xxCount >= 1 || homeP95 >= 1500 || readerP95 >= 1200) {
+    } else if (this.consecutive5xxCount >= 1 || (homeP95 >= 5000 && (this.readerSamples.length === 0 || readerP95 >= 2500))) {
       siteHealth = 'ORANGE';
       sitePressure = 35;
-      pressureReason = `Confirmed site degradation (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
-    } else if (homeP95 >= 800 || readerP95 >= 700) {
+      pressureReason = this.consecutive5xxCount >= 1
+        ? `HTTP 5xx error observed (${this.consecutive5xxCount})`
+        : `Confirmed site degradation (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
+    } else if (this.consecutive5xxCount === 0 && (homeP95 >= 1500 || readerP95 >= 1200)) {
       siteHealth = 'YELLOW';
       sitePressure = 15;
       pressureReason = `Mild site latency increase (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
@@ -877,11 +893,13 @@ export class ProtectiveSentinel {
 
   private async persistAutoEmergencyPause(): Promise<void> {
     try {
-      const pool = getYugabytePool();
-      await pool.query(
-        "INSERT INTO settings (key, value) VALUES ('importer_auto_emergency_pause', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-        [JSON.stringify(this.autoEmergencyPause)]
-      );
+      const pool = this.getPool();
+      if (pool && typeof pool.query === 'function') {
+        await pool.query(
+          "INSERT INTO settings (key, value) VALUES ('importer_auto_emergency_pause', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+          [JSON.stringify(this.autoEmergencyPause)]
+        );
+      }
     } catch (err: any) {
       this.logger.warn('Failed to persist importer_auto_emergency_pause', { error: err?.message });
     }
