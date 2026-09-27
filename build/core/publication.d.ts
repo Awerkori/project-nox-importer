@@ -30,7 +30,7 @@ export declare class PublicationBarrier {
     private supabase;
     private logger;
     private workLocks;
-    onPublished?: (isFreshRelease: boolean) => void;
+    onPublished?: (isFreshRelease: boolean, durableRateEvent?: boolean) => void;
     constructor(supabase: SupabaseClient);
     private getWorkLock;
     /**

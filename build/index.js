@@ -19,6 +19,7 @@ import { MockStorageProvider } from './storage/mock.js';
 import { ImporterEngine } from './core/engine.js';
 import { HealthMonitor } from './core/health.js';
 import { diagnostics } from './core/diagnostics.js';
+import { telemetryCollector } from './core/telemetry-collector.js';
 async function main() {
     const __dirname = path.dirname(fileURLToPath(import.meta.url));
     let buildCommit = 'unknown';
@@ -27,6 +28,12 @@ async function main() {
     }
     catch (e) { /* ignore */ }
     rootLogger.info(`Starting Project Nox Importer daemon... | Build: ${buildCommit}`);
+    let buildMetadata = { buildId: buildCommit };
+    try {
+        buildMetadata = JSON.parse(buildCommit);
+    }
+    catch { }
+    telemetryCollector.setRuntimeFingerprint({ ...buildMetadata, nodeVersion: process.version, bootedAt: new Date().toISOString() });
     const config = getConfig();
     // Network diagnostics: determine egress IP and TCP port reachability
     try {

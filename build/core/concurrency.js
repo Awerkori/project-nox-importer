@@ -7,9 +7,17 @@ export class AsyncSemaphore {
     maxPermits;
     waitQueue = [];
     name;
+    configuredPermits;
     constructor(maxPermits, name = 'unnamed_semaphore') {
         this.maxPermits = Math.max(1, maxPermits);
+        this.configuredPermits = this.maxPermits;
         this.name = name;
+        if (!name.startsWith('work_lock') && name !== 'unnamed_semaphore') {
+            telemetryCollector.registerLimiter(name, () => ({
+                configuredCapacity: this.configuredPermits, currentCapacity: this.maxPermits,
+                active: this.activePermits, available: this.available, waiters: this.waitQueue.length,
+            }));
+        }
     }
     tryAcquire() {
         if (this.activePermits < this.maxPermits && this.waitQueue.length === 0) {

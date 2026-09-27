@@ -54,6 +54,7 @@ export interface LimiterAuditRecord {
     waitSamples: number[];
     totalWaitMs: number;
     maxWaitMs: number;
+    concurrencySamples?: number[];
 }
 export interface SlotStateRecord {
     slotIndex: number;
@@ -67,6 +68,25 @@ export declare class TelemetryCollector {
     private logger;
     private activeSessionId;
     private sessionStartTime;
+    private sessionExpiresAt;
+    private configuredChapterSlots;
+    private effectiveCapacity;
+    private flushing;
+    private nextSessionCheck;
+    private gcObserver;
+    private runtimeFingerprint;
+    setRuntimeFingerprint(value: Record<string, unknown>): void;
+    private limiterProviders;
+    configureChapterSlots(count: number, effectiveCapacity?: () => number): void;
+    registerLimiter(name: string, snapshot: () => {
+        configuredCapacity: number;
+        currentCapacity: number;
+        active: number;
+        available: number;
+        waiters: number;
+    }): void;
+    unregisterLimiter(name: string): void;
+    stop(): void;
     private slots;
     private activeWorkersSamples;
     private activeWorkersDistribution;
@@ -78,6 +98,15 @@ export declare class TelemetryCollector {
     private dbPoolActiveQueries;
     private dbPoolTotalWaitMs;
     private dbPoolMaxWaitMs;
+    private dbSqlSamples;
+    private dbHoldSamples;
+    private dbTransactionSamples;
+    private dbQueryCount;
+    private dbSqlTotalMs;
+    private completedChapterCount;
+    recordDbQuery(ms: number): void;
+    recordDbHold(ms: number): void;
+    recordDbTransaction(ms: number): void;
     private telegramActiveUploads;
     private telegramActiveUploadsSamples;
     private telegramPageUploadMsSamples;
@@ -105,7 +134,7 @@ export declare class TelemetryCollector {
     private constructor();
     static getInstance(): TelemetryCollector;
     setPool(pool: pg.Pool): void;
-    startSession(sessionId: string): void;
+    startSession(sessionId: string, expiresAt?: number): void;
     getSessionId(): string | null;
     registerSlot(slotIndex: number): void;
     setSlotState(slotIndex: number, newState: SlotStateType | string, context?: string): void;
@@ -140,7 +169,29 @@ export declare class TelemetryCollector {
     getSnapshotReport(): {
         sessionId: string | null;
         timestamp: string;
+        telemetryMode: string;
+        runtimeFingerprint: Record<string, unknown>;
+        diagnosticExpiresAt: string | null;
+        sampleCapacity: number;
         slotsConfigured: number;
+        effectiveConcurrency: number;
+        database: {
+            queries: number;
+            sqlTotalMs: number;
+            completedChapters: number;
+            amortizedQueriesPerCompletedChapter: number | null;
+            amortizedSqlMsPerCompletedChapter: number | null;
+            sqlP50Ms: number;
+            sqlP95Ms: number;
+            clientHoldP50Ms: number;
+            clientHoldP95Ms: number;
+            transactionP50Ms: number;
+            transactionP95Ms: number;
+            poolMax: number | undefined;
+            totalConnections: number | undefined;
+            idleConnections: number | undefined;
+            waitingClients: number | undefined;
+        };
         avgSlotStates: {
             ACTIVE_PROCESSING: number;
             BLOCKED: number;
@@ -173,19 +224,10 @@ export declare class TelemetryCollector {
             p95: number;
             peak: number;
             distribution: Record<number, number>;
-            timeWith8ActivePercent: number;
-            timeWithLessThan6Percent: number;
+            timeAtConfiguredCapacityPercent: number;
         };
         perSourceActive: {
-            hanamiheaven: {
-                avg: number;
-                peak: number;
-            };
-            fleurblanche: {
-                avg: number;
-                peak: number;
-            };
-            mangalivreto: {
+            [k: string]: {
                 avg: number;
                 peak: number;
             };
@@ -556,6 +598,10 @@ export declare class TelemetryCollector {
             rssMb: number;
             heapUsedMb: number;
             heapTotalMb: number;
+            externalMb: number;
+            arrayBuffersMb: number;
+            gcPauseP50Ms: number;
+            gcPauseP95Ms: number;
         };
     };
     flushTelemetryToDb(): Promise<void>;

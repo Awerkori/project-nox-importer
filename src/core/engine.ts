@@ -174,12 +174,13 @@ export class ImporterEngine {
     this.dbPool = effectivePool;
     this.rateBucketTracker = new RateBucketTracker(effectivePool);
 
-    this.publicationBarrier.onPublished = (isFreshRelease: boolean) => {
+    this.publicationBarrier.onPublished = (isFreshRelease: boolean, durableRateEvent = false) => {
       this.scheduler.recordPublication(isFreshRelease);
-      this.rateBucketTracker.recordVisiblePublication(isFreshRelease);
-      this.autotuner.recordVisibleChapterPublished();
+      if (!durableRateEvent) this.rateBucketTracker.recordVisiblePublication(isFreshRelease);
       if (isFreshRelease) {
         this.autotuner.recordFreshChapterPublished();
+      } else {
+        this.autotuner.recordVisibleChapterPublished();
       }
     };
 
@@ -505,6 +506,7 @@ export class ImporterEngine {
   }
 
   stop(): void {
+    telemetryCollector.stop();
     this.stopSignal = true;
     this.abortController.abort();
     this.autoHealWatchdog.stop();
@@ -697,15 +699,7 @@ export class ImporterEngine {
       try {
         this.logger.info('🧹 [HYGIENE SWEEP] Starting bounded hygiene sweep...');
 
-        // 1. Reclaim expired job leases
-        try {
-          const { recovered } = await this.queue.recoverExpiredLeases();
-          if (recovered > 0) {
-            this.logger.info(`🧹 [HYGIENE SWEEP] Reclaimed ${recovered} expired job leases.`);
-          }
-        } catch (e: any) {
-          this.logger.warn('Hygiene sweep lease recovery failed', { error: e?.message });
-        }
+        // Lease recovery is owned by the dedicated loop; emergency callers share its single flight.
 
         // 2. Clean stale source cooldowns in importer_sources
         try {
@@ -1418,10 +1412,7 @@ export class ImporterEngine {
           cycleReason: evaluation.reason,
         });
 
-        // Periodic pruning of old telemetry every 120 cycles (~1 hour)
-        if (this.autotunerCycleCount % 120 === 0) {
-          void this.pruneTelemetry();
-        }
+        // Telemetry retention is owned by the hygiene sweep.
       } catch (err: any) {
         this.logger.error('Error during autotuner evaluation loop', { error: err?.message });
       }
@@ -1670,6 +1661,17 @@ export class ImporterEngine {
       Math.min(this.config.MAX_CONCURRENT_CHAPTERS || 5, this.config.TESTED_CONCURRENCY_CEILING || 32)
     );
     this.logger.info(`Starting shared chapter runner pool (${slotsCount} slots for target concurrency ${slotsCount})`);
+    telemetryCollector.configureChapterSlots(slotsCount, () => this.autotuner.getGlobalChapterSemaphore().capacity);
+    this.logger.info('RUNTIME_FINGERPRINT', {
+      nodeVersion: process.version, environment: process.env.NODE_ENV || 'production',
+      configuredConcurrency: slotsCount, effectiveConcurrency: this.autotuner.getGlobalChapterSemaphore().capacity,
+      healthyFloor: this.autotuner.getHealthyConcurrencyFloor(), dbPoolMax: this.config.DIRECT_DB_POOL_MAX,
+      telegramConcurrency: this.autotuner.getGlobalMediaSemaphore().capacity,
+      downloadConcurrency: this.autotuner.getGlobalInflightRequestSemaphore().capacity,
+      bufferedPageCapacity: this.autotuner.getBufferedPageSemaphore().capacity,
+      bufferBudgetBytes: 64 * 1024 * 1024,
+      leaseSeconds: this.config.QUEUE_LEASE_DURATION_SECONDS, heartbeatSeconds: this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS,
+    });
     const slots = Array.from({ length: slotsCount }, (_, i) => this.runGeneralSlot(i));
     await Promise.all(slots);
   }
@@ -1687,6 +1689,10 @@ export class ImporterEngine {
     const globalSem = this.autotuner.getGlobalChapterSemaphore();
 
     while (!this.stopSignal) {
+      let globalHeld = false;
+      let sourceHeld: AsyncSemaphore | null = null;
+      let claimedWork: QueueJob | null = null;
+      const releaseGlobal = () => { if (globalHeld) { globalHeld = false; globalSem.release(); } };
       try {
         // 0. Enforce PublicationSafetyBarrier: if CLOSED or RECOVERING, hold 0 permits, 0 slots
         telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_PUBLICATION_BARRIER');
@@ -1725,9 +1731,11 @@ export class ImporterEngine {
         // A. Check global chapter semaphore capacity first (slot-level concurrency)
         if (!globalSem.tryAcquire()) {
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
-          await this.sleep(25);
+          await this.sleep(200);
           continue;
         }
+
+        globalHeld = true;
 
         // B. Check productive slots and trigger replenishment if starved
         const prodSnap = telemetryCollector.getSlotProductivitySnapshot();
@@ -1738,7 +1746,7 @@ export class ImporterEngine {
         // C. Find sources that currently have available capacity (outside mutex)
         let eligibleSources = await this.getEligibleChapterSources();
         if (eligibleSources.length === 0) {
-          globalSem.release();
+          releaseGlobal();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
           await this.sleep(100);
           continue;
@@ -1786,6 +1794,7 @@ export class ImporterEngine {
               const maxInflight = this.scheduler.getMaxInflightPerWork();
               if (inFlight > maxInflight) {
                 sourceSem.release();
+          sourceHeld = null;
                 return { reserved: false, reason: 'WORK_MAX_INFLIGHT_EXCEEDED', sourceSem: null };
               }
             }
@@ -1817,7 +1826,7 @@ export class ImporterEngine {
         }
 
         if (!candidateJob || !reservation.reserved) {
-          globalSem.release();
+          releaseGlobal();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
           const emptyBackoffMs = 50 + Math.floor(Math.random() * 100);
           await this.sleep(emptyBackoffMs);
@@ -1826,19 +1835,23 @@ export class ImporterEngine {
 
         const { sourceSem } = reservation;
         const job = candidateJob;
+        sourceHeld = sourceSem;
+        claimedWork = job;
 
         // Post-Mutex Concurrent Validation (runs concurrently, zero blocking of other workers!)
-        telemetryCollector.setSlotState(slotIndex, 'ACTIVE_DB', `validating ch ${job.payload?.chapterNumber}`);
+        telemetryCollector.setSlotState(slotIndex, 'ACTIVE_DB', `${job.source} validating ch ${job.payload?.chapterNumber}`);
         const validation = await this.scheduler.validateClaimedJobPostMutex(job);
 
         if (!validation.valid) {
           if (job.payload?.workId) {
             this.scheduler.onJobFinished(job.payload.workId, job.chapter_sort_key);
+            claimedWork = null;
           }
           if (sourceSem) {
             sourceSem.release();
+          sourceHeld = null;
           }
-          globalSem.release();
+          releaseGlobal();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
           await this.sleep(15);
           continue;
@@ -1866,13 +1879,15 @@ export class ImporterEngine {
         } finally {
           if (job.payload?.workId) {
             this.scheduler.onJobFinished(job.payload.workId, job.chapter_sort_key);
+            claimedWork = null;
           }
           this.scheduler.recordJobCompletion();
           this.rateBucketTracker.recordJobCompletion();
           if (sourceSem) {
             sourceSem.release();
+          sourceHeld = null;
           }
-          globalSem.release();
+          releaseGlobal();
         }
 
         telemetryCollector.setSlotState(slotIndex, 'IDLE');
@@ -1882,6 +1897,10 @@ export class ImporterEngine {
         telemetryCollector.setSlotState(slotIndex, 'IDLE');
         this.logger.error(`Error in general worker slot ${slotIndex}`, { error: err?.message });
         await this.sleep(2000);
+      } finally {
+        if (claimedWork?.payload?.workId) this.scheduler.onJobFinished(claimedWork.payload.workId, claimedWork.chapter_sort_key);
+        sourceHeld?.release();
+        releaseGlobal();
       }
     }
   }

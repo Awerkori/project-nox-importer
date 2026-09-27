@@ -1,6 +1,7 @@
 import { performance, PerformanceObserver } from 'node:perf_hooks';
 import type pg from 'pg';
 import { Logger } from './logger.js';
+import { BoundedSamples } from './bounded-samples.js';
 
 export type SlotStateType =
   | 'WAITING_MUTEX'
@@ -69,6 +70,7 @@ export interface LimiterAuditRecord {
   waitSamples: number[];
   totalWaitMs: number;
   maxWaitMs: number;
+  concurrencySamples?: number[];
 }
 
 export interface SlotStateRecord {
@@ -98,36 +100,72 @@ export class TelemetryCollector {
 
   private activeSessionId: string | null = null;
   private sessionStartTime = 0;
+  private sessionExpiresAt = 0;
+  private configuredChapterSlots = 0;
+  private effectiveCapacity = () => this.configuredChapterSlots;
+  private flushing = false;
+  private nextSessionCheck = 0;
+  private gcObserver: PerformanceObserver | null = null;
+  private runtimeFingerprint: Record<string, unknown> = {};
+  public setRuntimeFingerprint(value: Record<string, unknown>) { this.runtimeFingerprint = value; }
+  private limiterProviders = new Map<string, () => { configuredCapacity: number; currentCapacity: number; active: number; available: number; waiters: number }>();
+
+  public configureChapterSlots(count: number, effectiveCapacity = () => count) {
+    this.configuredChapterSlots = Math.max(0, Math.floor(count));
+    this.effectiveCapacity = effectiveCapacity;
+    for (const index of this.slots.keys()) if (index >= count) this.slots.delete(index);
+  }
+
+  public registerLimiter(name: string, snapshot: () => { configuredCapacity: number; currentCapacity: number; active: number; available: number; waiters: number }) {
+    if (this.limiterProviders.size < 128 || this.limiterProviders.has(name)) this.limiterProviders.set(name, snapshot);
+  }
+
+  public unregisterLimiter(name: string) { this.limiterProviders.delete(name); this.limiters.delete(name); }
+
+  public stop() {
+    if (this.samplerTimer) clearTimeout(this.samplerTimer);
+    if (this.flushTimer) clearInterval(this.flushTimer);
+    this.gcObserver?.disconnect();
+    this.samplerTimer = this.flushTimer = null;
+  }
 
   // 1. Slot Utilization & Worker State Tracking
   private slots = new Map<number, SlotStateRecord>();
-  private activeWorkersSamples: number[] = [];
-  private activeWorkersDistribution: Record<number, number> = {
-    0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0
-  };
+  private activeWorkersSamples: number[] = new BoundedSamples();
+  private activeWorkersDistribution: Record<number, number> = {};
   private sourceActiveSamples = new Map<string, number[]>();
-  private slotStateDistributionSamples: Array<Record<SlotStateType, number>> = [];
+  private slotStateDistributionSamples: Array<Record<SlotStateType, number>> = new BoundedSamples();
   private samplerTimer: NodeJS.Timeout | null = null;
 
   // 2. DB Pool Telemetry
-  private dbPoolWaitSamples: number[] = [];
-  private dbPoolQueuedSamples: number[] = [];
+  private dbPoolWaitSamples: number[] = new BoundedSamples();
+  private dbPoolQueuedSamples: number[] = new BoundedSamples();
   private dbPoolActiveQueries = 0;
   private dbPoolTotalWaitMs = 0;
   private dbPoolMaxWaitMs = 0;
+  private dbSqlSamples: number[] = new BoundedSamples();
+  private dbHoldSamples: number[] = new BoundedSamples();
+  private dbTransactionSamples: number[] = new BoundedSamples();
+  private dbQueryCount = 0;
+  private dbSqlTotalMs = 0;
+  private completedChapterCount = 0;
+
+  public recordDbQuery(ms: number) { this.dbSqlSamples.push(ms); this.dbQueryCount++; this.dbSqlTotalMs += ms; }
+  public recordDbHold(ms: number) { this.dbHoldSamples.push(ms); }
+  public recordDbTransaction(ms: number) { this.dbTransactionSamples.push(ms); }
 
   // 3. Telegram Storage Telemetry
   private telegramActiveUploads = 0;
-  private telegramActiveUploadsSamples: number[] = [];
-  private telegramPageUploadMsSamples: number[] = [];
-  private telegramSemaphoreWaitSamples: number[] = [];
+  private telegramActiveUploadsSamples: number[] = new BoundedSamples();
+  private telegramPageUploadMsSamples: number[] = new BoundedSamples();
+  private telegramSemaphoreWaitSamples: number[] = new BoundedSamples();
   private telegramTotalBytesUploaded = 0;
 
   // 4. Image Download Telemetry
   private downloadActiveRequests = 0;
-  private downloadActiveSamples: number[] = [];
-  private downloadPageMsSamples: number[] = [];
-  private downloadSemaphoreWaitSamples: number[] = [];
+  private downloadActiveSamples: number[] = new BoundedSamples();
+  private downloadPageMsSamples: number[] = new BoundedSamples();
+  private downloadSemaphoreWaitSamples: number[] = new BoundedSamples();
   private downloadTotalBytes = 0;
   private downloadErrorsCount = 0;
   private downloadRetriesCount = 0;
@@ -139,16 +177,16 @@ export class TelemetryCollector {
   private limiters = new Map<string, LimiterAuditRecord>();
 
   // 7. Chapter Jobs
-  private chapters: ChapterMetricRecord[] = [];
+  private chapters: ChapterMetricRecord[] = new BoundedSamples(256);
 
   // 8. Event Loop & Node Runtime Telemetry
-  private eventLoopLagSamples: number[] = [];
+  private eventLoopLagSamples: number[] = new BoundedSamples();
   private lastELU = performance.eventLoopUtilization ? performance.eventLoopUtilization() : null;
-  private eluHistory: number[] = [];
-  private gcPauseSamples: number[] = [];
+  private eluHistory: number[] = new BoundedSamples();
+  private gcPauseSamples: number[] = new BoundedSamples();
   private lastCpuUsage = process.cpuUsage();
   private lastCpuTime = performance.now();
-  private cpuPercentSamples: number[] = [];
+  private cpuPercentSamples: number[] = new BoundedSamples();
 
   // Persistence
   private poolRef: pg.Pool | null = null;
@@ -170,34 +208,39 @@ export class TelemetryCollector {
     this.poolRef = pool;
   }
 
-  public startSession(sessionId: string) {
+  public startSession(sessionId: string, expiresAt = Date.now() + 5 * 60_000) {
     this.activeSessionId = sessionId;
+    this.sessionExpiresAt = Math.min(expiresAt, Date.now() + 5 * 60_000);
     this.sessionStartTime = performance.now();
-    this.activeWorkersSamples = [];
-    this.activeWorkersDistribution = {
-      0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0
-    };
-    this.dbPoolWaitSamples = [];
-    this.dbPoolQueuedSamples = [];
+    this.activeWorkersSamples = new BoundedSamples();
+    this.activeWorkersDistribution = {};
+    this.limiters.clear();
+    this.telegramTotalBytesUploaded = this.downloadTotalBytes = 0;
+    this.dbPoolWaitSamples = new BoundedSamples();
+    this.dbPoolQueuedSamples = new BoundedSamples();
     this.dbPoolTotalWaitMs = 0;
     this.dbPoolMaxWaitMs = 0;
-    this.telegramActiveUploadsSamples = [];
-    this.telegramPageUploadMsSamples = [];
-    this.telegramSemaphoreWaitSamples = [];
-    this.downloadActiveSamples = [];
-    this.downloadPageMsSamples = [];
-    this.downloadSemaphoreWaitSamples = [];
+    this.dbQueryCount = this.dbSqlTotalMs = this.completedChapterCount = 0;
+    this.dbSqlSamples = new BoundedSamples();
+    this.dbHoldSamples = new BoundedSamples();
+    this.dbTransactionSamples = new BoundedSamples();
+    this.telegramActiveUploadsSamples = new BoundedSamples();
+    this.telegramPageUploadMsSamples = new BoundedSamples();
+    this.telegramSemaphoreWaitSamples = new BoundedSamples();
+    this.downloadActiveSamples = new BoundedSamples();
+    this.downloadPageMsSamples = new BoundedSamples();
+    this.downloadSemaphoreWaitSamples = new BoundedSamples();
     this.downloadErrorsCount = 0;
     this.downloadRetriesCount = 0;
     this.hostRateLimitWaitSamples.clear();
-    this.chapters = [];
-    this.gcPauseSamples = [];
-    this.eventLoopLagSamples = [];
-    this.eluHistory = [];
-    this.cpuPercentSamples = [];
+    this.chapters = new BoundedSamples(256);
+    this.gcPauseSamples = new BoundedSamples();
+    this.eventLoopLagSamples = new BoundedSamples();
+    this.eluHistory = new BoundedSamples();
+    this.cpuPercentSamples = new BoundedSamples();
     this.sourceActiveSamples.clear();
 
-    this.slotStateDistributionSamples = [];
+    this.slotStateDistributionSamples = new BoundedSamples();
 
     // Reset slot timers
     const now = performance.now();
@@ -284,10 +327,10 @@ export class TelemetryCollector {
     idleSlots: number;
     productiveSlotRatio: number;
   } {
-    const configuredSlots = this.slots.size || 10;
+    const configuredSlots = this.configuredChapterSlots || this.slots.size;
     let busySlots = 0;
     let productiveSlots = 0;
-    let idleSlots = 0;
+    let idleSlots = Math.max(0, configuredSlots - this.slots.size);
 
     for (const slot of this.slots.values()) {
       if (slot.currentState === 'IDLE') {
@@ -343,7 +386,6 @@ export class TelemetryCollector {
 
   public recordTelegramSemaphoreWait(waitMs: number) {
     this.telegramSemaphoreWaitSamples.push(waitMs);
-    this.recordLimiterWait('telegram_semaphore', waitMs, 6);
   }
 
   // --- Image Download Telemetry ---
@@ -358,7 +400,6 @@ export class TelemetryCollector {
 
   public recordDownloadSemaphoreWait(waitMs: number) {
     this.downloadSemaphoreWaitSamples.push(waitMs);
-    this.recordLimiterWait('download_semaphore', waitMs, 8);
   }
 
   public recordDownloadError(retried: boolean) {
@@ -370,7 +411,8 @@ export class TelemetryCollector {
   public recordRateLimitWait(host: string, waitMs: number) {
     let list = this.hostRateLimitWaitSamples.get(host);
     if (!list) {
-      list = [];
+      if (this.hostRateLimitWaitSamples.size >= 128) return;
+      list = new BoundedSamples<number>();
       this.hostRateLimitWaitSamples.set(host, list);
     }
     list.push(waitMs);
@@ -381,13 +423,14 @@ export class TelemetryCollector {
   public recordLimiterWait(name: string, waitMs: number, limit: number | string = 'unknown') {
     let rec = this.limiters.get(name);
     if (!rec) {
+      if (this.limiters.size >= 128) return;
       rec = {
         name,
         configuredLimit: limit,
         observedConcurrencyPeak: 0,
         observedConcurrencyAvg: 0,
         hitCount: 0,
-        waitSamples: [],
+        waitSamples: new BoundedSamples<number>(),
         totalWaitMs: 0,
         maxWaitMs: 0,
       };
@@ -402,13 +445,14 @@ export class TelemetryCollector {
   public updateLimiterConcurrency(name: string, current: number, limit?: number | string) {
     let rec = this.limiters.get(name);
     if (!rec) {
+      if (this.limiters.size >= 128) return;
       rec = {
         name,
         configuredLimit: limit ?? 'unknown',
         observedConcurrencyPeak: current,
         observedConcurrencyAvg: current,
         hitCount: 0,
-        waitSamples: [],
+        waitSamples: new BoundedSamples<number>(),
         totalWaitMs: 0,
         maxWaitMs: 0,
       };
@@ -424,14 +468,16 @@ export class TelemetryCollector {
 
   // --- Chapter Profile Recording ---
   public recordChapterMetric(record: ChapterMetricRecord) {
+    this.completedChapterCount++;
     this.chapters.push(record);
-    this.logger.info(`[CHAPTER_DIAGNOSTIC] ${record.source} ch ${record.chapterNumber}: duration=${record.totalDurationMs}ms (down=${record.download_ms}ms, up=${record.telegram_upload_ms}ms, db=${record.db_publish_ms}ms, sem_wait=${record.semaphore_wait_ms}ms, rl_wait=${record.rate_limit_wait_ms}ms)`);
+    this.logger.debug('CHAPTER_DIAGNOSTIC', record);
   }
 
   // --- Background Sampling ---
   private startRuntimeSampling() {
-    this.samplerTimer = setInterval(() => {
-      // 1. Sample 8 Chapter Worker Slots (mutually exclusive across 10 states)
+    const sample = () => {
+      if (this.activeSessionId && Date.now() >= this.sessionExpiresAt) this.activeSessionId = null;
+      // Sample the configured runner pool, including idle runners after downscale.
       let activeCount = 0;
       const sourceCounts = new Map<string, number>();
       const currentStatesCount: Record<SlotStateType, number> = {
@@ -447,7 +493,7 @@ export class TelemetryCollector {
         IDLE: 0,
       };
 
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < (this.configuredChapterSlots || this.slots.size); i++) {
         const slot = this.slots.get(i);
         const st = (slot?.currentState as SlotStateType) || 'IDLE';
         currentStatesCount[st] = (currentStatesCount[st] || 0) + 1;
@@ -464,14 +510,15 @@ export class TelemetryCollector {
 
       this.slotStateDistributionSamples.push(currentStatesCount);
       this.activeWorkersSamples.push(activeCount);
-      const bucket = Math.min(8, Math.max(0, activeCount));
+      const bucket = Math.max(0, activeCount);
       this.activeWorkersDistribution[bucket] = (this.activeWorkersDistribution[bucket] || 0) + 1;
 
-      for (const src of ['hanamiheaven', 'fleurblanche', 'mangalivreto']) {
+      for (const src of new Set([...this.sourceActiveSamples.keys(), ...sourceCounts.keys()])) {
         const c = sourceCounts.get(src) || 0;
         let arr = this.sourceActiveSamples.get(src);
         if (!arr) {
-          arr = [];
+          if (this.sourceActiveSamples.size >= 128) continue;
+          arr = new BoundedSamples<number>();
           this.sourceActiveSamples.set(src, arr);
         }
         arr.push(c);
@@ -479,11 +526,15 @@ export class TelemetryCollector {
 
       // 2. Telegram concurrency sample
       this.telegramActiveUploadsSamples.push(this.telegramActiveUploads);
-      this.updateLimiterConcurrency('telegram_semaphore', this.telegramActiveUploads, 6);
 
       // 3. Download concurrency sample
       this.downloadActiveSamples.push(this.downloadActiveRequests);
-      this.updateLimiterConcurrency('download_semaphore', this.downloadActiveRequests, 8);
+      for (const [name, provider] of this.limiterProviders) {
+        const state = provider();
+        this.updateLimiterConcurrency(name, state.active, state.configuredCapacity);
+        const limiter = this.limiters.get(name);
+        if (limiter) (limiter.concurrencySamples ||= new BoundedSamples<number>()).push(state.active);
+      }
 
       // 4. Event loop lag sample
       // Checked via lag monitor if needed
@@ -496,7 +547,7 @@ export class TelemetryCollector {
         const userDiff = (cpuNow.user - this.lastCpuUsage.user) / 1000;
         const sysDiff = (cpuNow.system - this.lastCpuUsage.system) / 1000;
         const totalCpuMs = userDiff + sysDiff;
-        const percent = Math.min(100, Math.round((totalCpuMs / elapsedMs) * 100 * 10) / 10);
+        const percent = Math.round((totalCpuMs / elapsedMs) * 100 * 10) / 10;
         this.cpuPercentSamples.push(percent);
         this.lastCpuUsage = cpuNow;
         this.lastCpuTime = timeNow;
@@ -504,16 +555,21 @@ export class TelemetryCollector {
 
       // 6. ELU sample
       if (performance.eventLoopUtilization && this.lastELU) {
-        const elu = performance.eventLoopUtilization(this.lastELU);
+        const currentELU = performance.eventLoopUtilization();
+        const elu = performance.eventLoopUtilization(currentELU, this.lastELU);
+        this.lastELU = currentELU;
         this.eluHistory.push(Math.round(elu.utilization * 1000) / 10);
       }
-    }, 100);
+      this.samplerTimer = setTimeout(sample, this.activeSessionId ? 200 : 1000);
+      this.samplerTimer.unref();
+    };
+    this.samplerTimer = setTimeout(sample, 1000);
     this.samplerTimer.unref();
 
-    // Background persistence flush every 3s
+    // Session polling is separately paced to 30s; diagnostic flushes use 5s.
     this.flushTimer = setInterval(async () => {
       await this.flushTelemetryToDb();
-    }, 3000);
+    }, 5000);
     this.flushTimer.unref();
   }
 
@@ -525,6 +581,7 @@ export class TelemetryCollector {
         }
       });
       obs.observe({ entryTypes: ['gc'] });
+      this.gcObserver = obs;
     } catch {
       // GC observation not supported in all environments
     }
@@ -539,16 +596,12 @@ export class TelemetryCollector {
     const mem = process.memoryUsage();
     const totalSlotSamples = this.activeWorkersSamples.length || 1;
 
-    let timeWith8ActiveCount = this.activeWorkersDistribution[8] || 0;
-    let timeWithLessThan6Count = 0;
-    for (let i = 0; i < 6; i++) {
-      timeWithLessThan6Count += this.activeWorkersDistribution[i] || 0;
-    }
+    const configuredSlots = this.configuredChapterSlots || this.slots.size;
+    const distribution: Record<number, number> = {};
+    for (let i = 0; i <= configuredSlots; i++) distribution[i] = 0;
+    for (const active of this.activeWorkersSamples) distribution[active] = (distribution[active] || 0) + 1;
+    const timeAtConfiguredCapacityPercent = Math.round(((distribution[configuredSlots] || 0) / totalSlotSamples) * 1000) / 10;
 
-    const timeWith8ActivePercent = Math.round((timeWith8ActiveCount / totalSlotSamples) * 1000) / 10;
-    const timeWithLessThan6Percent = Math.round((timeWithLessThan6Count / totalSlotSamples) * 1000) / 10;
-
-    // Slot breakdown across all 8 chapter slots (mutually exclusive)
     const totalSlotDistributionSamples = this.slotStateDistributionSamples.length || 1;
     const rawSums: Record<SlotStateType, number> = {
       WAITING_MUTEX: 0,
@@ -580,12 +633,7 @@ export class TelemetryCollector {
       IDLE: Math.round((rawSums.IDLE / totalSlotDistributionSamples) * 100) / 100,
     };
 
-    // Guarantee SUM is strictly 8.00 by balancing rounding drift on IDLE
     const sumStates = Object.values(avgSlotStates).reduce((a, b) => a + b, 0);
-    const roundingDiff = Math.round((8.00 - sumStates) * 100) / 100;
-    if (roundingDiff !== 0) {
-      avgSlotStates.IDLE = Math.max(0, Math.round((avgSlotStates.IDLE + roundingDiff) * 100) / 100);
-    }
 
     const slotStatesAggregated: Record<SlotStateType, number> = {
       WAITING_MUTEX: 0,
@@ -746,12 +794,19 @@ export class TelemetryCollector {
       limitersSummary[name] = {
         configuredLimit: rec.configuredLimit,
         observedConcurrencyPeak: rec.observedConcurrencyPeak,
-        observedConcurrencyAvg: avg(rec.waitSamples),
+        observedConcurrencyAvg: avg(rec.concurrencySamples || []),
         hitCount: rec.hitCount,
         waitAvgMs: avg(rec.waitSamples),
+        waitP50Ms: percentile(rec.waitSamples, 0.50),
         waitP95Ms: percentile(rec.waitSamples, 0.95),
         waitMaxMs: rec.maxWaitMs,
       };
+    }
+
+    for (const [name, provider] of this.limiterProviders) {
+      const state = provider();
+      limitersSummary[name] = { waitP50Ms: 0, waitP95Ms: 0, ...limitersSummary[name], ...state,
+        saturationPercent: state.currentCapacity > 0 ? state.active / state.currentCapacity * 100 : 0 };
     }
 
     const avgActiveProcessing = Math.round((
@@ -774,12 +829,28 @@ export class TelemetryCollector {
     return {
       sessionId: this.activeSessionId,
       timestamp: new Date().toISOString(),
-      slotsConfigured: 8,
+      telemetryMode: this.activeSessionId ? 'DIAGNOSTIC' : 'NORMAL',
+      runtimeFingerprint: this.runtimeFingerprint,
+      diagnosticExpiresAt: this.activeSessionId ? new Date(this.sessionExpiresAt).toISOString() : null,
+      sampleCapacity: 2048,
+      slotsConfigured: configuredSlots,
+      effectiveConcurrency: this.effectiveCapacity(),
+      database: {
+        queries: this.dbQueryCount, sqlTotalMs: Math.round(this.dbSqlTotalMs),
+        completedChapters: this.completedChapterCount,
+        amortizedQueriesPerCompletedChapter: this.completedChapterCount ? this.dbQueryCount / this.completedChapterCount : null,
+        amortizedSqlMsPerCompletedChapter: this.completedChapterCount ? this.dbSqlTotalMs / this.completedChapterCount : null,
+        sqlP50Ms: percentile(this.dbSqlSamples, 0.50), sqlP95Ms: percentile(this.dbSqlSamples, 0.95),
+        clientHoldP50Ms: percentile(this.dbHoldSamples, 0.50), clientHoldP95Ms: percentile(this.dbHoldSamples, 0.95),
+        transactionP50Ms: percentile(this.dbTransactionSamples, 0.50), transactionP95Ms: percentile(this.dbTransactionSamples, 0.95),
+        poolMax: this.poolRef?.options.max, totalConnections: this.poolRef?.totalCount,
+        idleConnections: this.poolRef?.idleCount, waitingClients: this.poolRef?.waitingCount,
+      },
       avgSlotStates: {
         ...avgSlotStates,
         ACTIVE_PROCESSING: avgActiveProcessing,
         BLOCKED: avgBlocked,
-        SUM: 8.00,
+        SUM: Math.round(sumStates * 100) / 100,
       },
       slotOccupancy: {
         meanSec: Math.round(meanSlotOccupancySec * 100) / 100,
@@ -789,7 +860,7 @@ export class TelemetryCollector {
         avgActiveProcessing,
         avgBlocked,
         avgIdle,
-        theoreticalCapacityPerMin: meanSlotOccupancySec > 0 ? Math.round(((8.0 * 60) / meanSlotOccupancySec) * 100) / 100 : 0,
+        theoreticalCapacityPerMin: meanSlotOccupancySec > 0 ? Math.round(((this.effectiveCapacity() * 60) / meanSlotOccupancySec) * 100) / 100 : 0,
       },
       activeWorkers: {
         avg: avg(this.activeWorkersSamples),
@@ -797,24 +868,10 @@ export class TelemetryCollector {
         p75: percentile(this.activeWorkersSamples, 0.75),
         p95: percentile(this.activeWorkersSamples, 0.95),
         peak: this.activeWorkersSamples.length ? Math.max(...this.activeWorkersSamples) : 0,
-        distribution: this.activeWorkersDistribution,
-        timeWith8ActivePercent,
-        timeWithLessThan6Percent,
+        distribution,
+        timeAtConfiguredCapacityPercent,
       },
-      perSourceActive: {
-        hanamiheaven: {
-          avg: avg(this.sourceActiveSamples.get('hanamiheaven') || []),
-          peak: (this.sourceActiveSamples.get('hanamiheaven') || []).length ? Math.max(...(this.sourceActiveSamples.get('hanamiheaven') || [0])) : 0,
-        },
-        fleurblanche: {
-          avg: avg(this.sourceActiveSamples.get('fleurblanche') || []),
-          peak: (this.sourceActiveSamples.get('fleurblanche') || []).length ? Math.max(...(this.sourceActiveSamples.get('fleurblanche') || [0])) : 0,
-        },
-        mangalivreto: {
-          avg: avg(this.sourceActiveSamples.get('mangalivreto') || []),
-          peak: (this.sourceActiveSamples.get('mangalivreto') || []).length ? Math.max(...(this.sourceActiveSamples.get('mangalivreto') || [0])) : 0,
-        },
-      },
+      perSourceActive: Object.fromEntries([...this.sourceActiveSamples].map(([source, samples]) => [source, { avg: avg(samples), peak: samples.length ? Math.max(...samples) : 0 }])),
       workerTimeBreakdown: {
         workerBusyPercent,
         workerIdlePercent,
@@ -921,37 +978,54 @@ export class TelemetryCollector {
         rssMb: Math.round(mem.rss / 1024 / 1024),
         heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
         heapTotalMb: Math.round(mem.heapTotal / 1024 / 1024),
+        externalMb: Math.round(mem.external / 1024 / 1024),
+        arrayBuffersMb: Math.round(mem.arrayBuffers / 1024 / 1024),
+        gcPauseP50Ms: percentile(this.gcPauseSamples, 0.50),
+        gcPauseP95Ms: percentile(this.gcPauseSamples, 0.95),
       },
     };
   }
 
   // --- Persistence to DB ---
   public async flushTelemetryToDb(): Promise<void> {
-    if (!this.poolRef) return;
+    if (!this.poolRef || this.flushing) return;
+    if (!this.activeSessionId && Date.now() < this.nextSessionCheck) return;
+    this.flushing = true;
     try {
       // 1. Check if an active diagnostic session has been requested via settings
       const settingRes = await this.poolRef.query(
         "SELECT value FROM settings WHERE key = 'active_diagnostic_session' LIMIT 1"
       );
+      this.nextSessionCheck = Date.now() + 30_000;
       let requestedSession = settingRes.rows[0]?.value;
       if (typeof requestedSession === 'string' && requestedSession.startsWith('"') && requestedSession.endsWith('"')) {
         try { requestedSession = JSON.parse(requestedSession); } catch {}
       }
-      if (requestedSession && requestedSession !== 'IDLE' && requestedSession !== this.activeSessionId) {
-        this.startSession(requestedSession);
+      if (requestedSession && requestedSession !== 'IDLE') {
+        const id = typeof requestedSession === 'object' ? requestedSession.id : requestedSession;
+        const started = typeof requestedSession === 'object' ? Date.parse(requestedSession.started_at) : Number(String(id).match(/(\d{13})$/)?.[1] || Date.now());
+        const expires = Math.min(started + 5 * 60_000, typeof requestedSession === 'object' ? Date.parse(requestedSession.expires_at) : started + 5 * 60_000);
+        if (!Number.isFinite(expires) || Date.now() >= expires) {
+          await this.poolRef.query("UPDATE settings SET value = $1::jsonb WHERE key = 'active_diagnostic_session' AND value = $2::jsonb", [JSON.stringify('IDLE'), JSON.stringify(requestedSession)]);
+          this.activeSessionId = null;
+        } else if (id !== this.activeSessionId) {
+          const session = { id, started_at: new Date(started).toISOString(), expires_at: new Date(expires).toISOString() };
+          await this.poolRef.query("UPDATE settings SET value = $1::jsonb WHERE key = 'active_diagnostic_session' AND value = $2::jsonb", [JSON.stringify(session), JSON.stringify(requestedSession)]);
+          this.startSession(id, expires);
+        }
+      } else {
+        this.activeSessionId = null;
       }
-
-      if (!this.activeSessionId) return;
 
       const report = this.getSnapshotReport();
       await this.poolRef.query(`
         INSERT INTO importer_diagnostic_telemetry (id, session_id, data, created_at)
         VALUES ($1, $2, $3::jsonb, NOW())
         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, created_at = NOW()
-      `, [`session-${this.activeSessionId}`, this.activeSessionId, JSON.stringify(report)]);
+      `, [`session-${this.activeSessionId || 'runtime'}`, this.activeSessionId || 'runtime', JSON.stringify(report)]);
     } catch (err: any) {
       // Non-fatal telemetry flush error
-    }
+    } finally { this.flushing = false; }
   }
 }
 

@@ -134,6 +134,45 @@ export function getYugabytePool() {
     pool.on('error', (err) => {
         logger.error('Unexpected error on idle direct Yugabyte client', { error: err.message });
     });
+    pool.on('connect', (client) => {
+        const query = client.query.bind(client);
+        let transactionStarted = 0;
+        client.query = (...args) => {
+            const start = performance.now();
+            const command = String(typeof args[0] === 'string' ? args[0] : args[0]?.text || '').trim().split(/\s+/, 1)[0].toUpperCase();
+            const finish = () => {
+                telemetryCollector.recordDbQuery(performance.now() - start);
+                if (command === 'BEGIN')
+                    transactionStarted = start;
+                if ((command === 'COMMIT' || command === 'ROLLBACK') && transactionStarted) {
+                    telemetryCollector.recordDbTransaction(performance.now() - transactionStarted);
+                    transactionStarted = 0;
+                }
+            };
+            const callbackIndex = args.findIndex(a => typeof a === 'function');
+            if (callbackIndex >= 0) {
+                const callback = args[callbackIndex];
+                args[callbackIndex] = (...result) => { finish(); return callback(...result); };
+                return query(...args);
+            }
+            try {
+                return query(...args).finally(finish);
+            }
+            catch (error) {
+                finish();
+                throw error;
+            }
+        };
+    });
+    const trackHold = (client) => {
+        const started = performance.now();
+        const release = client.release;
+        client.release = (...args) => {
+            telemetryCollector.recordDbHold(performance.now() - started);
+            return release.apply(client, args);
+        };
+        return client;
+    };
     const origConnect = pool.connect.bind(pool);
     pool.connect = function (...args) {
         const t0 = performance.now();
@@ -143,13 +182,15 @@ export function getYugabytePool() {
             return origConnect((err, client, done) => {
                 const waitMs = performance.now() - t0;
                 telemetryCollector.recordDbPoolWait(waitMs, queued);
-                cb(err, client, done);
+                if (client)
+                    trackHold(client);
+                cb(err, client, client?.release || done);
             });
         }
         return origConnect(...args).then((client) => {
             const waitMs = performance.now() - t0;
             telemetryCollector.recordDbPoolWait(waitMs, queued);
-            return client;
+            return trackHold(client);
         }).catch((err) => {
             const waitMs = performance.now() - t0;
             telemetryCollector.recordDbPoolWait(waitMs, queued);
@@ -355,7 +396,14 @@ export async function failBatchDirect(jobs) {
     return updatedCount;
 }
 /* 4. Direct Stale Lease Recovery Sweeper with Fencing Safety */
-export async function recoverStalledLeasesDirect(staleGraceSeconds = 30) {
+let leaseRecoveryFlight = null;
+export function recoverStalledLeasesDirect(staleGraceSeconds = 30) {
+    if (!leaseRecoveryFlight) {
+        leaseRecoveryFlight = executeLeaseRecovery(staleGraceSeconds).finally(() => { leaseRecoveryFlight = null; });
+    }
+    return leaseRecoveryFlight;
+}
+async function executeLeaseRecovery(staleGraceSeconds) {
     const p = getYugabytePool();
     // 1. Move exhausted stale leases directly to FAILED
     const failRes = await p.query(`
