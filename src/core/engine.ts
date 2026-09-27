@@ -2900,7 +2900,7 @@ export class ImporterEngine {
 
     const chaptersToEnqueue = missingChapters.filter((ch) => {
       const chKey = this.computeCanonicalChapterKey(ch.number, ch.title);
-      const activeJob = activeJobsForWork.find((j) => {
+      const activeJob = activeJobsForWork.find((j: { payload: any; source: string; status: string }) => {
         const jobNum = Number(j.payload?.chapterNumber);
         return Number(jobNum.toFixed(4)) === chKey.normalizedNumber;
       });
