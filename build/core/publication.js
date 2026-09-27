@@ -147,6 +147,7 @@ export class PublicationBarrier {
             // Direct YSQL atomic fast-path (production)
             const client = await pool.connect();
             let publishedSlug;
+            let isNewlyVisible = false;
             try {
                 await client.query('BEGIN');
                 // 1. Fetch current work details for cover/publication verification
@@ -180,10 +181,12 @@ export class PublicationBarrier {
                     });
                 }
                 // 3. Mark public.chapters.published_at and set is_fresh_release
-                await client.query(`UPDATE chapters
+                const chUpdateRes = await client.query(`UPDATE chapters
            SET published_at = COALESCE(published_at, $2::timestamptz),
                is_fresh_release = $3
-           WHERE id = $1::uuid`, [chapterId, publishedAtIso, Boolean(isFreshRelease)]);
+           WHERE id = $1::uuid
+           RETURNING (published_at = $2::timestamptz) AS newly_visible`, [chapterId, publishedAtIso, Boolean(isFreshRelease)]);
+                isNewlyVisible = chUpdateRes.rows[0]?.newly_visible === true;
                 // 4. Mark importer_chapter_mappings status = 'COMPLETED'
                 await client.query(`UPDATE importer_chapter_mappings
            SET status = 'COMPLETED', updated_at = NOW()
@@ -224,10 +227,12 @@ export class PublicationBarrier {
             finally {
                 client.release();
             }
-            try {
-                this.onPublished?.(Boolean(isFreshRelease));
+            if (isNewlyVisible) {
+                try {
+                    this.onPublished?.(Boolean(isFreshRelease));
+                }
+                catch { }
             }
-            catch { }
             // Invalidate edge cache (fire and forget asynchronously)
             try {
                 const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
@@ -295,6 +300,7 @@ export class PublicationBarrier {
         const currentWork = workRes?.data;
         const existingLatest = currentWork?.latest_chapter_published_at;
         const existingCh = chRes?.data;
+        const isNewlyVisible = !existingCh?.published_at;
         const finalPublishedAt = existingCh?.published_at || publishedAtIso;
         const [chUpdateRes, mapUpdateRes] = await Promise.all([
             this.supabase
@@ -345,10 +351,12 @@ export class PublicationBarrier {
             .from('works')
             .update(workUpdate)
             .eq('id', workId);
-        try {
-            this.onPublished?.(Boolean(isFreshRelease));
+        if (isNewlyVisible) {
+            try {
+                this.onPublished?.(Boolean(isFreshRelease));
+            }
+            catch { }
         }
-        catch { }
     }
     /**
      * Public cascade runner for a work (thread-safe under workLock).

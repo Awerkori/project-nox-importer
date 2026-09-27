@@ -209,6 +209,7 @@ export class PublicationBarrier {
       // Direct YSQL atomic fast-path (production)
       const client = await pool.connect();
       let publishedSlug: string | undefined;
+      let isNewlyVisible = false;
 
       try {
         await client.query('BEGIN');
@@ -249,13 +250,15 @@ export class PublicationBarrier {
         }
 
         // 3. Mark public.chapters.published_at and set is_fresh_release
-        await client.query(
+        const chUpdateRes = await client.query(
           `UPDATE chapters
            SET published_at = COALESCE(published_at, $2::timestamptz),
                is_fresh_release = $3
-           WHERE id = $1::uuid`,
+           WHERE id = $1::uuid
+           RETURNING (published_at = $2::timestamptz) AS newly_visible`,
           [chapterId, publishedAtIso, Boolean(isFreshRelease)]
         );
+        isNewlyVisible = chUpdateRes.rows[0]?.newly_visible === true;
 
         // 4. Mark importer_chapter_mappings status = 'COMPLETED'
         await client.query(
@@ -312,9 +315,11 @@ export class PublicationBarrier {
         client.release();
       }
 
-      try {
-        this.onPublished?.(Boolean(isFreshRelease));
-      } catch {}
+      if (isNewlyVisible) {
+        try {
+          this.onPublished?.(Boolean(isFreshRelease));
+        } catch {}
+      }
 
       // Invalidate edge cache (fire and forget asynchronously)
       try {
@@ -386,6 +391,7 @@ export class PublicationBarrier {
     const currentWork = workRes?.data;
     const existingLatest = currentWork?.latest_chapter_published_at;
     const existingCh = chRes?.data;
+    const isNewlyVisible = !existingCh?.published_at;
     const finalPublishedAt = existingCh?.published_at || publishedAtIso;
 
     const [chUpdateRes, mapUpdateRes] = await Promise.all([
@@ -439,9 +445,11 @@ export class PublicationBarrier {
       .update(workUpdate)
       .eq('id', workId);
 
-    try {
-      this.onPublished?.(Boolean(isFreshRelease));
-    } catch {}
+    if (isNewlyVisible) {
+      try {
+        this.onPublished?.(Boolean(isFreshRelease));
+      } catch {}
+    }
   }
 
   /**
