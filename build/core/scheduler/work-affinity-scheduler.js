@@ -557,8 +557,8 @@ export class WorkAffinityScheduler {
                 this.logDecision(decision);
                 return p1Job;
             }
-            // Target work had no claimable job: mark it cooling down for 15s
-            this.markWorkUnclaimable(targetWork.workId, 15000);
+            // Target work had no claimable job: short transient backoff (500ms)
+            this.markWorkUnclaimable(targetWork.workId, 500);
             // 2. Instead of sequential individual queries (which would do 5-10 queries),
             // batch query all remaining candidates in ONE single query!
             const remainingCandidates = readyP1Works.filter((w) => w.workId !== targetWork.workId && !this.isWorkUnclaimable(w.workId));
@@ -603,12 +603,6 @@ export class WorkAffinityScheduler {
                     };
                     this.logDecision(decision);
                     return p1Job;
-                }
-                else {
-                    // All remaining candidates were empty: mark them cooling down so subsequent workers don't query them
-                    for (const w of remainingCandidates) {
-                        this.markWorkUnclaimable(w.workId, 15000);
-                    }
                 }
             }
         }
@@ -671,7 +665,8 @@ export class WorkAffinityScheduler {
                 this.logDecision(decision);
                 return p2Job;
             }
-            this.markWorkUnclaimable(targetWork.workId, 15000);
+            // Target work had no claimable job: short transient backoff (500ms)
+            this.markWorkUnclaimable(targetWork.workId, 500);
             const remainingCandidates = readyP2Works.filter((w) => w.workId !== targetWork.workId && !this.isWorkUnclaimable(w.workId));
             if (remainingCandidates.length > 0) {
                 telemetry.p2WorkAttempts++;
@@ -714,11 +709,6 @@ export class WorkAffinityScheduler {
                     };
                     this.logDecision(decision);
                     return p2Job;
-                }
-                else {
-                    for (const w of remainingCandidates) {
-                        this.markWorkUnclaimable(w.workId, 15000);
-                    }
                 }
             }
         }
