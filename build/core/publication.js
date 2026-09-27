@@ -351,6 +351,15 @@ export class PublicationBarrier {
         catch { }
     }
     /**
+     * Public cascade runner for a work (thread-safe under workLock).
+     */
+    async runCascade(workId, maxBatch = 8) {
+        const lock = this.getWorkLock(workId);
+        return lock.runExclusive(async () => {
+            return this.runCascadeUnderLock(workId, maxBatch);
+        });
+    }
+    /**
      * Cascading publication of all consecutive STAGED chapters for a work.
      * Bounded by maxBatch to guarantee multi-work fairness.
      */

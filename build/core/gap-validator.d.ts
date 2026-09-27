@@ -64,3 +64,30 @@ export interface MarkGapResult {
  * FAILS CLOSED if alternative source query fails.
  */
 export declare function markPermanentGapSafely(client: any, params: MarkGapParams): Promise<MarkGapResult>;
+export interface ConfirmUpstreamGapIntervalParams {
+    workId: string;
+    startSortKey: number;
+    endSortKey: number;
+    primarySource: string;
+    reason?: string;
+}
+export interface ConfirmUpstreamGapIntervalResult {
+    confirmed: boolean;
+    reason: string;
+    sourcesChecked: string[];
+    alternativeSourceFound?: {
+        source: string;
+        chapterSortKey: number;
+        status: string;
+    };
+}
+/**
+ * Validates and confirms an upstream structural gap across an entire interval [startSortKey, endSortKey].
+ * Enforces Section 1:
+ * - Checks all known mappings across all mapped sources for the work
+ * - Checks importer_queue
+ * - If alternative source has the chapter, prioritizes importing it (does NOT declare gap)
+ * - Only if NO source possesses the chapters, inserts into importer_confirmed_gaps
+ *   and registers canonical gap mappings.
+ */
+export declare function confirmUpstreamGapInterval(client: any, params: ConfirmUpstreamGapIntervalParams): Promise<ConfirmUpstreamGapIntervalResult>;

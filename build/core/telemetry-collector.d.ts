@@ -109,6 +109,18 @@ export declare class TelemetryCollector {
     getSessionId(): string | null;
     registerSlot(slotIndex: number): void;
     setSlotState(slotIndex: number, newState: SlotStateType | string, context?: string): void;
+    /**
+     * Authoritative calculation of productive vs busy vs idle slot occupancy.
+     * Productive slots: ACTIVE_DOWNLOAD, ACTIVE_TELEGRAM, ACTIVE_DB, ACTIVE_SOURCE, ACTIVE_ENCODE.
+     * Busy slots: all non-IDLE slots (including mutex/permit/db wait).
+     */
+    getSlotProductivitySnapshot(): {
+        configuredSlots: number;
+        busySlots: number;
+        productiveSlots: number;
+        idleSlots: number;
+        productiveSlotRatio: number;
+    };
     recordDbPoolWait(waitMs: number, waitingCount: number): void;
     trackActiveDbQuery(delta: number): void;
     trackActiveTelegramUpload(delta: number): void;

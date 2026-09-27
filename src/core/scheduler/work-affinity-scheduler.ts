@@ -18,6 +18,8 @@ import { Logger } from '../logger.js';
 import { ProtectiveSentinel } from '../protective-sentinel.js';
 import { AdmissionController } from './admission-controller.js';
 import { SchedulerStateStore } from './state-store.js';
+import { confirmUpstreamGapInterval } from '../gap-validator.js';
+import { SOURCE_CONCURRENCY_LIMITS } from '../concurrency.js';
 import {
   ActiveWork,
   SchedulerDecision,
@@ -41,6 +43,17 @@ export class WorkAffinityScheduler {
   private p0ConsecutiveClaims = 0;
   private rrIndexP1 = 0;
   private rrIndexP2 = 0;
+
+  private publicationBarrier?: any;
+  private sourcePermitProvider?: (source: string) => number;
+
+  public setPublicationBarrier(barrier: any): void {
+    this.publicationBarrier = barrier;
+  }
+
+  public setSourcePermitProvider(provider: (source: string) => number): void {
+    this.sourcePermitProvider = provider;
+  }
 
   // Staff requests fast-cache (avoids 1 query per claim)
   private lastStaffCheckTime = 0;
@@ -560,9 +573,17 @@ export class WorkAffinityScheduler {
              (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork
     );
 
-    const readyP1Works = allowedSources && allowedSources.length > 0
+    let readyP1Works = allowedSources && allowedSources.length > 0
       ? eligibleP1Works.filter((w) => allowedSources.includes(w.primarySource))
       : eligibleP1Works;
+
+    if (this.sourcePermitProvider) {
+      const permitProvider = this.sourcePermitProvider;
+      const permitFiltered = readyP1Works.filter((w) => permitProvider(w.primarySource) > 0);
+      if (permitFiltered.length > 0) {
+        readyP1Works = permitFiltered.sort((a, b) => permitProvider(b.primarySource) - permitProvider(a.primarySource));
+      }
+    }
 
     if (readyP1Works.length > 0) {
       // 1. Try round-robin target work first (fairness & affinity)
@@ -686,9 +707,17 @@ export class WorkAffinityScheduler {
              (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork
     );
 
-    const readyP2Works = allowedSources && allowedSources.length > 0
+    let readyP2Works = allowedSources && allowedSources.length > 0
       ? eligibleP2Works.filter((w) => allowedSources.includes(w.primarySource))
       : eligibleP2Works;
+
+    if (this.sourcePermitProvider) {
+      const permitProvider = this.sourcePermitProvider;
+      const permitFiltered = readyP2Works.filter((w) => permitProvider(w.primarySource) > 0);
+      if (permitFiltered.length > 0) {
+        readyP2Works = permitFiltered.sort((a, b) => permitProvider(b.primarySource) - permitProvider(a.primarySource));
+      }
+    }
 
     if (readyP2Works.length > 0) {
       const startIdx = this.rrIndexP2 % readyP2Works.length;
@@ -881,11 +910,24 @@ export class WorkAffinityScheduler {
     // -------------------------------------------------------------
     const tCat0 = performance.now();
     this.genericClaimAttempts++;
+
+    const disallowedCatalogWorkIds = Array.from(new Set([
+      ...fullWorkIds,
+      ...Array.from(this.stagedBlockedWorks.keys()).filter((wId) => this.isWorkStagedBlocked(wId)),
+      ...Array.from(this.unclaimableWorksCooldown.keys()).filter((wId) => this.isWorkUnclaimable(wId)),
+    ]));
+
+    let catalogAllowedSources = allowedSources;
+    if (this.sourcePermitProvider && catalogAllowedSources && catalogAllowedSources.length > 0) {
+      const permitted = catalogAllowedSources.filter((s) => this.sourcePermitProvider!(s) > 0);
+      if (permitted.length > 0) catalogAllowedSources = permitted;
+    }
+
     const catalogP1Job = await this.claimCatalogP1Job(this.pool, {
       workerId: options.workerId,
       leaseMin,
-      allowedSources,
-      disallowedWorkIds: fullWorkIds,
+      allowedSources: catalogAllowedSources,
+      disallowedWorkIds: disallowedCatalogWorkIds,
       telemetry,
     });
     telemetry.catalogFallbackMs = Math.round((performance.now() - tCat0) * 10) / 10;
@@ -1288,7 +1330,7 @@ export class WorkAffinityScheduler {
     // 2. Safety check: is there an un-published STAGED chapter behind this one?
     if (sortKey !== null) {
       const stagedCheck = await this.runQuery(this.pool, `
-        SELECT id, chapter_sort_key 
+        SELECT id, chapter_id, chapter_sort_key, source 
         FROM importer_chapter_mappings
         WHERE work_id = $1::uuid
           AND status = 'STAGED'
@@ -1299,6 +1341,74 @@ export class WorkAffinityScheduler {
 
       if (stagedCheck.rows.length > 0) {
         const barrierKey = parseFloat(stagedCheck.rows[0].chapter_sort_key);
+        const stagedChapterId = stagedCheck.rows[0].chapter_id;
+        const primarySource = stagedCheck.rows[0].source || job.source;
+
+        // Try to resolve structural upstream gap between maxPublished and barrierKey
+        const maxPubRes = await this.runQuery(this.pool, `
+          SELECT COALESCE(MAX(number), -1) as max_pub
+          FROM chapters
+          WHERE work_id = $1::uuid AND published_at IS NOT NULL;
+        `, [workId]);
+        const rawMax = maxPubRes.rows[0]?.max_pub;
+        const maxPub = rawMax !== null && rawMax !== undefined ? parseFloat(rawMax) : -1;
+        const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+        const gapEnd = barrierKey - 1;
+
+        let barrierResolved = false;
+
+        if (gapStart <= gapEnd) {
+          const gapResult = await confirmUpstreamGapInterval(this.pool, {
+            workId,
+            startSortKey: gapStart,
+            endSortKey: gapEnd,
+            primarySource,
+            reason: `UPSTREAM_GAP_UNBLOCKING_STAGED_${barrierKey}`,
+          });
+
+          if (gapResult.confirmed) {
+            this.logger.info(`Confirmed upstream gap [${gapStart}..${gapEnd}] for work ${workId}. Attempting publication of STAGED chapter ${barrierKey}.`);
+            if (this.publicationBarrier) {
+              const pubRes = await this.publicationBarrier.tryPublish(workId, barrierKey, stagedChapterId);
+              if (pubRes.published) {
+                barrierResolved = true;
+                this.logger.info(`Successfully published STAGED chapter ${barrierKey} after canonical gap confirmation for work ${workId}.`);
+              }
+            }
+          } else if (gapResult.alternativeSourceFound) {
+            const alt = gapResult.alternativeSourceFound;
+            await this.runQuery(this.pool, `
+              UPDATE importer_queue
+              SET priority = 95, next_run_at = NOW(), updated_at = NOW()
+              WHERE (payload->>'workId') = $1
+                AND chapter_sort_key = $2
+                AND status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF');
+            `, [workId, alt.chapterSortKey]);
+            this.logger.info(`Prioritized predecessor job ${alt.chapterSortKey} to priority 95 for work ${workId} on source ${alt.source}.`);
+            const activeWork = this.stateStore.getActiveWork(workId);
+            if (activeWork) {
+              activeWork.criticalGapSortKey = alt.chapterSortKey;
+              activeWork.criticalGapUnblockCount = 1;
+            }
+          }
+        }
+
+        // If barrier was resolved, check if any remaining STAGED chapters exist behind sortKey
+        if (barrierResolved) {
+          const remainingStaged = await this.runQuery(this.pool, `
+            SELECT id FROM importer_chapter_mappings
+            WHERE work_id = $1::uuid
+              AND status = 'STAGED'
+              AND chapter_sort_key < $2::numeric
+            LIMIT 1;
+          `, [workId, sortKey]);
+
+          if (remainingStaged.rows.length === 0) {
+            // Chapter is now unblocked!
+            return { valid: true };
+          }
+        }
+
         this.logger.info(`Claimed job ${job.id} for work ${workId} ch ${sortKey} is ahead of STAGED chapter ${barrierKey}. Releasing back to QUEUED to preserve canonical barrier.`);
 
         await this.runQuery(this.pool, `
@@ -1312,34 +1422,14 @@ export class WorkAffinityScheduler {
           WHERE id = $1;
         `, [job.id]);
 
-        // Mark work as staged-blocked so other backfill workers don't spin on it
-        this.markWorkStagedBlocked(workId, 15000);
+        // Vacate active slot immediately so capacity is not held hostage (Requirements 4 & 5)
+        this.stateStore.removeActiveWork(workId);
+        this.markWorkStagedBlocked(workId, 30000);
 
-        // Resolve true missing predecessor for critical gap resolution:
-        // Query for the lowest queued chapter strictly below barrierKey
-        const predCheck = await this.runQuery(this.pool, `
-          SELECT chapter_sort_key
-          FROM importer_queue
-          WHERE (payload->>'workId') = $1
-            AND chapter_sort_key < $2::numeric
-            AND status IN ('QUEUED', 'RETRY')
-            AND task_type = 'IMPORT_CHAPTER'
-          ORDER BY chapter_sort_key ASC
-          LIMIT 1;
-        `, [workId, barrierKey]);
-
-        const activeWork = this.stateStore.getActiveWork(workId);
-        if (activeWork) {
-          if (predCheck.rows.length > 0) {
-            const trueMissingKey = parseFloat(predCheck.rows[0].chapter_sort_key);
-            activeWork.criticalGapSortKey = trueMissingKey;
-            activeWork.criticalGapUnblockCount = 1;
-            this.logger.info(`Work ${workId} critical gap resolved to true missing queued predecessor ch ${trueMissingKey} (unblocks STAGED ch ${barrierKey})`);
-          } else {
-            // No queued predecessor below barrierKey; do not set criticalGapSortKey to barrierKey (which is STAGED, not QUEUED)
-            activeWork.criticalGapSortKey = null;
-          }
-        }
+        // Immediate on-demand admission replenishment
+        try {
+          await this.admissionController.admitNextWorkOnDemand('P1');
+        } catch {}
 
         return { valid: false, reason: 'BLOCKED_BY_STAGED' };
       }

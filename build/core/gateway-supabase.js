@@ -345,7 +345,19 @@ export class GatewaySupabaseClient {
             `, [workId]);
                         const initCount = parseInt(initCheck.rows[0]?.init_count || '0', 10);
                         const gapCount = parseInt(initCheck.rows[0]?.gap_count || '0', 10);
-                        if (initCount > 0 && gapCount === 0) {
+                        let confirmedGapCount = 0;
+                        try {
+                            const confirmedGapInit = await this.gateway.sql(`
+                SELECT COUNT(*) as gap_count
+                FROM importer_confirmed_gaps
+                WHERE work_id = $1::uuid
+                  AND start_sort_key <= 1.5
+                  AND end_sort_key >= $2::numeric - 1
+              `, [workId, targetSortKey]);
+                            confirmedGapCount = parseInt(confirmedGapInit.rows[0]?.gap_count || '0', 10);
+                        }
+                        catch { }
+                        if (initCount > 0 && gapCount === 0 && confirmedGapCount === 0) {
                             return {
                                 data: [{
                                         can_publish: false,
@@ -402,6 +414,13 @@ export class GatewaySupabaseClient {
             AND m.chapter_sort_key > $2::numeric
             AND m.chapter_sort_key < $3::numeric
             AND m.is_gap IS NOT TRUE
+            -- Exclude if covered by confirmed canonical gap
+            AND NOT EXISTS (
+              SELECT 1 FROM importer_confirmed_gaps g
+              WHERE g.work_id = m.work_id
+                AND g.start_sort_key <= m.chapter_sort_key
+                AND g.end_sort_key >= m.chapter_sort_key
+            )
             -- Exclude if already published in canonical chapters table
             AND NOT EXISTS (
               SELECT 1 FROM chapters c
@@ -431,8 +450,8 @@ export class GatewaySupabaseClient {
                     };
                 }
                 // If no uncompleted mapping rows exist between maxPublished and targetSortKey,
-                // but step is large (e.g. integer skip with no mappings at all), check if an explicit gap is registered.
-                if (step > 1.5) {
+                // check if an explicit or confirmed gap covers this interval.
+                if (step > 1.05) {
                     const explicitGapCheck = await this.gateway.sql(`
             SELECT COUNT(*) as gap_count
             FROM importer_chapter_mappings
@@ -442,7 +461,19 @@ export class GatewaySupabaseClient {
               AND is_gap IS TRUE
           `, [workId, maxPublished, targetSortKey]);
                     const gapCount = parseInt(explicitGapCheck.rows[0]?.gap_count || '0', 10);
-                    if (gapCount === 0) {
+                    let confirmedCount = 0;
+                    try {
+                        const confirmedGapCheck = await this.gateway.sql(`
+              SELECT COUNT(*) as gap_count
+              FROM importer_confirmed_gaps
+              WHERE work_id = $1::uuid
+                AND start_sort_key <= $2::numeric + 1
+                AND end_sort_key >= $3::numeric - 1
+            `, [workId, maxPublished, targetSortKey]);
+                        confirmedCount = parseInt(confirmedGapCheck.rows[0]?.gap_count || '0', 10);
+                    }
+                    catch { }
+                    if (gapCount === 0 && confirmedCount === 0) {
                         return {
                             data: [{
                                     can_publish: false,

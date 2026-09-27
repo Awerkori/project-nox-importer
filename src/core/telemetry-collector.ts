@@ -272,6 +272,53 @@ export class TelemetryCollector {
     slot.stateEnteredAt = now;
   }
 
+  /**
+   * Authoritative calculation of productive vs busy vs idle slot occupancy.
+   * Productive slots: ACTIVE_DOWNLOAD, ACTIVE_TELEGRAM, ACTIVE_DB, ACTIVE_SOURCE, ACTIVE_ENCODE.
+   * Busy slots: all non-IDLE slots (including mutex/permit/db wait).
+   */
+  public getSlotProductivitySnapshot(): {
+    configuredSlots: number;
+    busySlots: number;
+    productiveSlots: number;
+    idleSlots: number;
+    productiveSlotRatio: number;
+  } {
+    const configuredSlots = this.slots.size || 10;
+    let busySlots = 0;
+    let productiveSlots = 0;
+    let idleSlots = 0;
+
+    for (const slot of this.slots.values()) {
+      if (slot.currentState === 'IDLE') {
+        idleSlots++;
+      } else {
+        busySlots++;
+        if (
+          slot.currentState === 'ACTIVE_DOWNLOAD' ||
+          slot.currentState === 'ACTIVE_TELEGRAM' ||
+          slot.currentState === 'ACTIVE_DB' ||
+          slot.currentState === 'ACTIVE_SOURCE' ||
+          slot.currentState === 'ACTIVE_ENCODE'
+        ) {
+          productiveSlots++;
+        }
+      }
+    }
+
+    const productiveSlotRatio = configuredSlots > 0
+      ? Math.round((productiveSlots / configuredSlots) * 1000) / 10
+      : 0;
+
+    return {
+      configuredSlots,
+      busySlots,
+      productiveSlots,
+      idleSlots,
+      productiveSlotRatio,
+    };
+  }
+
   // --- DB Pool Telemetry ---
   public recordDbPoolWait(waitMs: number, waitingCount: number) {
     this.dbPoolWaitSamples.push(waitMs);
