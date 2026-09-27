@@ -134,7 +134,7 @@ describe('Liveness Watchdog & Anti-Starvation Edge Cases (Casos A a G)', () => {
     const mockClient = {
       query: vi.fn().mockImplementation((queryText: string, params: any[]) => {
         if (queryText.includes('queued_cnt') || queryText.includes('paused_cnt')) {
-          return { rows: [{ queued_cnt: '0', importing_cnt: '0', paused_cnt: '0', min_sort_key: null }] };
+          return { rows: params[0].map((work_id: string) => ({ work_id, queued_cnt:'0', importing_cnt:'0', paused_cnt:'0', min_sort_key:null, pub_cnt:'0', max_pub:'-1', staged_cnt:'2', min_staged:'3', unimported_cnt:'5', source_status:'ACTIVE' })) };
         }
         if (queryText.includes('FROM chapters')) {
           return { rows: [{ pub_cnt: '0', max_pub: '-1' }] };

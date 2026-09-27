@@ -51,6 +51,9 @@ export interface ChapterMetricRecord {
   download_ms: number;
   encode_ms: number;
   telegram_upload_ms: number;
+  // Wall time of overlapping media stages; per-page sums above are service demand, not additive wall time.
+  media_pipeline_wall_ms?: number;
+  cover_check_ms?: number;
   db_wait_ms: number;
   db_publish_ms: number;
   rate_limit_wait_ms: number;
@@ -105,6 +108,7 @@ export class TelemetryCollector {
   private effectiveCapacity = () => this.configuredChapterSlots;
   private flushing = false;
   private nextSessionCheck = 0;
+  private lastFlushWarningAt = 0;
   private gcObserver: PerformanceObserver | null = null;
   private runtimeFingerprint: Record<string, unknown> = {};
   public setRuntimeFingerprint(value: Record<string, unknown>) { this.runtimeFingerprint = value; }
@@ -879,6 +883,9 @@ export class TelemetryCollector {
         statesAggregatedMs: slotStatesAggregated,
       },
       jobProfile: {
+        wallTimeBreakdownMs: Object.fromEntries(['metadata_load_ms', 'source_fetch_ms', 'page_resolution_ms',
+          'media_pipeline_wall_ms', 'cover_check_ms', 'db_publish_ms', 'other_wait_ms'].map(key =>
+            [key, avg(this.chapters.map(c => Number((c as any)[key] || 0)))])),
         totalCompleted: this.chapters.length,
         totalDuration: {
           avg: avg(totalJobTimes),
@@ -966,6 +973,8 @@ export class TelemetryCollector {
         retriesCount: this.downloadRetriesCount,
       },
       eventLoopAndNode: {
+        uptimeSeconds: process.uptime(),
+        cpuTotalMicroseconds: process.cpuUsage().user + process.cpuUsage().system,
         eventLoopLagAvg: avg(this.eventLoopLagSamples),
         eventLoopLagP95: percentile(this.eventLoopLagSamples, 0.95),
         eventLoopLagMax: this.eventLoopLagSamples.length ? Math.max(...this.eventLoopLagSamples) : 0,
@@ -997,8 +1006,9 @@ export class TelemetryCollector {
         "SELECT value FROM settings WHERE key = 'active_diagnostic_session' LIMIT 1"
       );
       this.nextSessionCheck = Date.now() + 30_000;
-      let requestedSession = settingRes.rows[0]?.value;
-      if (typeof requestedSession === 'string' && requestedSession.startsWith('"') && requestedSession.endsWith('"')) {
+      const persistedValue = settingRes.rows[0]?.value;
+      let requestedSession = persistedValue;
+      if (typeof requestedSession === 'string' && (requestedSession.startsWith('"') || requestedSession.startsWith('{'))) {
         try { requestedSession = JSON.parse(requestedSession); } catch {}
       }
       if (requestedSession && requestedSession !== 'IDLE') {
@@ -1006,11 +1016,11 @@ export class TelemetryCollector {
         const started = typeof requestedSession === 'object' ? Date.parse(requestedSession.started_at) : Number(String(id).match(/(\d{13})$/)?.[1] || Date.now());
         const expires = Math.min(started + 5 * 60_000, typeof requestedSession === 'object' ? Date.parse(requestedSession.expires_at) : started + 5 * 60_000);
         if (!Number.isFinite(expires) || Date.now() >= expires) {
-          await this.poolRef.query("UPDATE settings SET value = $1::jsonb WHERE key = 'active_diagnostic_session' AND value = $2::jsonb", [JSON.stringify('IDLE'), JSON.stringify(requestedSession)]);
+          await this.poolRef.query("UPDATE settings SET value = $1 WHERE key = 'active_diagnostic_session' AND value = $2", ['IDLE', persistedValue]);
           this.activeSessionId = null;
         } else if (id !== this.activeSessionId) {
           const session = { id, started_at: new Date(started).toISOString(), expires_at: new Date(expires).toISOString() };
-          await this.poolRef.query("UPDATE settings SET value = $1::jsonb WHERE key = 'active_diagnostic_session' AND value = $2::jsonb", [JSON.stringify(session), JSON.stringify(requestedSession)]);
+          await this.poolRef.query("UPDATE settings SET value = $1 WHERE key = 'active_diagnostic_session' AND value = $2", [JSON.stringify(session), persistedValue]);
           this.startSession(id, expires);
         }
       } else {
@@ -1024,7 +1034,10 @@ export class TelemetryCollector {
         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, created_at = NOW()
       `, [`session-${this.activeSessionId || 'runtime'}`, this.activeSessionId || 'runtime', JSON.stringify(report)]);
     } catch (err: any) {
-      // Non-fatal telemetry flush error
+      if (Date.now() - this.lastFlushWarningAt >= 60_000) {
+        this.lastFlushWarningAt = Date.now();
+        this.logger.warn('Telemetry persistence failed', { code: err?.code || err?.name });
+      }
     } finally { this.flushing = false; }
   }
 }

@@ -36,6 +36,8 @@ export interface ChapterMetricRecord {
     download_ms: number;
     encode_ms: number;
     telegram_upload_ms: number;
+    media_pipeline_wall_ms?: number;
+    cover_check_ms?: number;
     db_wait_ms: number;
     db_publish_ms: number;
     rate_limit_wait_ms: number;
@@ -73,6 +75,7 @@ export declare class TelemetryCollector {
     private effectiveCapacity;
     private flushing;
     private nextSessionCheck;
+    private lastFlushWarningAt;
     private gcObserver;
     private runtimeFingerprint;
     setRuntimeFingerprint(value: Record<string, unknown>): void;
@@ -239,6 +242,9 @@ export declare class TelemetryCollector {
             statesAggregatedMs: Record<SlotStateType, number>;
         };
         jobProfile: {
+            wallTimeBreakdownMs: {
+                [k: string]: number;
+            };
             totalCompleted: number;
             totalDuration: {
                 avg: number;
@@ -532,6 +538,8 @@ export declare class TelemetryCollector {
             download_ms: number;
             encode_ms: number;
             telegram_upload_ms: number;
+            media_pipeline_wall_ms?: number;
+            cover_check_ms?: number;
             db_wait_ms: number;
             db_publish_ms: number;
             rate_limit_wait_ms: number;
@@ -586,6 +594,8 @@ export declare class TelemetryCollector {
             retriesCount: number;
         };
         eventLoopAndNode: {
+            uptimeSeconds: number;
+            cpuTotalMicroseconds: number;
             eventLoopLagAvg: number;
             eventLoopLagP95: number;
             eventLoopLagMax: number;
