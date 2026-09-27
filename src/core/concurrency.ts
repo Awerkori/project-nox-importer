@@ -215,6 +215,7 @@ export const TESTED_CONCURRENCY_CEILING = 32;
 
 export interface AutotunerConfig {
   minConcurrency: number;
+  healthyConcurrencyFloor?: number;
   maxConcurrency: number;
   initialConcurrency: number;
   requiredStableCycles: number;
@@ -239,6 +240,7 @@ export interface AutotunerConfig {
 
 const DEFAULT_AUTOTUNER_CONFIG: AutotunerConfig = {
   minConcurrency: 1,
+  healthyConcurrencyFloor: 8,
   maxConcurrency: Math.min(TESTED_CONCURRENCY_CEILING, parseInt(process.env.ADAPTIVE_MAX_CONCURRENCY || '18', 10)),
   initialConcurrency: 8,
   requiredStableCycles: 2,
@@ -450,6 +452,10 @@ export class AdaptiveAutotuner {
     this.config = { ...DEFAULT_AUTOTUNER_CONFIG, ...config };
     this.config.maxConcurrency = Math.min(TESTED_CONCURRENCY_CEILING, this.config.maxConcurrency);
     this.config.minConcurrency = Math.max(1, this.config.minConcurrency);
+    this.config.healthyConcurrencyFloor = Math.max(
+      this.config.minConcurrency,
+      Math.min(this.config.maxConcurrency, this.config.healthyConcurrencyFloor ?? 8)
+    );
 
     // Warm start from configured initial concurrency (minimum 1, maximum maxConcurrency)
     this.currentConcurrency = Math.max(
@@ -465,6 +471,10 @@ export class AdaptiveAutotuner {
     this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency, 'global_chapter_semaphore');
     this.globalMediaSemaphore = new AsyncSemaphore(mediaConcurrency, 'telegram_media_semaphore');
     this.globalInflightRequestSemaphore = new AsyncSemaphore(inflightConcurrency, 'global_download_inflight_semaphore');
+  }
+
+  getHealthyConcurrencyFloor(): number {
+    return this.config.healthyConcurrencyFloor ?? 8;
   }
 
   getGlobalChapterSemaphore(): AsyncSemaphore {
@@ -1033,6 +1043,7 @@ export class AdaptiveAutotuner {
     const hasHighLag = lagMs >= 450 && lagMs < 700;
     const hasElevatedLag = lagMs >= 300 && lagMs < 450;
     const hasStagedDebt = context.stagedDebt && context.stagedDebt >= 100;
+    const isHardwareStressed = hasSoftRss || hasHeapStress || hasHighLag || hasCriticalLag;
 
     if (hasEmergencyRss || hasCriticalLag) {
       pressureScore = Math.max(pressureScore, 85);
@@ -1110,8 +1121,13 @@ export class AdaptiveAutotuner {
 
     // CASE C: MODERATE PRESSURE (~20% reduction)
     if (pressureScore >= 30 && rateLimits === 0) {
-      target = Math.max(this.config.minConcurrency, Math.round(previous * 0.80));
-      state = 'RUNNING_THROTTLED';
+      const healthyFloor = this.config.healthyConcurrencyFloor ?? 8;
+      const isHealthyGreen = siteHealth === 'GREEN' && !isHardwareStressed;
+      const floor = (isHealthyGreen && previous >= healthyFloor)
+        ? healthyFloor
+        : this.config.minConcurrency;
+      target = Math.max(floor, Math.round(previous * 0.80));
+      state = target < previous ? 'RUNNING_THROTTLED' : 'RUNNING_STABLE';
       action = target < previous ? 'SCALED_DOWN' : 'STRESS_DETECTED';
       if (!pressureReason) pressureReason = 'Moderate pressure detected; downscaling 20%';
 
@@ -1187,8 +1203,13 @@ export class AdaptiveAutotuner {
 
     // CASE D: MILD PRESSURE (-1)
     if (hasSoftRss || (pressureScore >= 15 && rateLimits === 0 && errors === 0 && timeouts === 0)) {
-      target = Math.max(this.config.minConcurrency, previous - 1);
-      state = 'RUNNING_THROTTLED';
+      const healthyFloor = this.config.healthyConcurrencyFloor ?? 8;
+      const isHealthyGreen = siteHealth === 'GREEN' && !isHardwareStressed;
+      const floor = (isHealthyGreen && previous >= healthyFloor)
+        ? healthyFloor
+        : this.config.minConcurrency;
+      target = Math.max(floor, previous - 1);
+      state = target < previous ? 'RUNNING_THROTTLED' : 'RUNNING_STABLE';
       action = target < previous ? 'SCALED_DOWN' : 'STRESS_DETECTED';
       if (!pressureReason) pressureReason = 'Mild pressure detected; downscaling -1';
 

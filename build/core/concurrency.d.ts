@@ -41,6 +41,7 @@ export declare const DEFAULT_SOURCE_LIMIT: SourceConcurrencyConfig;
 export declare const TESTED_CONCURRENCY_CEILING = 32;
 export interface AutotunerConfig {
     minConcurrency: number;
+    healthyConcurrencyFloor?: number;
     maxConcurrency: number;
     initialConcurrency: number;
     requiredStableCycles: number;
@@ -148,6 +149,7 @@ export declare class AdaptiveAutotuner {
     private emaRate;
     private latestResult;
     constructor(config?: Partial<AutotunerConfig>);
+    getHealthyConcurrencyFloor(): number;
     getGlobalChapterSemaphore(): AsyncSemaphore;
     getGlobalMediaSemaphore(): AsyncSemaphore;
     getGlobalInflightRequestSemaphore(): AsyncSemaphore;
