@@ -32,6 +32,10 @@ export declare class WorkAffinityScheduler {
     private p0ConsecutiveClaims;
     private rrIndexP1;
     private rrIndexP2;
+    private publicationBarrier?;
+    private sourcePermitProvider?;
+    setPublicationBarrier(barrier: any): void;
+    setSourcePermitProvider(provider: (source: string) => number): void;
     private lastStaffCheckTime;
     private cachedStaffWorkIds;
     private unclaimableWorksCooldown;

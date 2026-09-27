@@ -57,6 +57,10 @@ export declare class PublicationBarrier {
      */
     private executePublish;
     /**
+     * Public cascade runner for a work (thread-safe under workLock).
+     */
+    runCascade(workId: string, maxBatch?: number): Promise<number>;
+    /**
      * Cascading publication of all consecutive STAGED chapters for a work.
      * Bounded by maxBatch to guarantee multi-work fairness.
      */

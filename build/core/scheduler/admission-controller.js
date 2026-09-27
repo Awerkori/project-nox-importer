@@ -12,6 +12,7 @@
  */
 import { getYugabytePool } from '../../db/yugabyte-direct.js';
 import { Logger } from '../logger.js';
+import { confirmUpstreamGapInterval } from '../gap-validator.js';
 export class AdmissionController {
     stateStore;
     protectiveSentinel;
@@ -19,6 +20,10 @@ export class AdmissionController {
     pool;
     isRunning = false;
     loopTimer = null;
+    sourcePermitProvider;
+    setSourcePermitProvider(provider) {
+        this.sourcePermitProvider = provider;
+    }
     constructor(stateStore, protectiveSentinel, pool) {
         this.stateStore = stateStore;
         this.protectiveSentinel = protectiveSentinel;
@@ -290,7 +295,37 @@ export class AdmissionController {
                     // Gap blocking check: for works with queued chapters, check if the queued frontier is ahead of expected frontier
                     const effectiveFrontier = queuedCnt > 0 && minQueued !== null ? minQueued : minSortKey;
                     const expectedFrontier = maxPub >= 0 ? maxPub + 1.5 : 1.5;
-                    const isGapBlocked = effectiveFrontier !== null && effectiveFrontier > expectedFrontier;
+                    let isGapBlocked = effectiveFrontier !== null && effectiveFrontier > expectedFrontier;
+                    if (isGapBlocked && effectiveFrontier !== null) {
+                        const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+                        const gapEnd = effectiveFrontier - 1;
+                        // 1. Check if covered by existing confirmed gaps
+                        const confCheck = await this.runQuery(`
+              SELECT COUNT(*) as gap_cnt
+              FROM importer_confirmed_gaps
+              WHERE work_id = $1::uuid
+                AND start_sort_key <= $2::numeric
+                AND end_sort_key >= $3::numeric;
+            `, [work.workId, gapStart, gapEnd]);
+                        const confCnt = parseInt(confCheck.rows[0]?.gap_cnt || '0', 10);
+                        if (confCnt > 0) {
+                            isGapBlocked = false;
+                        }
+                        else {
+                            // 2. Try to confirm the upstream gap interval
+                            const confRes = await confirmUpstreamGapInterval(this.pool, {
+                                workId: work.workId,
+                                startSortKey: gapStart,
+                                endSortKey: gapEnd,
+                                primarySource: work.primarySource,
+                                reason: `ADMISSION_RECONCILE_GAP_${gapStart}_TO_${gapEnd}`,
+                            });
+                            if (confRes.confirmed) {
+                                isGapBlocked = false;
+                                this.logger.info(`Confirmed upstream gap [${gapStart}..${gapEnd}] during admission reconcile for work ${work.workTitle} (${work.workId}).`);
+                            }
+                        }
+                    }
                     if (isGapBlocked) {
                         this.logger.warn(`Work ${work.workTitle} (${work.workId}) marked BLOCKED due to unresolvable gap. Vacating active slot.`);
                         work.state = 'BLOCKED';
@@ -431,11 +466,80 @@ export class AdmissionController {
                     pubMap.set(pr.work_id, parseFloat(pr.max_pub));
                 }
             }
-            // Keep only contiguous candidates
+            // Check confirmed gaps for candidate works
+            const gapsMap = new Map();
+            if (candidateWorkIds.length > 0) {
+                try {
+                    const gapsRes = await this.runQuery(`SELECT work_id::text, start_sort_key, end_sort_key
+             FROM importer_confirmed_gaps
+             WHERE work_id = ANY($1::uuid[])`, [candidateWorkIds]);
+                    for (const gr of gapsRes.rows) {
+                        const arr = gapsMap.get(gr.work_id) || [];
+                        arr.push({ start: parseFloat(gr.start_sort_key), end: parseFloat(gr.end_sort_key) });
+                        gapsMap.set(gr.work_id, arr);
+                    }
+                }
+                catch { }
+            }
+            const isContiguousOrConfirmed = (workId, minSort, maxPub) => {
+                if (maxPub === -1) {
+                    if (minSort <= 1.5)
+                        return true;
+                }
+                else {
+                    if (minSort <= maxPub + 1.5)
+                        return true;
+                }
+                const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+                const gapEnd = minSort - 1;
+                const intervals = gapsMap.get(workId) || [];
+                return intervals.some((g) => g.start <= gapStart && g.end >= gapEnd);
+            };
+            // Keep contiguous or confirmed candidates
             const contiguousCandidates = candidatesRes.rows.filter((cand) => {
                 const maxPub = pubMap.get(cand.work_id) ?? -1;
                 const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
-                return maxPub === -1 || minSort <= maxPub + 1.5;
+                return isContiguousOrConfirmed(cand.work_id, minSort, maxPub);
+            });
+            // Try confirming upstream gaps for non-contiguous candidates if slots need replenishment
+            if (contiguousCandidates.length < backfillSlotsAvailable) {
+                for (const cand of candidatesRes.rows) {
+                    if (contiguousCandidates.some((c) => c.work_id === cand.work_id))
+                        continue;
+                    const maxPub = pubMap.get(cand.work_id) ?? -1;
+                    const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
+                    const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+                    const gapEnd = minSort - 1;
+                    if (gapStart <= gapEnd) {
+                        try {
+                            const conf = await confirmUpstreamGapInterval(this.pool, {
+                                workId: cand.work_id,
+                                startSortKey: gapStart,
+                                endSortKey: gapEnd,
+                                primarySource: cand.source,
+                                reason: 'ADMISSION_CANDIDATE_GAP_CONFIRM',
+                            });
+                            if (conf.confirmed) {
+                                contiguousCandidates.push(cand);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            // Sort candidates by source permit headroom and diversity (Section 8 & 11)
+            contiguousCandidates.sort((a, b) => {
+                const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
+                const permitsB = this.sourcePermitProvider ? this.sourcePermitProvider(b.source) : 1;
+                const activeA = sourceCounts.get(a.source) || 0;
+                const activeB = sourceCounts.get(b.source) || 0;
+                if ((permitsA > 0) !== (permitsB > 0)) {
+                    return permitsA > 0 ? -1 : 1;
+                }
+                if (activeA !== activeB) {
+                    return activeA - activeB;
+                }
+                return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
             });
             let admitted = 0;
             for (const cand of contiguousCandidates) {
@@ -502,6 +606,20 @@ export class AdmissionController {
          GROUP BY (q.payload->>'workId'), w.title, q.source, w.created_at
          ORDER BY w.created_at DESC
          LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], newWorkSlotsAvailable * 3]);
+            // Sort P2 candidates by permit headroom and source diversity
+            candidatesRes.rows.sort((a, b) => {
+                const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
+                const permitsB = this.sourcePermitProvider ? this.sourcePermitProvider(b.source) : 1;
+                const activeA = sourceCounts.get(a.source) || 0;
+                const activeB = sourceCounts.get(b.source) || 0;
+                if ((permitsA > 0) !== (permitsB > 0)) {
+                    return permitsA > 0 ? -1 : 1;
+                }
+                if (activeA !== activeB) {
+                    return activeA - activeB;
+                }
+                return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+            });
             let admitted = 0;
             for (const cand of candidatesRes.rows) {
                 if (admitted >= newWorkSlotsAvailable)
@@ -511,6 +629,37 @@ export class AdmissionController {
                 const otherSourceCandidates = candidatesRes.rows.filter((r) => (sourceCounts.get(r.source) || 0) < maxWorksPerSource);
                 if (srcCount >= maxWorksPerSource && otherSourceCandidates.length > 0) {
                     continue;
+                }
+                // Validate initial upstream gap if catalog begins beyond chapter 1 (Section 6 & Test E)
+                const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 1;
+                if (minSort > 1.5) {
+                    let gapCovered = false;
+                    try {
+                        const confCheck = await this.runQuery(`
+              SELECT COUNT(*) as gap_cnt
+              FROM importer_confirmed_gaps
+              WHERE work_id = $1::uuid
+                AND start_sort_key <= 1.5
+                AND end_sort_key >= $2::numeric - 1
+            `, [cand.work_id, minSort]);
+                        if (parseInt(confCheck.rows[0]?.gap_cnt || '0', 10) > 0) {
+                            gapCovered = true;
+                        }
+                        else {
+                            const conf = await confirmUpstreamGapInterval(this.pool, {
+                                workId: cand.work_id,
+                                startSortKey: 1,
+                                endSortKey: minSort - 1,
+                                primarySource: cand.source,
+                                reason: 'P2_INITIAL_UPSTREAM_GAP',
+                            });
+                            gapCovered = conf.confirmed;
+                        }
+                    }
+                    catch { }
+                    if (!gapCovered) {
+                        continue;
+                    }
                 }
                 const newWork = {
                     workId: cand.work_id,
@@ -693,11 +842,79 @@ export class AdmissionController {
                     pubMap.set(pr.work_id, parseFloat(pr.max_pub));
                 }
             }
-            const match = res.rows.find((cand) => {
+            // Check confirmed gaps
+            const gapsMap = new Map();
+            if (candWorkIds.length > 0) {
+                try {
+                    const gapsRes = await this.runQuery(`SELECT work_id::text, start_sort_key, end_sort_key
+             FROM importer_confirmed_gaps
+             WHERE work_id = ANY($1::uuid[])`, [candWorkIds]);
+                    for (const gr of gapsRes.rows) {
+                        const arr = gapsMap.get(gr.work_id) || [];
+                        arr.push({ start: parseFloat(gr.start_sort_key), end: parseFloat(gr.end_sort_key) });
+                        gapsMap.set(gr.work_id, arr);
+                    }
+                }
+                catch { }
+            }
+            // Sort candidate rows by permit headroom and diversity
+            res.rows.sort((a, b) => {
+                const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
+                const permitsB = this.sourcePermitProvider ? this.sourcePermitProvider(b.source) : 1;
+                const activeA = sourceCounts.get(a.source) || 0;
+                const activeB = sourceCounts.get(b.source) || 0;
+                if ((permitsA > 0) !== (permitsB > 0)) {
+                    return permitsA > 0 ? -1 : 1;
+                }
+                if (activeA !== activeB) {
+                    return activeA - activeB;
+                }
+                return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
+            });
+            const isCandidateFrontierValid = (workId, minSort, maxPub) => {
+                if (isP1) {
+                    if (maxPub === -1 || minSort <= maxPub + 1.5)
+                        return true;
+                }
+                else {
+                    if (minSort <= 1.5)
+                        return true;
+                }
+                const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+                const gapEnd = minSort - 1;
+                const intervals = gapsMap.get(workId) || [];
+                return intervals.some((g) => g.start <= gapStart && g.end >= gapEnd);
+            };
+            let match = res.rows.find((cand) => {
                 const maxPub = pubMap.get(cand.work_id) ?? -1;
                 const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
-                return isP1 ? (maxPub === -1 || minSort <= maxPub + 1.5) : (minSort <= 1.5);
+                return isCandidateFrontierValid(cand.work_id, minSort, maxPub);
             });
+            // If no match found directly, attempt confirmUpstreamGapInterval on top candidates
+            if (!match && res.rows.length > 0) {
+                for (const cand of res.rows) {
+                    const maxPub = pubMap.get(cand.work_id) ?? -1;
+                    const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
+                    const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+                    const gapEnd = minSort - 1;
+                    if (gapStart <= gapEnd) {
+                        try {
+                            const conf = await confirmUpstreamGapInterval(this.pool, {
+                                workId: cand.work_id,
+                                startSortKey: gapStart,
+                                endSortKey: gapEnd,
+                                primarySource: cand.source,
+                                reason: 'ON_DEMAND_ADMISSION_GAP_CONFIRM',
+                            });
+                            if (conf.confirmed) {
+                                match = cand;
+                                break;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
             if (match) {
                 const cand = match;
                 const newWork = {

@@ -174,6 +174,13 @@ export class ImporterEngine {
             rssEmergencyLimitMb: 460,
             maxBufferedBytes: 64 * 1024 * 1024,
         });
+        this.scheduler.setPublicationBarrier(this.publicationBarrier);
+        this.scheduler.setSourcePermitProvider((source) => {
+            return this.autotuner.getSourceSemaphore(source).available;
+        });
+        this.admissionController.setSourcePermitProvider((source) => {
+            return this.autotuner.getSourceSemaphore(source).available;
+        });
         this.protectiveSentinel.setOnAutoResume(() => {
             this.autotuner.setCapacity(1, 'RECOVERING', 'Auto-resumed after site stabilization (capacity=1)');
         });
@@ -1163,6 +1170,7 @@ export class ImporterEngine {
         }
     }
     autotunerCycleCount = 0;
+    consecutiveUnderutilizedCycles = 0;
     /**
      * Periodic autotuner telemetry & evaluation loop (every 30s)
      */
@@ -1209,7 +1217,30 @@ export class ImporterEngine {
                     rssMb: mem.rssMb,
                 });
                 const lagMetrics = diagnostics.lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
-                this.logger.info(`[Autotuner Telemetry] State: ${evaluation.state} | Action: ${evaluation.action} | Concurrency: ${evaluation.concurrency} | Pressure: ${evaluation.pressureScore} | Site: ${evaluation.siteHealth} | Active Jobs: ${activeJobs} | Mem: ${mem.heapUsedMb}MB heap / ${mem.rssMb}MB rss (512MB RAM) | Reason: ${evaluation.reason}`);
+                const slotSnapshot = telemetryCollector.getSlotProductivitySnapshot();
+                if (slotSnapshot.productiveSlotRatio < 70) {
+                    this.consecutiveUnderutilizedCycles++;
+                    if (this.consecutiveUnderutilizedCycles >= 2) {
+                        try {
+                            const qCountRes = await this.dbPool.query(`
+                SELECT COUNT(*) as claimable_cnt
+                FROM importer_queue q
+                JOIN importer_sources s ON s.id = q.source
+                WHERE q.status = 'QUEUED' AND q.task_type = 'IMPORT_CHAPTER' AND s.enabled = true
+              `);
+                            const claimable = parseInt(qCountRes.rows[0]?.claimable_cnt || '0', 10);
+                            if (claimable > 0) {
+                                this.logger.warn(`[ADMISSION_UNDERUTILIZATION] Productive slot ratio: ${slotSnapshot.productiveSlotRatio}% (< 70%) for >60s with ${claimable} claimable jobs in queue. Triggering immediate admission replenishment.`);
+                                await this.admissionController.runAdmissionCycle();
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                else {
+                    this.consecutiveUnderutilizedCycles = 0;
+                }
+                this.logger.info(`[Autotuner Telemetry] State: ${evaluation.state} | Action: ${evaluation.action} | Concurrency: ${evaluation.concurrency} | Pressure: ${evaluation.pressureScore} | Site: ${evaluation.siteHealth} | Active Jobs: ${activeJobs} | Slots: ${slotSnapshot.productiveSlots}/${slotSnapshot.configuredSlots} prod (${slotSnapshot.productiveSlotRatio}%) busy=${slotSnapshot.busySlots} idle=${slotSnapshot.idleSlots} | Mem: ${mem.heapUsedMb}MB heap / ${mem.rssMb}MB rss (512MB RAM) | Reason: ${evaluation.reason}`);
                 // Record async telemetry snapshot without blocking the loop
                 void this.recordTelemetrySnapshot({
                     workerId: this.config.WORKER_ID,

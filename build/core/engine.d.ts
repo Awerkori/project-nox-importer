@@ -175,6 +175,7 @@ export declare class ImporterEngine {
         cooldown_until?: string | null;
     }): Promise<void>;
     private autotunerCycleCount;
+    private consecutiveUnderutilizedCycles;
     /**
      * Periodic autotuner telemetry & evaluation loop (every 30s)
      */

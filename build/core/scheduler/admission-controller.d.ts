@@ -20,6 +20,8 @@ export declare class AdmissionController {
     private pool;
     private isRunning;
     private loopTimer;
+    private sourcePermitProvider?;
+    setSourcePermitProvider(provider: (source: string) => number): void;
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
     /**
