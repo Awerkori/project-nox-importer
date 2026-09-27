@@ -2892,19 +2892,15 @@ export class ImporterEngine {
     }
 
     // For missing chapters, check if another source already has an active job in queue
-    let { data: activeJobs } = await this.supabase
-      .from('importer_queue')
-      .select('payload, source, status')
-      .eq('task_type', 'IMPORT_CHAPTER')
-      .in('status', ['QUEUED', 'IMPORTING', 'RETRY']);
-
-    const activeJobsForWork = (activeJobs || []).filter(
-      (j) => j.payload?.workId === result.workId
+    const { rows: activeJobsForWork } = await this.dbPool.query(
+      `SELECT payload, source, status FROM importer_queue
+       WHERE task_type='IMPORT_CHAPTER' AND status IN ('QUEUED','IMPORTING','RETRY')
+         AND payload->>'workId'=$1`, [result.workId]
     );
 
     const chaptersToEnqueue = missingChapters.filter((ch) => {
       const chKey = this.computeCanonicalChapterKey(ch.number, ch.title);
-      const activeJob = activeJobsForWork.find((j) => {
+      const activeJob = activeJobsForWork.find((j: { payload: any; source: string; status: string }) => {
         const jobNum = Number(j.payload?.chapterNumber);
         return Number(jobNum.toFixed(4)) === chKey.normalizedNumber;
       });
@@ -3148,6 +3144,22 @@ export class ImporterEngine {
     let chDownloadSemWaitMs = 0;
     let chTelegramSemWaitMs = 0;
     let metadataLoadMs = 0;
+    let mediaPipelineWallMs = 0;
+    // Shared by producers, bounded to this job; heartbeat cancellation remains independent.
+    let cancelCheckedAt = -Infinity;
+    let cancellation = false;
+    let cancelInFlight: Promise<boolean> | null = null;
+    const checkCancellation = (): Promise<boolean> => {
+      if (cancellation || isCancelled?.()) return Promise.resolve(true);
+      if (cancelInFlight) return cancelInFlight;
+      if (performance.now() - cancelCheckedAt < 2000) return Promise.resolve(false);
+      cancelInFlight = this.queue.isCancelRequested(job.id).then(value => {
+        cancellation = value;
+        cancelCheckedAt = performance.now();
+        return value;
+      }).finally(() => { cancelInFlight = null; });
+      return cancelInFlight;
+    };
 
     let {
       sourceWorkId,
@@ -3348,6 +3360,7 @@ export class ImporterEngine {
       allSourceCandidates = candidateFallbacks;
     }
 
+    metadataLoadMs = performance.now() - metaStart;
     try {
       for (let candidateIdx = 0; candidateIdx < allSourceCandidates.length; candidateIdx++) {
         const candidate = allSourceCandidates[candidateIdx];
@@ -3374,6 +3387,7 @@ export class ImporterEngine {
 
         let pageUrls: string[] = [];
         let primaryError: Error | null = null;
+        const sourceFetchStart = performance.now();
         try {
           pageUrls = await callProvider(() => adapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber));
         } catch (adapterErr: any) {
@@ -3381,6 +3395,8 @@ export class ImporterEngine {
           this.logger.warn(`Source ${effectiveSource} failed fetchChapterPages for ch ${chapterNumber}`, {
             error: primaryError.message,
           });
+        } finally {
+          sourceFetchMs += performance.now() - sourceFetchStart;
         }
 
         if (!pageUrls || pageUrls.length === 0) {
@@ -3397,6 +3413,7 @@ export class ImporterEngine {
           continue;
         }
 
+        const pageResolutionStart = performance.now();
         const expectedCount = pageUrls.length;
         this.supabase.from('importer_queue').update({
           progress_total: expectedCount,
@@ -3440,6 +3457,7 @@ export class ImporterEngine {
             }));
             skipDownloadDueToExistingPages = true;
             successfulExecution = true;
+            pageResolutionMs += performance.now() - pageResolutionStart;
             break;
           }
         }
@@ -3520,7 +3538,7 @@ export class ImporterEngine {
           try {
             while (!this.stopSignal && !pipelineError && !isCancelled?.()) {
             // Safe Checkpoint: cancellation check
-            if (isCancelled?.() || (nextDownloadIndex % 3 === 0 && (await this.queue.isCancelRequested(job.id)))) {
+            if (await checkCancellation()) {
               pipelineError = new JobCancelledByStaffError(job.id);
               notifyConsumer();
               break;
@@ -3803,7 +3821,9 @@ export class ImporterEngine {
         if (extraTiming?.slotIndex !== undefined) {
           telemetryCollector.setSlotState(extraTiming.slotIndex, 'ACTIVE_DOWNLOAD', `${effectiveSource} ch ${chapterNumber}`);
         }
+        pageResolutionMs += performance.now() - pageResolutionStart;
         telemetry.tDownloadStart = Date.now();
+        const mediaPipelineStart = performance.now();
         const producerPromises = Array.from({ length: downloadConcurrency }, () => producer());
         telemetry.tUploadStart = Date.now();
         const consumerPromises = Array.from({ length: uploadConcurrency }, () => consumer());
@@ -3822,6 +3842,7 @@ export class ImporterEngine {
           telemetry.totalBytesDown = totalBytes;
           telemetry.pages = expectedCount;
         } finally {
+          mediaPipelineWallMs += performance.now() - mediaPipelineStart;
           // RAII Cleanup: Drain any unconsumed items left in readyQueue
           // to prevent leaking bytes into ImporterEngine.activeBufferedBytes
           while (readyQueue.length > 0) {
@@ -3953,7 +3974,7 @@ export class ImporterEngine {
             .then(undefined, () => {});
         }
         telemetry.tStaged = Date.now();
-        this.logger.info('TELEMETRY_JOB_STAGED', telemetry);
+        this.logger.debug('TELEMETRY_JOB_STAGED', telemetry);
         this.supabase.from('importer_queue').update({
           payload: { ...job.payload, telemetry }
         }).eq('id', job.id).then(undefined, () => {});
@@ -4135,7 +4156,7 @@ export class ImporterEngine {
       const tPublishUpdate = Math.round(pubResult.timings?.publishUpdateMs || 0);
       const tCascade = Math.round(pubResult.timings?.cascadeMs || 0);
 
-      this.logger.info(`[DB_DIAGNOSTIC] ${effectiveSource} ch ${chapterNumber}: db_total=${tDb}ms (cover=${tCoverCheck}ms, ch_upsert=${tChapterUpsert}ms, pages_rpc=${tPagesRpc}ms, stage=${tStage}ms, barrier=${tBarrierCheck}ms, pub_update=${tPublishUpdate}ms, cascade=${tCascade}ms)`);
+      this.logger.debug(`[DB_DIAGNOSTIC] ${effectiveSource} ch ${chapterNumber}: db_total=${tDb}ms (cover=${tCoverCheck}ms, ch_upsert=${tChapterUpsert}ms, pages_rpc=${tPagesRpc}ms, stage=${tStage}ms, barrier=${tBarrierCheck}ms, pub_update=${tPublishUpdate}ms, cascade=${tCascade}ms)`);
 
       const downloadWallTimeMs = Math.max(0, (telemetry.tDownloadEnd || Date.now()) - (telemetry.tDownloadStart || Date.now()));
       const uploadWallTimeMs = Math.max(0, (telemetry.tUploadEnd || Date.now()) - (telemetry.tUploadStart || Date.now()));
@@ -4145,7 +4166,7 @@ export class ImporterEngine {
         ? Math.min(1.0, Math.round((overlapMs / Math.min(downloadWallTimeMs, uploadWallTimeMs)) * 100) / 100)
         : 0;
 
-      this.logger.info(`[MEDIA_DIAGNOSTIC] ${effectiveSource} ch ${chapterNumber}: media_wall=${mediaWallTimeMs}ms, dl_wall=${downloadWallTimeMs}ms, up_wall=${uploadWallTimeMs}ms, overlap_ratio=${overlapRatio}`);
+      this.logger.debug(`[MEDIA_DIAGNOSTIC] ${effectiveSource} ch ${chapterNumber}: media_wall=${mediaWallTimeMs}ms, dl_wall=${downloadWallTimeMs}ms, up_wall=${uploadWallTimeMs}ms, overlap_ratio=${overlapRatio}`);
 
       // Record fine-grained chapter job metric asynchronously
       void this.recordJobMetric({
@@ -4201,12 +4222,14 @@ export class ImporterEngine {
         download_ms: Math.round(chDownloadMs),
         encode_ms: 0,
         telegram_upload_ms: Math.round(chTelegramUploadMs),
+        media_pipeline_wall_ms: Math.round(mediaPipelineWallMs),
+        cover_check_ms: tCoverCheck,
         db_wait_ms: 0,
         db_publish_ms: Math.round(tDb),
         rate_limit_wait_ms: Math.round(chRateLimitWaitMs),
         semaphore_wait_ms: Math.round(extraTiming?.semWaitMs || 0) + Math.round(chDownloadSemWaitMs) + Math.round(chTelegramSemWaitMs),
-        other_wait_ms: Math.max(0, Math.round(chTotalDuration - (sourceFetchMs + chDownloadMs + chTelegramUploadMs + tDb))),
-        barrier_wait_ms: 0,
+        other_wait_ms: Math.max(0, Math.round(chTotalDuration - (metadataLoadMs + sourceFetchMs + pageResolutionMs + mediaPipelineWallMs + tCoverCheck + tDb))),
+        barrier_wait_ms: tBarrierCheck + tPublishUpdate + tCascade,
         timestamp: new Date().toISOString(),
       });
 

@@ -288,11 +288,9 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
         }
         // Work queue reconciliation query
         if (queryText.includes('queued_cnt') || queryText.includes('paused_cnt')) {
-          const wId = params[0];
-          if (wId === 'work-4') {
-            return { rows: [{ queued_cnt: '0', importing_cnt: '0', paused_cnt: '0', min_sort_key: null }] };
-          }
-          return { rows: [{ queued_cnt: '5', importing_cnt: '0', paused_cnt: '5', min_sort_key: '10' }] };
+          return { rows: params[0].map((work_id: string) => work_id === 'work-4'
+            ? { work_id, queued_cnt:'0', importing_cnt:'0', paused_cnt:'0', min_sort_key:null, pub_cnt:'20', max_pub:'20', unimported_cnt:'0', source_status:'ACTIVE' }
+            : { work_id, queued_cnt:'5', importing_cnt:'0', paused_cnt:'5', min_sort_key:'10', pub_cnt:'20', max_pub:'20', staged_cnt:'0', source_status:'ACTIVE' }) };
         }
         if (queryText.includes('FROM chapters')) {
           return { rows: [{ pub_cnt: '20' }] };
@@ -616,7 +614,7 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
       query: vi.fn().mockImplementation((queryText: string, params: any[]) => {
         // Work queue reconciliation query: 0 queued, 0 importing
         if (queryText.includes('queued_cnt') || queryText.includes('paused_cnt')) {
-          return { rows: [{ queued_cnt: '0', importing_cnt: '0', paused_cnt: '0', min_sort_key: null }] };
+          return { rows: params[0].map((work_id: string) => ({ work_id, queued_cnt:'0', importing_cnt:'0', paused_cnt:'0', min_sort_key:null, pub_cnt:'10', max_pub:'10', unimported_cnt:'10', source_status:'ACTIVE' })) };
         }
         if (queryText.includes('FROM chapters')) {
           return { rows: [{ pub_cnt: '10' }] };

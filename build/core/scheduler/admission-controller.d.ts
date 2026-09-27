@@ -21,6 +21,7 @@ export declare class AdmissionController {
     private isRunning;
     private loopTimer;
     private sourcePermitProvider?;
+    private admissionInFlight;
     setSourcePermitProvider(provider: (source: string) => number): void;
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
@@ -65,6 +66,7 @@ export declare class AdmissionController {
      * Executes a single admission reconciliation cycle.
      */
     runAdmissionCycle(): Promise<void>;
+    private executeAdmissionCycle;
     /**
      * Step 1: Reconciles all currently tracked active works.
      * Updates their progress, checks if they reached CAUGHT_UP, detects barrier gaps.

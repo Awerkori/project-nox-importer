@@ -1,10 +1,31 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TelemetryCollector } from '../src/core/telemetry-collector.js';
 import { BoundedSamples } from '../src/core/bounded-samples.js';
+import { PGlite } from '@electric-sql/pglite';
 
 describe('bounded runtime telemetry', () => {
   afterEach(() => vi.useRealTimers());
   function collector() { return new (TelemetryCollector as any)() as TelemetryCollector; }
+
+  it('persists TTL metadata in the production TEXT settings column and expires it', async () => {
+    const db = new PGlite();
+    const c = collector();
+    try {
+      await db.exec(`CREATE TABLE settings (key text PRIMARY KEY, value text);
+        CREATE TABLE importer_diagnostic_telemetry (id text PRIMARY KEY,session_id text,data jsonb,created_at timestamptz);
+        INSERT INTO settings VALUES ('active_diagnostic_session','old-1700000000000');`);
+      c.setPool({ query: (s:string,p?:any[]) => db.query(s,p), options:{max:4} } as any);
+      await c.flushTelemetryToDb();
+      expect((await db.query('SELECT value FROM settings')).rows).toEqual([{value:'IDLE'}]);
+      expect((await db.query('SELECT session_id FROM importer_diagnostic_telemetry')).rows).toEqual([{session_id:'runtime'}]);
+      await db.query('UPDATE settings SET value=$1', [`fresh-${Date.now()}`]);
+      (c as any).nextSessionCheck = 0;
+      await c.flushTelemetryToDb();
+      const value = (await db.query<{value:string}>('SELECT value FROM settings')).rows[0].value;
+      expect(Date.parse(JSON.parse(value).expires_at)-Date.parse(JSON.parse(value).started_at)).toBe(300000);
+      expect(c.getSessionId()).toMatch(/^fresh-/);
+    } finally { c.stop(); await db.close(); }
+  });
 
   it('keeps the last bounded population without changing array statistics', () => {
     const samples = new BoundedSamples<number>(3);

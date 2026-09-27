@@ -96,14 +96,6 @@ export class DirectTelegramStorageProvider {
                 }
             }
         }
-        const defaultBots = {
-            'Project Nox Storage 01': { token: '8618893801:AAEih6jadpEkXdsjKY1JVDAzvXwWl9RMy1g', username: 'project_nox_manga_storage_bot' },
-            'Project Nox Storage 02': { token: '8511822349:AAGSjzMAx9kptEckfYLIiMwSiKa4IgnL_vg', username: 'nox_manga_02_bot' },
-            'Project Nox Storage 03': { token: '8943758747:AAHltzHOycs539RgljKdqB9wcJjlEihhthA', username: 'project_nox_storage_03_bot' },
-            'Project Nox Storage 04': { token: '8929999439:AAFQppMRv4TRf6Cpwb9Dk_9B2wvWYuJxDbw', username: 'project_nox_storage_04_bot' },
-            'Project Nox Storage 05': { token: '8650821577:AAEXH-Uw3XW2FbIypGY03la_rVWVMvbqPWI', username: 'project_nox_storage_05_bot' },
-            'Project Nox Storage 06': { token: '8782900571:AAFi0eRd7wsK8yo44QP0cacXiw4pNfpc-h0', username: 'project_nox_storage_06_bot' },
-        };
         const defaultShards10To21 = {
             SHARD_10: { shardId: 'fd879adf-fe05-497d-b29b-e6c7624abbc3', channel_id: -1003979364862 },
             SHARD_11: { shardId: '786a6616-dcff-4b3e-9eca-2464c483dc93', channel_id: -1003948859445 },
@@ -128,7 +120,7 @@ export class DirectTelegramStorageProvider {
         ];
         for (const def of botDefs) {
             const bdata = cp?.bots?.[def.key];
-            const token = bdata?.token || process.env[`TELEGRAM_STORAGE_BOT_${def.ref.replace('MANGA_STORAGE_', '')}_TOKEN`] || defaultBots[def.key]?.token;
+            const token = process.env[`TELEGRAM_STORAGE_BOT_${def.ref.replace('MANGA_STORAGE_', '')}_TOKEN`] || bdata?.token;
             if (!token) {
                 throw new Error(`Missing token for bot ${def.ref} (${def.key})`);
             }

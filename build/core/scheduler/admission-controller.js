@@ -21,6 +21,7 @@ export class AdmissionController {
     isRunning = false;
     loopTimer = null;
     sourcePermitProvider;
+    admissionInFlight = null;
     setSourcePermitProvider(provider) {
         this.sourcePermitProvider = provider;
     }
@@ -69,6 +70,9 @@ export class AdmissionController {
     }
     stop() {
         this.isRunning = false;
+        if (this.immediateReplenishTimer)
+            clearTimeout(this.immediateReplenishTimer);
+        this.immediateReplenishTimer = null;
         if (this.loopTimer) {
             clearTimeout(this.loopTimer);
             this.loopTimer = null;
@@ -242,7 +246,13 @@ export class AdmissionController {
     /**
      * Executes a single admission reconciliation cycle.
      */
-    async runAdmissionCycle() {
+    runAdmissionCycle() {
+        if (this.admissionInFlight)
+            return this.admissionInFlight;
+        this.admissionInFlight = this.executeAdmissionCycle().finally(() => { this.admissionInFlight = null; });
+        return this.admissionInFlight;
+    }
+    async executeAdmissionCycle() {
         const config = this.stateStore.getConfig();
         if (!config.enabled && !config.shadowMode) {
             return;
@@ -268,27 +278,40 @@ export class AdmissionController {
         if (activeWorks.length === 0)
             return;
         try {
+            // One bounded snapshot for the active cohort; no cache of editorial state.
+            // Keep indexed work predicates inside each aggregate to avoid scanning the hot queue.
+            const snapshot = await this.runQuery(`
+        SELECT w.work_id, q.*, p.*, m.*, s.status AS source_status, s.cooldown_until
+        FROM unnest($1::text[], $2::text[]) AS w(work_id, source)
+        CROSS JOIN LATERAL (
+          SELECT COUNT(*) FILTER (WHERE status='QUEUED' AND attempts < COALESCE(max_attempts,7)) AS queued_cnt,
+            COUNT(*) FILTER (WHERE status='IMPORTING') AS importing_cnt,
+            COUNT(*) FILTER (WHERE status='PAUSED_BY_STAFF') AS paused_cnt,
+            MIN(chapter_sort_key) FILTER (WHERE status='QUEUED' AND attempts < COALESCE(max_attempts,7)) AS min_queued,
+            MIN(chapter_sort_key) FILTER (WHERE status IN ('QUEUED','PAUSED_BY_STAFF') AND attempts < COALESCE(max_attempts,7)) AS min_sort_key
+          FROM importer_queue WHERE task_type='IMPORT_CHAPTER' AND payload->>'workId'=w.work_id
+            AND status IN ('QUEUED','IMPORTING','PAUSED_BY_STAFF')
+        ) q
+        CROSS JOIN LATERAL (
+          SELECT COUNT(*) AS pub_cnt, COALESCE(MAX(number),-1) AS max_pub
+          FROM chapters WHERE work_id=w.work_id::uuid AND published_at IS NOT NULL
+        ) p
+        CROSS JOIN LATERAL (
+          SELECT COUNT(*) FILTER (WHERE status='STAGED') AS staged_cnt,
+            MIN(chapter_sort_key) FILTER (WHERE status='STAGED') AS min_staged,
+            COUNT(*) FILTER (WHERE status NOT IN ('COMPLETED','FAILED')) AS unimported_cnt
+          FROM importer_chapter_mappings WHERE work_id=w.work_id::uuid
+        ) m
+        LEFT JOIN importer_sources s ON s.id=w.source
+      `, [activeWorks.map(w => w.workId), activeWorks.map(w => w.primarySource)]);
+            const byWork = new Map(snapshot.rows.map((r) => [r.work_id, r]));
             for (const work of activeWorks) {
                 try {
-                    // A. Count claimable queued & importing jobs for this work
-                    const queueRes = await this.runQuery(`SELECT 
-               COUNT(CASE WHEN status = 'QUEUED' AND attempts < COALESCE(max_attempts, 7) THEN 1 END) as queued_cnt,
-               COUNT(CASE WHEN status = 'IMPORTING' THEN 1 END) as importing_cnt,
-               COUNT(CASE WHEN status = 'PAUSED_BY_STAFF' THEN 1 END) as paused_cnt,
-               MIN(CASE WHEN status = 'QUEUED' AND attempts < COALESCE(max_attempts, 7) THEN chapter_sort_key END) as min_queued,
-               MIN(CASE WHEN status IN ('QUEUED', 'PAUSED_BY_STAFF') AND attempts < COALESCE(max_attempts, 7) THEN chapter_sort_key END) as min_sort_key
-             FROM importer_queue
-             WHERE task_type = 'IMPORT_CHAPTER' AND (payload->>'workId') = $1`, [work.workId]);
-                    // B. Count published chapters
-                    const pubRes = await this.runQuery(`SELECT COUNT(*) as pub_cnt, COALESCE(MAX(number), -1) as max_pub FROM chapters WHERE work_id = $1::uuid AND published_at IS NOT NULL`, [work.workId]);
-                    // C. Detect STAGED barrier gaps and unimported mappings for this work
-                    const stagedRes = await this.runQuery(`SELECT 
-               COUNT(CASE WHEN status = 'STAGED' THEN 1 END) as staged_cnt,
-               MIN(CASE WHEN status = 'STAGED' THEN chapter_sort_key END) as min_staged,
-               COUNT(CASE WHEN status NOT IN ('COMPLETED', 'FAILED') THEN 1 END) as unimported_cnt
-             FROM importer_chapter_mappings
-             WHERE work_id = $1::uuid`, [work.workId]);
-                    const qRow = queueRes.rows[0];
+                    const qRow = byWork.get(work.workId);
+                    if (!qRow)
+                        continue; // Never vacate a work because a snapshot is missing.
+                    const pubRes = { rows: [qRow] };
+                    const stagedRes = { rows: [qRow] };
                     const queuedCnt = parseInt(qRow?.queued_cnt || '0', 10);
                     const importingCnt = parseInt(qRow?.importing_cnt || '0', 10);
                     const pausedCnt = parseInt(qRow?.paused_cnt || '0', 10);
@@ -361,8 +384,7 @@ export class AdmissionController {
                         continue;
                     }
                     // Check primary source health
-                    const srcCheck = await this.runQuery(`SELECT status, cooldown_until FROM importer_sources WHERE id = $1`, [work.primarySource]);
-                    const srcRow = srcCheck.rows[0];
+                    const srcRow = { status: qRow.source_status, cooldown_until: qRow.cooldown_until };
                     const isSourceBlocked = srcRow && (srcRow.status === 'DISABLED' ||
                         srcRow.status === 'PAUSED' ||
                         srcRow.status === 'DEGRADED' ||
