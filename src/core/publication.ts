@@ -37,17 +37,25 @@ export interface PublishResult {
 export class PublicationBarrier {
   private logger = new Logger('PublicationBarrier');
   private workLocks = new Map<string, AsyncSemaphore>();
-  public onPublished?: (isFreshRelease: boolean) => void;
+  public onPublished?: (isFreshRelease: boolean, durableRateEvent?: boolean) => void;
 
   constructor(private supabase: SupabaseClient) {}
 
-  private getWorkLock(workId: string): AsyncSemaphore {
+  private getWorkLock(workId: string) {
     let sem = this.workLocks.get(workId);
     if (!sem) {
       sem = new AsyncSemaphore(1);
       this.workLocks.set(workId, sem);
     }
-    return sem;
+    const lock = sem;
+    return {
+      runExclusive: async <T>(fn: () => Promise<T>): Promise<T> => {
+        try { return await lock.runExclusive(fn); }
+        finally {
+          if (lock.active === 0 && lock.queued === 0 && this.workLocks.get(workId) === lock) this.workLocks.delete(workId);
+        }
+      },
+    };
   }
 
   /**
@@ -251,14 +259,30 @@ export class PublicationBarrier {
 
         // 3. Mark public.chapters.published_at and set is_fresh_release
         const chUpdateRes = await client.query(
-          `UPDATE chapters
-           SET published_at = COALESCE(published_at, $2::timestamptz),
-               is_fresh_release = $3
-           WHERE id = $1::uuid
-           RETURNING (published_at = $2::timestamptz) AS newly_visible`,
-          [chapterId, publishedAtIso, Boolean(isFreshRelease)]
+          `WITH visible AS (
+             UPDATE chapters SET published_at = clock_timestamp(), is_fresh_release = $2
+             WHERE id = $1::uuid AND published_at IS NULL
+             RETURNING id, published_at, is_fresh_release
+           ), event AS (
+             INSERT INTO importer_publication_events (chapter_id, transition_at, recorded_at, bucket_minute, is_fresh_release)
+             SELECT id, published_at, clock_timestamp(), date_trunc('minute', published_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC', is_fresh_release FROM visible
+             ON CONFLICT (chapter_id) DO NOTHING
+             RETURNING bucket_minute, is_fresh_release
+           ), bucket AS (
+             INSERT INTO importer_rate_buckets (bucket_minute, completed_jobs, fresh_visible, visible_published, updated_at)
+             SELECT bucket_minute, 0, CASE WHEN is_fresh_release THEN 1 ELSE 0 END, 1, clock_timestamp() FROM event
+             ON CONFLICT (bucket_minute) DO UPDATE
+             SET fresh_visible = importer_rate_buckets.fresh_visible + EXCLUDED.fresh_visible,
+                 visible_published = importer_rate_buckets.visible_published + EXCLUDED.visible_published,
+                 updated_at = EXCLUDED.updated_at
+           ) SELECT true AS newly_visible, published_at FROM visible
+           UNION ALL SELECT false AS newly_visible, published_at FROM chapters
+           WHERE id = $1::uuid AND NOT EXISTS (SELECT 1 FROM visible)`,
+          [chapterId, Boolean(isFreshRelease)]
         );
         isNewlyVisible = chUpdateRes.rows[0]?.newly_visible === true;
+        if (!chUpdateRes.rows[0]?.published_at) throw new Error('Publication target chapter missing');
+        publishedAtIso = new Date(chUpdateRes.rows[0].published_at).toISOString();
 
         // 4. Mark importer_chapter_mappings status = 'COMPLETED'
         await client.query(
@@ -317,7 +341,7 @@ export class PublicationBarrier {
 
       if (isNewlyVisible) {
         try {
-          this.onPublished?.(Boolean(isFreshRelease));
+          this.onPublished?.(Boolean(isFreshRelease), true);
         } catch {}
       }
 

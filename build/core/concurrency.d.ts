@@ -4,6 +4,7 @@ export declare class AsyncSemaphore {
     private maxPermits;
     private waitQueue;
     name: string;
+    private configuredPermits;
     constructor(maxPermits: number, name?: string);
     tryAcquire(): boolean;
     acquire(signal?: AbortSignal): Promise<void>;
