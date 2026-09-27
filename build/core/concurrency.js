@@ -926,7 +926,8 @@ export class AdaptiveAutotuner {
         }
         // CASE B: SEVERE PRESSURE (~50% reduction or at least 3 steps down)
         if (hasHardRss || siteHealth === 'ORANGE' || pressureScore >= 50) {
-            target = Math.max(this.config.minConcurrency, Math.min(Math.round(previous * 0.50), previous - 3));
+            const floor = hasHardRss ? this.config.minConcurrency : Math.min(previous, 4);
+            target = Math.max(floor, Math.min(Math.round(previous * 0.50), previous - 3));
             state = 'RUNNING_THROTTLED';
             action = target < previous ? 'SCALED_DOWN' : 'STRESS_DETECTED';
             if (!pressureReason)
@@ -946,7 +947,7 @@ export class AdaptiveAutotuner {
             const isHealthyGreen = siteHealth === 'GREEN' && !isHardwareStressed;
             const floor = (isHealthyGreen && previous >= healthyFloor)
                 ? healthyFloor
-                : this.config.minConcurrency;
+                : (siteHealth === 'YELLOW' ? Math.max(this.config.minConcurrency, Math.min(previous, 6)) : this.config.minConcurrency);
             target = Math.max(floor, Math.round(previous * 0.80));
             state = target < previous ? 'RUNNING_THROTTLED' : 'RUNNING_STABLE';
             action = target < previous ? 'SCALED_DOWN' : 'STRESS_DETECTED';
@@ -1128,7 +1129,8 @@ export class AdaptiveAutotuner {
                 state = 'RUNNING_BELOW_TARGET';
             }
             else {
-                state = previous === 1 ? 'RECOVERING' : 'RUNNING_ACCELERATING';
+                const healthyFloor = this.config.healthyConcurrencyFloor ?? 8;
+                state = target >= healthyFloor ? 'RUNNING_STABLE' : (previous === 1 ? 'RECOVERING' : 'RUNNING_ACCELERATING');
             }
             action = 'SCALED_UP';
             const reason = `System healthy across ${this.stableCycleCount} cycles, throughput: ${throughput.emaRate} cap/min. Scaled up: ${previous} -> ${target}`;
