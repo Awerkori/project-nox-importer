@@ -472,14 +472,12 @@ export class AdmissionController {
         `SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`
       );
       const importingCnt = parseInt(qAct.rows[0]?.cnt || '0', 10);
-      idleWorkers = Math.max(0, 8 - importingCnt);
+      idleWorkers = Math.max(0, 10 - importingCnt);
     } catch {}
 
     // Elastic backfill: if workers are idle, allow expanding active P1 up to 36 works
     // to guarantee full worker utilization without violating maxInflightPerWork = 2.
-    const targetBackfillLimit = idleWorkers >= 2
-      ? Math.min(36, Math.max(config.maxActiveBackfillWorks, 8 + idleWorkers))
-      : config.maxActiveBackfillWorks;
+    const targetBackfillLimit = idleWorkers >= 1 ? 36 : config.maxActiveBackfillWorks;
     const backfillSlotsAvailable = Math.max(0, targetBackfillLimit - activeBackfills.length);
 
     // P2 uses spare capacity when P1 cannot occupy available workers
