@@ -187,8 +187,10 @@ export class ImporterEngine {
       config.MAX_CONCURRENT_CHAPTERS || 10,
       config.TESTED_CONCURRENCY_CEILING || 18
     );
+    const defaultMinConcurrency = Math.max(1, parseInt(process.env.ADAPTIVE_MIN_CONCURRENCY || '8', 10));
     this.autotuner = new AdaptiveAutotuner({
-      initialConcurrency: Math.min(requestedMax, 8),
+      minConcurrency: Math.min(requestedMax, defaultMinConcurrency),
+      initialConcurrency: requestedMax,
       maxConcurrency: requestedMax,
       maxRssMb: 420,
       maxHeapMb: 240,

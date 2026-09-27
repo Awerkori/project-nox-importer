@@ -1273,7 +1273,9 @@ export class WorkAffinityScheduler {
                 this.markWorkStagedBlocked(workId, 30000);
                 // Immediate on-demand admission replenishment
                 try {
-                    this.admissionController.triggerImmediateReplenishment('WORK_STAGED_BLOCKED_VACATED');
+                    if (typeof this.admissionController?.triggerImmediateReplenishment === 'function') {
+                        this.admissionController.triggerImmediateReplenishment('WORK_STAGED_BLOCKED_VACATED');
+                    }
                     await this.admissionController.admitNextWorkOnDemand('P1');
                 }
                 catch { }

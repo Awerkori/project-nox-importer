@@ -89,6 +89,7 @@ export declare class ProtectiveSentinel {
     private autoEmergencyPause;
     private onAutoResume?;
     constructor(supabase: SupabaseClient, thresholds?: SentinelThresholds, siteUrl?: string | undefined, dbPool?: any | undefined);
+    private getPool;
     setOnAutoResume(fn: () => void): void;
     isEmergencyPaused(): boolean;
     getEmergencyPauseState(): AutoEmergencyPauseState;
