@@ -8,6 +8,7 @@
 
 import { getYugabytePool } from '../../db/yugabyte-direct.js';
 import { Logger } from '../logger.js';
+import { maintenanceScheduler } from '../maintenance-scheduler.js';
 import {
   ActiveWork,
   SchedulerConfig,
@@ -90,11 +91,11 @@ export class SchedulerStateStore {
       }
 
       // Start periodic settings refresh loop
-      setInterval(async () => {
+      maintenanceScheduler.register('scheduler-settings', 10000, 7000, async () => {
         try {
           await this.refreshSettingsFromDb();
         } catch {}
-      }, 10000);
+      });
 
       // Load active works (importer_scheduler_state with fallback to settings)
       let rawWorks: any[] = [];

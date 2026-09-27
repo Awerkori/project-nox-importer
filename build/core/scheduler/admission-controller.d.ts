@@ -22,6 +22,7 @@ export declare class AdmissionController {
     private loopTimer;
     private sourcePermitProvider?;
     private admissionInFlight;
+    private demandFlights;
     setSourcePermitProvider(provider: (source: string) => number): void;
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
@@ -89,4 +90,5 @@ export declare class AdmissionController {
      * Work-conserving and strictly controlled: preserves work-affinity, fairness, and sliding window.
      */
     admitNextWorkOnDemand(preferredLane?: 'P1' | 'P2', allowedSources?: string[]): Promise<ActiveWork | null>;
+    private executeOnDemandAdmission;
 }

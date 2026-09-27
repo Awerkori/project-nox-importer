@@ -1,6 +1,8 @@
 import { performance, PerformanceObserver } from 'node:perf_hooks';
 import { Logger } from './logger.js';
 import { BoundedSamples } from './bounded-samples.js';
+import { maintenanceScheduler } from './maintenance-scheduler.js';
+import { Session as InspectorSession } from 'node:inspector';
 function percentile(arr, p) {
     if (!arr || arr.length === 0)
         return 0;
@@ -27,6 +29,45 @@ export class TelemetryCollector {
     lastFlushWarningAt = 0;
     gcObserver = null;
     runtimeFingerprint = {};
+    cpuProfile = null;
+    profiledSession = null;
+    async captureBoundedCpuProfile(sessionId) {
+        if (this.profiledSession === sessionId)
+            return;
+        this.profiledSession = sessionId;
+        const session = new InspectorSession();
+        const post = (method, params = {}) => new Promise((resolve, reject) => session.post(method, params, (error, result) => error ? reject(error) : resolve(result)));
+        try {
+            session.connect();
+            await post('Profiler.enable');
+            await post('Profiler.setSamplingInterval', { interval: 2000 });
+            await post('Profiler.start');
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            const { profile } = await post('Profiler.stop');
+            const nodes = new Map(profile.nodes.map((n) => [n.id, n]));
+            const stacks = new Map();
+            let totalUs = 0;
+            for (let i = 0; i < (profile.samples?.length || 0); i++) {
+                const node = nodes.get(profile.samples[i]);
+                const frame = node?.callFrame;
+                const name = String(frame?.functionName || '(anonymous)').slice(0, 120);
+                const file = String(frame?.url || '').split(/[/?#]/).pop()?.slice(0, 100) || '';
+                const key = `${name} @ ${file}:${frame?.lineNumber ?? 0}`;
+                const us = profile.timeDeltas?.[i] || 0;
+                totalUs += us;
+                stacks.set(key, (stacks.get(key) || 0) + us);
+            }
+            this.cpuProfile = { sessionId, durationMs: (profile.endTime - profile.startTime) / 1000,
+                samples: profile.samples?.length || 0, topStacks: [...stacks].sort((a, b) => b[1] - a[1]).slice(0, 20)
+                    .map(([frame, us]) => ({ frame, percent: totalUs ? Math.round(us / totalUs * 1000) / 10 : 0 })) };
+        }
+        catch (error) {
+            this.cpuProfile = { sessionId, error: error?.code || error?.name };
+        }
+        finally {
+            session.disconnect();
+        }
+    }
     setRuntimeFingerprint(value) { this.runtimeFingerprint = value; }
     limiterProviders = new Map();
     configureChapterSlots(count, effectiveCapacity = () => count) {
@@ -686,6 +727,8 @@ export class TelemetryCollector {
             timestamp: new Date().toISOString(),
             telemetryMode: this.activeSessionId ? 'DIAGNOSTIC' : 'NORMAL',
             runtimeFingerprint: this.runtimeFingerprint,
+            maintenance: maintenanceScheduler.snapshot(),
+            boundedCpuProfile: this.cpuProfile,
             diagnosticExpiresAt: this.activeSessionId ? new Date(this.sessionExpiresAt).toISOString() : null,
             sampleCapacity: 2048,
             slotsConfigured: configuredSlots,
@@ -872,9 +915,12 @@ export class TelemetryCollector {
                     this.activeSessionId = null;
                 }
                 else if (id !== this.activeSessionId) {
-                    const session = { id, started_at: new Date(started).toISOString(), expires_at: new Date(expires).toISOString() };
+                    const session = { id, started_at: new Date(started).toISOString(), expires_at: new Date(expires).toISOString(),
+                        cpu_profile: requestedSession?.cpu_profile === true };
                     await this.poolRef.query("UPDATE settings SET value = $1 WHERE key = 'active_diagnostic_session' AND value = $2", [JSON.stringify(session), persistedValue]);
                     this.startSession(id, expires);
+                    if (session.cpu_profile)
+                        void this.captureBoundedCpuProfile(id);
                 }
             }
             else {

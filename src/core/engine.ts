@@ -1,6 +1,7 @@
 import { callProvider } from './retry-policy.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getYugabytePool, recoverStalledLeasesDirect, closeYugabytePool } from '../db/yugabyte-direct.js';
+import { maintenanceScheduler } from './maintenance-scheduler.js';
 import { SourceRegistry } from '../sources/registry.js';
 import { StorageProvider } from '../storage/provider.js';
 import { ImporterQueue, QueueJob, TaskType } from './queue.js';
@@ -506,6 +507,8 @@ export class ImporterEngine {
   }
 
   stop(): void {
+    maintenanceScheduler.stop();
+    this.admissionController.stop();
     telemetryCollector.stop();
     this.stopSignal = true;
     this.abortController.abort();
@@ -3195,13 +3198,12 @@ export class ImporterEngine {
     // Pre-flight check: if already published by concurrent worker, skip download
     let { data: alreadyPub } = await this.supabase
       .from('chapters')
-      .select('id, number, title')
+      .select('id, number, title, published_at')
       .eq('work_id', workId)
       .eq('number', chapterNumber)
-      .not('published_at', 'is', null)
       .maybeSingle();
 
-    if (alreadyPub && job.payload.readerRepair !== true) {
+    if (alreadyPub?.published_at && job.payload.readerRepair !== true) {
       this.logger.info('Chapter already published by concurrent source, linking mapping and skipping duplicate download', {
         workId,
         chapterNumber,
@@ -3278,12 +3280,7 @@ export class ImporterEngine {
     }
 
     // Pre-flight check 2: Check if chapter record already exists in database
-    let { data: existingChapter } = await this.supabase
-      .from('chapters')
-      .select('id, published_at')
-      .eq('work_id', workId)
-      .eq('number', chapterNumber)
-      .maybeSingle();
+    const existingChapter = alreadyPub;
 
     // Mark chapter mapping as IMPORTING
     await this.supabase
@@ -3332,17 +3329,19 @@ export class ImporterEngine {
     const targetChapterId = existingChapter?.id || crypto.randomUUID();
 
     // Dynamic candidate fallbacks resolution across payload, mappings, manifest, and work sources
-    const candidateFallbacks = await this.resolveDynamicCandidateFallbacks(
-      workId,
-      chapterNumber,
-      effectiveSource,
-      (job.payload?.fallbackSources as any) || []
-    );
-
-    let allSourceCandidates = [
+    let allSourceCandidates: Array<{source: string; sourceChapterId: string; mappingId?: string}> = [
       { source: effectiveSource, sourceChapterId: effectiveSourceChapterId, mappingId: effectiveWorkMappingId },
-      ...candidateFallbacks,
     ];
+    let fallbacksResolved = false;
+    const loadFallbacks = async () => {
+      if (fallbacksResolved) return;
+      const started = performance.now();
+      const alternatives = await this.resolveDynamicCandidateFallbacks(workId, chapterNumber,
+        allSourceCandidates[0].source, (job.payload?.fallbackSources as any) || []);
+      allSourceCandidates.push(...alternatives);
+      fallbacksResolved = true;
+      pageResolutionMs += performance.now() - started;
+    };
 
     // If primary source is UPSTREAM_BLOCKED, skip directly to first healthy fallback
     let { data: primarySrc } = await this.supabase
@@ -3351,16 +3350,12 @@ export class ImporterEngine {
       .eq('id', effectiveSource)
       .maybeSingle();
 
-    if (primarySrc?.status === 'UPSTREAM_BLOCKED' && candidateFallbacks.length > 0) {
-      this.logger.info(`CROSS_PROVIDER_RESCUE: Primary source ${effectiveSource} is UPSTREAM_BLOCKED. Routing directly to fallback source ${candidateFallbacks[0].source}`, {
-        workId,
-        chapterNumber,
-        fallbackSource: candidateFallbacks[0].source,
-      });
-      allSourceCandidates = candidateFallbacks;
+    if (primarySrc?.status === 'UPSTREAM_BLOCKED') {
+      await loadFallbacks();
+      if (allSourceCandidates.length > 1) allSourceCandidates = allSourceCandidates.slice(1);
     }
 
-    metadataLoadMs = performance.now() - metaStart;
+    metadataLoadMs = performance.now() - metaStart - pageResolutionMs;
     try {
       for (let candidateIdx = 0; candidateIdx < allSourceCandidates.length; candidateIdx++) {
         const candidate = allSourceCandidates[candidateIdx];
@@ -3373,6 +3368,7 @@ export class ImporterEngine {
         const adapter = this.registry.get(effectiveSource);
         if (!adapter) {
           this.logger.warn(`Source adapter not registered: ${effectiveSource}, skipping candidate`);
+          await loadFallbacks();
           continue;
         }
 
@@ -3400,6 +3396,7 @@ export class ImporterEngine {
         }
 
         if (!pageUrls || pageUrls.length === 0) {
+          await loadFallbacks();
           lastRescuedError = primaryError?.message || `Source ${effectiveSource} returned 0 pages`;
           if (candidateIdx === allSourceCandidates.length - 1) {
             if (allSourceCandidates.length === 1) {
@@ -3869,6 +3866,7 @@ export class ImporterEngine {
             resolvedError.message.includes('ProviderDownloadError');
 
           // If image/media error occurred and we have remaining candidate sources, rescue entire chapter!
+          if (isRescueCandidate) await loadFallbacks();
           if (isRescueCandidate && candidateIdx < allSourceCandidates.length - 1) {
             lastRescuedError = resolvedError.message;
             this.logger.warn(
@@ -3992,6 +3990,10 @@ export class ImporterEngine {
         try {
           const botUserId = await this.resolveBotUserId();
           const coverId = await this.ensureWorkHasCover(workId, botUserId);
+          if (this.knownCoveredWorks.size >= 2000) {
+            const oldest = this.knownCoveredWorks.values().next().value;
+            if (oldest) this.knownCoveredWorks.delete(oldest);
+          }
           if (coverId) {
             this.knownCoveredWorks.add(workId);
           } else {
