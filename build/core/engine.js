@@ -595,16 +595,17 @@ export class ImporterEngine {
         }
     }
     async scheduleCatalogBackfill() {
+        // Catalog expansion is lowest priority. Skip all DB work while the site or
+        // shared YSQL budget is under pressure; publication and fresh discovery
+        // continue through their dedicated paths.
+        const pressure = this.protectiveSentinel.getPressureSnapshot();
+        if (pressure.siteHealth !== 'GREEN' || pressure.pressureScore > 0)
+            return;
         const isDiscoveryAllowed = await this.isDiscoveryAllowed();
         if (!isDiscoveryAllowed)
             return;
         const isAllowed = await this.safetyBarrier.isBackfillAllowed();
         if (!isAllowed)
-            return;
-        // Backfill is explicitly lowest priority.  Do not compete with readers or
-        // chapter publication while the protective monitor observes pressure.
-        const pressure = this.protectiveSentinel.getPressureSnapshot();
-        if (pressure.siteHealth !== 'GREEN' || pressure.pressureScore > 0)
             return;
         const sources = await this.getSourceScheduleSnapshot();
         if (!sources || sources.length === 0)
@@ -857,7 +858,15 @@ export class ImporterEngine {
                         }
                     }
                 }
-                // 3. Periodic micro-batch every 3-4 minutes with randomized jitter (0-60s)
+                // 3. Periodic reconciliation is maintenance. Never add a multi-work
+                // batch while user-facing latency or the shared database is pressured.
+                // Explicit staff/admin requests above retain their priority.
+                const pressure = this.protectiveSentinel.getPressureSnapshot();
+                if (pressure.siteHealth !== 'GREEN' || pressure.pressureScore > 0) {
+                    await this.sleep(30_000);
+                    continue;
+                }
+                // Periodic micro-batch every 3-4 minutes with randomized jitter (0-60s)
                 const jitterMs = Math.floor(Math.random() * 60_000);
                 const intervalMs = (3 * 60 * 1000) + jitterMs;
                 if (now - lastFullBatch >= intervalMs) {
@@ -1348,9 +1357,12 @@ export class ImporterEngine {
                 });
                 const lagMetrics = diagnostics.lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
                 const slotSnapshot = telemetryCollector.getSlotProductivitySnapshot();
+                const canSpendDbOnUnderutilizationRecovery = pressureSnapshot.siteHealth === 'GREEN' &&
+                    pressureSnapshot.pressureScore === 0 &&
+                    (pressureSnapshot.pressureBreakdown?.dbPressure ?? 0) === 0;
                 if (slotSnapshot.productiveSlotRatio < 70) {
                     this.consecutiveUnderutilizedCycles++;
-                    if (this.consecutiveUnderutilizedCycles >= 2) {
+                    if (this.consecutiveUnderutilizedCycles >= 2 && canSpendDbOnUnderutilizationRecovery) {
                         try {
                             const qCountRes = await this.dbPool.query(`
                 SELECT COUNT(*) as claimable_cnt
