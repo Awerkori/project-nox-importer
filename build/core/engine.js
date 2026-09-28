@@ -25,6 +25,18 @@ import { AutoHealWatchdog } from './auto-heal-watchdog.js';
 import { RateBucketTracker } from './rate-bucket-tracker.js';
 import { performance } from 'node:perf_hooks';
 export { computeCanonicalChapterKey };
+const DEFAULT_MAX_BUFFERED_BYTES = 64 * 1024 * 1024;
+/**
+ * The buffer budget is an operational limit, so it must be resolved where the
+ * engine constructs the autotuner rather than being silently replaced by a
+ * historical constant.
+ */
+export function resolveBufferBudgetBytes(value = process.env.MAX_BUFFERED_BYTES) {
+    const parsed = Number.parseInt(value || '', 10);
+    return Number.isFinite(parsed) && parsed >= 8 * 1024 * 1024
+        ? parsed
+        : DEFAULT_MAX_BUFFERED_BYTES;
+}
 export function computeInternalLivenessState(params) {
     const tripwire = params.rssTripwireMb ?? 380;
     if (params.isStopActive || params.rssMb >= tripwire) {
@@ -180,7 +192,7 @@ export class ImporterEngine {
             rssSoftLimitMb: 390,
             rssHardLimitMb: 430,
             rssEmergencyLimitMb: 460,
-            maxBufferedBytes: 64 * 1024 * 1024,
+            maxBufferedBytes: resolveBufferBudgetBytes(),
         });
         this.scheduler.setPublicationBarrier(this.publicationBarrier);
         this.scheduler.setSourcePermitProvider((source) => {
