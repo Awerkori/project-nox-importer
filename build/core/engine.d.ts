@@ -72,6 +72,7 @@ export declare class ImporterEngine {
     private stopSignal;
     private abortController;
     private chapterClaimMutex;
+    private catalogMaintenanceLane;
     private activeSourcesCache;
     private sourceScheduleSnapshot;
     private sourceScheduleSnapshotFlight;
