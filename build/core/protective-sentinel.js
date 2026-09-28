@@ -30,6 +30,11 @@ export class ProtectiveSentinel {
     consecutive5xxCount = 0;
     last5xxTimestamp = null;
     consecutiveProbeFailures = 0;
+    // A single pg_stat_activity sample includes the monitor's own query and can
+    // briefly spike while ordinary claims complete.  Mild DB pressure must be
+    // sustained (or accompanied by a local pool waiter) before it changes
+    // importer capacity.  Severe pressure remains immediate.
+    consecutiveMildDbPressureCycles = 0;
     // Cached dynamic chapter ID for Reader probe (refreshed every 5 min)
     cachedReaderChapterId = null;
     cachedReaderChapterAt = 0;
@@ -459,9 +464,11 @@ export class ProtectiveSentinel {
         const lagMetrics = diagnostics.lagMonitor?.getMetrics?.() || { avgLagMs: 0 };
         let totalConns = 0;
         let activeConns = 0;
+        let poolWait = 0;
         try {
             const pool = this.getPool();
             if (pool && typeof pool.query === 'function') {
+                poolWait = Math.max(0, Number(pool.waitingCount || 0));
                 const cRes = await pool.query(`
           SELECT count(*) as total,
                  count(*) FILTER (WHERE state = 'active') as active
@@ -588,11 +595,21 @@ export class ProtectiveSentinel {
         // DB pressure score
         let dbPressure = 0;
         if (totalConns >= this.thresholds.ysqlConnTripwire || activeConns >= 6) {
+            this.consecutiveMildDbPressureCycles = 0;
             dbPressure = 30;
             pressureReason = `Elevated YSQL load: ${totalConns}/13 total (${activeConns} active)`;
         }
         else if (totalConns >= 10 || activeConns >= 4) {
-            dbPressure = 15;
+            this.consecutiveMildDbPressureCycles++;
+            if (poolWait > 0 || this.consecutiveMildDbPressureCycles >= 3) {
+                dbPressure = 15;
+                pressureReason = poolWait > 0
+                    ? `YSQL pool wait: ${poolWait} waiter(s) with ${totalConns}/13 total (${activeConns} active)`
+                    : `Sustained YSQL activity for ${this.consecutiveMildDbPressureCycles} cycles: ${totalConns}/13 total (${activeConns} active)`;
+            }
+        }
+        else {
+            this.consecutiveMildDbPressureCycles = 0;
         }
         // Memory pressure score
         let memoryPressure = 0;
@@ -624,7 +641,7 @@ export class ProtectiveSentinel {
             lastHttp5xx: this.last5xxTimestamp,
             ysqlTotal: totalConns,
             ysqlActive: activeConns,
-            poolWait: 0,
+            poolWait,
             rssMb: mem.rssMb,
             heapUsedMb: mem.heapUsedMb,
             eventLoopLagMs: lagMetrics.avgLagMs,

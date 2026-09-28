@@ -179,6 +179,7 @@ export declare class AdaptiveAutotuner {
     getBufferedBytes(): number;
     getReservedBytes(): number;
     getCommittedBytes(): number;
+    getMaxBufferedBytes(): number;
     private updateMaxCommittedObserved;
     getMaxCommittedBytesObserved(): number;
     waitForMemoryHeadroom(estimatedBytes?: number, signal?: AbortSignal): Promise<void>;
