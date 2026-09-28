@@ -21,6 +21,10 @@ export class AdmissionController {
     isRunning = false;
     loopTimer = null;
     sourcePermitProvider;
+    chapterCapacityProvider = () => 1;
+    setChapterCapacityProvider(provider) {
+        this.chapterCapacityProvider = provider;
+    }
     admissionInFlight = null;
     demandFlights = new Map();
     setSourcePermitProvider(provider) {
@@ -473,7 +477,7 @@ export class AdmissionController {
         try {
             const qAct = await this.runQuery(`SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`);
             const importingCnt = parseInt(qAct.rows[0]?.cnt || '0', 10);
-            idleWorkers = Math.max(0, 10 - importingCnt);
+            idleWorkers = Math.max(0, this.chapterCapacityProvider() - importingCnt);
         }
         catch { }
         // Elastic backfill: if workers are idle, allow expanding active P1 up to 36 works
