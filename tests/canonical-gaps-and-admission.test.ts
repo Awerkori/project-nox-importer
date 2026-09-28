@@ -466,6 +466,19 @@ describe('Project Nox — Canonical Gaps & Elastic Admission (Tests A-E)', () =>
     expect(job.payload?.workId).toBe('work-headroom');
   });
 
+  it('does not scan admission when all effective chapter permits are already occupied', async () => {
+    const mockClient = { query: vi.fn().mockResolvedValue({ rows: [] }), release: vi.fn() };
+    const mockPool = { connect: vi.fn().mockResolvedValue(mockClient), query: mockClient.query };
+    const scheduler = new WorkAffinityScheduler(mockStateStore, mockAdmissionController, mockSentinel, mockPool);
+    scheduler.setChapterCapacityProvider(() => 3);
+    (scheduler as any).inFlightByWork.set('work-a', 2);
+    (scheduler as any).inFlightByWork.set('work-b', 1);
+
+    await scheduler.acquireNextChapterJob({ workerId: 'runner-slot-1' });
+
+    expect(mockAdmissionController.admitNextWorkOnDemand).not.toHaveBeenCalled();
+  });
+
   // =========================================================================
   // TEST E: AdmissionController admits P2 work whose catalog starts at chapter 10
   // (because 1..9 are confirmed upstream gaps)
