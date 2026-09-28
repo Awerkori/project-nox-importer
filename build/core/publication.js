@@ -157,8 +157,9 @@ export class PublicationBarrier {
         if (pool) {
             // Direct YSQL atomic fast-path (production)
             const client = await pool.connect();
-            let publishedSlug;
             let isNewlyVisible = false;
+            let coverIdToWarm;
+            let workBecamePublic = false;
             try {
                 await client.query('BEGIN');
                 // 1. Fetch current work details for cover/publication verification
@@ -239,13 +240,17 @@ export class PublicationBarrier {
                AND status IN ('PENDING', 'QUEUED')`, [chapterId, workId, sortKey]);
                 }
                 // 6. Update public.works: published and latest_chapter_published_at
-                const worksUpdateRes = await client.query(`UPDATE works
+                await client.query(`UPDATE works
            SET published = (CASE WHEN $2::boolean THEN true ELSE published END),
                latest_chapter_published_at = GREATEST(COALESCE(latest_chapter_published_at, $3::timestamptz), $3::timestamptz),
                updated_at = NOW()
            WHERE id = $1::uuid
            RETURNING slug`, [workId, shouldPublishWork, publishedAtIso]);
-                publishedSlug = worksUpdateRes.rows[0]?.slug || currentWork?.slug;
+                // A newly-public work is about to be rendered on Home/Lançamentos.
+                // Warm only its immutable thumbnail after commit; never make the
+                // publication transaction or existing works wait on Telegram/edge I/O.
+                workBecamePublic = Boolean(!currentWork?.published && shouldPublishWork);
+                coverIdToWarm = workBecamePublic ? currentWork?.cover_id : undefined;
                 await client.query('COMMIT');
             }
             catch (txErr) {
@@ -261,24 +266,23 @@ export class PublicationBarrier {
                 }
                 catch { }
             }
-            // Invalidate edge cache (fire and forget asynchronously)
+            // A cold cover comes from Telegram and can otherwise leave the first
+            // visitor staring at a progressively streamed image for seconds. Consume
+            // one small, immutable thumbnail only when a work first becomes public.
+            // This stays outside the DB transaction and is deliberately detached from
+            // chapter throughput; failed warming is harmless because normal delivery
+            // remains authoritative.
             try {
                 const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
-                const token = process.env.NOX_STORAGE_BRIDGE_TOKEN;
-                fetch(`${siteUrl}/api/internal/cache/invalidate`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                    },
-                    body: JSON.stringify({
-                        type: 'CHAPTER_PUBLISHED',
-                        workId,
-                        workSlug: publishedSlug,
-                        chapterId,
-                    }),
-                    signal: AbortSignal.timeout(2000),
-                }).catch(() => { });
+                if (isNewlyVisible && workBecamePublic && coverIdToWarm) {
+                    const warmUrl = `${siteUrl.replace(/\/$/, '')}/media/${coverIdToWarm}?size=thumb&v=3`;
+                    fetch(warmUrl, { signal: AbortSignal.timeout(10_000) })
+                        .then(async (response) => {
+                        if (response.ok)
+                            await response.arrayBuffer();
+                    })
+                        .catch(() => { });
+                }
             }
             catch { }
             // Update importer_chapter_manifest status to PUBLISHED if available (asynchronously)
