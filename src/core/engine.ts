@@ -1673,7 +1673,7 @@ export class ImporterEngine {
       telegramConcurrency: this.autotuner.getGlobalMediaSemaphore().capacity,
       downloadConcurrency: this.autotuner.getGlobalInflightRequestSemaphore().capacity,
       bufferedPageCapacity: this.autotuner.getBufferedPageSemaphore().capacity,
-      bufferBudgetBytes: 64 * 1024 * 1024,
+      bufferBudgetBytes: this.autotuner.getMaxBufferedBytes(),
       leaseSeconds: this.config.QUEUE_LEASE_DURATION_SECONDS, heartbeatSeconds: this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS,
     });
     const slots = Array.from({ length: slotsCount }, (_, i) => this.runGeneralSlot(i));

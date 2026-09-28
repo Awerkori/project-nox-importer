@@ -78,6 +78,7 @@ export declare class ProtectiveSentinel {
     private consecutive5xxCount;
     private last5xxTimestamp;
     private consecutiveProbeFailures;
+    private consecutiveMildDbPressureCycles;
     private cachedReaderChapterId;
     private cachedReaderChapterAt;
     private latestSnapshot;

@@ -824,6 +824,10 @@ export class AdaptiveAutotuner {
     return this.activeBufferedBytes + this.reservedBufferedBytes;
   }
 
+  getMaxBufferedBytes(): number {
+    return this.config.maxBufferedBytes;
+  }
+
   private updateMaxCommittedObserved(): void {
     const total = this.activeBufferedBytes + this.reservedBufferedBytes;
     if (total > this.maxCommittedBytesObserved) {

@@ -97,6 +97,19 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(snap.pressureReason).toContain('Elevated YSQL load');
   });
 
+  it('requires sustained mild YSQL activity before reducing importer capacity', async () => {
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
+    mockDbConns = { total: 10, active: 4 };
+
+    await sentinel.evaluatePreSlaGuardRails();
+    expect(sentinel.getPressureSnapshot().pressureBreakdown.dbPressure).toBe(0);
+    await sentinel.evaluatePreSlaGuardRails();
+    expect(sentinel.getPressureSnapshot().pressureBreakdown.dbPressure).toBe(0);
+    await sentinel.evaluatePreSlaGuardRails();
+    expect(sentinel.getPressureSnapshot().pressureBreakdown.dbPressure).toBe(15);
+    expect(sentinel.getPressureSnapshot().pressureReason).toContain('Sustained YSQL activity');
+  });
+
   it('Requirement 2: Legacy automatic protective stop in database is auto-cleared', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
 
