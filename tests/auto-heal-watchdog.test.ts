@@ -11,6 +11,19 @@ import { ImporterEngine } from '../src/core/engine.js';
 import { diagnostics } from '../src/core/diagnostics.js';
 
 describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)', () => {
+  it('coalesces concurrent health collectors and releases the guard after failure', async () => {
+    const watchdog = Object.create(AutoHealWatchdog.prototype) as any;
+    let release!: (value: any) => void;
+    watchdog.collectTelemetrySnapshot = vi.fn(() => new Promise(resolve => { release = resolve; }));
+    const first = watchdog.collectTelemetry();
+    const second = watchdog.collectTelemetry(true);
+    expect(watchdog.collectTelemetrySnapshot).toHaveBeenCalledTimes(1);
+    release({ status: 'HEALTHY' });
+    expect(await first).toEqual(await second);
+    watchdog.collectTelemetrySnapshot.mockRejectedValueOnce(new Error('temporary'));
+    await expect(watchdog.collectTelemetry()).rejects.toThrow('temporary');
+    expect(watchdog.telemetryFlight).toBeNull();
+  });
   let mockPool: any;
   let mockScheduler: any;
   let mockAdmissionController: any;

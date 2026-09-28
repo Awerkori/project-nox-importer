@@ -111,6 +111,7 @@ export declare class AutoHealWatchdog {
     private stuckIdentities;
     private circuitBreakerOpen;
     private cachedTelemetry;
+    private telemetryFlight;
     private lastTelemetryAt;
     private telemetryCacheTtlMs;
     private lastDeepStagedAt;
@@ -143,6 +144,7 @@ export declare class AutoHealWatchdog {
      * Collects real-time telemetry from database and memory.
      */
     collectTelemetry(forceFresh?: boolean): Promise<HealthPanelMetrics>;
+    private collectTelemetrySnapshot;
     /**
      * Deterministic Multidimensional Health evaluation separating processing and publication health.
      */
