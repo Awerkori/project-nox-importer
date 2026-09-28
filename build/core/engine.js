@@ -2583,6 +2583,10 @@ export class ImporterEngine {
             .eq('id', job.source);
     }
     async handleSyncWork(job) {
+        // Reconciliation can refresh source metadata without downloading a cover
+        // or scanning chapters again. This keeps historical tag repair isolated
+        // from the media/queue hot path.
+        const metadataOnly = job.payload?.metadataOnly === true;
         let { sourceWorkId } = job.payload;
         if (!sourceWorkId && job.payload?.workId) {
             let { data: mapping } = await this.supabase
@@ -2613,11 +2617,12 @@ export class ImporterEngine {
         if (!adapter)
             throw new Error(`Source adapter not registered: ${job.source}`);
         const details = await callProvider(() => adapter.fetchWorkDetails(sourceWorkId));
-        const botUserId = await this.resolveBotUserId();
+        let botUserId = null;
+        const getBotUserId = async () => botUserId ??= await this.resolveBotUserId();
         let coverMediaId = null;
-        if (details.coverUrl) {
+        if (!metadataOnly && details.coverUrl) {
             try {
-                coverMediaId = await this.downloadAndRegisterImage(details.coverUrl, botUserId, 'editorial', job.source);
+                coverMediaId = await this.downloadAndRegisterImage(details.coverUrl, await getBotUserId(), 'editorial', job.source);
             }
             catch (coverErr) {
                 this.logger.warn('Failed to import cover image from primary coverUrl, attempting fallback', {
@@ -2628,12 +2633,12 @@ export class ImporterEngine {
             }
         }
         // Fallback 1: Raw metadata cover alternatives
-        if (!coverMediaId && details.raw) {
-            coverMediaId = await this.tryRawMetadataCoverFallback(details.raw, botUserId, job.source, details.coverUrl);
+        if (!metadataOnly && !coverMediaId && details.raw) {
+            coverMediaId = await this.tryRawMetadataCoverFallback(details.raw, await getBotUserId(), job.source, details.coverUrl);
         }
         // Fallback 2: Sibling mappings from other mapped sources
-        if (!coverMediaId && (job.payload?.workId || details.sourceWorkId)) {
-            coverMediaId = await this.trySiblingMappingCoverFallback(job.payload?.workId, job.source, details.slug || details.title, botUserId);
+        if (!metadataOnly && !coverMediaId && (job.payload?.workId || details.sourceWorkId)) {
+            coverMediaId = await this.trySiblingMappingCoverFallback(job.payload?.workId, job.source, details.slug || details.title, await getBotUserId());
         }
         const candidate = {
             source: job.source,
@@ -2669,6 +2674,15 @@ export class ImporterEngine {
                 throw new PermanentDataError(`Invalid editorial metadata from ${job.source}/${sourceWorkId}: ${result.reason}`);
             }
             throw new Error(`Failed to obtain valid workId for ${details.title}`);
+        }
+        if (metadataOnly) {
+            await this.deduplication.removeLegacySystemGeneratedNonGenreTags(result.workId);
+            this.logger.debug('Metadata-only sync completed', {
+                source: job.source,
+                sourceWorkId,
+                workId: result.workId,
+            });
+            return;
         }
         const chapters = await adapter.fetchChapters(sourceWorkId);
         this.logger.info('Found chapters for work', {

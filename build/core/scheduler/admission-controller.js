@@ -64,7 +64,9 @@ export class AdmissionController {
         throw new Error('Pool has neither query nor connect');
     }
     /**
-     * Starts the periodic admission background loop (every 5 seconds).
+     * Periodic reconciliation is the fallback; real vacancies trigger an
+     * immediate coalesced cycle. Keep this cadence low enough that aggregate
+     * queue scans do not compete with claims and publication.
      */
     start() {
         if (this.isRunning)
@@ -96,7 +98,7 @@ export class AdmissionController {
                 this.logger.error('Error during admission cycle', { error: err?.message });
             }
             finally {
-                this.scheduleNextCycle(4000);
+                this.scheduleNextCycle(10_000);
             }
         }, delayMs);
     }
@@ -221,12 +223,14 @@ export class AdmissionController {
             };
         }
         // 4. WORKER_CAPACITY_CHECK:
-        // P0 >>> P1 > P2 > P3. If all 18 workers are fully utilized, wait.
-        // But if there is spare worker capacity (< 18 in-flight) AND activeP2Works < maxP2Cohort:
+        // P0 >>> P1 > P2 > P3. P2 must use the effective chapter capacity, not
+        // a historical runner count: otherwise a 3-slot runtime keeps admitting
+        // new work and repeatedly scans the hot queue while all slots are busy.
+        // If there is spare capacity and activeP2Works < maxP2Cohort:
         // allow P2/P3 new works to admit so P3 never dies of starvation from catalog backlog.
         const inFlightRes = await this.runQuery(`SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`);
         const importingCnt = parseInt(inFlightRes.rows[0]?.cnt || '0', 10);
-        const maxTotalWorkers = 18;
+        const maxTotalWorkers = Math.max(1, this.chapterCapacityProvider());
         if (importingCnt >= maxTotalWorkers) {
             return {
                 allowed: false,

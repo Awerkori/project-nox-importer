@@ -34,4 +34,20 @@ describe('bounded admission snapshot', () => {
     finish(); await first;
     const third=c.runAdmissionCycle(); expect(calls).toBe(2); finish(); await third;
   });
+
+  it('does not admit P2 work beyond the effective chapter capacity', async () => {
+    const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
+    const sentinel={isProtectiveStopActive:async()=>false} as any;
+    const pool={query:async(sql:string)=> {
+      if (sql.includes('priority >= 100')) return {rows:[{p0_cnt:'0'}]};
+      if (sql.includes("status = 'IMPORTING'")) return {rows:[{cnt:'3'}]};
+      return {rows:[]};
+    }};
+    const c=new AdmissionController(state,sentinel,pool);
+    c.setChapterCapacityProvider(()=>3);
+    await expect(c.canAdmitNewWork()).resolves.toMatchObject({
+      allowed:false,
+      reason:'WORKERS_FULLY_UTILIZED: 3/3 chapters in-flight',
+    });
+  });
 });

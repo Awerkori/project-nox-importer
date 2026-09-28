@@ -68,6 +68,13 @@ export function validateEditorialTitle(rawTitle) {
 export class DeduplicationEngine {
     supabase;
     logger = new Logger('Deduplication');
+    // Tags are a small, shared catalog. Reloading the entire catalog for every
+    // work made metadata sync needlessly DB-heavy. The short TTL keeps manual
+    // curation visible quickly while making the cache bounded by catalog size.
+    tagCatalog = null;
+    tagCatalogExpiresAt = 0;
+    tagCatalogFlight = null;
+    tagCatalogTtlMs = 60_000;
     constructor(supabase) {
         this.supabase = supabase;
     }
@@ -466,7 +473,7 @@ export class DeduplicationEngine {
             if (mapInsertErr)
                 throw mapInsertErr;
             // Attach canonical adult tags and upstream genres safely
-            await this.syncWorkTags(newWorkId, candidate, isAdultSource, safeKind);
+            await this.syncWorkTags(newWorkId, candidate, isAdultSource, safeKind, source);
             this.logger.info('Created new work & mapping', {
                 workId: newWorkId,
                 slug: uniqueSlug,
@@ -717,14 +724,27 @@ export class DeduplicationEngine {
             'mature': 'Adulto',
             'pornhwa': 'Pornhwa',
             'porn hwa': 'Pornhwa',
-            'manhua': 'Manhua',
-            'manga': 'Manga',
-            'manhwa': 'Manhwa',
-            'webtoon': 'Webtoon',
-            'doujinshi': 'Doujinshi'
+            // Provider vocabulary is commonly English while the canonical catalog
+            // is Portuguese. Normalize before lookup to avoid Action/Horror/etc.
+            // becoming duplicate, non-canonical tags.
+            'action': 'Ação',
+            'adventure': 'Aventura',
+            'comedy': 'Comédia',
+            'fantasy': 'Fantasia',
+            'horror': 'Terror',
+            'psychological': 'Psicológico',
+            'reincarnation': 'Reencarnação',
+            'supernatural': 'Sobrenatural',
+            'slice of life': 'Slice of life',
+            'sci fi': 'Sci-Fi',
+            'science fiction': 'Sci-Fi',
+            'martial arts': 'Artes marciais',
+            'school life': 'Escolar',
+            'mystery': 'Mistério',
+            'thriller': 'Suspense'
         };
-        let cleaned = raw.trim();
-        const lower = cleaned.toLowerCase();
+        let cleaned = decodeHtmlEntities(raw).replace(/\s+/g, ' ').trim();
+        const lower = cleaned.toLowerCase().replace(/[’']/g, '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ');
         if (canonicalAliases[lower]) {
             return canonicalAliases[lower];
         }
@@ -735,12 +755,50 @@ export class DeduplicationEngine {
         return cleaned;
     }
     isGarbageTag(raw) {
-        const garbage = [
+        const pageGarbage = [
             'leia no nosso site', 'atualizacao', 'atualização', 'projeto da scan',
-            'completo', 'em andamento', 'em lancamento', 'em lançamento', 'cancelado', 'hiato', 'lancamento'
         ];
-        const lower = raw.toLowerCase();
-        return garbage.some(g => lower.includes(g));
+        const nonGenreFields = new Set([
+            'completo', 'em andamento', 'em lancamento', 'em lançamento', 'cancelado', 'hiato', 'lancamento',
+            // These are work type/status fields, not genres. They must never be
+            // used as a substitute when an upstream provider omitted genres.
+            'manga', 'manhwa', 'manhua', 'webtoon', 'comic', 'doujinshi'
+        ]);
+        const lower = decodeHtmlEntities(raw).trim().toLowerCase();
+        return nonGenreFields.has(lower) || pageGarbage.some((value) => lower.includes(value));
+    }
+    tagLookupKey(raw) {
+        return decodeHtmlEntities(raw).replace(/\s+/g, ' ').trim().toLowerCase();
+    }
+    async getTagCatalog() {
+        if (this.tagCatalog && Date.now() < this.tagCatalogExpiresAt) {
+            return this.tagCatalog;
+        }
+        if (this.tagCatalogFlight)
+            return this.tagCatalogFlight;
+        this.tagCatalogFlight = (async () => {
+            const { data, error } = await this.supabase.from('tags').select('id, name, slug');
+            if (error)
+                throw error;
+            const lookup = new Map();
+            for (const tag of data || []) {
+                if (tag.name) {
+                    lookup.set(this.tagLookupKey(tag.name), tag.id);
+                    lookup.set(this.sanitizeSlug(tag.name), tag.id);
+                }
+                if (tag.slug)
+                    lookup.set(this.tagLookupKey(tag.slug), tag.id);
+            }
+            this.tagCatalog = lookup;
+            this.tagCatalogExpiresAt = Date.now() + this.tagCatalogTtlMs;
+            return lookup;
+        })();
+        try {
+            return await this.tagCatalogFlight;
+        }
+        finally {
+            this.tagCatalogFlight = null;
+        }
     }
     getProviderDefaultTags(source) {
         const special = {
@@ -772,17 +830,39 @@ export class DeduplicationEngine {
         };
         return special[source] || [];
     }
+    /**
+     * Legacy importer versions wrote type/status vocabulary as automatic tags.
+     * This removes only those machine-generated associations; staff-curated
+     * associations are deliberately untouched.
+     */
+    async removeLegacySystemGeneratedNonGenreTags(workId) {
+        const tagLookup = await this.getTagCatalog();
+        const legacyTagIds = [
+            'manga', 'manhwa', 'manhua', 'webtoon', 'comic', 'doujinshi',
+            'completo', 'em andamento', 'hiato', 'cancelado',
+        ].map((key) => tagLookup.get(key)).filter((id) => Boolean(id));
+        if (legacyTagIds.length === 0)
+            return;
+        const { error } = await this.supabase
+            .from('work_tags')
+            .delete()
+            .eq('work_id', workId)
+            .eq('system_generated', true)
+            .in('tag_id', legacyTagIds);
+        if (error)
+            throw error;
+        this.logger.debug('WORK_METADATA_TAGS_LEGACY_TYPES_REMOVED', {
+            workId,
+            candidateTagCount: legacyTagIds.length,
+        });
+    }
     async syncWorkTags(workId, candidate, isAdult, kind, source) {
+        const sourceCount = (candidate.genres || []).filter((tag) => typeof tag === 'string' && tag.trim().length > 0).length;
+        let normalizedCount = 0;
+        let persistedCount = 0;
+        let createdCount = 0;
         try {
-            const tagRes = await this.supabase.from('tags').select('id, name, slug');
-            const allTags = tagRes?.data || [];
-            const tagLookup = new Map();
-            for (const t of allTags) {
-                if (t.name)
-                    tagLookup.set(t.name.trim().toLowerCase(), t.id);
-                if (t.slug)
-                    tagLookup.set(t.slug.trim().toLowerCase(), t.id);
-            }
+            const tagLookup = await this.getTagCatalog();
             const targetTagIds = new Set();
             if (isAdult) {
                 for (const key of ['adulto', '18', '+18', 'adulto-18', 'adulto (+18)']) {
@@ -811,9 +891,10 @@ export class DeduplicationEngine {
                     desiredTags.add(this.normalizeTagName(genre));
                 }
             }
+            normalizedCount = desiredTags.size;
             // Auto-create missing tags safely
             for (const tName of desiredTags) {
-                const lower = tName.toLowerCase();
+                const lower = this.tagLookupKey(tName);
                 const tSlug = this.sanitizeSlug(lower);
                 let tagId = tagLookup.get(lower) || tagLookup.get(tSlug);
                 if (!tagId) {
@@ -821,10 +902,16 @@ export class DeduplicationEngine {
                     const { data: newTag, error: createErr } = await this.supabase.from('tags').upsert({
                         name: tName,
                         slug: tSlug,
-                        kind: 'TAG'
+                        kind: 'GENRE'
                     }, { onConflict: 'slug' }).select('id').maybeSingle();
+                    if (createErr)
+                        throw createErr;
+                    if (!newTag?.id) {
+                        throw new Error(`Unable to resolve canonical tag ${tSlug}`);
+                    }
                     if (newTag?.id) {
                         tagId = newTag.id;
+                        createdCount += 1;
                         // Add to lookup for same run
                         if (tagId)
                             tagLookup.set(lower, tagId);
@@ -842,11 +929,37 @@ export class DeduplicationEngine {
                     tag_id: tagId,
                     system_generated: true,
                 }));
-                await this.supabase.from('work_tags').upsert(rows, { onConflict: 'work_id,tag_id' });
+                const { error } = await this.supabase.from('work_tags').upsert(rows, { onConflict: 'work_id,tag_id' });
+                if (error)
+                    throw error;
+                persistedCount = targetTagIds.size;
+            }
+            this.logger.debug('WORK_METADATA_TAGS', {
+                source,
+                workId,
+                sourceCount,
+                normalizedCount,
+                persistedCount,
+                createdCount,
+            });
+            if (sourceCount > 0 && persistedCount === 0) {
+                this.logger.warn('WORK_METADATA_TAGS_EMPTY', {
+                    source,
+                    workId,
+                    sourceCount,
+                    normalizedCount,
+                });
             }
         }
         catch (err) {
-            this.logger?.warn?.('Safe non-blocking error in syncWorkTags', { error: err.message });
+            this.logger.warn('WORK_METADATA_TAGS_PERSIST_FAILED', {
+                source,
+                workId,
+                sourceCount,
+                normalizedCount,
+                persistedCount,
+                error: err?.message || String(err),
+            });
         }
     }
     sanitizeSlug(raw) {
