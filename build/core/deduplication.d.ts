@@ -39,6 +39,10 @@ export declare function validateEditorialTitle(rawTitle: string): EditorialValid
 export declare class DeduplicationEngine {
     private supabase;
     private logger;
+    private tagCatalog;
+    private tagCatalogExpiresAt;
+    private tagCatalogFlight;
+    private readonly tagCatalogTtlMs;
     constructor(supabase: SupabaseClient);
     /**
      * Resolve or register a work conservatively.
@@ -63,6 +67,8 @@ export declare class DeduplicationEngine {
      */
     private normalizeTagName;
     private isGarbageTag;
+    private tagLookupKey;
+    private getTagCatalog;
     private getProviderDefaultTags;
     syncWorkTags(workId: string, candidate: CandidateWork, isAdult: boolean, kind?: string, source?: string): Promise<void>;
     private sanitizeSlug;
