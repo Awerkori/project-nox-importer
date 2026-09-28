@@ -11,7 +11,7 @@ import { readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
 import { AdaptiveAutotuner, AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
-import { RetryPolicy, ProviderDownloadError, InvalidMediaError } from './retry-policy.js';
+import { RetryPolicy, ProviderDownloadError, InvalidMediaError, PermanentDataError } from './retry-policy.js';
 import { ExistingWorksReconciler } from './reconciliation.js';
 import { CloudflareClassifier } from './cloudflare-classifier.js';
 import { SourceCircuitBreaker } from './circuit-breaker.js';
@@ -2491,6 +2491,9 @@ export class ImporterEngine {
             return;
         }
         if (!result.workId) {
+            if (result.status === 'FAILED' && result.reason?.startsWith('INVALID_EDITORIAL_TITLE:')) {
+                throw new PermanentDataError(`Invalid editorial metadata from ${job.source}/${sourceWorkId}: ${result.reason}`);
+            }
             throw new Error(`Failed to obtain valid workId for ${details.title}`);
         }
         const chapters = await adapter.fetchChapters(sourceWorkId);

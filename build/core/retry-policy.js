@@ -8,6 +8,7 @@ export const CATEGORY_RETRY_BUDGET = {
     SOURCE_404: 2,
     SOURCE_403: 2,
     INVALID_MEDIA: 3,
+    PERMANENT_DATA_ERROR: 1,
     LEASE_EXPIRED: 3,
     WORKER_STALL: 3,
     DB_TRANSIENT: 5,
@@ -45,6 +46,13 @@ export class InvalidMediaError extends Error {
         this.name = 'InvalidMediaError';
     }
 }
+/** A source returned a structurally invalid editorial record, not a transient failure. */
+export class PermanentDataError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'PermanentDataError';
+    }
+}
 export async function callProvider(operation) {
     try {
         return await operation();
@@ -65,6 +73,19 @@ export class RetryPolicy {
         const message = err?.message || String(err);
         const status = err?.status || err?.statusCode;
         const stage = err?.sourceStage || (err instanceof NoxWorkerStorageError ? 'storage' : undefined);
+        if (err instanceof PermanentDataError || err?.name === 'PermanentDataError') {
+            return {
+                taxonomyCode: 'PERMANENT_DATA_ERROR',
+                retryClass: 'FAILED',
+                isTransient: false,
+                isPermanent: true,
+                retryBudgetMax: CATEGORY_RETRY_BUDGET.PERMANENT_DATA_ERROR,
+                needsRevalidation: false,
+                message,
+                structuredMessage: `[PERMANENT_DATA_ERROR] ${message}`,
+                sourceStage: 'provider',
+            };
+        }
         // 1. Invalid Media Format (HTML page received instead of binary image, corrupt magic bytes)
         if (err instanceof InvalidMediaError ||
             err?.name === 'InvalidMediaError' ||
