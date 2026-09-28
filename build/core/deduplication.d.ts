@@ -70,6 +70,12 @@ export declare class DeduplicationEngine {
     private tagLookupKey;
     private getTagCatalog;
     private getProviderDefaultTags;
+    /**
+     * Legacy importer versions wrote type/status vocabulary as automatic tags.
+     * This removes only those machine-generated associations; staff-curated
+     * associations are deliberately untouched.
+     */
+    removeLegacySystemGeneratedNonGenreTags(workId: string): Promise<void>;
     syncWorkTags(workId: string, candidate: CandidateWork, isAdult: boolean, kind?: string, source?: string): Promise<void>;
     private sanitizeSlug;
 }

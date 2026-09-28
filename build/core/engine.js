@@ -2676,6 +2676,7 @@ export class ImporterEngine {
             throw new Error(`Failed to obtain valid workId for ${details.title}`);
         }
         if (metadataOnly) {
+            await this.deduplication.removeLegacySystemGeneratedNonGenreTags(result.workId);
             this.logger.debug('Metadata-only sync completed', {
                 source: job.source,
                 sourceWorkId,

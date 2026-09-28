@@ -830,6 +830,32 @@ export class DeduplicationEngine {
         };
         return special[source] || [];
     }
+    /**
+     * Legacy importer versions wrote type/status vocabulary as automatic tags.
+     * This removes only those machine-generated associations; staff-curated
+     * associations are deliberately untouched.
+     */
+    async removeLegacySystemGeneratedNonGenreTags(workId) {
+        const tagLookup = await this.getTagCatalog();
+        const legacyTagIds = [
+            'manga', 'manhwa', 'manhua', 'webtoon', 'comic', 'doujinshi',
+            'completo', 'em andamento', 'hiato', 'cancelado',
+        ].map((key) => tagLookup.get(key)).filter((id) => Boolean(id));
+        if (legacyTagIds.length === 0)
+            return;
+        const { error } = await this.supabase
+            .from('work_tags')
+            .delete()
+            .eq('work_id', workId)
+            .eq('system_generated', true)
+            .in('tag_id', legacyTagIds);
+        if (error)
+            throw error;
+        this.logger.debug('WORK_METADATA_TAGS_LEGACY_TYPES_REMOVED', {
+            workId,
+            candidateTagCount: legacyTagIds.length,
+        });
+    }
     async syncWorkTags(workId, candidate, isAdult, kind, source) {
         const sourceCount = (candidate.genres || []).filter((tag) => typeof tag === 'string' && tag.trim().length > 0).length;
         let normalizedCount = 0;

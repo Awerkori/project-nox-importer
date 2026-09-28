@@ -3055,6 +3055,7 @@ export class ImporterEngine {
     }
 
     if (metadataOnly) {
+      await this.deduplication.removeLegacySystemGeneratedNonGenreTags(result.workId);
       this.logger.debug('Metadata-only sync completed', {
         source: job.source,
         sourceWorkId,

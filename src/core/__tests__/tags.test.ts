@@ -104,4 +104,31 @@ describe('Tag Normalization', () => {
       { work_id: 'work-2', tag_id: 'new-genre', system_generated: true },
     ], { onConflict: 'work_id,tag_id' });
   });
+
+  it('removes only legacy system-generated type tags during reconciliation', async () => {
+    const deleteIn = vi.fn().mockResolvedValue({ error: null });
+    const deleteSystemGenerated = vi.fn(() => ({ in: deleteIn }));
+    const deleteWork = vi.fn(() => ({ eq: deleteSystemGenerated }));
+    const deleteRoot = vi.fn(() => ({ eq: deleteWork }));
+    const client = {
+      from: vi.fn((table: string) => {
+        if (table === 'tags') return {
+          select: async () => ({ data: [
+            { id: 'manhua-type', name: 'Manhua', slug: 'manhua' },
+            { id: 'manhwa-type', name: 'Manhwa', slug: 'manhwa' },
+          ], error: null }),
+        };
+        if (table === 'work_tags') return { delete: deleteRoot };
+        throw new Error(`unexpected table ${table}`);
+      }),
+    };
+    const engine = new DeduplicationEngine(client as any);
+
+    await engine.removeLegacySystemGeneratedNonGenreTags('work-3');
+
+    expect(deleteRoot).toHaveBeenCalledOnce();
+    expect(deleteWork).toHaveBeenCalledWith('work_id', 'work-3');
+    expect(deleteSystemGenerated).toHaveBeenCalledWith('system_generated', true);
+    expect(deleteIn).toHaveBeenCalledWith('tag_id', expect.arrayContaining(['manhua-type', 'manhwa-type']));
+  });
 });
