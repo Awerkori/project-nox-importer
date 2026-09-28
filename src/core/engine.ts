@@ -197,7 +197,7 @@ export class ImporterEngine {
     this.autotuner = new AdaptiveAutotuner({
       minConcurrency,
       healthyConcurrencyFloor: healthyFloor,
-      initialConcurrency: requestedMax,
+      initialConcurrency: Math.max(minConcurrency, Math.min(requestedMax, config.ADAPTIVE_INITIAL_CONCURRENCY ?? 3)),
       maxConcurrency: requestedMax,
       maxRssMb: 420,
       maxHeapMb: 240,
