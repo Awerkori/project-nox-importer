@@ -475,7 +475,7 @@ export class ExistingWorksReconciler {
         .eq('task_type', 'IMPORT_CHAPTER')
         .eq('payload->>workId', workId);
       if (typeof q.in === 'function') {
-        const { data } = await q.in('status', ['QUEUED', 'IMPORTING', 'RETRY']);
+        const { data } = await q.in('status', ['QUEUED', 'IMPORTING', 'RETRY', 'PAUSED_BY_STAFF']);
         activeQueue = data || [];
       }
     }
@@ -1017,7 +1017,7 @@ export class ExistingWorksReconciler {
           .eq('task_type', 'IMPORT_CHAPTER')
           .eq('payload->>workId', workId);
         if (typeof q.in === 'function') {
-          const { data } = await q.in('status', ['QUEUED', 'IMPORTING', 'RETRY']);
+          const { data } = await q.in('status', ['QUEUED', 'IMPORTING', 'RETRY', 'PAUSED_BY_STAFF']);
           activeQueue = data || [];
         }
       }
