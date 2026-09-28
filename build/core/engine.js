@@ -1950,29 +1950,48 @@ export class ImporterEngine {
                         .select('id, status, created_at')
                         .eq('task_type', 'DISCOVER_WORKS')
                         .eq('source', src.id);
+                    // Newest first: a current discovery must win over historical stale rows.
+                    // Without this ordering the first ten old rows were updated one by one on
+                    // every pass, while a current discovery could sit beyond the limit.
                     let { data: existingActive } = typeof q.in === 'function'
-                        ? await q.in('status', ['QUEUED', 'IMPORTING', 'RETRY']).limit(10)
+                        ? await q.in('status', ['QUEUED', 'IMPORTING', 'RETRY']).order('created_at', { ascending: false }).limit(10)
                         : await q.limit(10);
                     if (existingActive && Array.isArray(existingActive)) {
                         const DISCOVERY_TTL_MS = 60 * 60 * 1000; // 1 hour TTL
+                        const staleIds = [];
+                        const staleAgesMinutes = [];
                         for (const j of existingActive) {
                             const age = now - new Date(j.created_at).getTime();
                             if (['QUEUED', 'RETRY'].includes(j.status) && age > DISCOVERY_TTL_MS) {
-                                this.logger.warn(`Consolidating stale DISCOVER_WORKS job ${j.id} for ${src.id} (age: ${Math.round(age / 60000)}m)`, {
-                                    jobId: j.id,
-                                    source: src.id,
-                                    ageMinutes: Math.round(age / 60000),
-                                });
-                                await this.supabase
-                                    .from('importer_queue')
-                                    .update({
-                                    status: 'SUPERSEDED',
-                                    last_error: 'superseded_stale_discovery_ttl',
-                                    updated_at: new Date().toISOString(),
-                                })
-                                    .eq('id', j.id);
+                                staleIds.push(j.id);
+                                staleAgesMinutes.push(Math.round(age / 60000));
                             }
                             else if (['QUEUED', 'IMPORTING', 'RETRY'].includes(j.status)) {
+                                hasActive = true;
+                            }
+                        }
+                        if (staleIds.length > 0) {
+                            // Keep stale consolidation bounded and atomic.  The status predicate
+                            // fences a job claimed after the read, so cleanup can never overwrite
+                            // a live lease.  If this page was full, defer enqueueing one pass: more
+                            // old rows may exist behind it and a duplicate discovery is worse than
+                            // a 30s catalog delay.
+                            this.logger.warn('Consolidating stale DISCOVER_WORKS jobs', {
+                                source: src.id,
+                                count: staleIds.length,
+                                oldestAgeMinutes: Math.max(...staleAgesMinutes),
+                                newestAgeMinutes: Math.min(...staleAgesMinutes),
+                            });
+                            await this.supabase
+                                .from('importer_queue')
+                                .update({
+                                status: 'SUPERSEDED',
+                                last_error: 'superseded_stale_discovery_ttl',
+                                updated_at: new Date().toISOString(),
+                            })
+                                .in('id', staleIds)
+                                .in('status', ['QUEUED', 'RETRY']);
+                            if (existingActive.length >= 10) {
                                 hasActive = true;
                             }
                         }
