@@ -22,7 +22,8 @@ import { SchedulerLane, } from './types.js';
 // the matching migration is the cross-runner fence for that invariant.
 export function isActiveChapterClaimConflict(error) {
     return error?.code === '23505' &&
-        String(error?.constraint || '').includes('idx_importer_queue_one_importing_canonical_chapter');
+        (String(error?.constraint || '').includes('idx_importer_queue_one_importing_canonical_chapter') ||
+            String(error?.message || '').includes('idx_importer_queue_one_importing_canonical_chapter'));
 }
 export class WorkAffinityScheduler {
     stateStore;
@@ -891,6 +892,14 @@ export class WorkAffinityScheduler {
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
+          AND NOT EXISTS (
+            SELECT 1
+            FROM importer_queue active_chapter
+            WHERE active_chapter.task_type = 'IMPORT_CHAPTER'
+              AND active_chapter.status = 'IMPORTING'
+              AND (active_chapter.payload->>'workId') = (q.payload->>'workId')
+              AND active_chapter.chapter_sort_key = q.chapter_sort_key
+          )
         ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -1023,6 +1032,14 @@ export class WorkAffinityScheduler {
           AND (q.payload->>'workId') = ANY($6::text[])
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
+          AND NOT EXISTS (
+            SELECT 1
+            FROM importer_queue active_chapter
+            WHERE active_chapter.task_type = 'IMPORT_CHAPTER'
+              AND active_chapter.status = 'IMPORTING'
+              AND (active_chapter.payload->>'workId') = (q.payload->>'workId')
+              AND active_chapter.chapter_sort_key = q.chapter_sort_key
+          )
         ORDER BY 
           COALESCE(sr.priority_boost, 0) DESC,
           COALESCE(sr.created_at, '9999-12-31'::timestamptz) ASC,
@@ -1099,6 +1116,14 @@ export class WorkAffinityScheduler {
           AND ($7::text[] IS NULL OR (q.payload->>'workId') = ANY($7::text[]))
           AND ($8::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($8::text[])))
           AND ($9::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($9::text[])))
+          AND NOT EXISTS (
+            SELECT 1
+            FROM importer_queue active_chapter
+            WHERE active_chapter.task_type = 'IMPORT_CHAPTER'
+              AND active_chapter.status = 'IMPORTING'
+              AND (active_chapter.payload->>'workId') = (q.payload->>'workId')
+              AND active_chapter.chapter_sort_key = q.chapter_sort_key
+          )
         ${orderClause}
         FOR UPDATE SKIP LOCKED
         LIMIT 1
