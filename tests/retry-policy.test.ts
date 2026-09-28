@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { RetryPolicy, ProviderDownloadError, InvalidMediaError } from '../src/core/retry-policy.js';
+import { RetryPolicy, ProviderDownloadError, InvalidMediaError, PermanentDataError } from '../src/core/retry-policy.js';
 import { NoxWorkerStorageError } from '../src/storage/worker.js';
 
 describe('RetryPolicy - Classification & Adaptive Backoff', () => {
@@ -69,6 +69,13 @@ describe('RetryPolicy - Classification & Adaptive Backoff', () => {
       expect(c.sourceStage).toBe('provider');
       expect(c.needsRevalidation).toBe(true);
       expect(c.retryBudgetMax).toBe(3);
+    });
+
+    it('quarantines invalid source editorial metadata without a retry loop', () => {
+      const c = RetryPolicy.classify(new PermanentDataError('Invalid editorial metadata from pizzariascan/x: INVALID_EDITORIAL_TITLE: login prompt'));
+      expect(c.taxonomyCode).toBe('PERMANENT_DATA_ERROR');
+      expect(c.isPermanent).toBe(true);
+      expect(RetryPolicy.decide(c, 1).status).toBe('FAILED');
     });
 
     it('classifies 0 pages returned as EMPTY_PAGES', () => {

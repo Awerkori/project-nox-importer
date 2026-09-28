@@ -1,4 +1,4 @@
-export type ErrorTaxonomyCode = 'TRANSIENT_NETWORK' | 'SOURCE_TIMEOUT' | 'SOURCE_429' | 'SOURCE_403' | 'SOURCE_404' | 'SOURCE_5XX' | 'IMAGE_404' | 'IMAGE_TIMEOUT' | 'TELEGRAM_TRANSIENT' | 'TELEGRAM_RATE_LIMIT' | 'DB_TRANSIENT' | 'LEASE_EXPIRED' | 'WORKER_STALL' | 'PARSER_ERROR' | 'EMPTY_PAGES' | 'INVALID_MEDIA' | 'PERMANENT_NOT_FOUND' | 'SOURCE_PAUSED' | 'CIRCUIT_BREAKER_OPEN' | 'RETRY_BUDGET_EXHAUSTED' | 'UNKNOWN';
+export type ErrorTaxonomyCode = 'TRANSIENT_NETWORK' | 'SOURCE_TIMEOUT' | 'SOURCE_429' | 'SOURCE_403' | 'SOURCE_404' | 'SOURCE_5XX' | 'IMAGE_404' | 'IMAGE_TIMEOUT' | 'TELEGRAM_TRANSIENT' | 'TELEGRAM_RATE_LIMIT' | 'DB_TRANSIENT' | 'LEASE_EXPIRED' | 'WORKER_STALL' | 'PARSER_ERROR' | 'EMPTY_PAGES' | 'INVALID_MEDIA' | 'PERMANENT_DATA_ERROR' | 'PERMANENT_NOT_FOUND' | 'SOURCE_PAUSED' | 'CIRCUIT_BREAKER_OPEN' | 'RETRY_BUDGET_EXHAUSTED' | 'UNKNOWN';
 export type RetryErrorClass = 'LOCAL_RETRY' | 'QUEUE_RETRY_STORAGE_502' | 'QUEUE_RETRY_STORAGE_503' | 'QUEUE_RETRY_TIMEOUT' | 'QUEUE_RETRY_429' | 'QUEUE_RETRY_PROVIDER' | 'QUEUE_RETRY_PERMANENT' | 'FAILED';
 export interface RetryClassification {
     taxonomyCode: ErrorTaxonomyCode;
@@ -29,6 +29,10 @@ export declare class InvalidMediaError extends Error {
     readonly url: string;
     readonly source: string;
     constructor(url: string, source: string, message?: string);
+}
+/** A source returned a structurally invalid editorial record, not a transient failure. */
+export declare class PermanentDataError extends Error {
+    constructor(message: string);
 }
 export declare function callProvider<T>(operation: () => Promise<T>): Promise<T>;
 export declare class RetryPolicy {
