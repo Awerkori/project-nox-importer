@@ -10,6 +10,12 @@ import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from 
 import { AutoHealWatchdog } from './auto-heal-watchdog.js';
 import { RateBucketTracker } from './rate-bucket-tracker.js';
 export { computeCanonicalChapterKey };
+/**
+ * The buffer budget is an operational limit, so it must be resolved where the
+ * engine constructs the autotuner rather than being silently replaced by a
+ * historical constant.
+ */
+export declare function resolveBufferBudgetBytes(value?: string | undefined): number;
 export type InternalLivenessState = 'HEALTHY_IDLE' | 'HEALTHY_WORKING' | 'BACKPRESSURED' | 'STALLED';
 export type ExternalLivenessState = InternalLivenessState | 'DEAD';
 export declare function computeInternalLivenessState(params: {
