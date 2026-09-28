@@ -30,6 +30,14 @@ import {
   AcquireTelemetry,
 } from './types.js';
 
+// Alternative-source jobs are retained for resilience, but exactly one may own
+// a canonical work/chapter while it is IMPORTING. The partial unique index in
+// the matching migration is the cross-runner fence for that invariant.
+export function isActiveChapterClaimConflict(error: any): boolean {
+  return error?.code === '23505' &&
+    String(error?.constraint || '').includes('idx_importer_queue_one_importing_canonical_chapter');
+}
+
 export interface AcquiredSchedulerJob {
   job: any;
   lane: SchedulerLane;
@@ -356,25 +364,35 @@ export class WorkAffinityScheduler {
       return null;
     }
 
-    // If disabled and not in shadow mode, directly use legacy claim
-    if (!config.enabled && !config.shadowMode) {
-      const legacyJobs = await acquireJobsDirect({
-        workerId: options.workerId,
-        leaseDurationMinutes: options.leaseDurationMinutes,
-        allowedSources: options.allowedSources,
-        taskType: 'IMPORT_CHAPTER',
-        batchSize: 1,
-      });
-      return legacyJobs.length > 0 ? legacyJobs[0] : null;
-    }
+    try {
+      // If disabled and not in shadow mode, directly use legacy claim
+      if (!config.enabled && !config.shadowMode) {
+        const legacyJobs = await acquireJobsDirect({
+          workerId: options.workerId,
+          leaseDurationMinutes: options.leaseDurationMinutes,
+          allowedSources: options.allowedSources,
+          taskType: 'IMPORT_CHAPTER',
+          batchSize: 1,
+        });
+        return legacyJobs.length > 0 ? legacyJobs[0] : null;
+      }
 
-    // Shadow Mode simulation branch
-    if (config.shadowMode && !config.enabled) {
-      return this.executeShadowModeSimulation(options, t0);
-    }
+      // Shadow Mode simulation branch
+      if (config.shadowMode && !config.enabled) {
+        return await this.executeShadowModeSimulation(options, t0);
+      }
 
-    // LIVE WORK-ORIENTED SCHEDULING
-    return this.executeIntelligentClaim(options, t0);
+      // LIVE WORK-ORIENTED SCHEDULING
+      return await this.executeIntelligentClaim(options, t0);
+    } catch (error: any) {
+      // The competing claim statement rolled back, leaving its job QUEUED. The
+      // winning canonical importer will complete its sibling alternatives.
+      if (isActiveChapterClaimConflict(error)) {
+        this.logger.debug('Skipped duplicate alternative-source chapter claim');
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**
