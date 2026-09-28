@@ -37,6 +37,7 @@ export class AutoHealWatchdog {
     stuckIdentities = new Map();
     circuitBreakerOpen = false;
     cachedTelemetry = null;
+    telemetryFlight = null;
     lastTelemetryAt = 0;
     telemetryCacheTtlMs = 45_000;
     lastDeepStagedAt = 0;
@@ -124,6 +125,19 @@ export class AutoHealWatchdog {
      * Collects real-time telemetry from database and memory.
      */
     async collectTelemetry(forceFresh = false) {
+        if (this.telemetryFlight)
+            return this.telemetryFlight;
+        const flight = this.collectTelemetrySnapshot(forceFresh);
+        this.telemetryFlight = flight;
+        try {
+            return await flight;
+        }
+        finally {
+            if (this.telemetryFlight === flight)
+                this.telemetryFlight = null;
+        }
+    }
+    async collectTelemetrySnapshot(forceFresh = false) {
         const nowMs = Date.now();
         if (!forceFresh && this.cachedTelemetry && nowMs - this.lastTelemetryAt < this.telemetryCacheTtlMs) {
             return this.cachedTelemetry;
@@ -155,6 +169,7 @@ export class AutoHealWatchdog {
         COUNT(CASE WHEN status = 'IMPORTING' THEN 1 END) as importing_cnt,
         COUNT(CASE WHEN status = 'RETRY' THEN 1 END) as retry_cnt
       FROM importer_queue
+      WHERE status IN ('QUEUED', 'RETRY', 'IMPORTING')
     `);
         const qRow = qRes.rows[0] || {};
         const eligibleJobs = parseInt(qRow.eligible_cnt || '0', 10);
