@@ -3139,7 +3139,7 @@ export class ImporterEngine {
     // For missing chapters, check if another source already has an active job in queue
     const { rows: activeJobsForWork } = await this.dbPool.query(
       `SELECT payload, source, status FROM importer_queue
-       WHERE task_type='IMPORT_CHAPTER' AND status IN ('QUEUED','IMPORTING','RETRY')
+       WHERE task_type='IMPORT_CHAPTER' AND status IN ('QUEUED','IMPORTING','RETRY','PAUSED_BY_STAFF')
          AND payload->>'workId'=$1`, [result.workId]
     );
 

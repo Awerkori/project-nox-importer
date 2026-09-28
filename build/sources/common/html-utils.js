@@ -43,8 +43,18 @@ export function stripHtml(str) {
     return decodeHtmlEntities(str.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
 }
 export function extractChapterNumber(str) {
-    const match = str.match(/(?:capitulo|cap[ií]tulo|cap\.?|ep\.?|ch\.?)[-_\s]*(\d+(?:[.,]\d+|-\d+)?)/i) ||
-        str.match(/(\d+(?:[.,]\d+|-\d+)?)/);
+    // Source chapter URLs commonly contain percent-encoded decorative glyphs
+    // (for example `%e2%86%ab`). Parsing the raw URL made the fallback read the
+    // `2` from that escape sequence, collapsing an entire work into chapter 2.
+    let normalized = str;
+    try {
+        normalized = decodeURIComponent(str);
+    }
+    catch {
+        // Keep the original value when an upstream URL contains malformed escapes.
+    }
+    const match = normalized.match(/(?:capitulo|cap[ií]tulo|cap\.?|epis[oó]dio|episode|ep\.?|chapter|ch\.?)[-_\s]*(\d+(?:[.,]\d+|-\d+)?)/i) ||
+        normalized.match(/(\d+(?:[.,]\d+|-\d+)?)/);
     if (!match)
         return 0;
     const raw = match[1].replace('-', '.').replace(',', '.');
