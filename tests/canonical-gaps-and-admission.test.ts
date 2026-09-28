@@ -514,6 +514,7 @@ describe('Project Nox — Canonical Gaps & Elastic Admission (Tests A-E)', () =>
     });
 
     admissionController.setSourcePermitProvider(() => 4);
+    admissionController.setChapterCapacityProvider(() => 8);
 
     // Run admission cycle
     await admissionController.runAdmissionCycle();

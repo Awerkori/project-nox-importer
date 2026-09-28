@@ -29,7 +29,9 @@ export declare class AdmissionController {
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
     /**
-     * Starts the periodic admission background loop (every 5 seconds).
+     * Periodic reconciliation is the fallback; real vacancies trigger an
+     * immediate coalesced cycle. Keep this cadence low enough that aggregate
+     * queue scans do not compete with claims and publication.
      */
     start(): void;
     stop(): void;
