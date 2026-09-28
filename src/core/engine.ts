@@ -1831,7 +1831,9 @@ export class ImporterEngine {
             if (workId) {
               const inFlight = this.scheduler.getInFlightCount(workId);
               const maxInflight = this.scheduler.getMaxInflightPerWork();
-              if (inFlight > maxInflight) {
+              // `inFlight === maxInflight` is already at capacity.  Allowing it
+              // through claims one extra job only to release it moments later.
+              if (inFlight >= maxInflight) {
                 sourceSem.release();
           sourceHeld = null;
                 return { reserved: false, reason: 'WORK_MAX_INFLIGHT_EXCEEDED', sourceSem: null };
