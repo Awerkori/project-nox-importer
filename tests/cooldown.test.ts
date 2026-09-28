@@ -145,6 +145,18 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
               await db.query(`update public.${table} set ${sets} where ${col} = $${params.length}`, params);
               return { error: null };
             },
+            in: (firstColumn: string, firstValues: any[]) => ({
+              in: async (secondColumn: string, secondValues: any[]) => {
+                const keys = Object.keys(values);
+                const sets = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+                const params = [...keys.map((k) => values[k]), firstValues, secondValues];
+                await db.query(
+                  `update public.${table} set ${sets} where ${firstColumn} = any($${params.length - 1}) and ${secondColumn} = any($${params.length})`,
+                  params
+                );
+                return { error: null };
+              },
+            }),
           }),
         };
         return builder;
@@ -239,6 +251,26 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
     // Verify job was scheduled
     const queued = await db.query(`select * from public.importer_queue where source = 'nexus'`);
     expect(queued.rows.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('consolidates stale discovery rows in one bounded batch before scheduling a replacement', async () => {
+    await db.query(`delete from public.importer_queue where source = 'nexus'`);
+    await db.query(`update public.importer_sources set status = 'ACTIVE', cooldown_until = null, last_sync_at = null where id = 'nexus'`);
+    await db.query(`
+      insert into public.importer_queue (task_type, source, dedupe_key, status, created_at)
+      values
+        ('DISCOVER_WORKS', 'nexus', 'nexus:stale:1', 'QUEUED', now() - interval '2 hours'),
+        ('DISCOVER_WORKS', 'nexus', 'nexus:stale:2', 'RETRY', now() - interval '2 hours'),
+        ('DISCOVER_WORKS', 'nexus', 'nexus:stale:3', 'QUEUED', now() - interval '2 hours')
+    `);
+
+    await (engine as any).scheduleSources();
+
+    const stale = await db.query(`select status from public.importer_queue where source = 'nexus' and dedupe_key like 'nexus:stale:%'`);
+    expect(stale.rows).toHaveLength(3);
+    expect(stale.rows.every((row: any) => row.status === 'SUPERSEDED')).toBe(true);
+    const replacement = await db.query(`select count(*)::int as count from public.importer_queue where source = 'nexus' and task_type = 'DISCOVER_WORKS' and status = 'QUEUED'`);
+    expect((replacement.rows[0] as any).count).toBe(1);
   });
 
   it('transitions source to COOLDOWN upon receiving HTTP 429 rate limit error', async () => {
