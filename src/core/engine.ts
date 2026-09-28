@@ -1742,8 +1742,10 @@ export class ImporterEngine {
 
         // B. Check productive slots and trigger replenishment if starved
         const prodSnap = telemetryCollector.getSlotProductivitySnapshot();
-        if (prodSnap.productiveSlots < 7) {
-          this.admissionController.triggerImmediateReplenishment('PRODUCTIVE_SLOTS_UNDER_7');
+        // This runner has just reserved a permit but has not claimed yet.
+        // Judge vacancy against effective capacity, not the historical 8-slot pool.
+        if (prodSnap.productiveSlots < Math.max(0, globalSem.capacity - 1)) {
+          this.admissionController.triggerImmediateReplenishment('PRODUCTIVE_SLOT_VACANCY');
         }
 
         // C. Find sources that currently have available capacity (outside mutex)

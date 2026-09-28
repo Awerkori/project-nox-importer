@@ -38,6 +38,7 @@ export declare class AdmissionController {
      * Triggers immediate admission reconciliation and replenishment.
      * Debounced with 50ms trailing window to collapse concurrent vacate events.
      */
+    private lastVacancyReplenishAt;
     triggerImmediateReplenishment(reason: string): void;
     /**
      * Section 5: Admission Gate Obrigatório

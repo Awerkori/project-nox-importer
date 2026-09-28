@@ -109,9 +109,17 @@ export class AdmissionController {
    * Triggers immediate admission reconciliation and replenishment.
    * Debounced with 50ms trailing window to collapse concurrent vacate events.
    */
+  private lastVacancyReplenishAt = 0;
+
   public triggerImmediateReplenishment(reason: string): void {
     if (!this.isRunning || this.isReplenishingCycle) return;
     if (this.immediateReplenishTimer) return;
+    // Polling hints must not rerun expensive admission after every claim.
+    // Real work-vacated events remain immediate and bypass this coalescing window.
+    if (reason === 'PRODUCTIVE_SLOT_VACANCY') {
+      if (Date.now() - this.lastVacancyReplenishAt < 5000) return;
+      this.lastVacancyReplenishAt = Date.now();
+    }
     this.immediateReplenishTimer = setTimeout(async () => {
       this.immediateReplenishTimer = null;
       if (!this.isRunning || this.isReplenishingCycle) return;
