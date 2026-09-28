@@ -46,9 +46,10 @@ const ConfigSchema = z.object({
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
   BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
   // Aeon exposes only 13 YSQL connections in production and warns at 60%.
-  // Three importer connections preserve capacity for Hyperdrive, readers and
-  // operational access; media/network latency does not benefit from a larger pool.
-  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(10).default(3),
+  // Three importer connections plus the site/Hyperdrive reaches that threshold;
+  // two leave a real reader and operational headroom. Media/network latency
+  // does not benefit from a larger direct pool.
+  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(10).default(2),
   UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.coerce.number().int().default(4194304),
   TELEGRAM_MEDIA_CONCURRENCY: z.coerce.number().int().default(12),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
