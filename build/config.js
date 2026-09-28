@@ -38,6 +38,7 @@ const ConfigSchema = z.object({
     QUEUE_LEASE_DURATION_SECONDS: z.coerce.number().int().min(30).default(300),
     QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
     MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(128).default(10),
+    ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(3),
     // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
     TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),

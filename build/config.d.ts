@@ -14,6 +14,7 @@ declare const ConfigSchema: z.ZodObject<{
     QUEUE_LEASE_DURATION_SECONDS: z.ZodDefault<z.ZodNumber>;
     QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.ZodDefault<z.ZodNumber>;
     MAX_CONCURRENT_CHAPTERS: z.ZodDefault<z.ZodNumber>;
+    ADAPTIVE_INITIAL_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     TESTED_CONCURRENCY_CEILING: z.ZodDefault<z.ZodNumber>;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     DIRECT_DB_POOL_MAX: z.ZodDefault<z.ZodNumber>;
@@ -38,6 +39,7 @@ declare const ConfigSchema: z.ZodObject<{
     QUEUE_LEASE_DURATION_SECONDS: number;
     QUEUE_HEARTBEAT_INTERVAL_SECONDS: number;
     MAX_CONCURRENT_CHAPTERS: number;
+    ADAPTIVE_INITIAL_CONCURRENCY: number;
     TESTED_CONCURRENCY_CEILING: number;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: number;
     DIRECT_DB_POOL_MAX: number;
@@ -71,6 +73,7 @@ declare const ConfigSchema: z.ZodObject<{
     QUEUE_LEASE_DURATION_SECONDS?: number | undefined;
     QUEUE_HEARTBEAT_INTERVAL_SECONDS?: number | undefined;
     MAX_CONCURRENT_CHAPTERS?: number | undefined;
+    ADAPTIVE_INITIAL_CONCURRENCY?: number | undefined;
     TESTED_CONCURRENCY_CEILING?: number | undefined;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY?: number | undefined;
     DIRECT_DB_POOL_MAX?: number | undefined;

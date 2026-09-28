@@ -1214,8 +1214,17 @@ export class AdaptiveAutotuner {
     if (hasSoftRss || (pressureScore >= 15 && rateLimits === 0 && errors === 0 && timeouts === 0)) {
       const healthyFloor = this.config.healthyConcurrencyFloor ?? 8;
       const isHealthyGreen = siteHealth === 'GREEN' && !isHardwareStressed;
-      const floor = (isHealthyGreen && previous >= healthyFloor)
-        ? healthyFloor
+      const breakdown = pressureSnapshot?.pressureBreakdown;
+      const onlyMildSiteLatency = siteHealth === 'YELLOW' && pressureScore < 30 && !isHardwareStressed &&
+        !hasStagedDebt && pressureSnapshot?.consecutive5xx === 0 && breakdown &&
+        breakdown.dbPressure === 0 && breakdown.memoryPressure === 0 &&
+        breakdown.eventLoopPressure === 0 && breakdown.storagePressure === 0 &&
+        breakdown.sourcePressure === 0 && breakdown.publicationPressure === 0;
+      // A sustained mild WAN warning may trim headroom, but must not repeat
+      // 10 -> 9 -> ... -> 1. Never raise capacity under a warning, and never
+      // apply this floor to real DB/process/storage pressure.
+      const floor = ((isHealthyGreen && previous >= healthyFloor) || onlyMildSiteLatency)
+        ? Math.min(previous, healthyFloor, this.config.maxConcurrency)
         : this.config.minConcurrency;
       target = Math.max(floor, previous - 1);
       state = target < previous ? 'RUNNING_THROTTLED' : 'RUNNING_STABLE';
