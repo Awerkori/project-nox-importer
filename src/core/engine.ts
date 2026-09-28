@@ -147,6 +147,11 @@ export class ImporterEngine {
   private abortController = new AbortController();
   private chapterClaimMutex = new AsyncSemaphore(1, 'chapter_claim_mutex');
   private activeSourcesCache: { sources: string[]; cachedAt: number } = { sources: [], cachedAt: 0 };
+  // Source configuration changes infrequently. Share one short-lived snapshot between
+  // discovery and catalog backfill instead of making two full-table reads every minute.
+  private sourceScheduleSnapshot: { sources: any[]; cachedAt: number } = { sources: [], cachedAt: 0 };
+  private sourceScheduleSnapshotFlight: Promise<any[] | null> | null = null;
+  private catalogBackfillCursor = 0;
   private knownCoveredWorks = new Set<string>();
   private lastProgressTimestamp: number = Date.now();
   private lastAutoRecoveryTimestamp: number = 0;
@@ -570,6 +575,73 @@ export class ImporterEngine {
   }
 
   /**
+   * Scheduling uses only this projection, so a short cache is safe and avoids a
+   * full importer_sources read for each independent maintenance loop.  Runtime
+   * source admission continues to use its own much shorter status cache.
+   */
+  private async getSourceScheduleSnapshot(): Promise<any[] | null> {
+    const now = Date.now();
+    if (this.sourceScheduleSnapshot.sources.length > 0 && now - this.sourceScheduleSnapshot.cachedAt < 60_000) {
+      return this.sourceScheduleSnapshot.sources;
+    }
+    if (this.sourceScheduleSnapshotFlight) return this.sourceScheduleSnapshotFlight;
+
+    const flight = (async (): Promise<any[] | null> => {
+      const { data, error } = await this.supabase
+        .from('importer_sources')
+        .select('id, name, enabled, status, catalog_discovery_enabled, cooldown_until, base_url, rate_limit_per_second, last_sync_at, sync_interval_minutes');
+      if (error || !data) {
+        this.logger.warn('Unable to refresh source scheduling snapshot', { error: error?.message });
+        return null;
+      }
+      this.sourceScheduleSnapshot = { sources: data, cachedAt: Date.now() };
+      return data;
+    })();
+    this.sourceScheduleSnapshotFlight = flight;
+    try {
+      return await flight;
+    } finally {
+      if (this.sourceScheduleSnapshotFlight === flight) this.sourceScheduleSnapshotFlight = null;
+    }
+  }
+
+  private async getRecentDiscoveryJobsBySource(sourceIds: string[]): Promise<Map<string, Array<{ id: string; status: string; created_at: string }>> | null> {
+    if (sourceIds.length === 0) return new Map();
+    try {
+      // One bounded indexed query replaces a round-trip per source. The window
+      // keeps historical discovery churn out of the hot scheduler path.
+      const pool = this.dbPool && typeof this.dbPool.query === 'function' ? this.dbPool : getYugabytePool();
+      const result = await pool.query(
+        `WITH recent AS (
+           SELECT id, source, status, created_at,
+                  ROW_NUMBER() OVER (PARTITION BY source ORDER BY created_at DESC) AS row_num
+           FROM importer_queue
+           WHERE task_type = 'DISCOVER_WORKS'
+             AND source = ANY($1::text[])
+             AND status = ANY($2::text[])
+         )
+         SELECT id, source, status, created_at
+         FROM recent
+         WHERE row_num <= 10`,
+        [sourceIds, ['QUEUED', 'IMPORTING', 'RETRY']]
+      );
+      const bySource = new Map<string, Array<{ id: string; status: string; created_at: string }>>();
+      for (const row of result.rows) {
+        const source = String(row.source);
+        const entries = bySource.get(source) || [];
+        entries.push({ id: String(row.id), status: String(row.status), created_at: String(row.created_at) });
+        bySource.set(source, entries);
+      }
+      return bySource;
+    } catch (err: any) {
+      // Fail closed: enqueuing while the de-duplication read failed could create
+      // duplicate discovery work and is worse than a delayed catalog pass.
+      this.logger.warn('Unable to load batched discovery state; deferring discovery scheduling', { error: err?.message });
+      return null;
+    }
+  }
+
+  /**
    * Periodic discovery scheduler running in the background
    */
   private async runDiscoveryLoop(): Promise<void> {
@@ -616,13 +688,32 @@ export class ImporterEngine {
     const isAllowed = await this.safetyBarrier.isBackfillAllowed();
     if (!isAllowed) return;
 
-    let { data: sources, error } = await this.supabase
-      .from('importer_sources')
-      .select('*');
+    // Backfill is explicitly lowest priority.  Do not compete with readers or
+    // chapter publication while the protective monitor observes pressure.
+    const pressure = this.protectiveSentinel.getPressureSnapshot();
+    if (pressure.siteHealth !== 'GREEN' || pressure.pressureScore > 0) return;
 
-    if (error || !sources) return;
+    const sources = await this.getSourceScheduleSnapshot();
+    if (!sources || sources.length === 0) return;
 
-    for (const src of sources) {
+    const candidates = sources.filter((src: any) =>
+      src.enabled !== false &&
+      (src as any).catalog_discovery_enabled !== false &&
+      (src as any).catalog_discovery_enabled !== 0 &&
+      src.status === 'ACTIVE'
+    );
+    if (candidates.length === 0) return;
+
+    // Two sources per pass prevents a source-count-sized DB burst every 20s.
+    // Round-robin keeps the reduced maintenance budget fair.
+    const perPass = Math.min(2, candidates.length);
+    const selected: any[] = [];
+    for (let offset = 0; offset < perPass; offset++) {
+      selected.push(candidates[(this.catalogBackfillCursor + offset) % candidates.length]);
+    }
+    this.catalogBackfillCursor = (this.catalogBackfillCursor + perPass) % candidates.length;
+
+    for (const src of selected) {
       if (!src.enabled || (src as any).catalog_discovery_enabled === false || (src as any).catalog_discovery_enabled === 0 || src.status !== 'ACTIVE') continue;
 
       const checkpoint = await this.checkpoints.getCheckpoint(src.id);
@@ -2160,13 +2251,11 @@ export class ImporterEngine {
       return;
     }
 
-    let { data: sources, error } = await this.supabase
-      .from('importer_sources')
-      .select('*');
-
-    if (error || !sources) return;
+    const sources = await this.getSourceScheduleSnapshot();
+    if (!sources || sources.length === 0) return;
 
     const now = Date.now();
+    const dueSources: any[] = [];
 
     for (const src of sources) {
       if (
@@ -2193,6 +2282,7 @@ export class ImporterEngine {
           .from('importer_sources')
           .update({ status: 'ACTIVE', cooldown_until: null, updated_at: new Date().toISOString() })
           .eq('id', src.id);
+        this.sourceScheduleSnapshot.cachedAt = 0;
       }
 
       if (src.status !== 'ACTIVE') {
@@ -2212,87 +2302,77 @@ export class ImporterEngine {
       const intervalMs = (src.sync_interval_minutes || 30) * 60 * 1000;
 
       if (now - lastSync >= intervalMs) {
-        // Prevent duplicate DISCOVER_WORKS jobs from piling up if one is already active or in retry
-        let hasActive = false;
-        try {
-          const q = this.supabase
-            .from('importer_queue')
-            .select('id, status, created_at')
-            .eq('task_type', 'DISCOVER_WORKS')
-            .eq('source', src.id);
-
-          // Newest first: a current discovery must win over historical stale rows.
-          // Without this ordering the first ten old rows were updated one by one on
-          // every pass, while a current discovery could sit beyond the limit.
-          let { data: existingActive } = typeof (q as any).in === 'function'
-            ? await (q as any).in('status', ['QUEUED', 'IMPORTING', 'RETRY']).order('created_at', { ascending: false }).limit(10)
-            : await q.limit(10);
-
-          if (existingActive && Array.isArray(existingActive)) {
-            const DISCOVERY_TTL_MS = 60 * 60 * 1000; // 1 hour TTL
-            const staleIds: string[] = [];
-            const staleAgesMinutes: number[] = [];
-            for (const j of existingActive) {
-              const age = now - new Date(j.created_at).getTime();
-              if (['QUEUED', 'RETRY'].includes(j.status) && age > DISCOVERY_TTL_MS) {
-                staleIds.push(j.id);
-                staleAgesMinutes.push(Math.round(age / 60000));
-              } else if (['QUEUED', 'IMPORTING', 'RETRY'].includes(j.status)) {
-                hasActive = true;
-              }
-            }
-
-            if (staleIds.length > 0) {
-              // Keep stale consolidation bounded and atomic.  The status predicate
-              // fences a job claimed after the read, so cleanup can never overwrite
-              // a live lease.  If this page was full, defer enqueueing one pass: more
-              // old rows may exist behind it and a duplicate discovery is worse than
-              // a 30s catalog delay.
-              this.logger.warn('Consolidating stale DISCOVER_WORKS jobs', {
-                source: src.id,
-                count: staleIds.length,
-                oldestAgeMinutes: Math.max(...staleAgesMinutes),
-                newestAgeMinutes: Math.min(...staleAgesMinutes),
-              });
-              await (this.supabase
-                .from('importer_queue')
-                .update({
-                  status: 'SUPERSEDED',
-                  last_error: 'superseded_stale_discovery_ttl',
-                  updated_at: new Date().toISOString(),
-                })
-                .in('id', staleIds) as any)
-                .in('status', ['QUEUED', 'RETRY']);
-
-              if (existingActive.length >= 10) {
-                hasActive = true;
-              }
-            }
-          }
-        } catch (err: any) {
-          this.logger.warn('Error checking existing active discoveries', { error: err?.message });
-        }
-
-        if (hasActive) {
-          continue;
-        }
-
-        const checkpoint = await this.checkpoints.getCheckpoint(src.id);
-        const isCompleted = Boolean(checkpoint?.metadata?.catalog_completed);
-        const discoveryMode = isCompleted ? 'maintenance' : 'bootstrap';
-
-        const dedupeKey = `${src.id}:discover:${Math.floor(now / intervalMs)}`;
-        await this.queue.enqueue(
-          'DISCOVER_WORKS',
-          src.id,
-          dedupeKey,
-          {
-            workTitle: `Varredura de Catálogo (${src.name || src.id})`,
-            mode: discoveryMode,
-          },
-          10
-        );
+        dueSources.push(src);
       }
+    }
+
+    const activeBySource = await this.getRecentDiscoveryJobsBySource(dueSources.map((src) => src.id));
+    if (!activeBySource) return;
+
+    const DISCOVERY_TTL_MS = 60 * 60 * 1000;
+    const MAX_STALE_DISCOVERY_CLEANUP_PER_CYCLE = 12;
+    let cleanupBudget = MAX_STALE_DISCOVERY_CLEANUP_PER_CYCLE;
+    const staleIds: string[] = [];
+    let staleCount = 0;
+    const decisions: Array<{ src: any; hasActive: boolean; intervalMs: number }> = [];
+
+    for (const src of dueSources) {
+      const existingActive = activeBySource.get(src.id) || [];
+      const stale = existingActive.filter((job) =>
+        (job.status === 'QUEUED' || job.status === 'RETRY') && now - new Date(job.created_at).getTime() > DISCOVERY_TTL_MS
+      );
+      staleCount += stale.length;
+      const live = existingActive.some((job) => !stale.includes(job));
+      const selectedStale = stale.slice(0, cleanupBudget);
+      staleIds.push(...selectedStale.map((job) => job.id));
+      cleanupBudget -= selectedStale.length;
+
+      // If the bounded cleanup has deferred stale rows, retain the no-duplicate
+      // gate for this pass. A later pass will clean and schedule safely.
+      const hasActive = live || selectedStale.length < stale.length || existingActive.length >= 10;
+      decisions.push({
+        src,
+        hasActive,
+        intervalMs: (src.sync_interval_minutes || 30) * 60 * 1000,
+      });
+    }
+
+    if (staleIds.length > 0) {
+      try {
+        const pool = this.dbPool && typeof this.dbPool.query === 'function' ? this.dbPool : getYugabytePool();
+        const result = await pool.query(
+          `UPDATE importer_queue
+           SET status = 'SUPERSEDED', last_error = 'superseded_stale_discovery_ttl', updated_at = NOW()
+           WHERE id = ANY($1::uuid[]) AND status = ANY($2::text[])
+           RETURNING id`,
+          [staleIds, ['QUEUED', 'RETRY']]
+        );
+        this.logger.info('Consolidated stale DISCOVER_WORKS jobs', {
+          count: result.rowCount || 0,
+          deferred: Math.max(0, staleCount - staleIds.length),
+        });
+      } catch (err: any) {
+        this.logger.warn('Unable to consolidate stale DISCOVER_WORKS jobs; deferring discovery scheduling', { error: err?.message });
+        return;
+      }
+    }
+
+    for (const { src, hasActive, intervalMs } of decisions) {
+      if (hasActive) continue;
+      const checkpoint = await this.checkpoints.getCheckpoint(src.id);
+      const isCompleted = Boolean(checkpoint?.metadata?.catalog_completed);
+      const discoveryMode = isCompleted ? 'maintenance' : 'bootstrap';
+      const dedupeKey = `${src.id}:discover:${Math.floor(now / intervalMs)}`;
+      await this.queue.enqueue(
+        'DISCOVER_WORKS',
+        src.id,
+        dedupeKey,
+        {
+          workTitle: `Varredura de Catálogo (${src.name || src.id})`,
+          mode: discoveryMode,
+        },
+        10
+      );
     }
   }
 

@@ -73,6 +73,9 @@ export declare class ImporterEngine {
     private abortController;
     private chapterClaimMutex;
     private activeSourcesCache;
+    private sourceScheduleSnapshot;
+    private sourceScheduleSnapshotFlight;
+    private catalogBackfillCursor;
     private knownCoveredWorks;
     private lastProgressTimestamp;
     private lastAutoRecoveryTimestamp;
@@ -114,6 +117,13 @@ export declare class ImporterEngine {
      * Cached for 5s to eliminate unnecessary database calls on tight loops.
      */
     isDiscoveryAllowed(): Promise<boolean>;
+    /**
+     * Scheduling uses only this projection, so a short cache is safe and avoids a
+     * full importer_sources read for each independent maintenance loop.  Runtime
+     * source admission continues to use its own much shorter status cache.
+     */
+    private getSourceScheduleSnapshot;
+    private getRecentDiscoveryJobsBySource;
     /**
      * Periodic discovery scheduler running in the background
      */
