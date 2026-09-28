@@ -31,11 +31,15 @@ export class WorkAffinityScheduler {
     rrCatalogSourceIndex = 0;
     publicationBarrier;
     sourcePermitProvider;
+    chapterCapacityProvider = () => 1;
     setPublicationBarrier(barrier) {
         this.publicationBarrier = barrier;
     }
     setSourcePermitProvider(provider) {
         this.sourcePermitProvider = provider;
+    }
+    setChapterCapacityProvider(provider) {
+        this.chapterCapacityProvider = provider;
     }
     // Staff requests fast-cache (avoids 1 query per claim)
     lastStaffCheckTime = 0;
@@ -745,7 +749,11 @@ export class WorkAffinityScheduler {
         // If active works have no jobs, check real total worker occupancy
         const tAdm0 = performance.now();
         const totalInFlight = this.getTotalInFlight();
-        if (!fallbackJob && totalInFlight < 18) {
+        // Do not run an admission scan from every failed claim when all effective
+        // chapter permits are already occupied. The old historical ceiling (18)
+        // caused expensive P0/queue checks even in a deliberately throttled
+        // 3-slot runtime.
+        if (!fallbackJob && totalInFlight < Math.max(1, this.chapterCapacityProvider())) {
             const newlyAdmitted = await this.admissionController.admitNextWorkOnDemand('P1', allowedSources || undefined);
             if (newlyAdmitted) {
                 telemetry.worksTested++;

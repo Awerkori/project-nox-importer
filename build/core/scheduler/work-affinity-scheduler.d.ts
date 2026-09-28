@@ -35,8 +35,10 @@ export declare class WorkAffinityScheduler {
     private rrCatalogSourceIndex;
     private publicationBarrier?;
     private sourcePermitProvider?;
+    private chapterCapacityProvider;
     setPublicationBarrier(barrier: any): void;
     setSourcePermitProvider(provider: (source: string) => number): void;
+    setChapterCapacityProvider(provider: () => number): void;
     private lastStaffCheckTime;
     private cachedStaffWorkIds;
     private unclaimableWorksCooldown;
