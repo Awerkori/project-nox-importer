@@ -2185,7 +2185,13 @@ export class ImporterEngine {
   }
 
   /**
-   * Executes a job with active lease heartbeat and hard timeout watchdog.
+   * Executes a job with an active lease heartbeat and a bounded soft deadline.
+   *
+   * A Promise.race cannot cancel network I/O. Releasing its permits when the
+   * deadline wins creates a zombie upload that continues consuming Telegram,
+   * CPU and DB while another slot claims more work. Keep the lease and permits
+   * until the real operation settles; a slow dependency then reduces only its
+   * own effective capacity instead of exceeding global concurrency.
    */
   private async executeJobDirectly(
     job: QueueJob,
@@ -2250,26 +2256,34 @@ export class ImporterEngine {
       }
     );
 
-    // Dynamic safety timeout: scales with page count if available, with a minimum of 2.5 minutes and maximum of 4 minutes
+    // Dynamic soft deadline: scales with page count if available, with a minimum of 2.5 minutes and maximum of 4 minutes.
     const pageCountHint = typeof job.payload?.pageCount === 'number' ? job.payload.pageCount : (job.progress_total || 40);
     const maxJobDurationMs = job.task_type === 'IMPORT_CHAPTER'
       ? Math.min(4 * 60 * 1000, Math.max(150 * 1000, pageCountHint * 4 * 1000))
       : 3 * 60 * 1000;
     let jobTimeoutTimer: NodeJS.Timeout | null = null;
-    const timeoutPromise = new Promise<never>((_, reject) => {
+    const deadlinePromise = new Promise<true>((resolve) => {
       jobTimeoutTimer = setTimeout(() => {
-        cancelSignalTriggered = true;
-        reject(
-          new Error(
-            `JobExecutionTimeout: Job ${job.id} (${job.task_type}) exceeded safety limit of ${Math.round(maxJobDurationMs / 60000)} minutes`
-          )
-        );
+        resolve(true);
       }, maxJobDurationMs);
     });
 
     try {
       const executionPromise = this.processJob(job, () => cancelSignalTriggered, extraTiming);
-      await Promise.race([executionPromise, timeoutPromise]);
+      const exceededDeadline = await Promise.race([
+        executionPromise.then(() => false as const),
+        deadlinePromise,
+      ]);
+
+      if (exceededDeadline) {
+        this.logger.warn(
+          `[JOB_SOFT_DEADLINE] ${job.id} (${job.task_type}) exceeded ${Math.round(maxJobDurationMs / 60000)}m; retaining lease and permits until the in-flight operation settles`,
+          { jobId: job.id, taskType: job.task_type, source: job.source, maxJobDurationMs }
+        );
+        // Do not turn this into a staff cancellation: that would either lose
+        // valid work or let an unabortable operation race a retried job.
+        await executionPromise;
+      }
     } finally {
       if (jobTimeoutTimer) clearTimeout(jobTimeoutTimer);
       heartbeat.stop();

@@ -228,7 +228,13 @@ export declare class ImporterEngine {
      */
     private runCatalogSyncWorker;
     /**
-     * Executes a job with active lease heartbeat and hard timeout watchdog.
+     * Executes a job with an active lease heartbeat and a bounded soft deadline.
+     *
+     * A Promise.race cannot cancel network I/O. Releasing its permits when the
+     * deadline wins creates a zombie upload that continues consuming Telegram,
+     * CPU and DB while another slot claims more work. Keep the lease and permits
+     * until the real operation settles; a slow dependency then reduces only its
+     * own effective capacity instead of exceeding global concurrency.
      */
     private executeJobDirectly;
     /**
