@@ -67,6 +67,7 @@ export declare class ImporterEngine {
     private circuitBreaker;
     private sharedNetworkDetector;
     private admissionGate;
+    private sourceProbesInFlight;
     private isRunning;
     private stopSignal;
     private abortController;
@@ -179,6 +180,7 @@ export declare class ImporterEngine {
         blocked_reason?: string | null;
         blocked_details?: any;
         cooldown_until?: string | null;
+        last_health_check_at?: string | null;
     }): Promise<void>;
     private autotunerCycleCount;
     private consecutiveUnderutilizedCycles;

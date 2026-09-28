@@ -290,4 +290,33 @@ describe('UPSTREAM_BLOCKED Isolation, Job Parking & Cross-Provider Fallback', ()
       global.fetch = originalFetch;
     }
   });
+
+  it('records one failure and enters cooldown for a failed degraded-source probe', async () => {
+    const updates: any[] = [];
+    mockSupabase = {
+      from: vi.fn(() => ({
+        update: vi.fn((payload: any) => {
+          updates.push(payload);
+          return { eq: vi.fn().mockResolvedValue({ error: null }) };
+        }),
+      })),
+    };
+    const adapter: SourceAdapter = {
+      id: 'cooldown-source', name: 'Cooldown source', baseUrl: 'https://example.test',
+      fetchUpdatedWorks: vi.fn(), fetchWorkDetails: vi.fn(), fetchChapters: vi.fn(),
+      fetchChapterPages: vi.fn(), searchWorks: vi.fn(),
+    };
+    registry.register(adapter);
+    engine = new ImporterEngine(mockSupabase, storage, registry, rateLimiter, config);
+    const breaker = (engine as any).circuitBreaker;
+    const failure = vi.spyOn(breaker, 'recordFailure');
+    vi.spyOn((engine as any).admissionGate, 'executeProdProbe').mockResolvedValue({
+      overallStatus: 'FAIL', classification: 'API_BLOCK', cfRay: null, stages: [],
+    });
+
+    await engine.probeSourceHealth({ id: 'cooldown-source', name: 'Cooldown source', status: 'DEGRADED' });
+
+    expect(failure).toHaveBeenCalledTimes(1);
+    expect(updates.at(-1).status).toBe('COOLDOWN');
+  });
 });

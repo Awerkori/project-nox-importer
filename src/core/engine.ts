@@ -139,6 +139,9 @@ export class ImporterEngine {
   private circuitBreaker = new SourceCircuitBreaker();
   private sharedNetworkDetector = new SharedNetworkDetector();
   private admissionGate = new SourceAdmissionGate();
+  // A full admission probe reaches catalog, work, chapter and image endpoints.
+  // Never overlap those probes for the same source.
+  private sourceProbesInFlight = new Set<string>();
   private isRunning = false;
   private stopSignal = false;
   private abortController = new AbortController();
@@ -1195,15 +1198,22 @@ export class ImporterEngine {
   }
 
   public async checkBlockedSourcesHealth(): Promise<void> {
-    let { data: blockedSources, error } = await this.supabase
+    let query = this.supabase
       .from('importer_sources')
-      .select('id, name, status, base_url, blocked_reason, blocked_details, cooldown_until')
-      .in('status', ['UPSTREAM_BLOCKED', 'RECOVERING', 'PROBING', 'DEGRADED', 'COOLDOWN']);
+      .select('id, name, status, base_url, blocked_reason, blocked_details, cooldown_until, last_health_check_at')
+      .in('status', ['UPSTREAM_BLOCKED', 'RECOVERING', 'PROBING']);
+
+    // Recovery checks are deliberately small and staggered. COOLDOWN and
+    // DEGRADED sources are owned by the dedicated expiry loop.
+    if (typeof (query as any).order === 'function') query = (query as any).order('last_health_check_at', { ascending: true, nullsFirst: true });
+    if (typeof (query as any).limit === 'function') query = (query as any).limit(2);
+    const { data: blockedSources, error } = await query;
 
     if (error || !blockedSources || blockedSources.length === 0) return;
 
     for (const src of blockedSources) {
       if (this.stopSignal) break;
+      if (!this.circuitBreaker.canExecute(src.id)) continue;
       await this.probeSourceHealth(src);
     }
   }
@@ -1216,14 +1226,22 @@ export class ImporterEngine {
     blocked_reason?: string | null;
     blocked_details?: any;
     cooldown_until?: string | null;
+    last_health_check_at?: string | null;
   }): Promise<void> {
     const nowIso = new Date().toISOString();
     const adapter = this.registry.get(src.id);
     if (!adapter) return;
 
+    const cooldownUntil = src.cooldown_until ? Date.parse(src.cooldown_until) : 0;
+    if (src.status === 'COOLDOWN' && Number.isFinite(cooldownUntil) && cooldownUntil > Date.now()) return;
+    if (!this.circuitBreaker.canExecute(src.id)) return;
+    if (this.sourceProbesInFlight.has(src.id)) return;
+    this.sourceProbesInFlight.add(src.id);
+
     // If shared network incident is active, suppress probe storms
     if (this.sharedNetworkDetector.isSharedBlockActive()) {
       this.logger.warn(`Shared network block is currently active on datacenter network. Suppressing probe for ${src.id}.`);
+      this.sourceProbesInFlight.delete(src.id);
       return;
     }
 
@@ -1244,7 +1262,7 @@ export class ImporterEngine {
         const primaryReason: CloudflareClassification = report.classification || 'CLOUDFLARE_DATACENTER_BLOCK';
         this.logger.info(`Source ${src.id} failed production admission probe (${primaryReason}).`, { stages: report.stages });
 
-        this.circuitBreaker.recordFailure(src.id, primaryReason);
+        const circuit = this.circuitBreaker.recordFailure(src.id, primaryReason);
         this.sharedNetworkDetector.recordBlockEvent({
           sourceId: src.id,
           classification: primaryReason,
@@ -1252,8 +1270,7 @@ export class ImporterEngine {
         });
 
         if (src.status === 'COOLDOWN' || src.status === 'DEGRADED' || src.status === 'PROBING') {
-          const { cooldownMs } = this.circuitBreaker.recordFailure(src.id, primaryReason);
-          const nextCooldownIso = new Date(Date.now() + (cooldownMs || 60_000)).toISOString();
+          const nextCooldownIso = new Date(Date.now() + (circuit.cooldownMs || 60_000)).toISOString();
           await this.supabase
             .from('importer_sources')
             .update({
@@ -1334,6 +1351,8 @@ export class ImporterEngine {
       }
     } catch (err: any) {
       this.logger.error(`Error probing health for source ${src.id}`, { error: err?.message });
+    } finally {
+      this.sourceProbesInFlight.delete(src.id);
     }
   }
 
