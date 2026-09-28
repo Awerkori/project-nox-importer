@@ -16,6 +16,7 @@ import { ProtectiveSentinel } from '../protective-sentinel.js';
 import { AdmissionController } from './admission-controller.js';
 import { SchedulerStateStore } from './state-store.js';
 import { SchedulerDecision, SchedulerLane, SchedulerMetrics } from './types.js';
+export declare function isActiveChapterClaimConflict(error: any): boolean;
 export interface AcquiredSchedulerJob {
     job: any;
     lane: SchedulerLane;
