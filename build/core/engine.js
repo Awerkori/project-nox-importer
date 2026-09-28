@@ -1406,6 +1406,45 @@ export class ImporterEngine {
     }
     sourceEmptyCooldown = new Map();
     sourceStatusCache = new Map();
+    // Staff focus is global and changes through an explicit admin action. A tiny
+    // TTL removes two no-op DB round-trips from every ordinary chapter without
+    // materially delaying an explicit priority request.
+    activeStaffFocusCache = { workId: null, cachedAt: 0 };
+    activeStaffFocusFlight = null;
+    async getActiveStaffFocusWorkId() {
+        const now = Date.now();
+        if (now - this.activeStaffFocusCache.cachedAt < 5_000)
+            return this.activeStaffFocusCache.workId;
+        if (this.activeStaffFocusFlight)
+            return this.activeStaffFocusFlight;
+        const flight = (async () => {
+            try {
+                let query = this.supabase
+                    .from('importer_staff_requests')
+                    .select('work_id');
+                if (typeof query?.in === 'function')
+                    query = query.in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
+                const { data } = typeof query?.maybeSingle === 'function' ? await query.maybeSingle() : { data: null };
+                const workId = data?.work_id ? String(data.work_id) : null;
+                this.activeStaffFocusCache = { workId, cachedAt: Date.now() };
+                return workId;
+            }
+            catch {
+                // Preserve existing semantics: an unavailable staff table must never
+                // block normal importing. Keep the last known focus only briefly.
+                this.activeStaffFocusCache.cachedAt = Date.now();
+                return this.activeStaffFocusCache.workId;
+            }
+        })();
+        this.activeStaffFocusFlight = flight;
+        try {
+            return await flight;
+        }
+        finally {
+            if (this.activeStaffFocusFlight === flight)
+                this.activeStaffFocusFlight = null;
+        }
+    }
     async getEligibleChapterSources() {
         const now = Date.now();
         if (now - this.activeSourcesCache.cachedAt > 5_000) {
@@ -2120,11 +2159,36 @@ export class ImporterEngine {
                     return;
                 }
             }
-            let { data: sourceRec } = await this.supabase
-                .from('importer_sources')
-                .select('id, status, cooldown_until, enabled')
-                .eq('id', job.source)
-                .maybeSingle();
+            // The runner already consulted this source before claiming. Reuse its
+            // short-lived status snapshot; refresh only after its 10s TTL expires.
+            const sourceCached = this.sourceStatusCache.get(job.source);
+            let sourceRec = null;
+            if (sourceCached && Date.now() - sourceCached.cachedAt < 10_000) {
+                sourceRec = {
+                    id: job.source,
+                    status: sourceCached.status,
+                    enabled: sourceCached.enabled,
+                    cooldown_until: sourceCached.cooldownUntil ? new Date(sourceCached.cooldownUntil).toISOString() : null,
+                };
+            }
+            else {
+                const { data } = await this.supabase
+                    .from('importer_sources')
+                    .select('id, status, cooldown_until, enabled, chapter_ingestion_enabled, catalog_discovery_enabled')
+                    .eq('id', job.source)
+                    .maybeSingle();
+                sourceRec = data;
+                if (data) {
+                    this.sourceStatusCache.set(job.source, {
+                        enabled: data.enabled !== false,
+                        chapterIngestionEnabled: data.chapter_ingestion_enabled !== false,
+                        catalogDiscoveryEnabled: data.catalog_discovery_enabled === true || data.catalog_discovery_enabled === 1,
+                        status: data.status || 'ACTIVE',
+                        cooldownUntil: data.cooldown_until ? new Date(data.cooldown_until).getTime() : 0,
+                        cachedAt: Date.now(),
+                    });
+                }
+            }
             if (sourceRec) {
                 if (sourceRec.status === 'UPSTREAM_BLOCKED') {
                     // If this is a chapter import job, check if other healthy sources exist for the work
@@ -2158,35 +2222,31 @@ export class ImporterEngine {
                             .from('importer_sources')
                             .update({ status: 'ACTIVE', cooldown_until: null, updated_at: new Date().toISOString() })
                             .eq('id', job.source);
+                        this.sourceStatusCache.set(job.source, {
+                            enabled: sourceRec.enabled !== false,
+                            chapterIngestionEnabled: true,
+                            catalogDiscoveryEnabled: true,
+                            status: 'ACTIVE',
+                            cooldownUntil: 0,
+                            cachedAt: Date.now(),
+                        });
                         this.circuitBreaker.reset(job.source);
                     }
                 }
             }
-            // Prioridade Absoluta Guard: if an active focus work exists, ONLY jobs for that work may run
-            try {
-                let reqQuery = this.supabase
-                    .from('importer_staff_requests')
-                    .select('id, work_id');
-                if (typeof reqQuery?.in === 'function') {
-                    reqQuery = reqQuery.in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
-                }
-                if (typeof reqQuery?.maybeSingle === 'function') {
-                    let { data: activeFocus } = await reqQuery.maybeSingle();
-                    if (activeFocus?.work_id && job.payload?.workId && job.payload.workId !== activeFocus.work_id) {
-                        this.logger.info(`Focus Mode active for work ${activeFocus.work_id}. Deferring non-priority job for ${job.payload?.workId}`, {
-                            jobId: job.id,
-                            focusWorkId: activeFocus.work_id,
-                            jobWorkId: job.payload?.workId,
-                        });
-                        await this.queue.releaseJob(job.id, 'RETRY', `Focus mode active for work ${activeFocus.work_id}`, 15);
-                        return;
-                    }
-                }
+            // Prioridade Absoluta Guard: cache the global staff focus briefly. This
+            // removes repeated no-op reads and writes from ordinary chapter imports.
+            const activeFocusWorkId = await this.getActiveStaffFocusWorkId();
+            if (activeFocusWorkId && job.payload?.workId && job.payload.workId !== activeFocusWorkId) {
+                this.logger.info(`Focus Mode active for work ${activeFocusWorkId}. Deferring non-priority job for ${job.payload?.workId}`, {
+                    jobId: job.id,
+                    focusWorkId: activeFocusWorkId,
+                    jobWorkId: job.payload?.workId,
+                });
+                await this.queue.releaseJob(job.id, 'RETRY', `Focus mode active for work ${activeFocusWorkId}`, 15);
+                return;
             }
-            catch {
-                // Safe fallback in test harnesses where importer_staff_requests is unmocked
-            }
-            if (job.payload?.workId) {
+            if (activeFocusWorkId && job.payload?.workId === activeFocusWorkId) {
                 try {
                     await this.supabase
                         .from('importer_staff_requests')
@@ -2863,7 +2923,10 @@ export class ImporterEngine {
         let metadataLoadMs = 0;
         let mediaPipelineWallMs = 0;
         // Shared by producers, bounded to this job; heartbeat cancellation remains independent.
-        let cancelCheckedAt = -Infinity;
+        // processJob performed the authoritative pre-flight cancellation read just
+        // before entering this handler. Avoid repeating it immediately; producers
+        // recheck after two seconds and heartbeat cancellation remains active.
+        let cancelCheckedAt = performance.now();
         let cancellation = false;
         let cancelInFlight = null;
         const checkCancellation = () => {
@@ -2895,10 +2958,6 @@ export class ImporterEngine {
             if (wm?.id) {
                 workMappingId = wm.id;
             }
-        }
-        // Checkpoint 1: Pre-flight check for staff cancellation
-        if (isCancelled?.() || (await this.queue.isCancelRequested(job.id))) {
-            throw new JobCancelledByStaffError(job.id);
         }
         // Pre-flight check: if already published by concurrent worker, skip download
         let { data: alreadyPub } = await this.supabase
