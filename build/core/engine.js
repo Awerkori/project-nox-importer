@@ -126,6 +126,9 @@ export class ImporterEngine {
     stopSignal = false;
     abortController = new AbortController();
     chapterClaimMutex = new AsyncSemaphore(1, 'chapter_claim_mutex');
+    // Discovery and catalog sync are maintenance lanes. They must not each hold
+    // a DB client beside chapter claims, publication and site traffic.
+    catalogMaintenanceLane = new AsyncSemaphore(1, 'catalog_maintenance_lane');
     activeSourcesCache = { sources: [], cachedAt: 0 };
     // Source configuration changes infrequently. Share one short-lived snapshot between
     // discovery and catalog backfill instead of making two full-table reads every minute.
@@ -1887,6 +1890,7 @@ export class ImporterEngine {
     async runDiscoveryWorker() {
         this.logger.info('Starting dedicated discovery lane runner');
         while (!this.stopSignal) {
+            let idle = false;
             try {
                 if (await this.protectiveSentinel.isProtectiveStopActive()) {
                     await this.sleep(3000);
@@ -1897,14 +1901,25 @@ export class ImporterEngine {
                     await this.sleep(5_000);
                     continue;
                 }
-                const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), undefined, 'DISCOVER_WORKS');
-                if (!job) {
-                    await this.sleep(5_000);
-                    continue;
+                // Shared with SYNC_WORK. Acquire before claiming so a job never holds a
+                // lease while merely waiting behind another maintenance operation.
+                await this.catalogMaintenanceLane.acquire();
+                try {
+                    if (this.stopSignal)
+                        continue;
+                    const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), undefined, 'DISCOVER_WORKS');
+                    if (!job) {
+                        idle = true;
+                    }
+                    else {
+                        this.logger.info(`[Discovery Lane] Acquired ${job.task_type} for source ${job.source} (Job: ${job.id})`);
+                        await this.executeJobDirectly(job);
+                    }
                 }
-                this.logger.info(`[Discovery Lane] Acquired ${job.task_type} for source ${job.source} (Job: ${job.id})`);
-                await this.executeJobDirectly(job);
-                await this.sleep(100);
+                finally {
+                    this.catalogMaintenanceLane.release();
+                }
+                await this.sleep(idle ? 5_000 : 100);
             }
             catch (err) {
                 this.logger.error('Error in discovery worker lane', { error: err?.message });
@@ -1919,6 +1934,7 @@ export class ImporterEngine {
     async runCatalogSyncWorker() {
         this.logger.info('Starting dedicated catalog sync lane runner');
         while (!this.stopSignal) {
+            let idle = false;
             try {
                 if (await this.protectiveSentinel.isProtectiveStopActive()) {
                     await this.sleep(3000);
@@ -1929,14 +1945,23 @@ export class ImporterEngine {
                     await this.sleep(5_000);
                     continue;
                 }
-                const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), undefined, 'SYNC_WORK');
-                if (!job) {
-                    await this.sleep(5_000);
-                    continue;
+                await this.catalogMaintenanceLane.acquire();
+                try {
+                    if (this.stopSignal)
+                        continue;
+                    const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), undefined, 'SYNC_WORK');
+                    if (!job) {
+                        idle = true;
+                    }
+                    else {
+                        this.logger.info(`[Sync Lane] Acquired ${job.task_type} for source ${job.source} (Job: ${job.id})`);
+                        await this.executeJobDirectly(job);
+                    }
                 }
-                this.logger.info(`[Sync Lane] Acquired ${job.task_type} for source ${job.source} (Job: ${job.id})`);
-                await this.executeJobDirectly(job);
-                await this.sleep(100);
+                finally {
+                    this.catalogMaintenanceLane.release();
+                }
+                await this.sleep(idle ? 5_000 : 100);
             }
             catch (err) {
                 this.logger.error('Error in catalog sync worker lane', { error: err?.message });
