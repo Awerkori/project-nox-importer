@@ -13,4 +13,11 @@ describe('active canonical chapter claim fence', () => {
     expect(isActiveChapterClaimConflict({ code: '23505', constraint: 'importer_queue_dedupe_key_key' })).toBe(false);
     expect(isActiveChapterClaimConflict({ code: '40001' })).toBe(false);
   });
+
+  it('recognizes Yugabyte errors that omit the constraint field', () => {
+    expect(isActiveChapterClaimConflict({
+      code: '23505',
+      message: 'duplicate key value violates unique constraint "idx_importer_queue_one_importing_canonical_chapter"'
+    })).toBe(true);
+  });
 });
