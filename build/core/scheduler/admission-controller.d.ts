@@ -21,6 +21,8 @@ export declare class AdmissionController {
     private isRunning;
     private loopTimer;
     private sourcePermitProvider?;
+    private chapterCapacityProvider;
+    setChapterCapacityProvider(provider: () => number): void;
     private admissionInFlight;
     private demandFlights;
     setSourcePermitProvider(provider: (source: string) => number): void;
