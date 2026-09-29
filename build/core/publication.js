@@ -230,9 +230,14 @@ export class PublicationBarrier {
             }
             // Barrier cleared! Publish this chapter
             const t1 = performance.now();
-            await this.executePublish(workId, chapterId, new Date().toISOString(), sortKey, isFreshRelease);
+            const publication = await this.executePublish(workId, chapterId, new Date().toISOString(), sortKey, isFreshRelease);
             const publishUpdateMs = Math.round(performance.now() - t1);
-            this.logger.info('Chapter published via barrier', { workId, sortKey, chapterId, isFreshRelease });
+            // A second barrier caller may arrive after the canonical transition.
+            // It still completes mapping cleanup, but must not emit a second
+            // publication event/log for an already-visible chapter.
+            if (publication.newlyVisible) {
+                this.logger.info('Chapter published via barrier', { workId, sortKey, chapterId, isFreshRelease });
+            }
             // Run immediate cascade for subsequent STAGED chapters of this work
             const t2 = performance.now();
             await this.runCascadeUnderLock(workId);
@@ -392,7 +397,7 @@ export class PublicationBarrier {
                 }
                 catch { }
             })();
-            return;
+            return { newlyVisible: isNewlyVisible };
         }
         // Fallback path for unit tests / mock clients without direct pool
         const [workRes, chRes] = await Promise.all([
@@ -467,6 +472,7 @@ export class PublicationBarrier {
             }
             catch { }
         }
+        return { newlyVisible: isNewlyVisible };
     }
     /**
      * Public cascade runner for a work (thread-safe under workLock).
