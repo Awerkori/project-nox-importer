@@ -133,6 +133,7 @@ export declare class AdaptiveAutotuner {
     private sourceSemaphores;
     private sourceDownloadSemaphores;
     private eligibleSourceCountForFairness;
+    private eligibleSourceCountForDownloadFairness;
     private globalMediaSemaphore;
     private globalInflightRequestSemaphore;
     private bufferedPageSemaphore;
@@ -200,6 +201,7 @@ export declare class AdaptiveAutotuner {
      * conservation is preserved.
      */
     setEligibleSourceCountForFairness(count: number): void;
+    setEligibleSourceCountForDownloadFairness(count: number): void;
     /**
      * Fairness must follow sources that actually have chapter work in flight,
      * not every enabled provider.  Counting idle providers made a lone backlog

@@ -300,6 +300,10 @@ export class AdaptiveAutotuner {
     // before claiming work. Keep the conservative one-source default so isolated
     // callers and tests retain the source's configured capacity.
     eligibleSourceCountForFairness = 1;
+    // Download fan-out is intentionally more conservative than chapter
+    // admission. A source that claims first must not fill every page/buffer
+    // permit before another healthy source gets its first chapter slot.
+    eligibleSourceCountForDownloadFairness = 1;
     globalMediaSemaphore;
     globalInflightRequestSemaphore;
     bufferedPageSemaphore;
@@ -711,6 +715,15 @@ export class AdaptiveAutotuner {
         this.eligibleSourceCountForFairness = next;
         this.refreshSourceSemaphoreCapacities();
     }
+    setEligibleSourceCountForDownloadFairness(count) {
+        const next = Math.max(1, Math.floor(count) || 1);
+        if (next === this.eligibleSourceCountForDownloadFairness)
+            return;
+        this.eligibleSourceCountForDownloadFairness = next;
+        for (const [source, semaphore] of this.sourceDownloadSemaphores) {
+            semaphore.setCapacity(this.getEffectiveSourceDownloadCapacity(source));
+        }
+    }
     /**
      * Fairness must follow sources that actually have chapter work in flight,
      * not every enabled provider.  Counting idle providers made a lone backlog
@@ -757,10 +770,10 @@ export class AdaptiveAutotuner {
         const limits = this.getSourceLimits(source);
         const sourceChapterCapacity = this.getEffectiveSourceCapacity(source);
         const configured = Math.max(1, Math.min(this.globalInflightRequestSemaphore.capacity, limits.maxPagesPerChapter * sourceChapterCapacity));
-        if (this.eligibleSourceCountForFairness <= 1)
+        if (this.eligibleSourceCountForDownloadFairness <= 1)
             return configured;
         const fairShare = Math.max(1, Math.ceil(this.globalInflightRequestSemaphore.capacity /
-            Math.min(3, this.eligibleSourceCountForFairness)));
+            Math.min(3, this.eligibleSourceCountForDownloadFairness)));
         return Math.min(configured, fairShare);
     }
     /**
