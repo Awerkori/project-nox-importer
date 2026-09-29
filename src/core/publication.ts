@@ -43,12 +43,14 @@ export class PublicationBarrier {
   private coverWarmQueue = new AsyncSemaphore(1, 'cover_warm_queue');
   private warmedCoverIds = new Set<string>();
   private readonly maxRememberedWarmCovers = 256;
+  private pendingCoverWarmRetries = new Set<string>();
+  private readonly maxPendingCoverWarmRetries = 32;
   private lastCoverWarmFailureLogAt = 0;
   public onPublished?: (isFreshRelease: boolean, durableRateEvent?: boolean) => void;
 
   constructor(private supabase: SupabaseClient) {}
 
-  private warmPublishedCover(coverId: string | undefined): void {
+  private warmPublishedCover(coverId: string | undefined, retryAttempt = 0): void {
     if (!coverId || !/^[0-9a-f-]{36}$/i.test(coverId) || this.warmedCoverIds.has(coverId)) return;
     this.warmedCoverIds.add(coverId);
     if (this.warmedCoverIds.size > this.maxRememberedWarmCovers) {
@@ -78,6 +80,20 @@ export class PublicationBarrier {
         // authoritative regardless of warming outcome.
         if (!warmed) {
           this.warmedCoverIds.delete(coverId);
+          // Media can become visible to the site worker a few seconds after
+          // the publication transaction commits. Retry that propagation race
+          // once, without holding the serialized warming lane or a DB client.
+          if (retryAttempt === 0 &&
+              this.pendingCoverWarmRetries.size < this.maxPendingCoverWarmRetries &&
+              !this.pendingCoverWarmRetries.has(coverId)) {
+            this.pendingCoverWarmRetries.add(coverId);
+            const retryTimer = setTimeout(() => {
+              this.pendingCoverWarmRetries.delete(coverId);
+              this.warmPublishedCover(coverId, 1);
+            }, 15_000);
+            retryTimer.unref?.();
+            return;
+          }
           // A failed warmer is operationally meaningful, but one warning per
           // minute keeps a bad edge route from becoming a hot-path log storm.
           if (Date.now() - this.lastCoverWarmFailureLogAt >= 60_000) {
