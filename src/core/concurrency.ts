@@ -1279,7 +1279,13 @@ export class AdaptiveAutotuner {
     if (throughput.status === 'CEILING_REACHED' || throughput.emaRate >= ceiling) {
       state = 'CEILING_REACHED';
       action = 'STABLE';
-      const reason = `Throughput ceiling reached (${throughput.emaRate} cap/min >= ${ceiling} cap/min); holding concurrency at ${previous}`;
+      // A one-minute burst intentionally blocks further scale-up, but it is
+      // not the same thing as sustained throughput. Keep the operational
+      // reason numerically honest so dashboards do not claim "10 >= 12".
+      const burstOnly = throughput.rate1m >= ceiling && throughput.emaRate < ceiling;
+      const reason = burstOnly
+        ? `Throughput burst guard (1m: ${throughput.rate1m} cap/min; sustained: ${throughput.emaRate} < ${ceiling}); holding concurrency at ${previous}`
+        : `Sustained throughput ceiling reached (${throughput.emaRate} cap/min >= ${ceiling} cap/min); holding concurrency at ${previous}`;
       this.latestResult = {
         concurrency: previous,
         targetConcurrency: previous,
