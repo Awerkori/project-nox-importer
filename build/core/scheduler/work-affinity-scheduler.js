@@ -1341,37 +1341,53 @@ export class WorkAffinityScheduler {
         if (!workId || (chapterNumber === undefined && sortKey === null)) {
             return { valid: true };
         }
-        // 1. Check: is this chapter already published canonically in chapters table?
-        const pubCheck = await this.runQuery(this.pool, `
-      SELECT id FROM chapters 
-      WHERE work_id = $1::uuid 
-        AND (number = $2::numeric OR ($3::numeric IS NOT NULL AND number = $3::numeric))
-        AND published_at IS NOT NULL
-      LIMIT 1;
-    `, [workId, chapterNumber !== undefined ? chapterNumber : sortKey, sortKey]);
-        if (pubCheck.rows.length > 0) {
-            const publishedChapterId = pubCheck.rows[0].id;
-            this.logger.info(`Claimed job ${job.id} for work ${workId} ch ${chapterNumber} is already canonically published. Auto-completing immediately.`);
-            await this.runQuery(this.pool, `
-        UPDATE importer_queue 
+        // 1. Check and retire an already-visible chapter in one short statement.
+        //
+        // This path is reached for cross-source duplicates and stale historical
+        // queue rows.  It used to do one read followed by three separate writes,
+        // while a global chapter/source permit was held.  Besides wasting YSQL
+        // round trips, a burst of stale mappings could occupy useful chapter
+        // slots.  The canonical chapter index makes this bounded lookup cheap;
+        // the CTE preserves the existing idempotent cleanup semantics atomically.
+        const alreadyPublished = await this.runQuery(this.pool, `
+      WITH published AS MATERIALIZED (
+        SELECT id
+        FROM chapters
+        WHERE work_id = $1::uuid
+          AND (number = $2::numeric OR ($3::numeric IS NOT NULL AND number = $3::numeric))
+          AND published_at IS NOT NULL
+        LIMIT 1
+      ),
+      claimed_job AS (
+        UPDATE importer_queue q
         SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
-        WHERE id = $1;
-      `, [job.id]);
-            if (sortKey !== null) {
-                await this.runQuery(this.pool, `
-          UPDATE importer_queue
-          SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
-          WHERE (payload->>'workId') = $1
-            AND chapter_sort_key = $2
-            AND status IN ('QUEUED', 'RETRY')
-            AND task_type = 'IMPORT_CHAPTER';
-        `, [workId, sortKey]);
-                await this.runQuery(this.pool, `
-          UPDATE importer_chapter_mappings
-          SET status = 'COMPLETED', is_page_provider = false, chapter_id = $3, updated_at = NOW()
-          WHERE work_id = $1::uuid AND chapter_sort_key = $2 AND status IN ('PENDING', 'QUEUED');
-        `, [workId, sortKey, publishedChapterId]);
-            }
+        FROM published p
+        WHERE q.id = $4
+        RETURNING q.id
+      ),
+      sibling_jobs AS (
+        UPDATE importer_queue q
+        SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
+        FROM published p
+        WHERE (q.payload->>'workId') = $1
+          AND q.chapter_sort_key = $3
+          AND q.status IN ('QUEUED', 'RETRY')
+          AND q.task_type = 'IMPORT_CHAPTER'
+        RETURNING q.id
+      ),
+      sibling_mappings AS (
+        UPDATE importer_chapter_mappings m
+        SET status = 'COMPLETED', is_page_provider = false, chapter_id = p.id, updated_at = NOW()
+        FROM published p
+        WHERE m.work_id = $1::uuid
+          AND m.chapter_sort_key = $3
+          AND m.status IN ('PENDING', 'QUEUED')
+        RETURNING m.id
+      )
+      SELECT id FROM published;
+    `, [workId, chapterNumber !== undefined ? chapterNumber : sortKey, sortKey, job.id]);
+        if (alreadyPublished.rows.length > 0) {
+            this.logger.info(`Claimed job ${job.id} for work ${workId} ch ${chapterNumber} is already canonically published. Auto-completing immediately.`);
             return { valid: false, reason: 'ALREADY_PUBLISHED' };
         }
         // 2. Safety check: is there an un-published STAGED chapter behind this one?
