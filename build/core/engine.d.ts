@@ -33,6 +33,19 @@ export declare function computeExternalLivenessState(params: {
     heartbeatTimeoutMs?: number;
     internalState: InternalLivenessState;
 }): ExternalLivenessState;
+/**
+ * A container can restart with the same WORKER_ID before its old 5-minute
+ * leases expire.  Those leases belong to a process which cannot still be
+ * running, so retaining them would briefly admit a second cohort on top of
+ * the configured capacity.  Keep this deliberately scoped to this worker;
+ * other workers and genuinely active leases are never touched.
+ */
+export declare function reclaimStartupOwnedLeases(pool: {
+    query: (text: string, params?: unknown[]) => Promise<{
+        rowCount?: number | null;
+        rows?: unknown[];
+    }>;
+}, workerId: string): Promise<number>;
 export declare class JobCancelledByStaffError extends Error {
     readonly jobId: string;
     constructor(jobId: string, message?: string);

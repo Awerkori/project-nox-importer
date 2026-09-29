@@ -86,6 +86,37 @@ export function computeExternalLivenessState(params: {
   return params.internalState;
 }
 
+/**
+ * A container can restart with the same WORKER_ID before its old 5-minute
+ * leases expire.  Those leases belong to a process which cannot still be
+ * running, so retaining them would briefly admit a second cohort on top of
+ * the configured capacity.  Keep this deliberately scoped to this worker;
+ * other workers and genuinely active leases are never touched.
+ */
+export async function reclaimStartupOwnedLeases(
+  pool: { query: (text: string, params?: unknown[]) => Promise<{ rowCount?: number | null; rows?: unknown[] }> },
+  workerId: string
+): Promise<number> {
+  const result = await pool.query(
+    `UPDATE importer_queue
+     SET status = 'QUEUED',
+         locked_by = NULL,
+         locked_at = NULL,
+         lease_expires_at = NULL,
+         next_run_at = NOW(),
+         last_recovered_error = COALESCE(last_error, 'Worker restarted before lease completion'),
+         recovered_at = NOW(),
+         retry_reason = 'WORKER_RESTART_RECOVERED',
+         last_error = NULL,
+         updated_at = NOW()
+     WHERE status = 'IMPORTING'
+       AND locked_by = $1
+     RETURNING id`,
+    [workerId]
+  );
+  return result.rowCount ?? result.rows?.length ?? 0;
+}
+
 export class JobCancelledByStaffError extends Error {
   constructor(public readonly jobId: string, message: string = 'Job cancelado pela Staff no checkpoint seguro') {
     super(message);
@@ -457,6 +488,15 @@ export class ImporterEngine {
 
   async runStartupRecovery(): Promise<void> {
     try {
+      const pool = (this.dbPool && typeof this.dbPool.query === 'function') ? this.dbPool : getYugabytePool();
+      const reclaimedOwnedLeases = await reclaimStartupOwnedLeases(pool, this.config.WORKER_ID);
+      if (reclaimedOwnedLeases > 0) {
+        this.logger.warn(
+          `Startup reclaimed ${reclaimedOwnedLeases} lease(s) from the prior process with this worker identity`,
+          { workerId: this.config.WORKER_ID, reclaimedOwnedLeases }
+        );
+      }
+
       this.logger.info('Starting generic lease recovery for stalled jobs...');
       let { recovered, failed } = await this.queue.recoverExpiredLeases();
       if (recovered > 0 || failed > 0) {
