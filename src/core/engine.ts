@@ -1184,6 +1184,14 @@ export class ImporterEngine {
           canonicalRate5m: rateMetrics.rate5m,
         };
         const throughputData = this.autotuner.getThroughputTelemetry(throughputContext);
+        // The heartbeat is the admin panel's one low-overhead snapshot. Keep
+        // the capacity explanation in that existing write rather than adding
+        // a polling query per limiter or per slot.
+        const slotRuntime = telemetryCollector.getSlotProductivitySnapshot();
+        const chapterLimiter = this.autotuner.getGlobalChapterSemaphore();
+        const mediaLimiter = this.autotuner.getGlobalMediaSemaphore();
+        const downloadLimiter = this.autotuner.getGlobalInflightRequestSemaphore();
+        const bufferLimiter = this.autotuner.getBufferedPageSemaphore();
 
         // Write atomic heartbeat and health panel to settings table for external watchdog / supervisor monitoring
         try {
@@ -1212,13 +1220,42 @@ export class ImporterEngine {
               pressureScore: this.protectiveSentinel.getPressureSnapshot().pressureScore,
               siteHealth: this.protectiveSentinel.getPressureSnapshot().siteHealth,
               pressureReason: this.protectiveSentinel.getPressureSnapshot().pressureReason,
-              targetFloor: 5,
-              optimalLow: 7,
-              optimalHigh: 9,
-              preferredHigh: 10,
-              ceiling: 12,
+              targetFloor: throughputData.targetFloor,
+              optimalLow: throughputData.optimalLow,
+              optimalHigh: throughputData.optimalHigh,
+              preferredHigh: throughputData.preferredHigh,
+              ceiling: throughputData.ceiling,
               limitingFactor: throughputData.limitingFactor,
               throughputStatus: throughputData.status,
+            },
+            pipelineCapacity: {
+              slots: {
+                ...slotRuntime,
+                chapterPermitsActive: chapterLimiter.active,
+                chapterPermitsAvailable: chapterLimiter.available,
+              },
+              media: {
+                configuredCapacity: mediaLimiter.capacity,
+                active: mediaLimiter.active,
+                available: mediaLimiter.available,
+                waiters: mediaLimiter.queued,
+              },
+              downloads: {
+                configuredCapacity: downloadLimiter.capacity,
+                active: downloadLimiter.active,
+                available: downloadLimiter.available,
+                waiters: downloadLimiter.queued,
+              },
+              buffers: {
+                configuredCapacity: bufferLimiter.capacity,
+                active: bufferLimiter.active,
+                available: bufferLimiter.available,
+                waiters: bufferLimiter.queued,
+                committedBytes: this.autotuner.getCommittedBytes(),
+                reservedBytes: this.autotuner.getReservedBytes(),
+              },
+              eligibleSourceCount: candidateSources.filter((source) => this.circuitBreaker.canExecute(source)).length,
+              sourceCandidates: candidateSources.length,
             },
             autoEmergencyPause: this.protectiveSentinel.getEmergencyPauseState(),
             throughput: throughputData,
