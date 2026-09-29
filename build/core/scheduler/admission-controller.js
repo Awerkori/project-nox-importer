@@ -501,7 +501,7 @@ export class AdmissionController {
         // 1. Replenish P1 Backfill Works
         if (backfillSlotsAvailable > 0) {
             const activeIds = activeWorks.map((w) => w.workId);
-            const candidatesRes = await this.runQuery(`WITH queue_candidates AS MATERIALIZED (
+            const candidatesRes = await this.runQuery(`WITH queue_candidate_groups AS MATERIALIZED (
            SELECT payload->>'workId' AS work_id, source, COUNT(*) AS pending_jobs,
              MIN(chapter_sort_key) AS min_sort_key
            FROM importer_queue
@@ -509,6 +509,18 @@ export class AdmissionController {
              AND attempts < COALESCE(max_attempts,7)
              AND NOT ((payload->>'workId') = ANY($1::text[]))
            GROUP BY payload->>'workId', source
+         ),
+         queue_candidates AS MATERIALIZED (
+           SELECT work_id, source, pending_jobs, min_sort_key
+           FROM (
+             SELECT g.*,
+               ROW_NUMBER() OVER (
+                 PARTITION BY source
+                 ORDER BY pending_jobs DESC, min_sort_key ASC NULLS LAST
+               ) AS source_rank
+             FROM queue_candidate_groups g
+           ) ranked
+           WHERE source_rank <= $3
          )
          SELECT q.work_id,
                 w.title,
@@ -525,7 +537,11 @@ export class AdmissionController {
            AND s.enabled = true
            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
          ORDER BY queued_count DESC
-         LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], Math.max(50, backfillSlotsAvailable * 5)]);
+         LIMIT $2`, [
+                activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
+                Math.max(50, backfillSlotsAvailable * 5),
+                4,
+            ]);
             // Fast frontier check: query max_published for candidate works only
             const candidateWorkIds = candidatesRes.rows.map((r) => r.work_id);
             const pubMap = new Map();
@@ -659,13 +675,15 @@ export class AdmissionController {
         }
         else if (newWorkSlotsAvailable > 0) {
             const activeIds = this.stateStore.getActiveWorks().map((w) => w.workId);
-            const candidatesRes = await this.runQuery(`SELECT (q.payload->>'workId') as work_id,
+            const candidatesRes = await this.runQuery(`WITH queue_candidates AS MATERIALIZED (
+           SELECT (q.payload->>'workId') as work_id,
                 w.title,
                 q.source,
                 COUNT(*) as pending_jobs,
                 COUNT(CASE WHEN q.status = 'QUEUED' THEN 1 END) as queued_count,
                 COUNT(CASE WHEN q.status = 'PAUSED_BY_STAFF' THEN 1 END) as paused_count,
-                MIN(q.chapter_sort_key) as min_sort_key
+                MIN(q.chapter_sort_key) as min_sort_key,
+                w.created_at
          FROM importer_queue q
          JOIN works w ON w.id = (q.payload->>'workId')::uuid
          JOIN importer_sources s ON s.id = q.source
@@ -676,8 +694,23 @@ export class AdmissionController {
            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
            AND NOT ((q.payload->>'workId') = ANY($1::text[]))
          GROUP BY (q.payload->>'workId'), w.title, q.source, w.created_at
-         ORDER BY w.created_at DESC
-         LIMIT $2`, [activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'], newWorkSlotsAvailable * 3]);
+         )
+         SELECT work_id, title, source, pending_jobs, queued_count, paused_count, min_sort_key, created_at
+         FROM (
+           SELECT q.*,
+             ROW_NUMBER() OVER (
+               PARTITION BY source
+               ORDER BY created_at DESC
+             ) AS source_rank
+           FROM queue_candidates q
+         ) ranked
+         WHERE source_rank <= $3
+         ORDER BY created_at DESC
+         LIMIT $2`, [
+                activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
+                newWorkSlotsAvailable * 3,
+                4,
+            ]);
             // Sort P2 candidates by permit headroom and source diversity
             candidatesRes.rows.sort((a, b) => {
                 const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
