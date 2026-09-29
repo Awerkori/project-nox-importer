@@ -1369,7 +1369,7 @@ export class WorkAffinityScheduler {
         UPDATE importer_queue q
         SET status = 'COMPLETED', updated_at = NOW(), last_error = 'CANONICAL_ALREADY_SATISFIED'
         FROM published p
-        WHERE (q.payload->>'workId') = $1
+        WHERE (q.payload->>'workId') = $1::text
           AND q.chapter_sort_key = $3
           AND q.status IN ('QUEUED', 'RETRY')
           AND q.task_type = 'IMPORT_CHAPTER'
