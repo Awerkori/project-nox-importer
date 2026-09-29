@@ -30,6 +30,7 @@ export declare class WorkAffinityScheduler {
     private pool;
     private inFlightByWork;
     private inFlightChapterKeys;
+    private pendingClaimReservationsByWork;
     private p0ConsecutiveClaims;
     private rrIndexP1;
     private rrIndexP2;
