@@ -31,6 +31,7 @@ describe('runtime leadership lease', () => {
 
     const [sql, params] = query.mock.calls[0];
     expect(sql).toContain("INSERT INTO settings AS leader");
+    expect(sql).toContain("$2::text");
     expect(params[0]).toBe('importer_runtime_leader');
     expect(sql).toContain("expires_at");
     expect(params[1]).toMatch(/^discloud-importer-1@/);
