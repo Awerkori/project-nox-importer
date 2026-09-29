@@ -5,7 +5,6 @@ export class HostRateLimiter {
     defaultRatePerSecond;
     buckets = new Map();
     logger = new Logger('RateLimiter');
-    turboMode = false;
     constructor(defaultRatePerSecond = 5.0) {
         this.defaultRatePerSecond = defaultRatePerSecond;
         if (process.env.DEFAULT_HOST_RATE_PER_SECOND) {
@@ -18,14 +17,12 @@ export class HostRateLimiter {
     setHostRate(host, ratePerSecond, capacity, maxRatePerSecond, minRatePerSecond) {
         const minRate = minRatePerSecond ?? Math.max(1.0, ratePerSecond * 0.5);
         const maxRate = maxRatePerSecond ?? Math.max(ratePerSecond * 2.5, 16.0);
-        const effectiveRate = this.turboMode ? Math.min(maxRate, ratePerSecond * 1.5) : ratePerSecond;
-        const cap = capacity ?? Math.max(2, Math.ceil(effectiveRate * 2));
+        const cap = capacity ?? Math.max(2, Math.ceil(ratePerSecond * 2));
         this.buckets.set(host, {
             tokens: cap,
             lastRefill: Date.now(),
             capacity: cap,
-            ratePerSecond: effectiveRate,
-            baseRatePerSecond: ratePerSecond,
+            ratePerSecond,
             maxRatePerSecond: maxRate,
             minRatePerSecond: minRate,
             consecutiveSuccesses: 0,
@@ -41,7 +38,6 @@ export class HostRateLimiter {
                 lastRefill: Date.now(),
                 capacity: cap,
                 ratePerSecond: this.defaultRatePerSecond,
-                baseRatePerSecond: this.defaultRatePerSecond,
                 maxRatePerSecond: Math.max(this.defaultRatePerSecond * 2.5, 16.0),
                 minRatePerSecond: Math.max(1.0, this.defaultRatePerSecond * 0.5),
                 consecutiveSuccesses: 0,
@@ -54,11 +50,11 @@ export class HostRateLimiter {
     recordSuccess(host) {
         const bucket = this.getBucket(host);
         bucket.consecutiveSuccesses++;
-        // Additive Increase: every 8 consecutive successes (or 4 in turbo mode), ramp rate up
-        const rampThreshold = this.turboMode ? 4 : 8;
-        if (bucket.consecutiveSuccesses >= rampThreshold) {
+        // Keep host recovery independent of queue priority. A Staff request must
+        // not accelerate every source sharing this global limiter.
+        if (bucket.consecutiveSuccesses >= 8) {
             bucket.consecutiveSuccesses = 0;
-            const step = this.turboMode ? 1.0 : 0.5;
+            const step = 0.5;
             if (bucket.ratePerSecond < bucket.maxRatePerSecond) {
                 const oldRate = bucket.ratePerSecond;
                 bucket.ratePerSecond = Math.min(bucket.maxRatePerSecond, bucket.ratePerSecond + step);
@@ -66,22 +62,6 @@ export class HostRateLimiter {
                 this.logger.debug(`HostRateLimiter AIMD scale-up for ${host}: ${oldRate.toFixed(1)} -> ${bucket.ratePerSecond.toFixed(1)} req/s`);
             }
         }
-    }
-    setTurboMode(enabled) {
-        this.turboMode = enabled;
-        for (const [host, bucket] of this.buckets.entries()) {
-            if (enabled) {
-                bucket.ratePerSecond = Math.min(bucket.maxRatePerSecond, Math.max(bucket.ratePerSecond, bucket.baseRatePerSecond * 1.5));
-            }
-            else {
-                bucket.ratePerSecond = bucket.baseRatePerSecond;
-            }
-            bucket.capacity = Math.max(2, Math.ceil(bucket.ratePerSecond * 2));
-        }
-        this.logger.info(`HostRateLimiter turbo mode: ${enabled ? 'ENABLED' : 'DISABLED'}`);
-    }
-    isTurboMode() {
-        return this.turboMode;
     }
     getHostRate(host) {
         return this.getBucket(host).ratePerSecond;

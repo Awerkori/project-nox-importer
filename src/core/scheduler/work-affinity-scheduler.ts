@@ -39,6 +39,20 @@ export function isActiveChapterClaimConflict(error: any): boolean {
       String(error?.message || '').includes('idx_importer_queue_one_importing_canonical_chapter'));
 }
 
+/**
+ * Staff requests own the scheduling order, not the resource budget. After a
+ * bounded Staff burst, a waiting P0 gets one opportunity to claim the next
+ * slot. The caller still applies the normal source, DB, media and global
+ * chapter permits, so this cannot manufacture capacity.
+ */
+export function shouldReserveP0AfterStaffBurst(
+  consecutiveStaffClaims: number,
+  antiStarvationRatio: number,
+  hasP0Candidate: boolean,
+): boolean {
+  return hasP0Candidate && antiStarvationRatio > 0 && consecutiveStaffClaims >= antiStarvationRatio;
+}
+
 export interface AcquiredSchedulerJob {
   job: any;
   lane: SchedulerLane;
@@ -54,7 +68,9 @@ export class WorkAffinityScheduler {
   // statement returns. Reserve a known work during that gap so concurrent
   // runner slots do not claim-and-release work #3 when the limit is 2.
   private pendingClaimReservationsByWork: Map<string, number> = new Map();
-  private p0ConsecutiveClaims = 0;
+  // Counts actual successful STAFF_FORCED claims. It is deliberately local to
+  // ordering: it never changes semaphores, pool size, or worker capacity.
+  private staffConsecutiveClaims = 0;
   private rrIndexP1 = 0;
   private rrIndexP2 = 0;
   private rrCatalogSourceIndex = 0;
@@ -135,7 +151,9 @@ export class WorkAffinityScheduler {
     try {
       const r = await this.runQuery(this.pool, `
         SELECT 1 FROM importer_queue 
-        WHERE status = 'QUEUED' AND task_type = 'IMPORT_CHAPTER' AND priority >= 100 
+        WHERE (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW()))
+          AND task_type = 'IMPORT_CHAPTER'
+          AND priority >= 100 AND priority < 1000
         LIMIT 1;
       `);
       this.hasP0InQueue = r.rows.length > 0;
@@ -400,6 +418,32 @@ export class WorkAffinityScheduler {
     }
   }
 
+  private completeStaffClaim(staffForcedJob: any, t0: number, telemetry: AcquireTelemetry): any {
+    const waitTimeMs = performance.now() - t0;
+    telemetry.totalAcquireMs = Math.round(waitTimeMs * 10) / 10;
+    staffForcedJob._acquireTelemetry = telemetry;
+    const workId = staffForcedJob.payload?.workId || '';
+    this.onJobStarted(workId, staffForcedJob.chapter_sort_key);
+    this.lastClaimTime = Date.now();
+    this.staffConsecutiveClaims++;
+
+    const decision: SchedulerDecision = {
+      jobId: staffForcedJob.id,
+      workId,
+      workTitle: staffForcedJob.payload?.chapterTitle || 'Staff Forced Job',
+      chapterNumber: staffForcedJob.payload?.chapterNumber ?? 0,
+      chapterSortKey: staffForcedJob.chapter_sort_key ?? 0,
+      lane: SchedulerLane.STAFF_FORCED,
+      reason: 'STAFF_PRIORITY_WITH_P0_BOUNDED_RESERVATION',
+      workState: 'FILLING',
+      source: staffForcedJob.source,
+      waitTimeMs: Math.round(waitTimeMs * 10) / 10,
+      decisionTime: new Date().toISOString(),
+    };
+    this.logDecision(decision);
+    return staffForcedJob;
+  }
+
   /**
    * Core intelligent claim logic implementing P0 -> P1 -> P2 -> Fallback.
    */
@@ -434,47 +478,35 @@ export class WorkAffinityScheduler {
     };
 
     // -------------------------------------------------------------
-    // LANE STAFF_FORCED: Explicit Absolute Staff Priority
+    // LANE STAFF_FORCED: Explicit Staff Priority
     // Any eligible STAFF_FORCED job (priority >= 1000, staffForced=true,
-    // or active staff request) ALWAYS preempts P0, P1, P2, P3.
-    // Next free worker slot MUST be allocated to this work.
-    // Preserves manual priority ordering via importer_staff_requests.
+    // or active staff request) wins normal selection. A bounded P0 reservation
+    // after a Staff burst avoids starving a genuinely fresh release forever;
+    // it does not change any global resource limiter.
     // -------------------------------------------------------------
     const fullWorkIds = this.getFullInFlightWorkIds(config.maxInflightPerWork);
-    const tStaff0 = performance.now();
-    const staffForcedJob = await this.claimStaffForcedJob(this.pool, {
-      workerId: options.workerId,
-      leaseMin,
-      allowedSources,
-      disallowedWorkIds: fullWorkIds,
-      telemetry,
-    });
-    telemetry.staffCheckMs = Math.round((performance.now() - tStaff0) * 10) / 10;
+    const reserveP0 = shouldReserveP0AfterStaffBurst(
+      this.staffConsecutiveClaims,
+      config.antiStarvationRatio,
+      await this.hasP0Candidate(),
+    );
+    let staffForcedJob: any | null = null;
+    if (!reserveP0) {
+      const tStaff0 = performance.now();
+      staffForcedJob = await this.claimStaffForcedJob(this.pool, {
+        workerId: options.workerId,
+        leaseMin,
+        allowedSources,
+        disallowedWorkIds: fullWorkIds,
+        telemetry,
+      });
+      telemetry.staffCheckMs = Math.round((performance.now() - tStaff0) * 10) / 10;
+    }
 
     if (staffForcedJob) {
-      const waitTimeMs = performance.now() - t0;
-      telemetry.totalAcquireMs = Math.round(waitTimeMs * 10) / 10;
-      staffForcedJob._acquireTelemetry = telemetry;
-      const workId = staffForcedJob.payload?.workId || '';
-      this.onJobStarted(workId, staffForcedJob.chapter_sort_key);
-      this.lastClaimTime = Date.now();
-
-      const decision: SchedulerDecision = {
-        jobId: staffForcedJob.id,
-        workId,
-        workTitle: staffForcedJob.payload?.chapterTitle || 'Staff Forced Job',
-        chapterNumber: staffForcedJob.payload?.chapterNumber ?? 0,
-        chapterSortKey: staffForcedJob.chapter_sort_key ?? 0,
-        lane: SchedulerLane.STAFF_FORCED,
-        reason: 'STAFF_FORCED_ABSOLUTE_PRIORITY',
-        workState: 'FILLING',
-        source: staffForcedJob.source,
-        waitTimeMs: Math.round(waitTimeMs * 10) / 10,
-        decisionTime: new Date().toISOString(),
-      };
-      this.logDecision(decision);
-      return staffForcedJob;
+      return this.completeStaffClaim(staffForcedJob, t0, telemetry);
     }
+    if (!reserveP0) this.staffConsecutiveClaims = 0;
 
     // -------------------------------------------------------------
     // LANE P0: Fresh New Releases (Priority >= 100) - ABSOLUTE PRIORITY
@@ -489,11 +521,15 @@ export class WorkAffinityScheduler {
         leaseMin,
         allowedSources,
         minPriority: 100,
+        maxPriority: 999,
         disallowedWorkIds: fullWorkIds,
         telemetry,
       });
 
       if (p0Job) {
+        // A P0 claim consumes the bounded reservation and begins a fresh
+        // Staff burst. It has used the exact same normal claim path/limits.
+        this.staffConsecutiveClaims = 0;
         this.genericClaimSuccesses++;
         const waitTimeMs = performance.now() - t0;
         telemetry.p0ProbeMs = Math.round((performance.now() - tP0_0) * 10) / 10;
@@ -528,6 +564,23 @@ export class WorkAffinityScheduler {
       }
     }
     telemetry.p0ProbeMs = Math.round((performance.now() - tP0_0) * 10) / 10;
+
+    // The P0 that triggered a reservation may have raced another worker or
+    // become source-blocked. Do not waste a healthy slot: Staff resumes only
+    // after that bounded P0 opportunity was actually attempted.
+    if (reserveP0) {
+      const tStaff0 = performance.now();
+      staffForcedJob = await this.claimStaffForcedJob(this.pool, {
+        workerId: options.workerId,
+        leaseMin,
+        allowedSources,
+        disallowedWorkIds: fullWorkIds,
+        telemetry,
+      });
+      telemetry.staffCheckMs += Math.round((performance.now() - tStaff0) * 10) / 10;
+      if (staffForcedJob) return this.completeStaffClaim(staffForcedJob, t0, telemetry);
+      this.staffConsecutiveClaims = 0;
+    }
 
     // -------------------------------------------------------------
     // LANE P1: Critical Gap (Priority >= 90, unblocks STAGED barrier)
@@ -1149,23 +1202,22 @@ export class WorkAffinityScheduler {
   ): Promise<any | null> {
     const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
 
-    // 1. Check for active staff requests (cached for 3s to eliminate DB query per claim)
+    // 1. Check for active staff requests (cached for 3s to eliminate DB query per claim).
+    // Historical schema revisions used QUEUED/IMPORTING/RETRYING while newer
+    // control paths may use ACTIVE; accept both without making priority depend
+    // on one deployment-era spelling.
     const now = Date.now();
     let staffWorkIds = this.cachedStaffWorkIds;
     if (now - this.lastStaffCheckTime > 3000 || !staffWorkIds) {
       const activeReqs = await this.runQuery(client, `
         SELECT work_id::text, priority_boost, created_at 
         FROM importer_staff_requests 
-        WHERE status = 'ACTIVE' 
+        WHERE status IN ('ACTIVE', 'QUEUED', 'IMPORTING', 'RETRYING')
         ORDER BY priority_boost DESC, created_at ASC
       `, [], opts.telemetry);
       this.lastStaffCheckTime = now;
       this.cachedStaffWorkIds = activeReqs.rows.map((r: any) => r.work_id);
       staffWorkIds = this.cachedStaffWorkIds;
-    }
-
-    if (!staffWorkIds || staffWorkIds.length === 0) {
-      return null;
     }
 
     const query = `
@@ -1174,7 +1226,8 @@ export class WorkAffinityScheduler {
         FROM importer_queue q
         JOIN importer_sources s ON s.id = q.source
         LEFT JOIN importer_staff_requests sr 
-          ON sr.work_id = (q.payload->>'workId')::uuid AND sr.status = 'ACTIVE'
+          ON sr.work_id = (q.payload->>'workId')::uuid
+         AND sr.status IN ('ACTIVE', 'QUEUED', 'IMPORTING', 'RETRYING')
         WHERE (
           q.status = 'QUEUED'
           OR (q.status = 'RETRY' AND q.next_run_at <= NOW())
@@ -1184,7 +1237,10 @@ export class WorkAffinityScheduler {
           AND s.enabled = true
           AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
-          AND (q.payload->>'workId') = ANY($6::text[])
+          AND (
+            q.priority >= 1000
+            OR (q.payload->>'workId') = ANY($6::text[])
+          )
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
           AND NOT EXISTS (
@@ -1253,6 +1309,7 @@ export class WorkAffinityScheduler {
       leaseMin: number;
       allowedSources: string[] | null;
       minPriority?: number;
+      maxPriority?: number;
       workId?: string;
       sortKey?: number;
       allowedWorkIds?: string[] | null;
@@ -1296,6 +1353,7 @@ export class WorkAffinityScheduler {
           AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::int IS NULL OR q.priority >= $2::int)
+          AND ($10::int IS NULL OR q.priority <= $10::int)
           AND ($3::text IS NULL OR (q.payload->>'workId') = $3::text)
           AND ($4::numeric IS NULL OR q.chapter_sort_key = $4::numeric)
           AND ($7::text[] IS NULL OR (q.payload->>'workId') = ANY($7::text[]))
@@ -1349,6 +1407,7 @@ export class WorkAffinityScheduler {
           opts.allowedWorkIds || null,
           opts.disallowedWorkIds || null,
           disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
+          opts.maxPriority ?? null,
         ]);
         const sqlMs = performance.now() - tLockSql0;
         if (opts.telemetry) {

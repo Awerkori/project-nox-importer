@@ -13,6 +13,21 @@ export interface MatchCandidate {
     slug?: string;
     aliases?: string[];
     kind?: string;
+    author?: string;
+    artist?: string;
+    synopsis?: string;
+    year?: number | null;
+}
+export interface MetadataMatchEvidence {
+    score: number;
+    authorExact: boolean;
+    artistExact: boolean;
+    kindCompatible: boolean;
+    yearCompatible: boolean;
+    titleSimilarity: number;
+    synopsisSimilarity: number;
+    autoMatch: boolean;
+    ambiguous: boolean;
 }
 /**
  * Curated Canonical Synonym Groups.
@@ -57,6 +72,12 @@ export declare function levenshteinSimilarity(s1: string, s2: string): number;
  * Token Jaccard overlap ratio.
  */
 export declare function tokenOverlapRatio(s1: string, s2: string): number;
+/**
+ * Metadata is deliberately corroborative. It may upgrade a candidate only
+ * when creator, kind, synopsis and title evidence agree; weaker evidence is
+ * retained for an AMBIGUOUS review rather than creating a risky auto-merge.
+ */
+export declare function evaluateMetadataMatchEvidence(target: MatchCandidate, candidate: MatchCandidate): MetadataMatchEvidence;
 /**
  * Evaluates whether candidate work matches target work with safety constraints.
  */

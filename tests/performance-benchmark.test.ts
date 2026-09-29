@@ -21,12 +21,8 @@ describe('Importer Performance Benchmarks [INTEGRAÇÃO / SIMULAÇÃO CONTROLADA
     // 8.0 + (24 / 8) * 0.5 = 9.5 req/s
     expect(scaledRate).toBeGreaterThanOrEqual(9.5);
 
-    // Turbo Mode activation (Absolute Priority)
-    limiter.setTurboMode(true);
-    const turboRate = limiter.getHostRate('cdn.nexusmangas.com');
-    expect(turboRate).toBeGreaterThanOrEqual(12.0);
-
-    limiter.setTurboMode(false);
+    // Staff priority must not mutate this process-wide source limiter.
+    expect(limiter.getHostRate('cdn.nexusmangas.com')).toBe(scaledRate);
   });
 
   it('Benchmark 2: Overlapped Producer-Consumer vs Serial Pipeline Speedup Simulation', async () => {
