@@ -63,6 +63,9 @@ export interface AutotunerConfig {
     preferredFreshPerMin?: number;
     maxFreshPerMin?: number;
     catastrophicSiteLatencyMs?: number;
+    mediaConcurrency?: number;
+    downloadInflightConcurrency?: number;
+    bufferedPageConcurrency?: number;
 }
 export type AdaptiveCapacityState = 'RUNNING_ACCELERATING' | 'RUNNING_STABLE' | 'RUNNING_THROTTLED' | 'SURVIVAL' | 'WAITING_DEPENDENCY' | 'WAITING_SOURCES' | 'RECOVERING' | 'MANUAL_STOP' | 'AUTO_EMERGENCY_PAUSE' | 'THROUGHPUT_CONSTRAINED' | 'RUNNING_BELOW_TARGET' | 'RUNNING_OPTIMAL' | 'RUNNING_PREFERRED' | 'CEILING_REACHED';
 export type ThroughputStatus = 'STALL' | 'THROUGHPUT_CONSTRAINED' | 'RUNNING_BELOW_TARGET' | 'RUNNING_OPTIMAL' | 'RUNNING_PREFERRED' | 'CEILING_REACHED';

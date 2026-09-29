@@ -51,7 +51,12 @@ const ConfigSchema = z.object({
   // does not benefit from a larger direct pool.
   DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(10).default(2),
   UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.coerce.number().int().default(4194304),
-  TELEGRAM_MEDIA_CONCURRENCY: z.coerce.number().int().default(12),
+  // These are global pipeline ceilings, not per-chapter multipliers.  Keep
+  // them aligned with the small production container so a chapter ramp cannot
+  // create a hidden 24+ request/media burst behind five chapter slots.
+  TELEGRAM_MEDIA_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
+  DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
+  BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(12),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   IMPORTER_DB_MODE: z.enum(['direct', 'gateway']).default('direct'),
   YUGABYTE_HOST: z.string().default('sa-east-1.b49305ea-8536-43e6-936e-b2fd77fc07b0.aws.yugabyte.cloud'),
