@@ -711,6 +711,23 @@ export class AdaptiveAutotuner {
         this.eligibleSourceCountForFairness = next;
         this.refreshSourceSemaphoreCapacities();
     }
+    /**
+     * Fairness must follow sources that actually have chapter work in flight,
+     * not every enabled provider.  Counting idle providers made a lone backlog
+     * look like a 50-source workload and stranded otherwise safe capacity.
+     *
+     * Once another source is claimed it immediately joins the fairness set;
+     * existing holders drain naturally if the resulting local cap is smaller.
+     */
+    refreshSourceFairnessFromActiveSources(sources) {
+        let activeSources = 0;
+        for (const source of sources) {
+            if (this.getSourceSemaphore(source).active > 0)
+                activeSources++;
+        }
+        this.setEligibleSourceCountForFairness(Math.max(1, activeSources));
+        return Math.max(1, activeSources);
+    }
     getSourceFairnessCap() {
         const globalCapacity = this.globalChapterSemaphore.capacity;
         if (this.eligibleSourceCountForFairness <= 1)

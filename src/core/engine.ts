@@ -1722,16 +1722,11 @@ export class ImporterEngine {
       ? this.activeSourcesCache.sources
       : Object.keys(SOURCE_CONCURRENCY_LIMITS);
 
-    // A source's configured limit is an upper bound. When several sources are
-    // healthy, cap each one to a fair share of the current global capacity so
-    // a slow provider cannot retain nearly every chapter slot. This is local
-    // source isolation, not a global throttle; the one-source case remains
-    // work-conserving.
-    const healthySourceCount = candidateSources.reduce(
-      (count, source) => count + (this.circuitBreaker.canExecute(source) ? 1 : 0),
-      0,
-    );
-    this.autotuner.setEligibleSourceCountForFairness(healthySourceCount);
+    // A source's configured limit is an upper bound.  Fairness follows
+    // chapter sources that are actually in flight, rather than every enabled
+    // provider.  The latter can be dozens of idle sources and would throttle
+    // a real one-source backlog without protecting any competing work.
+    this.autotuner.refreshSourceFairnessFromActiveSources(candidateSources);
 
     const eligible: string[] = [];
     for (const src of candidateSources) {
