@@ -244,6 +244,9 @@ export interface AutotunerConfig {
   preferredFreshPerMin?: number;    // 10
   maxFreshPerMin?: number;          // 12
   catastrophicSiteLatencyMs?: number; // 10000
+  mediaConcurrency?: number;
+  downloadInflightConcurrency?: number;
+  bufferedPageConcurrency?: number;
 }
 
 const DEFAULT_AUTOTUNER_CONFIG: AutotunerConfig = {
@@ -474,9 +477,12 @@ export class AdaptiveAutotuner {
     );
     this.lastStableConcurrency = this.currentConcurrency;
 
-    const mediaConcurrency = parseInt(process.env.TELEGRAM_MEDIA_CONCURRENCY || '24', 10);
-    const inflightConcurrency = parseInt(process.env.DOWNLOAD_INFLIGHT_CONCURRENCY || '16', 10);
-    const bufferedConcurrency = parseInt(process.env.BUFFERED_PAGE_CONCURRENCY || '32', 10);
+    // The engine passes parsed runtime configuration here.  The environment
+    // fallbacks retain isolated-autotuner test compatibility, but production
+    // must not silently revive the historic 24/16/32 media burst defaults.
+    const mediaConcurrency = this.config.mediaConcurrency ?? parseInt(process.env.TELEGRAM_MEDIA_CONCURRENCY || '8', 10);
+    const inflightConcurrency = this.config.downloadInflightConcurrency ?? parseInt(process.env.DOWNLOAD_INFLIGHT_CONCURRENCY || '8', 10);
+    const bufferedConcurrency = this.config.bufferedPageConcurrency ?? parseInt(process.env.BUFFERED_PAGE_CONCURRENCY || '12', 10);
     this.bufferedPageSemaphore = new AsyncSemaphore(bufferedConcurrency, 'buffered_page_semaphore');
     this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency, 'global_chapter_semaphore');
     this.globalMediaSemaphore = new AsyncSemaphore(mediaConcurrency, 'telegram_media_semaphore');

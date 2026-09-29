@@ -8,9 +8,11 @@ const PUPPETEER_OPTS = {
   args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--ignore-certificate-errors']
 };
 
+const sessionId = process.env.DISCLOUD_SESSION_ID;
+if (!sessionId) throw new Error('DISCLOUD_SESSION_ID is required; do not store dashboard sessions in source.');
 const DISCLOUD_COOKIE = {
   name: 'session_id',
-  value: '4bc8293a4be7d5e98fe447b89d6d3bb0e12897b1b421820829d4ee8127348f2404af1f927eea5a62c186f98bc11ef7676a9f9a68',
+  value: sessionId,
   domain: '.discloud.com',
   path: '/'
 };
@@ -23,7 +25,7 @@ let targetBandwidthMb = 4.0;
 let targetPoolMax = 2;
 let action = 'rebuild'; // Default to rebuild so new .env is always baked in
 
-let targetMediaConcurrency = 16;
+let targetMediaConcurrency = 8;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--workers' && args[i+1]) {
@@ -77,8 +79,8 @@ const envMap = {
   YUGABYTE_SSL_CERT: 'certs/yugabyte-root.crt',
   DIRECT_DB_POOL_MAX: String(targetPoolMax),
   DEFAULT_HOST_RATE_PER_SECOND: '5.0',
-  BUFFERED_PAGE_CONCURRENCY: '160',
-  DOWNLOAD_INFLIGHT_CONCURRENCY: '64'
+  BUFFERED_PAGE_CONCURRENCY: '12',
+  DOWNLOAD_INFLIGHT_CONCURRENCY: '8'
 };
 
 const ENV_CONTENT = Object.entries(envMap)

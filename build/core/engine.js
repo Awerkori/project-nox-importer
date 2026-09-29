@@ -228,6 +228,9 @@ export class ImporterEngine {
             rssHardLimitMb: 430,
             rssEmergencyLimitMb: 460,
             maxBufferedBytes: resolveBufferBudgetBytes(),
+            mediaConcurrency: config.TELEGRAM_MEDIA_CONCURRENCY,
+            downloadInflightConcurrency: config.DOWNLOAD_INFLIGHT_CONCURRENCY,
+            bufferedPageConcurrency: config.BUFFERED_PAGE_CONCURRENCY,
         });
         this.scheduler.setPublicationBarrier(this.publicationBarrier);
         this.scheduler.setSourcePermitProvider((source) => {

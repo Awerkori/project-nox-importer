@@ -20,6 +20,8 @@ declare const ConfigSchema: z.ZodObject<{
     DIRECT_DB_POOL_MAX: z.ZodDefault<z.ZodNumber>;
     UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.ZodDefault<z.ZodNumber>;
     TELEGRAM_MEDIA_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
+    DOWNLOAD_INFLIGHT_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
+    BUFFERED_PAGE_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     LOG_LEVEL: z.ZodDefault<z.ZodEnum<["debug", "info", "warn", "error"]>>;
     IMPORTER_DB_MODE: z.ZodDefault<z.ZodEnum<["direct", "gateway"]>>;
     YUGABYTE_HOST: z.ZodDefault<z.ZodString>;
@@ -45,6 +47,8 @@ declare const ConfigSchema: z.ZodObject<{
     DIRECT_DB_POOL_MAX: number;
     UPLOAD_RATE_LIMIT_BYTES_PER_SEC: number;
     TELEGRAM_MEDIA_CONCURRENCY: number;
+    DOWNLOAD_INFLIGHT_CONCURRENCY: number;
+    BUFFERED_PAGE_CONCURRENCY: number;
     LOG_LEVEL: "debug" | "info" | "warn" | "error";
     IMPORTER_DB_MODE: "direct" | "gateway";
     YUGABYTE_HOST: string;
@@ -79,6 +83,8 @@ declare const ConfigSchema: z.ZodObject<{
     DIRECT_DB_POOL_MAX?: number | undefined;
     UPLOAD_RATE_LIMIT_BYTES_PER_SEC?: number | undefined;
     TELEGRAM_MEDIA_CONCURRENCY?: number | undefined;
+    DOWNLOAD_INFLIGHT_CONCURRENCY?: number | undefined;
+    BUFFERED_PAGE_CONCURRENCY?: number | undefined;
     LOG_LEVEL?: "debug" | "info" | "warn" | "error" | undefined;
     IMPORTER_DB_MODE?: "direct" | "gateway" | undefined;
     YUGABYTE_HOST?: string | undefined;
