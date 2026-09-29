@@ -50,6 +50,10 @@ export declare class WorkAffinityScheduler {
     setChapterCapacityProvider(provider: () => number): void;
     private lastStaffCheckTime;
     private cachedStaffWorkIds;
+    private lastStaffCandidateProbeAt;
+    private hasStaffCandidate;
+    private staffCandidateProbeFlight;
+    private readonly staffCandidateProbeTtlMs;
     private unclaimableWorksCooldown;
     markWorkUnclaimable(workId: string, ttlMs?: number): void;
     isWorkUnclaimable(workId: string): boolean;
@@ -71,6 +75,7 @@ export declare class WorkAffinityScheduler {
     private lastP0ProbeAt;
     private hasP0InQueue;
     private hasP0Candidate;
+    private hasStaffForcedCandidate;
     getClaimStats(): {
         specificAttempts: number;
         specificSuccesses: number;
