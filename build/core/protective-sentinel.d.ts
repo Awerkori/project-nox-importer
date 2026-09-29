@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 export type IncidentClassification = 'MANUAL_STOP' | 'TRANSIENT_EDGE_INCIDENT' | 'REAL_SYSTEM_PRESSURE' | 'YSQL_PRESSURE' | 'IMPORTER_PRESSURE';
 export type SiteHealthState = 'GREEN' | 'YELLOW' | 'ORANGE' | 'RED';
+type SiteProbeLabel = 'home' | 'reader' | 'health';
 export interface AutoEmergencyPauseState {
     active: boolean;
     pausedAt: string | null;
@@ -37,6 +38,8 @@ export interface PressureSnapshot {
         publicationPressure: number;
     };
     pressureReason: string;
+    probeRouteMismatch: boolean;
+    probeRouteMismatchCycles: number;
 }
 export interface ProtectiveStopInfo {
     active: boolean;
@@ -83,6 +86,10 @@ export declare class ProtectiveSentinel {
     private consecutive5xxCount;
     private last5xxTimestamp;
     private consecutiveProbeFailures;
+    private route4xxLabels;
+    private lastProbeStatus;
+    private probeRouteMismatch;
+    private probeRouteMismatchCycles;
     private consecutiveMildDbPressureCycles;
     private cachedReaderChapterId;
     private cachedReaderChapterAt;
@@ -158,7 +165,7 @@ export declare class ProtectiveSentinel {
      * Probes site route latency using keep-alive connection.
      */
     private probeSiteLatency;
-    recordProbeResult(label: 'home' | 'reader', ttfbMs: number, statusCode?: number, timestamp?: number): void;
+    recordProbeResult(label: SiteProbeLabel, ttfbMs: number, statusCode?: number, timestamp?: number): void;
     private recordProbeFailure;
     private updatePressureState;
     private persistAutoEmergencyPause;

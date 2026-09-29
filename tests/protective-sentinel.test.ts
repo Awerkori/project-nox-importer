@@ -102,6 +102,16 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(sentinel.getPressureSnapshot().siteHealth).toBe('ORANGE');
   });
 
+  it('does not let a health corroboration erase a preceding public 5xx', () => {
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
+
+    (sentinel as any).recordProbeResult('home', 90, 503);
+    (sentinel as any).recordProbeResult('home', 90, 404);
+    (sentinel as any).recordProbeResult('health', 90, 200);
+
+    expect((sentinel as any).consecutive5xxCount).toBe(1);
+  });
+
   it('invalidates only a stale Reader probe target on 404', () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
     (sentinel as any).cachedReaderChapterId = 'stale-reader-id';
@@ -110,6 +120,21 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
 
     expect((sentinel as any).cachedReaderChapterId).toBeNull();
     expect((sentinel as any).consecutiveProbeFailures).toBe(0);
+  });
+
+  it('keeps capacity when an edge-only route mismatch is corroborated by health', async () => {
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, 'https://test-site.workers.dev');
+    vi.spyOn(sentinel as any, 'probeSiteLatency').mockImplementation(async (label: 'home' | 'reader' | 'health') => {
+      (sentinel as any).recordProbeResult(label, 90, label === 'health' ? 200 : 404);
+    });
+
+    await sentinel.evaluatePreSlaGuardRails();
+
+    const snapshot = sentinel.getPressureSnapshot();
+    expect(snapshot.siteHealth).toBe('GREEN');
+    expect(snapshot.pressureBreakdown.sitePressure).toBe(0);
+    expect(snapshot.probeRouteMismatch).toBe(true);
+    expect(snapshot.pressureReason).toContain('Monitor route mismatch confirmed');
   });
 
   it('selects a Reader probe chapter only when published pages exist', async () => {
