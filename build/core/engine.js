@@ -1037,6 +1037,7 @@ export class ImporterEngine {
                     eligibleJobs: healthMetrics.eligibleJobs,
                     stagedDebt: healthMetrics.publishableStaged,
                     allSourcesBlocked,
+                    canonicalRate5m: rateMetrics.rate5m,
                 };
                 const throughputData = this.autotuner.getThroughputTelemetry(throughputContext);
                 // Write atomic heartbeat and health panel to settings table for external watchdog / supervisor monitoring

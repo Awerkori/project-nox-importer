@@ -100,6 +100,8 @@ export interface AutotunerEvaluationContext {
     stagedDebt?: number;
     storageUnavailable?: boolean;
     eligibleJobs?: number;
+    /** Durable canonical-visible rate, used to hydrate the governor after a restart. */
+    canonicalRate5m?: number;
 }
 export declare class WorkCostEstimator {
     static estimateCost(pageCount?: number | null, historicalBytes?: number | null): number;

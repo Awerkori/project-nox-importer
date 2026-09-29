@@ -38,6 +38,12 @@ describe('Definitive Throughput Governor & Auto-Emergency Pause Policy', () => {
     expect(telem.ceiling).toBe(12);
   });
 
+  it('hydrates visible throughput from the durable canonical rate after restart', () => {
+    const telem = autotuner.getThroughputTelemetry({ canonicalRate5m: 8.4 });
+    expect(telem.rate5m).toBe(8.4);
+    expect(telem.status).toBe('RUNNING_OPTIMAL');
+  });
+
   it('Requirement: Throughput Ceiling (>= 12 cap/min) freezes scale-up and sets CEILING_REACHED', () => {
     // Record 13 fresh publications in the last minute
     for (let i = 0; i < 13; i++) {

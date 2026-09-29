@@ -441,7 +441,9 @@ export class AdaptiveAutotuner {
     getThroughputTelemetry(context) {
         const rate1m = this.getRate1m();
         const rate3m = this.getRate3m();
-        const rate5m = this.getRate5m();
+        // In-memory samples are empty after a process restart. The durable
+        // canonical bucket prevents a live importer being misread as 0 cap/min.
+        const rate5m = Math.max(this.getRate5m(), context?.canonicalRate5m ?? 0);
         const completed1m = this.getCompletedRate1m();
         const completed5m = this.getCompletedRate5m();
         const effectiveRate = this.emaRate > 0 ? this.emaRate : rate5m;
