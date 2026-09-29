@@ -84,6 +84,7 @@ export declare class ImporterEngine {
     private isRunning;
     private stopSignal;
     private abortController;
+    private activeChapterExecutions;
     private chapterClaimMutex;
     private catalogMaintenanceLane;
     private activeSourcesCache;
@@ -113,7 +114,7 @@ export declare class ImporterEngine {
      * 6. Resets AdaptiveAutotuner to capacity 1 in RECOVERING mode.
      * 7. Resumes worker loops smoothly without process exit (protects Discloud uptime).
      */
-    initiateControlledSelfRestart(reason: string, metrics?: any): Promise<void>;
+    initiateControlledSelfRestart(reason: string, metrics?: any): Promise<boolean>;
     getAutotuner(): AdaptiveAutotuner;
     getSafetyBarrier(): PublicationSafetyBarrier;
     start(): Promise<void>;
