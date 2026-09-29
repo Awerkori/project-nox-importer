@@ -398,6 +398,7 @@ describe('Project Nox — Canonical Gaps & Elastic Admission (Tests A-E)', () =>
     expect(validation).toEqual({ valid: false, reason: 'ALREADY_PUBLISHED' });
     expect(query).toHaveBeenCalledTimes(1);
     expect(query.mock.calls[0][0]).toContain("last_error = 'CANONICAL_ALREADY_SATISFIED'");
+    expect(query.mock.calls[0][0]).toContain("(q.payload->>'workId') = $1::text");
   });
 
   // =========================================================================

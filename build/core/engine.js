@@ -2068,8 +2068,28 @@ export class ImporterEngine {
                 await this.sleep(2000);
             }
             finally {
-                if (claimedWork?.payload?.workId)
-                    this.scheduler.onJobFinished(claimedWork.payload.workId, claimedWork.chapter_sort_key);
+                // A validation/query failure can happen after the durable claim but
+                // before executeJobDirectly takes ownership of its retry path.  Never
+                // leave that lease to expire: release it through the fenced queue RPC
+                // before freeing the local permits.  executeJobDirectly clears
+                // claimedWork in its own finally, so this cannot double-release an
+                // executing/completed job.
+                if (claimedWork) {
+                    const strandedJob = claimedWork;
+                    claimedWork = null;
+                    try {
+                        await this.queue.releaseJob(strandedJob.id, 'RETRY', 'Pre-execution validation failed; released by slot safety guard', 15, 'PRE_EXECUTION_VALIDATION');
+                    }
+                    catch (releaseErr) {
+                        this.logger.error('Failed to release pre-execution claimed job', {
+                            jobId: strandedJob.id,
+                            error: releaseErr?.message,
+                        });
+                    }
+                    if (strandedJob.payload?.workId) {
+                        this.scheduler.onJobFinished(strandedJob.payload.workId, strandedJob.chapter_sort_key);
+                    }
+                }
                 sourceHeld?.release();
                 releaseGlobal();
             }
