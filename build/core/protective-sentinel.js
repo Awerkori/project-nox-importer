@@ -40,6 +40,10 @@ export class ProtectiveSentinel {
     consecutive5xxCount = 0;
     last5xxTimestamp = null;
     consecutiveProbeFailures = 0;
+    route4xxLabels = new Set();
+    lastProbeStatus = {};
+    probeRouteMismatch = false;
+    probeRouteMismatchCycles = 0;
     // A single pg_stat_activity sample includes the monitor's own query and can
     // briefly spike while ordinary claims complete.  Mild DB pressure must be
     // sustained (or accompanied by a local pool waiter) before it changes
@@ -75,6 +79,8 @@ export class ProtectiveSentinel {
             publicationPressure: 0,
         },
         pressureReason: 'System initialized and healthy',
+        probeRouteMismatch: false,
+        probeRouteMismatchCycles: 0,
     };
     homeAgent = new https.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 60000 });
     readerAgent = new https.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 60000 });
@@ -509,6 +515,8 @@ export class ProtectiveSentinel {
         }
         // Probes site routes if siteUrl is configured
         if (this.siteUrl) {
+            this.route4xxLabels.clear();
+            this.probeRouteMismatch = false;
             await this.probeSiteLatency('home', `${this.siteUrl}/`);
             const chapterId = await this.getValidReaderChapterId();
             await new Promise((r) => setTimeout(r, 1000));
@@ -517,6 +525,27 @@ export class ProtectiveSentinel {
             }
             else {
                 await this.probeSiteLatency('reader', `${this.siteUrl}/api/health`);
+            }
+            // Do not let a Discloud/edge-specific 404 on an otherwise healthy
+            // public route permanently pin the importer below its safe baseline.
+            // We only classify it as a monitor-route mismatch after an independent
+            // lightweight health route succeeds in the same cycle. Any 5xx,
+            // timeout, or failed corroboration remains real capacity pressure.
+            if (this.route4xxLabels.size > 0) {
+                await this.probeSiteLatency('health', `${this.siteUrl}/api/health`);
+                const healthStatus = this.lastProbeStatus.health || 0;
+                if (healthStatus >= 200 && healthStatus < 400) {
+                    this.consecutiveProbeFailures = 0;
+                    this.probeRouteMismatch = true;
+                    this.probeRouteMismatchCycles++;
+                    this.logger.warn(`[Site Probe Mismatch] ${[...this.route4xxLabels].map((label) => label.toUpperCase()).join(', ')} returned 4xx, but /api/health is ${healthStatus}; keeping site capacity under independent health confirmation (cycle ${this.probeRouteMismatchCycles})`);
+                }
+                else {
+                    this.probeRouteMismatchCycles = 0;
+                }
+            }
+            else {
+                this.probeRouteMismatchCycles = 0;
             }
         }
         // Compute rolling percentiles with time eviction (75s window)
@@ -612,6 +641,9 @@ export class ProtectiveSentinel {
             sitePressure = 15;
             pressureReason = `Mild site latency increase (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
         }
+        else if (this.probeRouteMismatch) {
+            pressureReason = `Monitor route mismatch confirmed (${[...this.route4xxLabels].map((label) => label.toUpperCase()).join(', ')} 4xx; /api/health healthy)`;
+        }
         // DB pressure score
         let dbPressure = 0;
         if (totalConns >= this.thresholds.ysqlConnTripwire || activeConns >= 6) {
@@ -676,6 +708,8 @@ export class ProtectiveSentinel {
                 publicationPressure: 0,
             },
             pressureReason,
+            probeRouteMismatch: this.probeRouteMismatch,
+            probeRouteMismatchCycles: this.probeRouteMismatchCycles,
         };
     }
     getPercentile(samples, p) {
@@ -731,11 +765,13 @@ export class ProtectiveSentinel {
         });
     }
     recordProbeResult(label, ttfbMs, statusCode = 200, timestamp = Date.now()) {
+        this.lastProbeStatus[label] = statusCode;
         // A Reader 404 can occur when a chapter changes between the cached-ID
         // lookup and the probe. Refresh that target next cycle; it is neither a
         // healthy response nor a global site incident.
         if (label === 'reader' && statusCode === 404) {
             this.cachedReaderChapterId = null;
+            this.route4xxLabels.add(label);
             this.logger.warn('[Site Probe] Reader returned 404 for probed chapter; invalidating cached probe target');
             return;
         }
@@ -748,14 +784,20 @@ export class ProtectiveSentinel {
             // A Home/work route 4xx is user-facing routing/data failure. It must
             // not erase a preceding 5xx and falsely label the site recovered.
             this.consecutiveProbeFailures++;
+            if (label !== 'health')
+                this.route4xxLabels.add(label);
             this.logger.warn(`[Site Probe Route Error] ${label.toUpperCase()} returned HTTP ${statusCode} (consecutive: ${this.consecutiveProbeFailures})`);
             return;
         }
         else {
-            if (this.consecutive5xxCount > 0) {
+            // A lightweight health endpoint can corroborate a route mismatch, but
+            // it must not erase a preceding user-facing 5xx. Only a successful
+            // public page/Reader probe is evidence that the page path recovered.
+            if (label !== 'health' && this.consecutive5xxCount > 0) {
                 this.logger.info(`[Site Probe Recovered] ${label.toUpperCase()} returned HTTP ${statusCode} (5xx cleared)`);
             }
-            this.consecutive5xxCount = 0;
+            if (label !== 'health')
+                this.consecutive5xxCount = 0;
         }
         const sample = { ttfbMs, timestamp };
         const cutoff = timestamp - this.LATENCY_SAMPLE_WINDOW_MS;
@@ -765,7 +807,7 @@ export class ProtectiveSentinel {
             if (this.homeSamples.length > 20)
                 this.homeSamples.shift();
         }
-        else {
+        else if (label === 'reader') {
             this.readerSamples.push(sample);
             this.readerSamples = this.readerSamples.filter((s) => s.timestamp >= cutoff);
             if (this.readerSamples.length > 20)

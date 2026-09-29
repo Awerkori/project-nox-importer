@@ -13,6 +13,7 @@ export type IncidentClassification =
   | 'IMPORTER_PRESSURE';
 
 export type SiteHealthState = 'GREEN' | 'YELLOW' | 'ORANGE' | 'RED';
+type SiteProbeLabel = 'home' | 'reader' | 'health';
 
 export interface AutoEmergencyPauseState {
   active: boolean;
@@ -51,6 +52,11 @@ export interface PressureSnapshot {
     publicationPressure: number;
   };
   pressureReason: string;
+  // A public HTML probe can occasionally be routed differently from a real
+  // browser by an edge/WAF.  Keep that visible without turning an isolated
+  // monitor-route mismatch into a global importer throttle.
+  probeRouteMismatch: boolean;
+  probeRouteMismatchCycles: number;
 }
 
 export interface ProtectiveStopInfo {
@@ -117,6 +123,10 @@ export class ProtectiveSentinel {
   private consecutive5xxCount = 0;
   private last5xxTimestamp: number | null = null;
   private consecutiveProbeFailures = 0;
+  private route4xxLabels = new Set<Exclude<SiteProbeLabel, 'health'>>();
+  private lastProbeStatus: Partial<Record<SiteProbeLabel, number>> = {};
+  private probeRouteMismatch = false;
+  private probeRouteMismatchCycles = 0;
   // A single pg_stat_activity sample includes the monitor's own query and can
   // briefly spike while ordinary claims complete.  Mild DB pressure must be
   // sustained (or accompanied by a local pool waiter) before it changes
@@ -154,6 +164,8 @@ export class ProtectiveSentinel {
       publicationPressure: 0,
     },
     pressureReason: 'System initialized and healthy',
+    probeRouteMismatch: false,
+    probeRouteMismatchCycles: 0,
   };
 
   private homeAgent = new https.Agent({ keepAlive: true, maxSockets: 5, keepAliveMsecs: 60000 });
@@ -644,6 +656,8 @@ export class ProtectiveSentinel {
 
     // Probes site routes if siteUrl is configured
     if (this.siteUrl) {
+      this.route4xxLabels.clear();
+      this.probeRouteMismatch = false;
       await this.probeSiteLatency('home', `${this.siteUrl}/`);
       
       const chapterId = await this.getValidReaderChapterId();
@@ -652,6 +666,28 @@ export class ProtectiveSentinel {
         await this.probeSiteLatency('reader', `${this.siteUrl}/ler/${chapterId}`);
       } else {
         await this.probeSiteLatency('reader', `${this.siteUrl}/api/health`);
+      }
+
+      // Do not let a Discloud/edge-specific 404 on an otherwise healthy
+      // public route permanently pin the importer below its safe baseline.
+      // We only classify it as a monitor-route mismatch after an independent
+      // lightweight health route succeeds in the same cycle. Any 5xx,
+      // timeout, or failed corroboration remains real capacity pressure.
+      if (this.route4xxLabels.size > 0) {
+        await this.probeSiteLatency('health', `${this.siteUrl}/api/health`);
+        const healthStatus = this.lastProbeStatus.health || 0;
+        if (healthStatus >= 200 && healthStatus < 400) {
+          this.consecutiveProbeFailures = 0;
+          this.probeRouteMismatch = true;
+          this.probeRouteMismatchCycles++;
+          this.logger.warn(
+            `[Site Probe Mismatch] ${[...this.route4xxLabels].map((label) => label.toUpperCase()).join(', ')} returned 4xx, but /api/health is ${healthStatus}; keeping site capacity under independent health confirmation (cycle ${this.probeRouteMismatchCycles})`
+          );
+        } else {
+          this.probeRouteMismatchCycles = 0;
+        }
+      } else {
+        this.probeRouteMismatchCycles = 0;
       }
     }
 
@@ -752,6 +788,8 @@ export class ProtectiveSentinel {
       siteHealth = 'YELLOW';
       sitePressure = 15;
       pressureReason = `Mild site latency increase (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
+    } else if (this.probeRouteMismatch) {
+      pressureReason = `Monitor route mismatch confirmed (${[...this.route4xxLabels].map((label) => label.toUpperCase()).join(', ')} 4xx; /api/health healthy)`;
     }
 
     // DB pressure score
@@ -818,6 +856,8 @@ export class ProtectiveSentinel {
         publicationPressure: 0,
       },
       pressureReason,
+      probeRouteMismatch: this.probeRouteMismatch,
+      probeRouteMismatchCycles: this.probeRouteMismatchCycles,
     };
   }
 
@@ -834,7 +874,7 @@ export class ProtectiveSentinel {
    * Probes site route latency using keep-alive connection.
    */
   private async probeSiteLatency(
-    label: 'home' | 'reader',
+    label: SiteProbeLabel,
     url: string,
     isRetry = false
   ): Promise<void> {
@@ -885,16 +925,18 @@ export class ProtectiveSentinel {
   }
 
   public recordProbeResult(
-    label: 'home' | 'reader',
+    label: SiteProbeLabel,
     ttfbMs: number,
     statusCode: number = 200,
     timestamp: number = Date.now()
   ): void {
+    this.lastProbeStatus[label] = statusCode;
     // A Reader 404 can occur when a chapter changes between the cached-ID
     // lookup and the probe. Refresh that target next cycle; it is neither a
     // healthy response nor a global site incident.
     if (label === 'reader' && statusCode === 404) {
       this.cachedReaderChapterId = null;
+      this.route4xxLabels.add(label);
       this.logger.warn('[Site Probe] Reader returned 404 for probed chapter; invalidating cached probe target');
       return;
     }
@@ -907,13 +949,17 @@ export class ProtectiveSentinel {
       // A Home/work route 4xx is user-facing routing/data failure. It must
       // not erase a preceding 5xx and falsely label the site recovered.
       this.consecutiveProbeFailures++;
+      if (label !== 'health') this.route4xxLabels.add(label);
       this.logger.warn(`[Site Probe Route Error] ${label.toUpperCase()} returned HTTP ${statusCode} (consecutive: ${this.consecutiveProbeFailures})`);
       return;
     } else {
-      if (this.consecutive5xxCount > 0) {
+      // A lightweight health endpoint can corroborate a route mismatch, but
+      // it must not erase a preceding user-facing 5xx. Only a successful
+      // public page/Reader probe is evidence that the page path recovered.
+      if (label !== 'health' && this.consecutive5xxCount > 0) {
         this.logger.info(`[Site Probe Recovered] ${label.toUpperCase()} returned HTTP ${statusCode} (5xx cleared)`);
       }
-      this.consecutive5xxCount = 0;
+      if (label !== 'health') this.consecutive5xxCount = 0;
     }
 
     const sample: LatencySample = { ttfbMs, timestamp };
@@ -923,7 +969,7 @@ export class ProtectiveSentinel {
       this.homeSamples.push(sample);
       this.homeSamples = this.homeSamples.filter((s) => s.timestamp >= cutoff);
       if (this.homeSamples.length > 20) this.homeSamples.shift();
-    } else {
+    } else if (label === 'reader') {
       this.readerSamples.push(sample);
       this.readerSamples = this.readerSamples.filter((s) => s.timestamp >= cutoff);
       if (this.readerSamples.length > 20) this.readerSamples.shift();
@@ -931,7 +977,7 @@ export class ProtectiveSentinel {
     this.consecutiveProbeFailures = 0;
   }
 
-  private recordProbeFailure(label: 'home' | 'reader', err: any): void {
+  private recordProbeFailure(label: SiteProbeLabel, err: any): void {
     this.consecutiveProbeFailures++;
     this.logger.warn(`[Site Probe Error] ${label.toUpperCase()} probe error: ${err?.message} (consecutive: ${this.consecutiveProbeFailures})`);
   }
