@@ -670,18 +670,23 @@ export class ProtectiveSentinel {
 
       // Do not let a Discloud/edge-specific 404 on an otherwise healthy
       // public route permanently pin the importer below its safe baseline.
-      // We only classify it as a monitor-route mismatch after an independent
-      // lightweight health route succeeds in the same cycle. Any 5xx,
-      // timeout, or failed corroboration remains real capacity pressure.
+      // An independent lightweight health success is sufficient evidence. A
+      // uniform 404 across Home, Reader and health is also a monitor-routing
+      // signature: reducing importer load cannot repair an edge route that
+      // rejects every request from this one egress. Any 5xx, timeout, mixed
+      // failure, or failed corroboration remains real capacity pressure.
       if (this.route4xxLabels.size > 0) {
         await this.probeSiteLatency('health', `${this.siteUrl}/api/health`);
         const healthStatus = this.lastProbeStatus.health || 0;
-        if (healthStatus >= 200 && healthStatus < 400) {
+        const primaryStatuses = [...this.route4xxLabels].map((label) => this.lastProbeStatus[label] || 0);
+        const uniform404 = healthStatus === 404 && primaryStatuses.length > 0 && primaryStatuses.every((status) => status === 404);
+        if ((healthStatus >= 200 && healthStatus < 400) || uniform404) {
           this.consecutiveProbeFailures = 0;
           this.probeRouteMismatch = true;
           this.probeRouteMismatchCycles++;
+          const confirmation = uniform404 ? 'all monitor routes returned 404' : `/api/health is ${healthStatus}`;
           this.logger.warn(
-            `[Site Probe Mismatch] ${[...this.route4xxLabels].map((label) => label.toUpperCase()).join(', ')} returned 4xx, but /api/health is ${healthStatus}; keeping site capacity under independent health confirmation (cycle ${this.probeRouteMismatchCycles})`
+            `[Site Probe Mismatch] ${[...this.route4xxLabels].map((label) => label.toUpperCase()).join(', ')} returned 4xx and ${confirmation}; keeping site capacity under independent health confirmation (cycle ${this.probeRouteMismatchCycles})`
           );
         } else {
           this.probeRouteMismatchCycles = 0;
@@ -789,7 +794,12 @@ export class ProtectiveSentinel {
       sitePressure = 15;
       pressureReason = `Mild site latency increase (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
     } else if (this.probeRouteMismatch) {
-      pressureReason = `Monitor route mismatch confirmed (${[...this.route4xxLabels].map((label) => label.toUpperCase()).join(', ')} 4xx; /api/health healthy)`;
+      const healthStatus = this.lastProbeStatus.health || 0;
+      const primaryStatuses = [...this.route4xxLabels].map((label) => this.lastProbeStatus[label] || 0);
+      const uniform404 = healthStatus === 404 && primaryStatuses.length > 0 && primaryStatuses.every((status) => status === 404);
+      pressureReason = uniform404
+        ? `Monitor route mismatch confirmed (uniform 404 from this egress)`
+        : `Monitor route mismatch confirmed (${[...this.route4xxLabels].map((label) => label.toUpperCase()).join(', ')} 4xx; /api/health healthy)`;
     }
 
     // DB pressure score
