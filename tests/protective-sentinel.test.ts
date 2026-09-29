@@ -82,6 +82,24 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(snap.pressureReason).toContain('Sustained HTTP 5xx');
   });
 
+  it('selects a Reader probe chapter only when published pages exist', async () => {
+    let readerSql = '';
+    const pool = {
+      query: vi.fn().mockImplementation((sql: string) => {
+        if (sql.includes('FROM chapters c')) {
+          readerSql = sql;
+          return Promise.resolve({ rows: [{ id: 'reader-with-pages' }] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+    };
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, undefined, pool);
+
+    await expect((sentinel as any).getValidReaderChapterId()).resolves.toBe('reader-with-pages');
+    expect(readerSql).toContain('FROM pages p');
+    expect(readerSql).toContain('p.chapter_id = c.id');
+  });
+
   it('Requirement 1 & 2: YSQL connection spikes NEVER trigger global protective stop', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
 

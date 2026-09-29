@@ -425,6 +425,10 @@ export class ProtectiveSentinel {
           JOIN works w ON c.work_id = w.id
           WHERE c.published_at IS NOT NULL
             AND w.published IS TRUE
+            AND EXISTS (
+              SELECT 1 FROM pages p
+              WHERE p.chapter_id = c.id
+            )
           ORDER BY c.published_at DESC
           LIMIT 1;
         `);
