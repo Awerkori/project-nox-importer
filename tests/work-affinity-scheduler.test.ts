@@ -172,6 +172,32 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(scheduler.getInFlightCount(workId)).toBe(2);
   });
 
+  it('reserves a known work while its claim is in flight to avoid claim-and-release churn', async () => {
+    const workId = 'reserved-work';
+    const resolvers: Array<(value: any) => void> = [];
+    const mockClient = {
+      query: vi.fn(() => new Promise((resolve) => resolvers.push(resolve))),
+      release: vi.fn(),
+    };
+    (scheduler as any).pool = { connect: vi.fn().mockResolvedValue(mockClient) };
+    const opts = {
+      workerId: 'worker', leaseMin: 5, allowedSources: null,
+      workId, telemetry: undefined,
+    };
+
+    const first = (scheduler as any).claimSingleJob((scheduler as any).pool, opts);
+    const second = (scheduler as any).claimSingleJob((scheduler as any).pool, opts);
+    const third = await (scheduler as any).claimSingleJob((scheduler as any).pool, opts);
+
+    expect(third).toBeNull();
+    await Promise.resolve();
+    expect(mockClient.query).toHaveBeenCalledTimes(2);
+    resolvers.forEach((resolve, index) => resolve({ rows: [{
+      id: `job-${index}`, payload: { workId }, chapter_sort_key: index + 1,
+    }] }));
+    await Promise.all([first, second]);
+  });
+
   // =========================================================================
   // TEST C: Fairness & Max Inflight per Work (MAX_INFLIGHT_PER_WORK = 2)
   // =========================================================================

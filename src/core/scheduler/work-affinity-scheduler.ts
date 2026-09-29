@@ -50,6 +50,10 @@ export class WorkAffinityScheduler {
   private pool: any;
   private inFlightByWork: Map<string, number> = new Map();
   private inFlightChapterKeys: Set<string> = new Set();
+  // A claim is not reflected in inFlightByWork until its short database
+  // statement returns. Reserve a known work during that gap so concurrent
+  // runner slots do not claim-and-release work #3 when the limit is 2.
+  private pendingClaimReservationsByWork: Map<string, number> = new Map();
   private p0ConsecutiveClaims = 0;
   private rrIndexP1 = 0;
   private rrIndexP2 = 0;
@@ -605,9 +609,7 @@ export class WorkAffinityScheduler {
     if (this.sourcePermitProvider) {
       const permitProvider = this.sourcePermitProvider;
       const permitFiltered = readyP1Works.filter((w) => permitProvider(w.primarySource) > 0);
-      if (permitFiltered.length > 0) {
-        readyP1Works = permitFiltered.sort((a, b) => permitProvider(b.primarySource) - permitProvider(a.primarySource));
-      }
+      readyP1Works = permitFiltered.sort((a, b) => permitProvider(b.primarySource) - permitProvider(a.primarySource));
     }
 
     if (readyP1Works.length > 0) {
@@ -734,9 +736,7 @@ export class WorkAffinityScheduler {
     if (this.sourcePermitProvider) {
       const permitProvider = this.sourcePermitProvider;
       const permitFiltered = readyP2Works.filter((w) => permitProvider(w.primarySource) > 0);
-      if (permitFiltered.length > 0) {
-        readyP2Works = permitFiltered.sort((a, b) => permitProvider(b.primarySource) - permitProvider(a.primarySource));
-      }
+      readyP2Works = permitFiltered.sort((a, b) => permitProvider(b.primarySource) - permitProvider(a.primarySource));
     }
 
     if (readyP2Works.length > 0) {
@@ -1260,16 +1260,28 @@ export class WorkAffinityScheduler {
       telemetry?: AcquireTelemetry;
     }
   ): Promise<any | null> {
-    const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
-    const isSingleWork = Boolean(opts.workId);
-    const orderClause = isSingleWork
-      ? `ORDER BY q.chapter_sort_key ASC NULLS LAST`
-      : `ORDER BY 
+    const workId = opts.workId;
+    let reservedWorkId: string | null = null;
+    if (workId) {
+      const maxInFlight = Math.max(1, this.stateStore.getConfig().maxInflightPerWork || 2);
+      const inFlight = this.getInFlightCount(workId);
+      const pending = this.pendingClaimReservationsByWork.get(workId) || 0;
+      if (inFlight + pending >= maxInFlight) return null;
+      this.pendingClaimReservationsByWork.set(workId, pending + 1);
+      reservedWorkId = workId;
+    }
+
+    try {
+      const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
+      const isSingleWork = Boolean(opts.workId);
+      const orderClause = isSingleWork
+        ? `ORDER BY q.chapter_sort_key ASC NULLS LAST`
+        : `ORDER BY
           q.priority DESC, 
           q.chapter_sort_key ASC NULLS LAST, 
           q.next_run_at ASC`;
 
-    const query = `
+      const query = `
       WITH to_lock AS (
         SELECT q.id
         FROM importer_queue q
@@ -1315,51 +1327,58 @@ export class WorkAffinityScheduler {
                 q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
     `;
 
-    const targetPool = client?.connect ? client : this.pool;
-    const tConn0 = performance.now();
-    const dbClient = await targetPool.connect();
-    const poolWaitMs = performance.now() - tConn0;
-    if (opts.telemetry) {
-      opts.telemetry.poolWaitTotalMs += poolWaitMs;
-      opts.telemetry.claimLockPoolWaitMs = Math.round(poolWaitMs * 10) / 10;
-    }
-
-    let res: any;
-    try {
-      const tLockSql0 = performance.now();
-      res = await dbClient.query(query, [
-        opts.allowedSources,
-        opts.minPriority || null,
-        opts.workId || null,
-        opts.sortKey || null,
-        opts.workerId,
-        opts.leaseMin,
-        opts.allowedWorkIds || null,
-        opts.disallowedWorkIds || null,
-        disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
-      ]);
-      const sqlMs = performance.now() - tLockSql0;
+      const targetPool = client?.connect ? client : this.pool;
+      const tConn0 = performance.now();
+      const dbClient = await targetPool.connect();
+      const poolWaitMs = performance.now() - tConn0;
       if (opts.telemetry) {
-        opts.telemetry.sqlExecTotalMs += sqlMs;
-        opts.telemetry.claimLockSqlExecMs = Math.round(sqlMs * 10) / 10;
-        opts.telemetry.claimLockSqlMs = Math.round(sqlMs * 10) / 10;
-        opts.telemetry.totalQueries++;
+        opts.telemetry.poolWaitTotalMs += poolWaitMs;
+        opts.telemetry.claimLockPoolWaitMs = Math.round(poolWaitMs * 10) / 10;
       }
+
+      let res: any;
+      try {
+        const tLockSql0 = performance.now();
+        res = await dbClient.query(query, [
+          opts.allowedSources,
+          opts.minPriority || null,
+          opts.workId || null,
+          opts.sortKey || null,
+          opts.workerId,
+          opts.leaseMin,
+          opts.allowedWorkIds || null,
+          opts.disallowedWorkIds || null,
+          disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
+        ]);
+        const sqlMs = performance.now() - tLockSql0;
+        if (opts.telemetry) {
+          opts.telemetry.sqlExecTotalMs += sqlMs;
+          opts.telemetry.claimLockSqlExecMs = Math.round(sqlMs * 10) / 10;
+          opts.telemetry.claimLockSqlMs = Math.round(sqlMs * 10) / 10;
+          opts.telemetry.totalQueries++;
+        }
+      } finally {
+        if (typeof dbClient?.release === 'function') dbClient.release();
+      }
+
+      if (res.rows.length === 0) return null;
+      const r = res.rows[0];
+      const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
+      const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
+
+      this.lastClaimTime = Date.now();
+      return {
+        ...r,
+        payload,
+        chapter_sort_key: sortKey,
+      };
     } finally {
-      if (typeof dbClient?.release === 'function') dbClient.release();
+      if (reservedWorkId) {
+        const pending = this.pendingClaimReservationsByWork.get(reservedWorkId) || 0;
+        if (pending <= 1) this.pendingClaimReservationsByWork.delete(reservedWorkId);
+        else this.pendingClaimReservationsByWork.set(reservedWorkId, pending - 1);
+      }
     }
-
-    if (res.rows.length === 0) return null;
-    const r = res.rows[0];
-    const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
-    const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
-
-    this.lastClaimTime = Date.now();
-    return {
-      ...r,
-      payload,
-      chapter_sort_key: sortKey,
-    };
   }
 
   /**
