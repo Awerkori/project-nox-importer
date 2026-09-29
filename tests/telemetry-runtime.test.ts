@@ -52,6 +52,21 @@ describe('bounded runtime telemetry', () => {
     } finally { c.stop(); }
   });
 
+  it('measures productivity against effective autotuner capacity during a ramp', () => {
+    const c = collector();
+    try {
+      c.configureChapterSlots(5, () => 4);
+      for (let i = 0; i < 4; i++) c.setSlotState(i, 'ACTIVE_DOWNLOAD', 'source chapter');
+      c.setSlotState(4, 'IDLE');
+      expect(c.getSlotProductivitySnapshot()).toMatchObject({
+        configuredSlots: 5,
+        effectiveSlots: 4,
+        productiveSlots: 4,
+        productiveSlotRatio: 100,
+      });
+    } finally { c.stop(); }
+  });
+
   it('bounds every numeric sample even after a long diagnostic and returns to normal automatically', async () => {
     vi.useFakeTimers();
     const c = collector();

@@ -268,6 +268,13 @@ export class TelemetryCollector {
      */
     getSlotProductivitySnapshot() {
         const configuredSlots = this.configuredChapterSlots || this.slots.size;
+        // Runner count is an upper bound. During a controlled autotuner ramp
+        // (for example 3 -> 4 -> 5), productivity must be measured against the
+        // permits that can actually be claimed, or a healthy 3/4 looks like an
+        // artificial 60% 3/5 underutilization and can trigger needless upkeep.
+        const effectiveSlots = configuredSlots > 0
+            ? Math.max(1, Math.min(configuredSlots, Math.floor(this.effectiveCapacity())))
+            : 0;
         let busySlots = 0;
         let productiveSlots = 0;
         let idleSlots = Math.max(0, configuredSlots - this.slots.size);
@@ -286,11 +293,12 @@ export class TelemetryCollector {
                 }
             }
         }
-        const productiveSlotRatio = configuredSlots > 0
-            ? Math.round((productiveSlots / configuredSlots) * 1000) / 10
+        const productiveSlotRatio = effectiveSlots > 0
+            ? Math.round((Math.min(productiveSlots, effectiveSlots) / effectiveSlots) * 1000) / 10
             : 0;
         return {
             configuredSlots,
+            effectiveSlots,
             busySlots,
             productiveSlots,
             idleSlots,
