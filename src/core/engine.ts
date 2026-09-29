@@ -3822,6 +3822,10 @@ export class ImporterEngine {
         const uploadConcurrency = Math.min(8, Math.max(3, Math.floor(this.autotuner.getCurrentConcurrency() * 0.75)));
         const globalMediaSemaphore = this.autotuner.getGlobalMediaSemaphore();
         const globalInflightRequestSemaphore = this.autotuner.getGlobalInflightRequestSemaphore();
+        // A chapter-level source cap is insufficient here: two 120-page jobs
+        // from one source can otherwise consume all eight global download
+        // permits, starving pages already queued for other healthy sources.
+        const sourceDownloadSemaphore = this.autotuner.getSourceDownloadSemaphore(effectiveSource);
 
         const bufferedPageSemaphore = this.autotuner.getBufferedPageSemaphore();
         const bufferedWaitAbort = new AbortController();
@@ -3953,21 +3957,30 @@ export class ImporterEngine {
 
               try {
                 const inf0 = performance.now();
-                pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
-                  chDownloadSemWaitMs += (performance.now() - inf0);
-                  telemetryCollector.trackActiveDownload(1);
-                  try {
-                    return await callProvider(() =>
-                      this.fetchImageBytes(currentUrl, effectiveSource, {
-                        timeoutMs,
-                        freshConnection,
-                        reservation,
-                      })
-                    );
-                  } finally {
-                    telemetryCollector.trackActiveDownload(-1);
-                  }
-                });
+                await sourceDownloadSemaphore.acquire(
+                  AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal])
+                );
+                try {
+                  // Source permit comes first so an overcrowded CDN never
+                  // holds a global download permit while merely waiting.
+                  pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
+                    chDownloadSemWaitMs += (performance.now() - inf0);
+                    telemetryCollector.trackActiveDownload(1);
+                    try {
+                      return await callProvider(() =>
+                        this.fetchImageBytes(currentUrl, effectiveSource, {
+                          timeoutMs,
+                          freshConnection,
+                          reservation,
+                        })
+                      );
+                    } finally {
+                      telemetryCollector.trackActiveDownload(-1);
+                    }
+                  });
+                } finally {
+                  sourceDownloadSemaphore.release();
+                }
 
                 const dlMs = Date.now() - d0;
                 tDownload += dlMs;

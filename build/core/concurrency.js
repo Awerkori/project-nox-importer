@@ -292,6 +292,9 @@ export class AdaptiveAutotuner {
     logger = new Logger('Autotuner');
     globalChapterSemaphore;
     sourceSemaphores = new Map();
+    // Shared page-download budgets prevent a single CDN from consuming every
+    // global request permit through multiple large chapter pipelines.
+    sourceDownloadSemaphores = new Map();
     // Source limits are ceilings, not a license for one source to consume the
     // whole importer. The engine refreshes this from its healthy-source snapshot
     // before claiming work. Keep the conservative one-source default so isolated
@@ -723,6 +726,40 @@ export class AdaptiveAutotuner {
         for (const [source, semaphore] of this.sourceSemaphores) {
             semaphore.setCapacity(this.getEffectiveSourceCapacity(source));
         }
+        for (const [source, semaphore] of this.sourceDownloadSemaphores) {
+            semaphore.setCapacity(this.getEffectiveSourceDownloadCapacity(source));
+        }
+    }
+    /**
+     * Keep page-download capacity work-conserving for a lone healthy source,
+     * while reserving room for other healthy sources when they exist.  This is
+     * intentionally separate from chapter admission: two large chapters from
+     * one source must not monopolize all global download permits.
+     */
+    getEffectiveSourceDownloadCapacity(source) {
+        const limits = this.getSourceLimits(source);
+        const sourceChapterCapacity = this.getEffectiveSourceCapacity(source);
+        const configured = Math.max(1, Math.min(this.globalInflightRequestSemaphore.capacity, limits.maxPagesPerChapter * sourceChapterCapacity));
+        if (this.eligibleSourceCountForFairness <= 1)
+            return configured;
+        const fairShare = Math.max(1, Math.ceil(this.globalInflightRequestSemaphore.capacity /
+            Math.min(3, this.eligibleSourceCountForFairness)));
+        return Math.min(configured, fairShare);
+    }
+    /**
+     * Acquire this local permit before the global download permit.  A page then
+     * never holds scarce global capacity while waiting for its own source.
+     */
+    getSourceDownloadSemaphore(source) {
+        let semaphore = this.sourceDownloadSemaphores.get(source);
+        if (!semaphore) {
+            const limits = this.getSourceLimits(source);
+            const configured = Math.max(1, Math.min(this.globalInflightRequestSemaphore.capacity, limits.maxPagesPerChapter * limits.maxChapters));
+            semaphore = new AsyncSemaphore(configured, `source_download_semaphore:${source}`);
+            this.sourceDownloadSemaphores.set(source, semaphore);
+        }
+        semaphore.setCapacity(this.getEffectiveSourceDownloadCapacity(source));
+        return semaphore;
     }
     getSourceSemaphore(source, limitPerSource) {
         let sem = this.sourceSemaphores.get(source);
