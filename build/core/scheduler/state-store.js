@@ -10,7 +10,7 @@ import { Logger } from '../logger.js';
 import { maintenanceScheduler } from '../maintenance-scheduler.js';
 export class SchedulerStateStore {
     logger = new Logger('SchedulerStateStore');
-    pool = getYugabytePool();
+    pool;
     activeWorksCache = new Map();
     watermarksCache = new Map();
     configCache = {
@@ -26,7 +26,13 @@ export class SchedulerStateStore {
     metricsCache = null;
     isLoaded = false;
     saveDebounceTimer = null;
-    constructor() { }
+    constructor(pool) {
+        // State is replaced by a local double in scheduler unit tests. Avoid
+        // resolving production credentials merely to create that empty instance.
+        this.pool = pool || (process.env.NODE_ENV === 'test'
+            ? { query: async () => ({ rows: [] }) }
+            : getYugabytePool());
+    }
     /**
      * Initializes state by creating table if missing and loading existing records.
      */

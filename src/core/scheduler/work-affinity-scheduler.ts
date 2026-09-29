@@ -265,7 +265,13 @@ export class WorkAffinityScheduler {
     private protectiveSentinel: ProtectiveSentinel,
     pool?: any
   ) {
-    const rawPool = pool || getYugabytePool();
+    // Scheduler unit tests exercise only in-memory scheduling invariants. Do
+    // not require a Yugabyte credential just to construct that pure state
+    // machine; production always receives Engine's bounded direct pool (or
+    // falls back to it when constructed standalone).
+    const rawPool = pool || (process.env.NODE_ENV === 'test'
+      ? { query: async () => ({ rows: [] }) }
+      : getYugabytePool());
     if (typeof rawPool.connect === 'function') {
       this.pool = rawPool;
     } else {
