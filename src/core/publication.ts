@@ -276,9 +276,14 @@ export class PublicationBarrier {
 
       // Barrier cleared! Publish this chapter
       const t1 = performance.now();
-      await this.executePublish(workId, chapterId, new Date().toISOString(), sortKey, isFreshRelease);
+      const publication = await this.executePublish(workId, chapterId, new Date().toISOString(), sortKey, isFreshRelease);
       const publishUpdateMs = Math.round(performance.now() - t1);
-      this.logger.info('Chapter published via barrier', { workId, sortKey, chapterId, isFreshRelease });
+      // A second barrier caller may arrive after the canonical transition.
+      // It still completes mapping cleanup, but must not emit a second
+      // publication event/log for an already-visible chapter.
+      if (publication.newlyVisible) {
+        this.logger.info('Chapter published via barrier', { workId, sortKey, chapterId, isFreshRelease });
+      }
 
       // Run immediate cascade for subsequent STAGED chapters of this work
       const t2 = performance.now();
@@ -301,7 +306,7 @@ export class PublicationBarrier {
     publishedAtIso: string,
     sortKey?: number | string,
     isFreshRelease: boolean = false
-  ): Promise<void> {
+  ): Promise<{ newlyVisible: boolean }> {
     const pool = typeof (this.supabase as any)?.getPool === 'function' ? (this.supabase as any).getPool() : null;
 
     if (pool) {
@@ -474,7 +479,7 @@ export class PublicationBarrier {
           }
         } catch {}
       })();
-      return;
+      return { newlyVisible: isNewlyVisible };
     }
 
     // Fallback path for unit tests / mock clients without direct pool
@@ -553,6 +558,7 @@ export class PublicationBarrier {
         this.onPublished?.(Boolean(isFreshRelease));
       } catch {}
     }
+    return { newlyVisible: isNewlyVisible };
   }
 
   /**

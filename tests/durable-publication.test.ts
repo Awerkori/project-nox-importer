@@ -33,9 +33,9 @@ describe('atomic canonical publication events', () => {
     expect((await db.query('SELECT * FROM importer_rate_buckets')).rows).toHaveLength(0);
     await db.exec('ALTER TABLE works DROP CONSTRAINT reject_publication');
     const onPublished=vi.fn(); barrier.onPublished=onPublished;
-    await (barrier as any).executePublish(work,chapter,new Date().toISOString(),undefined,true);
+    expect(await (barrier as any).executePublish(work,chapter,new Date().toISOString(),undefined,true)).toEqual({newlyVisible:true});
     // Reprocessing must not change fresh semantics or increment either counter.
-    await (barrier as any).executePublish(work,chapter,new Date().toISOString(),undefined,false);
+    expect(await (barrier as any).executePublish(work,chapter,new Date().toISOString(),undefined,false)).toEqual({newlyVisible:false});
     expect(onPublished).toHaveBeenCalledTimes(1);
     expect(onPublished).toHaveBeenCalledWith(true,true);
     expect((await db.query('SELECT visible_published,fresh_visible FROM importer_rate_buckets')).rows).toEqual([{visible_published:1,fresh_visible:1}]);
