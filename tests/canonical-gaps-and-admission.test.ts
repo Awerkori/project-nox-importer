@@ -377,6 +377,29 @@ describe('Project Nox — Canonical Gaps & Elastic Admission (Tests A-E)', () =>
     expect(activeWorks.has('work-healthy-replacement')).toBe(true);
   });
 
+  it('retires an already-visible cross-source duplicate with one bounded canonical cleanup statement', async () => {
+    const workId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes('WITH published AS MATERIALIZED') && sql.includes('sibling_mappings')) {
+        return { rows: [{ id: 'canonical-chapter-id' }] };
+      }
+      return { rows: [] };
+    });
+    const pool = { query, connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }) };
+    const scheduler = new WorkAffinityScheduler(mockStateStore, mockAdmissionController, mockSentinel, pool);
+
+    const validation = await scheduler.validateClaimedJobPostMutex({
+      id: 'duplicate-job',
+      source: 'secondary-source',
+      chapter_sort_key: 12.5,
+      payload: { workId, chapterNumber: '12.5' },
+    });
+
+    expect(validation).toEqual({ valid: false, reason: 'ALREADY_PUBLISHED' });
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0][0]).toContain("last_error = 'CANONICAL_ALREADY_SATISFIED'");
+  });
+
   // =========================================================================
   // TEST D: Scheduler avoids saturated source (0 permits) and prioritizes
   // source with available permit headroom
