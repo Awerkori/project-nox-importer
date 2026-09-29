@@ -16,6 +16,13 @@ export { computeCanonicalChapterKey };
  * historical constant.
  */
 export declare function resolveBufferBudgetBytes(value?: string | undefined): number;
+/**
+ * Queue selection is DB-bound, while a claimed chapter spends nearly all of
+ * its lifetime on upstream/Telegram I/O.  Keep only a pool-sized number of
+ * slots in the short selection phase; never let DB acquisition consume the
+ * chapter-execution permits themselves.
+ */
+export declare function resolveChapterClaimConcurrency(globalConcurrency: number, dbPoolMax: number): number;
 export type InternalLivenessState = 'HEALTHY_IDLE' | 'HEALTHY_WORKING' | 'BACKPRESSURED' | 'STALLED';
 export type ExternalLivenessState = InternalLivenessState | 'DEAD';
 export declare function computeInternalLivenessState(params: {
@@ -85,6 +92,7 @@ export declare class ImporterEngine {
     private abortController;
     private activeChapterExecutions;
     private chapterClaimMutex;
+    private chapterClaimGate;
     private catalogMaintenanceLane;
     private activeSourcesCache;
     private sourceScheduleSnapshot;
