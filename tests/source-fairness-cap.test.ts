@@ -94,4 +94,36 @@ describe('source fair-share chapter capacity', () => {
     autotuner.setEligibleSourceCountForFairness(1);
     expect(nexus.capacity).toBe(8);
   });
+
+  it('uses active chapter sources for fairness so idle providers do not strand capacity', () => {
+    const autotuner = new AdaptiveAutotuner({
+      minConcurrency: 1,
+      healthyConcurrencyFloor: 5,
+      initialConcurrency: 5,
+      maxConcurrency: 5,
+      downloadInflightConcurrency: 8,
+    });
+
+    // A catalog may have many healthy providers even though only Manhastro
+    // currently has queued chapter work. It should retain its configured
+    // chapter capacity and page fan-out until another source is active.
+    autotuner.setEligibleSourceCountForFairness(53);
+    const manhastro = autotuner.getSourceSemaphore('manhastro');
+    expect(manhastro.capacity).toBe(2);
+    expect(manhastro.tryAcquire()).toBe(true);
+    expect(autotuner.refreshSourceFairnessFromActiveSources(['manhastro', 'nexus', 'hanamiheaven'])).toBe(1);
+    expect(manhastro.capacity).toBe(3);
+    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(8);
+
+    // As independent sources receive work, local caps narrow again without
+    // changing global chapter, Telegram, download, or memory budgets.
+    expect(autotuner.getSourceSemaphore('nexus').tryAcquire()).toBe(true);
+    expect(autotuner.refreshSourceFairnessFromActiveSources(['manhastro', 'nexus', 'hanamiheaven'])).toBe(2);
+    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(4);
+
+    expect(autotuner.getSourceSemaphore('hanamiheaven').tryAcquire()).toBe(true);
+    expect(autotuner.refreshSourceFairnessFromActiveSources(['manhastro', 'nexus', 'hanamiheaven'])).toBe(3);
+    expect(manhastro.capacity).toBe(2);
+    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(3);
+  });
 });

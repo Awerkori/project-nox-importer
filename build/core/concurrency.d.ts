@@ -200,6 +200,15 @@ export declare class AdaptiveAutotuner {
      * conservation is preserved.
      */
     setEligibleSourceCountForFairness(count: number): void;
+    /**
+     * Fairness must follow sources that actually have chapter work in flight,
+     * not every enabled provider.  Counting idle providers made a lone backlog
+     * look like a 50-source workload and stranded otherwise safe capacity.
+     *
+     * Once another source is claimed it immediately joins the fairness set;
+     * existing holders drain naturally if the resulting local cap is smaller.
+     */
+    refreshSourceFairnessFromActiveSources(sources: Iterable<string>): number;
     private getSourceFairnessCap;
     private getEffectiveSourceCapacity;
     private refreshSourceSemaphoreCapacities;
