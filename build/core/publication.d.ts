@@ -30,8 +30,12 @@ export declare class PublicationBarrier {
     private supabase;
     private logger;
     private workLocks;
+    private coverWarmQueue;
+    private warmedCoverIds;
+    private readonly maxRememberedWarmCovers;
     onPublished?: (isFreshRelease: boolean, durableRateEvent?: boolean) => void;
     constructor(supabase: SupabaseClient);
+    private warmPublishedCover;
     private getWorkLock;
     /**
      * Check if a chapter can be published according to the canonical sort key order,
