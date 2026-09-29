@@ -137,6 +137,21 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(snapshot.pressureReason).toContain('Monitor route mismatch confirmed');
   });
 
+  it('keeps capacity for a uniform 404 monitor-routing signature', async () => {
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, 'https://test-site.workers.dev');
+    vi.spyOn(sentinel as any, 'probeSiteLatency').mockImplementation(async (label: 'home' | 'reader' | 'health') => {
+      (sentinel as any).recordProbeResult(label, 90, 404);
+    });
+
+    await sentinel.evaluatePreSlaGuardRails();
+
+    const snapshot = sentinel.getPressureSnapshot();
+    expect(snapshot.siteHealth).toBe('GREEN');
+    expect(snapshot.pressureBreakdown.sitePressure).toBe(0);
+    expect(snapshot.probeRouteMismatch).toBe(true);
+    expect(snapshot.pressureReason).toContain('uniform 404');
+  });
+
   it('selects a Reader probe chapter only when published pages exist', async () => {
     let readerSql = '';
     const pool = {
