@@ -67,6 +67,14 @@ export class WorkAffinityScheduler {
     // Staff requests fast-cache (avoids 1 query per claim)
     lastStaffCheckTime = 0;
     cachedStaffWorkIds = [];
+    // Most production claims have no STAFF work. Do not execute the full
+    // claim-and-lock CTE merely to learn that fact on every free chapter slot.
+    // A short, single-flight presence probe preserves prompt staff admission
+    // while preventing concurrent P1/P2 workers from stampeding Yugabyte.
+    lastStaffCandidateProbeAt = 0;
+    hasStaffCandidate = false;
+    staffCandidateProbeFlight = null;
+    staffCandidateProbeTtlMs = 1_000;
     // In-memory unclaimable work cooldown (avoids hammering depleted/unready works)
     unclaimableWorksCooldown = new Map();
     markWorkUnclaimable(workId, ttlMs = 15000) {
@@ -128,6 +136,61 @@ export class WorkAffinityScheduler {
         }
         catch {
             return false;
+        }
+    }
+    async hasStaffForcedCandidate() {
+        // Tests intentionally exercise the complete STAFF claim path using their
+        // lightweight database doubles. Production gets the bounded fast path.
+        if (process.env.NODE_ENV === 'test' || !this.pool?.query)
+            return true;
+        const now = Date.now();
+        if (now - this.lastStaffCandidateProbeAt < this.staffCandidateProbeTtlMs) {
+            return this.hasStaffCandidate;
+        }
+        if (this.staffCandidateProbeFlight)
+            return this.staffCandidateProbeFlight;
+        const probe = (async () => {
+            // Preserve the existing 3s cache for request identities. The second
+            // probe covers explicit priority>=1000 jobs that have no request row.
+            if (now - this.lastStaffCheckTime > 3_000) {
+                const activeReqs = await this.runQuery(this.pool, `
+          SELECT work_id::text, priority_boost, created_at
+          FROM importer_staff_requests
+          WHERE status IN ('ACTIVE', 'QUEUED', 'IMPORTING', 'RETRYING')
+          ORDER BY priority_boost DESC, created_at ASC;
+        `);
+                this.lastStaffCheckTime = now;
+                this.cachedStaffWorkIds = activeReqs.rows.map((r) => r.work_id);
+            }
+            if (this.cachedStaffWorkIds.length > 0) {
+                this.hasStaffCandidate = true;
+                return true;
+            }
+            const priorityProbe = await this.runQuery(this.pool, `
+        SELECT 1
+        FROM importer_queue
+        WHERE (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW()))
+          AND task_type = 'IMPORT_CHAPTER'
+          AND priority >= 1000
+        LIMIT 1;
+      `);
+            this.hasStaffCandidate = priorityProbe.rows.length > 0;
+            return this.hasStaffCandidate;
+        })();
+        this.staffCandidateProbeFlight = probe;
+        this.lastStaffCandidateProbeAt = now;
+        try {
+            return await probe;
+        }
+        catch {
+            // Fail closed for priority, not for capacity: the normal scheduler still
+            // proceeds and the next short probe retries the check.
+            this.hasStaffCandidate = false;
+            return false;
+        }
+        finally {
+            if (this.staffCandidateProbeFlight === probe)
+                this.staffCandidateProbeFlight = null;
         }
     }
     getClaimStats() {
@@ -1039,6 +1102,8 @@ export class WorkAffinityScheduler {
      * then canonical chapter_sort_key ASC.
      */
     async claimStaffForcedJob(client, opts) {
+        if (!(await this.hasStaffForcedCandidate()))
+            return null;
         const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
         // 1. Check for active staff requests (cached for 3s to eliminate DB query per claim).
         // Historical schema revisions used QUEUED/IMPORTING/RETRYING while newer
@@ -1119,8 +1184,12 @@ export class WorkAffinityScheduler {
             staffWorkIds,
         ];
         const res = await this.runQuery(client, query, queryParams, opts.telemetry);
-        if (res.rows.length === 0)
+        if (res.rows.length === 0) {
+            // The short presence snapshot raced another slot. Avoid paying the full
+            // CTE again until the next bounded probe.
+            this.hasStaffCandidate = false;
             return null;
+        }
         const r = res.rows[0];
         const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
         const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
