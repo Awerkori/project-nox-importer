@@ -292,6 +292,11 @@ export class AdaptiveAutotuner {
     logger = new Logger('Autotuner');
     globalChapterSemaphore;
     sourceSemaphores = new Map();
+    // Source limits are ceilings, not a license for one source to consume the
+    // whole importer. The engine refreshes this from its healthy-source snapshot
+    // before claiming work. Keep the conservative one-source default so isolated
+    // callers and tests retain the source's configured capacity.
+    eligibleSourceCountForFairness = 1;
     globalMediaSemaphore;
     globalInflightRequestSemaphore;
     bufferedPageSemaphore;
@@ -689,13 +694,46 @@ export class AdaptiveAutotuner {
     getSourcePageConcurrency(source) {
         return this.getSourceLimits(source).maxPagesPerChapter;
     }
+    /**
+     * Updates the source-fairness context without changing global capacity. With
+     * several healthy sources, one source may use at most roughly half of a
+     * small importer (or a third when three+ sources are available). If it is
+     * the only healthy source, its configured limit remains available so work
+     * conservation is preserved.
+     */
+    setEligibleSourceCountForFairness(count) {
+        const next = Math.max(1, Math.floor(count) || 1);
+        if (next === this.eligibleSourceCountForFairness)
+            return;
+        this.eligibleSourceCountForFairness = next;
+        this.refreshSourceSemaphoreCapacities();
+    }
+    getSourceFairnessCap() {
+        const globalCapacity = this.globalChapterSemaphore.capacity;
+        if (this.eligibleSourceCountForFairness <= 1)
+            return globalCapacity;
+        return Math.max(1, Math.ceil(globalCapacity / Math.min(3, this.eligibleSourceCountForFairness)));
+    }
+    getEffectiveSourceCapacity(source) {
+        const configured = this.getSourceLimits(source).maxChapters;
+        const healthCapacity = this.sourceHealth.get(source)?.currentCapacity ?? configured;
+        return Math.max(1, Math.min(configured, healthCapacity, this.getSourceFairnessCap()));
+    }
+    refreshSourceSemaphoreCapacities() {
+        for (const [source, semaphore] of this.sourceSemaphores) {
+            semaphore.setCapacity(this.getEffectiveSourceCapacity(source));
+        }
+    }
     getSourceSemaphore(source, limitPerSource) {
         let sem = this.sourceSemaphores.get(source);
         if (!sem) {
             const configuredLimit = limitPerSource ?? this.getSourceLimits(source).maxChapters;
+            // Preserve the real configured ceiling for telemetry, then apply the
+            // current fair-share capacity as the runtime limit.
             sem = new AsyncSemaphore(configuredLimit, `source_semaphore:${source}`);
             this.sourceSemaphores.set(source, sem);
         }
+        sem.setCapacity(this.getEffectiveSourceCapacity(source));
         return sem;
     }
     isSourceCapacityAvailable(source) {
@@ -712,14 +750,18 @@ export class AdaptiveAutotuner {
         }
         health.consecutiveFailures++;
         health.consecutiveSuccesses = 0;
+        const previousEffectiveCapacity = this.getEffectiveSourceCapacity(source);
         if (health.consecutiveFailures >= 2 && health.currentCapacity > 1) {
             health.currentCapacity = Math.max(1, health.currentCapacity - 1);
             const sem = this.getSourceSemaphore(source);
-            sem.setCapacity(health.currentCapacity);
-            this.logger.warn(`Source ${source} concurrency throttled: ${health.currentCapacity + 1} -> ${health.currentCapacity} due to ${health.consecutiveFailures} consecutive failures`);
-            return { throttled: true, newCapacity: health.currentCapacity };
+            const effectiveCapacity = this.getEffectiveSourceCapacity(source);
+            sem.setCapacity(effectiveCapacity);
+            if (effectiveCapacity < previousEffectiveCapacity) {
+                this.logger.warn(`Source ${source} concurrency throttled: ${previousEffectiveCapacity} -> ${effectiveCapacity} due to ${health.consecutiveFailures} consecutive failures`);
+                return { throttled: true, newCapacity: effectiveCapacity };
+            }
         }
-        return { throttled: false, newCapacity: health.currentCapacity };
+        return { throttled: false, newCapacity: this.getEffectiveSourceCapacity(source) };
     }
     recordSourceSuccess(source) {
         const limits = this.getSourceLimits(source);
@@ -730,15 +772,19 @@ export class AdaptiveAutotuner {
         }
         health.consecutiveFailures = 0;
         health.consecutiveSuccesses++;
+        const previousEffectiveCapacity = this.getEffectiveSourceCapacity(source);
         if (health.consecutiveSuccesses >= 5 && health.currentCapacity < limits.maxChapters) {
             health.currentCapacity = Math.min(limits.maxChapters, health.currentCapacity + 1);
             health.consecutiveSuccesses = 0;
             const sem = this.getSourceSemaphore(source);
-            sem.setCapacity(health.currentCapacity);
-            this.logger.info(`Source ${source} concurrency restored: ${health.currentCapacity - 1} -> ${health.currentCapacity} after consecutive successes`);
-            return { restored: true, newCapacity: health.currentCapacity };
+            const effectiveCapacity = this.getEffectiveSourceCapacity(source);
+            sem.setCapacity(effectiveCapacity);
+            if (effectiveCapacity > previousEffectiveCapacity) {
+                this.logger.info(`Source ${source} concurrency restored: ${previousEffectiveCapacity} -> ${effectiveCapacity} after consecutive successes`);
+                return { restored: true, newCapacity: effectiveCapacity };
+            }
         }
-        return { restored: false, newCapacity: health.currentCapacity };
+        return { restored: false, newCapacity: this.getEffectiveSourceCapacity(source) };
     }
     recordError(type) {
         if (type === 'ratelimit')
@@ -1214,6 +1260,7 @@ export class AdaptiveAutotuner {
         }
         // SINGLE AUTHORITY: Update the global chapter semaphore
         this.globalChapterSemaphore.setCapacity(clampedTarget);
+        this.refreshSourceSemaphoreCapacities();
         // STRUCTURED DECISION LOG
         if (clampedTarget !== previous) {
             this.logger.warn(`[CAPACITY_DECISION] Concurrency changed from ${previous} to ${clampedTarget} | State: ${state} | Action: ${action} | Reason: ${reason} | Site: ${siteHealth} | RSS: ${mem.rssMb}MB | Lag: ${lag.avgLagMs}ms | YSQL: ${pressureSnapshot?.ysqlTotal ?? '?'}/${pressureSnapshot?.ysqlActive ?? '?'}`);

@@ -131,6 +131,7 @@ export declare class AdaptiveAutotuner {
     private logger;
     private globalChapterSemaphore;
     private sourceSemaphores;
+    private eligibleSourceCountForFairness;
     private globalMediaSemaphore;
     private globalInflightRequestSemaphore;
     private bufferedPageSemaphore;
@@ -190,6 +191,17 @@ export declare class AdaptiveAutotuner {
     waitForMemoryHeadroom(estimatedBytes?: number, signal?: AbortSignal): Promise<void>;
     getSourceLimits(source: string): SourceConcurrencyConfig;
     getSourcePageConcurrency(source: string): number;
+    /**
+     * Updates the source-fairness context without changing global capacity. With
+     * several healthy sources, one source may use at most roughly half of a
+     * small importer (or a third when three+ sources are available). If it is
+     * the only healthy source, its configured limit remains available so work
+     * conservation is preserved.
+     */
+    setEligibleSourceCountForFairness(count: number): void;
+    private getSourceFairnessCap;
+    private getEffectiveSourceCapacity;
+    private refreshSourceSemaphoreCapacities;
     getSourceSemaphore(source: string, limitPerSource?: number): AsyncSemaphore;
     isSourceCapacityAvailable(source: string): boolean;
     private sourceHealth;
