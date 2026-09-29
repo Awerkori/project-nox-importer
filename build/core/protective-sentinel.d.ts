@@ -57,6 +57,11 @@ export interface SentinelThresholds {
     maxTelegramFloodWaitSec: number;
 }
 export declare const DEFAULT_SENTINEL_THRESHOLDS: SentinelThresholds;
+export declare const SITE_PROBE_HEADERS: {
+    'User-Agent': string;
+    Accept: string;
+    'Accept-Language': string;
+};
 export interface LatencySample {
     ttfbMs: number;
     timestamp: number;
