@@ -98,6 +98,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     await expect((sentinel as any).getValidReaderChapterId()).resolves.toBe('reader-with-pages');
     expect(readerSql).toContain('FROM pages p');
     expect(readerSql).toContain('p.chapter_id = c.id');
+    expect(readerSql).toContain("INTERVAL '5 minutes'");
   });
 
   it('Requirement 1 & 2: YSQL connection spikes NEVER trigger global protective stop', async () => {

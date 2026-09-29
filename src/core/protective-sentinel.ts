@@ -557,6 +557,10 @@ export class ProtectiveSentinel {
           FROM chapters c
           JOIN works w ON c.work_id = w.id
           WHERE c.published_at IS NOT NULL
+            -- Probe an established public reader route. Freshly committed
+            -- chapters can briefly race edge/data propagation and are not a
+            -- representative health signal for an interactive reader.
+            AND c.published_at < clock_timestamp() - INTERVAL '5 minutes'
             AND w.published IS TRUE
             AND EXISTS (
               SELECT 1 FROM pages p
