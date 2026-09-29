@@ -29,7 +29,7 @@ vi.mock('../src/db/yugabyte-direct.js', () => ({
   getYugabytePool: () => mockPool,
 }));
 
-import { ProtectiveSentinel } from '../src/core/protective-sentinel.js';
+import { ProtectiveSentinel, SITE_PROBE_HEADERS } from '../src/core/protective-sentinel.js';
 import { diagnostics } from '../src/core/diagnostics.js';
 
 describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
@@ -61,6 +61,12 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
       externalMb: 10,
       arrayBuffersMb: 0,
     });
+  });
+
+  it('uses browser-navigation headers for public health probes', () => {
+    expect(SITE_PROBE_HEADERS['User-Agent']).toContain('Mozilla/5.0');
+    expect(SITE_PROBE_HEADERS.Accept).toContain('text/html');
+    expect(SITE_PROBE_HEADERS['Accept-Language']).toContain('pt-BR');
   });
 
   it('Requirement 1 & 2: Automatic 5xx errors NEVER trigger global protective stop', async () => {

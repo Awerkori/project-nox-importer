@@ -86,6 +86,17 @@ export const DEFAULT_SENTINEL_THRESHOLDS: SentinelThresholds = {
   maxTelegramFloodWaitSec: 60,
 };
 
+// The sentinel must exercise the same public HTML route a reader sees. Some
+// edge configurations legitimately route bot-like/no-Accept probes
+// differently, which would turn a probe artifact into an importer throttle.
+// This is intentionally a normal browser navigation header set, not a bypass
+// header and not an authenticated request.
+export const SITE_PROBE_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+};
+
 export interface LatencySample {
   ttfbMs: number;
   timestamp: number;
@@ -836,9 +847,7 @@ export class ProtectiveSentinel {
         url,
         {
           agent: isHttps ? (label === 'reader' ? this.readerAgent : this.homeAgent) : this.httpAgent,
-          headers: {
-            'User-Agent': 'Project-Nox-AdaptiveMonitor/2.0',
-          },
+          headers: SITE_PROBE_HEADERS,
           timeout: 12000,
         },
         (res: any) => {
