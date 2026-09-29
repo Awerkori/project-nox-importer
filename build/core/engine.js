@@ -1027,6 +1027,7 @@ export class ImporterEngine {
                 let rateMetrics = { rate5m: 0, rate30m: 0, fresh5m: 0, fresh30m: 0, completedRate5m: 0, completedRate30m: 0, completed5m: 0, completed30m: 0 };
                 try {
                     rateMetrics = await this.rateBucketTracker.getRecentRates();
+                    this.latestCanonicalRate5m = rateMetrics.rate5m;
                 }
                 catch { }
                 const candidateSources = this.activeSourcesCache.sources.length > 0
@@ -1344,6 +1345,10 @@ export class ImporterEngine {
     }
     autotunerCycleCount = 0;
     consecutiveUnderutilizedCycles = 0;
+    // Refreshed by the liveness heartbeat from the durable publication bucket.
+    // The autotuner consumes this shared snapshot; it must not add another DB
+    // query on its hot 30s cycle.
+    latestCanonicalRate5m = 0;
     /**
      * Periodic autotuner telemetry & evaluation loop (every 30s)
      */
@@ -1368,6 +1373,7 @@ export class ImporterEngine {
                     dbUnavailable: (pressureSnapshot.pressureBreakdown?.dbPressure ?? 0) >= 90,
                     storageUnavailable: false,
                     allSourcesBlocked,
+                    canonicalRate5m: this.latestCanonicalRate5m,
                 });
                 const activeJobs = diagnostics.getActiveJobsCount();
                 const uploads = this.autotuner.getGlobalMediaSemaphore();

@@ -208,6 +208,7 @@ export declare class ImporterEngine {
     }): Promise<void>;
     private autotunerCycleCount;
     private consecutiveUnderutilizedCycles;
+    private latestCanonicalRate5m;
     /**
      * Periodic autotuner telemetry & evaluation loop (every 30s)
      */
