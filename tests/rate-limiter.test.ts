@@ -65,17 +65,10 @@ describe('HostRateLimiter', () => {
     expect(limiter.getHostRate('cdn.test.com')).toBeCloseTo(7.0, 1);
   });
 
-  it('enables turbo mode boosting host capacity for priority works', () => {
-    limiter.setHostRate('cdn.turbo.com', 8.0, 16, 16.0);
-    expect(limiter.getHostRate('cdn.turbo.com')).toBe(8.0);
-
-    limiter.setTurboMode(true);
-    expect(limiter.isTurboMode()).toBe(true);
-    // 8.0 * 1.5 = 12.0
-    expect(limiter.getHostRate('cdn.turbo.com')).toBe(12.0);
-
-    limiter.setTurboMode(false);
-    expect(limiter.isTurboMode()).toBe(false);
-    expect(limiter.getHostRate('cdn.turbo.com')).toBe(8.0);
+  it('keeps host capacity independent of Staff queue priority', () => {
+    limiter.setHostRate('cdn.priority.com', 8.0, 16, 16.0);
+    // Priority is a scheduler concern. This limiter deliberately exposes no
+    // global turbo switch which could amplify all active sources.
+    expect(limiter.getHostRate('cdn.priority.com')).toBe(8.0);
   });
 });

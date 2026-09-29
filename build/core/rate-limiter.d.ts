@@ -2,13 +2,10 @@ export declare class HostRateLimiter {
     private defaultRatePerSecond;
     private buckets;
     private logger;
-    private turboMode;
     constructor(defaultRatePerSecond?: number);
     setHostRate(host: string, ratePerSecond: number, capacity?: number, maxRatePerSecond?: number, minRatePerSecond?: number): void;
     private getBucket;
     recordSuccess(host: string): void;
-    setTurboMode(enabled: boolean): void;
-    isTurboMode(): boolean;
     getHostRate(host: string): number;
     /**
      * Acquire a token for host with jitter and sleep if necessary

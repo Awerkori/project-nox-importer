@@ -246,6 +246,51 @@ export function tokenOverlapRatio(s1, s2) {
     const union = new Set([...t1, ...t2]).size;
     return union > 0 ? intersection / union : 0.0;
 }
+function normalizedCreator(value) {
+    return normalizeTitle(value || '').replace(/\s+/g, ' ').trim();
+}
+function synopsisSimilarity(left, right) {
+    const a = normalizeTitle(left || '').split(/\s+/).filter((token) => token.length >= 4).join(' ');
+    const b = normalizeTitle(right || '').split(/\s+/).filter((token) => token.length >= 4).join(' ');
+    if (a.length < 30 || b.length < 30)
+        return 0;
+    return tokenOverlapRatio(a, b);
+}
+/**
+ * Metadata is deliberately corroborative. It may upgrade a candidate only
+ * when creator, kind, synopsis and title evidence agree; weaker evidence is
+ * retained for an AMBIGUOUS review rather than creating a risky auto-merge.
+ */
+export function evaluateMetadataMatchEvidence(target, candidate) {
+    // Metadata must never bypass the identity guards used by title matching.
+    // A shared creator or synopsis is not enough to conflate a novel, a later
+    // season, or a side story with its parent work.
+    const identityGuardFailed = isNovel(target.title, target.kind) !== isNovel(candidate.title, candidate.kind) ||
+        (() => {
+            const targetSeason = extractSeason(target.title);
+            const candidateSeason = extractSeason(candidate.title);
+            return targetSeason !== candidateSeason && Boolean(targetSeason || candidateSeason);
+        })() ||
+        extractSpinOff(target.title) !== extractSpinOff(candidate.title);
+    const targetAuthor = normalizedCreator(target.author);
+    const candidateAuthor = normalizedCreator(candidate.author);
+    const targetArtist = normalizedCreator(target.artist);
+    const candidateArtist = normalizedCreator(candidate.artist);
+    const authorExact = targetAuthor.length >= 3 && targetAuthor === candidateAuthor;
+    const artistExact = targetArtist.length >= 3 && targetArtist === candidateArtist;
+    const kindCompatible = !target.kind || !candidate.kind || target.kind === 'UNKNOWN' || candidate.kind === 'UNKNOWN' || target.kind === candidate.kind;
+    const yearCompatible = !target.year || !candidate.year || Math.abs(target.year - candidate.year) <= 1;
+    const normalizedTarget = normalizeTitle(target.title);
+    const normalizedCandidate = normalizeTitle(candidate.title);
+    const titleSimilarity = Math.max(diceSimilarity(normalizedTarget, normalizedCandidate), levenshteinSimilarity(normalizedTarget, normalizedCandidate), tokenOverlapRatio(normalizedTarget, normalizedCandidate));
+    const synopsis = synopsisSimilarity(target.synopsis, candidate.synopsis);
+    const creatorScore = authorExact ? 0.3 : artistExact ? 0.2 : 0;
+    const score = Number(Math.min(1, creatorScore + (kindCompatible ? 0.1 : 0) + (yearCompatible ? 0.05 : 0) + titleSimilarity * 0.25 + synopsis * 0.3).toFixed(4));
+    const hasCreator = authorExact || artistExact;
+    const autoMatch = !identityGuardFailed && hasCreator && kindCompatible && synopsis >= 0.72 && titleSimilarity >= 0.55;
+    const ambiguous = !identityGuardFailed && !autoMatch && hasCreator && kindCompatible && ((synopsis >= 0.35 && titleSimilarity >= 0.3) || titleSimilarity >= 0.72);
+    return { score, authorExact, artistExact, kindCompatible, yearCompatible, titleSimilarity, synopsisSimilarity: synopsis, autoMatch, ambiguous };
+}
 /**
  * Evaluates whether candidate work matches target work with safety constraints.
  */

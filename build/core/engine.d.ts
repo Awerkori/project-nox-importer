@@ -215,9 +215,6 @@ export declare class ImporterEngine {
     private runAutotunerLoop;
     private sourceEmptyCooldown;
     private sourceStatusCache;
-    private activeStaffFocusCache;
-    private activeStaffFocusFlight;
-    private getActiveStaffFocusWorkId;
     private getEligibleChapterSources;
     private checkSourceAvailability;
     /**

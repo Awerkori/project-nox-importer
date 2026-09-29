@@ -72,7 +72,7 @@ export interface SchedulerConfig {
   maxInflightPerWork: number;      // Default: 2 (strictly preserved: guarantees >= 4 concurrent works across 8 workers)
   slidingWindowSize: number;       // Default: 8 chapters admitted to QUEUED per active work
   slidingWindowMin: number;        // Default: 3 chapters low watermark before promoting next batch
-  antiStarvationRatio: number;     // Default: 4 (after 4 P0 claims, allow 1 P1/P2 if eligible)
+  antiStarvationRatio: number;     // Default: 4 (after 4 Staff claims, reserve one normal P0 opportunity)
 }
 
 export interface SchedulerMetrics {

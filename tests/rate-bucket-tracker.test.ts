@@ -14,7 +14,9 @@ describe('RateBucketTracker', () => {
           return {
             rows: [
               {
+                visible_1m: 3,
                 visible_5m: 10,
+                visible_10m: 18,
                 fresh_5m: 10,
                 completed_5m: 15,
                 visible_30m: 45,
@@ -56,15 +58,19 @@ describe('RateBucketTracker', () => {
     expect(mockPool.query).toHaveBeenCalledTimes(1);
   });
 
-  it('calculates 5m and 30m chapter throughput rates accurately', async () => {
+  it('calculates canonical 1m/5m/10m/30m throughput rates accurately', async () => {
     const tracker = new RateBucketTracker(mockPool);
 
     const rates = await tracker.getRecentRates(true);
 
     expect(mockPool.query).toHaveBeenCalledTimes(1);
-    // fresh_5m = 10 -> 10 / 5 = 2.0 chapters/min
+    // Canonical visible publications (not fresh or completed) drive Cap/min.
+    expect(rates.rate1m).toBe(3);
+    // visible_5m = 10 -> 10 / 5 = 2.0 chapters/min
     expect(rates.rate5m).toBe(2);
-    // fresh_30m = 45 -> 45 / 30 = 1.5 chapters/min
+    // visible_10m = 18 -> 18 / 10 = 1.8 chapters/min
+    expect(rates.rate10m).toBe(1.8);
+    // visible_30m = 45 -> 45 / 30 = 1.5 chapters/min
     expect(rates.rate30m).toBe(1.5);
     // completed_5m = 15 -> 15 / 5 = 3.0 jobs/min
     expect(rates.completedRate5m).toBe(3);
@@ -72,6 +78,8 @@ describe('RateBucketTracker', () => {
     expect(rates.completedRate30m).toBe(2);
     expect(rates.fresh5m).toBe(10);
     expect(rates.fresh30m).toBe(45);
+    expect(rates.visible1m).toBe(3);
+    expect(rates.visible10m).toBe(18);
   });
 
   it('caches rate metrics for CACHE_TTL duration', async () => {

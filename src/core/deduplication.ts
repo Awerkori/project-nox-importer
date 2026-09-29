@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { Logger } from './logger.js';
 import { decodeHtmlEntities } from '../sources/common/html-utils.js';
-import { matchWorkCandidate, getCanonicalSynonyms } from './matching.js';
+import { evaluateMetadataMatchEvidence, matchWorkCandidate, getCanonicalSynonyms } from './matching.js';
 
 export interface DeduplicationResult {
   workId: string | null;
@@ -226,13 +226,13 @@ export class DeduplicationEngine {
 
     // Step 2B: Query works table by slug, aliases, title, or mapped workIds
     const workQueries: PromiseLike<any>[] = [
-      this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind, status').in('slug', incomingSlugs),
-      this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind, status').overlaps('aliases', incomingTitles),
-      this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind, status').in('title', incomingTitles),
+      this.supabase.from('works').select('id, title, slug, author, artist, aliases, synopsis, kind, status, year').in('slug', incomingSlugs),
+      this.supabase.from('works').select('id, title, slug, author, artist, aliases, synopsis, kind, status, year').overlaps('aliases', incomingTitles),
+      this.supabase.from('works').select('id, title, slug, author, artist, aliases, synopsis, kind, status, year').in('title', incomingTitles),
     ];
     if (mappedWorkIds.size > 0) {
       workQueries.push(
-        this.supabase.from('works').select('id, title, slug, author, aliases, synopsis, kind, status').in('id', Array.from(mappedWorkIds))
+        this.supabase.from('works').select('id, title, slug, author, artist, aliases, synopsis, kind, status, year').in('id', Array.from(mappedWorkIds))
       );
     }
 
@@ -245,6 +245,28 @@ export class DeduplicationEngine {
     for (const res of workQueryResults) {
       for (const w of res.data || []) {
         candidateMap.set(w.id, w);
+      }
+    }
+
+    // Title/alias remains the cheap primary narrowing path. Only when it
+    // yields no candidate do we use exact creator fields to surface a small
+    // corroborative set for translated titles. This avoids catalog scans.
+    if (candidateMap.size === 0 && (candidate.author || candidate.artist)) {
+      const creatorQueries: PromiseLike<any>[] = [];
+      if (candidate.author?.trim()) {
+        let query: any = this.supabase.from('works').select('id, title, slug, author, artist, aliases, synopsis, kind, status, year').in('author', [candidate.author.trim()]);
+        if (typeof query?.limit === 'function') query = query.limit(24);
+        creatorQueries.push(query);
+      }
+      if (candidate.artist?.trim()) {
+        let query: any = this.supabase.from('works').select('id, title, slug, author, artist, aliases, synopsis, kind, status, year').in('artist', [candidate.artist.trim()]);
+        if (typeof query?.limit === 'function') query = query.limit(24);
+        creatorQueries.push(query);
+      }
+      const creatorResults = await Promise.all(creatorQueries);
+      for (const res of creatorResults) {
+        if (res.error) throw res.error;
+        for (const work of res.data || []) candidateMap.set(work.id, work);
       }
     }
     const matchedWorks = Array.from(candidateMap.values());
@@ -266,6 +288,7 @@ export class DeduplicationEngine {
       let bestMatch: any = null;
       let highestScore = -1;
       let secondScore = -1;
+      const ambiguousMetadataCandidates: Array<{ work: any; score: number }> = [];
 
       for (const w of matchedWorks) {
         if (claimedBySameSource.has(w.id)) continue;
@@ -277,20 +300,38 @@ export class DeduplicationEngine {
             slug: w.slug,
             aliases: w.aliases || [],
             kind: w.kind,
+            author: w.author,
+            artist: w.artist,
+            synopsis: w.synopsis,
+            year: w.year,
           },
           {
             title: candidate.title,
             slug: cleanSlug,
             aliases: incomingTitles,
             kind: candidate.kind,
+            author: candidate.author,
+            artist: candidate.artist,
+            synopsis: candidate.synopsis,
+            year: candidate.year,
           }
         );
 
+        const metadataEvidence = evaluateMetadataMatchEvidence(
+          { title: w.title, kind: w.kind, author: w.author, artist: w.artist, synopsis: w.synopsis, year: w.year },
+          { title: candidate.title, kind: candidate.kind, author: candidate.author, artist: candidate.artist, synopsis: candidate.synopsis, year: candidate.year }
+        );
+
         if (!matchResult.matched) {
-          continue;
+          if (metadataEvidence.ambiguous) {
+            ambiguousMetadataCandidates.push({ work: w, score: metadataEvidence.score });
+          }
+          if (!metadataEvidence.autoMatch) continue;
         }
 
-        let score = matchResult.confidenceScore;
+        let score = matchResult.matched
+          ? matchResult.confidenceScore
+          : Math.max(0.9, metadataEvidence.score);
 
         // Additional signal: Author match bonus
         if (candidate.author && w.author) {
@@ -330,7 +371,7 @@ export class DeduplicationEngine {
 
       // High confidence threshold: >= 0.85
       if (!bestMatch || highestScore < 0.85) {
-        if (matchedWorks.some(w => claimedBySameSource.has(w.id)) || (highestScore >= 0.60 && highestScore < 0.85)) {
+        if (ambiguousMetadataCandidates.length > 0 || matchedWorks.some(w => claimedBySameSource.has(w.id)) || (highestScore >= 0.60 && highestScore < 0.85)) {
           isAmbiguous = true;
         }
       } else {
@@ -363,6 +404,7 @@ export class DeduplicationEngine {
                 ? 'Work already claimed by another ID from the same source'
                 : 'Conflict with multiple existing works or low confidence score',
               candidates: matchedWorks.map(m => ({ id: m.id, title: m.title, score: m._score })),
+              metadata_candidates: ambiguousMetadataCandidates.map(({ work, score }) => ({ id: work.id, title: work.title, score })),
               raw: candidate.rawMetadata,
             },
             last_synced_at: new Date().toISOString(),

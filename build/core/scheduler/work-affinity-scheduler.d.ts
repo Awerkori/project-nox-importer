@@ -17,6 +17,13 @@ import { AdmissionController } from './admission-controller.js';
 import { SchedulerStateStore } from './state-store.js';
 import { SchedulerDecision, SchedulerLane, SchedulerMetrics } from './types.js';
 export declare function isActiveChapterClaimConflict(error: any): boolean;
+/**
+ * Staff requests own the scheduling order, not the resource budget. After a
+ * bounded Staff burst, a waiting P0 gets one opportunity to claim the next
+ * slot. The caller still applies the normal source, DB, media and global
+ * chapter permits, so this cannot manufacture capacity.
+ */
+export declare function shouldReserveP0AfterStaffBurst(consecutiveStaffClaims: number, antiStarvationRatio: number, hasP0Candidate: boolean): boolean;
 export interface AcquiredSchedulerJob {
     job: any;
     lane: SchedulerLane;
@@ -31,7 +38,7 @@ export declare class WorkAffinityScheduler {
     private inFlightByWork;
     private inFlightChapterKeys;
     private pendingClaimReservationsByWork;
-    private p0ConsecutiveClaims;
+    private staffConsecutiveClaims;
     private rrIndexP1;
     private rrIndexP2;
     private rrCatalogSourceIndex;
@@ -112,6 +119,7 @@ export declare class WorkAffinityScheduler {
         leaseDurationMinutes?: number;
         allowedSources?: string[];
     }): Promise<any | null>;
+    private completeStaffClaim;
     /**
      * Core intelligent claim logic implementing P0 -> P1 -> P2 -> Fallback.
      */

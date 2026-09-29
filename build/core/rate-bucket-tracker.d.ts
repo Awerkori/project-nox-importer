@@ -1,8 +1,12 @@
 import type { Pool } from 'pg';
 export interface RateMetrics {
+    rate1m: number;
     rate5m: number;
+    rate10m: number;
     rate30m: number;
+    visible1m: number;
     visible5m: number;
+    visible10m: number;
     visible30m: number;
     freshRate5m: number;
     freshRate30m: number;

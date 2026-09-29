@@ -224,6 +224,10 @@ export class ImporterEngine {
             maxEventLoopLagMs: 300,
             requiredStableCycles: 2,
             cooldownPeriodMs: 15 * 1000,
+            // The 30s autotuner loop already requires two healthy cycles; this
+            // explicit dwell keeps recovery stepwise (for example 3 -> 4 -> 5)
+            // without raising the homologated global ceiling.
+            scaleUpDwellTimeMs: 30 * 1000,
             rssSoftLimitMb: 390,
             rssHardLimitMb: 430,
             rssEmergencyLimitMb: 460,
@@ -868,7 +872,10 @@ export class ImporterEngine {
                             break;
                         try {
                             this.logger.info(`Running cross-provider reconciliation for Prioridade Absoluta work ${req.work_id}`);
-                            await this.reconciler.reconcileWorkManifest(req.work_id, { priority: 100 });
+                            // Staff is a scheduling lane (>= 1000), not the P0 fresh-release
+                            // lane. Reconciliation must retain that distinction whenever it
+                            // refreshes the manifest.
+                            await this.reconciler.reconcileWorkManifest(req.work_id, { priority: 1000 });
                         }
                         catch (err) {
                             this.logger.warn(`Failed reconciling Prioridade Absoluta work ${req.work_id}`, { error: err?.message });
@@ -1027,7 +1034,7 @@ export class ImporterEngine {
                     newWorkPipeline = 'NEW_WORK_PIPELINE_HEALTHY';
                 }
                 // Fetch persistent throughput rates from importer_rate_buckets
-                let rateMetrics = { rate5m: 0, rate30m: 0, fresh5m: 0, fresh30m: 0, completedRate5m: 0, completedRate30m: 0, completed5m: 0, completed30m: 0 };
+                let rateMetrics = { rate1m: 0, rate5m: 0, rate10m: 0, rate30m: 0, visible1m: 0, visible5m: 0, visible10m: 0, visible30m: 0, fresh5m: 0, fresh30m: 0, completedRate5m: 0, completedRate30m: 0, completed5m: 0, completed30m: 0 };
                 try {
                     rateMetrics = await this.rateBucketTracker.getRecentRates();
                     this.latestCanonicalRate5m = rateMetrics.rate5m;
@@ -1053,7 +1060,9 @@ export class ImporterEngine {
                         processingHealth: healthMetrics.processingHealth,
                         publicationHealth: healthMetrics.publicationHealth,
                         noProgressReason: healthMetrics.noProgressReason || null,
+                        rate1m: rateMetrics.rate1m,
                         rate5m: rateMetrics.rate5m,
+                        rate10m: rateMetrics.rate10m,
                         rate30m: rateMetrics.rate30m,
                         fresh5m: rateMetrics.fresh5m,
                         fresh30m: rateMetrics.fresh30m,
@@ -1449,45 +1458,6 @@ export class ImporterEngine {
     }
     sourceEmptyCooldown = new Map();
     sourceStatusCache = new Map();
-    // Staff focus is global and changes through an explicit admin action. A tiny
-    // TTL removes two no-op DB round-trips from every ordinary chapter without
-    // materially delaying an explicit priority request.
-    activeStaffFocusCache = { workId: null, cachedAt: 0 };
-    activeStaffFocusFlight = null;
-    async getActiveStaffFocusWorkId() {
-        const now = Date.now();
-        if (now - this.activeStaffFocusCache.cachedAt < 5_000)
-            return this.activeStaffFocusCache.workId;
-        if (this.activeStaffFocusFlight)
-            return this.activeStaffFocusFlight;
-        const flight = (async () => {
-            try {
-                let query = this.supabase
-                    .from('importer_staff_requests')
-                    .select('work_id');
-                if (typeof query?.in === 'function')
-                    query = query.in('status', ['QUEUED', 'IMPORTING', 'RETRYING']);
-                const { data } = typeof query?.maybeSingle === 'function' ? await query.maybeSingle() : { data: null };
-                const workId = data?.work_id ? String(data.work_id) : null;
-                this.activeStaffFocusCache = { workId, cachedAt: Date.now() };
-                return workId;
-            }
-            catch {
-                // Preserve existing semantics: an unavailable staff table must never
-                // block normal importing. Keep the last known focus only briefly.
-                this.activeStaffFocusCache.cachedAt = Date.now();
-                return this.activeStaffFocusCache.workId;
-            }
-        })();
-        this.activeStaffFocusFlight = flight;
-        try {
-            return await flight;
-        }
-        finally {
-            if (this.activeStaffFocusFlight === flight)
-                this.activeStaffFocusFlight = null;
-        }
-    }
     async getEligibleChapterSources() {
         const now = Date.now();
         if (now - this.activeSourcesCache.cachedAt > 5_000) {
@@ -2313,19 +2283,12 @@ export class ImporterEngine {
                     }
                 }
             }
-            // Prioridade Absoluta Guard: cache the global staff focus briefly. This
-            // removes repeated no-op reads and writes from ordinary chapter imports.
-            const activeFocusWorkId = await this.getActiveStaffFocusWorkId();
-            if (activeFocusWorkId && job.payload?.workId && job.payload.workId !== activeFocusWorkId) {
-                this.logger.info(`Focus Mode active for work ${activeFocusWorkId}. Deferring non-priority job for ${job.payload?.workId}`, {
-                    jobId: job.id,
-                    focusWorkId: activeFocusWorkId,
-                    jobWorkId: job.payload?.workId,
-                });
-                await this.queue.releaseJob(job.id, 'RETRY', `Focus mode active for work ${activeFocusWorkId}`, 15);
-                return;
-            }
-            if (activeFocusWorkId && job.payload?.workId === activeFocusWorkId) {
+            // Staff affects queue ordering only. Once this job has been claimed, it
+            // keeps the same global DB/media/download/buffer budget as every other
+            // job; non-Staff jobs are never bounced into RETRY merely because a
+            // Staff request exists.
+            const isStaffPriorityJob = Boolean(job.payload?.staffRequested || job.payload?.staffForced || job.priority >= 1000);
+            if (isStaffPriorityJob && job.payload?.workId) {
                 try {
                     await this.supabase
                         .from('importer_staff_requests')
@@ -2840,7 +2803,7 @@ export class ImporterEngine {
                     .from('importer_staff_requests')
                     .select('id, priority_boost')
                     .eq('work_id', result.workId)
-                    .eq('status', 'ACTIVE')
+                    .in('status', ['QUEUED', 'IMPORTING', 'RETRYING', 'ACTIVE'])
                     .maybeSingle();
                 if (staffReq) {
                     isStaffPriority = true;
@@ -2850,7 +2813,6 @@ export class ImporterEngine {
             catch {
                 // Safe fallback
             }
-            const chapterPriority = isStaffPriority ? 1000 + staffPriorityBoost : 30;
             // 1. Batch pre-register in importer_chapter_mappings in chunks
             const mappingsToUpsert = chaptersToEnqueue.map((ch) => {
                 const chKey = this.computeCanonicalChapterKey(ch.number, ch.title);
@@ -2922,7 +2884,10 @@ export class ImporterEngine {
                 let isFreshRelease = false;
                 if (isStaffPriority) {
                     priority = 1000 + staffPriorityBoost;
-                    isFreshRelease = true;
+                    // Staff scheduling does not redefine editorial freshness. A chapter
+                    // is fresh only when it is genuinely above an existing work's
+                    // watermark; historical Staff backfill remains canonical backfill.
+                    isFreshRelease = Boolean(isWorkAlreadyOnSite && watermark && chKey.sortKey > watermark.lastSeenSortKey);
                 }
                 else if (isWorkAlreadyOnSite && watermark && chKey.sortKey > watermark.lastSeenSortKey) {
                     // P0: Fresh New Release of tracked/existing work
@@ -3289,17 +3254,12 @@ export class ImporterEngine {
                         break;
                     }
                 }
-                const isPriority = Boolean(job.payload?.staffRequested);
-                if (isPriority) {
-                    this.rateLimiter.setTurboMode(true);
-                }
                 const storedPages = new Array(expectedCount).fill(null);
                 const mediaRecordsToInsert = [];
-                // Per-source page download concurrency & priority boost
+                // Per-source page download concurrency. Staff work is scheduled first
+                // but never multiplies request fan-out beyond the normal global budget.
                 const baseSourcePageConcurrency = this.autotuner.getSourcePageConcurrency(effectiveSource);
-                const downloadConcurrency = isPriority
-                    ? Math.min(12, Math.max(8, baseSourcePageConcurrency * 2))
-                    : Math.min(baseSourcePageConcurrency, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY || 8);
+                const downloadConcurrency = Math.min(baseSourcePageConcurrency, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY || 8);
                 // Upload pool concurrency: up to 8, bounded by autotuner and globalMediaSemaphore
                 const uploadConcurrency = Math.min(8, Math.max(3, Math.floor(this.autotuner.getCurrentConcurrency() * 0.75)));
                 const globalMediaSemaphore = this.autotuner.getGlobalMediaSemaphore();
@@ -4047,9 +4007,6 @@ export class ImporterEngine {
             throw err;
         }
         finally {
-            if (Boolean(job.payload?.staffRequested)) {
-                this.rateLimiter.setTurboMode(false);
-            }
             diagnostics.unregisterJob(job.id);
         }
     }

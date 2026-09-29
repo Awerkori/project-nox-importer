@@ -439,7 +439,7 @@ export class ExistingWorksReconciler {
             isWorkPublished = true;
         }
         // 10. Check Staff Priority
-        let isStaffPriority = options?.priority === 1000 || options?.priority === 100;
+        let isStaffPriority = options?.priority === 1000;
         if (!isStaffPriority) {
             try {
                 const staffQuery = this.supabase.from('importer_staff_requests');
@@ -447,7 +447,7 @@ export class ExistingWorksReconciler {
                     const { data: staffReq } = await staffQuery
                         .select('id, priority_boost')
                         .eq('work_id', workId)
-                        .eq('status', 'ACTIVE')
+                        .in('status', ['QUEUED', 'IMPORTING', 'RETRYING', 'ACTIVE'])
                         .maybeSingle();
                     if (staffReq)
                         isStaffPriority = true;

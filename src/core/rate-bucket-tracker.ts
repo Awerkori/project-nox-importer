@@ -2,9 +2,13 @@ import type { Pool } from 'pg';
 import { Logger } from './logger.js';
 
 export interface RateMetrics {
+  rate1m: number;          // Canonical visible publications / min in the rolling 1m window
   rate5m: number;          // Visible published chapters / min (over 5m window) — Operational Target
+  rate10m: number;         // Visible published chapters / min (over 10m window)
   rate30m: number;         // Visible published chapters / min (over 30m window)
+  visible1m: number;
   visible5m: number;       // Total visible published chapters in last 5m
+  visible10m: number;
   visible30m: number;      // Total visible published chapters in last 30m
   freshRate5m: number;     // Genuine fresh releases / min (over 5m window)
   freshRate30m: number;    // Genuine fresh releases / min (over 30m window)
@@ -114,7 +118,9 @@ export class RateBucketTracker {
     try {
       const res = await this.pool.query(`
         SELECT
+          COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '1 minute'), 0)::int AS visible_1m,
           COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '5 minutes'), 0)::int AS visible_5m,
+          COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '10 minutes'), 0)::int AS visible_10m,
           COALESCE(SUM(fresh_visible) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '5 minutes'), 0)::int AS fresh_5m,
           COALESCE(SUM(completed_jobs) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '5 minutes'), 0)::int AS completed_5m,
           COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '30 minutes'), 0)::int AS visible_30m,
@@ -125,7 +131,9 @@ export class RateBucketTracker {
       `);
 
       const row = res.rows[0] || {};
+      const visible1m = Number(row.visible_1m) || 0;
       const visible5m = Number(row.visible_5m) || 0;
+      const visible10m = Number(row.visible_10m) || 0;
       const fresh5m = Number(row.fresh_5m) || 0;
       const completed5m = Number(row.completed_5m) || 0;
       const visible30m = Number(row.visible_30m) || 0;
@@ -133,7 +141,9 @@ export class RateBucketTracker {
       const completed30m = Number(row.completed_30m) || 0;
 
       // Rate calculations
+      const rate1m = visible1m;
       const rate5m = Math.round((visible5m / 5.0) * 10) / 10;
+      const rate10m = Math.round((visible10m / 10.0) * 10) / 10;
       const rate30m = Math.round((visible30m / 30.0) * 10) / 10;
       const freshRate5m = Math.round((fresh5m / 5.0) * 10) / 10;
       const freshRate30m = Math.round((fresh30m / 30.0) * 10) / 10;
@@ -143,9 +153,13 @@ export class RateBucketTracker {
       const completedRate30m = Math.round((completed30m / 30.0) * 10) / 10;
 
       const metrics: RateMetrics = {
+        rate1m,
         rate5m,
+        rate10m,
         rate30m,
+        visible1m,
         visible5m,
+        visible10m,
         visible30m,
         freshRate5m,
         freshRate30m,
@@ -166,9 +180,13 @@ export class RateBucketTracker {
       this.logger.warn('Failed querying recent rates from importer_rate_buckets', { error: err?.message });
       return (
         this.cachedRates || {
+          rate1m: 0,
           rate5m: 0,
+          rate10m: 0,
           rate30m: 0,
+          visible1m: 0,
           visible5m: 0,
+          visible10m: 0,
           visible30m: 0,
           freshRate5m: 0,
           freshRate30m: 0,
