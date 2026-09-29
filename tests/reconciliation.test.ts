@@ -24,7 +24,7 @@ describe('ExistingWorksReconciler - Canonical Gap & Fresh Release Discovery', ()
     };
   });
 
-  it('enqueues confirmed gaps with Priority 70 in strict ascending sort order and fresh releases with Priority 80', async () => {
+  it('enqueues confirmed gaps with P1 priority 70 and tracked fresh releases with P0 priority 100', async () => {
     // Published: Ch 1, 2, 5 (Max published = 5).
     // Gaps in between: Ch 3, Ch 4.
     // Fresh release: Ch 6.
@@ -118,7 +118,8 @@ describe('ExistingWorksReconciler - Canonical Gap & Fresh Release Discovery', ()
     expect(enqueuedJobs[1].dedupeKey).toBe(`work:${workId}:chapter:4`);
 
     expect(enqueuedJobs[2].sortKey).toBe(6);
-    expect(enqueuedJobs[2].priority).toBe(80);
+    expect(enqueuedJobs[2].priority).toBe(100);
+    expect(enqueuedJobs[2].payload.isFreshRelease).toBe(true);
     expect(enqueuedJobs[2].dedupeKey).toBe(`work:${workId}:chapter:6`);
   });
 
@@ -189,13 +190,14 @@ describe('ExistingWorksReconciler - Canonical Gap & Fresh Release Discovery', ()
     reconciler = new ExistingWorksReconciler(mockSupabase, mockQueue, registry);
     const stats = await reconciler.reconcileExistingWorks(10);
 
-    // Only chapter 20 should be enqueued as fresh release (priority 80)
+    // Only chapter 20 should be enqueued as a P0 fresh release (priority 100)
     // Chapters 11..19 must NEVER be invented!
     expect(stats.confirmedGapsDiscovered).toBe(0);
     expect(stats.newChaptersDiscovered).toBe(1);
     expect(enqueuedJobs.length).toBe(1);
     expect(enqueuedJobs[0].sortKey).toBe(20);
-    expect(enqueuedJobs[0].priority).toBe(80);
+    expect(enqueuedJobs[0].priority).toBe(100);
+    expect(enqueuedJobs[0].payload.isFreshRelease).toBe(true);
   });
 
   it('protects STAGED chapters and NEVER re-enqueues them', async () => {
@@ -365,6 +367,8 @@ describe('ExistingWorksReconciler - Canonical Gap & Fresh Release Discovery', ()
     expect(enqueuedJobs.length).toBe(1);
     expect(enqueuedJobs[0].source).toBe('kuro');
     expect(enqueuedJobs[0].payload.sourceChapterId).toBe('kuro-ch-4');
+    expect(enqueuedJobs[0].priority).toBe(70);
+    expect(enqueuedJobs[0].payload.isFreshRelease).toBe(false);
     expect(enqueuedJobs[0].payload.fallbackSources).toBeDefined();
     expect(enqueuedJobs[0].payload.fallbackSources[0].source).toBe('mangaflix');
   });
