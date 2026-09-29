@@ -684,8 +684,12 @@ export class ExistingWorksReconciler {
             mappingId: s.mappingId,
           }));
 
-        const isGap = sortKey < highestMilestone;
-        const naturalPriority = isWorkPublished ? (isGap ? 70 : 80) : 50;
+        // P0 is only a chapter genuinely newer than a tracked work's known
+        // frontier. A pre-existing work with no canonical frontier is still
+        // historical P1 backfill, not a burst of false fresh releases.
+        const isFreshRelease = isWorkPublished && highestMilestone > 0 && sortKey > highestMilestone;
+        const isGap = !isFreshRelease;
+        const naturalPriority = isWorkPublished ? (isFreshRelease ? 100 : 70) : 50;
         let assignedPriority = naturalPriority;
         if (options?.priority !== undefined) {
           assignedPriority = options.priority;
@@ -731,6 +735,7 @@ export class ExistingWorksReconciler {
             chapterTitle: candidate.chapterTitle,
             expectedPageCount: candidate.pageCount || null,
             isGapBackfill: isGap,
+            isFreshRelease,
             fallbackSources: fallbacks,
             ...(isStaffPriority ? { staffForced: true, originalPriority: naturalPriority } : {}),
           },
@@ -1219,8 +1224,12 @@ export class ExistingWorksReconciler {
         stats.confirmedGapsDiscovered++;
       }
 
-      // Process new chapters (Priority 80)
+      // A candidate strictly above the tracked canonical frontier is a P0
+      // release. An existing work without that frontier is historical P1
+      // backfill, never a fabricated fresh-release signal.
       for (const cand of newChapters) {
+        const isFreshRelease = highestMilestone > 0 && cand.sortKey > highestMilestone;
+        const priority = isFreshRelease ? 100 : 70;
         const operationalSources = cand.sources.filter((s) =>
           this.isSourceOperationallyAvailable(s.source, sourcesState)
         );
@@ -1286,10 +1295,12 @@ export class ExistingWorksReconciler {
             chapterNumber: cand.chapterNumber,
             chapterTitle: cand.chapterTitle,
             expectedPageCount: cand.expectedPages || null,
-            isNewRelease: true,
+            isNewRelease: isFreshRelease,
+            isFreshRelease,
+            isGapBackfill: !isFreshRelease,
             fallbackSources: operationalFallbackSources,
           },
-          priority: 80,
+          priority,
           chapterSortKey: cand.sortKey,
         });
 
