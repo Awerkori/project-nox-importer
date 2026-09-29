@@ -45,7 +45,11 @@ export class AdmissionController {
     private protectiveSentinel: ProtectiveSentinel,
     pool?: any
   ) {
-    const rawPool = pool || getYugabytePool();
+    // Keep in-memory scheduler tests independent of runtime Yugabyte secrets.
+    // Engine passes the real bounded pool in production.
+    const rawPool = pool || (process.env.NODE_ENV === 'test'
+      ? { query: async () => ({ rows: [] }) }
+      : getYugabytePool());
     if (typeof rawPool.connect === 'function') {
       this.pool = rawPool;
     } else {
@@ -462,8 +466,11 @@ export class AdmissionController {
           if (queuedCnt === 0 && importingCnt === 0) {
             const isCaughtUp = unimportedCnt === 0 && pubCnt > 0;
             const stateLabel = isCaughtUp ? 'CAUGHT_UP' : 'DRAINED';
+            // Capture the cohort before mutating this work's state. Counting
+            // only FILLING after changing it to COMPLETE produced misleading
+            // "0 -> -1" vacancy telemetry for a real one-work cohort.
+            const beforeCount = this.stateStore.getActiveWorks().length;
             work.state = isCaughtUp ? 'CAUGHT_UP' : 'COMPLETE';
-            const beforeCount = this.stateStore.getActiveWorks().filter((w) => w.state === 'FILLING').length;
             this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${stateLabel} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${unimportedCnt} unimported mappings). Vacating active slot. ACTIVE SET BEFORE: ${beforeCount} -> AFTER: ${beforeCount - 1}`);
             this.stateStore.removeActiveWork(work.workId);
             this.triggerImmediateReplenishment('WORK_DRAINED_VACATED');

@@ -614,6 +614,7 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
   // =========================================================================
   it('TEST I: Zombie Active Works Prevention — work with unimported chapters but 0 queued vacates active slot', async () => {
     const admission = new AdmissionController(mockStateStore, mockSentinel);
+    const admissionInfo = vi.spyOn((admission as any).logger, 'info');
 
     // Set up active work that has zero queued and zero importing, but has unimported/staged mappings
     mockStateStore.setActiveWork({
@@ -679,5 +680,6 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     const healthyAdmitted = activeAfterCycle.some((w) => w.workId === 'work-healthy-1');
     expect(healthyAdmitted).toBe(true);
     expect(activeAfterCycle.length).toBe(1);
+    expect(admissionInfo).toHaveBeenCalledWith(expect.stringContaining('ACTIVE SET BEFORE: 1 -> AFTER: 0'));
   });
 });

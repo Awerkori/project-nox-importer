@@ -18,7 +18,7 @@ import {
 
 export class SchedulerStateStore {
   private logger = new Logger('SchedulerStateStore');
-  private pool = getYugabytePool();
+  private pool: any;
 
   private activeWorksCache: Map<string, ActiveWork> = new Map();
   private watermarksCache: Map<string, WorkWatermark> = new Map();
@@ -36,7 +36,13 @@ export class SchedulerStateStore {
   private isLoaded = false;
   private saveDebounceTimer: NodeJS.Timeout | null = null;
 
-  constructor() {}
+  constructor(pool?: any) {
+    // State is replaced by a local double in scheduler unit tests. Avoid
+    // resolving production credentials merely to create that empty instance.
+    this.pool = pool || (process.env.NODE_ENV === 'test'
+      ? { query: async () => ({ rows: [] }) }
+      : getYugabytePool());
+  }
 
   /**
    * Initializes state by creating table if missing and loading existing records.

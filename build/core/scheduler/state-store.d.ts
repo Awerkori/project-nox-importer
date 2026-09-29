@@ -15,7 +15,7 @@ export declare class SchedulerStateStore {
     private metricsCache;
     private isLoaded;
     private saveDebounceTimer;
-    constructor();
+    constructor(pool?: any);
     /**
      * Initializes state by creating table if missing and loading existing records.
      */
