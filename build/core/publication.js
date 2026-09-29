@@ -6,9 +6,48 @@ export class PublicationBarrier {
     supabase;
     logger = new Logger('PublicationBarrier');
     workLocks = new Map();
+    // Cover warming is presentation work, never publication work.  Keep it
+    // process-bounded and serial so a burst of newly visible chapters cannot
+    // create a parallel Telegram/edge stampede.
+    coverWarmQueue = new AsyncSemaphore(1, 'cover_warm_queue');
+    warmedCoverIds = new Set();
+    maxRememberedWarmCovers = 256;
     onPublished;
     constructor(supabase) {
         this.supabase = supabase;
+    }
+    warmPublishedCover(coverId) {
+        if (!coverId || !/^[0-9a-f-]{36}$/i.test(coverId) || this.warmedCoverIds.has(coverId))
+            return;
+        this.warmedCoverIds.add(coverId);
+        if (this.warmedCoverIds.size > this.maxRememberedWarmCovers) {
+            const oldest = this.warmedCoverIds.values().next().value;
+            if (oldest)
+                this.warmedCoverIds.delete(oldest);
+        }
+        void this.coverWarmQueue.runExclusive(async () => {
+            let warmed = false;
+            try {
+                const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
+                // Sequential variants avoid duplicate origin reads. This happens after
+                // commit, outside the YSQL client and behind a single low-priority lane.
+                for (const variant of ['thumb', 'hero']) {
+                    const warmUrl = `${siteUrl.replace(/\/$/, '')}/media/${coverId}?size=${variant}&v=3`;
+                    const response = await fetch(warmUrl, { signal: AbortSignal.timeout(10_000) }).catch(() => null);
+                    if (response?.ok) {
+                        warmed = true;
+                        await response.arrayBuffer().catch(() => { });
+                    }
+                }
+            }
+            finally {
+                // A transient network failure must not suppress the next legitimate
+                // publication attempt for this cover. Normal media delivery remains
+                // authoritative regardless of warming outcome.
+                if (!warmed)
+                    this.warmedCoverIds.delete(coverId);
+            }
+        }).catch(() => this.warmedCoverIds.delete(coverId));
     }
     getWorkLock(workId) {
         let sem = this.workLocks.get(workId);
@@ -159,7 +198,6 @@ export class PublicationBarrier {
             const client = await pool.connect();
             let isNewlyVisible = false;
             let coverIdToWarm;
-            let workBecamePublic = false;
             try {
                 await client.query('BEGIN');
                 // 1. Fetch current work details for cover/publication verification
@@ -246,11 +284,10 @@ export class PublicationBarrier {
                updated_at = NOW()
            WHERE id = $1::uuid
            RETURNING slug`, [workId, shouldPublishWork, publishedAtIso]);
-                // A newly-public work is about to be rendered on Home/Lançamentos.
-                // Warm only its immutable thumbnail after commit; never make the
-                // publication transaction or existing works wait on Telegram/edge I/O.
-                workBecamePublic = Boolean(!currentWork?.published && shouldPublishWork);
-                coverIdToWarm = workBecamePublic ? currentWork?.cover_id : undefined;
+                // Any work promoted in a release feed can be rendered immediately on
+                // Home/Lançamentos. Warm its immutable derivatives after commit; never
+                // make the publication transaction or an existing work wait on edge I/O.
+                coverIdToWarm = currentWork?.cover_id;
                 await client.query('COMMIT');
             }
             catch (txErr) {
@@ -266,28 +303,11 @@ export class PublicationBarrier {
                 }
                 catch { }
             }
-            // A cold cover comes from Telegram and can otherwise leave the first
-            // visitor staring at a progressively streamed image for seconds. Consume
-            // the two bounded presentation variants only when a work first becomes public.
-            // This stays outside the DB transaction and is deliberately detached from
-            // chapter throughput; failed warming is harmless because normal delivery
-            // remains authoritative.
-            try {
-                const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
-                if (isNewlyVisible && workBecamePublic && coverIdToWarm) {
-                    void (async () => {
-                        // Sequential avoids a duplicate Telegram read for the same cover
-                        // while keeping publication and its YSQL transaction independent.
-                        for (const variant of ['thumb', 'hero']) {
-                            const warmUrl = `${siteUrl.replace(/\/$/, '')}/media/${coverIdToWarm}?size=${variant}&v=3`;
-                            const response = await fetch(warmUrl, { signal: AbortSignal.timeout(10_000) }).catch(() => null);
-                            if (response?.ok)
-                                await response.arrayBuffer().catch(() => { });
-                        }
-                    })();
-                }
-            }
-            catch { }
+            // A cold cover otherwise makes the first visitor wait on Telegram and
+            // progressively stream the image. This is detached, bounded and does not
+            // hold a database client.
+            if (isNewlyVisible)
+                this.warmPublishedCover(coverIdToWarm);
             // Update importer_chapter_manifest status to PUBLISHED if available (asynchronously)
             void (async () => {
                 try {
