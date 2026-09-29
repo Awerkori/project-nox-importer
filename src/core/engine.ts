@@ -51,6 +51,18 @@ export function resolveBufferBudgetBytes(value = process.env.MAX_BUFFERED_BYTES)
     : DEFAULT_MAX_BUFFERED_BYTES;
 }
 
+/**
+ * Queue selection is DB-bound, while a claimed chapter spends nearly all of
+ * its lifetime on upstream/Telegram I/O.  Keep only a pool-sized number of
+ * slots in the short selection phase; never let DB acquisition consume the
+ * chapter-execution permits themselves.
+ */
+export function resolveChapterClaimConcurrency(globalConcurrency: number, dbPoolMax: number): number {
+  const global = Number.isFinite(globalConcurrency) ? Math.floor(globalConcurrency) : 1;
+  const pool = Number.isFinite(dbPoolMax) ? Math.floor(dbPoolMax) : 1;
+  return Math.max(1, Math.min(Math.max(1, global), Math.max(1, pool)));
+}
+
 export type InternalLivenessState = 'HEALTHY_IDLE' | 'HEALTHY_WORKING' | 'BACKPRESSURED' | 'STALLED';
 export type ExternalLivenessState = InternalLivenessState | 'DEAD';
 
@@ -185,6 +197,10 @@ export class ImporterEngine {
   // restart never clears leases while a runner still owns a chapter permit.
   private activeChapterExecutions = new Set<string>();
   private chapterClaimMutex = new AsyncSemaphore(1, 'chapter_claim_mutex');
+  // The gate protects only the DB-backed claim/validation phase.  It is
+  // released before source download/Telegram work, so it never reduces the
+  // configured chapter concurrency.
+  private chapterClaimGate: AsyncSemaphore;
   // Discovery and catalog sync are maintenance lanes. They must not each hold
   // a DB client beside chapter claims, publication and site traffic.
   private catalogMaintenanceLane = new AsyncSemaphore(1, 'catalog_maintenance_lane');
@@ -223,6 +239,10 @@ export class ImporterEngine {
   ) {
     this.runtimeInstanceId = `${config.WORKER_ID}@${process.pid}-${randomUUID().slice(0, 8)}`;
     this.config = { ...config, WORKER_ID: this.runtimeInstanceId };
+    this.chapterClaimGate = new AsyncSemaphore(
+      resolveChapterClaimConcurrency(this.config.MAX_CONCURRENT_CHAPTERS || 5, this.config.DIRECT_DB_POOL_MAX || 2),
+      'chapter_claim_gate',
+    );
     this.queue = new ImporterQueue(supabase, this.config.WORKER_ID);
     this.deduplication = new DeduplicationEngine(supabase);
     this.checkpoints = new CheckpointManager(supabase);
@@ -1373,6 +1393,12 @@ export class ImporterEngine {
                 chapterPermitsActive: chapterLimiter.active,
                 chapterPermitsAvailable: chapterLimiter.available,
               },
+              claims: {
+                configuredCapacity: this.chapterClaimGate.capacity,
+                active: this.chapterClaimGate.active,
+                available: this.chapterClaimGate.available,
+                waiters: this.chapterClaimGate.queued,
+              },
               media: {
                 configuredCapacity: mediaLimiter.capacity,
                 active: mediaLimiter.active,
@@ -2060,6 +2086,7 @@ export class ImporterEngine {
       nodeVersion: process.version, environment: process.env.NODE_ENV || 'production',
       configuredConcurrency: slotsCount, effectiveConcurrency: this.autotuner.getGlobalChapterSemaphore().capacity,
       healthyFloor: this.autotuner.getHealthyConcurrencyFloor(), dbPoolMax: this.config.DIRECT_DB_POOL_MAX,
+      chapterClaimConcurrency: this.chapterClaimGate.capacity,
       telegramConcurrency: this.autotuner.getGlobalMediaSemaphore().capacity,
       downloadConcurrency: this.autotuner.getGlobalInflightRequestSemaphore().capacity,
       bufferedPageCapacity: this.autotuner.getBufferedPageSemaphore().capacity,
@@ -2084,9 +2111,16 @@ export class ImporterEngine {
 
     while (!this.stopSignal) {
       let globalHeld = false;
+      let claimGateHeld = false;
       let sourceHeld: AsyncSemaphore | null = null;
       let claimedWork: QueueJob | null = null;
       const releaseGlobal = () => { if (globalHeld) { globalHeld = false; globalSem.release(); } };
+      const releaseClaimGate = () => {
+        if (claimGateHeld) {
+          claimGateHeld = false;
+          this.chapterClaimGate.release();
+        }
+      };
       try {
         if (!this.isRuntimeLeader) {
           telemetryCollector.setSlotState(slotIndex, 'IDLE', 'RUNTIME_STANDBY');
@@ -2127,8 +2161,23 @@ export class ImporterEngine {
         const claimJitterMs = 10 + Math.floor(Math.random() * 20);
         await this.sleep(claimJitterMs);
 
-        // A. Check global chapter semaphore capacity first (slot-level concurrency)
+        // A. Limit only the brief DB-backed claim phase.  A slot that cannot
+        // enter this gate must remain logically idle; it must not reserve a
+        // global chapter permit merely while waiting for the two-connection
+        // YSQL pool.
+        telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
+        if (!this.chapterClaimGate.tryAcquire()) {
+          telemetryCollector.setSlotState(slotIndex, 'IDLE');
+          await this.sleep(50 + Math.floor(Math.random() * 50));
+          continue;
+        }
+        claimGateHeld = true;
+
+        // B. Reserve global chapter execution capacity only for a slot that
+        // is actively attempting a claim.  The claim gate above guarantees
+        // this cannot turn DB pool wait into five held execution permits.
         if (!globalSem.tryAcquire()) {
+          releaseClaimGate();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
           await this.sleep(200);
           continue;
@@ -2136,7 +2185,7 @@ export class ImporterEngine {
 
         globalHeld = true;
 
-        // B. Check productive slots and trigger replenishment if starved
+        // C. Check productive slots and trigger replenishment if starved
         const prodSnap = telemetryCollector.getSlotProductivitySnapshot();
         // This runner has just reserved a permit but has not claimed yet.
         // Judge vacancy against effective capacity, not the historical 8-slot pool.
@@ -2144,10 +2193,11 @@ export class ImporterEngine {
           this.admissionController.triggerImmediateReplenishment('PRODUCTIVE_SLOT_VACANCY');
         }
 
-        // C. Find sources that currently have available capacity (outside mutex)
+        // D. Find sources that currently have available capacity (outside mutex)
         let eligibleSources = await this.getEligibleChapterSources();
         if (eligibleSources.length === 0) {
           releaseGlobal();
+          releaseClaimGate();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
           await this.sleep(100);
           continue;
@@ -2230,6 +2280,7 @@ export class ImporterEngine {
 
         if (!candidateJob || !reservation.reserved) {
           releaseGlobal();
+          releaseClaimGate();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
           const emptyBackoffMs = 50 + Math.floor(Math.random() * 100);
           await this.sleep(emptyBackoffMs);
@@ -2255,10 +2306,16 @@ export class ImporterEngine {
           sourceHeld = null;
           }
           releaseGlobal();
+          releaseClaimGate();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
           await this.sleep(15);
           continue;
         }
+
+        // Validation has completed.  The job now owns a global chapter
+        // permit and source permit; free the DB claim gate before any media
+        // I/O so another slot can be admitted immediately.
+        releaseClaimGate();
 
         const claimDurationMs = schedulerAcquireTotalMs + mutexWaitMs;
         const acqTelem = (job as any)._acquireTelemetry;
@@ -2329,6 +2386,7 @@ export class ImporterEngine {
           }
         }
         sourceHeld?.release();
+        releaseClaimGate();
         releaseGlobal();
       }
     }
