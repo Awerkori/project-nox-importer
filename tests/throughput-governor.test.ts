@@ -68,6 +68,9 @@ describe('Definitive Throughput Governor & Auto-Emergency Pause Policy', () => {
     expect(result.state).toBe('CEILING_REACHED');
     expect(result.action).toBe('STABLE');
     expect(result.concurrency).toBe(4); // Did not scale up!
+    expect(result.reason).toContain('1m: 13 cap/min');
+    expect(result.reason).toContain('sustained:');
+    expect(result.reason).toContain('< 12');
   });
 
   it('Requirement: Throughput below floor (< 5 cap/min) with constraint reports THROUGHPUT_CONSTRAINED and limiting factor', () => {
