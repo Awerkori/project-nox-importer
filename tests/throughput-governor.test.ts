@@ -41,6 +41,7 @@ describe('Definitive Throughput Governor & Auto-Emergency Pause Policy', () => {
   it('hydrates visible throughput from the durable canonical rate after restart', () => {
     const telem = autotuner.getThroughputTelemetry({ canonicalRate5m: 8.4 });
     expect(telem.rate5m).toBe(8.4);
+    expect(telem.emaRate).toBe(8.4);
     expect(telem.status).toBe('RUNNING_OPTIMAL');
   });
 
