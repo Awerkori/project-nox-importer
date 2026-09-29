@@ -588,12 +588,14 @@ export class ProtectiveSentinel {
                 ? `Sustained HTTP 5xx errors (${this.consecutive5xxCount} consecutive)`
                 : `Severe site latency breach (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
         }
-        else if (this.consecutive5xxCount >= 1 || (homeP95 >= 5000 && isReaderDegraded) || (homeP95 >= 8000 && !hasReaderSamples)) {
+        else if (this.consecutive5xxCount >= 1 || this.consecutiveProbeFailures >= 1 || (homeP95 >= 5000 && isReaderDegraded) || (homeP95 >= 8000 && !hasReaderSamples)) {
             siteHealth = 'ORANGE';
             sitePressure = 35;
             pressureReason = this.consecutive5xxCount >= 1
                 ? `HTTP 5xx error observed (${this.consecutive5xxCount})`
-                : `Confirmed site degradation (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
+                : this.consecutiveProbeFailures >= 1
+                    ? `User-facing route/probe failure observed (${this.consecutiveProbeFailures})`
+                    : `Confirmed site degradation (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
         }
         else if (this.consecutive5xxCount === 0 && (homeP95 >= 1500 || readerP95 >= 1200)) {
             siteHealth = 'YELLOW';
@@ -721,21 +723,31 @@ export class ProtectiveSentinel {
         });
     }
     recordProbeResult(label, ttfbMs, statusCode = 200, timestamp = Date.now()) {
+        // A Reader 404 can occur when a chapter changes between the cached-ID
+        // lookup and the probe. Refresh that target next cycle; it is neither a
+        // healthy response nor a global site incident.
+        if (label === 'reader' && statusCode === 404) {
+            this.cachedReaderChapterId = null;
+            this.logger.warn('[Site Probe] Reader returned 404 for probed chapter; invalidating cached probe target');
+            return;
+        }
         if (statusCode >= 500) {
             this.consecutive5xxCount++;
             this.last5xxTimestamp = timestamp;
             this.logger.warn(`[Site Probe 5xx] ${label.toUpperCase()} returned HTTP ${statusCode} (consecutive: ${this.consecutive5xxCount})`);
+        }
+        else if (statusCode >= 400) {
+            // A Home/work route 4xx is user-facing routing/data failure. It must
+            // not erase a preceding 5xx and falsely label the site recovered.
+            this.consecutiveProbeFailures++;
+            this.logger.warn(`[Site Probe Route Error] ${label.toUpperCase()} returned HTTP ${statusCode} (consecutive: ${this.consecutiveProbeFailures})`);
+            return;
         }
         else {
             if (this.consecutive5xxCount > 0) {
                 this.logger.info(`[Site Probe Recovered] ${label.toUpperCase()} returned HTTP ${statusCode} (5xx cleared)`);
             }
             this.consecutive5xxCount = 0;
-        }
-        if (label === 'reader' && statusCode === 404) {
-            this.cachedReaderChapterId = null;
-            this.logger.warn('[Site Probe] Reader returned 404 for probed chapter; invalidating cache and ignoring sample');
-            return;
         }
         const sample = { ttfbMs, timestamp };
         const cutoff = timestamp - this.LATENCY_SAMPLE_WINDOW_MS;

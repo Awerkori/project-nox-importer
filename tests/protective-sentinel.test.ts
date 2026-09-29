@@ -82,6 +82,30 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(snap.pressureReason).toContain('Sustained HTTP 5xx');
   });
 
+  it('does not treat a Home 404 as a successful recovery', async () => {
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
+
+    (sentinel as any).recordProbeResult('home', 90, 503);
+    (sentinel as any).recordProbeResult('home', 90, 404);
+
+    // A route error may not erase the preceding server error or report GREEN.
+    expect((sentinel as any).consecutive5xxCount).toBe(1);
+    expect((sentinel as any).consecutiveProbeFailures).toBe(1);
+
+    await sentinel.evaluatePreSlaGuardRails();
+    expect(sentinel.getPressureSnapshot().siteHealth).toBe('ORANGE');
+  });
+
+  it('invalidates only a stale Reader probe target on 404', () => {
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
+    (sentinel as any).cachedReaderChapterId = 'stale-reader-id';
+
+    (sentinel as any).recordProbeResult('reader', 90, 404);
+
+    expect((sentinel as any).cachedReaderChapterId).toBeNull();
+    expect((sentinel as any).consecutiveProbeFailures).toBe(0);
+  });
+
   it('selects a Reader probe chapter only when published pages exist', async () => {
     let readerSql = '';
     const pool = {
