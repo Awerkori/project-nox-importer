@@ -102,6 +102,12 @@ export declare class ProtectiveSentinel {
     private autoEmergencyPause;
     private onAutoResume?;
     constructor(supabase: SupabaseClient, thresholds?: SentinelThresholds, siteUrl?: string | undefined, dbPool?: any | undefined);
+    /**
+     * The engine finishes constructing its bounded direct pool after creating
+     * the sentinel. Attach that shared pool before the watchdog starts so the
+     * monitor never creates a second, unbudgeted Yugabyte pool of its own.
+     */
+    setDbPool(pool: any): void;
     private getPool;
     setOnAutoResume(fn: () => void): void;
     isEmergencyPaused(): boolean;

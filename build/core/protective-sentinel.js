@@ -104,6 +104,14 @@ export class ProtectiveSentinel {
         this.siteUrl = siteUrl;
         this.dbPool = dbPool;
     }
+    /**
+     * The engine finishes constructing its bounded direct pool after creating
+     * the sentinel. Attach that shared pool before the watchdog starts so the
+     * monitor never creates a second, unbudgeted Yugabyte pool of its own.
+     */
+    setDbPool(pool) {
+        this.dbPool = pool;
+    }
     getPool() {
         return this.dbPool !== undefined ? this.dbPool : getYugabytePool();
     }
