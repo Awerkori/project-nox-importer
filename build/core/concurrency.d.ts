@@ -131,6 +131,7 @@ export declare class AdaptiveAutotuner {
     private logger;
     private globalChapterSemaphore;
     private sourceSemaphores;
+    private sourceDownloadSemaphores;
     private eligibleSourceCountForFairness;
     private globalMediaSemaphore;
     private globalInflightRequestSemaphore;
@@ -202,6 +203,18 @@ export declare class AdaptiveAutotuner {
     private getSourceFairnessCap;
     private getEffectiveSourceCapacity;
     private refreshSourceSemaphoreCapacities;
+    /**
+     * Keep page-download capacity work-conserving for a lone healthy source,
+     * while reserving room for other healthy sources when they exist.  This is
+     * intentionally separate from chapter admission: two large chapters from
+     * one source must not monopolize all global download permits.
+     */
+    private getEffectiveSourceDownloadCapacity;
+    /**
+     * Acquire this local permit before the global download permit.  A page then
+     * never holds scarce global capacity while waiting for its own source.
+     */
+    getSourceDownloadSemaphore(source: string): AsyncSemaphore;
     getSourceSemaphore(source: string, limitPerSource?: number): AsyncSemaphore;
     isSourceCapacityAvailable(source: string): boolean;
     private sourceHealth;
