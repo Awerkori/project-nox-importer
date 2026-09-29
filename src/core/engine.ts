@@ -455,10 +455,10 @@ export class ImporterEngine {
       const pool = (this.dbPool && typeof this.dbPool.query === 'function') ? this.dbPool : getYugabytePool();
       const result = await pool.query(
         `INSERT INTO settings AS leader (key, value)
-         VALUES ($1, json_build_object('owner', $2, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text)
+         VALUES ($1, json_build_object('owner', $2::text, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text)
          ON CONFLICT (key) DO UPDATE
-         SET value = json_build_object('owner', $2, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text
-         WHERE (leader.value::jsonb->>'owner') = $2
+         SET value = json_build_object('owner', $2::text, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text
+         WHERE (leader.value::jsonb->>'owner') = $2::text
             OR COALESCE((leader.value::jsonb->>'expires_at')::timestamptz, 'epoch'::timestamptz) <= NOW()
          RETURNING value`,
         [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS],
@@ -487,8 +487,8 @@ export class ImporterEngine {
         const pool = (this.dbPool && typeof this.dbPool.query === 'function') ? this.dbPool : getYugabytePool();
         const result = await pool.query(
           `UPDATE settings
-           SET value = json_build_object('owner', $2, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text
-           WHERE key = $1 AND (value::jsonb->>'owner') = $2
+           SET value = json_build_object('owner', $2::text, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text
+           WHERE key = $1 AND (value::jsonb->>'owner') = $2::text
            RETURNING value`,
           [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS],
         );
@@ -535,8 +535,8 @@ export class ImporterEngine {
       const pool = (this.dbPool && typeof this.dbPool.query === 'function') ? this.dbPool : getYugabytePool();
       await pool.query(
         `UPDATE settings
-         SET value = json_build_object('owner', $2, 'expires_at', NOW())::text
-         WHERE key = $1 AND (value::jsonb->>'owner') = $2`,
+         SET value = json_build_object('owner', $2::text, 'expires_at', NOW())::text
+         WHERE key = $1 AND (value::jsonb->>'owner') = $2::text`,
         [RUNTIME_LEADER_KEY, this.runtimeInstanceId],
       );
     } catch (err: any) {
