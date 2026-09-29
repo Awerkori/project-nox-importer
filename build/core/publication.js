@@ -34,14 +34,33 @@ export class PublicationBarrier {
                 // NOX_MANGA_URL is the validated runtime endpoint used by the storage
                 // bridge and sentinel. Do not rely on an untracked legacy alias here.
                 const siteUrl = process.env.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev';
-                // Sequential variants avoid duplicate origin reads. This happens after
-                // commit, outside the YSQL client and behind a single low-priority lane.
-                for (const variant of ['thumb', 'hero']) {
-                    const warmUrl = `${siteUrl.replace(/\/$/, '')}/media/${coverId}?size=${variant}&v=3`;
-                    const response = await fetch(warmUrl, { signal: AbortSignal.timeout(10_000) }).catch(() => null);
+                const bridgeToken = process.env.NOX_STORAGE_BRIDGE_TOKEN;
+                if (bridgeToken) {
+                    // Make the KV write in the Worker itself. A direct importer fetch of
+                    // /media can race storage propagation and leave the first reader on
+                    // the expensive Telegram path even after the request body is read.
+                    const warmUrl = `${siteUrl.replace(/\/$/, '')}/api/internal/cache/warm-recent-covers?coverId=${coverId}`;
+                    const response = await fetch(warmUrl, {
+                        headers: { Authorization: `Bearer ${bridgeToken}` },
+                        signal: AbortSignal.timeout(15_000),
+                    }).catch(() => null);
                     if (response?.ok) {
-                        warmed = true;
-                        await response.arrayBuffer().catch(() => { });
+                        const result = await response.json().catch(() => null);
+                        const thumb = result?.result?.thumb;
+                        const hero = result?.result?.hero;
+                        warmed = ['warmed', 'already_warm'].includes(thumb) && ['warmed', 'already_warm'].includes(hero);
+                    }
+                }
+                else {
+                    // Local/test fallback. Production uses the authenticated Worker path
+                    // above, which persists the variants atomically in KV.
+                    for (const variant of ['thumb', 'hero']) {
+                        const warmUrl = `${siteUrl.replace(/\/$/, '')}/media/${coverId}?size=${variant}&v=3`;
+                        const response = await fetch(warmUrl, { signal: AbortSignal.timeout(10_000) }).catch(() => null);
+                        if (response?.ok) {
+                            warmed = true;
+                            await response.arrayBuffer().catch(() => { });
+                        }
                     }
                 }
             }
