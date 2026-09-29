@@ -302,7 +302,10 @@ export class ImporterEngine {
       autotuner: this.autotuner,
       workerId: config.WORKER_ID,
       onControlledRestart: async (reason, metrics) => {
-        await this.initiateControlledSelfRestart(reason, metrics);
+        // Preserve a deferred restart result.  A false means live chapter
+        // work has not quiesced safely, so AutoHeal must not consume a
+        // restart-circuit attempt for a restart that did not occur.
+        return this.initiateControlledSelfRestart(reason, metrics);
       },
     });
   }
