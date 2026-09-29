@@ -171,6 +171,18 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(readerSql).toContain("INTERVAL '5 minutes'");
   });
 
+  it('can attach the engine shared pool before the watchdog starts', async () => {
+    const sharedPool = {
+      query: vi.fn().mockResolvedValue({ rows: [{ total: '2', active: '1' }] }),
+    };
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
+    sentinel.setDbPool(sharedPool);
+
+    await sentinel.evaluatePreSlaGuardRails();
+
+    expect(sharedPool.query).toHaveBeenCalledWith(expect.stringContaining('pg_stat_activity'));
+  });
+
   it('Requirement 1 & 2: YSQL connection spikes NEVER trigger global protective stop', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
 

@@ -267,6 +267,10 @@ export class ImporterEngine {
 
     const effectivePool = (dbPool && typeof dbPool.query === 'function') ? dbPool : getYugabytePool();
     this.dbPool = effectivePool;
+    // The sentinel is constructed before the direct pool is resolved. It
+    // must share this bounded pool rather than lazily opening a second pool
+    // when its first watchdog probe runs.
+    this.protectiveSentinel.setDbPool(effectivePool);
     this.rateBucketTracker = new RateBucketTracker(effectivePool);
 
     this.publicationBarrier.onPublished = (isFreshRelease: boolean, durableRateEvent = false) => {
