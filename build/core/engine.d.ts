@@ -34,11 +34,10 @@ export declare function computeExternalLivenessState(params: {
     internalState: InternalLivenessState;
 }): ExternalLivenessState;
 /**
- * A container can restart with the same WORKER_ID before its old 5-minute
- * leases expire.  Those leases belong to a process which cannot still be
- * running, so retaining them would briefly admit a second cohort on top of
- * the configured capacity.  Keep this deliberately scoped to this worker;
- * other workers and genuinely active leases are never touched.
+ * A worker identity can survive a container restart.  It is never safe to
+ * reclaim an unexpired lease merely because it has the same logical worker
+ * name: a rolling deploy may briefly overlap processes.  Recover only leases
+ * that have crossed their fencing expiry.
  */
 export declare function reclaimStartupOwnedLeases(pool: {
     query: (text: string, params?: unknown[]) => Promise<{
@@ -99,6 +98,10 @@ export declare class ImporterEngine {
     rateBucketTracker: RateBucketTracker;
     private isRestarting;
     private dbPool;
+    private runtimeInstanceId;
+    private isRuntimeLeader;
+    private runtimeLeadershipTimer;
+    private runtimeLeadershipRenewing;
     static activeBufferedBytes: number;
     constructor(supabase: SupabaseClient, storage: StorageProvider, registry: SourceRegistry, rateLimiter: HostRateLimiter, config: Config);
     private isExplicitExitHandlerSet;
@@ -117,6 +120,15 @@ export declare class ImporterEngine {
     initiateControlledSelfRestart(reason: string, metrics?: any): Promise<boolean>;
     getAutotuner(): AdaptiveAutotuner;
     getSafetyBarrier(): PublicationSafetyBarrier;
+    /**
+     * Acquires the single runtime lease used to fence rolling deploy overlap.
+     * The row is intentionally independent from heartbeat/settings hot paths.
+     * A contender observes no returned row while another live process owns it.
+     */
+    private tryAcquireRuntimeLeadership;
+    private startRuntimeLeadershipRenewal;
+    private waitForRuntimeLeadership;
+    private releaseRuntimeLeadership;
     start(): Promise<void>;
     runStartupRecovery(): Promise<void>;
     /**
