@@ -30,10 +30,14 @@ import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from 
 import { AutoHealWatchdog, HealthPanelMetrics } from './auto-heal-watchdog.js';
 import { RateBucketTracker } from './rate-bucket-tracker.js';
 import { performance } from 'node:perf_hooks';
+import { randomUUID } from 'node:crypto';
 
 export { computeCanonicalChapterKey };
 
 const DEFAULT_MAX_BUFFERED_BYTES = 64 * 1024 * 1024;
+const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
+const RUNTIME_LEASE_SECONDS = 45;
+const RUNTIME_LEASE_RENEW_MS = 15_000;
 
 /**
  * The buffer budget is an operational limit, so it must be resolved where the
@@ -87,11 +91,10 @@ export function computeExternalLivenessState(params: {
 }
 
 /**
- * A container can restart with the same WORKER_ID before its old 5-minute
- * leases expire.  Those leases belong to a process which cannot still be
- * running, so retaining them would briefly admit a second cohort on top of
- * the configured capacity.  Keep this deliberately scoped to this worker;
- * other workers and genuinely active leases are never touched.
+ * A worker identity can survive a container restart.  It is never safe to
+ * reclaim an unexpired lease merely because it has the same logical worker
+ * name: a rolling deploy may briefly overlap processes.  Recover only leases
+ * that have crossed their fencing expiry.
  */
 export async function reclaimStartupOwnedLeases(
   pool: { query: (text: string, params?: unknown[]) => Promise<{ rowCount?: number | null; rows?: unknown[] }> },
@@ -111,6 +114,7 @@ export async function reclaimStartupOwnedLeases(
          updated_at = NOW()
      WHERE status = 'IMPORTING'
        AND locked_by = $1
+       AND lease_expires_at < NOW()
      RETURNING id`,
     [workerId]
   );
@@ -198,6 +202,14 @@ export class ImporterEngine {
   public rateBucketTracker: RateBucketTracker;
   private isRestarting = false;
   private dbPool: any = null;
+  // Discloud can overlap a retiring container with its replacement.  Local
+  // semaphores alone cannot bound that situation, so only the DB lease leader
+  // is allowed to claim work.  The per-boot id also fences queue heartbeats
+  // from a previous process that shared the configured worker name.
+  private runtimeInstanceId = '';
+  private isRuntimeLeader = false;
+  private runtimeLeadershipTimer: NodeJS.Timeout | null = null;
+  private runtimeLeadershipRenewing = false;
 
   // Actual retained image bytes; bounded globally by page permits and per-image size.
   public static activeBufferedBytes = 0;
@@ -209,7 +221,9 @@ export class ImporterEngine {
     private rateLimiter: HostRateLimiter,
     private config: Config
   ) {
-    this.queue = new ImporterQueue(supabase, config.WORKER_ID);
+    this.runtimeInstanceId = `${config.WORKER_ID}@${process.pid}-${randomUUID().slice(0, 8)}`;
+    this.config = { ...config, WORKER_ID: this.runtimeInstanceId };
+    this.queue = new ImporterQueue(supabase, this.config.WORKER_ID);
     this.deduplication = new DeduplicationEngine(supabase);
     this.checkpoints = new CheckpointManager(supabase);
     this.publicationBarrier = new PublicationBarrier(supabase);
@@ -300,7 +314,7 @@ export class ImporterEngine {
       publicationBarrier: this.publicationBarrier,
       safetyBarrier: this.safetyBarrier,
       autotuner: this.autotuner,
-      workerId: config.WORKER_ID,
+      workerId: this.config.WORKER_ID,
       onControlledRestart: async (reason, metrics) => {
         // Preserve a deferred restart result.  A false means live chapter
         // work has not quiesced safely, so AutoHeal must not consume a
@@ -431,10 +445,114 @@ export class ImporterEngine {
     return this.safetyBarrier;
   }
 
+  /**
+   * Acquires the single runtime lease used to fence rolling deploy overlap.
+   * The row is intentionally independent from heartbeat/settings hot paths.
+   * A contender observes no returned row while another live process owns it.
+   */
+  private async tryAcquireRuntimeLeadership(): Promise<boolean> {
+    try {
+      const pool = (this.dbPool && typeof this.dbPool.query === 'function') ? this.dbPool : getYugabytePool();
+      const result = await pool.query(
+        `INSERT INTO settings AS leader (key, value)
+         VALUES ($1, json_build_object('owner', $2, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text)
+         ON CONFLICT (key) DO UPDATE
+         SET value = json_build_object('owner', $2, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text
+         WHERE (leader.value::jsonb->>'owner') = $2
+            OR COALESCE((leader.value::jsonb->>'expires_at')::timestamptz, 'epoch'::timestamptz) <= NOW()
+         RETURNING value`,
+        [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS],
+      );
+      const acquired = result.rows.length > 0;
+      if (acquired && !this.isRuntimeLeader) {
+        this.isRuntimeLeader = true;
+        this.logger.info('[RUNTIME_LEADER] Acquired exclusive importer leadership', {
+          instanceId: this.runtimeInstanceId,
+          leaseSeconds: RUNTIME_LEASE_SECONDS,
+        });
+      }
+      return acquired;
+    } catch (err: any) {
+      this.logger.warn('[RUNTIME_LEADER] Failed to acquire leadership lease', { error: err?.message });
+      return false;
+    }
+  }
+
+  private startRuntimeLeadershipRenewal(): void {
+    if (this.runtimeLeadershipTimer) return;
+    this.runtimeLeadershipTimer = setInterval(async () => {
+      if (!this.isRuntimeLeader || this.runtimeLeadershipRenewing || this.stopSignal) return;
+      this.runtimeLeadershipRenewing = true;
+      try {
+        const pool = (this.dbPool && typeof this.dbPool.query === 'function') ? this.dbPool : getYugabytePool();
+        const result = await pool.query(
+          `UPDATE settings
+           SET value = json_build_object('owner', $2, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text
+           WHERE key = $1 AND (value::jsonb->>'owner') = $2
+           RETURNING value`,
+          [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS],
+        );
+        if (result.rows.length === 0) {
+          this.isRuntimeLeader = false;
+          this.logger.error('[RUNTIME_LEADER_LOST] Leadership lease was not renewed; gating all new claims.');
+        }
+      } catch (err: any) {
+        // A transient DB failure does not immediately hand leadership away:
+        // the lease itself has 45 seconds of margin.  A later successful
+        // renewal restores certainty before that window elapses.
+        this.logger.warn('[RUNTIME_LEADER] Lease renewal failed', { error: err?.message });
+      } finally {
+        this.runtimeLeadershipRenewing = false;
+      }
+    }, RUNTIME_LEASE_RENEW_MS);
+    this.runtimeLeadershipTimer.unref();
+  }
+
+  private async waitForRuntimeLeadership(): Promise<boolean> {
+    let lastStandbyLog = 0;
+    while (!this.stopSignal) {
+      if (await this.tryAcquireRuntimeLeadership()) {
+        this.startRuntimeLeadershipRenewal();
+        return true;
+      }
+      if (Date.now() - lastStandbyLog >= 30_000) {
+        lastStandbyLog = Date.now();
+        this.logger.warn('[RUNTIME_STANDBY] Another importer instance owns the runtime lease; claims remain gated.');
+      }
+      await this.sleep(5_000);
+    }
+    return false;
+  }
+
+  private async releaseRuntimeLeadership(): Promise<void> {
+    if (this.runtimeLeadershipTimer) {
+      clearInterval(this.runtimeLeadershipTimer);
+      this.runtimeLeadershipTimer = null;
+    }
+    if (!this.isRuntimeLeader) return;
+    this.isRuntimeLeader = false;
+    try {
+      const pool = (this.dbPool && typeof this.dbPool.query === 'function') ? this.dbPool : getYugabytePool();
+      await pool.query(
+        `UPDATE settings
+         SET value = json_build_object('owner', $2, 'expires_at', NOW())::text
+         WHERE key = $1 AND (value::jsonb->>'owner') = $2`,
+        [RUNTIME_LEADER_KEY, this.runtimeInstanceId],
+      );
+    } catch (err: any) {
+      this.logger.warn('[RUNTIME_LEADER] Failed to release leadership lease', { error: err?.message });
+    }
+  }
+
   async start(): Promise<void> {
     this.isRunning = true;
     this.stopSignal = false;
     this.abortController = new AbortController();
+
+    if (!(await this.waitForRuntimeLeadership())) {
+      this.isRunning = false;
+      return;
+    }
 
     this.logger.info('Importer Engine daemon started with multi-source concurrent runners', {
       workerId: this.config.WORKER_ID,
@@ -609,6 +727,7 @@ export class ImporterEngine {
     this.autoHealWatchdog.stop();
     this.rateBucketTracker.stop();
     void this.rateBucketTracker.flush();
+    void this.releaseRuntimeLeadership();
   }
 
   private discoveryAllowedCache = false;
@@ -941,20 +1060,20 @@ export class ImporterEngine {
           .select('id, name, status, base_url, cooldown_until, blocked_reason')
           .in('status', ['COOLDOWN', 'DEGRADED', 'PROBING']);
 
-        if (error || !cooldownSources || cooldownSources.length === 0) continue;
+        if (!error && cooldownSources && cooldownSources.length > 0) {
+          const now = Date.now();
+          for (const src of cooldownSources) {
+            if (this.stopSignal) break;
 
-        const now = Date.now();
-        for (const src of cooldownSources) {
-          if (this.stopSignal) break;
+            const cooldownUntil = src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0;
+            if (src.status === 'COOLDOWN' && now < cooldownUntil) {
+              // Still within cooldown period, skip until expiry
+              continue;
+            }
 
-          const cooldownUntil = src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0;
-          if (src.status === 'COOLDOWN' && now < cooldownUntil) {
-            // Still within cooldown period, skip until expiry
-            continue;
+            // Cooldown expired or DEGRADED: probe for auto-healing to ACTIVE
+            await this.probeSourceHealth(src);
           }
-
-          // Cooldown expired or DEGRADED: probe for auto-healing to ACTIVE
-          await this.probeSourceHealth(src);
         }
       } catch (err: any) {
         this.logger.warn('Error during source cooldown auto-probe loop', { error: err?.message });
@@ -1969,6 +2088,11 @@ export class ImporterEngine {
       let claimedWork: QueueJob | null = null;
       const releaseGlobal = () => { if (globalHeld) { globalHeld = false; globalSem.release(); } };
       try {
+        if (!this.isRuntimeLeader) {
+          telemetryCollector.setSlotState(slotIndex, 'IDLE', 'RUNTIME_STANDBY');
+          await this.sleep(1_000);
+          continue;
+        }
         // 0. Enforce PublicationSafetyBarrier: if CLOSED or RECOVERING, hold 0 permits, 0 slots
         telemetryCollector.setSlotState(slotIndex, 'WAITING_FOR_PUBLICATION_BARRIER');
         const canAcquire = await this.safetyBarrier.canAcquireChapters();
@@ -2194,6 +2318,10 @@ export class ImporterEngine {
     while (!this.stopSignal) {
       let idle = false;
       try {
+        if (!this.isRuntimeLeader) {
+          await this.sleep(1_000);
+          continue;
+        }
         if (await this.protectiveSentinel.isProtectiveStopActive()) {
           await this.sleep(3000);
           continue;
@@ -2242,6 +2370,10 @@ export class ImporterEngine {
     while (!this.stopSignal) {
       let idle = false;
       try {
+        if (!this.isRuntimeLeader) {
+          await this.sleep(1_000);
+          continue;
+        }
         if (await this.protectiveSentinel.isProtectiveStopActive()) {
           await this.sleep(3000);
           continue;
