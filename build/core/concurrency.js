@@ -492,7 +492,10 @@ export class AdaptiveAutotuner {
             rate1m,
             rate3m,
             rate5m,
-            emaRate: Math.round(this.emaRate * 10) / 10,
+            // Consumers of this field are the capacity decisions below. Report the
+            // same effective rate used for status, so a restart cannot compare a
+            // durable 8/min snapshot as if it were a zero-rate EMA.
+            emaRate: Math.round(effectiveRate * 10) / 10,
             completedJobs1m: completed1m,
             completedJobs5m: completed5m,
             targetFloor: this.config.desiredFloorFreshPerMin || 5,
