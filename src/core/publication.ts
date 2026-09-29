@@ -65,6 +65,19 @@ export class PublicationBarrier {
         // bridge and sentinel. Do not rely on an untracked legacy alias here.
         const siteUrl = process.env.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev';
         const bridgeToken = process.env.NOX_STORAGE_BRIDGE_TOKEN;
+        const warmDirectVariant = async (variant: 'thumb' | 'hero'): Promise<boolean> => {
+          const warmUrl = `${siteUrl.replace(/\/$/, '')}/media/${coverId}?size=${variant}&v=3`;
+          const response = await fetch(warmUrl, { signal: AbortSignal.timeout(10_000) }).catch(() => null);
+          if (!response?.ok) return false;
+          // /media persists a bounded public cover in the Worker via waitUntil.
+          // Do not buffer a cover in the importer merely to keep that detached
+          // persistence alive; cancel only this client branch after headers.
+          await response.body?.cancel().catch(() => {});
+          return true;
+        };
+
+        let thumbWarmed = false;
+        let heroWarmed = false;
         if (bridgeToken) {
           // Make the KV write in the Worker itself. A direct importer fetch of
           // /media can race storage propagation and leave the first reader on
@@ -78,20 +91,16 @@ export class PublicationBarrier {
             const result = await response.json().catch(() => null) as any;
             const thumb = result?.result?.thumb;
             const hero = result?.result?.hero;
-            warmed = ['warmed', 'already_warm'].includes(thumb) && ['warmed', 'already_warm'].includes(hero);
-          }
-        } else {
-          // Local/test fallback. Production uses the authenticated Worker path
-          // above, which persists the variants atomically in KV.
-          for (const variant of ['thumb', 'hero']) {
-            const warmUrl = `${siteUrl.replace(/\/$/, '')}/media/${coverId}?size=${variant}&v=3`;
-            const response = await fetch(warmUrl, { signal: AbortSignal.timeout(10_000) }).catch(() => null);
-            if (response?.ok) {
-              warmed = true;
-              await response.arrayBuffer().catch(() => {});
-            }
+            thumbWarmed = ['warmed', 'already_warm'].includes(thumb);
+            heroWarmed = ['warmed', 'already_warm'].includes(hero);
           }
         }
+        // A Worker self-fetch can be rejected for one variant even while the
+        // public media route is healthy.  Fall back only for the missing
+        // derivative; this is serialized, post-commit and has no DB client.
+        if (!thumbWarmed) thumbWarmed = await warmDirectVariant('thumb');
+        if (!heroWarmed) heroWarmed = await warmDirectVariant('hero');
+        warmed = thumbWarmed && heroWarmed;
       } finally {
         // A transient network failure must not suppress the next legitimate
         // publication attempt for this cover. Normal media delivery remains
