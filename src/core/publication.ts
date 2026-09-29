@@ -352,19 +352,22 @@ export class PublicationBarrier {
 
       // A cold cover comes from Telegram and can otherwise leave the first
       // visitor staring at a progressively streamed image for seconds. Consume
-      // one small, immutable thumbnail only when a work first becomes public.
+      // the two bounded presentation variants only when a work first becomes public.
       // This stays outside the DB transaction and is deliberately detached from
       // chapter throughput; failed warming is harmless because normal delivery
       // remains authoritative.
       try {
         const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
         if (isNewlyVisible && workBecamePublic && coverIdToWarm) {
-          const warmUrl = `${siteUrl.replace(/\/$/, '')}/media/${coverIdToWarm}?size=thumb&v=3`;
-          fetch(warmUrl, { signal: AbortSignal.timeout(10_000) })
-            .then(async (response) => {
-              if (response.ok) await response.arrayBuffer();
-            })
-            .catch(() => {});
+          void (async () => {
+            // Sequential avoids a duplicate Telegram read for the same cover
+            // while keeping publication and its YSQL transaction independent.
+            for (const variant of ['thumb', 'hero']) {
+              const warmUrl = `${siteUrl.replace(/\/$/, '')}/media/${coverIdToWarm}?size=${variant}&v=3`;
+              const response = await fetch(warmUrl, { signal: AbortSignal.timeout(10_000) }).catch(() => null);
+              if (response?.ok) await response.arrayBuffer().catch(() => {});
+            }
+          })();
         }
       } catch {}
 
