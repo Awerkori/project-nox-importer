@@ -33,6 +33,8 @@ export declare class PublicationBarrier {
     private coverWarmQueue;
     private warmedCoverIds;
     private readonly maxRememberedWarmCovers;
+    private pendingCoverWarmRetries;
+    private readonly maxPendingCoverWarmRetries;
     private lastCoverWarmFailureLogAt;
     onPublished?: (isFreshRelease: boolean, durableRateEvent?: boolean) => void;
     constructor(supabase: SupabaseClient);
