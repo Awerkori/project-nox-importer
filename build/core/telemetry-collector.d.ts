@@ -151,6 +151,7 @@ export declare class TelemetryCollector {
      */
     getSlotProductivitySnapshot(): {
         configuredSlots: number;
+        effectiveSlots: number;
         busySlots: number;
         productiveSlots: number;
         idleSlots: number;
