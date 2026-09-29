@@ -176,6 +176,10 @@ export class ImporterEngine {
   private isRunning = false;
   private stopSignal = false;
   private abortController = new AbortController();
+  // diagnostics is intentionally broad and does not cover every runner
+  // transition. Keep the authoritative chapter-execution set here so a soft
+  // restart never clears leases while a runner still owns a chapter permit.
+  private activeChapterExecutions = new Set<string>();
   private chapterClaimMutex = new AsyncSemaphore(1, 'chapter_claim_mutex');
   // Discovery and catalog sync are maintenance lanes. They must not each hold
   // a DB client beside chapter claims, publication and site traffic.
@@ -325,8 +329,8 @@ export class ImporterEngine {
    * 6. Resets AdaptiveAutotuner to capacity 1 in RECOVERING mode.
    * 7. Resumes worker loops smoothly without process exit (protects Discloud uptime).
    */
-  async initiateControlledSelfRestart(reason: string, metrics?: any): Promise<void> {
-    if (this.isRestarting) return;
+  async initiateControlledSelfRestart(reason: string, metrics?: any): Promise<boolean> {
+    if (this.isRestarting) return false;
     this.isRestarting = true;
     const shutdownStartTime = Date.now();
 
@@ -346,24 +350,36 @@ export class ImporterEngine {
 
     // 2. Bounded drain of in-flight jobs (max 6s)
     const maxDrainTimeoutMs = 6000;
+    const chapterSemaphore = this.autotuner.getGlobalChapterSemaphore();
     while (Date.now() - shutdownStartTime < maxDrainTimeoutMs) {
       const activeCount = diagnostics.getActiveJobsCount();
-      if (activeCount === 0) {
+      const ownedChapterExecutions = this.activeChapterExecutions.size;
+      const chapterPermits = chapterSemaphore.active;
+      if (activeCount === 0 && ownedChapterExecutions === 0 && chapterPermits === 0) {
         this.logger.info(`[CONTROLLED SELF-RESTART] In-flight jobs successfully drained in ${Date.now() - shutdownStartTime}ms.`);
         break;
       }
       await new Promise((r) => setTimeout(r, 200));
     }
     const remainingActive = diagnostics.getActiveJobsCount();
-    if (remainingActive > 0) {
-      this.logger.warn(`[CONTROLLED SELF-RESTART] Drain timeout reached with ${remainingActive} active job(s) remaining. Proceeding with resource reconciliation.`);
+    const remainingChapterExecutions = this.activeChapterExecutions.size;
+    const remainingChapterPermits = chapterSemaphore.active;
+    if (remainingActive > 0 || remainingChapterExecutions > 0 || remainingChapterPermits > 0) {
+      // Never clear a lease or re-open capacity underneath a live/untracked
+      // network operation. Doing so was the source of lost lease heartbeats
+      // and leaked permits after previous soft restarts.
+      this.logger.warn(
+        `[CONTROLLED SELF-RESTART] Deferred: drain timeout with diagnostics=${remainingActive}, chapterExecutions=${remainingChapterExecutions}, chapterPermits=${remainingChapterPermits}.`,
+      );
+      this.isRestarting = false;
+      return false;
     }
 
     // If an explicit test handler was attached, invoke it for test assertions
     if (this.isExplicitExitHandlerSet && this.exitHandler) {
       this.stop();
       this.exitHandler(1);
-      return;
+      return true;
     }
 
     // 3. Clear orphaned leases and in-flight states in database
@@ -401,6 +417,7 @@ export class ImporterEngine {
     this.logger.warn(
       `✨ [IN_PROCESS_SOFT_RESTART_COMPLETED] Importer engine recovered in-process without container termination in ${totalElapsedMs}ms. Capacity set to ${restartCapacity} (${restartState}).`
     );
+    return true;
   }
 
   getAutotuner(): AdaptiveAutotuner {
@@ -2318,6 +2335,12 @@ export class ImporterEngine {
       }
     }
 
+    // This is intentionally at the execution boundary rather than in one
+    // runner implementation: source-dedicated, general and test/step paths
+    // all converge here. The restart drain must see every live chapter lease.
+    const tracksChapterExecution = job.task_type === 'IMPORT_CHAPTER';
+    if (tracksChapterExecution) this.activeChapterExecutions.add(job.id);
+
     let cancelSignalTriggered = false;
     const heartbeat = this.queue.startHeartbeat(
       job.id,
@@ -2358,6 +2381,7 @@ export class ImporterEngine {
     } finally {
       if (jobTimeoutTimer) clearTimeout(jobTimeoutTimer);
       heartbeat.stop();
+      if (tracksChapterExecution) this.activeChapterExecutions.delete(job.id);
     }
   }
 

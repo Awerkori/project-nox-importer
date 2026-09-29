@@ -91,7 +91,12 @@ export interface AutoHealWatchdogOptions {
   publicationBarrier?: PublicationBarrier;
   safetyBarrier?: PublicationSafetyBarrier;
   autotuner?: AdaptiveAutotuner;
-  onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<void>;
+  /**
+   * Returns false when the engine cannot safely quiesce. A deferred recovery
+   * is deliberately not counted as a restart: counting it would open the
+   * restart circuit even though no restart actually occurred.
+   */
+  onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<boolean | void>;
   intervalMs?: number;
   workerId?: string;
 }
@@ -118,7 +123,7 @@ export class AutoHealWatchdog {
   private publicationBarrier?: PublicationBarrier;
   private safetyBarrier?: PublicationSafetyBarrier;
   private autotuner?: AdaptiveAutotuner;
-  private onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<void>;
+  private onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<boolean | void>;
   private intervalMs: number;
   private workerId: string;
 
@@ -1061,17 +1066,24 @@ export class AutoHealWatchdog {
       const reason = `CRITICAL_STALL: 0 completions/fresh for ${Math.round(effectiveStallAgeSec / 60)}m while ${metrics.eligibleJobs} jobs eligible (processing: ${metrics.processingHealth}, publication: ${metrics.publicationHealth})`;
       this.logger.error(`🚨 [AUTO-HEAL NÍVEL 3] ${reason}. Initiating controlled graceful self-restart...`);
 
-      // Record restart event in DB before process exits
+      if (this.onControlledRestart) {
+        const restarted = await this.onControlledRestart(reason, metrics);
+        // Existing callbacks return void; treat that as a successful legacy
+        // restart. New callbacks can explicitly defer with false.
+        if (restarted === false) {
+          this.autoHealState = 'LEVEL_3_RESTART_PENDING';
+          this.logger.warn('[AUTO-HEAL NÍVEL 3] Restart deferred: in-flight work did not quiesce safely.');
+          return;
+        }
+      }
+
+      // Only a restart that actually completed consumes the circuit budget.
       await this.recordAutoRestart({
         timestamp: new Date().toISOString(),
         reason,
         progressAgeSec: effectiveStallAgeSec,
         eligibleJobs: metrics.eligibleJobs,
       });
-
-      if (this.onControlledRestart) {
-        await this.onControlledRestart(reason, metrics);
-      }
       return;
     }
 

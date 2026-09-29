@@ -894,16 +894,23 @@ export class AutoHealWatchdog {
             this.lastAutoHealAt = new Date().toISOString();
             const reason = `CRITICAL_STALL: 0 completions/fresh for ${Math.round(effectiveStallAgeSec / 60)}m while ${metrics.eligibleJobs} jobs eligible (processing: ${metrics.processingHealth}, publication: ${metrics.publicationHealth})`;
             this.logger.error(`🚨 [AUTO-HEAL NÍVEL 3] ${reason}. Initiating controlled graceful self-restart...`);
-            // Record restart event in DB before process exits
+            if (this.onControlledRestart) {
+                const restarted = await this.onControlledRestart(reason, metrics);
+                // Existing callbacks return void; treat that as a successful legacy
+                // restart. New callbacks can explicitly defer with false.
+                if (restarted === false) {
+                    this.autoHealState = 'LEVEL_3_RESTART_PENDING';
+                    this.logger.warn('[AUTO-HEAL NÍVEL 3] Restart deferred: in-flight work did not quiesce safely.');
+                    return;
+                }
+            }
+            // Only a restart that actually completed consumes the circuit budget.
             await this.recordAutoRestart({
                 timestamp: new Date().toISOString(),
                 reason,
                 progressAgeSec: effectiveStallAgeSec,
                 eligibleJobs: metrics.eligibleJobs,
             });
-            if (this.onControlledRestart) {
-                await this.onControlledRestart(reason, metrics);
-            }
             return;
         }
         // NÍVEL 1 — RECONCILIAÇÃO LEVE (>= 10m stall)

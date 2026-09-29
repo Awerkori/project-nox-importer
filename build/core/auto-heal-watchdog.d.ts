@@ -70,7 +70,12 @@ export interface AutoHealWatchdogOptions {
     publicationBarrier?: PublicationBarrier;
     safetyBarrier?: PublicationSafetyBarrier;
     autotuner?: AdaptiveAutotuner;
-    onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<void>;
+    /**
+     * Returns false when the engine cannot safely quiesce. A deferred recovery
+     * is deliberately not counted as a restart: counting it would open the
+     * restart circuit even though no restart actually occurred.
+     */
+    onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<boolean | void>;
     intervalMs?: number;
     workerId?: string;
 }
