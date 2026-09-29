@@ -43,6 +43,7 @@ export class PublicationBarrier {
   private coverWarmQueue = new AsyncSemaphore(1, 'cover_warm_queue');
   private warmedCoverIds = new Set<string>();
   private readonly maxRememberedWarmCovers = 256;
+  private lastCoverWarmFailureLogAt = 0;
   public onPublished?: (isFreshRelease: boolean, durableRateEvent?: boolean) => void;
 
   constructor(private supabase: SupabaseClient) {}
@@ -58,7 +59,9 @@ export class PublicationBarrier {
     void this.coverWarmQueue.runExclusive(async () => {
       let warmed = false;
       try {
-        const siteUrl = process.env.MANGA_SITE_URL || 'https://manga.project-nox-awerkori.workers.dev';
+        // NOX_MANGA_URL is the validated runtime endpoint used by the storage
+        // bridge and sentinel. Do not rely on an untracked legacy alias here.
+        const siteUrl = process.env.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev';
         // Sequential variants avoid duplicate origin reads. This happens after
         // commit, outside the YSQL client and behind a single low-priority lane.
         for (const variant of ['thumb', 'hero']) {
@@ -73,7 +76,15 @@ export class PublicationBarrier {
         // A transient network failure must not suppress the next legitimate
         // publication attempt for this cover. Normal media delivery remains
         // authoritative regardless of warming outcome.
-        if (!warmed) this.warmedCoverIds.delete(coverId);
+        if (!warmed) {
+          this.warmedCoverIds.delete(coverId);
+          // A failed warmer is operationally meaningful, but one warning per
+          // minute keeps a bad edge route from becoming a hot-path log storm.
+          if (Date.now() - this.lastCoverWarmFailureLogAt >= 60_000) {
+            this.lastCoverWarmFailureLogAt = Date.now();
+            this.logger.warn('Cover warming failed; normal media delivery remains authoritative', { coverId });
+          }
+        }
       }
     }).catch(() => this.warmedCoverIds.delete(coverId));
   }
