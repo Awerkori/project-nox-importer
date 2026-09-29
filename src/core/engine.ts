@@ -1702,6 +1702,17 @@ export class ImporterEngine {
       ? this.activeSourcesCache.sources
       : Object.keys(SOURCE_CONCURRENCY_LIMITS);
 
+    // A source's configured limit is an upper bound. When several sources are
+    // healthy, cap each one to a fair share of the current global capacity so
+    // a slow provider cannot retain nearly every chapter slot. This is local
+    // source isolation, not a global throttle; the one-source case remains
+    // work-conserving.
+    const healthySourceCount = candidateSources.reduce(
+      (count, source) => count + (this.circuitBreaker.canExecute(source) ? 1 : 0),
+      0,
+    );
+    this.autotuner.setEligibleSourceCountForFairness(healthySourceCount);
+
     const eligible: string[] = [];
     for (const src of candidateSources) {
       // 1. In-memory circuit breaker check
