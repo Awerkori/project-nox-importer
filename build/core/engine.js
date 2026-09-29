@@ -1551,6 +1551,11 @@ export class ImporterEngine {
         // provider.  The latter can be dozens of idle sources and would throttle
         // a real one-source backlog without protecting any competing work.
         this.autotuner.refreshSourceFairnessFromActiveSources(candidateSources);
+        // Page fan-out remains conservative across every healthy candidate. It
+        // prevents the first source claimed from flooding the shared download and
+        // buffer budgets before another source gets an opportunity to run.
+        const healthyDownloadCandidates = candidateSources.reduce((count, source) => count + (this.circuitBreaker.canExecute(source) ? 1 : 0), 0);
+        this.autotuner.setEligibleSourceCountForDownloadFairness(healthyDownloadCandidates);
         const eligible = [];
         for (const src of candidateSources) {
             // 1. In-memory circuit breaker check
@@ -3398,56 +3403,62 @@ export class ImporterEngine {
                             const rl0 = performance.now();
                             await this.rateLimiter.acquire(parsedUrl.host);
                             chRateLimitWaitMs += (performance.now() - rl0);
-                            const buf0 = performance.now();
-                            let reservation = await this.autotuner.reserveBufferBudget(2.0 * 1024 * 1024, AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
-                            await bufferedPageSemaphore.acquire(AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
-                            chDownloadSemWaitMs += (performance.now() - buf0);
-                            let bufferTransferred = false;
-                            let reservationCommitted = false;
-                            let pageBytes = null;
+                            // A producer waiting for a source-local page permit must not
+                            // reserve a scarce buffer slot first. With several large chapters
+                            // that speculative order filled all buffers while only a few
+                            // network requests were actually active.
+                            const sourceWait0 = performance.now();
+                            await sourceDownloadSemaphore.acquire(AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+                            chDownloadSemWaitMs += (performance.now() - sourceWait0);
                             try {
-                                if (this.stopSignal || pipelineError || isCancelled?.())
-                                    break;
-                                let attempts = 0;
-                                let lastErr = null;
-                                let currentUrl = pageUrls[idx] || pageUrl;
-                                const d0 = Date.now();
-                                while (attempts < 4 && !this.stopSignal && !pipelineError) {
-                                    attempts++;
-                                    const timeoutMs = attempts === 1 ? 15_000 : attempts === 2 ? 25_000 : 35_000;
-                                    const freshConnection = attempts >= 2;
-                                    // On attempt 3: refresh manifest before download to check for updated CDN tokens or corrected URLs
-                                    if (attempts === 3 && !manifestRefreshed) {
-                                        manifestRefreshed = true;
-                                        try {
-                                            const refreshAdapter = this.registry.get(effectiveSource);
-                                            if (refreshAdapter && typeof refreshAdapter.fetchChapterPages === 'function') {
-                                                const refreshedUrls = await callProvider(() => refreshAdapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber));
-                                                if (refreshedUrls && refreshedUrls.length === expectedCount) {
-                                                    const isDifferent = refreshedUrls.some((u, i) => u !== pageUrls[i]);
-                                                    if (isDifferent) {
-                                                        this.logger.info(`MANIFEST_REFRESH: Upstream manifest refreshed with updated URLs for chapter ${chapterNumber} on ${effectiveSource}`, {
-                                                            workId,
-                                                            chapterNumber,
-                                                            oldUrl: currentUrl,
-                                                            newUrl: refreshedUrls[idx],
-                                                        });
-                                                        pageUrls = refreshedUrls;
-                                                        currentUrl = pageUrls[idx] || currentUrl;
+                                const buf0 = performance.now();
+                                let reservation = await this.autotuner.reserveBufferBudget(2.0 * 1024 * 1024, AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+                                await bufferedPageSemaphore.acquire(AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+                                chDownloadSemWaitMs += (performance.now() - buf0);
+                                let bufferTransferred = false;
+                                let reservationCommitted = false;
+                                let pageBytes = null;
+                                try {
+                                    if (this.stopSignal || pipelineError || isCancelled?.())
+                                        break;
+                                    let attempts = 0;
+                                    let lastErr = null;
+                                    let currentUrl = pageUrls[idx] || pageUrl;
+                                    const d0 = Date.now();
+                                    while (attempts < 4 && !this.stopSignal && !pipelineError) {
+                                        attempts++;
+                                        const timeoutMs = attempts === 1 ? 15_000 : attempts === 2 ? 25_000 : 35_000;
+                                        const freshConnection = attempts >= 2;
+                                        // On attempt 3: refresh manifest before download to check for updated CDN tokens or corrected URLs
+                                        if (attempts === 3 && !manifestRefreshed) {
+                                            manifestRefreshed = true;
+                                            try {
+                                                const refreshAdapter = this.registry.get(effectiveSource);
+                                                if (refreshAdapter && typeof refreshAdapter.fetchChapterPages === 'function') {
+                                                    const refreshedUrls = await callProvider(() => refreshAdapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber));
+                                                    if (refreshedUrls && refreshedUrls.length === expectedCount) {
+                                                        const isDifferent = refreshedUrls.some((u, i) => u !== pageUrls[i]);
+                                                        if (isDifferent) {
+                                                            this.logger.info(`MANIFEST_REFRESH: Upstream manifest refreshed with updated URLs for chapter ${chapterNumber} on ${effectiveSource}`, {
+                                                                workId,
+                                                                chapterNumber,
+                                                                oldUrl: currentUrl,
+                                                                newUrl: refreshedUrls[idx],
+                                                            });
+                                                            pageUrls = refreshedUrls;
+                                                            currentUrl = pageUrls[idx] || currentUrl;
+                                                        }
                                                     }
                                                 }
                                             }
+                                            catch (refreshErr) {
+                                                this.logger.warn(`MANIFEST_REFRESH failed during page retry for ${effectiveSource} ch ${chapterNumber}`, { error: refreshErr?.message });
+                                            }
                                         }
-                                        catch (refreshErr) {
-                                            this.logger.warn(`MANIFEST_REFRESH failed during page retry for ${effectiveSource} ch ${chapterNumber}`, { error: refreshErr?.message });
-                                        }
-                                    }
-                                    try {
-                                        const inf0 = performance.now();
-                                        await sourceDownloadSemaphore.acquire(AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
                                         try {
-                                            // Source permit comes first so an overcrowded CDN never
-                                            // holds a global download permit while merely waiting.
+                                            const inf0 = performance.now();
+                                            // Source and buffer capacity have already been admitted, so
+                                            // only the shared network permit may be held here.
                                             pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
                                                 chDownloadSemWaitMs += (performance.now() - inf0);
                                                 telemetryCollector.trackActiveDownload(1);
@@ -3462,84 +3473,84 @@ export class ImporterEngine {
                                                     telemetryCollector.trackActiveDownload(-1);
                                                 }
                                             });
-                                        }
-                                        finally {
-                                            sourceDownloadSemaphore.release();
-                                        }
-                                        const dlMs = Date.now() - d0;
-                                        tDownload += dlMs;
-                                        chDownloadMs += dlMs;
-                                        telemetryCollector.recordImageDownload(effectiveSource, dlMs, pageBytes.length);
-                                        totalBytes += pageBytes.length;
-                                        reservation.commit(pageBytes.length);
-                                        reservationCommitted = true;
-                                        ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
-                                        if (attempts > 1) {
-                                            const autoRecoverReason = attempts === 2
-                                                ? 'TRANSIENT_TIMEOUT_RECOVERED'
-                                                : 'IMAGE_URL_REFRESHED';
-                                            this.logger.info(`AUTO_RECOVERED: Page ${idx + 1}/${expectedCount} recovered on attempt ${attempts}`, {
-                                                reason: autoRecoverReason,
-                                                source: effectiveSource,
-                                                chapterNumber,
-                                                pageIndex: idx,
-                                            });
-                                        }
-                                        break;
-                                    }
-                                    catch (err) {
-                                        lastErr = err;
-                                        telemetryCollector.recordDownloadError(attempts < 4);
-                                        if (err instanceof InvalidMediaError) {
+                                            const dlMs = Date.now() - d0;
+                                            tDownload += dlMs;
+                                            chDownloadMs += dlMs;
+                                            telemetryCollector.recordImageDownload(effectiveSource, dlMs, pageBytes.length);
+                                            totalBytes += pageBytes.length;
+                                            reservation.commit(pageBytes.length);
+                                            reservationCommitted = true;
+                                            ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
+                                            if (attempts > 1) {
+                                                const autoRecoverReason = attempts === 2
+                                                    ? 'TRANSIENT_TIMEOUT_RECOVERED'
+                                                    : 'IMAGE_URL_REFRESHED';
+                                                this.logger.info(`AUTO_RECOVERED: Page ${idx + 1}/${expectedCount} recovered on attempt ${attempts}`, {
+                                                    reason: autoRecoverReason,
+                                                    source: effectiveSource,
+                                                    chapterNumber,
+                                                    pageIndex: idx,
+                                                });
+                                            }
                                             break;
                                         }
-                                        if (attempts < 4 && !this.stopSignal && !pipelineError) {
-                                            if (reservation.isReleased) {
-                                                reservation = await this.autotuner.reserveBufferBudget(2.0 * 1024 * 1024, AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+                                        catch (err) {
+                                            lastErr = err;
+                                            telemetryCollector.recordDownloadError(attempts < 4);
+                                            if (err instanceof InvalidMediaError) {
+                                                break;
                                             }
-                                            await this.sleep(400 * attempts);
+                                            if (attempts < 4 && !this.stopSignal && !pipelineError) {
+                                                if (reservation.isReleased) {
+                                                    reservation = await this.autotuner.reserveBufferBudget(2.0 * 1024 * 1024, AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+                                                }
+                                                await this.sleep(400 * attempts);
+                                            }
                                         }
                                     }
-                                }
-                                if (!pageBytes) {
-                                    const errMsg = (lastErr instanceof Error && lastErr.message) ? lastErr.message : (lastErr ? String(lastErr) : 'Erro desconhecido');
-                                    const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
-                                    const pageSemantic = classifyPageUrl(currentUrl, idx, expectedCount);
-                                    // Non-content pages (credits, recruitment, promo, warning) can be skipped with telemetry
-                                    if (is404 && pageSemantic !== 'CONTENT_PAGE') {
-                                        failed404Count++;
-                                        this.logger.warn(`SKIPPED_NON_CONTENT_PAGE: Skipping non-content 404 page ${idx + 1}/${expectedCount} (${pageSemantic}): ${currentUrl}`, {
-                                            workId,
-                                            chapterNumber,
-                                            pageSemantic,
-                                            currentUrl,
-                                            failed404Count,
-                                        });
-                                        storedPages[idx] = { mediaId: '__SKIPPED_NON_CONTENT_PAGE__', width: 0, height: 0 };
-                                        continue;
+                                    if (!pageBytes) {
+                                        const errMsg = (lastErr instanceof Error && lastErr.message) ? lastErr.message : (lastErr ? String(lastErr) : 'Erro desconhecido');
+                                        const is404 = errMsg.includes('HTTP 404') || errMsg.includes('status: 404');
+                                        const pageSemantic = classifyPageUrl(currentUrl, idx, expectedCount);
+                                        // Non-content pages (credits, recruitment, promo, warning) can be skipped with telemetry
+                                        if (is404 && pageSemantic !== 'CONTENT_PAGE') {
+                                            failed404Count++;
+                                            this.logger.warn(`SKIPPED_NON_CONTENT_PAGE: Skipping non-content 404 page ${idx + 1}/${expectedCount} (${pageSemantic}): ${currentUrl}`, {
+                                                workId,
+                                                chapterNumber,
+                                                pageSemantic,
+                                                currentUrl,
+                                                failed404Count,
+                                            });
+                                            storedPages[idx] = { mediaId: '__SKIPPED_NON_CONTENT_PAGE__', width: 0, height: 0 };
+                                            continue;
+                                        }
+                                        // Narrative story page or persistent error: CANNOT be skipped!
+                                        pipelineError = (lastErr instanceof InvalidMediaError || errMsg.includes('Formato não permitido') || errMsg.includes('INVALID_MEDIA'))
+                                            ? lastErr
+                                            : new NarrativePageUnavailableError(effectiveSource, idx, expectedCount, errMsg);
+                                        notifyConsumer();
+                                        break;
                                     }
-                                    // Narrative story page or persistent error: CANNOT be skipped!
-                                    pipelineError = (lastErr instanceof InvalidMediaError || errMsg.includes('Formato não permitido') || errMsg.includes('INVALID_MEDIA'))
-                                        ? lastErr
-                                        : new NarrativePageUnavailableError(effectiveSource, idx, expectedCount, errMsg);
+                                    readyQueue.push({ index: idx, pageBytes, releaseBuffer: () => bufferedPageSemaphore.release() });
+                                    bufferTransferred = true;
                                     notifyConsumer();
-                                    break;
                                 }
-                                readyQueue.push({ index: idx, pageBytes, releaseBuffer: () => bufferedPageSemaphore.release() });
-                                bufferTransferred = true;
-                                notifyConsumer();
+                                finally {
+                                    if (!bufferTransferred) {
+                                        if (reservationCommitted && pageBytes) {
+                                            this.autotuner.releaseActiveBufferedBytes(pageBytes.length);
+                                            ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
+                                        }
+                                        else if (!reservationCommitted) {
+                                            reservation.release();
+                                        }
+                                        bufferedPageSemaphore.release();
+                                    }
+                                }
                             }
                             finally {
-                                if (!bufferTransferred) {
-                                    if (reservationCommitted && pageBytes) {
-                                        this.autotuner.releaseActiveBufferedBytes(pageBytes.length);
-                                        ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
-                                    }
-                                    else if (!reservationCommitted) {
-                                        reservation.release();
-                                    }
-                                    bufferedPageSemaphore.release();
-                                }
+                                sourceDownloadSemaphore.release();
                             }
                         }
                     }

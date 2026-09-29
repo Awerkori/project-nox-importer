@@ -1727,6 +1727,14 @@ export class ImporterEngine {
     // provider.  The latter can be dozens of idle sources and would throttle
     // a real one-source backlog without protecting any competing work.
     this.autotuner.refreshSourceFairnessFromActiveSources(candidateSources);
+    // Page fan-out remains conservative across every healthy candidate. It
+    // prevents the first source claimed from flooding the shared download and
+    // buffer budgets before another source gets an opportunity to run.
+    const healthyDownloadCandidates = candidateSources.reduce(
+      (count, source) => count + (this.circuitBreaker.canExecute(source) ? 1 : 0),
+      0,
+    );
+    this.autotuner.setEligibleSourceCountForDownloadFairness(healthyDownloadCandidates);
 
     const eligible: string[] = [];
     for (const src of candidateSources) {
@@ -3897,6 +3905,16 @@ export class ImporterEngine {
             await this.rateLimiter.acquire(parsedUrl.host);
             chRateLimitWaitMs += (performance.now() - rl0);
 
+            // A producer waiting for a source-local page permit must not
+            // reserve a scarce buffer slot first. With several large chapters
+            // that speculative order filled all buffers while only a few
+            // network requests were actually active.
+            const sourceWait0 = performance.now();
+            await sourceDownloadSemaphore.acquire(
+              AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal])
+            );
+            chDownloadSemWaitMs += (performance.now() - sourceWait0);
+            try {
             const buf0 = performance.now();
             let reservation = await this.autotuner.reserveBufferBudget(
               2.0 * 1024 * 1024,
@@ -3955,30 +3973,23 @@ export class ImporterEngine {
 
               try {
                 const inf0 = performance.now();
-                await sourceDownloadSemaphore.acquire(
-                  AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal])
-                );
-                try {
-                  // Source permit comes first so an overcrowded CDN never
-                  // holds a global download permit while merely waiting.
-                  pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
-                    chDownloadSemWaitMs += (performance.now() - inf0);
-                    telemetryCollector.trackActiveDownload(1);
-                    try {
-                      return await callProvider(() =>
-                        this.fetchImageBytes(currentUrl, effectiveSource, {
-                          timeoutMs,
-                          freshConnection,
-                          reservation,
-                        })
-                      );
-                    } finally {
-                      telemetryCollector.trackActiveDownload(-1);
-                    }
-                  });
-                } finally {
-                  sourceDownloadSemaphore.release();
-                }
+                // Source and buffer capacity have already been admitted, so
+                // only the shared network permit may be held here.
+                pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
+                  chDownloadSemWaitMs += (performance.now() - inf0);
+                  telemetryCollector.trackActiveDownload(1);
+                  try {
+                    return await callProvider(() =>
+                      this.fetchImageBytes(currentUrl, effectiveSource, {
+                        timeoutMs,
+                        freshConnection,
+                        reservation,
+                      })
+                    );
+                  } finally {
+                    telemetryCollector.trackActiveDownload(-1);
+                  }
+                });
 
                 const dlMs = Date.now() - d0;
                 tDownload += dlMs;
@@ -4064,6 +4075,9 @@ export class ImporterEngine {
                 }
                 bufferedPageSemaphore.release();
               }
+            }
+            } finally {
+              sourceDownloadSemaphore.release();
             }
           }
         } catch (err: any) {

@@ -64,6 +64,7 @@ describe('source fair-share chapter capacity', () => {
     });
 
     autotuner.setEligibleSourceCountForFairness(3);
+    autotuner.setEligibleSourceCountForDownloadFairness(3);
     const nexus = autotuner.getSourceDownloadSemaphore('nexus');
     const other = autotuner.getSourceDownloadSemaphore('hentaihome');
 
@@ -88,10 +89,11 @@ describe('source fair-share chapter capacity', () => {
     });
 
     autotuner.setEligibleSourceCountForFairness(3);
+    autotuner.setEligibleSourceCountForDownloadFairness(3);
     const nexus = autotuner.getSourceDownloadSemaphore('nexus');
     expect(nexus.capacity).toBe(3);
 
-    autotuner.setEligibleSourceCountForFairness(1);
+    autotuner.setEligibleSourceCountForDownloadFairness(1);
     expect(nexus.capacity).toBe(8);
   });
 
@@ -108,18 +110,19 @@ describe('source fair-share chapter capacity', () => {
     // currently has queued chapter work. It should retain its configured
     // chapter capacity and page fan-out until another source is active.
     autotuner.setEligibleSourceCountForFairness(53);
+    autotuner.setEligibleSourceCountForDownloadFairness(53);
     const manhastro = autotuner.getSourceSemaphore('manhastro');
     expect(manhastro.capacity).toBe(2);
     expect(manhastro.tryAcquire()).toBe(true);
     expect(autotuner.refreshSourceFairnessFromActiveSources(['manhastro', 'nexus', 'hanamiheaven'])).toBe(1);
     expect(manhastro.capacity).toBe(3);
-    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(8);
+    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(3);
 
     // As independent sources receive work, local caps narrow again without
     // changing global chapter, Telegram, download, or memory budgets.
     expect(autotuner.getSourceSemaphore('nexus').tryAcquire()).toBe(true);
     expect(autotuner.refreshSourceFairnessFromActiveSources(['manhastro', 'nexus', 'hanamiheaven'])).toBe(2);
-    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(4);
+    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(3);
 
     expect(autotuner.getSourceSemaphore('hanamiheaven').tryAcquire()).toBe(true);
     expect(autotuner.refreshSourceFairnessFromActiveSources(['manhastro', 'nexus', 'hanamiheaven'])).toBe(3);
