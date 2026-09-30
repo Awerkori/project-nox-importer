@@ -4,6 +4,22 @@ import { readFileSync } from 'node:fs';
 import { AdmissionController } from '../src/core/scheduler/admission-controller.js';
 
 describe('bounded admission snapshot', () => {
+  it('samples the earliest P1 publication frontier before queue size', () => {
+    const source = readFileSync('src/core/scheduler/admission-controller.ts', 'utf8');
+
+    // Regression: ordering the bounded sample by pending_jobs first selected
+    // large queues behind unresolved gaps and made contiguous P1 work invisible.
+    expect(source).toMatch(
+      /PARTITION BY source\s+ORDER BY min_sort_key ASC NULLS LAST, pending_jobs DESC/,
+    );
+    expect(source).toMatch(
+      /ORDER BY min_sort_key ASC NULLS LAST, queued_count DESC\s+LIMIT \$2/,
+    );
+    expect(source).toMatch(
+      /ORDER BY min_sort_key ASC NULLS LAST, queued_count DESC\s+LIMIT 10/,
+    );
+  });
+
   it('preserves per-work counts, attempt limits and frontiers with one SQL roundtrip', async () => {
     const db = new PGlite();
     try {

@@ -564,12 +564,14 @@ export class AdmissionController {
            GROUP BY payload->>'workId', source
          ),
          queue_candidates AS MATERIALIZED (
+           -- Admission samples the publication frontier first. A large queue
+           -- after an unresolved gap must not hide smaller contiguous P1 work.
            SELECT work_id, source, pending_jobs, min_sort_key
            FROM (
              SELECT g.*,
                ROW_NUMBER() OVER (
                  PARTITION BY source
-                 ORDER BY pending_jobs DESC, min_sort_key ASC NULLS LAST
+                 ORDER BY min_sort_key ASC NULLS LAST, pending_jobs DESC
                ) AS source_rank
              FROM queue_candidate_groups g
            ) ranked
@@ -589,7 +591,7 @@ export class AdmissionController {
            AND w.latest_chapter_published_at IS NOT NULL
            AND s.enabled = true
            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
-         ORDER BY queued_count DESC
+         ORDER BY min_sort_key ASC NULLS LAST, queued_count DESC
          LIMIT $2`,
         [
           activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
@@ -1034,7 +1036,10 @@ export class AdmissionController {
         WHERE ${isP1 ? 'w.published = true AND w.latest_chapter_published_at IS NOT NULL' : '(w.published IS FALSE OR w.latest_chapter_published_at IS NULL)'}
           AND s.enabled = true
           AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
-        ORDER BY queued_count DESC
+        -- The on-demand path has the same bounded frontier requirement as the
+        -- periodic replenisher.  Keep it from repeatedly sampling only large
+        -- queues parked behind an unresolved publication gap.
+        ORDER BY min_sort_key ASC NULLS LAST, queued_count DESC
         LIMIT 10;
       `;
 
