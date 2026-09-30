@@ -4251,6 +4251,12 @@ export class ImporterEngine {
                         timeoutMs,
                         freshConnection,
                         reservation,
+                        // The producer owns the chapter-level retry policy:
+                        // four bounded attempts, manifest refresh, and
+                        // cross-source rescue.  A second three-attempt loop
+                        // here made a single bad page consume up to twelve
+                        // network attempts while holding a chapter slot.
+                        maxAttempts: 1,
                       })
                     );
                   } finally {
@@ -5078,6 +5084,13 @@ export class ImporterEngine {
       freshConnection?: boolean;
       refererOverride?: string;
       reservation?: BufferReservation;
+      /**
+       * Page imports already own a bounded retry ladder (including manifest
+       * refresh).  Letting the low-level fetch retry that same request again
+       * multiplies a bad CDN response into minutes of occupied chapter-slot
+       * time.  Direct callers retain the defensive default of three tries.
+       */
+      maxAttempts?: number;
     }
   ): Promise<Uint8Array> {
     const parsedUrl = new URL(url);
@@ -5118,7 +5131,7 @@ export class ImporterEngine {
     let fetchError: any = null;
 
     let attempts = 0;
-    const maxAttempts = 3;
+    const maxAttempts = Math.max(1, Math.min(3, options?.maxAttempts ?? 3));
     while (attempts < maxAttempts) {
       attempts++;
       fetchError = null;

@@ -299,6 +299,13 @@ export declare class ImporterEngine {
         freshConnection?: boolean;
         refererOverride?: string;
         reservation?: BufferReservation;
+        /**
+         * Page imports already own a bounded retry ladder (including manifest
+         * refresh).  Letting the low-level fetch retry that same request again
+         * multiplies a bad CDN response into minutes of occupied chapter-slot
+         * time.  Direct callers retain the defensive default of three tries.
+         */
+        maxAttempts?: number;
     }): Promise<Uint8Array>;
     tryRawMetadataCoverFallback(raw: Record<string, any>, botUserId: string, source: string, excludeUrl?: string | null): Promise<string | null>;
     trySiblingMappingCoverFallback(workId: string | undefined, excludeSource: string, slugOrTitle: string, botUserId: string): Promise<string | null>;

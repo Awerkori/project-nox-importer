@@ -3706,6 +3706,12 @@ export class ImporterEngine {
                                                         timeoutMs,
                                                         freshConnection,
                                                         reservation,
+                                                        // The producer owns the chapter-level retry policy:
+                                                        // four bounded attempts, manifest refresh, and
+                                                        // cross-source rescue.  A second three-attempt loop
+                                                        // here made a single bad page consume up to twelve
+                                                        // network attempts while holding a chapter slot.
+                                                        maxAttempts: 1,
                                                     }));
                                                 }
                                                 finally {
@@ -4476,7 +4482,7 @@ export class ImporterEngine {
         let res = null;
         let fetchError = null;
         let attempts = 0;
-        const maxAttempts = 3;
+        const maxAttempts = Math.max(1, Math.min(3, options?.maxAttempts ?? 3));
         while (attempts < maxAttempts) {
             attempts++;
             fetchError = null;
