@@ -11,10 +11,12 @@ export declare class SchedulerStateStore {
     private pool;
     private activeWorksCache;
     private watermarksCache;
+    private p1AdmissionCursorsCache;
     private configCache;
     private metricsCache;
     private isLoaded;
     private saveDebounceTimer;
+    private p1CursorSaveDebounceTimer;
     constructor(pool?: any);
     /**
      * Initializes state by creating table if missing and loading existing records.
@@ -25,6 +27,8 @@ export declare class SchedulerStateStore {
     getActiveWorks(): ActiveWork[];
     getActiveWork(workId: string): ActiveWork | undefined;
     setActiveWork(work: ActiveWork): void;
+    getP1AdmissionCursors(): Record<string, string>;
+    setP1AdmissionCursor(source: string, workId: string): void;
     removeActiveWork(workId: string): boolean;
     private scheduleSaveActiveWorks;
     getWatermarkKey(workId: string, source: string): string;

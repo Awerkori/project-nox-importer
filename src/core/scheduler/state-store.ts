@@ -22,6 +22,9 @@ export class SchedulerStateStore {
 
   private activeWorksCache: Map<string, ActiveWork> = new Map();
   private watermarksCache: Map<string, WorkWatermark> = new Map();
+  // A small durable cursor lets P1 admission rotate through works of the
+  // same source.  It is scheduler control-plane state, not editorial data.
+  private p1AdmissionCursorsCache: Map<string, string> = new Map();
   private configCache: SchedulerConfig = {
     enabled: true,
     shadowMode: false,
@@ -35,6 +38,7 @@ export class SchedulerStateStore {
   private metricsCache: SchedulerMetrics | null = null;
   private isLoaded = false;
   private saveDebounceTimer: NodeJS.Timeout | null = null;
+  private p1CursorSaveDebounceTimer: NodeJS.Timeout | null = null;
 
   constructor(pool?: any) {
     // State is replaced by a local double in scheduler unit tests. Avoid
@@ -138,6 +142,15 @@ export class SchedulerStateStore {
         }
       }
 
+      const p1CursorRes = await this.pool.query(
+        `SELECT value FROM importer_scheduler_state WHERE key = 'p1_admission_cursors'`
+      );
+      if (p1CursorRes.rows.length > 0 && p1CursorRes.rows[0].value && typeof p1CursorRes.rows[0].value === 'object') {
+        for (const [source, workId] of Object.entries(p1CursorRes.rows[0].value)) {
+          if (typeof workId === 'string' && workId) this.p1AdmissionCursorsCache.set(source, workId);
+        }
+      }
+
       this.isLoaded = true;
       this.logger.info('SchedulerStateStore initialized successfully', {
         activeWorks: this.activeWorksCache.size,
@@ -176,6 +189,29 @@ export class SchedulerStateStore {
   setActiveWork(work: ActiveWork): void {
     this.activeWorksCache.set(work.workId, work);
     this.scheduleSaveActiveWorks();
+  }
+
+  // --- P1 admission fairness cursors ---
+
+  getP1AdmissionCursors(): Record<string, string> {
+    return Object.fromEntries(this.p1AdmissionCursorsCache);
+  }
+
+  setP1AdmissionCursor(source: string, workId: string): void {
+    if (!source || !workId || this.p1AdmissionCursorsCache.get(source) === workId) return;
+    this.p1AdmissionCursorsCache.set(source, workId);
+    // Sources are a bounded configuration set. Retain a hard ceiling anyway
+    // so a malformed source cannot turn this tiny cursor into an uptime leak.
+    while (this.p1AdmissionCursorsCache.size > 128) {
+      const oldest = this.p1AdmissionCursorsCache.keys().next().value;
+      if (!oldest) break;
+      this.p1AdmissionCursorsCache.delete(oldest);
+    }
+    if (this.p1CursorSaveDebounceTimer) return;
+    this.p1CursorSaveDebounceTimer = setTimeout(() => {
+      this.p1CursorSaveDebounceTimer = null;
+      void this.persistKey('p1_admission_cursors', this.getP1AdmissionCursors());
+    }, 1000);
   }
 
   removeActiveWork(workId: string): boolean {

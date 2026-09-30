@@ -4,19 +4,19 @@ import { readFileSync } from 'node:fs';
 import { AdmissionController } from '../src/core/scheduler/admission-controller.js';
 
 describe('bounded admission snapshot', () => {
-  it('samples the earliest P1 publication frontier before queue size', () => {
+  it('keeps publication frontier per work while rotating P1 admission fairly by source', () => {
     const source = readFileSync('src/core/scheduler/admission-controller.ts', 'utf8');
 
-    // Regression: ordering the bounded sample by pending_jobs first selected
-    // large queues behind unresolved gaps and made contiguous P1 work invisible.
+    // Regression: ranking source candidates by the smallest chapter number
+    // across different works permanently hid later-frontier P1 works.
     expect(source).toMatch(
-      /PARTITION BY source\s+ORDER BY min_sort_key ASC NULLS LAST, pending_jobs DESC/,
+      /PARTITION BY source\s+ORDER BY CASE WHEN work_id > COALESCE\(\$4::jsonb ->> source, ''\) THEN 0 ELSE 1 END/,
     );
     expect(source).toMatch(
-      /ORDER BY min_sort_key ASC NULLS LAST, queued_count DESC\s+LIMIT \$2/,
+      /\[P1_COHORT_ROTATED\]/,
     );
     expect(source).toMatch(
-      /ORDER BY min_sort_key ASC NULLS LAST, queued_count DESC\s+LIMIT 10/,
+      /status = 'QUEUED' OR status = 'PAUSED_BY_STAFF' OR \(status = 'RETRY' AND next_run_at <= NOW\(\)\)/,
     );
   });
 
@@ -99,6 +99,20 @@ describe('bounded admission snapshot', () => {
     c.setChapterCapacityProvider(()=>1);
     await c.runAdmissionCycle();
     expect(active.get(work.workId)).toMatchObject({lane:'P1',state:'FILLING',publishedChapters:1,queuedChapters:0});
+  });
+
+  it('rotates a drained P1 window instead of letting its paused backlog monopolize the cohort', async () => {
+    const active = new Map<string, any>();
+    const work = {workId:'00000000-0000-0000-0000-000000000012',workTitle:'Window Work',lane:'P1',state:'FILLING',primarySource:'s',admittedAt:new Date().toISOString(),lastActivityAt:new Date().toISOString(),totalChapters:12,publishedChapters:1,queuedChapters:0,inFlightChapters:0,frontierSortKey:2,criticalGapSortKey:null,criticalGapUnblockCount:0};
+    active.set(work.workId, work);
+    const state = {getActiveWorks:()=>Array.from(active.values()),setActiveWork:(w:any)=>active.set(w.workId,w),removeActiveWork:(id:string)=>active.delete(id)} as any;
+    const pool = {query:async(sql:string) => {
+      if (sql.includes('queued_cnt') && sql.includes('retry_cnt')) return {rows:[{work_id:work.workId,queued_cnt:'0',importing_cnt:'0',paused_cnt:'8',retry_cnt:'0',min_sort_key:'2',pub_cnt:'1',max_pub:'1',staged_cnt:'0',min_staged:null,unimported_cnt:'8',source_status:'ACTIVE',cooldown_until:null}]};
+      return {rows:[]};
+    }};
+    const controller = new AdmissionController(state, {} as any, pool as any);
+    await (controller as any).reconcileActiveWorks();
+    expect(active.has(work.workId)).toBe(false);
   });
 
   it('repairs a legacy visible P2 window in a bounded, idempotent work-scoped batch', async () => {
