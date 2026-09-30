@@ -978,9 +978,9 @@ export class AutoHealWatchdog {
 
   /**
    * Escalated Recovery Ladder:
-   * Level 1 (STALLED >= 15m): Light reconciliation
-   * Level 2 (STALLED >= 20m): Stuck state audit (expired leases, zombie active works)
-   * Level 3 (CRITICAL_STALL >= 30m): Controlled graceful self-restart
+   * Level 1 (STALLED >= 10m): Light reconciliation
+   * Level 2 (STALLED >= 15m): Stuck state audit (expired leases, zombie active works)
+   * Level 3 (sustained stall >= 20m): Controlled graceful self-restart
    */
   async executeRecoveryLadder(metrics: HealthPanelMetrics): Promise<void> {
     const nowMs = Date.now();
@@ -1010,13 +1010,13 @@ export class AutoHealWatchdog {
       );
     }
 
-    // NÍVEL 3 — RESTART CONTROLADO (>= 20m stall / CRITICAL_STALL)
+    // NÍVEL 3 — RESTART CONTROLADO (>= 20m sustained stall)
     // Only triggers if real eligible or importing jobs exist (never for staged backlog alone, which is handled by Level 1 sweep)
     // and after prior reconciliation rungs (Level 1/2) have been attempted.
     const hasAttemptedPriorLevels = this.lastLevel1At > 0 || this.lastLevel2At > 0;
     if (
       effectiveStallAgeSec >= 20 * 60 &&
-      metrics.status === 'CRITICAL_STALL' &&
+      (metrics.status === 'STALLED' || metrics.status === 'CRITICAL_STALL') &&
       (metrics.eligibleJobs > 0 || metrics.importingCount > 0) &&
       hasAttemptedPriorLevels
     ) {
@@ -1063,7 +1063,7 @@ export class AutoHealWatchdog {
       this.lastRestartAt = nowMs;
       this.lastAutoHealAt = new Date().toISOString();
 
-      const reason = `CRITICAL_STALL: 0 completions/fresh for ${Math.round(effectiveStallAgeSec / 60)}m while ${metrics.eligibleJobs} jobs eligible (processing: ${metrics.processingHealth}, publication: ${metrics.publicationHealth})`;
+      const reason = `SUSTAINED_STALL: 0 completions/fresh for ${Math.round(effectiveStallAgeSec / 60)}m while ${metrics.eligibleJobs} jobs eligible (processing: ${metrics.processingHealth}, publication: ${metrics.publicationHealth})`;
       this.logger.error(`🚨 [AUTO-HEAL NÍVEL 3] ${reason}. Initiating controlled graceful self-restart...`);
 
       if (this.onControlledRestart) {
