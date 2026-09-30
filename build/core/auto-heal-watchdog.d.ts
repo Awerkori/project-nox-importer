@@ -201,9 +201,9 @@ export declare class AutoHealWatchdog {
     evaluateCycle(): Promise<HealthPanelMetrics>;
     /**
      * Escalated Recovery Ladder:
-     * Level 1 (STALLED >= 10m): Light reconciliation
-     * Level 2 (STALLED >= 15m): Stuck state audit (expired leases, zombie active works)
-     * Level 3 (sustained stall >= 20m): Controlled graceful self-restart
+     * Level 1 (STALLED >= 8m): Light reconciliation
+     * Level 2 (STALLED >= 10m): Stuck state audit (expired leases, zombie active works)
+     * Level 3 (sustained stall >= 12m): Controlled graceful self-restart
      */
     executeRecoveryLadder(metrics: HealthPanelMetrics): Promise<void>;
     /**

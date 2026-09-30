@@ -12,7 +12,7 @@ const stalledMetrics: HealthPanelMetrics = {
 };
 
 describe('soft restart accounting', () => {
-  it('restarts a sustained STALLED pipeline at 20m after prior recovery ran', async () => {
+  it('restarts a sustained STALLED pipeline at 12m after prior recovery ran', async () => {
     const pool: any = { query: vi.fn(async (sql: string) => {
       if (sql.includes("key = 'importer_auto_restarts'")) return { rows: [{ value: '[]' }] };
       return { rows: [] };
@@ -26,8 +26,8 @@ describe('soft restart accounting', () => {
       status: 'STALLED',
       processingHealth: 'STALLED',
       publicationHealth: 'STALLED',
-      lastCompletedAgeSec: 20 * 60,
-      lastFreshVisibleAgeSec: 20 * 60,
+      lastCompletedAgeSec: 12 * 60,
+      lastFreshVisibleAgeSec: 12 * 60,
     });
 
     expect(onControlledRestart).toHaveBeenCalledOnce();
