@@ -47,6 +47,16 @@ export class AdmissionController {
   // catalog as part of normal admission.
   private visibleP2LifecycleRepairComplete = false;
 
+  private getP1AdmissionCursors(): Record<string, string> {
+    const getter = (this.stateStore as any).getP1AdmissionCursors;
+    return typeof getter === 'function' ? getter.call(this.stateStore) : {};
+  }
+
+  private advanceP1AdmissionCursor(source: string, workId: string): void {
+    const setter = (this.stateStore as any).setP1AdmissionCursor;
+    if (typeof setter === 'function') setter.call(this.stateStore, source, workId);
+  }
+
   public setSourcePermitProvider(provider: (source: string) => number): void {
     this.sourcePermitProvider = provider;
   }
@@ -675,6 +685,18 @@ export class AdmissionController {
             this.stateStore.setActiveWork(work);
           }
 
+          // A P1 work has consumed its admitted window.  Return it to the
+          // rotating cohort before opening another window so a large source
+          // cannot keep the same handful of works active indefinitely. Its
+          // remaining PAUSED_BY_STAFF jobs stay intact and are admitted again
+          // by the durable per-source cursor; no chapter is discarded.
+          if (work.lane === 'P1' && queuedCnt === 0 && importingCnt === 0 && retryCnt === 0 && pausedCnt > 0) {
+            this.logger.info(`[P1_COHORT_ROTATED] Work ${work.workTitle} (${work.workId}) completed its admission window; rotating to another eligible P1 work.`);
+            this.stateStore.removeActiveWork(work.workId);
+            this.triggerImmediateReplenishment('P1_WINDOW_ROTATED');
+            continue;
+          }
+
           // A cohort is only drained when it has no non-terminal queue state.
           // PAUSED_BY_STAFF is the sliding-window backlog, not completion;
           // RETRY is pending work, not completion. Treating either as empty
@@ -760,9 +782,10 @@ export class AdmissionController {
     const targetNewWorksLimit = idleWorkers >= 1 ? maxP2Cohort : 4;
     const newWorkSlotsAvailable = Math.max(0, targetNewWorksLimit - activeNewWorks.length);
 
-    // Track active sources for source diversity (Section 81)
+    // Track only work that is actually consuming a chapter slot. A logical
+    // cohort entry without in-flight work must not reserve a source forever.
     const sourceCounts = new Map<string, number>();
-    for (const w of activeWorks.filter((w) => w.state === 'FILLING')) {
+    for (const w of activeWorks.filter((w) => w.state === 'FILLING' && (w.inFlightChapters || 0) > 0)) {
       sourceCounts.set(w.primarySource, (sourceCounts.get(w.primarySource) || 0) + 1);
     }
 
@@ -777,7 +800,7 @@ export class AdmissionController {
              MIN(chapter_sort_key) AS min_sort_key
            FROM importer_queue
            WHERE task_type='IMPORT_CHAPTER'
-             AND (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW()))
+             AND (status = 'QUEUED' OR status = 'PAUSED_BY_STAFF' OR (status = 'RETRY' AND next_run_at <= NOW()))
              AND attempts < COALESCE(max_attempts,7)
              AND priority >= 75 AND priority < 100
              AND COALESCE(payload->>'staffForced', 'false') <> 'true'
@@ -787,13 +810,14 @@ export class AdmissionController {
          queue_candidates AS MATERIALIZED (
            -- Admission samples the publication frontier first. A large queue
            -- after an unresolved gap must not hide smaller contiguous P1 work.
-           SELECT work_id, source, pending_jobs, queued_count, paused_count, min_sort_key
+           SELECT work_id, source, pending_jobs, queued_count, paused_count, min_sort_key, source_rank
            FROM (
              SELECT g.*,
-               ROW_NUMBER() OVER (
-                 PARTITION BY source
-                 ORDER BY min_sort_key ASC NULLS LAST, pending_jobs DESC
-               ) AS source_rank
+             ROW_NUMBER() OVER (
+               PARTITION BY source
+               ORDER BY CASE WHEN work_id > COALESCE($4::jsonb ->> source, '') THEN 0 ELSE 1 END,
+                        work_id
+             ) AS source_rank
              FROM queue_candidate_groups g
            ) ranked
            WHERE source_rank <= $3
@@ -811,12 +835,15 @@ export class AdmissionController {
          WHERE w.published = true
            AND s.enabled = true
            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
-         ORDER BY min_sort_key ASC NULLS LAST, queued_count DESC
+         -- One candidate from every source before a second candidate from any
+         -- source. The bounded result remains diverse even with many sources.
+         ORDER BY source_rank, source
          LIMIT $2`,
         [
           activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
           Math.max(50, backfillSlotsAvailable * 5),
           4,
+          JSON.stringify(this.getP1AdmissionCursors()),
         ]
       );
 
@@ -943,6 +970,7 @@ export class AdmissionController {
         };
 
         this.stateStore.setActiveWork(newWork);
+        this.advanceP1AdmissionCursor(cand.source, cand.work_id);
         sourceCounts.set(cand.source, srcCount + 1);
         admitted++;
         const activeAfter = this.stateStore.getActiveWorks().filter((w) => w.state === 'FILLING').length;
@@ -1212,7 +1240,7 @@ export class AdmissionController {
     const activeIds = activeWorks.map((w) => w.workId);
 
     const sourceCounts = new Map<string, number>();
-    for (const w of activeWorks.filter((w) => w.state === 'FILLING')) {
+    for (const w of activeWorks.filter((w) => w.state === 'FILLING' && (w.inFlightChapters || 0) > 0)) {
       sourceCounts.set(w.primarySource, (sourceCounts.get(w.primarySource) || 0) + 1);
     }
     const saturatedSources = Array.from(sourceCounts.entries())
@@ -1241,7 +1269,7 @@ export class AdmissionController {
             MIN(chapter_sort_key) AS min_sort_key
           FROM importer_queue
           WHERE task_type='IMPORT_CHAPTER'
-            AND (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW()))
+            AND (status = 'QUEUED' OR status = 'PAUSED_BY_STAFF' OR (status = 'RETRY' AND next_run_at <= NOW()))
             AND attempts < COALESCE(max_attempts,7)
             AND priority >= ${isP1 ? 75 : 50} AND priority < ${maxPriority}
             AND COALESCE(payload->>'staffForced', 'false') <> 'true'
@@ -1265,7 +1293,9 @@ export class AdmissionController {
         -- The on-demand path has the same bounded frontier requirement as the
         -- periodic replenisher.  Keep it from repeatedly sampling only large
         -- queues parked behind an unresolved publication gap.
-        ORDER BY min_sort_key ASC NULLS LAST, queued_count DESC
+        ORDER BY ${isP1
+          ? "CASE WHEN q.work_id > COALESCE($4::jsonb ->> q.source, '') THEN 0 ELSE 1 END, q.source, q.work_id"
+          : 'min_sort_key ASC NULLS LAST, queued_count DESC'}
         LIMIT 10;
       `;
 
@@ -1273,6 +1303,7 @@ export class AdmissionController {
         allowedSources && allowedSources.length > 0 ? allowedSources : null,
         activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
         saturatedSources.length > 0 ? saturatedSources : null,
+        JSON.stringify(this.getP1AdmissionCursors()),
       ]);
 
       if (res.rows.length === 0) continue;
@@ -1389,6 +1420,7 @@ export class AdmissionController {
         };
 
         this.stateStore.setActiveWork(newWork);
+        if (isP1) this.advanceP1AdmissionCursor(cand.source, cand.work_id);
 
         // If this work has fewer than slidingWindowMin queued chapters, promote next batch
         if (newWork.queuedChapters < config.slidingWindowMin) {

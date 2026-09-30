@@ -29,6 +29,8 @@ export declare class AdmissionController {
     private p1BacklogProbeFlight;
     private p1BacklogSnapshot;
     private visibleP2LifecycleRepairComplete;
+    private getP1AdmissionCursors;
+    private advanceP1AdmissionCursor;
     setSourcePermitProvider(provider: (source: string) => number): void;
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
