@@ -940,9 +940,15 @@ export class AdaptiveAutotuner {
 
   /**
    * Keep page-download capacity work-conserving for a lone healthy source,
-   * while reserving room for other healthy sources when they exist.  This is
+   * while reserving room for other healthy sources when they exist. This is
    * intentionally separate from chapter admission: two large chapters from
    * one source must not monopolize all global download permits.
+   *
+   * With three or more healthy sources the strict fair share is three of the
+   * eight shared requests. That left pages waiting locally while the shared
+   * limiter was idle. One bounded burst page keeps that capacity useful: the
+   * shared limiter remains the hard ceiling and a source can still consume at
+   * most half of it, leaving four permits for competitors.
    */
   private getEffectiveSourceDownloadCapacity(source: string): number {
     const limits = this.getSourceLimits(source);
@@ -958,7 +964,8 @@ export class AdaptiveAutotuner {
       this.globalInflightRequestSemaphore.capacity /
       Math.min(3, this.eligibleSourceCountForDownloadFairness),
     ));
-    return Math.min(configured, fairShare);
+    const boundedBurst = this.eligibleSourceCountForDownloadFairness >= 3 ? 1 : 0;
+    return Math.min(configured, fairShare + boundedBurst);
   }
 
   /**
