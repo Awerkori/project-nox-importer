@@ -115,6 +115,46 @@ describe('bounded admission snapshot', () => {
     expect(active.has(work.workId)).toBe(false);
   });
 
+  it('caps a P1 work to one executable chapter and preserves its remaining backlog paused', async () => {
+    const db = new PGlite();
+    try {
+      const id = '00000000-0000-0000-0000-000000000013';
+      await db.exec(`
+        CREATE TABLE importer_queue (
+          id integer PRIMARY KEY, task_type text, status text, payload jsonb,
+          priority integer, chapter_sort_key numeric, next_run_at timestamptz,
+          updated_at timestamptz
+        );
+        INSERT INTO importer_queue VALUES
+          (1, 'IMPORT_CHAPTER', 'QUEUED', '{"workId":"${id}"}', 75, 1, now(), now()),
+          (2, 'IMPORT_CHAPTER', 'QUEUED', '{"workId":"${id}"}', 75, 2, now(), now()),
+          (3, 'IMPORT_CHAPTER', 'QUEUED', '{"workId":"${id}"}', 75, 3, now(), now()),
+          (4, 'IMPORT_CHAPTER', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 75, 4, now(), now());
+      `);
+      const controller = new AdmissionController({} as any, {} as any, {
+        query: (sql: string, params?: any[]) => db.query(sql, params),
+      });
+
+      await expect((controller as any).enforceP1FairWindow(id)).resolves.toBe(1);
+      const { rows } = await db.query<any>(
+        `SELECT status, chapter_sort_key FROM importer_queue ORDER BY chapter_sort_key`,
+      );
+      expect(rows).toEqual([
+        { status: 'QUEUED', chapter_sort_key: '1' },
+        { status: 'PAUSED_BY_STAFF', chapter_sort_key: '2' },
+        { status: 'PAUSED_BY_STAFF', chapter_sort_key: '3' },
+        { status: 'PAUSED_BY_STAFF', chapter_sort_key: '4' },
+      ]);
+    } finally { await db.close(); }
+  });
+
+  it('does not replenish a P1 window before it rotates', () => {
+    const source = readFileSync('src/core/scheduler/admission-controller.ts', 'utf8');
+    expect(source).toMatch(/const P1_FAIR_WINDOW_CHAPTERS = 1/);
+    expect(source).toMatch(/if \(work\.lane === 'P1' && work\.criticalGapSortKey === null\) continue;/);
+    expect(source).toMatch(/\[P1_FAIR_WINDOW_CAPPED\]/);
+  });
+
   it('repairs a legacy visible P2 window in a bounded, idempotent work-scoped batch', async () => {
     const db = new PGlite();
     try {

@@ -13,6 +13,11 @@
 import { getYugabytePool } from '../../db/yugabyte-direct.js';
 import { Logger } from '../logger.js';
 import { confirmUpstreamGapInterval } from '../gap-validator.js';
+// P1 is the shared existing-catalog lane.  A one-chapter admission window is
+// deliberately a *scheduling* fairness quantum, not a media/DB resource
+// limit: it prevents a large work from receiving another window before other
+// healthy P1 works get their first opportunity on the same source.
+const P1_FAIR_WINDOW_CHAPTERS = 1;
 export class AdmissionController {
     stateStore;
     protectiveSentinel;
@@ -86,6 +91,80 @@ export class AdmissionController {
             }
         }
         throw new Error('Pool has neither query nor connect');
+    }
+    /**
+     * Keep one executable P1 chapter per active work. Older scheduler versions
+     * could leave an entire backfill window (or more) QUEUED, then replenish it
+     * before it drained. That made the durable source cursor fair only on
+     * paper: a large work could retain its cohort position indefinitely.
+     *
+     * This is work-scoped, idempotent and touches no P0/Staff row. Remaining
+     * chapters remain PAUSED_BY_STAFF and are re-admitted through the ordinary
+     * per-source cursor. A retry remains ahead of a new promotion so retry and
+     * frontier safety retain their existing semantics.
+     */
+    async enforceP1FairWindow(workId) {
+        const capped = await this.runQuery(`WITH ranked AS (
+         SELECT id,
+                ROW_NUMBER() OVER (ORDER BY chapter_sort_key ASC NULLS LAST, id ASC) AS position
+         FROM importer_queue
+         WHERE task_type = 'IMPORT_CHAPTER'
+           AND (payload->>'workId') = $1
+           AND status = 'QUEUED'
+           AND priority >= 75 AND priority < 100
+           AND COALESCE(payload->>'staffForced', 'false') <> 'true'
+       )
+       UPDATE importer_queue q
+       SET status = 'PAUSED_BY_STAFF',
+           updated_at = NOW()
+       FROM ranked r
+       WHERE q.id = r.id
+         AND r.position > $2
+       RETURNING q.id;`, [workId, P1_FAIR_WINDOW_CHAPTERS]);
+        const promoted = await this.runQuery(`WITH existing AS (
+         SELECT COUNT(*) FILTER (WHERE status = 'QUEUED') AS queued_count,
+                COUNT(*) FILTER (WHERE status = 'RETRY') AS retry_count
+         FROM importer_queue
+         WHERE task_type = 'IMPORT_CHAPTER'
+           AND (payload->>'workId') = $1
+           AND status IN ('QUEUED', 'RETRY')
+           AND priority >= 75 AND priority < 100
+           AND COALESCE(payload->>'staffForced', 'false') <> 'true'
+       ), to_promote AS (
+         SELECT q.id
+         FROM importer_queue q
+         CROSS JOIN existing e
+         WHERE q.task_type = 'IMPORT_CHAPTER'
+           AND (q.payload->>'workId') = $1
+           AND q.status = 'PAUSED_BY_STAFF'
+           AND q.priority >= 75 AND q.priority < 100
+           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+           AND e.queued_count = 0
+           AND e.retry_count = 0
+         ORDER BY q.chapter_sort_key ASC NULLS LAST, q.id ASC
+         LIMIT $2
+       ), promoted AS (
+         UPDATE importer_queue q
+         SET status = 'QUEUED',
+             priority = 75,
+             next_run_at = NOW(),
+             updated_at = NOW()
+         FROM to_promote p
+         WHERE q.id = p.id
+         RETURNING q.id
+       )
+       SELECT (e.queued_count + (SELECT COUNT(*) FROM promoted))::int AS queued_count
+       FROM existing e;`, [workId, P1_FAIR_WINDOW_CHAPTERS]);
+        if (capped.rows.length > 0) {
+            this.logger.info('[P1_FAIR_WINDOW_CAPPED]', {
+                workId,
+                kept: P1_FAIR_WINDOW_CHAPTERS,
+                paused: capped.rows.length,
+            });
+        }
+        // A retained retry is intentionally represented as zero QUEUED here; the
+        // normal retry claim path remains responsible for it.
+        return parseInt(promoted.rows[0]?.queued_count || '0', 10);
     }
     /**
      * Periodic reconciliation is the fallback; real vacancies trigger an
@@ -644,6 +723,14 @@ export class AdmissionController {
                         work.state = 'FILLING';
                         this.stateStore.setActiveWork(work);
                     }
+                    // Normalize only legacy/previously-admitted P1 cohorts that still
+                    // have more than the fairness quantum open. New P1 admissions are
+                    // normalized below before they enter the active set.
+                    if (work.lane === 'P1' && work.criticalGapSortKey === null && queuedCnt > P1_FAIR_WINDOW_CHAPTERS) {
+                        work.queuedChapters = await this.enforceP1FairWindow(work.workId);
+                        this.stateStore.setActiveWork(work);
+                        continue;
+                    }
                     // A P1 work has consumed its admitted window.  Return it to the
                     // rotating cohort before opening another window so a large source
                     // cannot keep the same handful of works active indefinitely. Its
@@ -917,6 +1004,7 @@ export class AdmissionController {
                     criticalGapSortKey: null,
                     criticalGapUnblockCount: 0,
                 };
+                newWork.queuedChapters = await this.enforceP1FairWindow(newWork.workId);
                 this.stateStore.setActiveWork(newWork);
                 this.advanceP1AdmissionCursor(cand.source, cand.work_id);
                 sourceCounts.set(cand.source, srcCount + 1);
@@ -1097,12 +1185,19 @@ export class AdmissionController {
         for (const work of activeWorks) {
             if (work.state !== 'FILLING')
                 continue;
+            // Ordinary P1 is intentionally not a sliding window. Its one chapter
+            // window is opened only at admission, then the work rotates out.
+            // A verified critical-gap P1 remains exempt: it already has the
+            // higher, bounded barrier-unblock semantics and must not be delayed by
+            // unrelated catalog work.
+            if (work.lane === 'P1' && work.criticalGapSortKey === null)
+                continue;
             if (work.queuedChapters < config.slidingWindowMin) {
                 const needed = config.slidingWindowSize - work.queuedChapters;
                 if (needed <= 0)
                     continue;
                 // Check if this work has critical unblocking gap
-                let targetPriority = work.lane === 'P1' ? 75 : 50;
+                let targetPriority = 50;
                 if (work.criticalGapSortKey !== null) {
                     targetPriority = 95; // P1_CRITICAL_GAP boost
                 }
@@ -1324,13 +1419,16 @@ export class AdmissionController {
                     criticalGapSortKey: null,
                     criticalGapUnblockCount: 0,
                 };
-                this.stateStore.setActiveWork(newWork);
-                if (isP1)
+                if (isP1) {
+                    newWork.queuedChapters = await this.enforceP1FairWindow(newWork.workId);
                     this.advanceP1AdmissionCursor(cand.source, cand.work_id);
-                // If this work has fewer than slidingWindowMin queued chapters, promote next batch
-                if (newWork.queuedChapters < config.slidingWindowMin) {
+                }
+                this.stateStore.setActiveWork(newWork);
+                // P1 receives its one fair chapter through enforceP1FairWindow above.
+                // P2 keeps its existing sliding window semantics.
+                if (!isP1 && newWork.queuedChapters < config.slidingWindowMin) {
                     const needed = config.slidingWindowSize - newWork.queuedChapters;
-                    const targetPriority = isP1 ? 75 : 50;
+                    const targetPriority = 50;
                     const promoteRes = await this.runQuery(`WITH to_promote AS (
                SELECT id
                FROM importer_queue
