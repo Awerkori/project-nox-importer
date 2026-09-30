@@ -12,6 +12,28 @@ const stalledMetrics: HealthPanelMetrics = {
 };
 
 describe('soft restart accounting', () => {
+  it('restarts a sustained STALLED pipeline at 20m after prior recovery ran', async () => {
+    const pool: any = { query: vi.fn(async (sql: string) => {
+      if (sql.includes("key = 'importer_auto_restarts'")) return { rows: [{ value: '[]' }] };
+      return { rows: [] };
+    }) };
+    const onControlledRestart = vi.fn().mockResolvedValue(true);
+    const watchdog = new AutoHealWatchdog({ pool, onControlledRestart });
+    (watchdog as any).lastLevel1At = Date.now() - 60_000;
+
+    await watchdog.executeRecoveryLadder({
+      ...stalledMetrics,
+      status: 'STALLED',
+      processingHealth: 'STALLED',
+      publicationHealth: 'STALLED',
+      lastCompletedAgeSec: 20 * 60,
+      lastFreshVisibleAgeSec: 20 * 60,
+    });
+
+    expect(onControlledRestart).toHaveBeenCalledOnce();
+    expect(pool.query.mock.calls.some(([sql]: [string]) => sql.includes("VALUES ('importer_auto_restarts'"))).toBe(true);
+  });
+
   it('does not consume restart circuit budget when the engine defers an unsafe restart', async () => {
     const pool: any = { query: vi.fn(async (sql: string) => {
       if (sql.includes("key = 'importer_auto_restarts'")) return { rows: [{ value: '[]' }] };
