@@ -68,11 +68,12 @@ describe('source fair-share chapter capacity', () => {
     const nexus = autotuner.getSourceDownloadSemaphore('nexus');
     const other = autotuner.getSourceDownloadSemaphore('hentaihome');
 
-    // Nexus can run two chapters at four page requests each. While other
-    // sources are healthy it gets one bounded burst permit, never all eight
-    // shared requests, so idle capacity remains useful.
-    expect(nexus.capacity).toBe(4);
-    expect(other.capacity).toBe(4);
+    // Nexus can run two chapters at five page requests each. While other
+    // sources are healthy it may borrow only the shared headroom, never all
+    // eight requests: three remain reserved for competitors.
+    expect(nexus.capacity).toBe(5);
+    expect(other.capacity).toBe(5);
+    expect(nexus.tryAcquire()).toBe(true);
     expect(nexus.tryAcquire()).toBe(true);
     expect(nexus.tryAcquire()).toBe(true);
     expect(nexus.tryAcquire()).toBe(true);
@@ -93,7 +94,7 @@ describe('source fair-share chapter capacity', () => {
     autotuner.setEligibleSourceCountForFairness(3);
     autotuner.setEligibleSourceCountForDownloadFairness(3);
     const nexus = autotuner.getSourceDownloadSemaphore('nexus');
-    expect(nexus.capacity).toBe(4);
+    expect(nexus.capacity).toBe(5);
 
     autotuner.setEligibleSourceCountForDownloadFairness(1);
     expect(nexus.capacity).toBe(8);
@@ -118,17 +119,17 @@ describe('source fair-share chapter capacity', () => {
     expect(manhastro.tryAcquire()).toBe(true);
     expect(autotuner.refreshSourceFairnessFromActiveSources(['manhastro', 'nexus', 'hanamiheaven'])).toBe(1);
     expect(manhastro.capacity).toBe(3);
-    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(4);
+    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(5);
 
     // As independent sources receive work, local caps narrow again without
     // changing global chapter, Telegram, download, or memory budgets.
     expect(autotuner.getSourceSemaphore('nexus').tryAcquire()).toBe(true);
     expect(autotuner.refreshSourceFairnessFromActiveSources(['manhastro', 'nexus', 'hanamiheaven'])).toBe(2);
-    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(4);
+    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(5);
 
     expect(autotuner.getSourceSemaphore('hanamiheaven').tryAcquire()).toBe(true);
     expect(autotuner.refreshSourceFairnessFromActiveSources(['manhastro', 'nexus', 'hanamiheaven'])).toBe(3);
     expect(manhastro.capacity).toBe(2);
-    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(4);
+    expect(autotuner.getSourceDownloadSemaphore('manhastro').capacity).toBe(5);
   });
 });

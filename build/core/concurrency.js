@@ -768,9 +768,10 @@ export class AdaptiveAutotuner {
      *
      * With three or more healthy sources the strict fair share is three of the
      * eight shared requests. That left pages waiting locally while the shared
-     * limiter was idle. One bounded burst page keeps that capacity useful: the
-     * shared limiter remains the hard ceiling and a source can still consume at
-     * most half of it, leaving four permits for competitors.
+     * limiter was idle. A bounded burst may use up to five permits for one
+     * source, but always reserves three shared permits for competitors. The
+     * shared limiter remains the hard ceiling; no configured global resource is
+     * increased.
      */
     getEffectiveSourceDownloadCapacity(source) {
         const limits = this.getSourceLimits(source);
@@ -780,8 +781,11 @@ export class AdaptiveAutotuner {
             return configured;
         const fairShare = Math.max(1, Math.ceil(this.globalInflightRequestSemaphore.capacity /
             Math.min(3, this.eligibleSourceCountForDownloadFairness)));
-        const boundedBurst = this.eligibleSourceCountForDownloadFairness >= 3 ? 1 : 0;
-        return Math.min(configured, fairShare + boundedBurst);
+        const competitorReserve = this.eligibleSourceCountForDownloadFairness >= 3
+            ? Math.min(3, this.globalInflightRequestSemaphore.capacity - 1)
+            : 0;
+        const workConservingCap = Math.max(fairShare, this.globalInflightRequestSemaphore.capacity - competitorReserve);
+        return Math.min(configured, workConservingCap);
     }
     /**
      * Acquire this local permit before the global download permit.  A page then
