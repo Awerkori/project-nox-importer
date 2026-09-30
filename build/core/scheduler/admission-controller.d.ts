@@ -35,6 +35,18 @@ export declare class AdmissionController {
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
     /**
+     * Keep one executable P1 chapter per active work. Older scheduler versions
+     * could leave an entire backfill window (or more) QUEUED, then replenish it
+     * before it drained. That made the durable source cursor fair only on
+     * paper: a large work could retain its cohort position indefinitely.
+     *
+     * This is work-scoped, idempotent and touches no P0/Staff row. Remaining
+     * chapters remain PAUSED_BY_STAFF and are re-admitted through the ordinary
+     * per-source cursor. A retry remains ahead of a new promotion so retry and
+     * frontier safety retain their existing semantics.
+     */
+    private enforceP1FairWindow;
+    /**
      * Periodic reconciliation is the fallback; real vacancies trigger an
      * immediate coalesced cycle. Keep this cadence low enough that aggregate
      * queue scans do not compete with claims and publication.
