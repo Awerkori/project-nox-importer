@@ -15,7 +15,7 @@ const DB_CONFIG = {
   ssl: { rejectUnauthorized: false }
 };
 
-const DISCLOUD_TOKEN = '4bc8293a4be7d5e98fe447b89d6d3bb0e12897b1b421820829d4ee8127348f2404af1f927eea5a62c186f98bc11ef7676a9f9a68';
+const DISCLOUD_TOKEN = process.env.DISCLOUD_TOKEN || '';
 const APP_ID = '1788873398156';
 
 const HOME_URL = 'https://manga.project-nox-awerkori.workers.dev/';
