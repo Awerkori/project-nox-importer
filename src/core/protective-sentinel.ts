@@ -779,26 +779,41 @@ export class ProtectiveSentinel {
     const hasReaderSamples = this.readerSamples.length > 0;
     const isReaderDegraded = hasReaderSamples ? readerP95 >= 2500 : false;
     const isReaderSevere = hasReaderSamples ? readerP95 >= 5000 : false;
+    // Preserve an observed 5xx for diagnosis, but do not let one old failure
+    // permanently throttle the importer when this egress has subsequently
+    // produced a sustained, uniform 404 monitor-route signature. In that
+    // state the monitor cannot observe the real route; a current 5xx (or a
+    // sustained series of them) remains capacity pressure.
+    const staleSingle5xxMaskedByConfirmedRouteMismatch =
+      this.probeRouteMismatch &&
+      this.probeRouteMismatchCycles >= 3 &&
+      this.consecutive5xxCount === 1;
+    const effectiveConsecutive5xx = staleSingle5xxMaskedByConfirmedRouteMismatch
+      ? 0
+      : this.consecutive5xxCount;
+    const effectiveProbeFailures = staleSingle5xxMaskedByConfirmedRouteMismatch
+      ? 0
+      : this.consecutiveProbeFailures;
 
     if (this.autoEmergencyPause.active) {
       siteHealth = 'RED';
       sitePressure = 80;
       pressureReason = `AUTO_EMERGENCY_PAUSE: ${this.autoEmergencyPause.reason}`;
-    } else if (this.consecutive5xxCount >= 3 || homeP95 >= 10000 || (homeP95 >= 8000 && (!hasReaderSamples || isReaderSevere))) {
+    } else if (effectiveConsecutive5xx >= 3 || homeP95 >= 10000 || (homeP95 >= 8000 && (!hasReaderSamples || isReaderSevere))) {
       siteHealth = 'RED';
       sitePressure = 60;
-      pressureReason = this.consecutive5xxCount >= 3
-        ? `Sustained HTTP 5xx errors (${this.consecutive5xxCount} consecutive)`
+      pressureReason = effectiveConsecutive5xx >= 3
+        ? `Sustained HTTP 5xx errors (${effectiveConsecutive5xx} consecutive)`
         : `Severe site latency breach (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
-    } else if (this.consecutive5xxCount >= 1 || this.consecutiveProbeFailures >= 1 || (homeP95 >= 5000 && isReaderDegraded) || (homeP95 >= 8000 && !hasReaderSamples)) {
+    } else if (effectiveConsecutive5xx >= 1 || effectiveProbeFailures >= 1 || (homeP95 >= 5000 && isReaderDegraded) || (homeP95 >= 8000 && !hasReaderSamples)) {
       siteHealth = 'ORANGE';
       sitePressure = 35;
-      pressureReason = this.consecutive5xxCount >= 1
-        ? `HTTP 5xx error observed (${this.consecutive5xxCount})`
-        : this.consecutiveProbeFailures >= 1
-        ? `User-facing route/probe failure observed (${this.consecutiveProbeFailures})`
+      pressureReason = effectiveConsecutive5xx >= 1
+        ? `HTTP 5xx error observed (${effectiveConsecutive5xx})`
+        : effectiveProbeFailures >= 1
+        ? `User-facing route/probe failure observed (${effectiveProbeFailures})`
         : `Confirmed site degradation (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
-    } else if (this.consecutive5xxCount === 0 && (homeP95 >= 1500 || readerP95 >= 1200)) {
+    } else if (effectiveConsecutive5xx === 0 && (homeP95 >= 1500 || readerP95 >= 1200)) {
       siteHealth = 'YELLOW';
       sitePressure = 15;
       pressureReason = `Mild site latency increase (Home p95: ${homeP95}ms, Reader p95: ${readerP95}ms)`;
