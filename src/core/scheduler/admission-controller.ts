@@ -808,19 +808,24 @@ export class AdmissionController {
            GROUP BY payload->>'workId', source
          ),
          queue_candidates AS MATERIALIZED (
-           -- Admission samples the publication frontier first. A large queue
-           -- after an unresolved gap must not hide smaller contiguous P1 work.
-           SELECT work_id, source, pending_jobs, queued_count, paused_count, min_sort_key, source_rank
+           -- Rotate work selection independently from chapter number. Keep the
+           -- earliest frontier as one bounded fallback per source: a cursor
+           -- candidate can legitimately be parked behind an unresolved gap.
+           SELECT ranked.*
            FROM (
              SELECT g.*,
              ROW_NUMBER() OVER (
                PARTITION BY source
                ORDER BY CASE WHEN work_id > COALESCE($4::jsonb ->> source, '') THEN 0 ELSE 1 END,
                         work_id
-             ) AS source_rank
+             ) AS rotation_rank,
+             ROW_NUMBER() OVER (
+               PARTITION BY source
+               ORDER BY min_sort_key ASC NULLS LAST, pending_jobs DESC
+             ) AS frontier_rank
              FROM queue_candidate_groups g
            ) ranked
-           WHERE source_rank <= $3
+           WHERE rotation_rank <= $3 OR frontier_rank = 1
          )
          SELECT q.work_id,
                 w.title,
@@ -828,7 +833,8 @@ export class AdmissionController {
                 q.pending_jobs,
                 q.queued_count,
                 q.paused_count,
-                q.min_sort_key
+                q.min_sort_key,
+                CASE WHEN q.rotation_rank <= $3 THEN q.rotation_rank ELSE 100 + q.frontier_rank END AS admission_rank
          FROM queue_candidates q
          JOIN works w ON w.id = q.work_id::uuid
          JOIN importer_sources s ON s.id = q.source
@@ -837,7 +843,7 @@ export class AdmissionController {
            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
          -- One candidate from every source before a second candidate from any
          -- source. The bounded result remains diverse even with many sources.
-         ORDER BY source_rank, source
+         ORDER BY admission_rank, source
          LIMIT $2`,
         [
           activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
@@ -938,6 +944,9 @@ export class AdmissionController {
         if (activeA !== activeB) {
           return activeA - activeB;
         }
+        const rankA = parseInt(a.admission_rank || '1000', 10);
+        const rankB = parseInt(b.admission_rank || '1000', 10);
+        if (rankA !== rankB) return rankA - rankB;
         return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
       });
 
@@ -1290,12 +1299,10 @@ export class AdmissionController {
         WHERE ${isP1 ? 'w.published = true' : 'w.published IS FALSE'}
           AND s.enabled = true
           AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
-        -- The on-demand path has the same bounded frontier requirement as the
-        -- periodic replenisher.  Keep it from repeatedly sampling only large
-        -- queues parked behind an unresolved publication gap.
-        ORDER BY ${isP1
-          ? "CASE WHEN q.work_id > COALESCE($4::jsonb ->> q.source, '') THEN 0 ELSE 1 END, q.source, q.work_id"
-          : 'min_sort_key ASC NULLS LAST, queued_count DESC'}
+        -- On-demand admission is only a spare-capacity fallback. Preserve its
+        -- proven publication-frontier order; periodic cohort rotation provides
+        -- the cross-work fairness.
+        ORDER BY min_sort_key ASC NULLS LAST, queued_count DESC
         LIMIT 10;
       `;
 
@@ -1303,7 +1310,6 @@ export class AdmissionController {
         allowedSources && allowedSources.length > 0 ? allowedSources : null,
         activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
         saturatedSources.length > 0 ? saturatedSources : null,
-        JSON.stringify(this.getP1AdmissionCursors()),
       ]);
 
       if (res.rows.length === 0) continue;

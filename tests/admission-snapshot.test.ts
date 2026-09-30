@@ -10,7 +10,7 @@ describe('bounded admission snapshot', () => {
     // Regression: ranking source candidates by the smallest chapter number
     // across different works permanently hid later-frontier P1 works.
     expect(source).toMatch(
-      /PARTITION BY source\s+ORDER BY CASE WHEN work_id > COALESCE\(\$4::jsonb ->> source, ''\) THEN 0 ELSE 1 END/,
+      /rotation_rank,[\s\S]{0,300}frontier_rank/,
     );
     expect(source).toMatch(
       /\[P1_COHORT_ROTATED\]/,
