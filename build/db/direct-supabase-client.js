@@ -235,7 +235,7 @@ export class DirectSupabaseClient {
                 const delaySeconds = typeof args.p_retry_delay_seconds === 'number'
                     ? args.p_retry_delay_seconds
                     : (args.p_retry_delay ? parseInt(String(args.p_retry_delay).replace(/\D+/g, ''), 10) : undefined);
-                await failBatchDirect([{
+                const updated = await failBatchDirect([{
                         jobId: args.p_job_id,
                         status: args.p_status || 'RETRY',
                         error: args.p_error,
@@ -243,7 +243,10 @@ export class DirectSupabaseClient {
                         retryReason: args.p_retry_class || args.p_retry_reason,
                         workerId: args.p_worker_id,
                     }]);
-                return { data: true, error: null };
+                // Match the durable RPC contract: false means this runtime no longer
+                // owns the lease, so callers cannot mistake a stale release for a
+                // successful completion/retry transition.
+                return { data: updated === 1, error: null };
             }
             if (fn === 'importer_recover_stalled_leases') {
                 const res = await recoverStalledLeasesDirect();

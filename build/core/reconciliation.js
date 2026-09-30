@@ -15,6 +15,29 @@ export class ExistingWorksReconciler {
     siteUrl;
     logger = new Logger('ExistingWorksReconciler');
     lastReconciliationAt = new Map();
+    // This is a short de-duplication window, not a catalogue index. Keep it
+    // bounded so a long-lived importer cannot retain every work ever scanned.
+    maxRememberedReconciliations = 4096;
+    rememberReconciliation(workId, now) {
+        if (this.lastReconciliationAt.has(workId)) {
+            // Refresh insertion order as a small LRU cache.
+            this.lastReconciliationAt.delete(workId);
+        }
+        else if (this.lastReconciliationAt.size >= this.maxRememberedReconciliations) {
+            const expiredBefore = now - 10 * 60 * 1000;
+            for (const [id, at] of this.lastReconciliationAt) {
+                if (at <= expiredBefore)
+                    this.lastReconciliationAt.delete(id);
+            }
+            while (this.lastReconciliationAt.size >= this.maxRememberedReconciliations) {
+                const oldest = this.lastReconciliationAt.keys().next().value;
+                if (!oldest)
+                    break;
+                this.lastReconciliationAt.delete(oldest);
+            }
+        }
+        this.lastReconciliationAt.set(workId, now);
+    }
     constructor(supabase, queue, registry, siteUrl) {
         this.supabase = supabase;
         this.queue = queue;
@@ -791,7 +814,7 @@ export class ExistingWorksReconciler {
             const lastCheck = this.lastReconciliationAt.get(workId) || 0;
             if (now - lastCheck < 10 * 60 * 1000)
                 continue;
-            this.lastReconciliationAt.set(workId, now);
+            this.rememberReconciliation(workId, now);
             stats.worksScanned++;
             const workTitle = sourceMappings[0].works?.title || workId;
             // 3. Published chapters

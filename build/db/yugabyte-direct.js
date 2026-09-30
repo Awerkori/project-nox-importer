@@ -381,7 +381,13 @@ export async function failBatchDirect(jobs) {
           lease_expires_at = NULL,
           next_run_at = CASE WHEN $4::int IS NULL THEN NOW() ELSE NOW() + ($4::text || ' seconds')::interval END,
           updated_at = NOW()
-      WHERE id = $5 AND ($6::text IS NULL OR locked_by = $6::text OR status != 'IMPORTING');
+      -- A worker that lost its lease must never overwrite a successor's
+      -- RETRY/COMPLETED result. Every terminal/retry transition is fenced by
+      -- the currently-held worker identity while the job is IMPORTING.
+      WHERE id = $5
+        AND status = 'IMPORTING'
+        AND $6::text IS NOT NULL
+        AND locked_by = $6::text;
     `, [
             item.status || 'RETRY',
             item.error || 'Unknown error',

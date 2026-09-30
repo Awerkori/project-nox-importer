@@ -41,6 +41,8 @@ export declare class ExistingWorksReconciler {
     private siteUrl?;
     private logger;
     private lastReconciliationAt;
+    private readonly maxRememberedReconciliations;
+    private rememberReconciliation;
     constructor(supabase: SupabaseClient, queue: ImporterQueue, registry: SourceRegistry, siteUrl?: string | undefined);
     private sleep;
     getSystemLoad(): Promise<{

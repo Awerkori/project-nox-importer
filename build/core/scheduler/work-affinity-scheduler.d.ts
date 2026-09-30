@@ -24,6 +24,14 @@ export declare function isActiveChapterClaimConflict(error: any): boolean;
  * chapter permits, so this cannot manufacture capacity.
  */
 export declare function shouldReserveP0AfterStaffBurst(consecutiveStaffClaims: number, antiStarvationRatio: number, hasP0Candidate: boolean): boolean;
+/**
+ * Staff and P0 are order-only lanes, but an endless stream of either must not
+ * make already-admitted P1/P2 work mathematically impossible to finish.  One
+ * normal-lane claim after a bounded high-priority burst preserves the normal
+ * resource budget and gives lower lanes forward progress without weakening
+ * their usual priority when the burst has not happened.
+ */
+export declare function shouldReserveLowerPriorityAfterHighBurst(consecutiveHighPriorityClaims: number, antiStarvationRatio: number): boolean;
 export interface AcquiredSchedulerJob {
     job: any;
     lane: SchedulerLane;
@@ -39,6 +47,7 @@ export declare class WorkAffinityScheduler {
     private inFlightChapterKeys;
     private pendingClaimReservationsByWork;
     private staffConsecutiveClaims;
+    private highPriorityConsecutiveClaims;
     private rrIndexP1;
     private rrIndexP2;
     private rrCatalogSourceIndex;
@@ -192,5 +201,15 @@ export declare class WorkAffinityScheduler {
      */
     runControlledRedundantJobCleanup(batchSize?: number): Promise<{
         cleaned: number;
+    }>;
+    /**
+     * Moves only already-exhausted QUEUED/RETRY jobs out of the hot queue.
+     * Claim queries correctly exclude them, but leaving them there forever
+     * makes every scheduler/admission scan pay for terminal work.  This is a
+     * bounded, idempotent state transition: it never deletes mappings and
+     * never touches an active lease.
+     */
+    runControlledExhaustedJobCleanup(batchSize?: number): Promise<{
+        failed: number;
     }>;
 }
