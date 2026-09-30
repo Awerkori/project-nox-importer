@@ -222,9 +222,10 @@ export declare class AdaptiveAutotuner {
      *
      * With three or more healthy sources the strict fair share is three of the
      * eight shared requests. That left pages waiting locally while the shared
-     * limiter was idle. One bounded burst page keeps that capacity useful: the
-     * shared limiter remains the hard ceiling and a source can still consume at
-     * most half of it, leaving four permits for competitors.
+     * limiter was idle. A bounded burst may use up to five permits for one
+     * source, but always reserves three shared permits for competitors. The
+     * shared limiter remains the hard ceiling; no configured global resource is
+     * increased.
      */
     private getEffectiveSourceDownloadCapacity;
     /**
