@@ -1,4 +1,37 @@
 import { InvalidMediaError } from './retry-policy.js';
+function abortError(signal) {
+    const reason = signal.reason;
+    if (reason instanceof Error)
+        return reason;
+    return new DOMException('Image response body read was aborted', 'AbortError');
+}
+/**
+ * A fetch timeout only protects the response headers unless it is also raced
+ * against body reads. Some upstream CDNs send headers/content-length and then
+ * stop delivering bytes; leaving reader.read() pending would retain both the
+ * download permit and its buffer reservation forever.
+ */
+async function readChunk(reader, signal) {
+    if (!signal)
+        return reader.read();
+    signal.throwIfAborted();
+    return new Promise((resolve, reject) => {
+        const onAbort = () => {
+            // Do not await cancellation here: a broken upstream stream must not be
+            // able to keep the importer slot/buffer hostage while cancel settles.
+            void reader.cancel(signal.reason).catch(() => { });
+            reject(abortError(signal));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        reader.read().then((result) => {
+            signal.removeEventListener('abort', onAbort);
+            resolve(result);
+        }, (error) => {
+            signal.removeEventListener('abort', onAbort);
+            reject(error);
+        });
+    });
+}
 // Match the existing media validator's size limit before buffering the response.
 // Supports streaming reservation upgrade to enforce memory backpressure for chunked streams.
 export async function readImageBody(response, optionsOrMaxBytes) {
@@ -33,7 +66,7 @@ export async function readImageBody(response, optionsOrMaxBytes) {
     try {
         while (true) {
             signal?.throwIfAborted();
-            const { value, done } = await reader.read();
+            const { value, done } = await readChunk(reader, signal);
             if (done)
                 break;
             const newLength = length + value.byteLength;
@@ -62,7 +95,9 @@ export async function readImageBody(response, optionsOrMaxBytes) {
         return result;
     }
     catch (error) {
-        await reader.cancel().catch(() => { });
+        // Keep error recovery bounded too. The abort handler above already asked
+        // the stream to cancel; a second cancel is best-effort only.
+        void reader.cancel().catch(() => { });
         if (reservation && !reservation.isCommitted && !reservation.isReleased) {
             reservation.release();
         }
@@ -70,6 +105,12 @@ export async function readImageBody(response, optionsOrMaxBytes) {
     }
     finally {
         chunks.length = 0;
-        reader.releaseLock();
+        try {
+            reader.releaseLock();
+        }
+        catch {
+            // A non-cooperative stream can still have its cancelled read settling.
+            // It no longer owns importer permits/reservations at this point.
+        }
     }
 }
