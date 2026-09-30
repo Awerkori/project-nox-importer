@@ -66,4 +66,38 @@ describe('bounded admission snapshot', () => {
       reason:'WORKERS_FULLY_UTILIZED: 3/3 chapters in-flight',
     });
   });
+
+  it('holds P2 admission whenever a visible work still has P1 backlog, including paused window jobs', async () => {
+    const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
+    const sentinel={isProtectiveStopActive:async()=>false} as any;
+    const pool={query:async(sql:string)=> {
+      if (sql.includes('priority >= 100')) return {rows:[{p0_cnt:'0'}]};
+      if (sql.includes("AND (q.status = 'QUEUED'")) return {rows:[{status:'QUEUED'}]};
+      return {rows:[]};
+    }};
+    const c=new AdmissionController(state,sentinel,pool);
+    await expect(c.canAdmitNewWork()).resolves.toMatchObject({
+      allowed:false,
+      reason:'P1_BACKLOG_WAITING: existing catalog work must advance before P2 admission',
+      metrics:{p1Claimable:1,p1AvailableChapters:1,p1WorksWaiting:1},
+    });
+  });
+
+  it('keeps paused/retry backlog active and persists the P2-to-P1 transition after first publication', async () => {
+    const active=new Map<string, any>();
+    const work={workId:'00000000-0000-0000-0000-000000000011',workTitle:'Lifecycle Work',lane:'P2',state:'FILLING',primarySource:'s',admittedAt:new Date().toISOString(),lastActivityAt:new Date().toISOString(),totalChapters:8,publishedChapters:0,queuedChapters:0,inFlightChapters:0,frontierSortKey:null,criticalGapSortKey:null,criticalGapUnblockCount:0};
+    active.set(work.workId,work);
+    const state={getConfig:()=>({enabled:true,shadowMode:false,maxActiveBackfillWorks:1,maxActiveNewWorks:1,slidingWindowMin:4,slidingWindowSize:8}),getActiveWorks:()=>Array.from(active.values()),getActiveWork:(id:string)=>active.get(id),setActiveWork:(w:any)=>active.set(w.workId,w),removeActiveWork:(id:string)=>active.delete(id)} as any;
+    const sentinel={isProtectiveStopActive:async()=>false} as any;
+    const pool={query:async(sql:string,params:any[])=> {
+      if (sql.includes('queued_cnt') && sql.includes('retry_cnt')) return {rows:[{work_id:work.workId,queued_cnt:'0',importing_cnt:'0',paused_cnt:'6',retry_cnt:'1',min_sort_key:'3',pub_cnt:'1',max_pub:'1',staged_cnt:'0',min_staged:null,unimported_cnt:'7',source_status:'ACTIVE',cooldown_until:null}]};
+      if (sql.includes('SET priority = 75')) return {rows:[]};
+      if (sql.includes("status = 'IMPORTING'")) return {rows:[{cnt:'1'}]};
+      return {rows:[]};
+    }};
+    const c=new AdmissionController(state,sentinel,pool);
+    c.setChapterCapacityProvider(()=>1);
+    await c.runAdmissionCycle();
+    expect(active.get(work.workId)).toMatchObject({lane:'P1',state:'FILLING',publishedChapters:1,queuedChapters:0});
+  });
 });

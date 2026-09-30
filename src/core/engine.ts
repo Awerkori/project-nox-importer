@@ -3594,7 +3594,12 @@ export class ImporterEngine {
 
       // Check persistent watermark and catalog existence
       const watermark = await this.scheduler.getWatermark(result.workId, job.source);
-      const isWorkAlreadyOnSite = (publishedChapters && publishedChapters.length > 0) || false;
+      // A work becomes P1 as soon as it is canonically visible.  Do not use
+      // only the chapter query here: an existing visible work may temporarily
+      // have no published chapter rows (or be synced before that read catches
+      // up), and classifying it as P2 would let new-work admission outrank it.
+      const isWorkAlreadyOnSite = Boolean((result as any).work?.published) ||
+        (publishedChapters && publishedChapters.length > 0) || false;
 
       // Admission policy for new works cohort (Strict Section 5 Admission Gate)
       let isAdmitted = isWorkAlreadyOnSite || isStaffPriority;

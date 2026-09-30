@@ -26,12 +26,14 @@ export function isActiveChapterClaimConflict(error) {
             String(error?.message || '').includes('idx_importer_queue_one_importing_canonical_chapter'));
 }
 /**
- * Staff requests own the scheduling order, not the resource budget. After a
- * bounded Staff burst, a waiting P0 gets one opportunity to claim the next
- * slot. The caller still applies the normal source, DB, media and global
- * chapter permits, so this cannot manufacture capacity.
+ * Staff requests own the scheduling order, not the resource budget. They are
+ * absolute while a claimable Staff job exists; the caller still applies the
+ * normal source, DB, media and global chapter permits, so this cannot
+ * manufacture capacity.
  */
 export function shouldReserveP0AfterStaffBurst(consecutiveStaffClaims, antiStarvationRatio, hasP0Candidate) {
+    // Compatibility helper for old telemetry/tests. The live scheduler does not
+    // invoke it while Staff has claimable work.
     return hasP0Candidate && antiStarvationRatio > 0 && consecutiveStaffClaims >= antiStarvationRatio;
 }
 /**
@@ -63,6 +65,7 @@ export class WorkAffinityScheduler {
     // a fresh release inside a Staff burst), this reserves one admitted normal
     // lane opportunity after a sustained high-priority burst.
     highPriorityConsecutiveClaims = 0;
+    rrIndexP0 = 0;
     rrIndexP1 = 0;
     rrIndexP2 = 0;
     rrCatalogSourceIndex = 0;
@@ -127,29 +130,54 @@ export class WorkAffinityScheduler {
     // Lightweight probe for P0 queue presence (avoids 400ms scan on every claim)
     lastP0ProbeAt = 0;
     hasP0InQueue = false;
+    cachedP0WorkIds = [];
+    p0CandidateProbeFlight = null;
     async hasP0Candidate() {
+        return (await this.getP0CandidateWorkIds()).length > 0;
+    }
+    /** A bounded, short-lived P0 work list so concurrent releases take turns. */
+    async getP0CandidateWorkIds() {
         if (process.env.NODE_ENV === 'test' || !this.pool?.query) {
-            return true;
+            return ['__test_p0__'];
         }
         const now = Date.now();
-        if (this.hasP0InQueue)
-            return true;
-        if (now - this.lastP0ProbeAt < 5000)
-            return false;
+        if (now - this.lastP0ProbeAt < 1_000)
+            return this.cachedP0WorkIds;
+        if (this.p0CandidateProbeFlight)
+            return this.p0CandidateProbeFlight;
         this.lastP0ProbeAt = now;
+        const flight = (async () => {
+            try {
+                const r = await this.runQuery(this.pool, `
+          SELECT q.payload->>'workId' AS work_id
+          FROM importer_queue q
+          JOIN importer_sources s ON s.id = q.source
+          WHERE (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
+            AND q.task_type = 'IMPORT_CHAPTER'
+            AND q.priority >= 100 AND q.priority < 1000
+            AND s.enabled = true
+            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
+          GROUP BY q.payload->>'workId'
+          ORDER BY MIN(q.next_run_at) ASC, MIN(q.chapter_sort_key) ASC NULLS LAST
+          LIMIT 32;
+        `);
+                this.cachedP0WorkIds = r.rows.map((row) => row.work_id).filter(Boolean);
+                this.hasP0InQueue = this.cachedP0WorkIds.length > 0;
+                return this.cachedP0WorkIds;
+            }
+            catch {
+                this.cachedP0WorkIds = [];
+                this.hasP0InQueue = false;
+                return [];
+            }
+        })();
+        this.p0CandidateProbeFlight = flight;
         try {
-            const r = await this.runQuery(this.pool, `
-        SELECT 1 FROM importer_queue 
-        WHERE (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW()))
-          AND task_type = 'IMPORT_CHAPTER'
-          AND priority >= 100 AND priority < 1000
-        LIMIT 1;
-      `);
-            this.hasP0InQueue = r.rows.length > 0;
-            return this.hasP0InQueue;
+            return await flight;
         }
-        catch {
-            return false;
+        finally {
+            if (this.p0CandidateProbeFlight === flight)
+                this.p0CandidateProbeFlight = null;
         }
     }
     async hasStaffForcedCandidate() {
@@ -467,7 +495,7 @@ export class WorkAffinityScheduler {
             chapterNumber: staffForcedJob.payload?.chapterNumber ?? 0,
             chapterSortKey: staffForcedJob.chapter_sort_key ?? 0,
             lane: SchedulerLane.STAFF_FORCED,
-            reason: 'STAFF_PRIORITY_WITH_P0_BOUNDED_RESERVATION',
+            reason: 'STAFF_ABSOLUTE_PRIORITY',
             workState: 'FILLING',
             source: staffForcedJob.source,
             waitTimeMs: Math.round(waitTimeMs * 10) / 10,
@@ -507,20 +535,17 @@ export class WorkAffinityScheduler {
         // -------------------------------------------------------------
         // LANE STAFF_FORCED: Explicit Staff Priority
         // Any eligible STAFF_FORCED job (priority >= 1000, staffForced=true,
-        // or active staff request) wins normal selection. A bounded P0 reservation
-        // after a Staff burst avoids starving a genuinely fresh release forever;
-        // it does not change any global resource limiter.
+        // or active staff request) wins normal selection. It still uses exactly
+        // the same source, media, DB and chapter permits as every other lane.
         // -------------------------------------------------------------
         const fullWorkIds = this.getFullInFlightWorkIds(config.maxInflightPerWork);
-        // This is intentionally a scheduling reservation only. The normal-lane
-        // claim below still has to pass all source, work and global permits.
-        const reserveLowerPriority = shouldReserveLowerPriorityAfterHighBurst(this.highPriorityConsecutiveClaims, config.antiStarvationRatio);
+        // Staff is absolute while it has claimable work. Once it is exhausted (or
+        // temporarily unclaimable), P0 retains bounded lower-lane fairness.
+        const hasStaffCandidate = await this.hasStaffForcedCandidate();
+        let reserveLowerPriority = !hasStaffCandidate && shouldReserveLowerPriorityAfterHighBurst(this.highPriorityConsecutiveClaims, config.antiStarvationRatio);
         let reserveP0 = false;
         let staffForcedJob = null;
-        if (!reserveLowerPriority) {
-            reserveP0 = shouldReserveP0AfterStaffBurst(this.staffConsecutiveClaims, config.antiStarvationRatio, await this.hasP0Candidate());
-        }
-        if (!reserveLowerPriority && !reserveP0) {
+        if (hasStaffCandidate) {
             const tStaff0 = performance.now();
             staffForcedJob = await this.claimStaffForcedJob(this.pool, {
                 workerId: options.workerId,
@@ -534,8 +559,13 @@ export class WorkAffinityScheduler {
         if (staffForcedJob) {
             return this.completeStaffClaim(staffForcedJob, t0, telemetry);
         }
-        if (!reserveLowerPriority && !reserveP0)
-            this.staffConsecutiveClaims = 0;
+        // The presence probe may race another runner. Do not let an old Staff
+        // streak manufacture a P0 reservation while Staff is claimable; once the
+        // Staff CTE proved empty, normal P0/P1 anti-starvation may resume.
+        if (hasStaffCandidate) {
+            reserveLowerPriority = shouldReserveLowerPriorityAfterHighBurst(this.highPriorityConsecutiveClaims, config.antiStarvationRatio);
+        }
+        this.staffConsecutiveClaims = 0;
         // -------------------------------------------------------------
         // LANE P0: Fresh New Releases (Priority >= 100)
         // P0 wins normal selection, except for one bounded lower-priority
@@ -544,14 +574,18 @@ export class WorkAffinityScheduler {
         // -------------------------------------------------------------
         const tP0_0 = performance.now();
         let p0Job = null;
-        if (!reserveLowerPriority && await this.hasP0Candidate()) {
+        const p0WorkIds = !reserveLowerPriority ? await this.getP0CandidateWorkIds() : [];
+        if (!reserveLowerPriority && p0WorkIds.length > 0) {
             this.genericClaimAttempts++;
+            const startIdx = this.rrIndexP0 % p0WorkIds.length;
+            const targetP0WorkId = p0WorkIds[startIdx];
             p0Job = await this.claimSingleJob(this.pool, {
                 workerId: options.workerId,
                 leaseMin,
                 allowedSources,
                 minPriority: 100,
                 maxPriority: 999,
+                workId: targetP0WorkId,
                 disallowedWorkIds: fullWorkIds,
                 telemetry,
             });
@@ -560,6 +594,7 @@ export class WorkAffinityScheduler {
                 // Staff burst. It has used the exact same normal claim path/limits.
                 this.staffConsecutiveClaims = 0;
                 this.highPriorityConsecutiveClaims++;
+                this.rrIndexP0 = (startIdx + 1) % p0WorkIds.length;
                 this.genericClaimSuccesses++;
                 const waitTimeMs = performance.now() - t0;
                 telemetry.p0ProbeMs = Math.round((performance.now() - tP0_0) * 10) / 10;
@@ -589,7 +624,12 @@ export class WorkAffinityScheduler {
                 return p0Job;
             }
             else {
+                // The selected work may have raced another runner or lost its source
+                // permit. Let the next slot refresh the tiny candidate set instead of
+                // repeatedly favoring it over other P0 works.
                 this.hasP0InQueue = false;
+                this.cachedP0WorkIds = [];
+                this.lastP0ProbeAt = 0;
             }
         }
         telemetry.p0ProbeMs = Math.round((performance.now() - tP0_0) * 10) / 10;
@@ -1143,8 +1183,9 @@ export class WorkAffinityScheduler {
     /**
      * Helper to atomically claim 1 STAFF_FORCED job with SKIP LOCKED.
      * Priority >= 1000 or payload.staffForced = true or work with active importer_staff_requests.
-     * Strictly prioritizes staff requests by priority_boost DESC, created_at ASC (manual ordering),
-     * then canonical chapter_sort_key ASC.
+     * Staff is absolute against other lanes, but active Staff works take turns
+     * inside that lane. The small cached list is rotated after each successful
+     * claim; this never changes resource limits.
      */
     async claimStaffForcedJob(client, opts) {
         if (!(await this.hasStaffForcedCandidate()))
@@ -1198,9 +1239,9 @@ export class WorkAffinityScheduler {
               AND (active_chapter.payload->>'workId') = (q.payload->>'workId')
               AND active_chapter.chapter_sort_key = q.chapter_sort_key
           )
-        ORDER BY 
-          COALESCE(sr.priority_boost, 0) DESC,
-          COALESCE(sr.created_at, '9999-12-31'::timestamptz) ASC,
+        ORDER BY
+          CASE WHEN sr.work_id IS NOT NULL THEN 0 ELSE 1 END,
+          COALESCE(array_position($6::text[], q.payload->>'workId'), 2147483647),
           q.priority DESC, 
           q.chapter_sort_key ASC NULLS LAST, 
           q.next_run_at ASC
@@ -1238,6 +1279,16 @@ export class WorkAffinityScheduler {
         const r = res.rows[0];
         const payload = typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {});
         const sortKey = r.chapter_sort_key ? parseFloat(r.chapter_sort_key) : null;
+        const claimedWorkId = payload?.workId;
+        if (claimedWorkId && this.cachedStaffWorkIds.length > 1) {
+            const index = this.cachedStaffWorkIds.indexOf(claimedWorkId);
+            if (index >= 0) {
+                this.cachedStaffWorkIds = [
+                    ...this.cachedStaffWorkIds.slice(index + 1),
+                    ...this.cachedStaffWorkIds.slice(0, index + 1),
+                ];
+            }
+        }
         this.lastClaimTime = Date.now();
         return {
             ...r,

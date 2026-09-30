@@ -25,6 +25,9 @@ export declare class AdmissionController {
     setChapterCapacityProvider(provider: () => number): void;
     private admissionInFlight;
     private demandFlights;
+    private p1BacklogProbeAt;
+    private p1BacklogProbeFlight;
+    private p1BacklogSnapshot;
     setSourcePermitProvider(provider: (source: string) => number): void;
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
@@ -68,6 +71,14 @@ export declare class AdmissionController {
             systemHealthy: boolean;
         };
     }>;
+    /**
+     * A bounded health-aware P1 admission signal. This is an existence check,
+     * not a catalog aggregate: admission only needs to know whether P1 must go
+     * first, and a full COUNT(DISTINCT ...) scan would compete with imports.
+     */
+    private getP1BacklogSnapshot;
+    /** Promote the remaining non-terminal initial batch of one visible work. */
+    private promoteP2WorkToP1;
     /**
      * Executes a single admission reconciliation cycle.
      */
