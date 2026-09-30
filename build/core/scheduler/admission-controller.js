@@ -27,6 +27,12 @@ export class AdmissionController {
     }
     admissionInFlight = null;
     demandFlights = new Map();
+    // P2 admission can be evaluated by discovery bursts. Keep the P1 pressure
+    // probe short-lived and single-flight: it is an admission signal, never a
+    // cache of editorial state.
+    p1BacklogProbeAt = 0;
+    p1BacklogProbeFlight = null;
+    p1BacklogSnapshot = { claimable: 0, available: 0, works: 0 };
     setSourcePermitProvider(provider) {
         this.sourcePermitProvider = provider;
     }
@@ -193,7 +199,27 @@ export class AdmissionController {
                 },
             };
         }
-        // 3. P2_ACTIVE_COHORT_BELOW_LIMIT:
+        // 3. Existing visible works are P1 regardless of the priority that was
+        // assigned when they were first discovered.  This is deliberately based
+        // on the canonical work visibility, not latest_chapter_published_at: that
+        // denormalized timestamp may legitimately be null for older works.
+        const p1 = await this.getP1BacklogSnapshot();
+        if (p1.available > 0) {
+            return {
+                allowed: false,
+                reason: 'P1_BACKLOG_WAITING: existing catalog work must advance before P2 admission',
+                metrics: {
+                    p0Waiting: 0,
+                    p1Claimable: p1.claimable,
+                    p1AvailableChapters: p1.available,
+                    p1WorksWaiting: p1.works,
+                    p2ActiveCohortSize: 0,
+                    p2UnfinishedCount: 0,
+                    systemHealthy: true,
+                },
+            };
+        }
+        // 4. P2_ACTIVE_COHORT_BELOW_LIMIT:
         // Strictly restrict active P2 cohort to <= config.maxActiveNewWorks (default 4).
         // Filter out stale P2 works that have been in FILLING for >= 30m without progress.
         const activeWorks = this.stateStore.getActiveWorks();
@@ -226,7 +252,7 @@ export class AdmissionController {
                 },
             };
         }
-        // 4. WORKER_CAPACITY_CHECK:
+        // 5. WORKER_CAPACITY_CHECK:
         // P0 >>> P1 > P2 > P3. P2 must use the effective chapter capacity, not
         // a historical runner count: otherwise a 3-slot runtime keeps admitting
         // new work and repeatedly scans the hot queue while all slots are busy.
@@ -263,6 +289,90 @@ export class AdmissionController {
                 systemHealthy: true,
             },
         };
+    }
+    /**
+     * A bounded health-aware P1 admission signal. This is an existence check,
+     * not a catalog aggregate: admission only needs to know whether P1 must go
+     * first, and a full COUNT(DISTINCT ...) scan would compete with imports.
+     */
+    async getP1BacklogSnapshot() {
+        const now = Date.now();
+        if (now - this.p1BacklogProbeAt < 2_000)
+            return this.p1BacklogSnapshot;
+        if (this.p1BacklogProbeFlight)
+            return this.p1BacklogProbeFlight;
+        const flight = (async () => {
+            // Ready P1 uses the existing partial claim index. Only if no ready P1
+            // exists do we check the paused window backlog; that slower path is
+            // exceptional and avoids turning a normal admission probe into a scan.
+            const ready = await this.runQuery(`
+        SELECT q.status
+        FROM importer_queue q
+        JOIN importer_sources s ON s.id = q.source
+        WHERE q.task_type = 'IMPORT_CHAPTER'
+          AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
+          AND q.attempts < COALESCE(q.max_attempts, 7)
+          AND q.priority >= 75 AND q.priority < 100
+          AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+          AND s.enabled = true
+          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
+        LIMIT 1
+      `);
+            const candidate = ready.rows[0];
+            if (candidate) {
+                this.p1BacklogSnapshot = { claimable: 1, available: 1, works: 1 };
+                this.p1BacklogProbeAt = Date.now();
+                return this.p1BacklogSnapshot;
+            }
+            const paused = await this.runQuery(`
+        SELECT 1
+        FROM importer_queue q
+        JOIN importer_sources s ON s.id = q.source
+        WHERE q.task_type = 'IMPORT_CHAPTER'
+          AND q.status = 'PAUSED_BY_STAFF'
+          AND q.attempts < COALESCE(q.max_attempts, 7)
+          AND q.priority >= 75 AND q.priority < 100
+          AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+          AND s.enabled = true
+          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
+        LIMIT 1
+      `);
+            this.p1BacklogSnapshot = {
+                claimable: 0,
+                available: paused.rows.length > 0 ? 1 : 0,
+                works: paused.rows.length > 0 ? 1 : 0,
+            };
+            this.p1BacklogProbeAt = Date.now();
+            return this.p1BacklogSnapshot;
+        })();
+        this.p1BacklogProbeFlight = flight;
+        try {
+            return await flight;
+        }
+        catch (error) {
+            // Fail closed for P2 admission: if the P1 pressure probe is unavailable,
+            // do not make the catalog less fair by admitting more new works.
+            this.logger.warn('Unable to read P1 admission pressure; holding P2 admission', { error: error?.message });
+            return { claimable: 1, available: 1, works: 0 };
+        }
+        finally {
+            if (this.p1BacklogProbeFlight === flight)
+                this.p1BacklogProbeFlight = null;
+        }
+    }
+    /** Promote the remaining non-terminal initial batch of one visible work. */
+    async promoteP2WorkToP1(workId) {
+        await this.runQuery(`
+      UPDATE importer_queue
+      SET priority = 75,
+          payload = jsonb_set(COALESCE(payload, '{}'::jsonb), '{originalPriority}', '75'::jsonb, true),
+          updated_at = NOW()
+      WHERE task_type = 'IMPORT_CHAPTER'
+        AND (payload->>'workId') = $1
+        AND status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
+        AND priority >= 50 AND priority < 75
+        AND COALESCE(payload->>'staffForced', 'false') <> 'true'
+    `, [workId]);
     }
     /**
      * Executes a single admission reconciliation cycle.
@@ -308,10 +418,11 @@ export class AdmissionController {
           SELECT COUNT(*) FILTER (WHERE status='QUEUED' AND attempts < COALESCE(max_attempts,7)) AS queued_cnt,
             COUNT(*) FILTER (WHERE status='IMPORTING') AS importing_cnt,
             COUNT(*) FILTER (WHERE status='PAUSED_BY_STAFF') AS paused_cnt,
+            COUNT(*) FILTER (WHERE status='RETRY' AND attempts < COALESCE(max_attempts,7)) AS retry_cnt,
             MIN(chapter_sort_key) FILTER (WHERE status='QUEUED' AND attempts < COALESCE(max_attempts,7)) AS min_queued,
-            MIN(chapter_sort_key) FILTER (WHERE status IN ('QUEUED','PAUSED_BY_STAFF') AND attempts < COALESCE(max_attempts,7)) AS min_sort_key
+            MIN(chapter_sort_key) FILTER (WHERE status IN ('QUEUED','RETRY','PAUSED_BY_STAFF') AND attempts < COALESCE(max_attempts,7)) AS min_sort_key
           FROM importer_queue WHERE task_type='IMPORT_CHAPTER' AND payload->>'workId'=w.work_id
-            AND status IN ('QUEUED','IMPORTING','PAUSED_BY_STAFF')
+            AND status IN ('QUEUED','IMPORTING','RETRY','PAUSED_BY_STAFF')
         ) q
         CROSS JOIN LATERAL (
           SELECT COUNT(*) AS pub_cnt, COALESCE(MAX(number),-1) AS max_pub
@@ -336,6 +447,7 @@ export class AdmissionController {
                     const queuedCnt = parseInt(qRow?.queued_cnt || '0', 10);
                     const importingCnt = parseInt(qRow?.importing_cnt || '0', 10);
                     const pausedCnt = parseInt(qRow?.paused_cnt || '0', 10);
+                    const retryCnt = parseInt(qRow?.retry_cnt || '0', 10);
                     const minSortKey = qRow?.min_sort_key ? parseFloat(qRow.min_sort_key) : null;
                     const minQueued = qRow?.min_queued ? parseFloat(qRow.min_queued) : minSortKey;
                     const pubCnt = parseInt(pubRes.rows[0]?.pub_cnt || '0', 10);
@@ -347,10 +459,11 @@ export class AdmissionController {
                     work.queuedChapters = queuedCnt;
                     work.inFlightChapters = importingCnt;
                     work.publishedChapters = pubCnt;
-                    work.totalChapters = pubCnt + queuedCnt + importingCnt + pausedCnt;
+                    work.totalChapters = pubCnt + queuedCnt + importingCnt + pausedCnt + retryCnt;
                     work.frontierSortKey = queuedCnt > 0 && minQueued !== null ? minQueued : minSortKey;
                     // Promote P2 work to P1 if it has published chapters
                     if (pubCnt > 0 && work.lane === 'P2') {
+                        await this.promoteP2WorkToP1(work.workId);
                         this.logger.info(`Work ${work.workTitle} (${work.workId}) promoted from P2 to P1 (${pubCnt} published chapters).`);
                         work.lane = 'P1';
                     }
@@ -422,10 +535,11 @@ export class AdmissionController {
                         work.state = 'FILLING';
                         this.stateStore.setActiveWork(work);
                     }
-                    // Check if caught up or drained (zero claimable queued, zero importing)
-                    // A work with zero claimable queued work and zero importing cannot hold an active slot
-                    // Mappings remain safe in DB; work will be readmitted when predecessor/jobs become available
-                    if (queuedCnt === 0 && importingCnt === 0) {
+                    // A cohort is only drained when it has no non-terminal queue state.
+                    // PAUSED_BY_STAFF is the sliding-window backlog, not completion;
+                    // RETRY is pending work, not completion. Treating either as empty
+                    // abandoned newly-visible works after their first small P2 window.
+                    if (queuedCnt === 0 && importingCnt === 0 && pausedCnt === 0 && retryCnt === 0) {
                         const isCaughtUp = unimportedCnt === 0 && pubCnt > 0;
                         const stateLabel = isCaughtUp ? 'CAUGHT_UP' : 'DRAINED';
                         // Capture the cohort before mutating this work's state. Counting
@@ -433,7 +547,7 @@ export class AdmissionController {
                         // "0 -> -1" vacancy telemetry for a real one-work cohort.
                         const beforeCount = this.stateStore.getActiveWorks().length;
                         work.state = isCaughtUp ? 'CAUGHT_UP' : 'COMPLETE';
-                        this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${stateLabel} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${unimportedCnt} unimported mappings). Vacating active slot. ACTIVE SET BEFORE: ${beforeCount} -> AFTER: ${beforeCount - 1}`);
+                        this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) reached ${stateLabel} state (${queuedCnt} queued, ${importingCnt} in-flight, ${pausedCnt} paused, ${retryCnt} retry, ${unimportedCnt} unimported mappings). Vacating active slot. ACTIVE SET BEFORE: ${beforeCount} -> AFTER: ${beforeCount - 1}`);
                         this.stateStore.removeActiveWork(work.workId);
                         this.triggerImmediateReplenishment('WORK_DRAINED_VACATED');
                         continue;
@@ -510,17 +624,22 @@ export class AdmissionController {
             const activeIds = activeWorks.map((w) => w.workId);
             const candidatesRes = await this.runQuery(`WITH queue_candidate_groups AS MATERIALIZED (
            SELECT payload->>'workId' AS work_id, source, COUNT(*) AS pending_jobs,
+             COUNT(*) FILTER (WHERE status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW())) AS queued_count,
+             COUNT(*) FILTER (WHERE status = 'PAUSED_BY_STAFF') AS paused_count,
              MIN(chapter_sort_key) AS min_sort_key
            FROM importer_queue
-           WHERE task_type='IMPORT_CHAPTER' AND status='QUEUED'
+           WHERE task_type='IMPORT_CHAPTER'
+             AND (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW()))
              AND attempts < COALESCE(max_attempts,7)
+             AND priority >= 75 AND priority < 100
+             AND COALESCE(payload->>'staffForced', 'false') <> 'true'
              AND NOT ((payload->>'workId') = ANY($1::text[]))
            GROUP BY payload->>'workId', source
          ),
          queue_candidates AS MATERIALIZED (
            -- Admission samples the publication frontier first. A large queue
            -- after an unresolved gap must not hide smaller contiguous P1 work.
-           SELECT work_id, source, pending_jobs, min_sort_key
+           SELECT work_id, source, pending_jobs, queued_count, paused_count, min_sort_key
            FROM (
              SELECT g.*,
                ROW_NUMBER() OVER (
@@ -535,14 +654,13 @@ export class AdmissionController {
                 w.title,
                 q.source,
                 q.pending_jobs,
-                q.pending_jobs AS queued_count,
-                0 AS paused_count,
+                q.queued_count,
+                q.paused_count,
                 q.min_sort_key
          FROM queue_candidates q
          JOIN works w ON w.id = q.work_id::uuid
          JOIN importer_sources s ON s.id = q.source
          WHERE w.published = true
-           AND w.latest_chapter_published_at IS NOT NULL
            AND s.enabled = true
            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
          ORDER BY min_sort_key ASC NULLS LAST, queued_count DESC
@@ -698,7 +816,7 @@ export class AdmissionController {
          JOIN importer_sources s ON s.id = q.source
          WHERE q.task_type = 'IMPORT_CHAPTER'
            AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
-           AND (w.published IS FALSE OR w.latest_chapter_published_at IS NULL)
+           AND w.published IS FALSE
            AND s.enabled = true
            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
            AND NOT ((q.payload->>'workId') = ANY($1::text[]))
@@ -928,10 +1046,15 @@ export class AdmissionController {
             const query = `
         WITH queue_candidates AS MATERIALIZED (
           SELECT payload->>'workId' AS work_id, source, COUNT(*) AS pending_jobs,
+            COUNT(*) FILTER (WHERE status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW())) AS queued_count,
+            COUNT(*) FILTER (WHERE status = 'PAUSED_BY_STAFF') AS paused_count,
             MIN(chapter_sort_key) AS min_sort_key
           FROM importer_queue
-          WHERE task_type='IMPORT_CHAPTER' AND status='QUEUED'
+          WHERE task_type='IMPORT_CHAPTER'
+            AND (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW()))
             AND attempts < COALESCE(max_attempts,7)
+            AND priority >= 75 AND priority < 100
+            AND COALESCE(payload->>'staffForced', 'false') <> 'true'
             AND ($1::text[] IS NULL OR source = ANY($1::text[]))
             AND NOT ((payload->>'workId') = ANY($2::text[]))
             AND ($3::text[] IS NULL OR NOT (source = ANY($3::text[])))
@@ -941,12 +1064,12 @@ export class AdmissionController {
                w.title,
                q.source,
                q.pending_jobs,
-               q.pending_jobs AS queued_count,
+               q.queued_count,
                q.min_sort_key
         FROM queue_candidates q
         JOIN works w ON w.id = q.work_id::uuid
         JOIN importer_sources s ON s.id = q.source
-        WHERE ${isP1 ? 'w.published = true AND w.latest_chapter_published_at IS NOT NULL' : '(w.published IS FALSE OR w.latest_chapter_published_at IS NULL)'}
+        WHERE ${isP1 ? 'w.published = true' : 'w.published IS FALSE'}
           AND s.enabled = true
           AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
         -- The on-demand path has the same bounded frontier requirement as the

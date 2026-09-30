@@ -18,10 +18,10 @@ import { SchedulerStateStore } from './state-store.js';
 import { SchedulerDecision, SchedulerLane, SchedulerMetrics } from './types.js';
 export declare function isActiveChapterClaimConflict(error: any): boolean;
 /**
- * Staff requests own the scheduling order, not the resource budget. After a
- * bounded Staff burst, a waiting P0 gets one opportunity to claim the next
- * slot. The caller still applies the normal source, DB, media and global
- * chapter permits, so this cannot manufacture capacity.
+ * Staff requests own the scheduling order, not the resource budget. They are
+ * absolute while a claimable Staff job exists; the caller still applies the
+ * normal source, DB, media and global chapter permits, so this cannot
+ * manufacture capacity.
  */
 export declare function shouldReserveP0AfterStaffBurst(consecutiveStaffClaims: number, antiStarvationRatio: number, hasP0Candidate: boolean): boolean;
 /**
@@ -48,6 +48,7 @@ export declare class WorkAffinityScheduler {
     private pendingClaimReservationsByWork;
     private staffConsecutiveClaims;
     private highPriorityConsecutiveClaims;
+    private rrIndexP0;
     private rrIndexP1;
     private rrIndexP2;
     private rrCatalogSourceIndex;
@@ -83,7 +84,11 @@ export declare class WorkAffinityScheduler {
     emptyClaimAttempts: number;
     private lastP0ProbeAt;
     private hasP0InQueue;
+    private cachedP0WorkIds;
+    private p0CandidateProbeFlight;
     private hasP0Candidate;
+    /** A bounded, short-lived P0 work list so concurrent releases take turns. */
+    private getP0CandidateWorkIds;
     private hasStaffForcedCandidate;
     getClaimStats(): {
         specificAttempts: number;
@@ -154,8 +159,9 @@ export declare class WorkAffinityScheduler {
     /**
      * Helper to atomically claim 1 STAFF_FORCED job with SKIP LOCKED.
      * Priority >= 1000 or payload.staffForced = true or work with active importer_staff_requests.
-     * Strictly prioritizes staff requests by priority_boost DESC, created_at ASC (manual ordering),
-     * then canonical chapter_sort_key ASC.
+     * Staff is absolute against other lanes, but active Staff works take turns
+     * inside that lane. The small cached list is rotated after each successful
+     * claim; this never changes resource limits.
      */
     private claimStaffForcedJob;
     /**
