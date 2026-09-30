@@ -1,0 +1,31 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const failBatchDirect = vi.fn();
+
+vi.mock('../src/db/yugabyte-direct.js', () => ({
+  failBatchDirect,
+  getYugabytePool: () => ({ query: vi.fn() }),
+  acquireJobsDirect: vi.fn(),
+  heartbeatDirect: vi.fn(),
+  recoverStalledLeasesDirect: vi.fn(),
+}));
+
+const { DirectSupabaseClient } = await import('../src/db/direct-supabase-client.js');
+
+describe('direct release fencing', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it('reports a stale worker release as unsuccessful instead of claiming completion', async () => {
+    failBatchDirect.mockResolvedValueOnce(0);
+    const client = new DirectSupabaseClient({ query: vi.fn() } as any);
+
+    const result = await client.rpc('importer_release_job', {
+      p_job_id: 'job-1', p_worker_id: 'old-worker', p_status: 'COMPLETED',
+    });
+
+    expect(failBatchDirect).toHaveBeenCalledWith([
+      expect.objectContaining({ jobId: 'job-1', workerId: 'old-worker', status: 'COMPLETED' }),
+    ]);
+    expect(result).toEqual({ data: false, error: null });
+  });
+});

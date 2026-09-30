@@ -11,11 +11,15 @@ interface Bucket {
   minRatePerSecond: number;
   consecutiveSuccesses: number;
   blockedUntil: number;
+  lastUsedAt: number;
 }
 
 export class HostRateLimiter {
   private buckets = new Map<string, Bucket>();
   private logger = new Logger('RateLimiter');
+  // Hosts originate in upstream media URLs. They are not a durable registry;
+  // cap the in-process cache against sources that rotate CDN hostnames.
+  private readonly maxBuckets = 256;
 
   constructor(private defaultRatePerSecond: number = 5.0) {
     if (process.env.DEFAULT_HOST_RATE_PER_SECOND) {
@@ -36,6 +40,7 @@ export class HostRateLimiter {
     const minRate = minRatePerSecond ?? Math.max(1.0, ratePerSecond * 0.5);
     const maxRate = maxRatePerSecond ?? Math.max(ratePerSecond * 2.5, 16.0);
     const cap = capacity ?? Math.max(2, Math.ceil(ratePerSecond * 2));
+    this.ensureBucketCapacity(host);
     this.buckets.set(host, {
       tokens: cap,
       lastRefill: Date.now(),
@@ -45,12 +50,27 @@ export class HostRateLimiter {
       minRatePerSecond: minRate,
       consecutiveSuccesses: 0,
       blockedUntil: 0,
+      lastUsedAt: Date.now(),
     });
+  }
+
+  private ensureBucketCapacity(incomingHost: string): void {
+    if (this.buckets.has(incomingHost) || this.buckets.size < this.maxBuckets) return;
+    let oldestHost: string | undefined;
+    let oldestAt = Number.POSITIVE_INFINITY;
+    for (const [host, bucket] of this.buckets) {
+      if (bucket.lastUsedAt < oldestAt) {
+        oldestHost = host;
+        oldestAt = bucket.lastUsedAt;
+      }
+    }
+    if (oldestHost) this.buckets.delete(oldestHost);
   }
 
   private getBucket(host: string): Bucket {
     let bucket = this.buckets.get(host);
     if (!bucket) {
+      this.ensureBucketCapacity(host);
       const cap = Math.max(2, Math.ceil(this.defaultRatePerSecond * 2));
       bucket = {
         tokens: cap,
@@ -61,9 +81,11 @@ export class HostRateLimiter {
         minRatePerSecond: Math.max(1.0, this.defaultRatePerSecond * 0.5),
         consecutiveSuccesses: 0,
         blockedUntil: 0,
+        lastUsedAt: Date.now(),
       };
       this.buckets.set(host, bucket);
     }
+    bucket.lastUsedAt = Date.now();
     return bucket;
   }
 

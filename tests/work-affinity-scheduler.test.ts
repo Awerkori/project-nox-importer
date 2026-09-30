@@ -22,6 +22,7 @@ import {
 import { SchedulerStateStore } from '../src/core/scheduler/state-store.js';
 import { AdmissionController } from '../src/core/scheduler/admission-controller.js';
 import { WorkAffinityScheduler } from '../src/core/scheduler/work-affinity-scheduler.js';
+import { shouldReserveLowerPriorityAfterHighBurst } from '../src/core/scheduler/work-affinity-scheduler.js';
 
 describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
   let mockPool: any;
@@ -116,6 +117,70 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(acquired.id).toBe('job-solo-201');
     expect(acquired.priority).toBe(100);
     expect(scheduler.getInFlightCount('solo-leveling-id')).toBe(1);
+  });
+
+  it('gives an admitted P1 one bounded claim opportunity after a sustained P0/Staff burst', async () => {
+    const workId = 'p1-progress-work';
+    mockStateStore.setActiveWork({
+      workId,
+      workTitle: 'P1 progress must survive fresh-release bursts',
+      lane: 'P1',
+      state: 'FILLING',
+      primarySource: 'mangaflix',
+      admittedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+      totalChapters: 20,
+      publishedChapters: 5,
+      queuedChapters: 3,
+      inFlightChapters: 0,
+      frontierSortKey: 6,
+      criticalGapSortKey: null,
+      criticalGapUnblockCount: 0,
+    });
+    (scheduler as any).highPriorityConsecutiveClaims = 4;
+
+    const p1Job = {
+      id: 'p1-progress-job', source: 'mangaflix', priority: 75, chapter_sort_key: 6,
+      payload: { workId, chapterNumber: 6 },
+    };
+    const mockClient = {
+      query: vi.fn().mockImplementation((_sql: string, params: any[]) => {
+        // A priority-100 query would mean P0 was allowed to starve this P1.
+        if (params?.[1] === 100) throw new Error('P0 must be deferred for one P1 opportunity');
+        if (params?.[2] === workId) return { rows: [p1Job] };
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    (scheduler as any).pool = { connect: vi.fn().mockResolvedValue(mockClient) };
+
+    const acquired = await scheduler.acquireNextChapterJob({
+      workerId: 'worker-fairness', allowedSources: ['mangaflix'],
+    });
+
+    expect(acquired?.id).toBe('p1-progress-job');
+    expect((scheduler as any).highPriorityConsecutiveClaims).toBe(0);
+  });
+
+  it('only reserves lower-priority work after the configured high-priority burst', () => {
+    expect(shouldReserveLowerPriorityAfterHighBurst(3, 4)).toBe(false);
+    expect(shouldReserveLowerPriorityAfterHighBurst(4, 4)).toBe(true);
+    expect(shouldReserveLowerPriorityAfterHighBurst(100, 0)).toBe(false);
+  });
+
+  it('moves only retry-budget-exhausted queued/retry work out of the hot queue in a bounded statement', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [{ count: 2 }] });
+    (scheduler as any).pool = { query };
+
+    const result = await scheduler.runControlledExhaustedJobCleanup(999);
+
+    expect(result).toEqual({ failed: 2 });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain("status IN ('QUEUED', 'RETRY')");
+    expect(sql).toContain('attempts >= COALESCE(max_attempts, 7)');
+    expect(sql).toContain("SET status = 'FAILED'");
+    expect(sql).toContain('FOR UPDATE SKIP LOCKED');
+    expect(params).toEqual([500]);
   });
 
   // =========================================================================

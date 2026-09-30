@@ -53,6 +53,20 @@ export function shouldReserveP0AfterStaffBurst(
   return hasP0Candidate && antiStarvationRatio > 0 && consecutiveStaffClaims >= antiStarvationRatio;
 }
 
+/**
+ * Staff and P0 are order-only lanes, but an endless stream of either must not
+ * make already-admitted P1/P2 work mathematically impossible to finish.  One
+ * normal-lane claim after a bounded high-priority burst preserves the normal
+ * resource budget and gives lower lanes forward progress without weakening
+ * their usual priority when the burst has not happened.
+ */
+export function shouldReserveLowerPriorityAfterHighBurst(
+  consecutiveHighPriorityClaims: number,
+  antiStarvationRatio: number,
+): boolean {
+  return antiStarvationRatio > 0 && consecutiveHighPriorityClaims >= antiStarvationRatio;
+}
+
 export interface AcquiredSchedulerJob {
   job: any;
   lane: SchedulerLane;
@@ -71,6 +85,10 @@ export class WorkAffinityScheduler {
   // Counts actual successful STAFF_FORCED claims. It is deliberately local to
   // ordering: it never changes semaphores, pool size, or worker capacity.
   private staffConsecutiveClaims = 0;
+  // Combined STAFF/P0 streak.  Unlike staffConsecutiveClaims (which reserves
+  // a fresh release inside a Staff burst), this reserves one admitted normal
+  // lane opportunity after a sustained high-priority burst.
+  private highPriorityConsecutiveClaims = 0;
   private rrIndexP1 = 0;
   private rrIndexP2 = 0;
   private rrCatalogSourceIndex = 0;
@@ -496,6 +514,7 @@ export class WorkAffinityScheduler {
     this.onJobStarted(workId, staffForcedJob.chapter_sort_key);
     this.lastClaimTime = Date.now();
     this.staffConsecutiveClaims++;
+    this.highPriorityConsecutiveClaims++;
 
     const decision: SchedulerDecision = {
       jobId: staffForcedJob.id,
@@ -555,13 +574,22 @@ export class WorkAffinityScheduler {
     // it does not change any global resource limiter.
     // -------------------------------------------------------------
     const fullWorkIds = this.getFullInFlightWorkIds(config.maxInflightPerWork);
-    const reserveP0 = shouldReserveP0AfterStaffBurst(
-      this.staffConsecutiveClaims,
+    // This is intentionally a scheduling reservation only. The normal-lane
+    // claim below still has to pass all source, work and global permits.
+    const reserveLowerPriority = shouldReserveLowerPriorityAfterHighBurst(
+      this.highPriorityConsecutiveClaims,
       config.antiStarvationRatio,
-      await this.hasP0Candidate(),
     );
+    let reserveP0 = false;
     let staffForcedJob: any | null = null;
-    if (!reserveP0) {
+    if (!reserveLowerPriority) {
+      reserveP0 = shouldReserveP0AfterStaffBurst(
+        this.staffConsecutiveClaims,
+        config.antiStarvationRatio,
+        await this.hasP0Candidate(),
+      );
+    }
+    if (!reserveLowerPriority && !reserveP0) {
       const tStaff0 = performance.now();
       staffForcedJob = await this.claimStaffForcedJob(this.pool, {
         workerId: options.workerId,
@@ -576,15 +604,17 @@ export class WorkAffinityScheduler {
     if (staffForcedJob) {
       return this.completeStaffClaim(staffForcedJob, t0, telemetry);
     }
-    if (!reserveP0) this.staffConsecutiveClaims = 0;
+    if (!reserveLowerPriority && !reserveP0) this.staffConsecutiveClaims = 0;
 
     // -------------------------------------------------------------
-    // LANE P0: Fresh New Releases (Priority >= 100) - ABSOLUTE PRIORITY
-    // Next free slot ALWAYS goes to P0 if claimable. Never skipped.
+    // LANE P0: Fresh New Releases (Priority >= 100)
+    // P0 wins normal selection, except for one bounded lower-priority
+    // reservation after a sustained Staff/P0 burst. This prevents internal
+    // starvation without changing capacity or source/global limits.
     // -------------------------------------------------------------
     const tP0_0 = performance.now();
     let p0Job = null;
-    if (await this.hasP0Candidate()) {
+    if (!reserveLowerPriority && await this.hasP0Candidate()) {
       this.genericClaimAttempts++;
       p0Job = await this.claimSingleJob(this.pool, {
         workerId: options.workerId,
@@ -600,6 +630,7 @@ export class WorkAffinityScheduler {
         // A P0 claim consumes the bounded reservation and begins a fresh
         // Staff burst. It has used the exact same normal claim path/limits.
         this.staffConsecutiveClaims = 0;
+        this.highPriorityConsecutiveClaims++;
         this.genericClaimSuccesses++;
         const waitTimeMs = performance.now() - t0;
         telemetry.p0ProbeMs = Math.round((performance.now() - tP0_0) * 10) / 10;
@@ -638,7 +669,7 @@ export class WorkAffinityScheduler {
     // The P0 that triggered a reservation may have raced another worker or
     // become source-blocked. Do not waste a healthy slot: Staff resumes only
     // after that bounded P0 opportunity was actually attempted.
-    if (reserveP0) {
+    if (!reserveLowerPriority && reserveP0) {
       const tStaff0 = performance.now();
       staffForcedJob = await this.claimStaffForcedJob(this.pool, {
         workerId: options.workerId,
@@ -683,6 +714,7 @@ export class WorkAffinityScheduler {
       });
 
       if (gapJob) {
+        this.highPriorityConsecutiveClaims = 0;
         this.specificClaimSuccesses++;
         const waitTimeMs = performance.now() - t0;
         telemetry.criticalWorkTimeMs = Math.round((performance.now() - tCrit0) * 10) / 10;
@@ -754,6 +786,7 @@ export class WorkAffinityScheduler {
       });
 
       if (p1Job) {
+        this.highPriorityConsecutiveClaims = 0;
         this.specificClaimSuccesses++;
         this.rrIndexP1 = (startIdx + 1) % readyP1Works.length;
         const waitTimeMs = performance.now() - t0;
@@ -806,6 +839,7 @@ export class WorkAffinityScheduler {
         });
 
         if (p1Job) {
+          this.highPriorityConsecutiveClaims = 0;
           this.specificClaimSuccesses++;
           const matchedWorkId = p1Job.payload?.workId;
           const matchedIdx = readyP1Works.findIndex((w) => w.workId === matchedWorkId);
@@ -880,6 +914,7 @@ export class WorkAffinityScheduler {
       });
 
       if (p2Job) {
+        this.highPriorityConsecutiveClaims = 0;
         this.specificClaimSuccesses++;
         this.rrIndexP2 = (startIdx + 1) % readyP2Works.length;
         const waitTimeMs = performance.now() - t0;
@@ -930,6 +965,7 @@ export class WorkAffinityScheduler {
         });
 
         if (p2Job) {
+          this.highPriorityConsecutiveClaims = 0;
           this.specificClaimSuccesses++;
           const matchedWorkId = p2Job.payload?.workId;
           const matchedIdx = readyP2Works.findIndex((w) => w.workId === matchedWorkId);
@@ -1022,6 +1058,7 @@ export class WorkAffinityScheduler {
     telemetry.admissionOnDemandMs = Math.round((performance.now() - tAdm0) * 10) / 10;
 
     if (fallbackJob) {
+      this.highPriorityConsecutiveClaims = 0;
       const waitTimeMs = performance.now() - t0;
       telemetry.totalAcquireMs = Math.round(waitTimeMs * 10) / 10;
       fallbackJob._acquireTelemetry = telemetry;
@@ -1077,6 +1114,7 @@ export class WorkAffinityScheduler {
     telemetry.catalogFallbackMs = Math.round((performance.now() - tCat0) * 10) / 10;
 
     if (catalogP1Job) {
+      this.highPriorityConsecutiveClaims = 0;
       this.genericClaimSuccesses++;
       const waitTimeMs = performance.now() - t0;
       telemetry.totalAcquireMs = Math.round(waitTimeMs * 10) / 10;
@@ -1101,6 +1139,15 @@ export class WorkAffinityScheduler {
       };
       this.logDecision(decision);
       return catalogP1Job;
+    }
+
+    // A reservation only defers the high lanes for one real normal-lane
+    // opportunity.  If no lower-priority work is claimable (for example all
+    // sources are cooling down), retry the regular priority order once rather
+    // than idling a healthy slot or recursively reserving forever.
+    if (reserveLowerPriority) {
+      this.highPriorityConsecutiveClaims = 0;
+      return this.executeIntelligentClaim(options, t0);
     }
 
     this.emptyClaimAttempts++;
@@ -2009,6 +2056,55 @@ export class WorkAffinityScheduler {
     } catch (err: any) {
       this.logger.warn('[REDUNDANCY_CLEANUP_ERROR] Failed to run redundant job cleanup', { error: err?.message });
       return { cleaned: 0 };
+    }
+  }
+
+  /**
+   * Moves only already-exhausted QUEUED/RETRY jobs out of the hot queue.
+   * Claim queries correctly exclude them, but leaving them there forever
+   * makes every scheduler/admission scan pay for terminal work.  This is a
+   * bounded, idempotent state transition: it never deletes mappings and
+   * never touches an active lease.
+   */
+  async runControlledExhaustedJobCleanup(batchSize: number = 200): Promise<{ failed: number }> {
+    try {
+      const res = await this.runQuery(this.pool, `
+        WITH exhausted AS MATERIALIZED (
+          SELECT id
+          FROM importer_queue
+          WHERE status IN ('QUEUED', 'RETRY')
+            AND attempts >= COALESCE(max_attempts, 7)
+          ORDER BY updated_at ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT $1
+        ), updated AS (
+          UPDATE importer_queue q
+          SET status = 'FAILED',
+              locked_by = NULL,
+              locked_at = NULL,
+              lease_expires_at = NULL,
+              next_run_at = NOW(),
+              retry_reason = COALESCE(q.retry_reason, 'RETRY_BUDGET_EXHAUSTED'),
+              last_error = COALESCE(
+                NULLIF(q.last_error, ''),
+                '[RETRY_BUDGET_EXHAUSTED] Queue job reached its configured retry budget'
+              ),
+              last_error_at = NOW(),
+              updated_at = NOW()
+          FROM exhausted e
+          WHERE q.id = e.id
+          RETURNING q.id
+        )
+        SELECT COUNT(*)::int AS count FROM updated;
+      `, [Math.max(1, Math.min(500, batchSize))]);
+      const failed = parseInt(res.rows[0]?.count || '0', 10);
+      if (failed > 0) {
+        this.logger.warn(`[QUEUE_HYGIENE] Moved ${failed} retry-budget-exhausted job(s) to FAILED outside the hot queue.`);
+      }
+      return { failed };
+    } catch (err: any) {
+      this.logger.warn('[QUEUE_HYGIENE_ERROR] Failed to terminalize retry-budget-exhausted jobs', { error: err?.message });
+      return { failed: 0 };
     }
   }
 }
