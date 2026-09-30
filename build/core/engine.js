@@ -358,12 +358,37 @@ export class ImporterEngine {
         const remainingChapterExecutions = this.activeChapterExecutions.size;
         const remainingChapterPermits = chapterSemaphore.active;
         if (remainingActive > 0 || remainingChapterExecutions > 0 || remainingChapterPermits > 0) {
-            // Never clear a lease or re-open capacity underneath a live/untracked
-            // network operation. Doing so was the source of lost lease heartbeats
-            // and leaked permits after previous soft restarts.
-            this.logger.warn(`[CONTROLLED SELF-RESTART] Deferred: drain timeout with diagnostics=${remainingActive}, chapterExecutions=${remainingChapterExecutions}, chapterPermits=${remainingChapterPermits}.`);
-            this.isRestarting = false;
-            return false;
+            // A normal drain must never revoke a live upload/download.  However a
+            // CRITICAL_STALL is specifically the bounded escape hatch for a
+            // non-cooperative upstream operation. Abort the *current* operation
+            // epoch, give cancellation a short bounded window, then only continue
+            // if all permits/executions actually released. The watchdog cooldown
+            // and restart circuit remain the guard against restart loops.
+            this.logger.warn(`[CONTROLLED SELF-RESTART] Graceful drain timed out; requesting cancellation of the current operation epoch (diagnostics=${remainingActive}, chapterExecutions=${remainingChapterExecutions}, chapterPermits=${remainingChapterPermits}).`);
+            this.abortController.abort(new DOMException('Controlled recovery cancelled stalled in-flight work', 'AbortError'));
+            const cancellationDeadline = Date.now() + 4_000;
+            while (Date.now() < cancellationDeadline) {
+                if (diagnostics.getActiveJobsCount() === 0 &&
+                    this.activeChapterExecutions.size === 0 &&
+                    chapterSemaphore.active === 0) {
+                    break;
+                }
+                await new Promise((r) => setTimeout(r, 100));
+            }
+            if (diagnostics.getActiveJobsCount() > 0 ||
+                this.activeChapterExecutions.size > 0 ||
+                chapterSemaphore.active > 0) {
+                // Never clear a lease or re-open capacity underneath an operation
+                // that ignored cancellation. The next circuit-protected watchdog
+                // cycle can attempt recovery again, without a restart storm.
+                this.logger.warn(`[CONTROLLED SELF-RESTART] Deferred after bounded cancellation: diagnostics=${diagnostics.getActiveJobsCount()}, chapterExecutions=${this.activeChapterExecutions.size}, chapterPermits=${chapterSemaphore.active}.`);
+                this.isRestarting = false;
+                return false;
+            }
+            // All old callers received the abort. New work after this recovery must
+            // use a fresh epoch rather than inheriting a permanently aborted signal.
+            this.abortController = new AbortController();
+            this.logger.warn('[CONTROLLED SELF-RESTART] Stalled in-flight work cancelled and drained safely.');
         }
         // If an explicit test handler was attached, invoke it for test assertions
         if (this.isExplicitExitHandlerSet && this.exitHandler) {
@@ -4451,12 +4476,21 @@ export class ImporterEngine {
             attempts++;
             fetchError = null;
             try {
+                const requestSignal = AbortSignal.any([
+                    this.abortController.signal,
+                    AbortSignal.timeout(timeoutDuration),
+                ]);
                 res = await fetch(url, {
                     headers: requestHeaders,
-                    signal: AbortSignal.timeout(timeoutDuration),
+                    signal: requestSignal,
                 });
-                if (res.ok)
+                if (res.ok) {
+                    // Keep the signal alive through body consumption. A response that
+                    // sends headers then stalls must release its global download permit
+                    // and buffer reservation rather than pinning a chapter slot forever.
+                    res.__noxBodySignal = requestSignal;
                     break;
+                }
                 if (res.status === 429) {
                     const retryAfter = res.headers.get('Retry-After');
                     this.rateLimiter.handle429(parsedUrl.host, retryAfter);
@@ -4470,6 +4504,12 @@ export class ImporterEngine {
             }
             catch (err) {
                 fetchError = err;
+                // A controlled recovery cancels the current operation epoch. It is
+                // not a transient upstream failure and must not spend retry time or
+                // retain permits while the engine is draining.
+                if (this.abortController.signal.aborted) {
+                    throw err;
+                }
                 if (attempts < maxAttempts &&
                     (err?.name === 'TimeoutError' ||
                         err?.name === 'AbortError' ||
@@ -4485,6 +4525,10 @@ export class ImporterEngine {
         if ((fetchError || res?.status === 403) && this.config.NOX_STORAGE_BRIDGE_TOKEN && isKuro) {
             try {
                 const bridgeUrl = `${(this.config.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev').replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
+                const bridgeSignal = AbortSignal.any([
+                    this.abortController.signal,
+                    AbortSignal.timeout(timeoutDuration),
+                ]);
                 const bridgeRes = await fetch(bridgeUrl, {
                     method: 'POST',
                     headers: {
@@ -4497,7 +4541,7 @@ export class ImporterEngine {
                             Referer: referer,
                         },
                     }),
-                    signal: AbortSignal.timeout(timeoutDuration),
+                    signal: bridgeSignal,
                 });
                 if (bridgeRes.ok) {
                     this.rateLimiter.recordSuccess(parsedUrl.host);
@@ -4514,7 +4558,10 @@ export class ImporterEngine {
                             }
                         }
                     }
-                    return await readImageBody(bridgeRes, { reservation: options?.reservation });
+                    return await readImageBody(bridgeRes, {
+                        reservation: options?.reservation,
+                        signal: bridgeSignal,
+                    });
                 }
             }
             catch (bridgeErr) {
@@ -4546,7 +4593,10 @@ export class ImporterEngine {
                 }
             }
         }
-        const uint8 = await readImageBody(res, { reservation: options?.reservation });
+        const uint8 = await readImageBody(res, {
+            reservation: options?.reservation,
+            signal: res.__noxBodySignal,
+        });
         // Validate binary image integrity and check for fake HTML challenge pages returned with HTTP 200
         const bodySnippet = new TextDecoder('utf-8', { fatal: false }).decode(uint8.slice(0, 8192));
         const imgInsp = CloudflareClassifier.inspect(res.status, res.headers, bodySnippet, {
