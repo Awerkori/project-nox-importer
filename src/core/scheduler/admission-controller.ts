@@ -1533,7 +1533,16 @@ export class AdmissionController {
 
         if (isP1) {
           newWork.queuedChapters = await this.enforceP1FairWindow(newWork.workId);
-          this.advanceP1AdmissionCursor(cand.source, cand.work_id);
+          // On-demand admission is intentionally allowed to choose a
+          // publication-frontier candidate when the normal cohort cannot
+          // supply a job. That candidate is not necessarily the next work in
+          // the source's circular P1 order. Advancing the durable cursor here
+          // would make every work between the old cursor and this frontier
+          // candidate look as though it had already received a fair window.
+          //
+          // Keep the cursor owned exclusively by periodic P1 rotation. The
+          // on-demand work still receives its one-chapter window, but cannot
+          // skip unseen P1 works or rewrite progress across a restart.
         }
         this.stateStore.setActiveWork(newWork);
 

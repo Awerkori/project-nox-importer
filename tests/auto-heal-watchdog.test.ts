@@ -371,7 +371,7 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
   // =========================================================================
   // CASO F: Process alive + 4h simulated no progress => detecta muito antes de 4h
   // =========================================================================
-  it('Caso F: processo vivo mas 4h sem progresso => watchdog detecta em <=15m e escala para CRITICAL_STALL em <=30m', () => {
+  it('Caso F: processo vivo mas sem progresso => watchdog detecta em <=8m e escala para CRITICAL_STALL em <=30m', () => {
     const watchdog = new AutoHealWatchdog({
       pool: mockPool,
       scheduler: mockScheduler,
@@ -390,22 +390,22 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
     });
     expect(status5m).toBe('HEALTHY');
 
-    // Subcase 2: at 12 minutes (> 10m)
+    // Subcase 2: at 7 minutes (> 5m)
     const status12m = watchdog.determineHealthStatus({
       eligibleJobs: 500,
       importingCount: 2,
-      lastCompletedAgeSec: 720,
-      lastFreshVisibleAgeSec: 720,
+      lastCompletedAgeSec: 420,
+      lastFreshVisibleAgeSec: 420,
       protectiveStopActive: false,
     });
     expect(status12m).toBe('DEGRADED');
 
-    // Subcase 3: at 16 minutes (> 15m)
+    // Subcase 3: at 9 minutes (> 8m)
     const status16m = watchdog.determineHealthStatus({
       eligibleJobs: 500,
       importingCount: 2,
-      lastCompletedAgeSec: 960,
-      lastFreshVisibleAgeSec: 960,
+      lastCompletedAgeSec: 540,
+      lastFreshVisibleAgeSec: 540,
       protectiveStopActive: false,
     });
     expect(status16m).toBe('STALLED');

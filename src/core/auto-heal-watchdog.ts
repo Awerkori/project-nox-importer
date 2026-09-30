@@ -8,6 +8,19 @@ import type { PublicationSafetyBarrier } from './publication-safety-barrier.js';
 import type { AdaptiveAutotuner } from './concurrency.js';
 import { diagnostics } from './diagnostics.js';
 
+// With eligible backlog, five concurrent chapters should yield observable
+// progress well before these bounds.  They intentionally sit above normal
+// large-chapter variance, but below the former 15–20 minute silent window.
+const PROGRESS_HEALTHY_MAX_SEC = 5 * 60;
+const PROGRESS_DEGRADED_MAX_SEC = 8 * 60;
+// CRITICAL_STALL remains intentionally conservative; the faster recovery
+// ladder below handles the 8–12 minute window without prematurely opening
+// the restart circuit.
+const PROGRESS_CRITICAL_SEC = 30 * 60;
+const LIGHT_RECONCILIATION_AFTER_SEC = 8 * 60;
+const STUCK_STATE_AUDIT_AFTER_SEC = 10 * 60;
+const CONTROLLED_RESTART_AFTER_SEC = 12 * 60;
+
 export type ImporterHealthStatus =
   | 'HEALTHY'
   | 'DEGRADED'
@@ -792,11 +805,11 @@ export class AutoHealWatchdog {
 
     // 1. Processing Health Dimension (based on chapter completions)
     let processingHealth: ProcessingHealth;
-    if (params.lastCompletedAgeSec <= 10 * 60) {
+    if (params.lastCompletedAgeSec <= PROGRESS_HEALTHY_MAX_SEC) {
       processingHealth = 'HEALTHY';
-    } else if (params.lastCompletedAgeSec <= 15 * 60) {
+    } else if (params.lastCompletedAgeSec <= PROGRESS_DEGRADED_MAX_SEC) {
       processingHealth = 'DEGRADED';
-    } else if (params.lastCompletedAgeSec < 30 * 60) {
+    } else if (params.lastCompletedAgeSec < PROGRESS_CRITICAL_SEC) {
       processingHealth = 'STALLED';
     } else {
       processingHealth = 'CRITICAL_STALL';
@@ -804,9 +817,9 @@ export class AutoHealWatchdog {
 
     // 2. Publication Health Dimension (based on fresh visible chapters and staged backlog)
     let publicationHealth: PublicationHealth;
-    if (params.lastFreshVisibleAgeSec <= 10 * 60) {
+    if (params.lastFreshVisibleAgeSec <= PROGRESS_HEALTHY_MAX_SEC) {
       publicationHealth = 'HEALTHY';
-    } else if (params.lastFreshVisibleAgeSec <= 15 * 60) {
+    } else if (params.lastFreshVisibleAgeSec <= PROGRESS_DEGRADED_MAX_SEC) {
       publicationHealth = 'DEGRADED';
     } else if (params.recentCompletionsAreDedupeOnly && publishableStaged === 0 && stuckStaged === 0 && unclassifiedStaged === 0) {
       // Completed chapters were deduplicated/canonical-only and no publishable, stuck, or unclassified staged backlog exists
@@ -820,7 +833,7 @@ export class AutoHealWatchdog {
     ) {
       // No active work and zero actionable, stuck, or unclassified chapters waiting -> legitimate idle / no fresh expected
       publicationHealth = 'NO_FRESH_EXPECTED';
-    } else if (params.lastFreshVisibleAgeSec < 30 * 60) {
+    } else if (params.lastFreshVisibleAgeSec < PROGRESS_CRITICAL_SEC) {
       publicationHealth = 'STALLED';
     } else {
       publicationHealth = 'CRITICAL_STALL';
@@ -978,9 +991,9 @@ export class AutoHealWatchdog {
 
   /**
    * Escalated Recovery Ladder:
-   * Level 1 (STALLED >= 10m): Light reconciliation
-   * Level 2 (STALLED >= 15m): Stuck state audit (expired leases, zombie active works)
-   * Level 3 (sustained stall >= 20m): Controlled graceful self-restart
+   * Level 1 (STALLED >= 8m): Light reconciliation
+   * Level 2 (STALLED >= 10m): Stuck state audit (expired leases, zombie active works)
+   * Level 3 (sustained stall >= 12m): Controlled graceful self-restart
    */
   async executeRecoveryLadder(metrics: HealthPanelMetrics): Promise<void> {
     const nowMs = Date.now();
@@ -1010,12 +1023,12 @@ export class AutoHealWatchdog {
       );
     }
 
-    // NÍVEL 3 — RESTART CONTROLADO (>= 20m sustained stall)
+    // NÍVEL 3 — RESTART CONTROLADO (>= 12m sustained stall)
     // Only triggers if real eligible or importing jobs exist (never for staged backlog alone, which is handled by Level 1 sweep)
     // and after prior reconciliation rungs (Level 1/2) have been attempted.
     const hasAttemptedPriorLevels = this.lastLevel1At > 0 || this.lastLevel2At > 0;
     if (
-      effectiveStallAgeSec >= 20 * 60 &&
+      effectiveStallAgeSec >= CONTROLLED_RESTART_AFTER_SEC &&
       (metrics.status === 'STALLED' || metrics.status === 'CRITICAL_STALL') &&
       (metrics.eligibleJobs > 0 || metrics.importingCount > 0) &&
       hasAttemptedPriorLevels
@@ -1087,8 +1100,8 @@ export class AutoHealWatchdog {
       return;
     }
 
-    // NÍVEL 1 — RECONCILIAÇÃO LEVE (>= 10m stall)
-    if (effectiveStallAgeSec >= 10 * 60 && (this.lastLevel1At === 0 || nowMs - this.lastLevel1At >= 3 * 60 * 1000)) {
+    // NÍVEL 1 — RECONCILIAÇÃO LEVE (>= 8m stall)
+    if (effectiveStallAgeSec >= LIGHT_RECONCILIATION_AFTER_SEC && (this.lastLevel1At === 0 || nowMs - this.lastLevel1At >= 3 * 60 * 1000)) {
       this.lastLevel1At = nowMs;
       this.autoHealState = 'LEVEL_1_LIGHT_RECONCILIATION';
       this.lastAutoHealAt = new Date().toISOString();
@@ -1103,8 +1116,8 @@ export class AutoHealWatchdog {
       return;
     }
 
-    // NÍVEL 2 — ESTADO PRESO (>= 15m stall, after Level 1 attempted)
-    if (effectiveStallAgeSec >= 15 * 60 && nowMs - this.lastLevel2At >= 5 * 60 * 1000) {
+    // NÍVEL 2 — ESTADO PRESO (>= 10m stall, after Level 1 attempted)
+    if (effectiveStallAgeSec >= STUCK_STATE_AUDIT_AFTER_SEC && nowMs - this.lastLevel2At >= 5 * 60 * 1000) {
       this.lastLevel2At = nowMs;
       this.autoHealState = 'LEVEL_2_STUCK_STATE_AUDIT';
       this.lastAutoHealAt = new Date().toISOString();
