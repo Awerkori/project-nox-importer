@@ -2,8 +2,10 @@ export declare class HostRateLimiter {
     private defaultRatePerSecond;
     private buckets;
     private logger;
+    private readonly maxBuckets;
     constructor(defaultRatePerSecond?: number);
     setHostRate(host: string, ratePerSecond: number, capacity?: number, maxRatePerSecond?: number, minRatePerSecond?: number): void;
+    private ensureBucketCapacity;
     private getBucket;
     recordSuccess(host: string): void;
     getHostRate(host: string): number;

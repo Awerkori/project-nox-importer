@@ -980,7 +980,7 @@ export class ImporterEngine {
         }
     }
     /**
-     * Periodic atomic background cleanup of redundant queue jobs (runs every 30s).
+     * Periodic atomic background cleanup of redundant queue jobs (runs every 5 min).
      * Safely marks queued/retrying jobs as COMPLETED with CANONICAL_ALREADY_SATISFIED
      * if their canonical chapter has already been published in chapters table.
      * Full worker slots wasted = 0.
@@ -993,6 +993,11 @@ export class ImporterEngine {
             try {
                 if (typeof this.scheduler.runControlledRedundantJobCleanup === 'function') {
                     await this.scheduler.runControlledRedundantJobCleanup(200);
+                }
+                if (typeof this.scheduler.runControlledExhaustedJobCleanup === 'function') {
+                    // Keep terminal retry-budget jobs out of every hot-path scan. The
+                    // scheduler-side hard cap keeps this startup/periodic pass bounded.
+                    await this.scheduler.runControlledExhaustedJobCleanup(500);
                 }
             }
             catch (err) {
@@ -2704,7 +2709,10 @@ export class ImporterEngine {
                     }).eq('id', job.source).then();
                 }
             }
-            const isStaffPriority = Boolean(job.payload?.staffRequested) || (job.priority >= 100);
+            // P0 is a fresh-release lane, not Staff. Keep retry semantics aligned
+            // with scheduler identity so a later Staff-specific policy cannot make
+            // ordinary releases bypass its retry budget/backoff.
+            const isStaffPriority = Boolean(job.payload?.staffRequested || job.payload?.staffForced) || (job.priority >= 1000);
             const decision = RetryPolicy.decide(classification, job.attempts, job.max_attempts, { isStaffPriority });
             if (classification.retryClass === 'QUEUE_RETRY_429') {
                 if (classification.sourceStage === 'storage') {
