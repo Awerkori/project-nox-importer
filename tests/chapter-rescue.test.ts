@@ -36,6 +36,7 @@ describe('Cross-Provider Chapter Rescue & Page Classification', () => {
   let engine: ImporterEngine;
   let mangaflixAdapter: SourceAdapter;
   let manhastroAdapter: SourceAdapter;
+  let observedPageFetchAttempts: number[] = [];
   const botUserId = '00000000-0000-4000-8000-000000000001';
 
   const samplePngBytes = new Uint8Array([
@@ -329,7 +330,8 @@ describe('Cross-Provider Chapter Rescue & Page Classification', () => {
     engine = new ImporterEngine(supabaseMock, storage, registry, rateLimiter, config);
 
     // Mock fetchImageBytes to simulate 404 on mangaflix dead page, 200 on others
-    (engine as any).fetchImageBytes = async (url: string, source: string) => {
+    (engine as any).fetchImageBytes = async (url: string, source: string, options?: { maxAttempts?: number }) => {
+      observedPageFetchAttempts.push(options?.maxAttempts ?? -1);
       if (url.includes('dead-page-1')) {
         throw new Error(`Failed to download image from ${url}: HTTP 404`);
       }
@@ -347,6 +349,7 @@ describe('Cross-Provider Chapter Rescue & Page Classification', () => {
   });
 
   it('performs cross-provider chapter rescue when a narrative page fails with 404 on primary source', async () => {
+    observedPageFetchAttempts = [];
     // 1. Create work in DB with valid cover
     const coverRes = await db.query(
       `insert into public.media (created_by, provider, provider_key, mime, width, height, bytes, sha256, storage_ready, purpose)
@@ -431,6 +434,11 @@ describe('Cross-Provider Chapter Rescue & Page Classification', () => {
     };
 
     await (engine as any).handleImportChapter(job);
+
+    // The chapter producer owns retry/refresh/rescue.  It must not multiply
+    // its four-attempt policy with the low-level fetch retry loop.
+    expect(observedPageFetchAttempts.length).toBeGreaterThan(0);
+    expect(observedPageFetchAttempts.every((attempts) => attempts === 1)).toBe(true);
 
     // 6. Verify results in DB
     // Job should be staged or completed with last_recovered_error referencing CROSS_PROVIDER_RESCUE
