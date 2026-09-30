@@ -152,6 +152,25 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(snapshot.pressureReason).toContain('uniform 404');
   });
 
+  it('recovers capacity after a single stale 5xx and sustained uniform route mismatch', async () => {
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
+    (sentinel as any).recordProbeResult('home', 90, 503, Date.now() - 60_000);
+    (sentinel as any).probeRouteMismatch = true;
+    (sentinel as any).probeRouteMismatchCycles = 3;
+    (sentinel as any).route4xxLabels = new Set(['home', 'reader']);
+    (sentinel as any).lastProbeStatus = { home: 404, reader: 404, health: 404 };
+
+    await sentinel.evaluatePreSlaGuardRails();
+
+    const snapshot = sentinel.getPressureSnapshot();
+    // Keep the original event visible for diagnostics, but do not let it pin
+    // the capacity controller below its safe baseline forever.
+    expect(snapshot.consecutive5xx).toBe(1);
+    expect(snapshot.siteHealth).toBe('GREEN');
+    expect(snapshot.pressureBreakdown.sitePressure).toBe(0);
+    expect(snapshot.pressureReason).toContain('uniform 404');
+  });
+
   it('selects a Reader probe chapter only when published pages exist', async () => {
     let readerSql = '';
     const pool = {
