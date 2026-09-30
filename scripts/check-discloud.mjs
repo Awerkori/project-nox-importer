@@ -10,7 +10,8 @@ async function run() {
   await new Promise(r => setTimeout(r, 8000));
   
   // Actually, wait, let's use the DIScloud API if we have the token!
-  const discloudToken = process.env.DISCLOUD_TOKEN || 'a7bd315c26f7dd93fcb9bdde9187353f86e88ff2bb2b4539ef2a0322dfafc27a'; // Wait, I don't have the token in .env! 
+const discloudToken = process.env.DISCLOUD_TOKEN || '';
+if (!discloudToken) throw new Error('DISCLOUD_TOKEN is required');
   
 }
 run();
