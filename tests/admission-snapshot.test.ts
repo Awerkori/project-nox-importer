@@ -135,6 +135,7 @@ describe('bounded admission snapshot', () => {
     expect(source.indexOf('await this.repairVisibleP2LifecycleBacklog();'))
       .toBeLessThan(source.indexOf('await this.reconcileActiveWorks();'));
     expect(source).toMatch(/w\.published IS TRUE[\s\S]{0,1000}q\.priority >= 50 AND q\.priority < 75/);
+    expect(source).toMatch(/q\.status = 'QUEUED'[\s\S]{0,80}q\.status = 'IMPORTING'/);
     expect(source).toMatch(/status = CASE WHEN pw\.id IS NOT NULL THEN 'QUEUED'/);
   });
 });
