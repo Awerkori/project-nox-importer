@@ -416,6 +416,7 @@ export class AdmissionController {
         SELECT c.work_id,
           COUNT(*) FILTER (
             WHERE q.status = 'QUEUED'
+              OR q.status = 'IMPORTING'
               OR (q.status = 'RETRY' AND q.next_run_at <= NOW())
           ) AS ready_count
         FROM candidate_works c
