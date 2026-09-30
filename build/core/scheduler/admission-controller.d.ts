@@ -28,6 +28,7 @@ export declare class AdmissionController {
     private p1BacklogProbeAt;
     private p1BacklogProbeFlight;
     private p1BacklogSnapshot;
+    private visibleP2LifecycleRepairComplete;
     setSourcePermitProvider(provider: (source: string) => number): void;
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
@@ -79,6 +80,17 @@ export declare class AdmissionController {
     private getP1BacklogSnapshot;
     /** Promote the remaining non-terminal initial batch of one visible work. */
     private promoteP2WorkToP1;
+    /**
+     * Reclassify only visible mappings that an older scheduler stranded in P2.
+     *
+     * The candidate set starts from the indexed ACTIVE mapping state and probes
+     * each work through the queue work-id index. Each cycle touches at most 12
+     * works, stops permanently when there is nothing left, and is naturally
+     * idempotent because promoted rows no longer match priority 50..74. A
+     * matching initial window is reopened in the same statement so the normal
+     * indexed P1 claim path can immediately see the repaired work.
+     */
+    private repairVisibleP2LifecycleBacklog;
     /**
      * Executes a single admission reconciliation cycle.
      */

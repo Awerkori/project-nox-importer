@@ -33,6 +33,11 @@ export class AdmissionController {
     p1BacklogProbeAt = 0;
     p1BacklogProbeFlight = null;
     p1BacklogSnapshot = { claimable: 0, available: 0, works: 0 };
+    // A previous scheduler generation could vacate a visible P2 work after its
+    // first window, leaving the rest of its queue at priority 50. Repair that
+    // legacy state in small work-scoped batches; never scan or rewrite the P2
+    // catalog as part of normal admission.
+    visibleP2LifecycleRepairComplete = false;
     setSourcePermitProvider(provider) {
         this.sourcePermitProvider = provider;
     }
@@ -375,6 +380,97 @@ export class AdmissionController {
     `, [workId]);
     }
     /**
+     * Reclassify only visible mappings that an older scheduler stranded in P2.
+     *
+     * The candidate set starts from the indexed ACTIVE mapping state and probes
+     * each work through the queue work-id index. Each cycle touches at most 12
+     * works, stops permanently when there is nothing left, and is naturally
+     * idempotent because promoted rows no longer match priority 50..74. A
+     * matching initial window is reopened in the same statement so the normal
+     * indexed P1 claim path can immediately see the repaired work.
+     */
+    async repairVisibleP2LifecycleBacklog() {
+        if (this.visibleP2LifecycleRepairComplete)
+            return;
+        const windowSize = Math.max(1, Math.min(12, this.stateStore.getConfig().slidingWindowSize || 8));
+        const result = await this.runQuery(`
+      WITH candidate_works AS MATERIALIZED (
+        SELECT wm.work_id::text AS work_id
+        FROM importer_work_mappings wm
+        JOIN works w ON w.id = wm.work_id AND w.published IS TRUE
+        WHERE wm.sync_status = 'ACTIVE'
+          AND EXISTS (
+            SELECT 1
+            FROM importer_queue q
+            WHERE q.task_type = 'IMPORT_CHAPTER'
+              AND (q.payload->>'workId') = wm.work_id::text
+              AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
+              AND q.priority >= 50 AND q.priority < 75
+              AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+            LIMIT 1
+          )
+        GROUP BY wm.work_id
+        ORDER BY MAX(wm.updated_at) DESC
+        LIMIT 12
+      ), window_state AS MATERIALIZED (
+        SELECT c.work_id,
+          COUNT(*) FILTER (
+            WHERE q.status = 'QUEUED'
+              OR (q.status = 'RETRY' AND q.next_run_at <= NOW())
+          ) AS ready_count
+        FROM candidate_works c
+        JOIN importer_queue q ON (q.payload->>'workId') = c.work_id
+        WHERE q.task_type = 'IMPORT_CHAPTER'
+          AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
+          AND q.priority >= 50 AND q.priority < 75
+          AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+        GROUP BY c.work_id
+      ), paused_window AS MATERIALIZED (
+        SELECT ranked.id
+        FROM (
+          SELECT q.id, ws.work_id,
+            ROW_NUMBER() OVER (PARTITION BY ws.work_id ORDER BY q.chapter_sort_key ASC NULLS LAST) AS position
+          FROM window_state ws
+          JOIN importer_queue q ON (q.payload->>'workId') = ws.work_id
+          WHERE q.task_type = 'IMPORT_CHAPTER'
+            AND q.status = 'PAUSED_BY_STAFF'
+            AND q.priority >= 50 AND q.priority < 75
+            AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+        ) ranked
+        JOIN window_state ws ON ws.work_id = ranked.work_id
+        WHERE ranked.position <= GREATEST(0, $1::int - ws.ready_count)
+      ), target_jobs AS MATERIALIZED (
+        SELECT q.id, ws.work_id
+        FROM window_state ws
+        JOIN importer_queue q ON (q.payload->>'workId') = ws.work_id
+        WHERE q.task_type = 'IMPORT_CHAPTER'
+          AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
+          AND q.priority >= 50 AND q.priority < 75
+          AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+      ), promoted AS (
+        UPDATE importer_queue q
+        SET priority = 75,
+            payload = jsonb_set(COALESCE(q.payload, '{}'::jsonb), '{originalPriority}', '75'::jsonb, true),
+            status = CASE WHEN pw.id IS NOT NULL THEN 'QUEUED' ELSE q.status END,
+            next_run_at = CASE WHEN pw.id IS NOT NULL THEN NOW() ELSE q.next_run_at END,
+            updated_at = NOW()
+        FROM target_jobs t
+        LEFT JOIN paused_window pw ON pw.id = t.id
+        WHERE q.id = t.id
+        RETURNING t.work_id
+      )
+      SELECT COUNT(DISTINCT work_id)::int AS works, COUNT(*)::int AS jobs
+      FROM promoted
+    `, [windowSize]);
+        const repairedWorks = parseInt(result.rows[0]?.works || '0', 10);
+        const repairedJobs = parseInt(result.rows[0]?.jobs || '0', 10);
+        if (repairedWorks === 0) {
+            this.visibleP2LifecycleRepairComplete = true;
+            return;
+        }
+        this.logger.info(`[P2_TO_P1_LEGACY_REPAIR] Promoted ${repairedJobs} queued chapter(s) across ${repairedWorks} visible work(s).`);
+    }
+    /**
      * Executes a single admission reconciliation cycle.
      */
     runAdmissionCycle() {
@@ -393,6 +489,9 @@ export class AdmissionController {
             this.logger.warn('PROTECTIVE_STOP active, skipping admission cycle');
             return;
         }
+        // Run before P1/P2 admission so legacy visible works cannot be bypassed
+        // by discovery during the first post-deploy cycle.
+        await this.repairVisibleP2LifecycleBacklog();
         // Step 1: Reconcile current active works (check caught-up, in-flight, queued)
         await this.reconcileActiveWorks();
         // Step 2: Replenish active sets if below capacity
@@ -1043,6 +1142,7 @@ export class AdmissionController {
                 }
             }
             const isP1 = lane === 'P1';
+            const maxPriority = isP1 ? 100 : 75;
             const query = `
         WITH queue_candidates AS MATERIALIZED (
           SELECT payload->>'workId' AS work_id, source, COUNT(*) AS pending_jobs,
@@ -1053,7 +1153,7 @@ export class AdmissionController {
           WHERE task_type='IMPORT_CHAPTER'
             AND (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW()))
             AND attempts < COALESCE(max_attempts,7)
-            AND priority >= 75 AND priority < 100
+            AND priority >= ${isP1 ? 75 : 50} AND priority < ${maxPriority}
             AND COALESCE(payload->>'staffForced', 'false') <> 'true'
             AND ($1::text[] IS NULL OR source = ANY($1::text[]))
             AND NOT ((payload->>'workId') = ANY($2::text[]))
