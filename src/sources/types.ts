@@ -70,6 +70,14 @@ export interface SourceAdapter {
   fetchChapterPages(sourceChapterId: string, chapterNumber?: number): Promise<string[]>;
 
   /**
+   * Optional, fail-closed ownership proof for adapters whose chapter URL
+   * embeds the work slug.  The importer invokes this again at execution
+   * time, so an old/corrupt queue payload cannot cross-publish content into
+   * another canonical work.
+   */
+  isChapterOwnedByWork?(sourceWorkId: string, sourceChapterId: string): boolean;
+
+  /**
    * Search for works matching a query string (title, slug, or alias)
    */
   searchWorks(query: string): Promise<SourceWorkSummary[]>;
@@ -79,4 +87,3 @@ export interface SourceAdapter {
    */
   getImageHeaders?(url: string): Promise<Record<string, string>> | Record<string, string>;
 }
-

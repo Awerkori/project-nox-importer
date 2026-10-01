@@ -2031,4 +2031,46 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
       expect.stringContaining('Restart storm circuit breaker open')
     );
   });
+
+  it('keeps bounded recovery alive after the circuit cooldown instead of requiring human intervention', async () => {
+    const now = Date.now();
+    const pastRestarts: AutoRestartRecord[] = [
+      { timestamp: new Date(now - 45 * 60 * 1000).toISOString(), reason: 'CRITICAL_STALL', progressAgeSec: 1800, eligibleJobs: 100 },
+      { timestamp: new Date(now - 30 * 60 * 1000).toISOString(), reason: 'CRITICAL_STALL', progressAgeSec: 1800, eligibleJobs: 100 },
+      { timestamp: new Date(now - 9 * 60 * 1000).toISOString(), reason: 'CRITICAL_STALL', progressAgeSec: 1800, eligibleJobs: 100 },
+    ];
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes("key = 'importer_auto_restarts'")) return { rows: [{ value: JSON.stringify(pastRestarts) }] };
+      if (sql.includes("key = 'active_works'")) return { rows: [{ value: JSON.stringify([]) }] };
+      if (sql.includes('UPDATE importer_queue')) return { rows: [] };
+      return { rows: [] };
+    });
+    onControlledRestart.mockResolvedValue(true);
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+    // In production the circuit opens only after Level 1/2 already ran.
+    // Exercise that same Level 3 path instead of the initial reconciliation.
+    (watchdog as any).lastLevel1At = now - 60_000;
+
+    await watchdog.executeRecoveryLadder({
+      status: 'STALLED', autoHealState: 'MONITORING', processingHealth: 'STALLED', publicationHealth: 'STALLED',
+      lastStartedAgeSec: 20 * 60, lastCompletedAgeSec: 20 * 60, lastFreshVisibleAgeSec: 20 * 60,
+      startedLast15m: 0, completedLast15m: 0, freshLast15m: 0, eligibleJobs: 25, claimableWorks: 1,
+      activeWorksCount: 1, zombieWorksCount: 0, importingCount: 1, retryCount: 0, stagedUnique: 0,
+      publishableStaged: 0, waitingPredecessorStaged: 0, stuckStaged: 0, lastAutoHealAt: null,
+      autoRestartCount1h: 3, circuitBreakerOpen: true, protectiveStopActive: false, rssMb: 0, pid: 1,
+      timestamp: new Date().toISOString(),
+    });
+
+    expect(mockAdmissionController.runAdmissionCycle).toHaveBeenCalled();
+    expect(onControlledRestart).toHaveBeenCalledWith(
+      expect.stringContaining('CIRCUIT_CONTAINMENT_STALL'),
+      expect.any(Object),
+    );
+  });
 });

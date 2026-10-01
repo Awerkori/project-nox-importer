@@ -19,6 +19,16 @@ export declare class MadaraAdapter implements SourceAdapter {
     constructor(options: MadaraOptions, rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     protected get headers(): Record<string, string>;
     protected fetchHtml(url: string, options?: RequestInit): Promise<string>;
+    /**
+     * Madara chapter URLs are scoped by the work slug:
+     *   /manga/<source-work-id>/capitulo-<n>/
+     *
+     * Some themes render recommendation/sidebar links beside an otherwise
+     * incomplete chapter list.  Treating those links as chapters of the page
+     * being parsed corrupts the canonical work.  This intentionally rejects
+     * an unfamiliar URL shape rather than guessing its ownership.
+     */
+    isChapterOwnedByWork(sourceWorkId: string, sourceChapterId: string): boolean;
     fetchUpdatedWorks(cursor?: string | null, options?: {
         mode?: 'bootstrap' | 'maintenance';
     }): Promise<{

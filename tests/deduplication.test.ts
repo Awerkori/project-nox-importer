@@ -216,6 +216,46 @@ describe('DeduplicationEngine', () => {
     expect((map.rows[0] as any).sync_status).toBe('AMBIGUOUS');
   });
 
+  it('does not let fuzzy title similarity alone bind a source work that will publish chapters', async () => {
+    await db.exec(`
+      insert into public.importer_sources (id, name, base_url, enabled, rate_limit_per_second, sync_interval_minutes, config)
+      values
+        ('seed', 'seed', 'https://seed.invalid', true, 1, 60, '{}'::jsonb),
+        ('fuzzy-test-source', 'fuzzy-test-source', 'https://fuzzy.invalid', true, 1, 60, '{}'::jsonb)
+      on conflict (id) do nothing
+    `);
+    const canonical = await db.query(`
+      insert into public.works (title, slug, kind, status)
+      values ('Regressor Instructions Manual', 'regressor-instructions-manual', 'MANHWA', 'ONGOING')
+      returning id
+    `);
+    const canonicalId = (canonical.rows[0] as any).id;
+    // This pre-existing mapping merely narrows the candidate set. Its source
+    // title is intentionally close, but not the canonical work title.
+    await db.query(`
+      insert into public.importer_work_mappings
+        (source, source_work_id, work_id, source_slug, source_title, sync_status, metadata, last_synced_at)
+      values ('seed', 'seed-regressor', $1, 'regressor-instruction-manual', 'Regressor Instruction Manual', 'SYNCED', '{}'::jsonb, now())
+    `, [canonicalId]);
+
+    const result = await engine.resolveWork({
+      source: 'fuzzy-test-source',
+      sourceWorkId: 'regressor-near-match',
+      title: 'Regressor Instruction Manual',
+      slug: 'regressor-instruction-manual',
+      kind: 'MANHWA',
+    });
+
+    expect(result.status).toBe('AMBIGUOUS');
+    expect(result.workId).toBeNull();
+    const mapping = await db.query(
+      'select sync_status, work_id from public.importer_work_mappings where source = $1 and source_work_id = $2',
+      ['fuzzy-test-source', 'regressor-near-match'],
+    );
+    expect((mapping.rows[0] as any).sync_status).toBe('AMBIGUOUS');
+    expect((mapping.rows[0] as any).work_id).toBeNull();
+  });
+
   it('matches canonical work via alias and binds cleanly without creating duplicates (Demon King)', async () => {
     // 1. Canonical work exists with title "Imperador Demoníaco" and alias "The Servant Is the Demon King?!"
     const canonicalWork = await db.query(`

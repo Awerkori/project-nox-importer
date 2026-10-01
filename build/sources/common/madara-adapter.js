@@ -67,6 +67,37 @@ export class MadaraAdapter {
         }
         throw new Error(`Failed to fetch ${url} after ${maxAttempts} attempts`);
     }
+    /**
+     * Madara chapter URLs are scoped by the work slug:
+     *   /manga/<source-work-id>/capitulo-<n>/
+     *
+     * Some themes render recommendation/sidebar links beside an otherwise
+     * incomplete chapter list.  Treating those links as chapters of the page
+     * being parsed corrupts the canonical work.  This intentionally rejects
+     * an unfamiliar URL shape rather than guessing its ownership.
+     */
+    isChapterOwnedByWork(sourceWorkId, sourceChapterId) {
+        try {
+            const chapterUrl = new URL(sourceChapterId, `${this.baseUrl}/`);
+            const sourceUrl = new URL(this.baseUrl);
+            if (chapterUrl.origin !== sourceUrl.origin)
+                return false;
+            const workSlug = decodeURIComponent(String(sourceWorkId || ''))
+                .trim()
+                .replace(/^\/+|\/+$/g, '')
+                .toLocaleLowerCase();
+            if (!workSlug || workSlug.includes('/'))
+                return false;
+            const path = decodeURIComponent(chapterUrl.pathname)
+                .replace(/\/+/g, '/')
+                .toLocaleLowerCase();
+            const expectedPrefix = `/${this.mangaSubString.toLocaleLowerCase()}/${workSlug}/`;
+            return path.startsWith(expectedPrefix);
+        }
+        catch {
+            return false;
+        }
+    }
     async fetchUpdatedWorks(cursor, options) {
         const page = cursor ? Math.max(1, parseInt(cursor, 10)) : 1;
         let html = '';
@@ -271,9 +302,18 @@ export class MadaraAdapter {
             chapUrl = chapUrl.trim();
             if (!chapUrl || seenUrls.has(chapUrl))
                 continue;
+            const relativeOrFull = chapUrl.startsWith('http') ? chapUrl : `${this.baseUrl}${chapUrl.startsWith('/') ? '' : '/'}${chapUrl}`;
+            // General href fallback can see links from sidebars/recommendations.
+            // A URL outside this work's canonical path is never a chapter of it.
+            if (!this.isChapterOwnedByWork(sourceWorkId, relativeOrFull)) {
+                this.logger.warn('Ignoring chapter URL outside source work scope', {
+                    sourceWorkId,
+                    sourceChapterId: relativeOrFull,
+                });
+                continue;
+            }
             seenUrls.add(chapUrl);
             const num = extractChapterNumber(chapUrl);
-            const relativeOrFull = chapUrl.startsWith('http') ? chapUrl : `${this.baseUrl}${chapUrl.startsWith('/') ? '' : '/'}${chapUrl}`;
             chapters.push({
                 sourceChapterId: relativeOrFull,
                 number: num,
