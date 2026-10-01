@@ -1,6 +1,7 @@
 import { Logger } from './logger.js';
 import { decodeHtmlEntities } from '../sources/common/html-utils.js';
 import { evaluateMetadataMatchEvidence, matchWorkCandidate, getCanonicalSynonyms } from './matching.js';
+import { CANONICAL_ADULT_TAG_NAME, CANONICAL_ADULT_TAG_SLUG, canonicalAdultTagName } from './tag-normalization.js';
 export const ADULT_SOURCES = new Set([
     'hanamiheaven',
     'hipercool',
@@ -753,6 +754,9 @@ export class DeduplicationEngine {
      * Normalize and resolve a tag name to its canonical form
      */
     normalizeTagName(raw) {
+        const adultTag = canonicalAdultTagName(decodeHtmlEntities(raw));
+        if (adultTag)
+            return adultTag;
         const canonicalAliases = {
             'bl': 'Yaoi',
             'boys love': 'Yaoi',
@@ -768,11 +772,6 @@ export class DeduplicationEngine {
             'shoujo ai': 'Yuri',
             'shoujo-ai': 'Yuri',
             'shojo ai': 'Yuri',
-            'adult': 'Adulto',
-            'adults only': 'Adulto',
-            '18+': 'Adulto',
-            '+18': 'Adulto',
-            'mature': 'Adulto',
             'pornhwa': 'Pornhwa',
             'porn hwa': 'Pornhwa',
             // Provider vocabulary is commonly English while the canonical catalog
@@ -861,22 +860,22 @@ export class DeduplicationEngine {
             'pinkrosa': ['Yaoi'],
             'covenscan': ['Yaoi'],
             'borutoexplorer': ['Yaoi'],
-            'megahentai': ['Hentai', 'Adulto'],
-            'universohentai': ['Hentai', 'Adulto'],
-            'hentaifusion': ['Hentai', 'Adulto'],
-            'hentaihome': ['Hentai', 'Adulto'],
-            'hentaiseason': ['Hentai', 'Adulto'],
-            'hentaitokyo': ['Hentai', 'Adulto'],
-            'tankouhentai': ['Hentai', 'Adulto'],
-            'mundohentai': ['Hentai', 'Adulto'],
-            'nhentaibr': ['Hentai', 'Adulto'],
-            'instahentai': ['Hentai', 'Adulto'],
-            'hotcabaretscan': ['Hentai', 'Adulto'],
-            'acervohentai': ['Hentai', 'Adulto'],
-            'nocturnesummer': ['Pornhwa', 'Adulto'],
-            'tiamanhwa': ['Pornhwa', 'Adulto'],
-            'inkapk': ['Pornhwa', 'Adulto'],
-            'littletyrant': ['Pornhwa', 'Adulto'],
+            'megahentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'universohentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'hentaifusion': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'hentaihome': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'hentaiseason': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'hentaitokyo': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'tankouhentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'mundohentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'nhentaibr': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'instahentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'hotcabaretscan': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'acervohentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
+            'nocturnesummer': ['Pornhwa', CANONICAL_ADULT_TAG_NAME],
+            'tiamanhwa': ['Pornhwa', CANONICAL_ADULT_TAG_NAME],
+            'inkapk': ['Pornhwa', CANONICAL_ADULT_TAG_NAME],
+            'littletyrant': ['Pornhwa', CANONICAL_ADULT_TAG_NAME],
             'yuriverso': ['Yuri']
         };
         return special[source] || [];
@@ -915,21 +914,15 @@ export class DeduplicationEngine {
         try {
             const tagLookup = await this.getTagCatalog();
             const targetTagIds = new Set();
+            const desiredTags = new Set();
             if (isAdult) {
-                for (const key of ['adulto', '18', '+18', 'adulto-18', 'adulto (+18)']) {
-                    const tId = tagLookup.get(key);
-                    if (tId)
-                        targetTagIds.add(tId);
-                }
+                desiredTags.add(CANONICAL_ADULT_TAG_NAME);
                 const effectiveKind = (kind || candidate.kind || '').toUpperCase();
                 const hasManhwaGenre = (candidate.genres || []).some((g) => /manhwa|pornhwa/i.test(g));
                 if (effectiveKind === 'MANHWA' || hasManhwaGenre) {
-                    const pornhwaTag = tagLookup.get('pornhwa');
-                    if (pornhwaTag)
-                        targetTagIds.add(pornhwaTag);
+                    desiredTags.add('Pornhwa');
                 }
             }
-            const desiredTags = new Set();
             if (source) {
                 const def = this.getProviderDefaultTags(source);
                 for (const d of def)
@@ -946,7 +939,9 @@ export class DeduplicationEngine {
             // Auto-create missing tags safely
             for (const tName of desiredTags) {
                 const lower = this.tagLookupKey(tName);
-                const tSlug = this.sanitizeSlug(lower);
+                const tSlug = tName === CANONICAL_ADULT_TAG_NAME
+                    ? CANONICAL_ADULT_TAG_SLUG
+                    : this.sanitizeSlug(lower);
                 let tagId = tagLookup.get(lower) || tagLookup.get(tSlug);
                 if (!tagId) {
                     // Attempt to create it safely (idempotent due to unique constraint on slug/name)
