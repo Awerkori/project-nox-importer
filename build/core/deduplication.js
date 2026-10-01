@@ -246,6 +246,15 @@ export class DeduplicationEngine {
                     year: candidate.year,
                 });
                 const metadataEvidence = evaluateMetadataMatchEvidence({ title: w.title, kind: w.kind, author: w.author, artist: w.artist, synopsis: w.synopsis, year: w.year }, { title: candidate.title, kind: candidate.kind, author: candidate.author, artist: candidate.artist, synopsis: candidate.synopsis, year: candidate.year });
+                // A title-similarity score is useful for discovery, but it is never
+                // sufficient authority to attach a source work to an existing
+                // canonical work.  Without independent creator + synopsis
+                // corroboration, retain it for review instead of allowing every one
+                // of its chapters to inherit a potentially wrong work_id.
+                if (matchResult.matched && matchResult.matchMethod === 'FUZZY_HIGH' && !metadataEvidence.autoMatch) {
+                    ambiguousMetadataCandidates.push({ work: w, score: matchResult.confidenceScore });
+                    continue;
+                }
                 if (!matchResult.matched) {
                     if (metadataEvidence.ambiguous) {
                         ambiguousMetadataCandidates.push({ work: w, score: metadataEvidence.score });

@@ -12,6 +12,10 @@ const PROGRESS_CRITICAL_SEC = 30 * 60;
 const LIGHT_RECONCILIATION_AFTER_SEC = 8 * 60;
 const STUCK_STATE_AUDIT_AFTER_SEC = 10 * 60;
 const CONTROLLED_RESTART_AFTER_SEC = 12 * 60;
+// A restart storm must suppress rapid repeats, never liveness itself.  Once
+// the normal restart budget is open, one bounded containment probe remains
+// available after this cooldown to cancel a genuinely wedged in-flight epoch.
+const CIRCUIT_CONTAINMENT_COOLDOWN_MS = 8 * 60 * 1000;
 /**
  * AutoHealWatchdog
  *
@@ -46,6 +50,7 @@ export class AutoHealWatchdog {
     lastLevel2At = 0;
     lastRestartAt = 0;
     lastSweepAt = 0;
+    lastCircuitContainmentAt = 0;
     stuckIdentities = new Map();
     circuitBreakerOpen = false;
     cachedTelemetry = null;
@@ -844,6 +849,27 @@ export class AutoHealWatchdog {
      */
     async executeRecoveryLadder(metrics) {
         const nowMs = Date.now();
+        // A closed global publication barrier is an intentional integrity hold
+        // (for example while a bad source is being quarantined), not a dead
+        // worker. Do not turn that safety decision into a restart loop. Once the
+        // barrier reopens, normal liveness recovery resumes on the next cycle.
+        if (this.safetyBarrier) {
+            try {
+                const barrierState = await this.safetyBarrier.getState();
+                if (barrierState === 'CLOSED' || barrierState === 'RECOVERING') {
+                    this.autoHealState = 'MONITORING';
+                    this.logger.warn('[AUTO-HEAL] Global publication safety barrier is active; deferring restart recovery until it reopens.', {
+                        barrierState,
+                    });
+                    return;
+                }
+            }
+            catch (err) {
+                // The publication path owns the actual integrity guard. Keep liveness
+                // recovery available if this observational read fails.
+                this.logger.warn('[AUTO-HEAL] Could not read publication safety barrier state', { error: err?.message });
+            }
+        }
         // Unclassified staged alone MUST NEVER trigger recovery ladder or process restart
         if (metrics.eligibleJobs === 0 &&
             metrics.importingCount === 0 &&
@@ -880,10 +906,11 @@ export class AutoHealWatchdog {
             if (this.circuitBreakerOpen || restartsLast1h.length >= 3) {
                 this.circuitBreakerOpen = true;
                 this.autoHealState = 'CIRCUIT_OPEN';
-                this.logger.error(`🚨 [AUTO-RECOVERY CIRCUIT OPEN] Reached max 3 auto-restarts in 1h (Current count: ${restartsLast1h.length}). Halting automatic restarts to prevent loop. Setting SURVIVAL mode (concurrency = 1).`);
+                this.logger.error(`🚨 [AUTO-RECOVERY CIRCUIT OPEN] Reached max 3 auto-restarts in 1h (Current count: ${restartsLast1h.length}). Suppressing rapid restarts while continuing bounded containment recovery.`);
                 if (this.autotuner) {
                     this.autotuner.setCapacity(1, 'SURVIVAL', 'Restart storm circuit breaker open (>=3 restarts/1h)');
                 }
+                await this.runCircuitContainment(metrics, recentRestarts, nowMs);
                 return;
             }
             // Persistent 15-minute cooldown check across processes
@@ -953,6 +980,61 @@ export class AutoHealWatchdog {
                 this.logger.error('Failed executing Level 2 stuck state audit', { error: err?.message });
             }
             return;
+        }
+    }
+    /**
+     * The old circuit breaker made a stalled importer quieter after three
+     * failed restarts: it forced survival capacity and then waited for a human.
+     * Keep the loop guard, but continue low-frequency recovery.  This uses the
+     * existing controlled drain/cancellation path and never changes resource
+     * ceilings or retries at a high cadence.
+     */
+    async runCircuitContainment(metrics, recentRestarts, nowMs) {
+        const latestRestartMs = recentRestarts.reduce((latest, record) => {
+            const timestamp = new Date(record.timestamp).getTime();
+            return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
+        }, 0);
+        const lastContainmentMs = Math.max(this.lastCircuitContainmentAt, latestRestartMs);
+        if (lastContainmentMs > 0 && nowMs - lastContainmentMs < CIRCUIT_CONTAINMENT_COOLDOWN_MS) {
+            this.logger.warn('[AUTO-RECOVERY CIRCUIT] Containment cooldown active; reconciliation remains enabled.', {
+                waitMs: CIRCUIT_CONTAINMENT_COOLDOWN_MS - (nowMs - lastContainmentMs),
+            });
+            return;
+        }
+        this.lastCircuitContainmentAt = nowMs;
+        this.lastAutoHealAt = new Date(nowMs).toISOString();
+        // These are idempotent, bounded operations.  They can recover stale
+        // scheduler/admission state without touching live, healthy work.
+        try {
+            await this.runLevel1LightReconciliation(metrics);
+            await this.runLevel2StuckStateAudit(metrics);
+        }
+        catch (err) {
+            this.logger.warn('[AUTO-RECOVERY CIRCUIT] Containment reconciliation failed', { error: err?.message });
+        }
+        if (!this.onControlledRestart)
+            return;
+        const reason = `CIRCUIT_CONTAINMENT_STALL: no useful progress with ${metrics.eligibleJobs} eligible jobs after restart circuit opened`;
+        try {
+            const recovered = await this.onControlledRestart(reason, metrics);
+            if (recovered !== false) {
+                // Persist the containment event to establish a process-independent
+                // cooldown.  It is intentionally not used to raise capacity or clear
+                // the circuit, only to prevent another restart storm.
+                await this.recordAutoRestart({
+                    timestamp: new Date().toISOString(),
+                    reason,
+                    progressAgeSec: Math.max(metrics.lastCompletedAgeSec, metrics.lastFreshVisibleAgeSec),
+                    eligibleJobs: metrics.eligibleJobs,
+                });
+                this.logger.warn('[AUTO-RECOVERY CIRCUIT] Bounded containment recovery completed; awaiting real publication progress.');
+            }
+            else {
+                this.logger.warn('[AUTO-RECOVERY CIRCUIT] Containment restart deferred because work did not quiesce safely.');
+            }
+        }
+        catch (err) {
+            this.logger.error('[AUTO-RECOVERY CIRCUIT] Containment restart failed', { error: err?.message });
         }
     }
     /**

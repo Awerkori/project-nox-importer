@@ -140,6 +140,18 @@ export class JobCancelledByStaffError extends Error {
   }
 }
 
+/**
+ * A chapter payload whose source-work identity cannot be proven is unsafe to
+ * retry or publish.  It is a permanent, quarantinable data error: another
+ * healthy job/source may still make progress normally.
+ */
+export class WorkIdentityMismatchError extends PermanentDataError {
+  constructor(message: string) {
+    super(`[WORK_IDENTITY_MISMATCH] ${message}`);
+    this.name = 'PermanentDataError';
+  }
+}
+
 export type PageSemanticType = 'CONTENT_PAGE' | 'CREDIT_PAGE' | 'PROMO_PAGE' | 'RECRUITMENT_PAGE' | 'WARNING_PAGE';
 
 export function classifyPageUrl(url: string, index: number, total: number): PageSemanticType {
@@ -3013,6 +3025,32 @@ export class ImporterEngine {
       }
 
       const errorMessage = err?.message || String(err);
+
+      // Identity conflicts are poison-data incidents, not transient source
+      // failures.  Quarantine only this mapping/job so every unrelated work
+      // can continue through the scheduler.
+      if (err instanceof WorkIdentityMismatchError) {
+        const payload = job.payload || {};
+        if (payload.sourceChapterId && payload.workId) {
+          try {
+            await this.supabase
+              .from('importer_chapter_mappings')
+              .update({
+                status: 'FAILED',
+                is_page_provider: false,
+                last_error: this.sanitizeErrorMessage(errorMessage),
+                updated_at: new Date().toISOString(),
+              })
+              .eq('source', job.source)
+              .eq('source_chapter_id', payload.sourceChapterId)
+              .eq('work_id', payload.workId);
+          } catch {
+            // The terminal queue transition below remains fail-closed even if
+            // legacy mapping data itself is malformed.
+          }
+        }
+      }
+
       this.logger.error('Job execution failed', {
         jobId: job.id,
         taskType: job.task_type,
@@ -3436,7 +3474,24 @@ export class ImporterEngine {
       return;
     }
 
-    const chapters = await adapter.fetchChapters(sourceWorkId);
+    const discoveredChapters = await adapter.fetchChapters(sourceWorkId);
+    // An adapter that can prove URL ownership must never enqueue a chapter
+    // outside its current source work.  This is deliberately before mappings
+    // and queue writes: a bad upstream/sidebar link becomes no work at all.
+    const chapters = typeof adapter.isChapterOwnedByWork === 'function'
+      ? discoveredChapters.filter((chapter) => {
+          const owned = adapter.isChapterOwnedByWork!(sourceWorkId, chapter.sourceChapterId);
+          if (!owned) {
+            this.logger.error('WORK_IDENTITY_MISMATCH: refusing chapter outside source work during discovery', {
+              source: job.source,
+              sourceWorkId,
+              sourceChapterId: chapter.sourceChapterId,
+              chapterNumber: chapter.number,
+            });
+          }
+          return owned;
+        })
+      : discoveredChapters;
     this.logger.info('Found chapters for work', {
       title: details.title,
       chapterCount: chapters.length,
@@ -3740,6 +3795,69 @@ export class ImporterEngine {
     return this.computeCanonicalChapterKey(chapterNumber, chapterTitle).sortKey;
   }
 
+  /**
+   * Last fail-closed boundary before a chapter can consume media or become a
+   * canonical chapter.  The work mapping is the durable identity authority;
+   * a queue payload is only a cached transport envelope and must agree with
+   * it exactly.  For URL-scoped sources (Madara/MangaLivre), the adapter also
+   * proves that the chapter URL lives beneath the mapped work path.
+   */
+  private async assertChapterWorkIdentity(input: {
+    source: string;
+    sourceWorkId: string;
+    sourceChapterId: string;
+    workId: string;
+    workMappingId?: string;
+    jobId: string;
+  }): Promise<void> {
+    const { source, sourceWorkId, sourceChapterId, workId, workMappingId, jobId } = input;
+    if (!sourceWorkId || !sourceChapterId || !workId || !workMappingId) {
+      throw new WorkIdentityMismatchError(`job ${jobId} lacks a complete source/work identity`);
+    }
+
+    const { data: mapping, error: mappingError } = await this.supabase
+      .from('importer_work_mappings')
+      .select('id, source, source_work_id, work_id, sync_status')
+      .eq('id', workMappingId)
+      .maybeSingle();
+
+    if (mappingError || !mapping) {
+      throw new WorkIdentityMismatchError(`job ${jobId} references missing work mapping ${workMappingId}`);
+    }
+    if (
+      mapping.source !== source ||
+      mapping.source_work_id !== sourceWorkId ||
+      mapping.work_id !== workId ||
+      mapping.sync_status === 'UNMATCHED'
+    ) {
+      throw new WorkIdentityMismatchError(
+        `job ${jobId} conflicts with durable mapping (payload ${source}/${sourceWorkId}/${workId}, mapping ${mapping.source}/${mapping.source_work_id}/${mapping.work_id})`,
+      );
+    }
+
+    const { data: existingChapterMapping, error: chapterMappingError } = await this.supabase
+      .from('importer_chapter_mappings')
+      .select('work_id, work_mapping_id')
+      .eq('source', source)
+      .eq('source_chapter_id', sourceChapterId)
+      .maybeSingle();
+
+    if (chapterMappingError) {
+      throw new WorkIdentityMismatchError(`job ${jobId} could not verify its existing chapter mapping`);
+    }
+    if (
+      existingChapterMapping &&
+      (existingChapterMapping.work_id !== workId || existingChapterMapping.work_mapping_id !== workMappingId)
+    ) {
+      throw new WorkIdentityMismatchError(`source chapter ${sourceChapterId} is already mapped to a different canonical work`);
+    }
+
+    const adapter = this.registry.get(source);
+    if (typeof adapter?.isChapterOwnedByWork === 'function' && !adapter.isChapterOwnedByWork(sourceWorkId, sourceChapterId)) {
+      throw new WorkIdentityMismatchError(`source chapter URL/id is outside mapped source work ${sourceWorkId}`);
+    }
+  }
+
   private async handleImportChapter(
     job: QueueJob,
     isCancelled?: () => boolean,
@@ -3797,8 +3915,8 @@ export class ImporterEngine {
       chapterTitle,
     } = job.payload;
 
-    if (!sourceChapterId || !workId || chapterNumber === undefined) {
-      throw new Error('Incomplete chapter import payload');
+    if (!sourceWorkId || !sourceChapterId || !workId || chapterNumber === undefined) {
+      throw new WorkIdentityMismatchError(`job ${job.id} has incomplete chapter import payload`);
     }
 
     // Gracefully handle missing workMappingId (e.g. from manual gap revivals)
@@ -3808,11 +3926,21 @@ export class ImporterEngine {
         .select('id')
         .eq('work_id', workId)
         .eq('source', job.source)
+        .eq('source_work_id', sourceWorkId)
         .maybeSingle();
       if (wm?.id) {
         workMappingId = wm.id;
       }
     }
+
+    await this.assertChapterWorkIdentity({
+      source: job.source,
+      sourceWorkId,
+      sourceChapterId,
+      workId,
+      workMappingId,
+      jobId: job.id,
+    });
 
     // Pre-flight check: if already published by concurrent worker, skip download
     let { data: alreadyPub } = await this.supabase
@@ -3867,6 +3995,7 @@ export class ImporterEngine {
     let effectiveSource = job.source;
     let effectiveSourceChapterId = sourceChapterId;
     let effectiveWorkMappingId = workMappingId;
+    let effectiveSourceWorkId = sourceWorkId;
     const initialSource = job.source;
 
 
@@ -3890,6 +4019,22 @@ export class ImporterEngine {
         effectiveSource = realMapping.source;
         if (realMapping.work_mapping_id) {
           effectiveWorkMappingId = realMapping.work_mapping_id;
+          const { data: correctedWorkMapping } = await this.supabase
+            .from('importer_work_mappings')
+            .select('source, source_work_id, work_id, sync_status')
+            .eq('id', realMapping.work_mapping_id)
+            .maybeSingle();
+          if (
+            !correctedWorkMapping ||
+            correctedWorkMapping.source !== effectiveSource ||
+            correctedWorkMapping.work_id !== workId ||
+            correctedWorkMapping.sync_status === 'UNMATCHED'
+          ) {
+            throw new WorkIdentityMismatchError(
+              `source correction for job ${job.id} has no coherent canonical work mapping`,
+            );
+          }
+          effectiveSourceWorkId = correctedWorkMapping.source_work_id;
         }
         await this.supabase
           .from('importer_queue')
@@ -3948,8 +4093,8 @@ export class ImporterEngine {
     const targetChapterId = existingChapter?.id || crypto.randomUUID();
 
     // Dynamic candidate fallbacks resolution across payload, mappings, manifest, and work sources
-    let allSourceCandidates: Array<{source: string; sourceChapterId: string; mappingId?: string}> = [
-      { source: effectiveSource, sourceChapterId: effectiveSourceChapterId, mappingId: effectiveWorkMappingId },
+    let allSourceCandidates: Array<{source: string; sourceChapterId: string; mappingId?: string; sourceWorkId?: string}> = [
+      { source: effectiveSource, sourceChapterId: effectiveSourceChapterId, mappingId: effectiveWorkMappingId, sourceWorkId },
     ];
     let fallbacksResolved = false;
     const loadFallbacks = async () => {
@@ -3982,6 +4127,33 @@ export class ImporterEngine {
         effectiveSourceChapterId = candidate.sourceChapterId;
         if (candidate.mappingId) {
           effectiveWorkMappingId = candidate.mappingId;
+        }
+
+        // A rescue candidate is valid only through a mapping for this exact
+        // canonical work.  Similar-title sibling works are never evidence.
+        if (candidate.sourceWorkId) {
+          effectiveSourceWorkId = candidate.sourceWorkId;
+        } else if (candidate.mappingId) {
+          const { data: candidateMapping } = await this.supabase
+            .from('importer_work_mappings')
+            .select('source, source_work_id, work_id, sync_status')
+            .eq('id', candidate.mappingId)
+            .maybeSingle();
+          if (
+            !candidateMapping ||
+            candidateMapping.source !== effectiveSource ||
+            candidateMapping.work_id !== workId ||
+            candidateMapping.sync_status === 'UNMATCHED'
+          ) {
+            this.logger.warn('Skipping cross-provider candidate with incoherent work mapping', {
+              jobId: job.id,
+              source: effectiveSource,
+              mappingId: candidate.mappingId,
+              workId,
+            });
+            continue;
+          }
+          effectiveSourceWorkId = candidateMapping.source_work_id;
         }
 
         const adapter = this.registry.get(effectiveSource);
@@ -4652,6 +4824,18 @@ export class ImporterEngine {
       tCoverCheck = Math.round(performance.now() - cover0);
 
       const db0 = Date.now();
+
+      // Final integrity fence: media can take minutes to download/upload.
+      // Reconfirm the durable source-work mapping immediately before the
+      // chapter/pages are persisted or publication can be attempted.
+      await this.assertChapterWorkIdentity({
+        source: effectiveSource,
+        sourceWorkId: effectiveSourceWorkId,
+        sourceChapterId: effectiveSourceChapterId,
+        workId,
+        workMappingId: effectiveWorkMappingId,
+        jobId: job.id,
+      });
 
       // Step 1: Find or create chapter record in public.chapters
       const chUpsert0 = performance.now();
@@ -5455,24 +5639,24 @@ export class ImporterEngine {
     workId: string,
     chapterNumber: number,
     excludeSource: string,
-    payloadFallbacks: Array<{ source: string; sourceChapterId: string; mappingId?: string }> = []
-  ): Promise<Array<{ source: string; sourceChapterId: string; mappingId?: string }>> {
-    const candidates: Array<{ source: string; sourceChapterId: string; mappingId?: string }> = [];
+    payloadFallbacks: Array<{ source: string; sourceChapterId: string; mappingId?: string; sourceWorkId?: string }> = []
+  ): Promise<Array<{ source: string; sourceChapterId: string; mappingId?: string; sourceWorkId?: string }>> {
+    const candidates: Array<{ source: string; sourceChapterId: string; mappingId?: string; sourceWorkId?: string }> = [];
     const seen = new Set<string>();
 
-    const addCandidate = (s: string, id: string, mapId?: string) => {
+    const addCandidate = (s: string, id: string, mapId?: string, sourceWorkId?: string) => {
       if (!s || !id || s === excludeSource) return;
       const key = `${s}:${id}`;
       if (!seen.has(key)) {
         seen.add(key);
-        candidates.push({ source: s, sourceChapterId: id, mappingId: mapId });
+        candidates.push({ source: s, sourceChapterId: id, mappingId: mapId, sourceWorkId });
       }
     };
 
     // 1. Initial payload fallbacks
     for (const fb of payloadFallbacks) {
       if (fb?.source && fb?.sourceChapterId) {
-        addCandidate(fb.source, fb.sourceChapterId, fb.mappingId);
+        addCandidate(fb.source, fb.sourceChapterId, fb.mappingId, fb.sourceWorkId);
       }
     }
 
@@ -5536,7 +5720,7 @@ export class ImporterEngine {
               const altChapters = await altAdapter.fetchChapters(wm.source_work_id);
               const matched = altChapters.find((c) => c.number === chapterNumber);
               if (matched && matched.sourceChapterId) {
-                addCandidate(wm.source, matched.sourceChapterId, wm.id);
+                addCandidate(wm.source, matched.sourceChapterId, wm.id, wm.source_work_id);
               }
             } catch {}
           }
@@ -5544,52 +5728,12 @@ export class ImporterEngine {
       }
     } catch {}
 
-    // 4b. Discover candidate fallbacks across sibling works with matching title
-    try {
-      const { data: currentWork } = await this.supabase
-        .from('works')
-        .select('title')
-        .eq('id', workId)
-        .maybeSingle();
-
-      if (currentWork?.title) {
-        const cleanTitle = currentWork.title.trim();
-        const { data: siblingWorks } = await this.supabase
-          .from('works')
-          .select('id')
-          .neq('id', workId)
-          .ilike('title', cleanTitle);
-
-        if (siblingWorks && siblingWorks.length > 0) {
-          const siblingIds = siblingWorks.map((w: any) => w.id);
-          const { data: siblingMappings } = await this.supabase
-            .from('importer_work_mappings')
-            .select('id, source, source_work_id')
-            .in('work_id', siblingIds)
-            .neq('source', excludeSource)
-            .neq('sync_status', 'UNMATCHED');
-
-          if (siblingMappings) {
-            for (const wm of siblingMappings) {
-              if (candidates.some((c) => c.source === wm.source)) continue;
-              const altAdapter = this.registry.get(wm.source);
-              if (altAdapter && typeof altAdapter.fetchChapters === 'function') {
-                try {
-                  const altChapters = await altAdapter.fetchChapters(wm.source_work_id);
-                  const matched = altChapters.find((c) => c.number === chapterNumber);
-                  if (matched && matched.sourceChapterId) {
-                    addCandidate(wm.source, matched.sourceChapterId, wm.id);
-                  }
-                } catch {}
-              }
-            }
-          }
-        }
-      }
-    } catch {}
+    // Never use mappings from another canonical work merely because a title
+    // happens to match.  Fuzzy matching is discovery-only; page rescue is
+    // strictly identity-preserving.
 
     // 5. Filter candidates against operational sources (exclude disabled, paused, or cooling down)
-    const healthyCandidates: Array<{ source: string; sourceChapterId: string; mappingId?: string }> = [];
+    const healthyCandidates: Array<{ source: string; sourceChapterId: string; mappingId?: string; sourceWorkId?: string }> = [];
     for (const c of candidates) {
       try {
         let { data: srcCheck } = await this.supabase

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MangaOnlineTvAdapter } from '../src/sources/mangaonlinetv/mangaonlinetv-adapter';
+import { MangaLivreToAdapter } from '../src/sources/mangalivreto/mangalivreto-adapter';
 
 describe('Madara reader manifests', () => {
   it('reads every page of a paged chapter instead of sidebar recommendations', async () => {
@@ -12,5 +13,24 @@ describe('Madara reader manifests', () => {
     const html = '<img src="https://mangaonline.tv/wp-content/uploads/2025/07/cover-75x106.webp"><img class="wp-manga-chapter-img" data-src="https://cdn.example/1.jpg">';
     const adapter = new MangaOnlineTvAdapter(undefined, async () => new Response(html));
     expect(await adapter.fetchChapterPages('/chapter/', 1)).toEqual(['https://cdn.example/1.jpg']);
+  });
+
+  it('never treats a sidebar chapter from another work as a chapter of the requested work', async () => {
+    const html = `
+      <a href="https://mangalivre.to/manga/tokyo-fears-rhapsody/capitulo-1/">Capítulo 1</a>
+      <aside><a href="https://mangalivre.to/manga/madrasta-vem-primeiro-sem-censura/capitulo-10/">Capítulo 10</a></aside>
+    `;
+    const adapter = new MangaLivreToAdapter(undefined, async () => new Response(html));
+
+    await expect(adapter.fetchChapters('tokyo-fears-rhapsody')).resolves.toEqual([
+      expect.objectContaining({
+        sourceChapterId: 'https://mangalivre.to/manga/tokyo-fears-rhapsody/capitulo-1/',
+        number: 1,
+      }),
+    ]);
+    expect(adapter.isChapterOwnedByWork(
+      'tokyo-fears-rhapsody',
+      'https://mangalivre.to/manga/madrasta-vem-primeiro-sem-censura/capitulo-10/',
+    )).toBe(false);
   });
 });

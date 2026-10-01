@@ -5,6 +5,7 @@ import { computeCanonicalChapterKey } from './deduplication.js';
 import { HostRateLimiter } from './rate-limiter.js';
 import { Config } from '../config.js';
 import { AdaptiveAutotuner, BufferReservation } from './concurrency.js';
+import { PermanentDataError } from './retry-policy.js';
 import { PublicationSafetyBarrier } from './publication-safety-barrier.js';
 import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from './scheduler/index.js';
 import { AutoHealWatchdog } from './auto-heal-watchdog.js';
@@ -55,6 +56,14 @@ export declare function reclaimStartupOwnedLeases(pool: {
 export declare class JobCancelledByStaffError extends Error {
     readonly jobId: string;
     constructor(jobId: string, message?: string);
+}
+/**
+ * A chapter payload whose source-work identity cannot be proven is unsafe to
+ * retry or publish.  It is a permanent, quarantinable data error: another
+ * healthy job/source may still make progress normally.
+ */
+export declare class WorkIdentityMismatchError extends PermanentDataError {
+    constructor(message: string);
 }
 export type PageSemanticType = 'CONTENT_PAGE' | 'CREDIT_PAGE' | 'PROMO_PAGE' | 'RECRUITMENT_PAGE' | 'WARNING_PAGE';
 export declare function classifyPageUrl(url: string, index: number, total: number): PageSemanticType;
@@ -288,6 +297,14 @@ export declare class ImporterEngine {
         specialCategory?: "prologue" | "extra" | "special" | "side";
     };
     private computeChapterSortKey;
+    /**
+     * Last fail-closed boundary before a chapter can consume media or become a
+     * canonical chapter.  The work mapping is the durable identity authority;
+     * a queue payload is only a cached transport envelope and must agree with
+     * it exactly.  For URL-scoped sources (Madara/MangaLivre), the adapter also
+     * proves that the chapter URL lives beneath the mapped work path.
+     */
+    private assertChapterWorkIdentity;
     private handleImportChapter;
     private recordJobMetric;
     private recordTelemetrySnapshot;

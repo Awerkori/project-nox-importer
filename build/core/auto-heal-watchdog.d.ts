@@ -113,6 +113,7 @@ export declare class AutoHealWatchdog {
     private lastLevel2At;
     private lastRestartAt;
     private lastSweepAt;
+    private lastCircuitContainmentAt;
     private stuckIdentities;
     private circuitBreakerOpen;
     private cachedTelemetry;
@@ -206,6 +207,14 @@ export declare class AutoHealWatchdog {
      * Level 3 (sustained stall >= 12m): Controlled graceful self-restart
      */
     executeRecoveryLadder(metrics: HealthPanelMetrics): Promise<void>;
+    /**
+     * The old circuit breaker made a stalled importer quieter after three
+     * failed restarts: it forced survival capacity and then waited for a human.
+     * Keep the loop guard, but continue low-frequency recovery.  This uses the
+     * existing controlled drain/cancellation path and never changes resource
+     * ceilings or retries at a high cadence.
+     */
+    private runCircuitContainment;
     /**
      * NÍVEL 1 — RECONCILIAÇÃO LEVE
      */
