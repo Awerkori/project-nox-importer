@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DeduplicationEngine } from '../deduplication.js';
+import { CANONICAL_ADULT_TAG_NAME, canonicalAdultTagName } from '../tag-normalization.js';
 
 describe('Tag Normalization', () => {
   it('normalizes Yaoi aliases', () => {
@@ -11,8 +12,11 @@ describe('Tag Normalization', () => {
   
   it('normalizes Adult aliases', () => {
      const engine = new DeduplicationEngine({} as any);
-     expect(engine['normalizeTagName']('18+')).toBe('Adulto');
-     expect(engine['normalizeTagName']('mature')).toBe('Adulto');
+     for (const alias of ['Adulto', '+18', '18+', 'Adult', 'Adulto +18', 'Adulto (+18)', 'mature']) {
+       expect(engine['normalizeTagName'](alias)).toBe(CANONICAL_ADULT_TAG_NAME);
+       expect(canonicalAdultTagName(alias)).toBe(CANONICAL_ADULT_TAG_NAME);
+     }
+     expect(canonicalAdultTagName('Adult adventure')).toBeNull();
   });
 
   it('filters garbage tags', () => {
@@ -35,6 +39,7 @@ describe('Tag Normalization', () => {
      const engine = new DeduplicationEngine({} as any);
      expect(engine['getProviderDefaultTags']('yaoifanclub')).toContain('Yaoi');
      expect(engine['getProviderDefaultTags']('megahentai')).toContain('Hentai');
+     expect(engine['getProviderDefaultTags']('megahentai')).toContain(CANONICAL_ADULT_TAG_NAME);
      expect(engine['getProviderDefaultTags']('randomscan')).toHaveLength(0);
   });
 
