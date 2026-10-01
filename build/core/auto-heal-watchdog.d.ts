@@ -8,7 +8,7 @@ import type { AdaptiveAutotuner } from './concurrency.js';
 export type ImporterHealthStatus = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL' | 'IDLE' | 'PAUSED_BY_PROTECTION';
 export type ProcessingHealth = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL';
 export type PublicationHealth = 'HEALTHY' | 'DEGRADED' | 'STALLED' | 'CRITICAL_STALL' | 'NO_FRESH_EXPECTED';
-export type AutoHealState = 'IDLE' | 'MONITORING' | 'LEVEL_1_LIGHT_RECONCILIATION' | 'LEVEL_2_STUCK_STATE_AUDIT' | 'LEVEL_3_RESTART_PENDING' | 'CIRCUIT_OPEN' | 'RECOVERED';
+export type AutoHealState = 'IDLE' | 'MONITORING' | 'LEVEL_1_LIGHT_RECONCILIATION' | 'LEVEL_2_STUCK_STATE_AUDIT' | 'LEVEL_3_RESTART_PENDING' | 'LEVEL_3_RESTART_DEFERRED' | 'CIRCUIT_OPEN' | 'RECOVERED';
 export interface HealthPanelMetrics {
     status: ImporterHealthStatus;
     autoHealState: AutoHealState;
@@ -112,6 +112,7 @@ export declare class AutoHealWatchdog {
     private lastLevel1At;
     private lastLevel2At;
     private lastRestartAt;
+    private lastDeferredRestartAt;
     private lastSweepAt;
     private lastCircuitContainmentAt;
     private stuckIdentities;

@@ -48,5 +48,29 @@ describe('soft restart accounting', () => {
 
     expect(onControlledRestart).toHaveBeenCalledOnce();
     expect(pool.query.mock.calls.some(([sql]: [string]) => sql.includes("VALUES ('importer_auto_restarts'"))).toBe(false);
+    // A deferred drain is not a restart. It gets only its short local retry
+    // cooldown; it must never poison the 15-minute successful-restart gate.
+    expect((watchdog as any).lastRestartAt).toBe(0);
+    expect((watchdog as any).lastDeferredRestartAt).toBeGreaterThan(0);
+    expect((watchdog as any).autoHealState).toBe('LEVEL_3_RESTART_DEFERRED');
+  });
+
+  it('retries a deferred restart after its bounded local cooldown instead of waiting 15 minutes', async () => {
+    const pool: any = { query: vi.fn(async (sql: string) => {
+      if (sql.includes("key = 'importer_auto_restarts'")) return { rows: [{ value: '[]' }] };
+      return { rows: [] };
+    }) };
+    const onControlledRestart = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const watchdog = new AutoHealWatchdog({ pool, onControlledRestart });
+    (watchdog as any).lastLevel1At = Date.now();
+    (watchdog as any).lastLevel2At = Date.now();
+
+    await watchdog.executeRecoveryLadder(stalledMetrics);
+    (watchdog as any).lastDeferredRestartAt = Date.now() - 61_000;
+    await watchdog.executeRecoveryLadder(stalledMetrics);
+
+    expect(onControlledRestart).toHaveBeenCalledTimes(2);
+    expect((watchdog as any).lastRestartAt).toBeGreaterThan(0);
+    expect(pool.query.mock.calls.some(([sql]: [string]) => sql.includes("VALUES ('importer_auto_restarts'"))).toBe(true);
   });
 });
