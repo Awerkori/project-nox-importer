@@ -20,6 +20,11 @@ const PROGRESS_CRITICAL_SEC = 30 * 60;
 const LIGHT_RECONCILIATION_AFTER_SEC = 8 * 60;
 const STUCK_STATE_AUDIT_AFTER_SEC = 10 * 60;
 const CONTROLLED_RESTART_AFTER_SEC = 12 * 60;
+// A controller may decline a restart while it is still draining a real
+// operation.  That is not a restart and must not consume the 15-minute
+// cross-process restart cooldown, but retrying immediately would only spin
+// on the same non-cooperative operation.
+const DEFERRED_RESTART_RETRY_COOLDOWN_MS = 60 * 1000;
 // A restart storm must suppress rapid repeats, never liveness itself.  Once
 // the normal restart budget is open, one bounded containment probe remains
 // available after this cooldown to cancel a genuinely wedged in-flight epoch.
@@ -42,6 +47,7 @@ export type AutoHealState =
   | 'LEVEL_1_LIGHT_RECONCILIATION'
   | 'LEVEL_2_STUCK_STATE_AUDIT'
   | 'LEVEL_3_RESTART_PENDING'
+  | 'LEVEL_3_RESTART_DEFERRED'
   | 'CIRCUIT_OPEN'
   | 'RECOVERED';
 
@@ -153,6 +159,7 @@ export class AutoHealWatchdog {
   private lastLevel1At = 0;
   private lastLevel2At = 0;
   private lastRestartAt = 0;
+  private lastDeferredRestartAt = 0;
   private lastSweepAt = 0;
   private lastCircuitContainmentAt = 0;
   private stuckIdentities = new Map<string, number>();
@@ -1098,9 +1105,21 @@ export class AutoHealWatchdog {
         return;
       }
 
-      // Circuit Breaker allows restart
+      if (
+        this.lastDeferredRestartAt > 0 &&
+        nowMs - this.lastDeferredRestartAt < DEFERRED_RESTART_RETRY_COOLDOWN_MS
+      ) {
+        this.autoHealState = 'LEVEL_3_RESTART_DEFERRED';
+        this.logger.warn(
+          `⏳ [AUTO-HEAL NÍVEL 3] Deferred-restart retry cooldown active (${Math.round((nowMs - this.lastDeferredRestartAt) / 1000)}s/${DEFERRED_RESTART_RETRY_COOLDOWN_MS / 1000}s).`,
+        );
+        return;
+      }
+
+      // Circuit Breaker allows restart.  Do not mark lastRestartAt yet: a
+      // controlled restart can safely decline while a live operation drains.
+      // Only a completed restart earns the durable 15-minute cooldown.
       this.autoHealState = 'LEVEL_3_RESTART_PENDING';
-      this.lastRestartAt = nowMs;
       this.lastAutoHealAt = new Date().toISOString();
 
       const reason = `SUSTAINED_STALL: 0 completions/fresh for ${Math.round(effectiveStallAgeSec / 60)}m while ${metrics.eligibleJobs} jobs eligible (processing: ${metrics.processingHealth}, publication: ${metrics.publicationHealth})`;
@@ -1111,13 +1130,16 @@ export class AutoHealWatchdog {
         // Existing callbacks return void; treat that as a successful legacy
         // restart. New callbacks can explicitly defer with false.
         if (restarted === false) {
-          this.autoHealState = 'LEVEL_3_RESTART_PENDING';
-          this.logger.warn('[AUTO-HEAL NÍVEL 3] Restart deferred: in-flight work did not quiesce safely.');
+          this.lastDeferredRestartAt = nowMs;
+          this.autoHealState = 'LEVEL_3_RESTART_DEFERRED';
+          this.logger.warn('[AUTO-HEAL NÍVEL 3] Restart deferred: in-flight work did not quiesce safely; retry remains available after the bounded deferred cooldown.');
           return;
         }
       }
 
       // Only a restart that actually completed consumes the circuit budget.
+      this.lastRestartAt = nowMs;
+      this.lastDeferredRestartAt = 0;
       await this.recordAutoRestart({
         timestamp: new Date().toISOString(),
         reason,

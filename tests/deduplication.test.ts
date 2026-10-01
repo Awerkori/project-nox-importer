@@ -288,6 +288,40 @@ describe('DeduplicationEngine', () => {
     expect((mapCheck.rows[0] as any).sync_status).toBe('SYNCED');
   });
 
+  it('reuses a translated canonical alias rather than creating a second work (Baskerville regression)', async () => {
+    const canonicalWork = await db.query(`
+      insert into public.works (title, slug, aliases, kind, status)
+      values (
+        'Vingança do Cão de Caça',
+        'vinganca-do-cao-de-caca',
+        ARRAY[
+          'Revenge of the Baskerville Bloodhound',
+          'O Retorno do Cão de Caça dos Baskerville',
+          'A Vingança do Cão de Caça dos Baskerville'
+        ],
+        'MANHWA',
+        'ONGOING'
+      )
+      returning id
+    `);
+    const canonicalId = (canonicalWork.rows[0] as any).id;
+
+    const result = await engine.resolveWork({
+      source: 'kuro',
+      sourceWorkId: 'kuro-baskerville-regression',
+      title: 'Revenge of the Baskerville Bloodhound',
+      slug: 'revenge-of-the-baskerville-bloodhound',
+      kind: 'MANHWA',
+    });
+
+    expect(result.status).toBe('EXISTING_MAPPING');
+    expect(result.workId).toBe(canonicalId);
+    const duplicates = await db.query(
+      "select id from public.works where slug = 'revenge-of-the-baskerville-bloodhound'",
+    );
+    expect(duplicates.rows).toHaveLength(0);
+  });
+
   it('rejects match between a Novel and a Comic', async () => {
     const novelRes = await db.query(`
       insert into public.works (title, slug, kind, status)

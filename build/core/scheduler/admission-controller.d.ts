@@ -28,6 +28,7 @@ export declare class AdmissionController {
     private p1BacklogProbeAt;
     private p1BacklogProbeFlight;
     private p1BacklogSnapshot;
+    private lastOnDemandP1Source;
     private visibleP2LifecycleRepairComplete;
     private getP1AdmissionCursors;
     private advanceP1AdmissionCursor;
@@ -95,13 +96,13 @@ export declare class AdmissionController {
     /** Promote the remaining non-terminal initial batch of one visible work. */
     private promoteP2WorkToP1;
     /**
-     * Reclassify only visible mappings that an older scheduler stranded in P2.
+     * Reclassify visible works that an older scheduler stranded below P1.
      *
-     * The candidate set starts from the indexed ACTIVE mapping state and probes
-     * each work through the queue work-id index. Each cycle touches at most 12
-     * works, stops permanently when there is nothing left, and is naturally
-     * idempotent because promoted rows no longer match priority 50..74. A
-     * matching initial window is reopened in the same statement so the normal
+     * The candidate set starts from bounded ready queue rows, so it also covers
+     * mappings whose sync state is SYNCED rather than ACTIVE. Each cycle touches
+     * at most 12 works and is naturally idempotent because promoted rows no
+     * longer match priority <75. The matching initial window is reopened in
+     * the same statement so the normal
      * indexed P1 claim path can immediately see the repaired work.
      */
     private repairVisibleP2LifecycleBacklog;

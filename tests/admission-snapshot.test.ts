@@ -155,19 +155,17 @@ describe('bounded admission snapshot', () => {
     expect(source).toMatch(/\[P1_FAIR_WINDOW_CAPPED\]/);
   });
 
-  it('repairs a legacy visible P2 window in a bounded, idempotent work-scoped batch', async () => {
+  it('repairs a legacy visible P2/P3 window in a bounded, idempotent work-scoped batch', async () => {
     const db = new PGlite();
     try {
       const id = '00000000-0000-0000-0000-000000000021';
       await db.exec(`
         CREATE TABLE works (id uuid PRIMARY KEY, published boolean);
-        CREATE TABLE importer_work_mappings (work_id uuid, sync_status text, updated_at timestamptz);
         CREATE TABLE importer_queue (id integer PRIMARY KEY, task_type text, status text, payload jsonb, priority integer, chapter_sort_key numeric, next_run_at timestamptz, updated_at timestamptz);
         INSERT INTO works VALUES ('${id}', true);
-        INSERT INTO importer_work_mappings VALUES ('${id}', 'ACTIVE', now());
         INSERT INTO importer_queue VALUES
-          (1, 'IMPORT_CHAPTER', 'QUEUED', '{"workId":"${id}"}', 50, 1, now(), now()),
-          (2, 'IMPORT_CHAPTER', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 50, 2, now(), now());
+          (1, 'IMPORT_CHAPTER', 'QUEUED', '{"workId":"${id}"}', 20, 1, now(), now()),
+          (2, 'IMPORT_CHAPTER', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 20, 2, now(), now());
       `);
       const state = { getConfig: () => ({ slidingWindowSize: 8 }) } as any;
       const sentinel = {} as any;
@@ -184,11 +182,11 @@ describe('bounded admission snapshot', () => {
     }
   });
 
-  it('treats visible legacy priority-50 work as P1 before P2 discovery', () => {
+  it('treats every visible legacy below-P1 work as P1 before P2 discovery', () => {
     const source = readFileSync('src/core/scheduler/admission-controller.ts', 'utf8');
     expect(source.indexOf('await this.repairVisibleP2LifecycleBacklog();'))
       .toBeLessThan(source.indexOf('await this.reconcileActiveWorks();'));
-    expect(source).toMatch(/w\.published IS TRUE[\s\S]{0,1000}q\.priority >= 50 AND q\.priority < 75/);
+    expect(source).toMatch(/w\.published IS TRUE[\s\S]{0,1000}q\.priority < 75/);
     expect(source).toMatch(/q\.status = 'QUEUED'[\s\S]{0,80}q\.status = 'IMPORTING'/);
     expect(source).toMatch(/status = CASE WHEN pw\.id IS NOT NULL THEN 'QUEUED'/);
   });

@@ -38,6 +38,12 @@ export class AdmissionController {
     p1BacklogProbeAt = 0;
     p1BacklogProbeFlight = null;
     p1BacklogSnapshot = { claimable: 0, available: 0, works: 0 };
+    // On-demand P1 admission is intentionally exceptional, but it still has
+    // to share opportunities across sources when a cohort vacancy occurs.
+    // This cursor is process-local because the durable per-source P1 cursor is
+    // the authority for work order; it merely avoids choosing the first source
+    // alphabetically on every spare-capacity pass.
+    lastOnDemandP1Source = null;
     // A previous scheduler generation could vacate a visible P2 work after its
     // first window, leaving the rest of its queue at priority 50. Repair that
     // legacy state in small work-scoped batches; never scan or rewrite the P2
@@ -463,18 +469,18 @@ export class AdmissionController {
       WHERE task_type = 'IMPORT_CHAPTER'
         AND (payload->>'workId') = $1
         AND status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
-        AND priority >= 50 AND priority < 75
+        AND priority < 75
         AND COALESCE(payload->>'staffForced', 'false') <> 'true'
     `, [workId]);
     }
     /**
-     * Reclassify only visible mappings that an older scheduler stranded in P2.
+     * Reclassify visible works that an older scheduler stranded below P1.
      *
-     * The candidate set starts from the indexed ACTIVE mapping state and probes
-     * each work through the queue work-id index. Each cycle touches at most 12
-     * works, stops permanently when there is nothing left, and is naturally
-     * idempotent because promoted rows no longer match priority 50..74. A
-     * matching initial window is reopened in the same statement so the normal
+     * The candidate set starts from bounded ready queue rows, so it also covers
+     * mappings whose sync state is SYNCED rather than ACTIVE. Each cycle touches
+     * at most 12 works and is naturally idempotent because promoted rows no
+     * longer match priority <75. The matching initial window is reopened in
+     * the same statement so the normal
      * indexed P1 claim path can immediately see the repaired work.
      */
     async repairVisibleP2LifecycleBacklog() {
@@ -483,22 +489,18 @@ export class AdmissionController {
         const windowSize = Math.max(1, Math.min(12, this.stateStore.getConfig().slidingWindowSize || 8));
         const result = await this.runQuery(`
       WITH candidate_works AS MATERIALIZED (
-        SELECT wm.work_id::text AS work_id
-        FROM importer_work_mappings wm
-        JOIN works w ON w.id = wm.work_id AND w.published IS TRUE
-        WHERE wm.sync_status = 'ACTIVE'
-          AND EXISTS (
-            SELECT 1
-            FROM importer_queue q
-            WHERE q.task_type = 'IMPORT_CHAPTER'
-              AND (q.payload->>'workId') = wm.work_id::text
-              AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
-              AND q.priority >= 50 AND q.priority < 75
-              AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
-            LIMIT 1
-          )
-        GROUP BY wm.work_id
-        ORDER BY MAX(wm.updated_at) DESC
+        SELECT q.payload->>'workId' AS work_id
+        FROM importer_queue q
+        JOIN works w ON w.id::text = q.payload->>'workId' AND w.published IS TRUE
+        WHERE q.task_type = 'IMPORT_CHAPTER'
+          -- Start from ready/retry rows covered by the hot claim index. The
+          -- selected work is then repaired atomically including its paused
+          -- siblings below, avoiding a recurring full paused-queue scan.
+          AND q.status IN ('QUEUED', 'RETRY')
+          AND q.priority < 75
+          AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+        GROUP BY q.payload->>'workId'
+        ORDER BY MIN(q.next_run_at) ASC NULLS FIRST, MIN(q.chapter_sort_key) ASC NULLS LAST
         LIMIT 12
       ), window_state AS MATERIALIZED (
         SELECT c.work_id,
@@ -511,7 +513,7 @@ export class AdmissionController {
         JOIN importer_queue q ON (q.payload->>'workId') = c.work_id
         WHERE q.task_type = 'IMPORT_CHAPTER'
           AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
-          AND q.priority >= 50 AND q.priority < 75
+          AND q.priority < 75
           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
         GROUP BY c.work_id
       ), paused_window AS MATERIALIZED (
@@ -523,7 +525,7 @@ export class AdmissionController {
           JOIN importer_queue q ON (q.payload->>'workId') = ws.work_id
           WHERE q.task_type = 'IMPORT_CHAPTER'
             AND q.status = 'PAUSED_BY_STAFF'
-            AND q.priority >= 50 AND q.priority < 75
+            AND q.priority < 75
             AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
         ) ranked
         JOIN window_state ws ON ws.work_id = ranked.work_id
@@ -534,7 +536,7 @@ export class AdmissionController {
         JOIN importer_queue q ON (q.payload->>'workId') = ws.work_id
         WHERE q.task_type = 'IMPORT_CHAPTER'
           AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
-          AND q.priority >= 50 AND q.priority < 75
+          AND q.priority < 75
           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
       ), promoted AS (
         UPDATE importer_queue q
@@ -557,7 +559,7 @@ export class AdmissionController {
             this.visibleP2LifecycleRepairComplete = true;
             return;
         }
-        this.logger.info(`[P2_TO_P1_LEGACY_REPAIR] Promoted ${repairedJobs} queued chapter(s) across ${repairedWorks} visible work(s).`);
+        this.logger.info(`[VISIBLE_WORK_TO_P1_LEGACY_REPAIR] Promoted ${repairedJobs} queued chapter(s) across ${repairedWorks} visible work(s).`);
     }
     /**
      * Executes a single admission reconciliation cycle.
@@ -1291,29 +1293,47 @@ export class AdmissionController {
             AND NOT ((payload->>'workId') = ANY($2::text[]))
             AND ($3::text[] IS NULL OR NOT (source = ANY($3::text[])))
           GROUP BY payload->>'workId', source
+        ), p1_rotation AS MATERIALIZED (
+          SELECT ranked.*
+          FROM (
+            SELECT q.*,
+              ROW_NUMBER() OVER (
+                PARTITION BY source
+                ORDER BY CASE
+                  WHEN work_id > COALESCE($4::jsonb ->> source, '') THEN 0
+                  ELSE 1
+                END,
+                work_id
+              ) AS rotation_rank
+            FROM queue_candidates q
+          ) ranked
+          -- A vacancy must not let a low frontier repeatedly leapfrog unseen
+          -- P1 work.  The next circular candidate from each source is the
+          -- only ordinary on-demand P1 opportunity.  If it is a real gap,
+          -- the existing gap confirmation below can still make it eligible.
+          WHERE rotation_rank = 1
         )
         SELECT q.work_id,
                w.title,
                q.source,
                q.pending_jobs,
                q.queued_count,
-               q.min_sort_key
-        FROM queue_candidates q
+               q.min_sort_key,
+               ${isP1 ? 'q.rotation_rank' : 'NULL::int AS rotation_rank'}
+        FROM ${isP1 ? 'p1_rotation' : 'queue_candidates'} q
         JOIN works w ON w.id = q.work_id::uuid
         JOIN importer_sources s ON s.id = q.source
         WHERE ${isP1 ? 'w.published = true' : 'w.published IS FALSE'}
           AND s.enabled = true
           AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
-        -- On-demand admission is only a spare-capacity fallback. Preserve its
-        -- proven publication-frontier order; periodic cohort rotation provides
-        -- the cross-work fairness.
-        ORDER BY min_sort_key ASC NULLS LAST, queued_count DESC
-        LIMIT 10;
+        ORDER BY q.source, q.min_sort_key ASC NULLS LAST
+        LIMIT ${isP1 ? 64 : 10};
       `;
             const res = await this.runQuery(query, [
                 allowedSources && allowedSources.length > 0 ? allowedSources : null,
                 activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
                 saturatedSources.length > 0 ? saturatedSources : null,
+                JSON.stringify(this.getP1AdmissionCursors()),
             ]);
             if (res.rows.length === 0)
                 continue;
@@ -1343,7 +1363,22 @@ export class AdmissionController {
                 }
                 catch { }
             }
-            // Sort candidate rows by permit headroom and diversity
+            // Sort candidate rows by permit headroom and diversity. P1 has exactly
+            // one circular candidate per source here, so this cannot re-admit a
+            // large work by a lower frontier before unseen work gets its turn.
+            const p1Sources = isP1
+                ? Array.from(new Set(res.rows.map((row) => String(row.source)))).sort()
+                : [];
+            const nextP1SourceRank = (source) => {
+                if (!isP1 || p1Sources.length === 0)
+                    return 0;
+                if (!this.lastOnDemandP1Source)
+                    return p1Sources.indexOf(source);
+                const firstAfterCursor = p1Sources.findIndex((candidate) => candidate > this.lastOnDemandP1Source);
+                const start = firstAfterCursor >= 0 ? firstAfterCursor : 0;
+                const index = p1Sources.indexOf(source);
+                return (index - start + p1Sources.length) % p1Sources.length;
+            };
             res.rows.sort((a, b) => {
                 const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
                 const permitsB = this.sourcePermitProvider ? this.sourcePermitProvider(b.source) : 1;
@@ -1355,6 +1390,10 @@ export class AdmissionController {
                 if (activeA !== activeB) {
                     return activeA - activeB;
                 }
+                const sourceRankA = nextP1SourceRank(a.source);
+                const sourceRankB = nextP1SourceRank(b.source);
+                if (sourceRankA !== sourceRankB)
+                    return sourceRankA - sourceRankB;
                 return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
             });
             const isCandidateFrontierValid = (workId, minSort, maxPub) => {
@@ -1421,16 +1460,12 @@ export class AdmissionController {
                 };
                 if (isP1) {
                     newWork.queuedChapters = await this.enforceP1FairWindow(newWork.workId);
-                    // On-demand admission is intentionally allowed to choose a
-                    // publication-frontier candidate when the normal cohort cannot
-                    // supply a job. That candidate is not necessarily the next work in
-                    // the source's circular P1 order. Advancing the durable cursor here
-                    // would make every work between the old cursor and this frontier
-                    // candidate look as though it had already received a fair window.
-                    //
-                    // Keep the cursor owned exclusively by periodic P1 rotation. The
-                    // on-demand work still receives its one-chapter window, but cannot
-                    // skip unseen P1 works or rewrite progress across a restart.
+                    // The P1 query is restricted to rotation_rank=1. This admission is
+                    // therefore real circular progress, not a frontier leap: persist
+                    // it so the same work cannot be immediately re-admitted after it
+                    // consumes its one chapter window.
+                    this.advanceP1AdmissionCursor(cand.source, cand.work_id);
+                    this.lastOnDemandP1Source = cand.source;
                 }
                 this.stateStore.setActiveWork(newWork);
                 // P1 receives its one fair chapter through enforceP1FairWindow above.
