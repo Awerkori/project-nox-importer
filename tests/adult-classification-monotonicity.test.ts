@@ -260,10 +260,10 @@ describe('Adult Classification & Monotonicity Guarantee', () => {
       where wt.work_id = $1
     `, [res.workId]);
     const tagSlugs = dbWorkTags.rows.map((r: any) => r.slug);
-    expect(tagSlugs).toContain('18');
-    expect(tagSlugs).toContain('adulto');
     expect(tagSlugs).toContain('adulto-18');
     expect(tagSlugs).toContain('pornhwa'); // Because kind is MANHWA
+    expect(tagSlugs).not.toContain('18');
+    expect(tagSlugs).not.toContain('adulto');
   });
 
   it('monotonically preserves ADULT_18 when a non-adult source later updates or matches the work', async () => {
