@@ -233,7 +233,8 @@ export class ImporterQueue {
     /**
      * Create a lease heartbeat handle that periodically renews the lease
      * until stopped. Uses .unref() to avoid blocking graceful shutdown.
-     * Also polls for staff cancellation requests (cancel_requested = true).
+     * Also aborts on lost lease ownership and polls for staff cancellation
+     * requests (cancel_requested = true).
      */
     startHeartbeat(jobId, intervalSeconds = 60, onCancelRequested) {
         let stopped = false;
