@@ -12,5 +12,5 @@ export declare class TelegramStorageProvider implements StorageProvider {
     constructor(token: string, chatId: string, transport?: typeof fetch);
     getProviderKey(): string;
     healthCheck(): Promise<boolean>;
-    upload(bytes: Uint8Array, _mime: string, id: string): Promise<string>;
+    upload(bytes: Uint8Array, _mime: string, id: string, _chapterId?: string, signal?: AbortSignal): Promise<string>;
 }

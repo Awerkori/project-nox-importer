@@ -13,7 +13,7 @@ export interface StorageProvider {
    * @param id Unique media ID (UUID)
    * @returns provider_key string (e.g. Telegram file_id)
    */
-  upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string): Promise<string>;
+  upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string, signal?: AbortSignal): Promise<string>;
 
   /**
    * Check if storage service is operational and accessible

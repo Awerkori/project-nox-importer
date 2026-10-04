@@ -42,7 +42,7 @@ export class TelegramStorageProvider implements StorageProvider {
     }
   }
 
-  async upload(bytes: Uint8Array, _mime: string, id: string): Promise<string> {
+  async upload(bytes: Uint8Array, _mime: string, id: string, _chapterId?: string, signal?: AbortSignal): Promise<string> {
     const form = new FormData();
     form.append('chat_id', this.chatId);
     // Send as .bin with application/octet-stream to prevent Telegram from transcoding
@@ -53,11 +53,14 @@ export class TelegramStorageProvider implements StorageProvider {
     form.append('disable_notification', 'true');
 
     try {
+      const requestSignal = signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(60_000)])
+        : AbortSignal.timeout(60_000);
       const response = await this.transport(`https://api.telegram.org/bot${this.token}/sendDocument`, {
         method: 'POST',
         body: form,
         redirect: 'manual',
-        signal: AbortSignal.timeout(60_000),
+        signal: requestSignal,
       });
 
       if (!response.ok) {

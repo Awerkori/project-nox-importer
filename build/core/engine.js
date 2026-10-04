@@ -3022,7 +3022,7 @@ export class ImporterEngine {
                             let pageUrl = pageUrls[idx];
                             const parsedUrl = new URL(pageUrl);
                             const rl0 = performance.now();
-                            await this.rateLimiter.acquire(parsedUrl.host);
+                            await this.rateLimiter.acquire(parsedUrl.host, pipelineSignal);
                             chRateLimitWaitMs += (performance.now() - rl0);
                             const buf0 = performance.now();
                             let reservation;
@@ -3221,7 +3221,11 @@ export class ImporterEngine {
                                     const u0 = performance.now();
                                     telemetryCollector.trackActiveTelegramUpload(1);
                                     try {
-                                        return await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial', targetChapterId, { skipDbInsert: true, skipDedupLookup: !job.payload?.readerRepair });
+                                        return await processAndStoreMedia(this.supabase, this.storage, pageBytes, botUserId, 'editorial', targetChapterId, {
+                                            skipDbInsert: true,
+                                            skipDedupLookup: !job.payload?.readerRepair,
+                                            signal: pipelineSignal,
+                                        });
                                     }
                                     finally {
                                         telemetryCollector.trackActiveTelegramUpload(-1);

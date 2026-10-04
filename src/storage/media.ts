@@ -171,6 +171,7 @@ export interface StoredMediaResult {
 export interface ProcessMediaOptions {
   skipDbInsert?: boolean;
   skipDedupLookup?: boolean;
+  signal?: AbortSignal;
 }
 
 /**
@@ -221,7 +222,7 @@ export async function processAndStoreMedia(
 
   // 2. Upload to storage provider
   const mediaId = crypto.randomUUID();
-  const providerKey = await storage.upload(bytes, info.mime, mediaId, chapterId);
+  const providerKey = await storage.upload(bytes, info.mime, mediaId, chapterId, options?.signal);
 
   // 3. Prepare media record
   const botRef = storage.getLastBotReference?.(mediaId) || 'MANGA_STORAGE_01';

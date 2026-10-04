@@ -6,5 +6,5 @@ export declare class MockStorageProvider implements StorageProvider {
     }>;
     getProviderKey(): string;
     healthCheck(): Promise<boolean>;
-    upload(bytes: Uint8Array, mime: string, id: string): Promise<string>;
+    upload(bytes: Uint8Array, mime: string, id: string, _chapterId?: string, signal?: AbortSignal): Promise<string>;
 }

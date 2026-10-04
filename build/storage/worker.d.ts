@@ -20,5 +20,5 @@ export declare class NoxWorkerStorageProvider implements StorageProvider {
     getLastShardId(): string | null;
     getProviderKey(): string;
     healthCheck(): Promise<boolean>;
-    upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string): Promise<string>;
+    upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string, signal?: AbortSignal): Promise<string>;
 }

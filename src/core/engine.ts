@@ -3529,7 +3529,7 @@ export class ImporterEngine {
             let pageUrl = pageUrls[idx];
             const parsedUrl = new URL(pageUrl);
             const rl0 = performance.now();
-            await this.rateLimiter.acquire(parsedUrl.host);
+            await this.rateLimiter.acquire(parsedUrl.host, pipelineSignal);
             chRateLimitWaitMs += (performance.now() - rl0);
 
             const buf0 = performance.now();
@@ -3762,7 +3762,11 @@ export class ImporterEngine {
                     botUserId,
                     'editorial',
                     targetChapterId,
-                    { skipDbInsert: true, skipDedupLookup: !job.payload?.readerRepair }
+                    {
+                      skipDbInsert: true,
+                      skipDedupLookup: !job.payload?.readerRepair,
+                      signal: pipelineSignal,
+                    }
                   );
                 } finally {
                   telemetryCollector.trackActiveTelegramUpload(-1);
