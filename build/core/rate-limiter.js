@@ -106,15 +106,18 @@ export class HostRateLimiter {
     /**
      * Acquire a token for host with jitter and sleep if necessary
      */
-    async acquire(host, signal) {
+    async acquire(host, signal, maxWaitMs = 120_000) {
         const bucket = this.getBucket(host);
         const t0 = performance.now();
         while (true) {
             signal?.throwIfAborted();
+            if (performance.now() - t0 >= maxWaitMs) {
+                throw new Error(`Host rate-limit wait exceeded ${maxWaitMs}ms for ${host}`);
+            }
             const now = Date.now();
             // Check if blocked due to 429 Retry-After
             if (bucket.blockedUntil > now) {
-                const waitMs = bucket.blockedUntil - now;
+                const waitMs = Math.min(bucket.blockedUntil - now, Math.max(1, maxWaitMs - (performance.now() - t0)));
                 this.logger.debug(`Host ${host} is rate-blocked, waiting ${waitMs}ms`);
                 await abortableDelay(waitMs, signal);
                 continue;
@@ -135,7 +138,7 @@ export class HostRateLimiter {
             // Wait until at least 1 token is available + random jitter
             const timeForTokenMs = Math.ceil(((1 - bucket.tokens) / bucket.ratePerSecond) * 1000);
             const jitter = Math.floor(Math.random() * 30) + 5;
-            await abortableDelay(timeForTokenMs + jitter, signal);
+            await abortableDelay(Math.min(timeForTokenMs + jitter, Math.max(1, maxWaitMs - (performance.now() - t0))), signal);
         }
     }
     /**

@@ -24,4 +24,11 @@ describe('rate limiter cancellation', () => {
 
     await expect(pending).rejects.toThrow('lease lost');
   });
+
+  it('bounds a host cooldown even when the caller has no signal', async () => {
+    const limiter = new HostRateLimiter(10);
+    limiter.handle429('blocked.test', '60');
+
+    await expect(limiter.acquire('blocked.test', undefined, 10)).rejects.toThrow('rate-limit wait exceeded');
+  });
 });

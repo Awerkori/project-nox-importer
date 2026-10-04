@@ -14,7 +14,7 @@ export declare class HostRateLimiter {
     /**
      * Acquire a token for host with jitter and sleep if necessary
      */
-    acquire(host: string, signal?: AbortSignal): Promise<void>;
+    acquire(host: string, signal?: AbortSignal, maxWaitMs?: number): Promise<void>;
     /**
      * Handle HTTP 429 response by honoring Retry-After or applying exponential backoff
      */
