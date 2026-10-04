@@ -30,10 +30,22 @@ export async function readImageBody(response, optionsOrMaxBytes) {
     const reader = response.body.getReader();
     const chunks = [];
     let length = 0;
+    // `signal.throwIfAborted()` alone cannot interrupt a `reader.read()` that is
+    // already waiting for the next network chunk.  Cancel the reader when the
+    // job deadline/lease signal fires so the pending read settles and the slot
+    // can be released instead of remaining stuck behind an idle HTTP body.
+    const abortReader = () => {
+        void reader.cancel(signal?.reason).catch(() => { });
+    };
+    signal?.addEventListener('abort', abortReader, { once: true });
     try {
         while (true) {
             signal?.throwIfAborted();
             const { value, done } = await reader.read();
+            // Reader cancellation resolves a pending read as `done: true`. Check
+            // the signal again before accepting that as a clean EOF, otherwise a
+            // timed-out response could be returned as a truncated image.
+            signal?.throwIfAborted();
             if (done)
                 break;
             const newLength = length + value.byteLength;
@@ -69,6 +81,7 @@ export async function readImageBody(response, optionsOrMaxBytes) {
         throw error;
     }
     finally {
+        signal?.removeEventListener('abort', abortReader);
         chunks.length = 0;
         reader.releaseLock();
     }

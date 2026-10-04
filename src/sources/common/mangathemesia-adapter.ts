@@ -61,6 +61,7 @@ export class MangaThemesiaAdapter implements SourceAdapter {
             ...this.headers,
             ...(options.headers || {}),
           },
+          signal: options.signal ?? AbortSignal.timeout(15_000),
         });
 
         if (res.status === 429 || res.status >= 500) {

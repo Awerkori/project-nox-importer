@@ -43,6 +43,7 @@ export class MangaThemesiaAdapter {
                         ...this.headers,
                         ...(options.headers || {}),
                     },
+                    signal: options.signal ?? AbortSignal.timeout(15_000),
                 });
                 if (res.status === 429 || res.status >= 500) {
                     if (attempts < maxAttempts) {

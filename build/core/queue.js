@@ -251,12 +251,13 @@ export class ImporterQueue {
                     const renewed = await this.renewLease(jobId);
                     if (!renewed && !stopped) {
                         this.logger.warn('Heartbeat lease renewal failed or lost ownership', { jobId });
+                        onCancelRequested?.('LEASE_LOST');
                     }
                     if (!stopped && onCancelRequested) {
                         const isCancelled = await this.isCancelRequested(jobId);
                         if (isCancelled && !stopped) {
                             this.logger.warn('Staff requested cancellation detected during heartbeat', { jobId });
-                            onCancelRequested();
+                            onCancelRequested('STAFF_REQUESTED');
                         }
                     }
                 }

@@ -61,6 +61,10 @@ export class MangaWorkAdapter implements SourceAdapter {
             ...this.headers,
             ...(options.headers || {}),
           },
+          // Bound both headers and body reads.  Without this, a connected
+          // upstream that never finishes its HTML body can occupy a chapter
+          // slot until the engine-level deadline.
+          signal: options.signal ?? AbortSignal.timeout(15_000),
         });
 
         if (res.status === 429 || res.status >= 500) {
