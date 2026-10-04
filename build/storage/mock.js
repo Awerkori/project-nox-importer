@@ -6,7 +6,8 @@ export class MockStorageProvider {
     async healthCheck() {
         return true;
     }
-    async upload(bytes, mime, id) {
+    async upload(bytes, mime, id, _chapterId, signal) {
+        signal?.throwIfAborted();
         const mockFileId = `mock_file_${id}_${Date.now()}`;
         this.uploads.set(mockFileId, { bytes, mime });
         return mockFileId;

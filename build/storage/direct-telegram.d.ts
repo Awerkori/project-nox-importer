@@ -45,7 +45,7 @@ export declare class BandwidthLimiter {
     private lastRefill;
     private waitChain;
     constructor(bytesPerSec?: number, maxBurst?: number);
-    acquire(bytes: number): Promise<void>;
+    acquire(bytes: number, signal?: AbortSignal): Promise<void>;
     setRate(bytesPerSec: number): void;
 }
 export declare class DirectTelegramStorageProvider implements StorageProvider {
@@ -77,7 +77,8 @@ export declare class DirectTelegramStorageProvider implements StorageProvider {
     private selectOptimalBot;
     private selectOptimalShard;
     private executeTelegramUpload;
-    upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string): Promise<string>;
+    private waitForDrain;
+    upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string, signal?: AbortSignal): Promise<string>;
     getMetricsSummary(): {
         totalBotUploads: number;
         totalShardUploads: number;

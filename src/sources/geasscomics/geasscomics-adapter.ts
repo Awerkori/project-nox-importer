@@ -38,7 +38,10 @@ export class GeassComicsAdapter implements SourceAdapter {
     while (attempts < maxAttempts) {
       attempts++;
       try {
-        const res = await this.transport(url, { headers: this.headers });
+        const res = await this.transport(url, {
+          headers: this.headers,
+          signal: AbortSignal.timeout(15_000),
+        });
         if (res.status === 429 || res.status >= 500) {
           if (attempts < maxAttempts) {
             await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));

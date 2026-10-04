@@ -36,4 +36,42 @@ describe('bounded image pipeline', () => {
     sem.release();
     expect(sem.available).toBe(1);
   });
+  it('aborts runExclusive before entering the critical section', async () => {
+    const sem = new AsyncSemaphore(1, 'test-run-exclusive');
+    const abort = new AbortController();
+    await sem.acquire();
+    let entered = false;
+    const waiting = sem.runExclusive(async () => {
+      entered = true;
+    }, abort.signal);
+    abort.abort(new Error('job deadline'));
+    await expect(waiting).rejects.toThrow('job deadline');
+    expect(entered).toBe(false);
+    expect(sem.queued).toBe(0);
+    sem.release();
+    expect(sem.available).toBe(1);
+  });
+  it('cancels a body that stops producing while a read is pending', async () => {
+    let cancelled = false;
+    let sentFirstChunk = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sentFirstChunk) {
+          sentFirstChunk = true;
+          controller.enqueue(new Uint8Array([1]));
+          return;
+        }
+        // Simulate a connected HTTP response whose body never advances.
+        return;
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const abort = new AbortController();
+    const reading = readImageBody(new Response(body), { signal: abort.signal });
+    setTimeout(() => abort.abort(new Error('job deadline')), 10);
+    await expect(reading).rejects.toThrow('job deadline');
+    expect(cancelled).toBe(true);
+  });
 });

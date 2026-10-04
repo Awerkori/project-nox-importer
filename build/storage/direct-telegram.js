@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Logger } from '../core/logger.js';
+import { abortableDelay } from '../core/rate-limiter.js';
 export class BandwidthLimiter {
     bytesPerSec;
     maxBurst;
@@ -14,8 +15,9 @@ export class BandwidthLimiter {
         this.maxBurst = maxBurst || Math.max(bytesPerSec, 8 * 1024 * 1024);
         this.tokens = this.maxBurst;
     }
-    async acquire(bytes) {
+    async acquire(bytes, signal) {
         const acquireInternal = async () => {
+            signal?.throwIfAborted();
             const now = Date.now();
             const elapsed = Math.max(0, (now - this.lastRefill) / 1000);
             this.tokens = Math.min(this.maxBurst, this.tokens + elapsed * this.bytesPerSec);
@@ -28,7 +30,7 @@ export class BandwidthLimiter {
             const waitMs = Math.ceil((deficit / this.bytesPerSec) * 1000);
             this.tokens = 0;
             this.lastRefill = now + waitMs;
-            await new Promise((r) => setTimeout(r, waitMs));
+            await abortableDelay(waitMs, signal);
         };
         this.waitChain = this.waitChain.then(acquireInternal, acquireInternal);
         return this.waitChain;
@@ -243,13 +245,31 @@ export class DirectTelegramStorageProvider {
             }
         }
     }
-    async acquireGlobalSlot() {
+    async acquireGlobalSlot(signal) {
+        signal?.throwIfAborted();
         if (this.currentGlobalActive < this.maxGlobalConcurrent) {
             this.currentGlobalActive++;
             return;
         }
-        await new Promise((resolve) => {
-            this.waitingQueue.push(resolve);
+        await new Promise((resolve, reject) => {
+            const waiter = {
+                resolve: () => {
+                    signal?.removeEventListener('abort', abort);
+                    resolve();
+                },
+                reject: (reason) => {
+                    signal?.removeEventListener('abort', abort);
+                    reject(reason);
+                },
+            };
+            const abort = () => {
+                const index = this.waitingQueue.indexOf(waiter);
+                if (index >= 0)
+                    this.waitingQueue.splice(index, 1);
+                waiter.reject(signal?.reason || new Error('Storage slot acquisition aborted'));
+            };
+            signal?.addEventListener('abort', abort, { once: true });
+            this.waitingQueue.push(waiter);
         });
         this.currentGlobalActive++;
     }
@@ -258,7 +278,7 @@ export class DirectTelegramStorageProvider {
         if (this.waitingQueue.length > 0) {
             const next = this.waitingQueue.shift();
             if (next)
-                next();
+                next.resolve();
         }
     }
     selectOptimalBot(excludeRefs = new Set()) {
@@ -307,7 +327,7 @@ export class DirectTelegramStorageProvider {
         this.shardRoundRobinIndex = (this.shardRoundRobinIndex + 1) % 10000;
         return bestShard;
     }
-    executeTelegramUpload(token, channelId, bytes, id) {
+    executeTelegramUpload(token, channelId, bytes, id, signal) {
         return new Promise((resolve, reject) => {
             const boundary = `----TelegramUploadBoundary${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
             const headerPart = Buffer.from(`--${boundary}\r\n` +
@@ -363,19 +383,22 @@ export class DirectTelegramStorageProvider {
             req.on('timeout', () => {
                 req.destroy(new Error(`Upload timed out after 45000ms`));
             });
+            const abortRequest = () => req.destroy(signal?.reason || new Error('Telegram upload aborted'));
+            signal?.addEventListener('abort', abortRequest, { once: true });
+            req.on('close', () => signal?.removeEventListener('abort', abortRequest));
             req.on('error', (err) => {
                 reject(err);
             });
             const writeAsync = async () => {
-                await this.bandwidthLimiter.acquire(payloadBuffer.length);
+                await this.bandwidthLimiter.acquire(payloadBuffer.length, signal);
                 if (!req.write(headerPart)) {
-                    await new Promise((r) => req.once('drain', r));
+                    await this.waitForDrain(req, signal);
                 }
                 if (!req.write(payloadBuffer)) {
-                    await new Promise((r) => req.once('drain', r));
+                    await this.waitForDrain(req, signal);
                 }
                 if (!req.write(footerPart)) {
-                    await new Promise((r) => req.once('drain', r));
+                    await this.waitForDrain(req, signal);
                 }
                 req.end();
             };
@@ -385,8 +408,24 @@ export class DirectTelegramStorageProvider {
             });
         });
     }
-    async upload(bytes, mime, id, chapterId) {
-        await this.acquireGlobalSlot();
+    waitForDrain(req, signal) {
+        if (signal?.aborted)
+            return Promise.reject(signal.reason || new Error('Telegram upload aborted'));
+        return new Promise((resolve, reject) => {
+            const onDrain = () => {
+                signal?.removeEventListener('abort', onAbort);
+                resolve();
+            };
+            const onAbort = () => {
+                req.removeListener('drain', onDrain);
+                reject(signal?.reason || new Error('Telegram upload aborted'));
+            };
+            req.once('drain', onDrain);
+            signal?.addEventListener('abort', onAbort, { once: true });
+        });
+    }
+    async upload(bytes, mime, id, chapterId, signal) {
+        await this.acquireGlobalSlot(signal);
         const maxAttempts = 3;
         let lastError;
         const excludedBots = new Set();
@@ -399,13 +438,13 @@ export class DirectTelegramStorageProvider {
                 if (bot.cooldownUntil > now && this.bots.every(b => b.cooldownUntil > now)) {
                     const waitMs = Math.min(...this.bots.map(b => b.cooldownUntil)) - now;
                     this.logger.warn(`All bots in cooldown. Sleeping ${Math.ceil(waitMs / 1000)}s...`);
-                    await new Promise(r => setTimeout(r, Math.min(waitMs, 30_000)));
+                    await abortableDelay(Math.min(waitMs, 30_000), signal);
                 }
                 bot.activeUploads++;
                 shard.activeUploads++;
                 const startTime = Date.now();
                 try {
-                    const result = await this.executeTelegramUpload(bot.token, shard.channelId, bytes, id);
+                    const result = await this.executeTelegramUpload(bot.token, shard.channelId, bytes, id, signal);
                     const duration = Date.now() - startTime;
                     // AIMD Additive Increase on Bot
                     bot.activeUploads = Math.max(0, bot.activeUploads - 1);
@@ -474,7 +513,7 @@ export class DirectTelegramStorageProvider {
                         excludedShards.add(shard.shardId);
                     }
                     if (attempt < maxAttempts) {
-                        await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+                        await abortableDelay(200 + Math.random() * 300, signal);
                         continue;
                     }
                 }

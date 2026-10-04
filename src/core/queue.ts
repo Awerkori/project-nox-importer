@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { Logger } from './logger.js';
 
 export type TaskType = 'DISCOVER_WORKS' | 'SYNC_WORK' | 'IMPORT_CHAPTER';
+export type HeartbeatAbortReason = 'LEASE_LOST' | 'STAFF_REQUESTED';
 export type JobStatus =
   | 'QUEUED'
   | 'IMPORTING'
@@ -326,12 +327,13 @@ export class ImporterQueue {
   /**
    * Create a lease heartbeat handle that periodically renews the lease
    * until stopped. Uses .unref() to avoid blocking graceful shutdown.
-   * Also polls for staff cancellation requests (cancel_requested = true).
+   * Also aborts on lost lease ownership and polls for staff cancellation
+   * requests (cancel_requested = true).
    */
   startHeartbeat(
     jobId: string,
     intervalSeconds: number = 60,
-    onCancelRequested?: () => void
+    onCancelRequested?: (reason: HeartbeatAbortReason) => void
   ): { stop: () => void } {
     let stopped = false;
     let timer: NodeJS.Timeout | null = null;
@@ -348,13 +350,14 @@ export class ImporterQueue {
           const renewed = await this.renewLease(jobId);
           if (!renewed && !stopped) {
             this.logger.warn('Heartbeat lease renewal failed or lost ownership', { jobId });
+            onCancelRequested?.('LEASE_LOST');
           }
 
           if (!stopped && onCancelRequested) {
             const isCancelled = await this.isCancelRequested(jobId);
             if (isCancelled && !stopped) {
               this.logger.warn('Staff requested cancellation detected during heartbeat', { jobId });
-              onCancelRequested();
+              onCancelRequested('STAFF_REQUESTED');
             }
           }
         } catch (err: any) {

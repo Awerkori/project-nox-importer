@@ -1,3 +1,4 @@
+export declare function abortableDelay(ms: number, signal?: AbortSignal): Promise<void>;
 export declare class HostRateLimiter {
     private defaultRatePerSecond;
     private buckets;
@@ -12,12 +13,11 @@ export declare class HostRateLimiter {
     /**
      * Acquire a token for host with jitter and sleep if necessary
      */
-    acquire(host: string): Promise<void>;
+    acquire(host: string, signal?: AbortSignal, maxWaitMs?: number): Promise<void>;
     /**
      * Handle HTTP 429 response by honoring Retry-After or applying exponential backoff
      */
     handle429(host: string, retryAfterHeader?: string | null, attemptNumber?: number): number;
-    private sleep;
 }
 export interface StorageRateLimiterConfig {
     maxRequestsPerMinute?: number;
@@ -74,7 +74,7 @@ export declare class GlobalStorageRateLimiter {
      * Acquire an upload token before sending an image to the Storage Bridge.
      * Blocks if the rate limit or pacing threshold is reached.
      */
-    acquire(): Promise<void>;
+    acquire(signal?: AbortSignal): Promise<void>;
     /**
      * Record a successful upload with page size and latency metrics.
      * Evaluates real throughput (pages/min) over 30s windows with plateau detection:

@@ -2,6 +2,23 @@ import { Logger } from './logger.js';
 import { telemetryCollector } from './telemetry-collector.js';
 import { performance } from 'node:perf_hooks';
 
+export function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason || new Error('Operation aborted'));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, Math.max(0, ms));
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      reject(signal?.reason || new Error('Operation aborted'));
+    };
+    function done() {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    }
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
 interface Bucket {
   tokens: number;
   lastRefill: number;
@@ -114,18 +131,22 @@ export class HostRateLimiter {
   /**
    * Acquire a token for host with jitter and sleep if necessary
    */
-  async acquire(host: string): Promise<void> {
+  async acquire(host: string, signal?: AbortSignal, maxWaitMs = 120_000): Promise<void> {
     const bucket = this.getBucket(host);
     const t0 = performance.now();
 
     while (true) {
+      signal?.throwIfAborted();
+      if (performance.now() - t0 >= maxWaitMs) {
+        throw new Error(`Host rate-limit wait exceeded ${maxWaitMs}ms for ${host}`);
+      }
       const now = Date.now();
 
       // Check if blocked due to 429 Retry-After
       if (bucket.blockedUntil > now) {
-        const waitMs = bucket.blockedUntil - now;
+        const waitMs = Math.min(bucket.blockedUntil - now, Math.max(1, maxWaitMs - (performance.now() - t0)));
         this.logger.debug(`Host ${host} is rate-blocked, waiting ${waitMs}ms`);
-        await this.sleep(waitMs);
+        await abortableDelay(waitMs, signal);
         continue;
       }
 
@@ -138,7 +159,7 @@ export class HostRateLimiter {
         bucket.tokens -= 1;
         // Apply micro-jitter (5-15ms) to avoid perfectly periodic bursts
         const jitter = Math.floor(Math.random() * 10) + 5;
-        await this.sleep(jitter);
+        await abortableDelay(jitter, signal);
         const actualWaitMs = performance.now() - t0;
         telemetryCollector.recordRateLimitWait(host, actualWaitMs);
         return;
@@ -147,7 +168,10 @@ export class HostRateLimiter {
       // Wait until at least 1 token is available + random jitter
       const timeForTokenMs = Math.ceil(((1 - bucket.tokens) / bucket.ratePerSecond) * 1000);
       const jitter = Math.floor(Math.random() * 30) + 5;
-      await this.sleep(timeForTokenMs + jitter);
+      await abortableDelay(
+        Math.min(timeForTokenMs + jitter, Math.max(1, maxWaitMs - (performance.now() - t0))),
+        signal
+      );
     }
   }
 
@@ -191,9 +215,6 @@ export class HostRateLimiter {
     return waitSeconds;
   }
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
 }
 
 export interface StorageRateLimiterConfig {
@@ -271,15 +292,16 @@ export class GlobalStorageRateLimiter {
    * Acquire an upload token before sending an image to the Storage Bridge.
    * Blocks if the rate limit or pacing threshold is reached.
    */
-  async acquire(): Promise<void> {
+  async acquire(signal?: AbortSignal): Promise<void> {
     while (true) {
+      signal?.throwIfAborted();
       const now = Date.now();
 
       // 1. Check if blocked due to 429 / cooldown
       if (this.blockedUntil > now) {
         const waitMs = this.blockedUntil - now;
         this.logger.warn(`Storage Bridge is rate-blocked, waiting ${waitMs}ms before retry`);
-        await new Promise((r) => setTimeout(r, Math.min(waitMs, 5000)));
+        await abortableDelay(Math.min(waitMs, 5000), signal);
         continue;
       }
 
@@ -291,7 +313,7 @@ export class GlobalStorageRateLimiter {
         this.logger.debug(
           `Sliding window limit reached (${this.recentUploadTimestamps.length}/${this.currentRatePerMinute} req/min), pacing for ${waitMs}ms`
         );
-        await new Promise((r) => setTimeout(r, Math.min(waitMs, 2000)));
+        await abortableDelay(Math.min(waitMs, 2000), signal);
         continue;
       }
 
@@ -303,7 +325,7 @@ export class GlobalStorageRateLimiter {
       // 4. Minimum spacing pacing between releases
       const sinceLast = now - this.lastAcquiredTime;
       if (sinceLast < this.minIntervalMs) {
-        await new Promise((r) => setTimeout(r, this.minIntervalMs - sinceLast));
+        await abortableDelay(this.minIntervalMs - sinceLast, signal);
         continue;
       }
 
@@ -316,7 +338,7 @@ export class GlobalStorageRateLimiter {
 
       // Wait until next token is generated
       const waitMs = Math.ceil(((1 - this.tokens) / this.ratePerSecond) * 1000);
-      await new Promise((r) => setTimeout(r, Math.max(50, Math.min(waitMs, 1000))));
+      await abortableDelay(Math.max(50, Math.min(waitMs, 1000)), signal);
     }
   }
 

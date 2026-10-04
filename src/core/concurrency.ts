@@ -79,9 +79,9 @@ export class AsyncSemaphore {
   public waitSamples: number[] = [];
   public holdSamples: number[] = [];
 
-  async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+  async runExclusive<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const t0Wait = performance.now();
-    await this.acquire();
+    await this.acquire(signal);
     const waitMs = performance.now() - t0Wait;
     this.waitSamples.push(waitMs);
     if (this.waitSamples.length > 300) this.waitSamples.shift();
