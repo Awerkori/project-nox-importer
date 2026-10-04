@@ -1,7 +1,7 @@
 import https from 'node:https';
 import http from 'node:http';
 import { Logger } from '../core/logger.js';
-import { GlobalStorageRateLimiter } from '../core/rate-limiter.js';
+import { abortableDelay, GlobalStorageRateLimiter } from '../core/rate-limiter.js';
 export class NoxWorkerStorageError extends Error {
     stage;
     status;
@@ -59,6 +59,9 @@ function doHttp1Request(urlStr, options) {
         req.on('timeout', () => {
             req.destroy(new Error(`Request timed out after ${options.timeoutMs ?? 60_000}ms`));
         });
+        const abortRequest = () => req.destroy(options.signal?.reason || new Error('Storage request aborted'));
+        options.signal?.addEventListener('abort', abortRequest, { once: true });
+        req.on('close', () => options.signal?.removeEventListener('abort', abortRequest));
         req.on('error', (err) => {
             reject(err);
         });
@@ -94,11 +97,14 @@ export class NoxWorkerStorageProvider {
     }
     executeRequest(urlStr, options) {
         if (this.transport) {
+            const requestSignal = options.signal
+                ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? 60_000)])
+                : AbortSignal.timeout(options.timeoutMs ?? 60_000);
             return this.transport(urlStr, {
                 method: options.method,
                 headers: options.headers,
                 body: options.body,
-                signal: AbortSignal.timeout(options.timeoutMs ?? 60_000),
+                signal: requestSignal,
             }).then(async (res) => {
                 let headersObj = {};
                 if (res.headers) {
@@ -162,7 +168,7 @@ export class NoxWorkerStorageProvider {
             return false;
         }
     }
-    async upload(bytes, mime, id, chapterId) {
+    async upload(bytes, mime, id, chapterId, signal) {
         const queryParts = [`id=${encodeURIComponent(id)}`];
         if (chapterId) {
             queryParts.push(`chapter_id=${encodeURIComponent(chapterId)}`);
@@ -173,7 +179,7 @@ export class NoxWorkerStorageProvider {
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
                 // Enforce global rate limit across all sources (Token Bucket + Sliding Window cap at 120-160 req/min)
-                await this.rateLimiter.acquire();
+                await this.rateLimiter.acquire(signal);
                 const bodyBuffer = Buffer.isBuffer(bytes)
                     ? bytes
                     : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -189,6 +195,7 @@ export class NoxWorkerStorageProvider {
                     },
                     body: bodyBuffer,
                     timeoutMs: 60_000,
+                    signal,
                 });
                 if (res.status === 401 || res.status === 403) {
                     throw new NoxWorkerStorageError('auth', res.status, 'Authentication failed on internal storage endpoint');
@@ -213,7 +220,7 @@ export class NoxWorkerStorageProvider {
                     this.rateLimiter.recordRateLimit(waitSec);
                     this.logger.warn(`Storage Bridge returned HTTP 429 (Rate Limit)! Cooldown ${waitSec}s, retrying attempt ${attempt + 1}/${maxAttempts}...`, { id, waitSec });
                     if (attempt < maxAttempts) {
-                        await new Promise((r) => setTimeout(r, waitSec * 1000));
+                        await abortableDelay(waitSec * 1000, signal);
                         continue;
                     }
                     throw new NoxWorkerStorageError('http', 429, `Storage Bridge rate limit exceeded (Retry-After: ${waitSec}s)`);
@@ -230,7 +237,7 @@ export class NoxWorkerStorageProvider {
                         const jitterMs = Math.floor(Math.random() * (baseMs * 0.25));
                         const delayMs = baseMs + jitterMs;
                         this.logger.warn(`Storage upload transient error HTTP ${res.status}, local backoff ${Math.round(delayMs / 1000)}s with jitter before attempt ${attempt + 1}/${maxAttempts}...`, { id, status: res.status, delayMs });
-                        await new Promise((r) => setTimeout(r, delayMs));
+                        await abortableDelay(delayMs, signal);
                         continue;
                     }
                     throw error;
@@ -264,7 +271,7 @@ export class NoxWorkerStorageProvider {
                     const jitterMs = Math.floor(Math.random() * (baseMs * 0.25));
                     const delayMs = baseMs + jitterMs;
                     this.logger.warn(`Storage upload attempt ${attempt}/${maxAttempts} network failure (${err?.message}), waiting ${Math.round(delayMs / 1000)}s before retrying...`, { id, delayMs, cause: err?.cause?.message || err?.cause });
-                    await new Promise((r) => setTimeout(r, delayMs));
+                    await abortableDelay(delayMs, signal);
                     continue;
                 }
             }

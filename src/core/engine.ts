@@ -2618,12 +2618,20 @@ export class ImporterEngine {
     const tracksChapterExecution = job.task_type === 'IMPORT_CHAPTER';
     if (tracksChapterExecution) this.activeChapterExecutions.add(job.id);
 
-    let cancelSignalTriggered = false;
+    let staffCancellationRequested = false;
+    const jobAbortController = new AbortController();
     const heartbeat = this.queue.startHeartbeat(
       job.id,
       this.config.QUEUE_HEARTBEAT_INTERVAL_SECONDS,
-      () => {
-        cancelSignalTriggered = true;
+      (reason) => {
+        if (reason === 'STAFF_REQUESTED') {
+          staffCancellationRequested = true;
+        }
+        jobAbortController.abort(
+          reason === 'STAFF_REQUESTED'
+            ? new JobCancelledByStaffError(job.id)
+            : new Error('Lease heartbeat lost ownership')
+        );
       }
     );
 
@@ -2633,30 +2641,23 @@ export class ImporterEngine {
       ? Math.min(4 * 60 * 1000, Math.max(150 * 1000, pageCountHint * 4 * 1000))
       : 3 * 60 * 1000;
     let jobTimeoutTimer: NodeJS.Timeout | null = null;
-    const deadlinePromise = new Promise<true>((resolve) => {
+    const deadlinePromise = new Promise<never>((_, reject) => {
       jobTimeoutTimer = setTimeout(() => {
-        resolve(true);
+        jobAbortController.abort(new Error(`Job ${job.id} exceeded its bounded execution deadline`));
+        reject(
+          new Error(
+            `JobExecutionTimeout: Job ${job.id} (${job.task_type}) exceeded safety limit of ${Math.round(maxJobDurationMs / 60000)} minutes`
+          )
+        );
       }, maxJobDurationMs);
     });
 
     try {
-      const executionPromise = this.processJob(job, () => cancelSignalTriggered, extraTiming);
-      const exceededDeadline = await Promise.race([
-        executionPromise.then(() => false as const),
-        deadlinePromise,
-      ]);
-
-      if (exceededDeadline) {
-        this.logger.warn(
-          `[JOB_SOFT_DEADLINE] ${job.id} (${job.task_type}) exceeded ${Math.round(maxJobDurationMs / 60000)}m; retaining lease and permits until the in-flight operation settles`,
-          { jobId: job.id, taskType: job.task_type, source: job.source, maxJobDurationMs }
-        );
-        // Do not turn this into a staff cancellation: that would either lose
-        // valid work or let an unabortable operation race a retried job.
-        await executionPromise;
-      }
+      const executionPromise = this.processJob(job, () => staffCancellationRequested, extraTiming, jobAbortController.signal);
+      await Promise.race([executionPromise, deadlinePromise]);
     } finally {
       if (jobTimeoutTimer) clearTimeout(jobTimeoutTimer);
+      jobAbortController.abort();
       heartbeat.stop();
       if (tracksChapterExecution) this.activeChapterExecutions.delete(job.id);
     }
@@ -2843,7 +2844,8 @@ export class ImporterEngine {
       totalQueries?: number;
       worksTested?: number;
       acquireTelemetry?: any;
-    }
+    },
+    jobSignal?: AbortSignal
   ): Promise<void> {
     try {
       // Checkpoint 0: Staff cancellation pre-flight check
@@ -3000,7 +3002,7 @@ export class ImporterEngine {
           await this.handleSyncWork(job);
           break;
         case 'IMPORT_CHAPTER':
-          await this.handleImportChapter(job, isCancelled, extraTiming);
+          await this.handleImportChapter(job, isCancelled, extraTiming, jobSignal);
           break;
         default:
           throw new Error(`Unknown task type: ${job.task_type}`);
@@ -3874,7 +3876,8 @@ export class ImporterEngine {
       totalQueries?: number;
       worksTested?: number;
       acquireTelemetry?: any;
-    }
+    },
+    jobSignal?: AbortSignal
   ): Promise<void> {
     const jobStart = performance.now();
     const metaStart = performance.now();
@@ -4274,6 +4277,9 @@ export class ImporterEngine {
 
         const bufferedPageSemaphore = this.autotuner.getBufferedPageSemaphore();
         const bufferedWaitAbort = new AbortController();
+        const pipelineSignal = jobSignal
+          ? AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal, jobSignal])
+          : AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]);
         interface DownloadedPage {
           index: number;
           releaseBuffer: () => void;
@@ -4289,7 +4295,7 @@ export class ImporterEngine {
         const consumerResolvers: Array<() => void> = [];
 
         const notifyConsumer = () => {
-          if (pipelineError || this.stopSignal || isCancelled?.()) {
+          if (pipelineError || this.stopSignal || isCancelled?.() || jobSignal?.aborted) {
             bufferedWaitAbort.abort();
             while (readyQueue.length) {
               const discarded = readyQueue.shift()!;
@@ -4305,7 +4311,7 @@ export class ImporterEngine {
         };
 
         const waitForPage = (): Promise<void> => {
-          if (readyQueue.length > 0 || allDownloadsFinished || pipelineError || this.stopSignal || isCancelled?.()) {
+          if (readyQueue.length > 0 || allDownloadsFinished || pipelineError || this.stopSignal || isCancelled?.() || jobSignal?.aborted) {
             return Promise.resolve();
           }
           return new Promise<void>((resolve) => {
@@ -4325,7 +4331,7 @@ export class ImporterEngine {
         // Producer: downloads raw page bytes from source CDN into memory
         const producer = async () => {
           try {
-            while (!this.stopSignal && !pipelineError && !isCancelled?.()) {
+            while (!this.stopSignal && !pipelineError && !isCancelled?.() && !jobSignal?.aborted) {
             // Safe Checkpoint: cancellation check
             if (await checkCancellation()) {
               pipelineError = new JobCancelledByStaffError(job.id);
@@ -4341,7 +4347,7 @@ export class ImporterEngine {
             let pageUrl = pageUrls[idx];
             const parsedUrl = new URL(pageUrl);
             const rl0 = performance.now();
-            await this.rateLimiter.acquire(parsedUrl.host);
+            await this.rateLimiter.acquire(parsedUrl.host, pipelineSignal);
             chRateLimitWaitMs += (performance.now() - rl0);
 
             // A producer waiting for a source-local page permit must not
@@ -4355,23 +4361,36 @@ export class ImporterEngine {
             chDownloadSemWaitMs += (performance.now() - sourceWait0);
             try {
             const buf0 = performance.now();
-            let reservation = await this.autotuner.reserveBufferBudget(
-              2.0 * 1024 * 1024,
-              AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal])
-            );
-            await bufferedPageSemaphore.acquire(AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal]));
+            let reservation: BufferReservation | undefined;
+            let bufferedSemaphoreAcquired = false;
+            try {
+              reservation = await this.autotuner.reserveBufferBudget(
+                2.0 * 1024 * 1024,
+                pipelineSignal
+              );
+              await bufferedPageSemaphore.acquire(pipelineSignal);
+              bufferedSemaphoreAcquired = true;
+            } catch (acquireError) {
+              // A deadline/lease abort can fire between these two awaits.
+              // Return the first permit before propagating the abort so the
+              // next job cannot inherit a permanently reduced buffer budget.
+              if (reservation && !reservation.isCommitted && !reservation.isReleased) {
+                reservation.release();
+              }
+              throw acquireError;
+            }
             chDownloadSemWaitMs += (performance.now() - buf0);
             let bufferTransferred = false;
             let reservationCommitted = false;
             let pageBytes: Uint8Array | null = null;
             try {
-            if (this.stopSignal || pipelineError || isCancelled?.()) break;
+            if (this.stopSignal || pipelineError || isCancelled?.() || jobSignal?.aborted) break;
             let attempts = 0;
             let lastErr: any = null;
             let currentUrl = pageUrls[idx] || pageUrl;
 
             const d0 = Date.now();
-            while (attempts < 4 && !this.stopSignal && !pipelineError) {
+            while (attempts < 4 && !this.stopSignal && !pipelineError && !jobSignal?.aborted) {
               attempts++;
               const timeoutMs = attempts === 1 ? 15_000 : attempts === 2 ? 25_000 : 35_000;
               const freshConnection = attempts >= 2;
@@ -4429,19 +4448,20 @@ export class ImporterEngine {
                         // here made a single bad page consume up to twelve
                         // network attempts while holding a chapter slot.
                         maxAttempts: 1,
+                        signal: pipelineSignal,
                       })
                     );
                   } finally {
                     telemetryCollector.trackActiveDownload(-1);
                   }
-                });
+                }, pipelineSignal);
 
                 const dlMs = Date.now() - d0;
                 tDownload += dlMs;
                 chDownloadMs += dlMs;
                 telemetryCollector.recordImageDownload(effectiveSource, dlMs, pageBytes.length);
                 totalBytes += pageBytes.length;
-                reservation.commit(pageBytes.length);
+                reservation?.commit(pageBytes.length);
                 reservationCommitted = true;
                 ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
 
@@ -4463,11 +4483,11 @@ export class ImporterEngine {
                 if (err instanceof InvalidMediaError) {
                   break;
                 }
-                if (attempts < 4 && !this.stopSignal && !pipelineError) {
-                  if (reservation.isReleased) {
+                if (attempts < 4 && !this.stopSignal && !pipelineError && !jobSignal?.aborted) {
+                  if (reservation?.isReleased) {
                     reservation = await this.autotuner.reserveBufferBudget(
                       2.0 * 1024 * 1024,
-                      AbortSignal.any([this.abortController.signal, bufferedWaitAbort.signal])
+                      pipelineSignal
                     );
                   }
                   await this.sleep(400 * attempts);
@@ -4515,10 +4535,12 @@ export class ImporterEngine {
                 if (reservationCommitted && pageBytes) {
                   this.autotuner.releaseActiveBufferedBytes(pageBytes.length);
                   ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
-                } else if (!reservationCommitted) {
+                } else if (!reservationCommitted && reservation) {
                   reservation.release();
                 }
-                bufferedPageSemaphore.release();
+                if (bufferedSemaphoreAcquired) {
+                  bufferedPageSemaphore.release();
+                }
               }
             }
             } finally {
@@ -4537,14 +4559,16 @@ export class ImporterEngine {
       // Consumer: uploads downloaded pages to Storage Bridge / Telegram concurrently
       const consumer = async () => {
         try {
-          while (!this.stopSignal && !pipelineError && !isCancelled?.()) {
-            if (isCancelled?.()) {
-              pipelineError = new JobCancelledByStaffError(job.id);
+          while (!this.stopSignal && !pipelineError && !isCancelled?.() && !jobSignal?.aborted) {
+            if (isCancelled?.() || jobSignal?.aborted) {
+              pipelineError = isCancelled?.()
+                ? new JobCancelledByStaffError(job.id)
+                : (jobSignal?.reason instanceof Error ? jobSignal.reason : new Error('Job execution aborted'));
               break;
             }
 
             while (readyQueue.length === 0) {
-              if (allDownloadsFinished || pipelineError || this.stopSignal || isCancelled?.()) {
+              if (allDownloadsFinished || pipelineError || this.stopSignal || isCancelled?.() || jobSignal?.aborted) {
                 return;
               }
               await waitForPage();
@@ -4577,7 +4601,11 @@ export class ImporterEngine {
                     botUserId,
                     'editorial',
                     targetChapterId,
-                    { skipDbInsert: true, skipDedupLookup: !job.payload?.readerRepair }
+                    {
+                      skipDbInsert: true,
+                      skipDedupLookup: !job.payload?.readerRepair,
+                      signal: pipelineSignal,
+                    }
                   );
                 } finally {
                   telemetryCollector.trackActiveTelegramUpload(-1);
@@ -4586,7 +4614,7 @@ export class ImporterEngine {
                   chTelegramUploadMs += uploadDuration;
                   telemetryCollector.recordTelegramUpload(uploadDuration, pageBytes!.length);
                 }
-              });
+              }, pipelineSignal);
 
               if (typeof (this.storage as any).getRateLimiter === 'function') {
                 const limiter = (this.storage as any).getRateLimiter();
@@ -5275,6 +5303,7 @@ export class ImporterEngine {
        * time.  Direct callers retain the defensive default of three tries.
        */
       maxAttempts?: number;
+      signal?: AbortSignal;
     }
   ): Promise<Uint8Array> {
     const parsedUrl = new URL(url);
@@ -5312,6 +5341,7 @@ export class ImporterEngine {
     }
 
     let res: Response | null = null;
+    let responseSignal: AbortSignal | undefined;
     let fetchError: any = null;
 
     let attempts = 0;
@@ -5322,8 +5352,10 @@ export class ImporterEngine {
       try {
         const requestSignal = AbortSignal.any([
           this.abortController.signal,
+          ...(options?.signal ? [options.signal] : []),
           AbortSignal.timeout(timeoutDuration),
         ]);
+        responseSignal = requestSignal;
         res = await fetch(url, {
           headers: requestHeaders,
           signal: requestSignal,
@@ -5350,7 +5382,7 @@ export class ImporterEngine {
         // A controlled recovery cancels the current operation epoch. It is
         // not a transient upstream failure and must not spend retry time or
         // retain permits while the engine is draining.
-        if (this.abortController.signal.aborted) {
+        if (this.abortController.signal.aborted || options?.signal?.aborted) {
           throw err;
         }
         if (
@@ -5373,6 +5405,7 @@ export class ImporterEngine {
         const bridgeUrl = `${(this.config.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev').replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
         const bridgeSignal = AbortSignal.any([
           this.abortController.signal,
+          ...(options?.signal ? [options.signal] : []),
           AbortSignal.timeout(timeoutDuration),
         ]);
         const bridgeRes = await fetch(bridgeUrl, {
@@ -5445,7 +5478,7 @@ export class ImporterEngine {
 
     const uint8 = await readImageBody(res, {
       reservation: options?.reservation,
-      signal: (res as Response & { __noxBodySignal?: AbortSignal }).__noxBodySignal,
+      signal: (res as Response & { __noxBodySignal?: AbortSignal }).__noxBodySignal || responseSignal || options?.signal,
     });
 
     // Validate binary image integrity and check for fake HTML challenge pages returned with HTTP 200

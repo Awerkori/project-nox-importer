@@ -1,9 +1,11 @@
 import https from 'node:https';
+import type { ClientRequest } from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { StorageProvider } from './provider.js';
 import { Logger } from '../core/logger.js';
+import { abortableDelay } from '../core/rate-limiter.js';
 
 export interface BotRuntimeMetrics {
   ref: string;
@@ -60,8 +62,9 @@ export class BandwidthLimiter {
     this.tokens = this.maxBurst;
   }
 
-  async acquire(bytes: number): Promise<void> {
+  async acquire(bytes: number, signal?: AbortSignal): Promise<void> {
     const acquireInternal = async () => {
+      signal?.throwIfAborted();
       const now = Date.now();
       const elapsed = Math.max(0, (now - this.lastRefill) / 1000);
       this.tokens = Math.min(this.maxBurst, this.tokens + elapsed * this.bytesPerSec);
@@ -76,7 +79,7 @@ export class BandwidthLimiter {
       const waitMs = Math.ceil((deficit / this.bytesPerSec) * 1000);
       this.tokens = 0;
       this.lastRefill = now + waitMs;
-      await new Promise((r) => setTimeout(r, waitMs));
+      await abortableDelay(waitMs, signal);
     };
 
     this.waitChain = this.waitChain.then(acquireInternal, acquireInternal);
@@ -105,7 +108,7 @@ export class DirectTelegramStorageProvider implements StorageProvider {
   // Bounded queue backpressure
   private maxGlobalConcurrent = 32;
   private currentGlobalActive = 0;
-  private waitingQueue: Array<() => void> = [];
+  private waitingQueue: Array<{ resolve: () => void; reject: (reason?: unknown) => void }> = [];
 
   constructor(checkpointPath?: string, rateLimitBytesPerSec?: number) {
     const rate = rateLimitBytesPerSec || (process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC ? parseInt(process.env.UPLOAD_RATE_LIMIT_BYTES_PER_SEC, 10) : 25.0 * 1024 * 1024);
@@ -316,13 +319,30 @@ export class DirectTelegramStorageProvider implements StorageProvider {
     }
   }
 
-  private async acquireGlobalSlot(): Promise<void> {
+  private async acquireGlobalSlot(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (this.currentGlobalActive < this.maxGlobalConcurrent) {
       this.currentGlobalActive++;
       return;
     }
-    await new Promise<void>((resolve) => {
-      this.waitingQueue.push(resolve);
+    await new Promise<void>((resolve, reject) => {
+      const waiter = {
+        resolve: () => {
+          signal?.removeEventListener('abort', abort);
+          resolve();
+        },
+        reject: (reason?: unknown) => {
+          signal?.removeEventListener('abort', abort);
+          reject(reason);
+        },
+      };
+      const abort = () => {
+        const index = this.waitingQueue.indexOf(waiter);
+        if (index >= 0) this.waitingQueue.splice(index, 1);
+        waiter.reject(signal?.reason || new Error('Storage slot acquisition aborted'));
+      };
+      signal?.addEventListener('abort', abort, { once: true });
+      this.waitingQueue.push(waiter);
     });
     this.currentGlobalActive++;
   }
@@ -331,7 +351,7 @@ export class DirectTelegramStorageProvider implements StorageProvider {
     this.currentGlobalActive = Math.max(0, this.currentGlobalActive - 1);
     if (this.waitingQueue.length > 0) {
       const next = this.waitingQueue.shift();
-      if (next) next();
+      if (next) next.resolve();
     }
   }
 
@@ -399,7 +419,8 @@ export class DirectTelegramStorageProvider implements StorageProvider {
     token: string,
     channelId: string,
     bytes: Uint8Array,
-    id: string
+    id: string,
+    signal?: AbortSignal
   ): Promise<{ fileId: string; messageId: number }> {
     return new Promise((resolve, reject) => {
       const boundary = `----TelegramUploadBoundary${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
@@ -465,20 +486,24 @@ export class DirectTelegramStorageProvider implements StorageProvider {
         req.destroy(new Error(`Upload timed out after 45000ms`));
       });
 
+      const abortRequest = () => req.destroy(signal?.reason || new Error('Telegram upload aborted'));
+      signal?.addEventListener('abort', abortRequest, { once: true });
+      req.on('close', () => signal?.removeEventListener('abort', abortRequest));
+
       req.on('error', (err) => {
         reject(err);
       });
 
       const writeAsync = async () => {
-        await this.bandwidthLimiter.acquire(payloadBuffer.length);
+        await this.bandwidthLimiter.acquire(payloadBuffer.length, signal);
         if (!req.write(headerPart)) {
-          await new Promise<void>((r) => req.once('drain', r));
+          await this.waitForDrain(req, signal);
         }
         if (!req.write(payloadBuffer)) {
-          await new Promise<void>((r) => req.once('drain', r));
+          await this.waitForDrain(req, signal);
         }
         if (!req.write(footerPart)) {
-          await new Promise<void>((r) => req.once('drain', r));
+          await this.waitForDrain(req, signal);
         }
         req.end();
       };
@@ -489,8 +514,24 @@ export class DirectTelegramStorageProvider implements StorageProvider {
     });
   }
 
-  async upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string): Promise<string> {
-    await this.acquireGlobalSlot();
+  private waitForDrain(req: ClientRequest, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(signal.reason || new Error('Telegram upload aborted'));
+    return new Promise((resolve, reject) => {
+      const onDrain = () => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      const onAbort = () => {
+        req.removeListener('drain', onDrain);
+        reject(signal?.reason || new Error('Telegram upload aborted'));
+      };
+      req.once('drain', onDrain);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  async upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string, signal?: AbortSignal): Promise<string> {
+    await this.acquireGlobalSlot(signal);
 
     const maxAttempts = 3;
     let lastError: any;
@@ -506,7 +547,7 @@ export class DirectTelegramStorageProvider implements StorageProvider {
         if (bot.cooldownUntil > now && this.bots.every(b => b.cooldownUntil > now)) {
           const waitMs = Math.min(...this.bots.map(b => b.cooldownUntil)) - now;
           this.logger.warn(`All bots in cooldown. Sleeping ${Math.ceil(waitMs / 1000)}s...`);
-          await new Promise(r => setTimeout(r, Math.min(waitMs, 30_000)));
+          await abortableDelay(Math.min(waitMs, 30_000), signal);
         }
 
         bot.activeUploads++;
@@ -514,7 +555,7 @@ export class DirectTelegramStorageProvider implements StorageProvider {
         const startTime = Date.now();
 
         try {
-          const result = await this.executeTelegramUpload(bot.token, shard.channelId, bytes, id);
+          const result = await this.executeTelegramUpload(bot.token, shard.channelId, bytes, id, signal);
           const duration = Date.now() - startTime;
 
           // AIMD Additive Increase on Bot
@@ -588,7 +629,7 @@ export class DirectTelegramStorageProvider implements StorageProvider {
           }
 
           if (attempt < maxAttempts) {
-            await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+            await abortableDelay(200 + Math.random() * 300, signal);
             continue;
           }
         }

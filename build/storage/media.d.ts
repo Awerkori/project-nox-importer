@@ -23,6 +23,7 @@ export interface StoredMediaResult {
 export interface ProcessMediaOptions {
     skipDbInsert?: boolean;
     skipDedupLookup?: boolean;
+    signal?: AbortSignal;
 }
 /**
  * Process a single image:

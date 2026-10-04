@@ -80,6 +80,23 @@ describe('Concurrency Hardening & Runner Pool Tests', () => {
     vi.useRealTimers();
   });
 
+  it('aborts the owner when lease renewal is lost', async () => {
+    vi.useFakeTimers();
+    const onAbort = vi.fn();
+    const mockSupabase = {
+      rpc: vi.fn().mockResolvedValue({ data: false, error: null }),
+      from: vi.fn(),
+    };
+    const queue = new ImporterQueue(mockSupabase as any, 'test-worker');
+    const handle = queue.startHeartbeat('job-lease-loss', 1, onAbort);
+
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(onAbort).toHaveBeenCalledWith('LEASE_LOST');
+
+    handle.stop();
+    vi.useRealTimers();
+  });
+
   it('verifies runnerSlots = effectiveMaxConcurrentChapters calculation logic', () => {
     const calcRunnerSlots = (maxChapters: number, ceiling: number) => {
       const effective = Math.min(maxChapters, ceiling);

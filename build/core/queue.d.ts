@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 export type TaskType = 'DISCOVER_WORKS' | 'SYNC_WORK' | 'IMPORT_CHAPTER';
+export type HeartbeatAbortReason = 'LEASE_LOST' | 'STAFF_REQUESTED';
 export type JobStatus = 'QUEUED' | 'IMPORTING' | 'COMPLETED' | 'FAILED' | 'RETRY' | 'PAUSED_BY_STAFF' | 'CANCELLED_BY_STAFF' | 'BLOCKED_BY_UPSTREAM';
 export interface QueueJob {
     id: string;
@@ -69,9 +70,10 @@ export declare class ImporterQueue {
     /**
      * Create a lease heartbeat handle that periodically renews the lease
      * until stopped. Uses .unref() to avoid blocking graceful shutdown.
-     * Also polls for staff cancellation requests (cancel_requested = true).
+     * Also aborts on lost lease ownership and polls for staff cancellation
+     * requests (cancel_requested = true).
      */
-    startHeartbeat(jobId: string, intervalSeconds?: number, onCancelRequested?: () => void): {
+    startHeartbeat(jobId: string, intervalSeconds?: number, onCancelRequested?: (reason: HeartbeatAbortReason) => void): {
         stop: () => void;
     };
     /**

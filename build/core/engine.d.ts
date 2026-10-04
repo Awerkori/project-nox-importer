@@ -323,6 +323,7 @@ export declare class ImporterEngine {
          * time.  Direct callers retain the defensive default of three tries.
          */
         maxAttempts?: number;
+        signal?: AbortSignal;
     }): Promise<Uint8Array>;
     tryRawMetadataCoverFallback(raw: Record<string, any>, botUserId: string, source: string, excludeUrl?: string | null): Promise<string | null>;
     trySiblingMappingCoverFallback(workId: string | undefined, excludeSource: string, slugOrTitle: string, botUserId: string): Promise<string | null>;

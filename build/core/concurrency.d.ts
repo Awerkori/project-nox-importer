@@ -12,7 +12,7 @@ export declare class AsyncSemaphore {
     private drain;
     waitSamples: number[];
     holdSamples: number[];
-    runExclusive<T>(fn: () => Promise<T>): Promise<T>;
+    runExclusive<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T>;
     getMetrics(): {
         waitP50: number;
         waitP95: number;

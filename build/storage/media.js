@@ -194,7 +194,7 @@ export async function processAndStoreMedia(supabase, storage, bytes, userId, pur
     }
     // 2. Upload to storage provider
     const mediaId = crypto.randomUUID();
-    const providerKey = await storage.upload(bytes, info.mime, mediaId, chapterId);
+    const providerKey = await storage.upload(bytes, info.mime, mediaId, chapterId, options?.signal);
     // 3. Prepare media record
     const botRef = storage.getLastBotReference?.(mediaId) || 'MANGA_STORAGE_01';
     const shardId = storage.getLastShardId?.(mediaId) || null;
