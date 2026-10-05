@@ -20,7 +20,13 @@ describe('bounded admission snapshot', () => {
     // insufficient. This prevents a full GROUP BY over the staff-paused
     // catalog on every admission cycle.
     expect(source).toMatch(
-      /status = 'QUEUED' OR \(status = 'RETRY' AND next_run_at <= NOW\(\)\)/,
+      /q\.status = 'QUEUED' OR \(q\.status = 'RETRY' AND q\.next_run_at <= NOW\(\)\)/,
+    );
+    // Source health must be applied before the GROUP BY. Otherwise a large
+    // unresolved blocked-source backlog is still aggregated on every cycle
+    // and competes with claims on the bounded YSQL pool.
+    expect(source).toMatch(
+      /JOIN importer_sources s ON s\.id = q\.source[\s\S]{0,900}SOURCE_EXECUTION_ELIGIBILITY_SQL[\s\S]{0,120}GROUP BY q\.payload->>'workId', q\.source/,
     );
     expect(source).toMatch(
       /loadP1Candidates\(false\)[\s\S]{0,180}loadP1Candidates\(true\)/,
