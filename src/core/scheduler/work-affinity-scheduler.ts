@@ -2206,6 +2206,7 @@ export class WorkAffinityScheduler {
   private startMetricsReporter(): void {
     maintenanceScheduler.register('scheduler-metrics', 60000, 31000, async () => {
       try {
+        if (this.isPoolUnderClaimPressure()) return;
         for (const map of [this.unclaimableWorksCooldown, this.stagedBlockedWorks]) {
           for (const [id, until] of map) if (until <= Date.now()) map.delete(id);
         }

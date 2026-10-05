@@ -37,6 +37,14 @@ export class SchedulerStateStore {
             ? { query: async () => ({ rows: [] }) }
             : getYugabytePool());
     }
+    /** Settings refresh is control-plane work and must yield to chapter claims. */
+    isPoolUnderClaimPressure() {
+        const pool = this.pool;
+        const waiting = Number(pool?.waitingCount || 0);
+        const total = Number(pool?.totalCount || 0);
+        const idle = Number(pool?.idleCount || 0);
+        return waiting > 0 || (total > 0 && idle < total);
+    }
     /**
      * Initializes state by creating table if missing and loading existing records.
      */
@@ -84,6 +92,8 @@ export class SchedulerStateStore {
             // Start periodic settings refresh loop
             maintenanceScheduler.register('scheduler-settings', 10000, 7000, async () => {
                 try {
+                    if (this.isPoolUnderClaimPressure())
+                        return;
                     await this.refreshSettingsFromDb();
                 }
                 catch { }
