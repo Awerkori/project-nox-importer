@@ -11,6 +11,11 @@ export function isSourceExecutionEligible(record, now = Date.now()) {
         return !record.blockedReason || hasSuccessfulSourceRecovery(record);
     }
     if (record.status === 'COOLDOWN' || record.status === 'DEGRADED' || record.status === 'PROBING') {
+        // Expiry only authorizes a fresh health probe.  A source with an
+        // unresolved persisted block must not enter execution until that probe
+        // records an explicit recovery marker.
+        if (record.blockedReason && !hasSuccessfulSourceRecovery(record))
+            return false;
         return !record.cooldownUntil || record.cooldownUntil <= now;
     }
     return false;
@@ -33,6 +38,11 @@ export const SOURCE_EXECUTION_ELIGIBILITY_SQL = `(
   )
   OR (
     s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED')
+    AND (
+      s.blocked_reason IS NULL
+      OR s.blocked_details->>'probe_success' = 'true'
+      OR s.blocked_details->>'recovered_at' IS NOT NULL
+    )
     AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())
   )
 )`;

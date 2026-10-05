@@ -947,12 +947,17 @@ export class ImporterEngine {
                 // 2. Clean stale source cooldowns in importer_sources
                 try {
                     const pool = getYugabytePool();
+                    // Expiration only makes a source eligible for a fresh probe.  Never
+                    // promote a source with an unresolved block (or erase its evidence)
+                    // here: the bounded health-probe loop is the sole authority allowed
+                    // to clear blocked_reason after a successful check.
                     const cleanRes = await pool.query(`
             UPDATE importer_sources
-            SET status = 'ACTIVE', cooldown_until = NULL, blocked_reason = NULL
+            SET status = 'ACTIVE', cooldown_until = NULL
             WHERE status IN ('DEGRADED', 'COOLDOWN')
               AND cooldown_until IS NOT NULL
               AND cooldown_until < NOW()
+              AND blocked_reason IS NULL
           `);
                     if ((cleanRes.rowCount ?? 0) > 0) {
                         this.logger.info(`🧹 [HYGIENE SWEEP] Cleared ${cleanRes.rowCount} expired source cooldowns.`);
