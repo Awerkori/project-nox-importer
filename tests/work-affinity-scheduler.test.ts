@@ -160,6 +160,11 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
 
     expect(acquired?.id).toBe('p1-progress-job');
     expect((scheduler as any).highPriorityConsecutiveClaims).toBe(0);
+    const claimSql = mockClient.query.mock.calls
+      .map(([sql]: [string]) => sql)
+      .find((sql: string) => sql.includes('UPDATE importer_queue q'));
+    expect(claimSql).toContain('FOR UPDATE OF q SKIP LOCKED');
+    expect(claimSql).not.toContain('FOR UPDATE SKIP LOCKED');
   });
 
   it('only reserves lower-priority work after the configured high-priority burst', () => {
