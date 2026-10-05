@@ -848,14 +848,19 @@ export class AdmissionController {
         // 1. Replenish P1 Backfill Works
         if (backfillSlotsAvailable > 0) {
             const activeIds = activeWorks.map((w) => w.workId);
-            const candidatesRes = await this.runQuery(`WITH queue_candidate_groups AS MATERIALIZED (
+            // The normal path must only inspect executable work.  Including the
+            // entire PAUSED_BY_STAFF backlog here turns every 4s admission cycle
+            // into a full GROUP BY over hundreds of thousands of rows, competing
+            // with claims on the bounded YSQL pool.  A paused-only fallback is kept
+            // for the rare case where there are not enough executable candidates.
+            const loadP1Candidates = (includePaused) => this.runQuery(`WITH queue_candidate_groups AS MATERIALIZED (
            SELECT payload->>'workId' AS work_id, source, COUNT(*) AS pending_jobs,
              COUNT(*) FILTER (WHERE status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW())) AS queued_count,
              COUNT(*) FILTER (WHERE status = 'PAUSED_BY_STAFF') AS paused_count,
              MIN(chapter_sort_key) AS min_sort_key
            FROM importer_queue
            WHERE task_type='IMPORT_CHAPTER'
-             AND (status = 'QUEUED' OR status = 'PAUSED_BY_STAFF' OR (status = 'RETRY' AND next_run_at <= NOW()))
+             AND (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW())${includePaused ? " OR status = 'PAUSED_BY_STAFF'" : ''})
              AND attempts < COALESCE(max_attempts,7)
              AND priority >= 75 AND priority < 100
              AND COALESCE(payload->>'staffForced', 'false') <> 'true'
@@ -905,6 +910,10 @@ export class AdmissionController {
                 4,
                 JSON.stringify(this.getP1AdmissionCursors()),
             ]);
+            let candidatesRes = await loadP1Candidates(false);
+            if (candidatesRes.rows.length < backfillSlotsAvailable) {
+                candidatesRes = await loadP1Candidates(true);
+            }
             // Fast frontier check: query max_published for candidate works only
             const candidateWorkIds = candidatesRes.rows.map((r) => r.work_id);
             const pubMap = new Map();
@@ -1044,7 +1053,11 @@ export class AdmissionController {
         }
         else if (newWorkSlotsAvailable > 0) {
             const activeIds = this.stateStore.getActiveWorks().map((w) => w.workId);
-            const candidatesRes = await this.runQuery(`WITH queue_candidates AS MATERIALIZED (
+            // P2 has the same two populations as P1: executable QUEUED/RETRY rows
+            // and a potentially very large paused backlog.  Keep the common path
+            // on the queue index and only inspect paused rows when the executable
+            // frontier cannot fill the available cohort slots.
+            const loadP2Candidates = (includePaused) => this.runQuery(`WITH queue_candidates AS MATERIALIZED (
            SELECT (q.payload->>'workId') as work_id,
                 w.title,
                 q.source,
@@ -1057,7 +1070,7 @@ export class AdmissionController {
          JOIN works w ON w.id = (q.payload->>'workId')::uuid
          JOIN importer_sources s ON s.id = q.source
          WHERE q.task_type = 'IMPORT_CHAPTER'
-           AND q.status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF')
+           AND (q.status IN ('QUEUED', 'RETRY')${includePaused ? " OR q.status = 'PAUSED_BY_STAFF'" : ''})
            AND w.published IS FALSE
            AND s.enabled = true
            AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
@@ -1080,6 +1093,10 @@ export class AdmissionController {
                 newWorkSlotsAvailable * 3,
                 4,
             ]);
+            let candidatesRes = await loadP2Candidates(false);
+            if (candidatesRes.rows.length < newWorkSlotsAvailable) {
+                candidatesRes = await loadP2Candidates(true);
+            }
             // Sort P2 candidates by permit headroom and source diversity
             candidatesRes.rows.sort((a, b) => {
                 const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
@@ -1293,7 +1310,8 @@ export class AdmissionController {
             }
             const isP1 = lane === 'P1';
             const maxPriority = isP1 ? 100 : 75;
-            const query = `
+            const loadOnDemandCandidates = (includePaused) => {
+                const query = `
         WITH queue_candidates AS MATERIALIZED (
           SELECT payload->>'workId' AS work_id, source, COUNT(*) AS pending_jobs,
             COUNT(*) FILTER (WHERE status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW())) AS queued_count,
@@ -1301,7 +1319,7 @@ export class AdmissionController {
             MIN(chapter_sort_key) AS min_sort_key
           FROM importer_queue
           WHERE task_type='IMPORT_CHAPTER'
-            AND (status = 'QUEUED' OR status = 'PAUSED_BY_STAFF' OR (status = 'RETRY' AND next_run_at <= NOW()))
+            AND (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW())${includePaused ? " OR status = 'PAUSED_BY_STAFF'" : ''})
             AND attempts < COALESCE(max_attempts,7)
             AND priority >= ${isP1 ? 75 : 50} AND priority < ${maxPriority}
             AND COALESCE(payload->>'staffForced', 'false') <> 'true'
@@ -1345,12 +1363,17 @@ export class AdmissionController {
         ORDER BY q.source, q.min_sort_key ASC NULLS LAST
         LIMIT ${isP1 ? 64 : 10};
       `;
-            const res = await this.runQuery(query, [
-                allowedSources && allowedSources.length > 0 ? allowedSources : null,
-                activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
-                saturatedSources.length > 0 ? saturatedSources : null,
-                JSON.stringify(this.getP1AdmissionCursors()),
-            ]);
+                return this.runQuery(query, [
+                    allowedSources && allowedSources.length > 0 ? allowedSources : null,
+                    activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
+                    saturatedSources.length > 0 ? saturatedSources : null,
+                    JSON.stringify(this.getP1AdmissionCursors()),
+                ]);
+            };
+            let res = await loadOnDemandCandidates(false);
+            if (res.rows.length === 0) {
+                res = await loadOnDemandCandidates(true);
+            }
             if (res.rows.length === 0)
                 continue;
             const candWorkIds = res.rows.map((r) => r.work_id);
