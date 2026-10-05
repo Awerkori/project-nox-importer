@@ -30,6 +30,7 @@ export declare class AdmissionController {
     private p1BacklogSnapshot;
     private lastOnDemandP1Source;
     private visibleP2LifecycleRepairComplete;
+    private orphanCancelledRecoveryAt;
     private getP1AdmissionCursors;
     private advanceP1AdmissionCursor;
     setSourcePermitProvider(provider: (source: string) => number): void;
@@ -106,6 +107,14 @@ export declare class AdmissionController {
      * indexed P1 claim path can immediately see the repaired work.
      */
     private repairVisibleP2LifecycleBacklog;
+    /**
+     * Requeue legacy cancellation rows only when the canonical mapping is still
+     * executable and there is no active staff request for the work.  The strict
+     * null metadata predicates are intentional: explicit staff cancellations
+     * remain untouched.  Keep the batch bounded and rate-limited so recovery
+     * cannot turn into a queue-wide scan or compete with claims.
+     */
+    private recoverOrphanedCancelledChapterJobs;
     /**
      * Executes a single admission reconciliation cycle.
      */
