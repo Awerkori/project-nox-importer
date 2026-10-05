@@ -33,6 +33,7 @@ export declare class AdmissionController {
     private visibleP2LifecycleRepairComplete;
     private orphanCancelledRecoveryAt;
     private legacyTransientFailureRecoveryAt;
+    private sourceRecoveredFailureRecoveryAt;
     private getP1AdmissionCursors;
     private advanceP1AdmissionCursor;
     setSourcePermitProvider(provider: (source: string) => number): void;
@@ -126,6 +127,16 @@ export declare class AdmissionController {
      * statement so the canonical frontier cannot observe a half-recovered pair.
      */
     private recoverLegacyTransientFailures;
+    /**
+     * Reopen a transient frontier only after its source has demonstrably
+     * recovered.  A failed predecessor can otherwise leave every later
+     * canonical chapter behind a permanent barrier even though the source is
+     * healthy again.  The source-row update is the recovery edge: a retry is
+     * eligible once, and a second failure is not reopened until a newer source
+     * probe records another recovery.  Permanent failures and failures without
+     * a source recovery marker remain terminal.
+     */
+    private recoverSourceRecoveredTransientFailures;
     /**
      * Executes a single admission reconciliation cycle.
      */
