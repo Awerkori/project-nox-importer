@@ -943,8 +943,10 @@ export class AdmissionController {
          ),
          queue_candidates AS MATERIALIZED (
            -- Rotate work selection independently from chapter number. Keep the
-           -- earliest frontier as one bounded fallback per source: a cursor
-           -- candidate can legitimately be parked behind an unresolved gap.
+           -- earliest frontiers as a bounded fallback per source: the cursor
+           -- candidate can be parked behind an unresolved gap, so keeping a
+           -- small frontier window lets contiguity filtering find the next
+           -- executable work without scanning or admitting the whole source.
            SELECT ranked.*
            FROM (
              SELECT g.*,
@@ -959,7 +961,7 @@ export class AdmissionController {
              ) AS frontier_rank
              FROM queue_candidate_groups g
            ) ranked
-           WHERE rotation_rank <= $3 OR frontier_rank = 1
+           WHERE rotation_rank <= $3 OR frontier_rank <= $3
          )
          SELECT q.work_id,
                 w.title,
