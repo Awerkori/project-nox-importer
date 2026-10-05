@@ -23,7 +23,7 @@ import { telemetryCollector } from './telemetry-collector.js';
 import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from './scheduler/index.js';
 import { AutoHealWatchdog } from './auto-heal-watchdog.js';
 import { RateBucketTracker } from './rate-bucket-tracker.js';
-import { hasSuccessfulSourceRecovery, isSourceExecutionEligible, shouldProbePersistedSource, } from './source-eligibility.js';
+import { hasSuccessfulSourceRecovery, isCatalogExecutionEligible, isSourceExecutionEligible, shouldProbePersistedSource, } from './source-eligibility.js';
 import { performance } from 'node:perf_hooks';
 import { randomUUID } from 'node:crypto';
 export { computeCanonicalChapterKey };
@@ -2280,7 +2280,12 @@ export class ImporterEngine {
                 try {
                     if (this.stopSignal)
                         continue;
-                    const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), undefined, 'DISCOVER_WORKS');
+                    const allowedSources = await this.getEligibleCatalogSources();
+                    if (allowedSources.length === 0) {
+                        await this.sleep(5_000);
+                        continue;
+                    }
+                    const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), allowedSources, 'DISCOVER_WORKS');
                     if (!job) {
                         idle = true;
                     }
@@ -2326,7 +2331,12 @@ export class ImporterEngine {
                 try {
                     if (this.stopSignal)
                         continue;
-                    const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), undefined, 'SYNC_WORK');
+                    const allowedSources = await this.getEligibleCatalogSources();
+                    if (allowedSources.length === 0) {
+                        await this.sleep(5_000);
+                        continue;
+                    }
+                    const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), allowedSources, 'SYNC_WORK');
                     if (!job) {
                         idle = true;
                     }
@@ -2344,6 +2354,26 @@ export class ImporterEngine {
                 this.logger.error('Error in catalog sync worker lane', { error: err?.message });
                 await this.sleep(5_000);
             }
+        }
+    }
+    async getEligibleCatalogSources() {
+        try {
+            const sources = await this.getSourceScheduleSnapshot();
+            if (!sources)
+                return [];
+            return sources
+                .filter((src) => isCatalogExecutionEligible({
+                status: src.status,
+                enabled: src.enabled,
+                catalogDiscoveryEnabled: src.catalog_discovery_enabled,
+                blockedReason: src.blocked_reason,
+                blockedDetails: src.blocked_details,
+            }))
+                .map((src) => src.id);
+        }
+        catch (err) {
+            this.logger.warn('Failed to load eligible catalog sources', { error: err?.message });
+            return [];
         }
     }
     /**

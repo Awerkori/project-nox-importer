@@ -21,6 +21,12 @@ const DEFERRED_RESTART_RETRY_COOLDOWN_MS = 60 * 1000;
 // the normal restart budget is open, one bounded containment probe remains
 // available after this cooldown to cancel a genuinely wedged in-flight epoch.
 const CIRCUIT_CONTAINMENT_COOLDOWN_MS = 8 * 60 * 1000;
+// Containment probes are recovery attempts, not process restarts. Counting
+// them against the one-hour restart budget keeps the circuit latched forever
+// when a real restart has already cooled down.
+export function isCountedAutoRestart(record) {
+    return !record.reason.startsWith('CIRCUIT_CONTAINMENT_STALL:');
+}
 /**
  * AutoHealWatchdog
  *
@@ -509,7 +515,7 @@ export class AutoHealWatchdog {
         catch { }
         // 6. Recent Auto-Restarts and Circuit Breaker
         const recentRestarts = await this.getRecentAutoRestarts();
-        const restartsLast1h = recentRestarts.filter((r) => nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000);
+        const restartsLast1h = recentRestarts.filter((r) => isCountedAutoRestart(r) && nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000);
         const autoRestartCount1h = restartsLast1h.length;
         this.circuitBreakerOpen = autoRestartCount1h >= 3;
         // 7. Correlated dedupe classification of recent completed jobs (Tiered: only queried when fresh is delayed > 10m)
@@ -937,7 +943,7 @@ export class AutoHealWatchdog {
             }
             // Check Circuit Breaker & Persistent Cooldown from DB
             const recentRestarts = await this.getRecentAutoRestarts();
-            const restartsLast1h = recentRestarts.filter((r) => nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000);
+            const restartsLast1h = recentRestarts.filter((r) => isCountedAutoRestart(r) && nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000);
             if (this.circuitBreakerOpen || restartsLast1h.length >= 3) {
                 this.circuitBreakerOpen = true;
                 this.autoHealState = 'CIRCUIT_OPEN';
