@@ -1381,22 +1381,41 @@ export class AdmissionController {
       // with claims on the bounded YSQL pool.  A paused-only fallback is kept
       // for the rare case where there are not enough executable candidates.
       const loadP1Candidates = (includePaused: boolean) => this.runQuery(
-        `WITH queue_candidate_groups AS MATERIALIZED (
+        `WITH eligible_sources AS MATERIALIZED (
+           SELECT s.*
+           FROM importer_sources s
+           WHERE s.enabled = true
+             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+         ),
+         source_window AS MATERIALIZED (
+           -- Keep the hot path bounded by source and use the existing
+           -- (source,status,task_type,created_at) access path. Canonical
+           -- filtering stays outside this window so a correlated chapter
+           -- lookup cannot turn each source probe into a table scan.
+           SELECT q.*
+           FROM eligible_sources s
+           CROSS JOIN LATERAL (
+             SELECT q.*
+             FROM importer_queue q
+             WHERE q.source = s.id
+               AND q.task_type = 'IMPORT_CHAPTER'
+               AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())${includePaused ? " OR q.status = 'PAUSED_BY_STAFF'" : ''})
+               AND q.attempts < COALESCE(q.max_attempts, 7)
+               AND q.priority >= 75 AND q.priority < 100
+               AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+               AND NOT ((q.payload->>'workId') = ANY($1::text[]))
+               AND q.payload->>'workId' IS NOT NULL
+             ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC NULLS LAST
+             LIMIT $5
+           ) q
+         ),
+         queue_candidate_groups AS MATERIALIZED (
            SELECT q.payload->>'workId' AS work_id, q.source, COUNT(*) AS pending_jobs,
              COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) AS queued_count,
              COUNT(*) FILTER (WHERE q.status = 'PAUSED_BY_STAFF') AS paused_count,
              MIN(q.chapter_sort_key) AS min_sort_key
-           FROM importer_queue q
-           JOIN importer_sources s ON s.id = q.source
-           WHERE q.task_type='IMPORT_CHAPTER'
-             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())${includePaused ? " OR q.status = 'PAUSED_BY_STAFF'" : ''})
-             AND q.attempts < COALESCE(q.max_attempts,7)
-             AND q.priority >= 75 AND q.priority < 100
-             AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
-             AND NOT ((q.payload->>'workId') = ANY($1::text[]))
-             AND s.enabled = true
-             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
-             AND NOT EXISTS (
+           FROM source_window q
+           WHERE NOT EXISTS (
                SELECT 1
                FROM chapters canonical_chapter
                WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
@@ -1450,6 +1469,7 @@ export class AdmissionController {
           Math.max(50, backfillSlotsAvailable * 5),
           4,
           JSON.stringify(this.getP1AdmissionCursors()),
+          Math.max(64, backfillSlotsAvailable * 32),
         ]
       );
       let candidatesRes = await loadP1Candidates(false);
