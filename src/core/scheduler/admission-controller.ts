@@ -872,9 +872,25 @@ export class AdmissionController {
       idleWorkers = Math.max(0, this.chapterCapacityProvider() - importingCnt);
     } catch {}
 
-    // Elastic backfill: if workers are idle, allow expanding active P1 up to 36 works
-    // to guarantee full worker utilization without violating maxInflightPerWork = 2.
-    const targetBackfillLimit = idleWorkers >= 1 ? 36 : config.maxActiveBackfillWorks;
+    // Keep the admission query proportional to the actual chapter capacity.
+    //
+    // `importingCnt` only includes jobs after the durable claim.  A slot that
+    // is waiting on the bounded claim/validation path is therefore invisible
+    // to that count.  The previous `idleWorkers >= 1 ? 36 : ...` expansion
+    // treated those transiently unclaimed slots as real spare capacity and
+    // repeatedly ran the full queue GROUP BY (20k+ paused/queued rows) every
+    // admission cycle.  On the production pool (max 2) those scans competed
+    // with claims and could leave only two chapter slots productive.
+    //
+    // A one-chapter P1 fairness window only needs one active work per
+    // effective chapter slot.  Admit up to that bounded target when the
+    // active set is genuinely below capacity; otherwise skip the expensive
+    // candidate scan entirely.  This preserves P0/P1/P2 ordering, source
+    // rotation and maxInflightPerWork while making admission work-conserving.
+    const effectiveChapterCapacity = Math.max(1, this.chapterCapacityProvider());
+    const targetBackfillLimit = activeBackfills.length < effectiveChapterCapacity
+      ? Math.min(config.maxActiveBackfillWorks, effectiveChapterCapacity)
+      : effectiveChapterCapacity;
     const backfillSlotsAvailable = Math.max(0, targetBackfillLimit - activeBackfills.length);
 
     // P2 uses spare capacity when P1 cannot occupy available workers

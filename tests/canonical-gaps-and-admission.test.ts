@@ -503,6 +503,66 @@ describe('Project Nox — Canonical Gaps & Elastic Admission (Tests A-E)', () =>
     expect(mockAdmissionController.admitNextWorkOnDemand).not.toHaveBeenCalled();
   });
 
+  it('does not expand the P1 admission scan when the effective chapter capacity is full', async () => {
+    const now = new Date().toISOString();
+    for (let i = 0; i < 5; i += 1) {
+      const workId = `work-full-capacity-${i}`;
+      activeWorks.set(workId, {
+        workId,
+        workTitle: `Full Capacity Work ${i}`,
+        lane: 'P1',
+        state: 'FILLING',
+        primarySource: `source-${i}`,
+        admittedAt: now,
+        lastActivityAt: now,
+        totalChapters: 10,
+        publishedChapters: 1,
+        queuedChapters: 1,
+        inFlightChapters: 0,
+        frontierSortKey: 2,
+        criticalGapSortKey: null,
+        criticalGapUnblockCount: 0,
+      });
+    }
+
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM unnest')) {
+        return {
+          rows: Array.from(activeWorks.values()).map((work) => ({
+            work_id: work.workId,
+            queued_cnt: '1',
+            importing_cnt: '0',
+            paused_cnt: '0',
+            retry_cnt: '0',
+            min_queued: '2',
+            min_sort_key: '2',
+            pub_cnt: '1',
+            max_pub: '1',
+            staged_cnt: '0',
+            min_staged: null,
+            unimported_cnt: '0',
+            source_status: 'ACTIVE',
+            cooldown_until: null,
+          })),
+        };
+      }
+      if (sql.includes("status = 'IMPORTING'")) return { rows: [{ cnt: '5' }] };
+      if (sql.includes('priority >= 100 AND priority < 1000')) return { rows: [{ p0_cnt: '0' }] };
+      if (sql.includes('priority >= 75 AND priority < 100')) return { rows: [] };
+      return { rows: [] };
+    });
+
+    const admissionController = new AdmissionController(mockStateStore, mockSentinel, { query });
+    admissionController.setChapterCapacityProvider(() => 5);
+
+    await admissionController.runAdmissionCycle();
+
+    const ranExpensiveBackfillScan = query.mock.calls.some(([sql]) =>
+      String(sql).includes('queue_candidate_groups')
+    );
+    expect(ranExpensiveBackfillScan).toBe(false);
+  });
+
   // =========================================================================
   // TEST E: AdmissionController admits P2 work whose catalog starts at chapter 10
   // (because 1..9 are confirmed upstream gaps)
