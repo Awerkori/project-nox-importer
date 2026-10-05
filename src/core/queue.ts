@@ -598,7 +598,7 @@ export class ImporterQueue {
       for (const job of failed) {
         const workId = job.payload?.workId;
         if (!workId || job.chapter_sort_key === null || job.chapter_sort_key === undefined) continue;
-        const { data: mapping, error: mappingError } = await this.supabase
+        const { data: mappings, error: mappingError } = await this.supabase
           .from('importer_chapter_mappings')
           .select('id')
           .eq('work_id', workId)
@@ -606,8 +606,8 @@ export class ImporterQueue {
           .eq('chapter_sort_key', job.chapter_sort_key)
           .eq('status', 'PENDING')
           .eq('is_gap', false)
-          .maybeSingle();
-        if (mappingError || !mapping) continue;
+          .limit(1);
+        if (mappingError || !mappings?.length) continue;
 
         const { error: updateError } = await this.supabase
           .from('importer_queue')
