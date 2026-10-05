@@ -19,9 +19,11 @@ export { computeCanonicalChapterKey };
 export declare function resolveBufferBudgetBytes(value?: string | undefined): number;
 /**
  * Queue selection is DB-bound, while a claimed chapter spends nearly all of
- * its lifetime on upstream/Telegram I/O.  Keep only a pool-sized number of
- * slots in the short selection phase; never let DB acquisition consume the
- * chapter-execution permits themselves.
+ * its lifetime on upstream/Telegram I/O.  The YSQL pool remains the hard
+ * bound for concurrent SQL, but the claim gate must cover all execution
+ * slots; otherwise slots beyond the pool size stay idle even while the pool
+ * is making progress.  Execution permits are acquired only after claim and
+ * validation, so pool wait cannot consume chapter capacity.
  */
 export declare function resolveChapterClaimConcurrency(globalConcurrency: number, dbPoolMax: number): number;
 export type InternalLivenessState = 'HEALTHY_IDLE' | 'HEALTHY_WORKING' | 'BACKPRESSURED' | 'STALLED';

@@ -44,14 +44,19 @@ export function resolveBufferBudgetBytes(value = process.env.MAX_BUFFERED_BYTES)
 }
 /**
  * Queue selection is DB-bound, while a claimed chapter spends nearly all of
- * its lifetime on upstream/Telegram I/O.  Keep only a pool-sized number of
- * slots in the short selection phase; never let DB acquisition consume the
- * chapter-execution permits themselves.
+ * its lifetime on upstream/Telegram I/O.  The YSQL pool remains the hard
+ * bound for concurrent SQL, but the claim gate must cover all execution
+ * slots; otherwise slots beyond the pool size stay idle even while the pool
+ * is making progress.  Execution permits are acquired only after claim and
+ * validation, so pool wait cannot consume chapter capacity.
  */
 export function resolveChapterClaimConcurrency(globalConcurrency, dbPoolMax) {
     const global = Number.isFinite(globalConcurrency) ? Math.floor(globalConcurrency) : 1;
-    const pool = Number.isFinite(dbPoolMax) ? Math.floor(dbPoolMax) : 1;
-    return Math.max(1, Math.min(Math.max(1, global), Math.max(1, pool)));
+    // Keep the argument for API compatibility and telemetry callers.  The pool
+    // itself bounds active SQL connections; using it as a second semaphore here
+    // artificially caps productive workers (pool=2 => only two slots can claim).
+    void dbPoolMax;
+    return Math.max(1, global);
 }
 export function computeInternalLivenessState(params) {
     const tripwire = params.rssTripwireMb ?? 380;
@@ -2059,10 +2064,10 @@ export class ImporterEngine {
                 telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 const claimJitterMs = 10 + Math.floor(Math.random() * 20);
                 await this.sleep(claimJitterMs);
-                // A. Limit only the brief DB-backed claim phase.  A slot that cannot
-                // enter this gate must remain logically idle; it must not reserve a
-                // global chapter permit merely while waiting for the two-connection
-                // YSQL pool.
+                // A. Limit the bounded DB-backed claim phase by execution slots.  The
+                // YSQL pool remains bounded independently; slots may queue briefly on
+                // that pool instead of being made permanently idle by a pool-sized
+                // second semaphore.
                 telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
                 if (!this.chapterClaimGate.tryAcquire()) {
                     telemetryCollector.setSlotState(slotIndex, 'IDLE');
@@ -2070,24 +2075,17 @@ export class ImporterEngine {
                     continue;
                 }
                 claimGateHeld = true;
-                // B. Reserve global chapter execution capacity only for a slot that
-                // is actively attempting a claim.  The claim gate above guarantees
-                // this cannot turn DB pool wait into five held execution permits.
-                if (!globalSem.tryAcquire()) {
+                // Do not claim ahead of the effective governor capacity. This keeps
+                // the queue lease bounded when the governor is intentionally below
+                // the nominal five slots, while still allowing all available slots to
+                // claim when capacity is healthy.
+                if (globalSem.available <= 0) {
                     releaseClaimGate();
                     telemetryCollector.setSlotState(slotIndex, 'IDLE');
-                    await this.sleep(200);
+                    await this.sleep(100);
                     continue;
                 }
-                globalHeld = true;
-                // C. Check productive slots and trigger replenishment if starved
-                const prodSnap = telemetryCollector.getSlotProductivitySnapshot();
-                // This runner has just reserved a permit but has not claimed yet.
-                // Judge vacancy against effective capacity, not the historical 8-slot pool.
-                if (prodSnap.productiveSlots < Math.max(0, globalSem.capacity - 1)) {
-                    this.admissionController.triggerImmediateReplenishment('PRODUCTIVE_SLOT_VACANCY');
-                }
-                // D. Find sources that currently have available capacity (outside mutex)
+                // B. Find sources that currently have available capacity (outside mutex)
                 let eligibleSources = await this.getEligibleChapterSources();
                 if (eligibleSources.length === 0) {
                     releaseGlobal();
@@ -2202,9 +2200,30 @@ export class ImporterEngine {
                     await this.sleep(15);
                     continue;
                 }
-                // Validation has completed.  The job now owns a global chapter
-                // permit and source permit; free the DB claim gate before any media
-                // I/O so another slot can be admitted immediately.
+                // Validation has completed. Reserve execution capacity only now. This
+                // keeps DB claim/validation work from consuming chapter permits while
+                // still preserving the global bounded execution ceiling.
+                if (!globalSem.tryAcquire()) {
+                    await this.queue.releaseJob(job.id, 'QUEUED', 'Execution capacity unavailable after claim validation', 0, 'CAPACITY_RETRY');
+                    if (job.payload?.workId)
+                        this.scheduler.onJobFinished(job.payload.workId, job.chapter_sort_key);
+                    sourceSem?.release();
+                    sourceHeld = null;
+                    claimedWork = null;
+                    releaseClaimGate();
+                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
+                    await this.sleep(50);
+                    continue;
+                }
+                globalHeld = true;
+                // Check productive slots and trigger replenishment if starved now that
+                // this runner owns an execution permit.
+                const prodSnap = telemetryCollector.getSlotProductivitySnapshot();
+                if (prodSnap.productiveSlots < Math.max(0, globalSem.capacity - 1)) {
+                    this.admissionController.triggerImmediateReplenishment('PRODUCTIVE_SLOT_VACANCY');
+                }
+                // Free the DB claim gate before any media I/O so another slot can be
+                // admitted immediately.
                 releaseClaimGate();
                 const claimDurationMs = schedulerAcquireTotalMs + mutexWaitMs;
                 const acqTelem = job._acquireTelemetry;
