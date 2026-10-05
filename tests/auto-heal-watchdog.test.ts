@@ -218,6 +218,7 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
     expect(reconcileQuery).toContain("sq.status = 'CANCELLED_BY_STAFF'");
     expect(reconcileQuery).toContain("status = 'FAILED'");
     expect(reconcileQuery).toContain("INTERVAL '15 minutes'");
+    expect(reconcileQuery).toContain('LIMIT 250');
   });
 
   // =========================================================================
