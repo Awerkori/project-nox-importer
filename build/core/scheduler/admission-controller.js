@@ -409,6 +409,53 @@ export class AdmissionController {
         if (this.p1BacklogProbeFlight)
             return this.p1BacklogProbeFlight;
         const flight = (async () => {
+            // A P1 row only represents admission pressure when it is the current
+            // executable frontier.  Later rows behind a failed/waiting predecessor
+            // must not block healthy P2 work indefinitely.
+            const frontierEligibility = `
+          AND NOT EXISTS (
+            SELECT 1
+            FROM importer_queue predecessor
+            WHERE predecessor.task_type = 'IMPORT_CHAPTER'
+              AND predecessor.payload->>'workId' = q.payload->>'workId'
+              AND predecessor.chapter_sort_key < q.chapter_sort_key
+              AND predecessor.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+          )
+          AND (
+            (pub.max_published IS NOT NULL AND q.chapter_sort_key <= pub.max_published + 1.5)
+            OR (
+              pub.max_published IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM importer_confirmed_gaps gap
+                WHERE gap.work_id = (q.payload->>'workId')::uuid
+                  AND gap.start_sort_key <= pub.max_published + 1
+                  AND gap.end_sort_key >= q.chapter_sort_key - 1
+              )
+            )
+            OR (
+              pub.max_published IS NULL
+              AND q.chapter_sort_key <= 1.5
+              AND NOT EXISTS (
+                SELECT 1
+                FROM importer_chapter_mappings predecessor_mapping
+                WHERE predecessor_mapping.work_id = (q.payload->>'workId')::uuid
+                  AND predecessor_mapping.chapter_sort_key < q.chapter_sort_key
+                  AND predecessor_mapping.is_gap = false
+                  AND predecessor_mapping.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
+              )
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM chapters canonical_chapter
+            WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
+              AND canonical_chapter.published_at IS NOT NULL
+              AND (
+                canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
+                OR canonical_chapter.number = q.chapter_sort_key
+              )
+          )`;
             // Ready P1 uses the existing partial claim index. Only if no ready P1
             // exists do we check the paused window backlog; that slower path is
             // exceptional and avoids turning a normal admission probe into a scan.
@@ -416,6 +463,12 @@ export class AdmissionController {
         SELECT q.status
         FROM importer_queue q
         JOIN importer_sources s ON s.id = q.source
+        CROSS JOIN LATERAL (
+          SELECT MAX(c.number) AS max_published
+          FROM chapters c
+          WHERE c.work_id = (q.payload->>'workId')::uuid
+            AND c.published_at IS NOT NULL
+        ) pub
         WHERE q.task_type = 'IMPORT_CHAPTER'
           AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
           AND q.attempts < COALESCE(q.max_attempts, 7)
@@ -423,6 +476,7 @@ export class AdmissionController {
           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          ${frontierEligibility}
         LIMIT 1
       `);
             const candidate = ready.rows[0];
@@ -435,6 +489,12 @@ export class AdmissionController {
         SELECT 1
         FROM importer_queue q
         JOIN importer_sources s ON s.id = q.source
+        CROSS JOIN LATERAL (
+          SELECT MAX(c.number) AS max_published
+          FROM chapters c
+          WHERE c.work_id = (q.payload->>'workId')::uuid
+            AND c.published_at IS NOT NULL
+        ) pub
         WHERE q.task_type = 'IMPORT_CHAPTER'
           AND q.status = 'PAUSED_BY_STAFF'
           AND q.attempts < COALESCE(q.max_attempts, 7)
@@ -442,6 +502,7 @@ export class AdmissionController {
           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          ${frontierEligibility}
         LIMIT 1
       `);
             this.p1BacklogSnapshot = {

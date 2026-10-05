@@ -592,7 +592,7 @@ describe('Project Nox — Canonical Gaps & Elastic Admission (Tests A-E)', () =>
         }
 
         // Query importer_confirmed_gaps for candidate
-        if (sql.includes('FROM importer_confirmed_gaps')) {
+        if (sql.includes('SELECT COUNT(*) as gap_cnt') && sql.includes('FROM importer_confirmed_gaps')) {
           return {
             rows: [{
               gap_cnt: '1',
