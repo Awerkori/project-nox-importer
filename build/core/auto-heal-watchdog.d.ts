@@ -216,6 +216,7 @@ export declare class AutoHealWatchdog {
      * ceilings or retries at a high cadence.
      */
     private runCircuitContainment;
+    private reconcileStaleChapterMappings;
     /**
      * NÍVEL 1 — RECONCILIAÇÃO LEVE
      */
