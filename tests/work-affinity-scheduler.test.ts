@@ -263,6 +263,29 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     await Promise.all([first, second]);
   });
 
+  it('filters canonically published chapters before consuming a chapter claim', async () => {
+    const sqlCalls: string[] = [];
+    const mockClient = {
+      query: vi.fn().mockImplementation((sql: string) => {
+        sqlCalls.push(sql);
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    (scheduler as any).pool = { connect: vi.fn().mockResolvedValue(mockClient) };
+
+    await (scheduler as any).claimSingleJob((scheduler as any).pool, {
+      workerId: 'canonical-filter-test',
+      leaseMin: 5,
+      allowedSources: ['mangaflix'],
+    });
+
+    expect(sqlCalls).toHaveLength(1);
+    expect(sqlCalls[0]).toContain('canonical_chapter.work_id = (q.payload->>\'workId\')::uuid');
+    expect(sqlCalls[0]).toContain('canonical_chapter.published_at IS NOT NULL');
+    expect(sqlCalls[0]).toContain('canonical_chapter.number = q.chapter_sort_key');
+  });
+
   // =========================================================================
   // TEST C: Fairness & Max Inflight per Work (MAX_INFLIGHT_PER_WORK = 2)
   // =========================================================================

@@ -18,6 +18,22 @@ import { Logger } from '../logger.js';
 import { confirmUpstreamGapInterval } from '../gap-validator.js';
 import { SOURCE_EXECUTION_ELIGIBILITY_SQL } from '../source-eligibility.js';
 import { SchedulerLane, } from './types.js';
+// Queue rows can outlive a canonical chapter when a source is re-synced or a
+// duplicate mapping is recovered.  Validation already retires these rows, but
+// claiming them first wastes a bounded chapter slot on I/O-free dedupe work.
+// Keep the same canonical identity used by validateClaimedJobPostMutex in the
+// claim predicates so stale rows are skipped before they consume a slot.
+const CANONICAL_PUBLISHED_CLAIM_FILTER = `
+          AND NOT EXISTS (
+            SELECT 1
+            FROM chapters canonical_chapter
+            WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
+              AND canonical_chapter.published_at IS NOT NULL
+              AND (
+                canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
+                OR canonical_chapter.number = q.chapter_sort_key
+              )
+          )`;
 // Alternative-source jobs are retained for resilience, but exactly one may own
 // a canonical work/chapter while it is IMPORTING. The partial unique index in
 // the matching migration is the cross-runner fence for that invariant.
@@ -1082,6 +1098,7 @@ export class WorkAffinityScheduler {
           AND w.published = true
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          ${CANONICAL_PUBLISHED_CLAIM_FILTER}
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
@@ -1225,6 +1242,7 @@ export class WorkAffinityScheduler {
           AND q.attempts < COALESCE(q.max_attempts, 7)
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          ${CANONICAL_PUBLISHED_CLAIM_FILTER}
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND (
             q.priority >= 1000
@@ -1335,6 +1353,7 @@ export class WorkAffinityScheduler {
           AND q.attempts < COALESCE(q.max_attempts, 7)
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          ${CANONICAL_PUBLISHED_CLAIM_FILTER}
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::int IS NULL OR q.priority >= $2::int)
           AND ($10::int IS NULL OR q.priority <= $10::int)
