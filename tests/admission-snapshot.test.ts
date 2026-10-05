@@ -15,8 +15,21 @@ describe('bounded admission snapshot', () => {
     expect(source).toMatch(
       /\[P1_COHORT_ROTATED\]/,
     );
+    // The hot path must stay on executable rows; paused backlog is only
+    // inspected by the explicit fallback when the executable frontier is
+    // insufficient. This prevents a full GROUP BY over the staff-paused
+    // catalog on every admission cycle.
     expect(source).toMatch(
-      /status = 'QUEUED' OR status = 'PAUSED_BY_STAFF' OR \(status = 'RETRY' AND next_run_at <= NOW\(\)\)/,
+      /status = 'QUEUED' OR \(status = 'RETRY' AND next_run_at <= NOW\(\)\)/,
+    );
+    expect(source).toMatch(
+      /loadP1Candidates\(false\)[\s\S]{0,180}loadP1Candidates\(true\)/,
+    );
+    expect(source).toMatch(
+      /loadP2Candidates\(false\)[\s\S]{0,180}loadP2Candidates\(true\)/,
+    );
+    expect(source).toMatch(
+      /loadOnDemandCandidates\(false\)[\s\S]{0,180}loadOnDemandCandidates\(true\)/,
     );
   });
 
