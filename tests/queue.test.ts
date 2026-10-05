@@ -93,7 +93,7 @@ describe('ImporterQueue transient reservation-limit recovery', () => {
       return {
         select: vi.fn().mockReturnValue({
           eq: vi.fn().mockReturnThis(),
-          maybeSingle: vi.fn().mockResolvedValue({ data: { id: 'mapping-2' }, error: null }),
+          limit: vi.fn().mockResolvedValue({ data: [{ id: 'mapping-2' }], error: null }),
         }),
       };
     });
