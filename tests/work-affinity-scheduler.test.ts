@@ -183,6 +183,24 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(params).toEqual([500]);
   });
 
+  it('guards direct claims behind the canonical publication frontier', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const client = { query, release: vi.fn() };
+    (scheduler as any).pool = { connect: vi.fn().mockResolvedValue(client) };
+
+    await (scheduler as any).claimSingleJob((scheduler as any).pool, {
+      workerId: 'frontier-guard',
+      leaseMin: 5,
+      allowedSources: null,
+    });
+
+    const sql = query.mock.calls[0][0] as string;
+    expect(sql).toContain('predecessor.chapter_sort_key < q.chapter_sort_key');
+    expect(sql).toContain("staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')");
+    expect(sql).toContain('pub.max_published + 1.5');
+    expect(sql).toContain('importer_confirmed_gaps');
+  });
+
   // =========================================================================
   // TEST B: Work Affinity (Progresso contínuo em obra admitida)
   // =========================================================================

@@ -34,6 +34,49 @@ const CANONICAL_PUBLISHED_CLAIM_FILTER = `
                 OR canonical_chapter.number = q.chapter_sort_key
               )
           )`;
+// Never spend a chapter slot on a later frontier while an earlier chapter is
+// still queued/importing or has an unresolved mapping. Admission already uses
+// the same ordering rule, but the direct claim paths must enforce it too:
+// catalog fallback and a racing worker can otherwise bypass admission and
+// claim chapters that publication can never accept yet.
+const CANONICAL_FRONTIER_CLAIM_FILTER = `
+          AND NOT EXISTS (
+            SELECT 1
+            FROM importer_queue predecessor
+            WHERE predecessor.task_type = 'IMPORT_CHAPTER'
+              AND predecessor.payload->>'workId' = q.payload->>'workId'
+              AND predecessor.chapter_sort_key < q.chapter_sort_key
+              AND predecessor.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM importer_chapter_mappings staged_frontier
+            WHERE staged_frontier.work_id = (q.payload->>'workId')::uuid
+              AND staged_frontier.chapter_sort_key = q.chapter_sort_key
+              AND staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')
+          )
+          AND (
+            (pub.max_published IS NOT NULL AND q.chapter_sort_key <= pub.max_published + 1.5)
+            OR EXISTS (
+              SELECT 1
+              FROM importer_confirmed_gaps gap
+              WHERE gap.work_id = (q.payload->>'workId')::uuid
+                AND gap.start_sort_key <= COALESCE(pub.max_published + 1, 1)
+                AND gap.end_sort_key >= q.chapter_sort_key - 1
+            )
+            OR (
+              q.chapter_sort_key <= 1.5
+              AND pub.max_published IS NULL
+              AND NOT EXISTS (
+                SELECT 1
+                FROM importer_chapter_mappings predecessor_mapping
+                WHERE predecessor_mapping.work_id = (q.payload->>'workId')::uuid
+                  AND predecessor_mapping.chapter_sort_key < q.chapter_sort_key
+                  AND predecessor_mapping.is_gap = false
+                  AND predecessor_mapping.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
+              )
+            )
+          )`;
 // Alternative-source jobs are retained for resilience, but exactly one may own
 // a canonical work/chapter while it is IMPORTING. The partial unique index in
 // the matching migration is the cross-runner fence for that invariant.
@@ -1089,6 +1132,12 @@ export class WorkAffinityScheduler {
         FROM importer_queue q
         JOIN works w ON w.id = (q.payload->>'workId')::uuid
         JOIN importer_sources s ON s.id = q.source
+        LEFT JOIN LATERAL (
+          SELECT MAX(c.number) AS max_published
+          FROM chapters c
+          WHERE c.work_id = (q.payload->>'workId')::uuid
+            AND c.published_at IS NOT NULL
+        ) pub ON TRUE
         WHERE (
           q.status = 'QUEUED'
           OR (q.status = 'RETRY' AND q.next_run_at <= NOW())
@@ -1099,6 +1148,7 @@ export class WorkAffinityScheduler {
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
+          ${CANONICAL_FRONTIER_CLAIM_FILTER}
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
@@ -1231,6 +1281,12 @@ export class WorkAffinityScheduler {
         SELECT q.id
         FROM importer_queue q
         JOIN importer_sources s ON s.id = q.source
+        LEFT JOIN LATERAL (
+          SELECT MAX(c.number) AS max_published
+          FROM chapters c
+          WHERE c.work_id = (q.payload->>'workId')::uuid
+            AND c.published_at IS NOT NULL
+        ) pub ON TRUE
         LEFT JOIN importer_staff_requests sr 
           ON sr.work_id = (q.payload->>'workId')::uuid
          AND sr.status IN ('ACTIVE', 'QUEUED', 'IMPORTING', 'RETRYING')
@@ -1243,6 +1299,7 @@ export class WorkAffinityScheduler {
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
+          ${CANONICAL_FRONTIER_CLAIM_FILTER}
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND (
             q.priority >= 1000
@@ -1345,6 +1402,12 @@ export class WorkAffinityScheduler {
         SELECT q.id
         FROM importer_queue q
         JOIN importer_sources s ON s.id = q.source
+        LEFT JOIN LATERAL (
+          SELECT MAX(c.number) AS max_published
+          FROM chapters c
+          WHERE c.work_id = (q.payload->>'workId')::uuid
+            AND c.published_at IS NOT NULL
+        ) pub ON TRUE
         WHERE (
           q.status = 'QUEUED'
           OR (q.status = 'RETRY' AND q.next_run_at <= NOW())
@@ -1354,6 +1417,7 @@ export class WorkAffinityScheduler {
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
+          ${CANONICAL_FRONTIER_CLAIM_FILTER}
           AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::int IS NULL OR q.priority >= $2::int)
           AND ($10::int IS NULL OR q.priority <= $10::int)
