@@ -1198,6 +1198,16 @@ export class AdmissionController {
              AND NOT ((q.payload->>'workId') = ANY($1::text[]))
              AND s.enabled = true
              AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+             AND NOT EXISTS (
+               SELECT 1
+               FROM chapters canonical_chapter
+               WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
+                 AND canonical_chapter.published_at IS NOT NULL
+                 AND (
+                   canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
+                   OR canonical_chapter.number = q.chapter_sort_key
+                 )
+             )
            GROUP BY q.payload->>'workId', q.source
          ),
          queue_candidates AS MATERIALIZED (
@@ -1406,6 +1416,16 @@ export class AdmissionController {
            AND w.published IS FALSE
            AND s.enabled = true
            AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+           AND NOT EXISTS (
+             SELECT 1
+             FROM chapters canonical_chapter
+             WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
+               AND canonical_chapter.published_at IS NOT NULL
+               AND (
+                 canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
+                 OR canonical_chapter.number = q.chapter_sort_key
+               )
+           )
            AND NOT ((q.payload->>'workId') = ANY($1::text[]))
          GROUP BY (q.payload->>'workId'), w.title, q.source, w.created_at
          )
