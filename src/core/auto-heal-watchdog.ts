@@ -170,6 +170,8 @@ export class AutoHealWatchdog {
   private lastTelemetryAt = 0;
   private telemetryCacheTtlMs = 45_000;
   private lastDeepStagedAt = 0;
+  private lastStaleMappingRecoveryAt = 0;
+  private staleMappingRecoveryFlight: Promise<void> | null = null;
 
   private classificationCursor: {
     lastFrontierSortKey: number | null;
@@ -277,6 +279,22 @@ export class AutoHealWatchdog {
     const nowMs = Date.now();
     if (!forceFresh && this.cachedTelemetry && nowMs - this.lastTelemetryAt < this.telemetryCacheTtlMs) {
       return this.cachedTelemetry;
+    }
+
+    // Stale IMPORTING mappings can block a canonical frontier even while the
+    // importer is otherwise healthy (so the stall recovery ladder is not
+    // running). Keep cleanup bounded and low-frequency, and never overlap it
+    // with itself or make the telemetry response wait for the UPDATE.
+    if (
+      nowMs - this.lastStaleMappingRecoveryAt >= 60_000 &&
+      !this.staleMappingRecoveryFlight
+    ) {
+      this.lastStaleMappingRecoveryAt = nowMs;
+      const flight = this.reconcileStaleChapterMappings();
+      this.staleMappingRecoveryFlight = flight;
+      void flight.finally(() => {
+        if (this.staleMappingRecoveryFlight === flight) this.staleMappingRecoveryFlight = null;
+      });
     }
 
     const mem = diagnostics.getMemorySnapshot();
