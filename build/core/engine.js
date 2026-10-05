@@ -732,7 +732,7 @@ export class ImporterEngine {
         const flight = (async () => {
             const { data, error } = await this.supabase
                 .from('importer_sources')
-                .select('id, name, enabled, status, catalog_discovery_enabled, cooldown_until, base_url, rate_limit_per_second, last_sync_at, sync_interval_minutes');
+                .select('id, name, enabled, status, catalog_discovery_enabled, cooldown_until, base_url, rate_limit_per_second, last_sync_at, sync_interval_minutes, blocked_reason, blocked_details');
             if (error || !data) {
                 this.logger.warn('Unable to refresh source scheduling snapshot', { error: error?.message });
                 return null;
@@ -840,7 +840,11 @@ export class ImporterEngine {
         const candidates = sources.filter((src) => src.enabled !== false &&
             src.catalog_discovery_enabled !== false &&
             src.catalog_discovery_enabled !== 0 &&
-            src.status === 'ACTIVE');
+            src.status === 'ACTIVE' &&
+            (!src.blocked_reason || hasSuccessfulSourceRecovery({
+                blockedReason: src.blocked_reason,
+                blockedDetails: src.blocked_details,
+            })));
         if (candidates.length === 0)
             return;
         // Two sources per pass prevents a source-count-sized DB burst every 20s.
@@ -2461,9 +2465,24 @@ export class ImporterEngine {
                 src.status === 'UPSTREAM_BLOCKED') {
                 continue;
             }
+            // Do not turn an unresolved persisted block into ACTIVE merely because
+            // an older cooldown expired. The health probe owns recovery and must
+            // write an explicit success marker first.
+            if (src.status === 'ACTIVE' && src.blocked_reason && !hasSuccessfulSourceRecovery({
+                blockedReason: src.blocked_reason,
+                blockedDetails: src.blocked_details,
+            })) {
+                continue;
+            }
             if (src.status === 'COOLDOWN') {
                 const cooldownUntil = src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0;
                 if (now < cooldownUntil) {
+                    continue;
+                }
+                if (src.blocked_reason && !hasSuccessfulSourceRecovery({
+                    blockedReason: src.blocked_reason,
+                    blockedDetails: src.blocked_details,
+                })) {
                     continue;
                 }
                 this.logger.info(`Source ${src.id} cooldown expired. Transitioning back to ACTIVE`, { source: src.id });
@@ -2645,6 +2664,13 @@ export class ImporterEngine {
                         return;
                     }
                     else {
+                        if (sourceRec.blocked_reason && !hasSuccessfulSourceRecovery({
+                            blockedReason: sourceRec.blocked_reason,
+                            blockedDetails: sourceRec.blocked_details,
+                        })) {
+                            await this.queue.releaseJob(job.id, 'BLOCKED_BY_UPSTREAM', 'Source cooldown expired; waiting for a successful health probe before execution');
+                            return;
+                        }
                         await this.supabase
                             .from('importer_sources')
                             .update({ status: 'ACTIVE', cooldown_until: null, updated_at: new Date().toISOString() })
