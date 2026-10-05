@@ -555,6 +555,11 @@ export class ImporterEngine {
         await this.runStartupRecovery();
         // 1b. Initialize WorkAffinityScheduler & AdmissionController
         await this.scheduler.initialize();
+        // The scheduler restores durable state, but the admission loop is a
+        // separate lifecycle.  Start it on every normal boot so an empty/stale
+        // active-work set can be replenished from the eligible queue after a
+        // deploy or crash recovery.
+        this.admissionController.start();
         // 1c. Hydrate auto emergency pause state on boot to ensure pause persists across restarts
         await this.protectiveSentinel.hydrateAutoEmergencyPauseOnStartup();
         // 2. Launch background autotuner telemetry loop (every 30s)
@@ -1721,31 +1726,35 @@ export class ImporterEngine {
         const now = Date.now();
         if (now - this.activeSourcesCache.cachedAt > 5_000) {
             try {
-                let { data: srcs } = await this.supabase
+                const { data: srcs, error } = await this.supabase
                     .from('importer_sources')
                     .select('id, enabled, chapter_ingestion_enabled, status, cooldown_until, blocked_reason, blocked_details')
                     .eq('chapter_ingestion_enabled', true);
-                if (srcs && srcs.length > 0) {
-                    const activeIds = srcs
-                        .filter((s) => isSourceExecutionEligible({
-                        status: s.status,
-                        enabled: s.enabled,
-                        chapterIngestionEnabled: s.chapter_ingestion_enabled,
-                        cooldownUntil: s.cooldown_until ? new Date(s.cooldown_until).getTime() : null,
-                        blockedReason: s.blocked_reason,
-                        blockedDetails: s.blocked_details,
-                    }, now))
-                        .map((s) => s.id);
-                    this.activeSourcesCache = { sources: activeIds, cachedAt: now };
-                }
+                if (error)
+                    throw error;
+                const activeIds = (srcs || [])
+                    .filter((s) => isSourceExecutionEligible({
+                    status: s.status,
+                    enabled: s.enabled,
+                    chapterIngestionEnabled: s.chapter_ingestion_enabled,
+                    cooldownUntil: s.cooldown_until ? new Date(s.cooldown_until).getTime() : null,
+                    blockedReason: s.blocked_reason,
+                    blockedDetails: s.blocked_details,
+                }, now))
+                    .map((s) => s.id);
+                this.activeSourcesCache = { sources: activeIds, cachedAt: now };
             }
             catch (err) {
-                // Retain existing cache on transient failure
+                // Never fail open to every configured provider: that would re-admit a
+                // persisted ACTIVE+blocked source precisely when the health read is
+                // unavailable.  A short fail-closed pause is safer than claiming a
+                // source whose upstream state is unknown.
+                this.logger.warn('Failed to load eligible chapter sources; pausing claims briefly', { error: err?.message });
+                this.activeSourcesCache = { sources: [], cachedAt: now };
+                return [];
             }
         }
-        const candidateSources = this.activeSourcesCache.sources.length > 0
-            ? this.activeSourcesCache.sources
-            : Object.keys(SOURCE_CONCURRENCY_LIMITS);
+        const candidateSources = this.activeSourcesCache.sources;
         // A source's configured limit is an upper bound.  Fairness follows
         // chapter sources that are actually in flight, rather than every enabled
         // provider.  The latter can be dozens of idle sources and would throttle
@@ -1783,11 +1792,22 @@ export class ImporterEngine {
         const now = Date.now();
         let cached = this.sourceStatusCache.get(source);
         if (!cached || now - cached.cachedAt > 10_000) {
-            let { data: src } = await this.supabase
-                .from('importer_sources')
-                .select('status, enabled, cooldown_until, chapter_ingestion_enabled, catalog_discovery_enabled, blocked_reason, blocked_details')
-                .eq('id', source)
-                .maybeSingle();
+            let src = null;
+            try {
+                const result = await this.supabase
+                    .from('importer_sources')
+                    .select('status, enabled, cooldown_until, chapter_ingestion_enabled, catalog_discovery_enabled, blocked_reason, blocked_details')
+                    .eq('id', source)
+                    .maybeSingle();
+                if (result?.error)
+                    throw result.error;
+                src = result?.data ?? null;
+            }
+            catch (err) {
+                this.logger.warn('Failed to load source availability; rejecting execution', { source, error: err?.message });
+                this.sourceStatusCache.delete(source);
+                return false;
+            }
             if (src) {
                 cached = {
                     enabled: src.enabled !== false,
@@ -1801,9 +1821,13 @@ export class ImporterEngine {
                 };
                 this.sourceStatusCache.set(source, cached);
             }
+            else {
+                this.sourceStatusCache.delete(source);
+                return false;
+            }
         }
         if (!cached)
-            return true;
+            return false;
         if (!cached.enabled)
             return false;
         if (taskType === 'IMPORT_CHAPTER') {

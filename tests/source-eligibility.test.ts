@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ImporterEngine } from '../src/core/engine.js';
 import {
   hasSuccessfulSourceRecovery,
   isCatalogExecutionEligible,
@@ -74,5 +75,34 @@ describe('source eligibility policy', () => {
 
     expect(isSourceExecutionEligible(source, now)).toBe(false);
     expect(shouldProbePersistedSource(source)).toBe(true);
+  });
+
+  it('does not fail open to every provider when the source health read fails', async () => {
+    const engine: any = Object.create(ImporterEngine.prototype);
+    engine.activeSourcesCache = { sources: [], cachedAt: 0 };
+    engine.supabase = {
+      from: () => ({
+        select: () => ({
+          eq: () => Promise.reject(new Error('health read unavailable')),
+        }),
+      }),
+    };
+    engine.logger = { warn: () => {} };
+    engine.autotuner = {
+      refreshSourceFairnessFromActiveSources: () => {},
+      setEligibleSourceCountForDownloadFairness: () => {},
+      getSourceSemaphore: () => ({ available: 1 }),
+    };
+    engine.circuitBreaker = { canExecute: () => true };
+
+    await expect(engine.getEligibleChapterSources()).resolves.toEqual([]);
+  });
+
+  it('starts admission after scheduler initialization on normal boot', async () => {
+    const fs = await import('node:fs/promises');
+    const engineSource = await fs.readFile('src/core/engine.ts', 'utf8');
+    expect(engineSource).toMatch(
+      /await this\.scheduler\.initialize\(\);[\s\S]{0,300}this\.admissionController\.start\(\);/,
+    );
   });
 });
