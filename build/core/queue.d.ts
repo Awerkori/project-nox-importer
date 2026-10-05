@@ -100,4 +100,6 @@ export declare class ImporterQueue {
      * enforced by processJob, which parks blocked sources safely.
      */
     recoverPublicationBarrierFailures(limit?: number): Promise<number>;
+    /** Reopen old reservation-limit failures when their canonical mapping is still pending. */
+    recoverReservationLimitFailures(limit?: number): Promise<number>;
 }

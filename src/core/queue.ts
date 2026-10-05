@@ -580,4 +580,52 @@ export class ImporterQueue {
       return 0;
     }
   }
+
+  /** Reopen old reservation-limit failures when their canonical mapping is still pending. */
+  async recoverReservationLimitFailures(limit = 100): Promise<number> {
+    try {
+      const { data: failed, error } = await this.supabase
+        .from('importer_queue')
+        .select('id, source, payload, chapter_sort_key')
+        .eq('task_type', 'IMPORT_CHAPTER')
+        .eq('status', 'FAILED')
+        .ilike('last_error', 'Concurrent reservation limit:%')
+        .order('updated_at', { ascending: true })
+        .limit(limit);
+      if (error || !failed?.length) return 0;
+
+      let recovered = 0;
+      for (const job of failed) {
+        const workId = job.payload?.workId;
+        if (!workId || job.chapter_sort_key === null || job.chapter_sort_key === undefined) continue;
+        const { data: mapping, error: mappingError } = await this.supabase
+          .from('importer_chapter_mappings')
+          .select('id')
+          .eq('work_id', workId)
+          .eq('source', job.source)
+          .eq('chapter_sort_key', job.chapter_sort_key)
+          .eq('status', 'PENDING')
+          .eq('is_gap', false)
+          .maybeSingle();
+        if (mappingError || !mapping) continue;
+
+        const { error: updateError } = await this.supabase
+          .from('importer_queue')
+          .update({
+            status: 'QUEUED', attempts: 0, last_error: null, last_error_at: null,
+            retry_reason: 'RESERVATION_LIMIT_RECOVERY', locked_by: null,
+            locked_at: null, lease_expires_at: null, next_run_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', job.id)
+          .eq('status', 'FAILED');
+        if (!updateError) recovered++;
+      }
+      if (recovered > 0) this.logger.info('Reopened reservation-limit chapter failures', { recovered });
+      return recovered;
+    } catch (err: any) {
+      this.logger.warn('Reservation-limit failure recovery skipped', { error: err?.message });
+      return 0;
+    }
+  }
 }
