@@ -1381,52 +1381,31 @@ export class AdmissionController {
       // with claims on the bounded YSQL pool.  A paused-only fallback is kept
       // for the rare case where there are not enough executable candidates.
       const loadP1Candidates = (includePaused: boolean) => this.runQuery(
-        `WITH eligible_sources AS MATERIALIZED (
-           SELECT s.*
-           FROM importer_sources s
-           WHERE s.enabled = true
-             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
-         ),
-         source_window AS MATERIALIZED (
-           -- Scan only a bounded, indexed frontier window per executable source.
-           -- The previous global GROUP BY visited the entire queue on every
-           -- admission cycle (5s+ on production), competing with claims and
-           -- making the bounded YSQL pool the throughput bottleneck.  Admission
-           -- only needs a small candidate set; the durable queue remains the
-           -- source of truth and the claim path performs the final validation.
-           SELECT q.*
-           FROM eligible_sources s
-           CROSS JOIN LATERAL (
-             SELECT q.*
-             FROM importer_queue q
-             WHERE q.source = s.id
-               AND q.task_type = 'IMPORT_CHAPTER'
-               AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())${includePaused ? " OR q.status = 'PAUSED_BY_STAFF'" : ''})
-               AND q.attempts < COALESCE(q.max_attempts, 7)
-               AND q.priority >= 75 AND q.priority < 100
-               AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
-               AND NOT ((q.payload->>'workId') = ANY($1::text[]))
-               AND q.payload->>'workId' IS NOT NULL
-               AND NOT EXISTS (
-                 SELECT 1
-                 FROM chapters canonical_chapter
-                 WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
-                   AND canonical_chapter.published_at IS NOT NULL
-                   AND (
-                     canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
-                     OR canonical_chapter.number = q.chapter_sort_key
-                   )
-               )
-             ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC NULLS LAST
-             LIMIT $5
-           ) q
-         ),
-         queue_candidate_groups AS MATERIALIZED (
+        `WITH queue_candidate_groups AS MATERIALIZED (
            SELECT q.payload->>'workId' AS work_id, q.source, COUNT(*) AS pending_jobs,
              COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) AS queued_count,
              COUNT(*) FILTER (WHERE q.status = 'PAUSED_BY_STAFF') AS paused_count,
              MIN(q.chapter_sort_key) AS min_sort_key
-           FROM source_window q
+           FROM importer_queue q
+           JOIN importer_sources s ON s.id = q.source
+           WHERE q.task_type='IMPORT_CHAPTER'
+             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())${includePaused ? " OR q.status = 'PAUSED_BY_STAFF'" : ''})
+             AND q.attempts < COALESCE(q.max_attempts,7)
+             AND q.priority >= 75 AND q.priority < 100
+             AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+             AND NOT ((q.payload->>'workId') = ANY($1::text[]))
+             AND s.enabled = true
+             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+             AND NOT EXISTS (
+               SELECT 1
+               FROM chapters canonical_chapter
+               WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
+                 AND canonical_chapter.published_at IS NOT NULL
+                 AND (
+                   canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
+                   OR canonical_chapter.number = q.chapter_sort_key
+                 )
+             )
            GROUP BY q.payload->>'workId', q.source
          ),
          queue_candidates AS MATERIALIZED (
@@ -1471,7 +1450,6 @@ export class AdmissionController {
           Math.max(50, backfillSlotsAvailable * 5),
           4,
           JSON.stringify(this.getP1AdmissionCursors()),
-          Math.max(64, backfillSlotsAvailable * 32),
         ]
       );
       let candidatesRes = await loadP1Candidates(false);
