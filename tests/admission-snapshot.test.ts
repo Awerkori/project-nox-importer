@@ -246,6 +246,46 @@ describe('bounded admission snapshot', () => {
     } finally { await db.close(); }
   });
 
+  it('reopens only legacy controlled-recovery failures on healthy sources', async () => {
+    const db = new PGlite();
+    try {
+      const work = '00000000-0000-0000-0000-000000000032';
+      await db.exec(`
+        CREATE TABLE importer_queue (
+          id integer PRIMARY KEY, task_type text, status text, source text,
+          payload jsonb, retry_reason text, last_error text, attempts integer,
+          locked_by text, locked_at timestamptz, lease_expires_at timestamptz,
+          cancel_requested boolean, next_run_at timestamptz, last_error_at timestamptz,
+          last_recovered_error text, recovered_at timestamptz, updated_at timestamptz
+        );
+        CREATE TABLE importer_chapter_mappings (
+          id integer PRIMARY KEY, work_id uuid, source text, source_chapter_id text,
+          status text, chapter_id uuid, is_gap boolean, last_error text, updated_at timestamptz
+        );
+        CREATE TABLE importer_sources (id text PRIMARY KEY, status text);
+        CREATE TABLE importer_staff_requests (work_id uuid, status text);
+        INSERT INTO importer_sources VALUES ('healthy','ACTIVE'),('blocked','UPSTREAM_BLOCKED');
+        INSERT INTO importer_queue (id,task_type,status,source,payload,retry_reason,last_error,attempts,updated_at)
+          VALUES (1,'IMPORT_CHAPTER','FAILED','healthy','{"workId":"${work}","sourceChapterId":"ch-1"}',
+            'TRANSIENT_NETWORK','[RETRY_BUDGET_EXHAUSTED] Controlled recovery cancelled stalled in-flight work',5,now()-interval '1 day'),
+                 (2,'IMPORT_CHAPTER','FAILED','blocked','{"workId":"${work}","sourceChapterId":"ch-2"}',
+            'TRANSIENT_NETWORK','[RETRY_BUDGET_EXHAUSTED] Controlled recovery cancelled stalled in-flight work',5,now()-interval '1 day');
+        INSERT INTO importer_chapter_mappings (id,work_id,source,source_chapter_id,status,is_gap)
+          VALUES (11,'${work}','healthy','ch-1','FAILED',false),(12,'${work}','blocked','ch-2','FAILED',false);
+      `);
+      const controller = new AdmissionController({ getConfig: () => ({}) } as any, {} as any, {
+        query: (sql: string, params?: any[]) => db.query(sql, params),
+      });
+
+      await expect((controller as any).recoverLegacyTransientFailures()).resolves.toBe(1);
+      const { rows } = await db.query<any>(`SELECT q.id,q.status,q.retry_reason,m.status mapping_status FROM importer_queue q JOIN importer_chapter_mappings m ON m.id=q.id+10 ORDER BY q.id`);
+      expect(rows).toEqual([
+        { id: 1, status: 'QUEUED', retry_reason: 'LEGACY_TRANSIENT_FAILURE_RECOVERY', mapping_status: 'QUEUED' },
+        { id: 2, status: 'FAILED', retry_reason: 'TRANSIENT_NETWORK', mapping_status: 'FAILED' },
+      ]);
+    } finally { await db.close(); }
+  });
+
   it('treats every visible legacy below-P1 work as P1 before P2 discovery', () => {
     const source = readFileSync('src/core/scheduler/admission-controller.ts', 'utf8');
     expect(source.indexOf('await this.repairVisibleP2LifecycleBacklog();'))

@@ -31,6 +31,7 @@ export declare class AdmissionController {
     private lastOnDemandP1Source;
     private visibleP2LifecycleRepairComplete;
     private orphanCancelledRecoveryAt;
+    private legacyTransientFailureRecoveryAt;
     private getP1AdmissionCursors;
     private advanceP1AdmissionCursor;
     setSourcePermitProvider(provider: (source: string) => number): void;
@@ -115,6 +116,15 @@ export declare class AdmissionController {
      * cannot turn into a queue-wide scan or compete with claims.
      */
     private recoverOrphanedCancelledChapterJobs;
+    /**
+     * Reopen failures produced by the old controlled-recovery path.  That path
+     * cancelled in-flight work during a process recovery and then exhausted the
+     * normal retry budget, even when the source is healthy again.  Only its
+     * exact diagnostic marker is eligible here; permanent media/identity/source
+     * failures remain terminal.  Queue and mapping are repaired in one bounded
+     * statement so the canonical frontier cannot observe a half-recovered pair.
+     */
+    private recoverLegacyTransientFailures;
     /**
      * Executes a single admission reconciliation cycle.
      */

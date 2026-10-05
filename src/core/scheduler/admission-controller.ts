@@ -65,6 +65,7 @@ export class AdmissionController {
   // cancellation fields) and needs a small, idempotent recovery pass so a
   // canonical frontier does not remain permanently invisible to admission.
   private orphanCancelledRecoveryAt = 0;
+  private legacyTransientFailureRecoveryAt = 0;
 
   private getP1AdmissionCursors(): Record<string, string> {
     const getter = (this.stateStore as any).getP1AdmissionCursors;
@@ -683,6 +684,89 @@ export class AdmissionController {
   }
 
   /**
+   * Reopen failures produced by the old controlled-recovery path.  That path
+   * cancelled in-flight work during a process recovery and then exhausted the
+   * normal retry budget, even when the source is healthy again.  Only its
+   * exact diagnostic marker is eligible here; permanent media/identity/source
+   * failures remain terminal.  Queue and mapping are repaired in one bounded
+   * statement so the canonical frontier cannot observe a half-recovered pair.
+   */
+  private async recoverLegacyTransientFailures(): Promise<number> {
+    const now = Date.now();
+    if (now - this.legacyTransientFailureRecoveryAt < 60_000) return 0;
+    this.legacyTransientFailureRecoveryAt = now;
+
+    try {
+      const result = await this.runQuery(`
+        WITH candidates AS MATERIALIZED (
+          SELECT q.id, m.id AS mapping_id
+          FROM importer_queue q
+          JOIN importer_chapter_mappings m
+            ON m.work_id::text = q.payload->>'workId'
+           AND m.source = q.source
+           AND m.source_chapter_id = q.payload->>'sourceChapterId'
+          JOIN importer_sources s ON s.id = q.source
+          WHERE q.task_type = 'IMPORT_CHAPTER'
+            AND q.status = 'FAILED'
+            AND q.retry_reason = 'TRANSIENT_NETWORK'
+            AND q.last_error ILIKE '%Controlled recovery cancelled stalled in-flight work%'
+            AND m.status = 'FAILED'
+            AND m.chapter_id IS NULL
+            AND m.is_gap IS FALSE
+            AND s.status = 'ACTIVE'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM importer_staff_requests sr
+              WHERE sr.work_id::text = q.payload->>'workId'
+                AND sr.status IN ('QUEUED', 'IMPORTING', 'RETRYING', 'ACTIVE')
+            )
+          ORDER BY q.updated_at ASC, q.id ASC
+          LIMIT 100
+          FOR UPDATE OF q, m SKIP LOCKED
+        ), revived_mappings AS (
+          UPDATE importer_chapter_mappings m
+          SET status = 'QUEUED',
+              last_error = NULL,
+              updated_at = NOW()
+          FROM candidates c
+          WHERE m.id = c.mapping_id
+            AND m.status = 'FAILED'
+          RETURNING m.id
+        ), revived_jobs AS (
+          UPDATE importer_queue q
+          SET status = 'QUEUED',
+              attempts = 0,
+              locked_by = NULL,
+              locked_at = NULL,
+              lease_expires_at = NULL,
+              cancel_requested = FALSE,
+              next_run_at = NOW(),
+              last_error = NULL,
+              last_error_at = NULL,
+              retry_reason = 'LEGACY_TRANSIENT_FAILURE_RECOVERY',
+              last_recovered_error = 'Reopened legacy controlled-recovery cancellation on active source',
+              recovered_at = NOW(),
+              updated_at = NOW()
+          FROM candidates c
+          WHERE q.id = c.id
+            AND q.status = 'FAILED'
+            AND EXISTS (SELECT 1 FROM revived_mappings m WHERE m.id = c.mapping_id)
+          RETURNING q.id
+        )
+        SELECT COUNT(*)::int AS recovered FROM revived_jobs;
+      `);
+      const recovered = Number(result.rows[0]?.recovered || 0);
+      if (recovered > 0) {
+        this.logger.warn('[LEGACY_TRANSIENT_FAILURE_RECOVERY] Reopened failed chapter frontiers', { recovered });
+      }
+      return recovered;
+    } catch (err: any) {
+      this.logger.warn('[LEGACY_TRANSIENT_FAILURE_RECOVERY] Query failed; no rows changed', { error: err?.message });
+      return 0;
+    }
+  }
+
+  /**
    * Executes a single admission reconciliation cycle.
    */
   runAdmissionCycle(): Promise<void> {
@@ -706,6 +790,7 @@ export class AdmissionController {
     // Run before P1/P2 admission so legacy visible works cannot be bypassed
     // by discovery during the first post-deploy cycle.
     await this.recoverOrphanedCancelledChapterJobs();
+    await this.recoverLegacyTransientFailures();
     await this.repairVisibleP2LifecycleBacklog();
 
     // Step 1: Reconcile current active works (check caught-up, in-flight, queued)
