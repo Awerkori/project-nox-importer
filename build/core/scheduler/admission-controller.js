@@ -33,6 +33,11 @@ export class AdmissionController {
     }
     admissionInFlight = null;
     demandFlights = new Map();
+    // Periodic reconciliation and on-demand admission both execute bounded
+    // GROUP BY/frontier queries against the same small YSQL pool. Keep them on
+    // one FIFO lane so a vacancy cannot start a second scan while the periodic
+    // cycle is still holding a pool client (and vice versa).
+    admissionOperationTail = Promise.resolve();
     // P2 admission can be evaluated by discovery bursts. Keep the P1 pressure
     // probe short-lived and single-flight: it is an admission signal, never a
     // cache of editorial state.
@@ -808,8 +813,17 @@ export class AdmissionController {
     runAdmissionCycle() {
         if (this.admissionInFlight)
             return this.admissionInFlight;
-        this.admissionInFlight = this.executeAdmissionCycle().finally(() => { this.admissionInFlight = null; });
+        this.admissionInFlight = this.enqueueAdmissionOperation(() => this.executeAdmissionCycle())
+            .finally(() => { this.admissionInFlight = null; });
         return this.admissionInFlight;
+    }
+    enqueueAdmissionOperation(operation) {
+        const previous = this.admissionOperationTail;
+        let release;
+        this.admissionOperationTail = new Promise((resolve) => { release = resolve; });
+        return previous
+            .then(operation)
+            .finally(release);
     }
     async executeAdmissionCycle() {
         const config = this.stateStore.getConfig();
@@ -1653,7 +1667,7 @@ export class AdmissionController {
         const existing = this.demandFlights.get(key);
         if (existing)
             return existing;
-        const flight = this.executeOnDemandAdmission(preferredLane, allowedSources)
+        const flight = this.enqueueAdmissionOperation(() => this.executeOnDemandAdmission(preferredLane, allowedSources))
             .finally(() => { this.demandFlights.delete(key); });
         this.demandFlights.set(key, flight);
         return flight;

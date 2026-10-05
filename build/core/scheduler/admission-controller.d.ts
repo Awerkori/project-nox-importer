@@ -25,6 +25,7 @@ export declare class AdmissionController {
     setChapterCapacityProvider(provider: () => number): void;
     private admissionInFlight;
     private demandFlights;
+    private admissionOperationTail;
     private p1BacklogProbeAt;
     private p1BacklogProbeFlight;
     private p1BacklogSnapshot;
@@ -129,6 +130,7 @@ export declare class AdmissionController {
      * Executes a single admission reconciliation cycle.
      */
     runAdmissionCycle(): Promise<void>;
+    private enqueueAdmissionOperation;
     private executeAdmissionCycle;
     /**
      * Step 1: Reconciles all currently tracked active works.
