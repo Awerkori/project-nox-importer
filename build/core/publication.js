@@ -2,6 +2,55 @@ import { getYugabytePool } from '../db/yugabyte-direct.js';
 import { Logger } from './logger.js';
 import { AsyncSemaphore } from './concurrency.js';
 import { computeCanonicalChapterKey } from './deduplication.js';
+/**
+ * Finds a bounded batch of staged frontiers that are already eligible for
+ * publication. The frontier aggregation must cover all works before LIMIT is
+ * applied; otherwise an old blocked prefix can starve later publishable work.
+ */
+export const PUBLISHABLE_STAGED_WORKS_QUERY = `
+  WITH staged_works AS (
+    SELECT
+      m.work_id,
+      MIN(m.chapter_sort_key) as frontier_sort_key
+    FROM importer_chapter_mappings m
+    WHERE m.status IN ('STAGED', 'WAITING_FOR_GAP') AND m.work_id IS NOT NULL
+    GROUP BY m.work_id
+  ),
+  works_with_published AS (
+    SELECT
+      sw.work_id,
+      sw.frontier_sort_key,
+      (
+        SELECT MAX(c.number)
+        FROM chapters c
+        WHERE c.work_id = sw.work_id
+          AND c.published_at IS NOT NULL
+      ) as max_published,
+      EXISTS (
+        SELECT 1
+        FROM importer_chapter_mappings pm
+        WHERE pm.work_id = sw.work_id
+          AND pm.chapter_sort_key < sw.frontier_sort_key
+          AND pm.is_gap = false
+          AND pm.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
+      ) as has_predecessor_in_mapping,
+      EXISTS (
+        SELECT 1
+        FROM importer_queue pq
+        WHERE (pq.payload->>'workId') = sw.work_id::text
+          AND pq.task_type = 'IMPORT_CHAPTER'
+          AND pq.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+          AND pq.chapter_sort_key < sw.frontier_sort_key
+      ) as has_predecessor_in_queue
+    FROM staged_works sw
+  )
+  SELECT work_id
+  FROM works_with_published
+  WHERE (max_published IS NOT NULL AND frontier_sort_key <= max_published + 1.05 AND NOT has_predecessor_in_queue)
+     OR (max_published IS NULL AND NOT has_predecessor_in_mapping AND NOT has_predecessor_in_queue)
+  ORDER BY frontier_sort_key ASC, work_id ASC
+  LIMIT 20;
+`;
 export class PublicationBarrier {
     supabase;
     logger = new Logger('PublicationBarrier');
@@ -593,52 +642,12 @@ export class PublicationBarrier {
             let distinctWorkIds = [];
             try {
                 const pool = getYugabytePool();
-                // Priority 1: Works with STAGED/WAITING_FOR_GAP chapters that are immediately publishable (100% index-driven)
-                const res = await pool.query(`
-          WITH staged_works AS (
-            SELECT 
-              m.work_id,
-              MIN(m.chapter_sort_key) as frontier_sort_key
-            FROM importer_chapter_mappings m
-            WHERE m.status IN ('STAGED', 'WAITING_FOR_GAP') AND m.work_id IS NOT NULL
-            GROUP BY m.work_id
-            ORDER BY MIN(m.chapter_sort_key) ASC, m.work_id ASC
-            LIMIT 40
-          ),
-          works_with_published AS (
-            SELECT 
-              sw.work_id,
-              sw.frontier_sort_key,
-              (
-                SELECT MAX(c.number) 
-                FROM chapters c 
-                WHERE c.work_id = sw.work_id 
-                  AND c.published_at IS NOT NULL
-              ) as max_published,
-              EXISTS (
-                SELECT 1 
-                FROM importer_chapter_mappings pm
-                WHERE pm.work_id = sw.work_id
-                  AND pm.chapter_sort_key < sw.frontier_sort_key
-                  AND pm.is_gap = false
-                  AND pm.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
-              ) as has_predecessor_in_mapping,
-              EXISTS (
-                SELECT 1 
-                FROM importer_queue pq
-                WHERE (pq.payload->>'workId') = sw.work_id::text
-                  AND pq.task_type = 'IMPORT_CHAPTER'
-                  AND pq.status IN ('QUEUED', 'RETRY', 'IMPORTING')
-                  AND pq.chapter_sort_key < sw.frontier_sort_key
-              ) as has_predecessor_in_queue
-            FROM staged_works sw
-          )
-          SELECT work_id
-          FROM works_with_published
-          WHERE (max_published IS NOT NULL AND frontier_sort_key <= max_published + 1.05 AND NOT has_predecessor_in_queue)
-             OR (max_published IS NULL AND NOT has_predecessor_in_mapping AND NOT has_predecessor_in_queue)
-          LIMIT 20;
-        `);
+                // Priority 1: Works with STAGED/WAITING_FOR_GAP chapters that are immediately publishable.
+                // Do not limit the frontier aggregation before applying the eligibility
+                // predicate: a large prefix of blocked/gapped works used to hide later
+                // publishable works forever, starving the sweep while publishableStaged
+                // existed in the database. The final result remains bounded.
+                const res = await pool.query(PUBLISHABLE_STAGED_WORKS_QUERY);
                 distinctWorkIds = res.rows.map((r) => r.work_id);
             }
             catch (poolErr) {
