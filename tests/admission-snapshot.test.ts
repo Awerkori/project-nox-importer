@@ -23,14 +23,16 @@ describe('bounded admission snapshot', () => {
     expect(source).toMatch(
       /q\.status = 'QUEUED' OR \(q\.status = 'RETRY' AND q\.next_run_at <= NOW\(\)\)/,
     );
-    // Source health must be applied before the GROUP BY. Otherwise a large
-    // unresolved blocked-source backlog is still aggregated on every cycle
-    // and competes with claims on the bounded YSQL pool.
+    // Source health must be applied before the bounded per-source window.
+    // Otherwise a large unresolved blocked-source backlog is still scanned on
+    // every cycle and competes with claims on the bounded YSQL pool.
     const periodicAdmissionStart = source.indexOf('const loadP1Candidates =');
     const periodicAdmissionSql = source.slice(periodicAdmissionStart, periodicAdmissionStart + 10000);
-    expect(periodicAdmissionSql).toMatch(
-      /JOIN importer_sources s ON s\.id = q\.source[\s\S]{0,800}SOURCE_EXECUTION_ELIGIBILITY_SQL[\s\S]{0,700}GROUP BY q\.payload->>'workId', q\.source/,
-    );
+    expect(periodicAdmissionSql).toMatch(/eligible_sources AS MATERIALIZED[\s\S]{0,700}SOURCE_EXECUTION_ELIGIBILITY_SQL/);
+    expect(periodicAdmissionSql).toMatch(/FROM eligible_sources s[\s\S]{0,700}CROSS JOIN LATERAL/);
+    expect(periodicAdmissionSql).toMatch(/LIMIT \$5/);
+    expect(periodicAdmissionSql).toContain('canonical_chapter.published_at IS NOT NULL');
+    expect(periodicAdmissionSql).toMatch(/GROUP BY q\.payload->>'workId', q\.source/);
     expect(source).toMatch(/WHERE rotation_rank <= \$3 OR frontier_rank <= \$3/);
     expect(source).toMatch(
       /loadP1Candidates\(false\)[\s\S]{0,180}loadP1Candidates\(true\)/,
