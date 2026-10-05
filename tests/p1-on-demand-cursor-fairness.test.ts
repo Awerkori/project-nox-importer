@@ -66,6 +66,9 @@ describe('P1 on-demand cursor fairness', () => {
       lane: 'P1',
       workId: GOBLIN_POSITION,
     }));
+    const admissionSql = pool.query.mock.calls.find(([sql]) => String(sql).includes('FROM p1_rotation q'))?.[0] as string;
+    expect(admissionSql).toContain('canonical_chapter.published_at IS NOT NULL');
+    expect(admissionSql).toContain("canonical_chapter.number = q.chapter_sort_key");
     // It received a real one-chapter window, so this is valid durable cursor
     // progress rather than the artificial leap that caused the regression.
     expect(stateStore.setP1AdmissionCursor).toHaveBeenCalledWith(SOURCE, GOBLIN_POSITION);
