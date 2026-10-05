@@ -406,6 +406,9 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
             ? { work_id, queued_cnt:'0', importing_cnt:'0', paused_cnt:'0', min_sort_key:null, pub_cnt:'20', max_pub:'20', unimported_cnt:'0', source_status:'ACTIVE' }
             : { work_id, queued_cnt:'5', importing_cnt:'0', paused_cnt:'5', min_sort_key:'10', pub_cnt:'20', max_pub:'20', staged_cnt:'0', source_status:'ACTIVE' }) };
         }
+        if (queryText.includes('SELECT q.status') || (queryText.includes('CROSS JOIN LATERAL') && queryText.includes('SELECT 1'))) {
+          return { rows: [] };
+        }
         if (queryText.includes('FROM chapters')) {
           return { rows: [{ pub_cnt: '20' }] };
         }

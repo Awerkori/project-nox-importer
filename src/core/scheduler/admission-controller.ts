@@ -447,6 +447,54 @@ export class AdmissionController {
     if (this.p1BacklogProbeFlight) return this.p1BacklogProbeFlight;
 
     const flight = (async () => {
+      // A P1 row only represents admission pressure when it is the current
+      // executable frontier.  Later rows behind a failed/waiting predecessor
+      // must not block healthy P2 work indefinitely.
+      const frontierEligibility = `
+          AND NOT EXISTS (
+            SELECT 1
+            FROM importer_queue predecessor
+            WHERE predecessor.task_type = 'IMPORT_CHAPTER'
+              AND predecessor.payload->>'workId' = q.payload->>'workId'
+              AND predecessor.chapter_sort_key < q.chapter_sort_key
+              AND predecessor.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+          )
+          AND (
+            (pub.max_published IS NOT NULL AND q.chapter_sort_key <= pub.max_published + 1.5)
+            OR (
+              pub.max_published IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM importer_confirmed_gaps gap
+                WHERE gap.work_id = (q.payload->>'workId')::uuid
+                  AND gap.start_sort_key <= pub.max_published + 1
+                  AND gap.end_sort_key >= q.chapter_sort_key - 1
+              )
+            )
+            OR (
+              pub.max_published IS NULL
+              AND q.chapter_sort_key <= 1.5
+              AND NOT EXISTS (
+                SELECT 1
+                FROM importer_chapter_mappings predecessor_mapping
+                WHERE predecessor_mapping.work_id = (q.payload->>'workId')::uuid
+                  AND predecessor_mapping.chapter_sort_key < q.chapter_sort_key
+                  AND predecessor_mapping.is_gap = false
+                  AND predecessor_mapping.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
+              )
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM chapters canonical_chapter
+            WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
+              AND canonical_chapter.published_at IS NOT NULL
+              AND (
+                canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
+                OR canonical_chapter.number = q.chapter_sort_key
+              )
+          )`;
+
       // Ready P1 uses the existing partial claim index. Only if no ready P1
       // exists do we check the paused window backlog; that slower path is
       // exceptional and avoids turning a normal admission probe into a scan.
@@ -454,6 +502,12 @@ export class AdmissionController {
         SELECT q.status
         FROM importer_queue q
         JOIN importer_sources s ON s.id = q.source
+        CROSS JOIN LATERAL (
+          SELECT MAX(c.number) AS max_published
+          FROM chapters c
+          WHERE c.work_id = (q.payload->>'workId')::uuid
+            AND c.published_at IS NOT NULL
+        ) pub
         WHERE q.task_type = 'IMPORT_CHAPTER'
           AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
           AND q.attempts < COALESCE(q.max_attempts, 7)
@@ -461,6 +515,7 @@ export class AdmissionController {
           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          ${frontierEligibility}
         LIMIT 1
       `);
       const candidate = ready.rows[0];
@@ -473,6 +528,12 @@ export class AdmissionController {
         SELECT 1
         FROM importer_queue q
         JOIN importer_sources s ON s.id = q.source
+        CROSS JOIN LATERAL (
+          SELECT MAX(c.number) AS max_published
+          FROM chapters c
+          WHERE c.work_id = (q.payload->>'workId')::uuid
+            AND c.published_at IS NOT NULL
+        ) pub
         WHERE q.task_type = 'IMPORT_CHAPTER'
           AND q.status = 'PAUSED_BY_STAFF'
           AND q.attempts < COALESCE(q.max_attempts, 7)
@@ -480,6 +541,7 @@ export class AdmissionController {
           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          ${frontierEligibility}
         LIMIT 1
       `);
       this.p1BacklogSnapshot = {
@@ -819,14 +881,31 @@ export class AdmissionController {
                s.blocked_reason AS source_blocked_reason, s.blocked_details AS source_blocked_details
         FROM unnest($1::text[], $2::text[]) AS w(work_id, source)
         CROSS JOIN LATERAL (
-          SELECT COUNT(*) FILTER (WHERE status='QUEUED' AND attempts < COALESCE(max_attempts,7)) AS queued_cnt,
-            COUNT(*) FILTER (WHERE status='IMPORTING') AS importing_cnt,
-            COUNT(*) FILTER (WHERE status='PAUSED_BY_STAFF') AS paused_cnt,
-            COUNT(*) FILTER (WHERE status='RETRY' AND attempts < COALESCE(max_attempts,7)) AS retry_cnt,
-            MIN(chapter_sort_key) FILTER (WHERE status='QUEUED' AND attempts < COALESCE(max_attempts,7)) AS min_queued,
-            MIN(chapter_sort_key) FILTER (WHERE status IN ('QUEUED','RETRY','PAUSED_BY_STAFF') AND attempts < COALESCE(max_attempts,7)) AS min_sort_key
-          FROM importer_queue WHERE task_type='IMPORT_CHAPTER' AND payload->>'workId'=w.work_id
-            AND status IN ('QUEUED','IMPORTING','RETRY','PAUSED_BY_STAFF')
+          SELECT COUNT(*) FILTER (WHERE q.status='QUEUED' AND q.attempts < COALESCE(q.max_attempts,7)) AS queued_cnt,
+            COUNT(*) FILTER (WHERE q.status='IMPORTING') AS importing_cnt,
+            COUNT(*) FILTER (WHERE q.status='PAUSED_BY_STAFF') AS paused_cnt,
+            COUNT(*) FILTER (WHERE q.status='RETRY' AND q.attempts < COALESCE(q.max_attempts,7)) AS retry_cnt,
+            MIN(q.chapter_sort_key) FILTER (WHERE q.status='QUEUED' AND q.attempts < COALESCE(q.max_attempts,7)) AS min_queued,
+            MIN(q.chapter_sort_key) FILTER (WHERE q.status IN ('QUEUED','RETRY','PAUSED_BY_STAFF') AND q.attempts < COALESCE(q.max_attempts,7)) AS min_sort_key,
+            COUNT(*) FILTER (
+              WHERE (q.status='QUEUED' OR (q.status='RETRY' AND q.next_run_at <= NOW()))
+                AND q.attempts < COALESCE(q.max_attempts,7)
+                AND s.enabled = true
+                AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+                AND NOT EXISTS (
+                  SELECT 1 FROM chapters canonical_chapter
+                  WHERE canonical_chapter.work_id = w.work_id::uuid
+                    AND canonical_chapter.published_at IS NOT NULL
+                    AND (
+                      canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
+                      OR canonical_chapter.number = q.chapter_sort_key
+                    )
+                )
+            ) AS claimable_cnt
+          FROM importer_queue q
+          LEFT JOIN importer_sources s ON s.id = q.source
+          WHERE q.task_type='IMPORT_CHAPTER' AND q.payload->>'workId'=w.work_id
+            AND q.status IN ('QUEUED','IMPORTING','RETRY','PAUSED_BY_STAFF')
         ) q
         CROSS JOIN LATERAL (
           SELECT COUNT(*) AS pub_cnt, COALESCE(MAX(number),-1) AS max_pub
@@ -848,6 +927,13 @@ export class AdmissionController {
           const pubRes = { rows: [qRow] };
           const stagedRes = { rows: [qRow] };
           const queuedCnt = parseInt(qRow?.queued_cnt || '0', 10);
+          // Older test doubles and persisted snapshots do not expose the
+          // source/canonical-aware count.  Fall back to the legacy queued
+          // count there, while production uses the bounded claimable count.
+          const hasClaimableSnapshot = qRow?.claimable_cnt !== undefined;
+          const claimableCnt = hasClaimableSnapshot
+            ? parseInt(qRow.claimable_cnt || '0', 10)
+            : queuedCnt;
           const importingCnt = parseInt(qRow?.importing_cnt || '0', 10);
           const pausedCnt = parseInt(qRow?.paused_cnt || '0', 10);
           const retryCnt = parseInt(qRow?.retry_cnt || '0', 10);
@@ -951,6 +1037,20 @@ export class AdmissionController {
             this.logger.info(`Work ${work.workTitle} (${work.workId}) unblocked as source ${work.primarySource} recovered.`);
             work.state = 'FILLING';
             this.stateStore.setActiveWork(work);
+          }
+
+          // A queued row is not enough to hold an active slot: it may belong
+          // to a blocked source, be already satisfied canonically, or be a
+          // retry whose cooldown has not elapsed.  If no chapter is actually
+          // claimable and nothing is in flight, rotate the work so admission
+          // can use the slot for another executable frontier.  The queue rows
+          // remain intact and will be eligible for a later admission cycle
+          // when their source/predecessor recovers.
+          if (hasClaimableSnapshot && claimableCnt === 0 && importingCnt === 0 && (queuedCnt > 0 || pausedCnt > 0 || retryCnt > 0)) {
+            this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) has no source/canonical-eligible chapter; rotating empty executable window.`);
+            this.stateStore.removeActiveWork(work.workId);
+            this.triggerImmediateReplenishment('WORK_NO_EXECUTABLE_FRONTIER');
+            continue;
           }
 
           // Normalize only legacy/previously-admitted P1 cohorts that still

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
 import { readFileSync } from 'node:fs';
 import { AdmissionController } from '../src/core/scheduler/admission-controller.js';
+import { SOURCE_EXECUTION_ELIGIBILITY_SQL } from '../src/core/source-eligibility.js';
 
 describe('bounded admission snapshot', () => {
   it('keeps publication frontier per work while rotating P1 admission fairly by source', () => {
@@ -43,18 +44,21 @@ describe('bounded admission snapshot', () => {
   it('preserves per-work counts, attempt limits and frontiers with one SQL roundtrip', async () => {
     const db = new PGlite();
     try {
-      await db.exec(`CREATE TABLE importer_queue (task_type text,status text,payload jsonb,attempts int,max_attempts int,chapter_sort_key numeric);
+      await db.exec(`CREATE TABLE importer_queue (task_type text,status text,payload jsonb,attempts int,max_attempts int,chapter_sort_key numeric,source text,next_run_at timestamptz);
         CREATE TABLE chapters (work_id uuid,number numeric,published_at timestamptz);
         CREATE TABLE importer_chapter_mappings (work_id uuid,status text,chapter_sort_key numeric);
         CREATE TABLE importer_sources (id text PRIMARY KEY,status text,cooldown_until timestamptz,enabled boolean,blocked_reason text,blocked_details jsonb);
         INSERT INTO importer_sources (id,status,cooldown_until,enabled,blocked_reason,blocked_details) VALUES ('s','ACTIVE',NULL,true,NULL,NULL);`);
       const id='00000000-0000-0000-0000-000000000001', empty='00000000-0000-0000-0000-000000000002';
       for (const [status,attempts,key] of [['QUEUED',0,3],['QUEUED',7,2],['IMPORTING',1,4],['PAUSED_BY_STAFF',0,5],['COMPLETED',0,1]]) {
-        await db.query(`INSERT INTO importer_queue VALUES ('IMPORT_CHAPTER',$1,$2, $3,7,$4)`,[status,JSON.stringify({workId:id}),attempts,key]);
+        await db.query(`INSERT INTO importer_queue VALUES ('IMPORT_CHAPTER',$1,$2, $3,7,$4,'s',now())`,[status,JSON.stringify({workId:id}),attempts,key]);
       }
       await db.query(`INSERT INTO chapters VALUES ($1,1,now()),($1,2,now()),($1,3,NULL)`,[id]);
       await db.query(`INSERT INTO importer_chapter_mappings VALUES ($1,'STAGED',4),($1,'COMPLETED',1),($1,'PENDING',5)`,[id]);
-      const sql=readFileSync('src/core/scheduler/admission-controller.ts','utf8').split('const snapshot = await this.runQuery(`')[1].split('`, [activeWorks')[0];
+      const sql=readFileSync('src/core/scheduler/admission-controller.ts','utf8')
+        .split('const snapshot = await this.runQuery(`')[1]
+        .split('`, [activeWorks')[0]
+        .replace('${SOURCE_EXECUTION_ELIGIBILITY_SQL}', SOURCE_EXECUTION_ELIGIBILITY_SQL);
       const {rows}=await db.query<any>(sql,[[id,empty],['s','s']]);
       expect(rows.find(r=>r.work_id===id)).toMatchObject({queued_cnt:1,importing_cnt:1,paused_cnt:1,min_queued:'3',min_sort_key:'3',pub_cnt:2,max_pub:'2',staged_cnt:1,min_staged:'4',unimported_cnt:2,source_status:'ACTIVE'});
       expect(rows.find(r=>r.work_id===empty)).toMatchObject({queued_cnt:0,pub_cnt:0,unimported_cnt:0});
@@ -128,6 +132,20 @@ describe('bounded admission snapshot', () => {
     const state = {getActiveWorks:()=>Array.from(active.values()),setActiveWork:(w:any)=>active.set(w.workId,w),removeActiveWork:(id:string)=>active.delete(id)} as any;
     const pool = {query:async(sql:string) => {
       if (sql.includes('queued_cnt') && sql.includes('retry_cnt')) return {rows:[{work_id:work.workId,queued_cnt:'0',importing_cnt:'0',paused_cnt:'8',retry_cnt:'0',min_sort_key:'2',pub_cnt:'1',max_pub:'1',staged_cnt:'0',min_staged:null,unimported_cnt:'8',source_status:'ACTIVE',cooldown_until:null}]};
+      return {rows:[]};
+    }};
+    const controller = new AdmissionController(state, {} as any, pool as any);
+    await (controller as any).reconcileActiveWorks();
+    expect(active.has(work.workId)).toBe(false);
+  });
+
+  it('rotates a queued window when every queued row is source-ineligible or canonically satisfied', async () => {
+    const active = new Map<string, any>();
+    const work = {workId:'00000000-0000-0000-0000-000000000014',workTitle:'Blocked Window Work',lane:'P1',state:'FILLING',primarySource:'s',admittedAt:new Date().toISOString(),lastActivityAt:new Date().toISOString(),totalChapters:12,publishedChapters:4,queuedChapters:1,inFlightChapters:0,frontierSortKey:5,criticalGapSortKey:null,criticalGapUnblockCount:0};
+    active.set(work.workId, work);
+    const state = {getActiveWorks:()=>Array.from(active.values()),setActiveWork:(w:any)=>active.set(w.workId,w),removeActiveWork:(id:string)=>active.delete(id)} as any;
+    const pool = {query:async(sql:string) => {
+      if (sql.includes('queued_cnt') && sql.includes('retry_cnt')) return {rows:[{work_id:work.workId,queued_cnt:'1',claimable_cnt:'0',importing_cnt:'0',paused_cnt:'8',retry_cnt:'0',min_sort_key:'5',min_queued:'5',pub_cnt:'4',max_pub:'4',staged_cnt:'0',min_staged:null,unimported_cnt:'8',source_status:'ACTIVE',cooldown_until:null}]};
       return {rows:[]};
     }};
     const controller = new AdmissionController(state, {} as any, pool as any);
