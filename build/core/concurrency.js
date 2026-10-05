@@ -143,6 +143,15 @@ export async function withSourceChapterPermits(source, global, fn, signal) {
         source.release();
     }
 }
+/**
+ * Select per-chapter media consumers without exceeding the shared Telegram
+ * bound. A chapter should not be capped at 75% of chapter concurrency when it
+ * is the only active media producer; the shared semaphore remains the hard
+ * global limit.
+ */
+export function resolveChapterUploadConcurrency(chapterConcurrency, mediaCapacity) {
+    return Math.min(Math.max(1, mediaCapacity), Math.max(3, Math.max(1, chapterConcurrency)));
+}
 export const SOURCE_CONCURRENCY_LIMITS = {
     mangaflix: { maxChapters: 3, maxPagesPerChapter: 6 },
     manhastro: { maxChapters: 3, maxPagesPerChapter: 6 },

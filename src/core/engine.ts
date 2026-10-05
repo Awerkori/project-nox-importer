@@ -14,7 +14,7 @@ import { Config } from '../config.js';
 import { withSourceChapterPermits } from './concurrency.js';
 import { readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
-import { AdaptiveAutotuner, AsyncSemaphore, BufferReservation, SOURCE_CONCURRENCY_LIMITS, AutotunerEvaluationContext } from './concurrency.js';
+import { AdaptiveAutotuner, AsyncSemaphore, BufferReservation, SOURCE_CONCURRENCY_LIMITS, AutotunerEvaluationContext, resolveChapterUploadConcurrency } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
 import { NoxWorkerStorageError } from '../storage/worker.js';
 import { RetryPolicy, ProviderDownloadError, InvalidMediaError, PermanentDataError } from './retry-policy.js';
@@ -2114,12 +2114,25 @@ export class ImporterEngine {
         // Job found: clear empty cooldown
         this.sourceEmptyCooldown.delete(source);
 
-        // Process job with lease heartbeat and timeout protection
+        // Process job with lease heartbeat and timeout protection. The source
+        // lane is needed only until its page bytes have been downloaded; the
+        // remaining media/database work is already bounded by the global
+        // chapter/media semaphores. Keep fallback jobs conservative by
+        // releasing only when the original source completed its source stage.
+        let sourcePermitReleased = false;
+        const releaseSourcePermitAfterDownload = (completedSource: string) => {
+          if (completedSource === job!.source && !sourcePermitReleased) {
+            sourcePermitReleased = true;
+            sourceSem.release();
+          }
+        };
         try {
-          await this.executeJobDirectly(job);
+          await this.executeJobDirectly(job, {
+            onSourceStageComplete: releaseSourcePermitAfterDownload,
+          });
         } finally {
           globalSem.release();
-          sourceSem.release();
+          if (!sourcePermitReleased) sourceSem.release();
         }
 
         // Brief yield
@@ -2350,6 +2363,14 @@ export class ImporterEngine {
         const job = candidateJob;
         sourceHeld = sourceSem;
         claimedWork = job;
+        let sourcePermitReleased = false;
+        const releaseSourcePermitAfterDownload = (completedSource: string) => {
+          if (completedSource === job.source && !sourcePermitReleased) {
+            sourcePermitReleased = true;
+            sourceSem.release();
+            sourceHeld = null;
+          }
+        };
 
         // Post-Mutex Concurrent Validation (runs concurrently, zero blocking of other workers!)
         telemetryCollector.setSlotState(slotIndex, 'ACTIVE_DB', `${job.source} validating ch ${job.payload?.chapterNumber}`);
@@ -2394,6 +2415,7 @@ export class ImporterEngine {
             totalQueries: acqTelem?.totalQueries || 1,
             worksTested: acqTelem?.worksTested || 1,
             acquireTelemetry: acqTelem,
+            onSourceStageComplete: releaseSourcePermitAfterDownload,
           });
         } finally {
           if (job.payload?.workId) {
@@ -2402,10 +2424,10 @@ export class ImporterEngine {
           }
           this.scheduler.recordJobCompletion();
           this.rateBucketTracker.recordJobCompletion();
-          if (sourceSem) {
+          if (sourceSem && !sourcePermitReleased) {
             sourceSem.release();
-          sourceHeld = null;
           }
+          sourceHeld = null;
           releaseGlobal();
         }
 
@@ -2577,6 +2599,7 @@ export class ImporterEngine {
       totalQueries?: number;
       worksTested?: number;
       acquireTelemetry?: any;
+      onSourceStageComplete?: (source: string) => void;
     }
   ): Promise<void> {
     // ADMISSION GATE: Catalog Discovery Global Guard
@@ -2848,6 +2871,7 @@ export class ImporterEngine {
       totalQueries?: number;
       worksTested?: number;
       acquireTelemetry?: any;
+      onSourceStageComplete?: (source: string) => void;
     },
     jobSignal?: AbortSignal
   ): Promise<void> {
@@ -3880,6 +3904,7 @@ export class ImporterEngine {
       totalQueries?: number;
       worksTested?: number;
       acquireTelemetry?: any;
+      onSourceStageComplete?: (source: string) => void;
     },
     jobSignal?: AbortSignal
   ): Promise<void> {
@@ -4252,6 +4277,7 @@ export class ImporterEngine {
             }));
             skipDownloadDueToExistingPages = true;
             successfulExecution = true;
+            extraTiming?.onSourceStageComplete?.(effectiveSource);
             pageResolutionMs += performance.now() - pageResolutionStart;
             break;
           }
@@ -4270,9 +4296,15 @@ export class ImporterEngine {
           this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY || 8,
         );
 
-        // Upload pool concurrency: up to 8, bounded by autotuner and globalMediaSemaphore
-        const uploadConcurrency = Math.min(8, Math.max(3, Math.floor(this.autotuner.getCurrentConcurrency() * 0.75)));
         const globalMediaSemaphore = this.autotuner.getGlobalMediaSemaphore();
+        // Use the existing global media bound fully for a chapter. This does
+        // not raise Telegram concurrency (the semaphore remains capped at 8);
+        // it only avoids leaving permits unused when one chapter is carrying
+        // the media pipeline while other chapter slots are source-bound.
+        const uploadConcurrency = resolveChapterUploadConcurrency(
+          this.autotuner.getCurrentConcurrency(),
+          globalMediaSemaphore.capacity,
+        );
         const globalInflightRequestSemaphore = this.autotuner.getGlobalInflightRequestSemaphore();
         // A chapter-level source cap is insufficient here: two 120-page jobs
         // from one source can otherwise consume all eight global download
@@ -4675,6 +4707,10 @@ export class ImporterEngine {
           telemetry.tDownloadEnd = Date.now();
           allDownloadsFinished = true;
           notifyConsumer();
+          // Source I/O is complete. Release only the source permit acquired
+          // for this job; global chapter and media semaphores still bound the
+          // remaining Telegram/YSQL stages.
+          extraTiming?.onSourceStageComplete?.(effectiveSource);
           if (extraTiming?.slotIndex !== undefined) {
             telemetryCollector.setSlotState(extraTiming.slotIndex, 'ACTIVE_TELEGRAM', `${effectiveSource} ch ${chapterNumber}`);
           }
