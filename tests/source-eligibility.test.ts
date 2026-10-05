@@ -41,4 +41,19 @@ describe('source eligibility policy', () => {
     expect(isSourceExecutionEligible({ ...base, cooldownUntil: now + 60_000 }, now)).toBe(false);
     expect(shouldProbePersistedSource({ ...base, cooldownUntil: now - 1 })).toBe(true);
   });
+
+  it('keeps an expired cooldown blocked until a probe records recovery', () => {
+    const now = Date.parse('2026-10-05T06:00:00.000Z');
+    const source = {
+      status: 'COOLDOWN',
+      enabled: true,
+      chapterIngestionEnabled: true,
+      cooldownUntil: now - 1,
+      blockedReason: 'JS_CHALLENGE',
+      blockedDetails: { last_checked_at: '2026-10-05T05:00:00.000Z' },
+    };
+
+    expect(isSourceExecutionEligible(source, now)).toBe(false);
+    expect(shouldProbePersistedSource(source)).toBe(true);
+  });
 });
