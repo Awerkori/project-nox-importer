@@ -1521,14 +1521,20 @@ export class AdmissionController {
                   ELSE 1
                 END,
                 work_id
-              ) AS rotation_rank
+              ) AS rotation_rank,
+              ROW_NUMBER() OVER (
+                PARTITION BY source
+                ORDER BY min_sort_key ASC NULLS LAST, pending_jobs DESC, work_id
+              ) AS frontier_rank
             FROM queue_candidates q
           ) ranked
-          -- A vacancy must not let a low frontier repeatedly leapfrog unseen
-          -- P1 work.  The next circular candidate from each source is the
-          -- only ordinary on-demand P1 opportunity.  If it is a real gap,
-          -- the existing gap confirmation below can still make it eligible.
-          WHERE rotation_rank = 1
+          -- A vacancy must preserve the circular source cursor, but a single
+          -- cursor work may be parked behind an unresolved canonical gap.
+          -- Keep a small bounded frontier window so the JS contiguity check
+          -- can select the next executable work without scanning/admitting an
+          -- entire source backlog. The bound is intentionally the same four-
+          -- candidate window used by the periodic P1 admission path.
+          WHERE rotation_rank <= 4 OR frontier_rank <= 4
         )
         SELECT q.work_id,
                w.title,
@@ -1536,7 +1542,7 @@ export class AdmissionController {
                q.pending_jobs,
                q.queued_count,
                q.min_sort_key,
-               ${isP1 ? 'q.rotation_rank' : 'NULL::int AS rotation_rank'}
+               ${isP1 ? 'q.rotation_rank, q.frontier_rank' : 'NULL::int AS rotation_rank, NULL::int AS frontier_rank'}
         FROM ${isP1 ? 'p1_rotation' : 'queue_candidates'} q
         JOIN works w ON w.id = q.work_id::uuid
         WHERE ${isP1 ? 'w.published = true' : 'w.published IS FALSE'}
