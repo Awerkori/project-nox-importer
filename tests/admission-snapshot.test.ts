@@ -26,12 +26,19 @@ describe('bounded admission snapshot', () => {
     // Source health must be applied before the GROUP BY. Otherwise a large
     // unresolved blocked-source backlog is still aggregated on every cycle
     // and competes with claims on the bounded YSQL pool.
-    expect(source).toMatch(
-      /JOIN importer_sources s ON s\.id = q\.source[\s\S]{0,900}SOURCE_EXECUTION_ELIGIBILITY_SQL[\s\S]{0,120}GROUP BY q\.payload->>'workId', q\.source/,
+    const periodicAdmissionStart = source.indexOf('const loadP1Candidates =');
+    const periodicAdmissionSql = source.slice(periodicAdmissionStart, periodicAdmissionStart + 10000);
+    expect(periodicAdmissionSql).toMatch(
+      /JOIN importer_sources s ON s\.id = q\.source[\s\S]{0,800}SOURCE_EXECUTION_ELIGIBILITY_SQL[\s\S]{0,700}GROUP BY q\.payload->>'workId', q\.source/,
     );
     expect(source).toMatch(/WHERE rotation_rank <= \$3 OR frontier_rank <= \$3/);
     expect(source).toMatch(
       /loadP1Candidates\(false\)[\s\S]{0,180}loadP1Candidates\(true\)/,
+    );
+    // Admission must not rotate a work solely because a stale queue row is
+    // still present after another source published its canonical chapter.
+    expect(source).toMatch(
+      /queue_candidate_groups[\s\S]{0,1800}canonical_chapter\.published_at IS NOT NULL[\s\S]{0,300}canonical_chapter\.number = q\.chapter_sort_key/,
     );
     expect(source).toMatch(
       /loadP2Candidates\(false\)[\s\S]{0,180}loadP2Candidates\(true\)/,

@@ -782,9 +782,6 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
         if (queryText.includes('queued_cnt') || queryText.includes('paused_cnt')) {
           return { rows: params[0].map((work_id: string) => ({ work_id, queued_cnt:'0', importing_cnt:'0', paused_cnt:'0', min_sort_key:null, pub_cnt:'10', max_pub:'10', unimported_cnt:'10', source_status:'ACTIVE' })) };
         }
-        if (queryText.includes('FROM chapters')) {
-          return { rows: [{ pub_cnt: '10' }] };
-        }
         // Work has 10 unimported mappings (e.g. STAGED or waiting)
         if (queryText.includes('FROM importer_chapter_mappings')) {
           return { rows: [{ unimported: '10' }] };
@@ -796,6 +793,9 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
               { work_id: 'work-healthy-1', title: 'Healthy Admitted Work', source: 'kuro', pending_jobs: '50', queued_count: '10', paused_count: '40', min_sort_key: '1' },
             ],
           };
+        }
+        if (queryText.includes('FROM chapters')) {
+          return { rows: [{ pub_cnt: '10' }] };
         }
         return { rows: [] };
       }),
