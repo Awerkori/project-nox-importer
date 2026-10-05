@@ -91,4 +91,13 @@ export declare class ImporterQueue {
         recovered: number;
         failed: number;
     }>;
+    /**
+     * Reopens chapter jobs that were permanently failed by an older build while
+     * the publication safety barrier was CLOSED/RECOVERING.  That condition is
+     * transient: the current engine parks the job in QUEUED instead.  Only a
+     * matching non-gap PENDING mapping is revived, so already completed/gap
+     * mappings and unrelated failures remain untouched.  Source health is still
+     * enforced by processJob, which parks blocked sources safely.
+     */
+    recoverPublicationBarrierFailures(limit?: number): Promise<number>;
 }
