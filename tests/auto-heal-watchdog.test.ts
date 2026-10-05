@@ -190,6 +190,36 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
     expect(reclaimQuery!.sql).not.toContain('attempts = 0');
   });
 
+  it('reconciles stale IMPORTING mappings without resurrecting live or staff-cancelled work', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+    const queries: string[] = [];
+    mockPool.query.mockImplementation((sql: string) => {
+      queries.push(sql);
+      if (sql.includes('UPDATE importer_chapter_mappings')) {
+        return { rows: [{ source: 'source-a', chapter_sort_key: 3 }] };
+      }
+      if (sql.includes("key = 'active_works'")) return { rows: [{ value: JSON.stringify([]) }] };
+      return { rows: [] };
+    });
+
+    await watchdog.runLevel2StuckStateAudit({} as HealthPanelMetrics);
+
+    const reconcileQuery = queries.find((sql) => sql.includes('STALE_IMPORTING_MAPPING_RECONCILED'));
+    expect(reconcileQuery).toBeDefined();
+    expect(reconcileQuery).toContain("m.status = 'IMPORTING'");
+    expect(reconcileQuery).toContain('m.chapter_id IS NULL');
+    expect(reconcileQuery).toContain("aq.status IN ('IMPORTING', 'PROCESSING')");
+    expect(reconcileQuery).toContain("sq.status = 'CANCELLED_BY_STAFF'");
+    expect(reconcileQuery).toContain("status = 'FAILED'");
+    expect(reconcileQuery).toContain("INTERVAL '15 minutes'");
+  });
+
   // =========================================================================
   // CASO C: Zero eligible jobs => IDLE, sem restart
   // =========================================================================
