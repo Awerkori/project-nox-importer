@@ -463,6 +463,7 @@ export class AdmissionController {
         SELECT q.status
         FROM importer_queue q
         JOIN importer_sources s ON s.id = q.source
+        JOIN works w ON w.id = (q.payload->>'workId')::uuid
         CROSS JOIN LATERAL (
           SELECT MAX(c.number) AS max_published
           FROM chapters c
@@ -474,6 +475,7 @@ export class AdmissionController {
           AND q.attempts < COALESCE(q.max_attempts, 7)
           AND q.priority >= 75 AND q.priority < 100
           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+          AND w.published IS TRUE
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${frontierEligibility}
@@ -489,6 +491,7 @@ export class AdmissionController {
         SELECT 1
         FROM importer_queue q
         JOIN importer_sources s ON s.id = q.source
+        JOIN works w ON w.id = (q.payload->>'workId')::uuid
         CROSS JOIN LATERAL (
           SELECT MAX(c.number) AS max_published
           FROM chapters c
@@ -500,6 +503,7 @@ export class AdmissionController {
           AND q.attempts < COALESCE(q.max_attempts, 7)
           AND q.priority >= 75 AND q.priority < 100
           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+          AND w.published IS TRUE
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${frontierEligibility}

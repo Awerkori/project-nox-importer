@@ -40,6 +40,11 @@ describe('bounded admission snapshot', () => {
     expect(source).toMatch(
       /queue_candidate_groups[\s\S]{0,1800}canonical_chapter\.published_at IS NOT NULL[\s\S]{0,300}canonical_chapter\.number = q\.chapter_sort_key/,
     );
+    const p1PressureStart = source.indexOf('const ready = await this.runQuery');
+    const p1PressureSql = source.slice(p1PressureStart, p1PressureStart + 9000);
+    expect(p1PressureSql).toMatch(
+      /JOIN works w ON w\.id = \(q\.payload->>'workId'\)::uuid[\s\S]{0,900}w\.published IS TRUE/,
+    );
     expect(source).toMatch(
       /loadP2Candidates\(false\)[\s\S]{0,180}loadP2Candidates\(true\)/,
     );
