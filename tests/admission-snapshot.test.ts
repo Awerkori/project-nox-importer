@@ -202,6 +202,50 @@ describe('bounded admission snapshot', () => {
     }
   });
 
+  it('revives only legacy cancelled rows whose canonical mapping is still queued', async () => {
+    const db = new PGlite();
+    try {
+      const work = '00000000-0000-0000-0000-000000000031';
+      await db.exec(`
+        CREATE TABLE importer_queue (
+          id integer PRIMARY KEY, task_type text, status text, source text,
+          payload jsonb, cancel_reason text, cancelled_by text, cancelled_at timestamptz,
+          updated_at timestamptz, locked_by text, locked_at timestamptz,
+          lease_expires_at timestamptz, cancel_requested boolean, next_run_at timestamptz,
+          last_error text, last_error_at timestamptz, retry_reason text,
+          last_recovered_error text, recovered_at timestamptz
+        );
+        CREATE TABLE importer_chapter_mappings (
+          work_id uuid, source text, source_chapter_id text, status text, is_gap boolean
+        );
+        CREATE TABLE importer_staff_requests (work_id uuid, status text);
+        INSERT INTO importer_queue (id,task_type,status,source,payload,updated_at,last_error)
+          VALUES (1,'IMPORT_CHAPTER','CANCELLED_BY_STAFF','source-a',
+            '{"workId":"${work}","sourceChapterId":"ch-1"}',now()-interval '1 day','Unknown error'),
+                 (2,'IMPORT_CHAPTER','CANCELLED_BY_STAFF','source-a',
+            '{"workId":"${work}","sourceChapterId":"ch-2"}',now()-interval '1 day','explicit pause');
+        INSERT INTO importer_chapter_mappings VALUES
+          ('${work}','source-a','ch-1','QUEUED',false),
+          ('${work}','source-a','ch-2','QUEUED',false);
+        INSERT INTO importer_staff_requests VALUES ('${work}','ACTIVE');
+      `);
+      // The active staff request protects both rows. Remove it before testing
+      // that the legacy row is revived while explicit metadata remains gated.
+      await db.exec(`DELETE FROM importer_staff_requests; UPDATE importer_queue SET cancel_reason='TEMPORARY_PAUSE', cancelled_by='staff', cancelled_at=now() WHERE id=2;`);
+      const state = { getConfig: () => ({}) } as any;
+      const controller = new AdmissionController(state, {} as any, {
+        query: (sql: string, params?: any[]) => db.query(sql, params),
+      });
+
+      await expect((controller as any).recoverOrphanedCancelledChapterJobs()).resolves.toBe(1);
+      const { rows } = await db.query<any>(`SELECT id,status,retry_reason FROM importer_queue ORDER BY id`);
+      expect(rows).toEqual([
+        { id: 1, status: 'QUEUED', retry_reason: 'ORPHANED_CANCELLED_MAPPING_RECOVERY' },
+        { id: 2, status: 'CANCELLED_BY_STAFF', retry_reason: null },
+      ]);
+    } finally { await db.close(); }
+  });
+
   it('treats every visible legacy below-P1 work as P1 before P2 discovery', () => {
     const source = readFileSync('src/core/scheduler/admission-controller.ts', 'utf8');
     expect(source.indexOf('await this.repairVisibleP2LifecycleBacklog();'))

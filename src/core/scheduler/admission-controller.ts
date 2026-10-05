@@ -59,6 +59,12 @@ export class AdmissionController {
   // legacy state in small work-scoped batches; never scan or rewrite the P2
   // catalog as part of normal admission.
   private visibleP2LifecycleRepairComplete = false;
+  // Older workers could leave a mapping QUEUED while its dedupe row was
+  // released as CANCELLED_BY_STAFF without any cancellation metadata.  This
+  // is distinct from an explicit staff pause (which always carries the
+  // cancellation fields) and needs a small, idempotent recovery pass so a
+  // canonical frontier does not remain permanently invisible to admission.
+  private orphanCancelledRecoveryAt = 0;
 
   private getP1AdmissionCursors(): Record<string, string> {
     const getter = (this.stateStore as any).getP1AdmissionCursors;
@@ -602,6 +608,81 @@ export class AdmissionController {
   }
 
   /**
+   * Requeue legacy cancellation rows only when the canonical mapping is still
+   * executable and there is no active staff request for the work.  The strict
+   * null metadata predicates are intentional: explicit staff cancellations
+   * remain untouched.  Keep the batch bounded and rate-limited so recovery
+   * cannot turn into a queue-wide scan or compete with claims.
+   */
+  private async recoverOrphanedCancelledChapterJobs(): Promise<number> {
+    const now = Date.now();
+    if (now - this.orphanCancelledRecoveryAt < 60_000) return 0;
+    this.orphanCancelledRecoveryAt = now;
+
+    try {
+      const result = await this.runQuery(`
+        WITH candidates AS MATERIALIZED (
+          SELECT q.id
+          FROM importer_queue q
+          WHERE q.task_type = 'IMPORT_CHAPTER'
+            AND q.status = 'CANCELLED_BY_STAFF'
+            AND q.cancel_reason IS NULL
+            AND q.cancelled_by IS NULL
+            AND q.cancelled_at IS NULL
+            AND q.updated_at < NOW() - INTERVAL '5 minutes'
+            AND EXISTS (
+              SELECT 1
+              FROM importer_chapter_mappings m
+              WHERE m.work_id::text = q.payload->>'workId'
+                AND m.source = q.source
+                AND m.source_chapter_id = q.payload->>'sourceChapterId'
+                AND m.status IN ('QUEUED', 'PENDING')
+                AND m.is_gap IS FALSE
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM importer_staff_requests sr
+              WHERE sr.work_id::text = q.payload->>'workId'
+                AND sr.status IN ('QUEUED', 'IMPORTING', 'RETRYING', 'ACTIVE')
+            )
+          ORDER BY q.updated_at ASC, q.id ASC
+          LIMIT 100
+          FOR UPDATE SKIP LOCKED
+        ), revived AS (
+          UPDATE importer_queue q
+          SET status = 'QUEUED',
+              locked_by = NULL,
+              locked_at = NULL,
+              lease_expires_at = NULL,
+              cancel_requested = FALSE,
+              next_run_at = NOW(),
+              last_error = NULL,
+              last_error_at = NULL,
+              retry_reason = 'ORPHANED_CANCELLED_MAPPING_RECOVERY',
+              last_recovered_error = 'Recovered legacy CANCELLED_BY_STAFF row with queued canonical mapping',
+              recovered_at = NOW(),
+              updated_at = NOW()
+          FROM candidates c
+          WHERE q.id = c.id
+            AND q.status = 'CANCELLED_BY_STAFF'
+          RETURNING q.id
+        )
+        SELECT COUNT(*)::int AS recovered FROM revived;
+      `);
+      const recovered = Number(result.rows[0]?.recovered || 0);
+      if (recovered > 0) {
+        this.logger.warn('[ORPHANED_CANCELLED_MAPPING_RECOVERY] Requeued legacy chapter jobs', { recovered });
+      }
+      return recovered;
+    } catch (err: any) {
+      // Recovery is best-effort; admission must never fail closed because an
+      // optional legacy cleanup query is unavailable during a deploy.
+      this.logger.warn('[ORPHANED_CANCELLED_MAPPING_RECOVERY] Query failed; no rows changed', { error: err?.message });
+      return 0;
+    }
+  }
+
+  /**
    * Executes a single admission reconciliation cycle.
    */
   runAdmissionCycle(): Promise<void> {
@@ -624,6 +705,7 @@ export class AdmissionController {
 
     // Run before P1/P2 admission so legacy visible works cannot be bypassed
     // by discovery during the first post-deploy cycle.
+    await this.recoverOrphanedCancelledChapterJobs();
     await this.repairVisibleP2LifecycleBacklog();
 
     // Step 1: Reconcile current active works (check caught-up, in-flight, queued)
