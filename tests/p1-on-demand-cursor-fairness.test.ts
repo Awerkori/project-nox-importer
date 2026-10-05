@@ -114,4 +114,78 @@ describe('P1 on-demand cursor fairness', () => {
       [otherSource]: '61000000-0000-4000-8000-000000000005',
     });
   });
+
+  it('skips a cursor work parked behind an unresolved gap and admits the next bounded frontier', async () => {
+    const blockedWork = '81000000-0000-4000-8000-000000000010';
+    const nextWork = '82000000-0000-4000-8000-000000000011';
+    const { stateStore, pool, sentinel } = makeOnDemandFixture({
+      rows: [
+        {
+          work_id: blockedWork,
+          title: 'Blocked frontier',
+          source: SOURCE,
+          pending_jobs: '20',
+          queued_count: '2',
+          min_sort_key: '10',
+          rotation_rank: '1',
+          frontier_rank: '2',
+        },
+        {
+          work_id: nextWork,
+          title: 'Executable frontier',
+          source: SOURCE,
+          pending_jobs: '4',
+          queued_count: '1',
+          min_sort_key: '6',
+          rotation_rank: '2',
+          frontier_rank: '1',
+        },
+      ],
+      maxPublished: '4',
+    });
+
+    pool.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('FROM p1_rotation q') || sql.includes('FROM queue_candidates q')) {
+        return { rows: [
+          {
+            work_id: blockedWork,
+            title: 'Blocked frontier',
+            source: SOURCE,
+            pending_jobs: '20',
+            queued_count: '2',
+            min_sort_key: '10',
+            rotation_rank: '1',
+            frontier_rank: '2',
+          },
+          {
+            work_id: nextWork,
+            title: 'Executable frontier',
+            source: SOURCE,
+            pending_jobs: '4',
+            queued_count: '1',
+            min_sort_key: '6',
+            rotation_rank: '2',
+            frontier_rank: '1',
+          },
+        ] };
+      }
+      if (sql.includes('FROM chapters')) {
+        return { rows: [
+          { work_id: blockedWork, max_pub: '4' },
+          { work_id: nextWork, max_pub: '5' },
+        ] };
+      }
+      if (sql.includes('FROM importer_confirmed_gaps')) return { rows: [] };
+      if (sql.includes('WITH ranked AS')) return { rows: [] };
+      if (sql.includes('WITH existing AS')) return { rows: [{ queued_count: '1' }] };
+      return { rows: [] };
+    });
+
+    const controller = new AdmissionController(stateStore as any, sentinel as any, pool);
+    const admitted = await controller.admitNextWorkOnDemand('P1');
+
+    expect(admitted?.workId).toBe(nextWork);
+    expect(admitted?.workId).not.toBe(blockedWork);
+    expect(stateStore.setP1AdmissionCursor).toHaveBeenCalledWith(SOURCE, nextWork);
+  });
 });
