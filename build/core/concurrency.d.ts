@@ -37,6 +37,13 @@ export interface SourceConcurrencyConfig {
     maxChapters: number;
     maxPagesPerChapter: number;
 }
+/**
+ * Select per-chapter media consumers without exceeding the shared Telegram
+ * bound. A chapter should not be capped at 75% of chapter concurrency when it
+ * is the only active media producer; the shared semaphore remains the hard
+ * global limit.
+ */
+export declare function resolveChapterUploadConcurrency(chapterConcurrency: number, mediaCapacity: number): number;
 export declare const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig>;
 export declare const DEFAULT_SOURCE_LIMIT: SourceConcurrencyConfig;
 export declare const TESTED_CONCURRENCY_CEILING = 32;

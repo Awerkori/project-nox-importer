@@ -1,5 +1,12 @@
 import { expect, it } from 'vitest';
-import { AsyncSemaphore, withSourceChapterPermits } from '../src/core/concurrency';
+import { AsyncSemaphore, resolveChapterUploadConcurrency, withSourceChapterPermits } from '../src/core/concurrency';
+
+it('uses available shared media capacity without raising the Telegram bound', () => {
+  expect(resolveChapterUploadConcurrency(5, 8)).toBe(5);
+  expect(resolveChapterUploadConcurrency(32, 8)).toBe(8);
+  expect(resolveChapterUploadConcurrency(1, 8)).toBe(3);
+  expect(resolveChapterUploadConcurrency(5, 2)).toBe(2);
+});
 it('lets a source worker progress while the general runner waits for the same source', async () => {
   const source = new AsyncSemaphore(1), global = new AsyncSemaphore(1);
   await source.acquire(); // Source runner acquired its source first.
