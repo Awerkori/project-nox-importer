@@ -855,6 +855,60 @@ export class AdmissionController {
                       OR canonical_chapter.number = q.chapter_sort_key
                     )
                 )
+                AND NOT EXISTS (
+                  SELECT 1 FROM importer_queue predecessor
+                  WHERE predecessor.task_type = 'IMPORT_CHAPTER'
+                    AND predecessor.payload->>'workId' = q.payload->>'workId'
+                    AND predecessor.chapter_sort_key < q.chapter_sort_key
+                    AND predecessor.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM importer_chapter_mappings staged_frontier
+                  WHERE staged_frontier.work_id = w.work_id::uuid
+                    AND staged_frontier.chapter_sort_key = q.chapter_sort_key
+                    AND staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')
+                )
+                AND (
+                  (
+                    EXISTS (
+                      SELECT 1 FROM chapters published_frontier
+                      WHERE published_frontier.work_id = w.work_id::uuid
+                        AND published_frontier.published_at IS NOT NULL
+                    )
+                    AND q.chapter_sort_key <= (
+                      SELECT MAX(published_frontier.number) + 1.5
+                      FROM chapters published_frontier
+                      WHERE published_frontier.work_id = w.work_id::uuid
+                        AND published_frontier.published_at IS NOT NULL
+                    )
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM importer_confirmed_gaps gap
+                    WHERE gap.work_id = w.work_id::uuid
+                      AND gap.start_sort_key <= COALESCE((
+                        SELECT MAX(published_frontier.number) + 1
+                        FROM chapters published_frontier
+                        WHERE published_frontier.work_id = w.work_id::uuid
+                          AND published_frontier.published_at IS NOT NULL
+                      ), 1)
+                      AND gap.end_sort_key >= q.chapter_sort_key - 1
+                  )
+                  OR (
+                    NOT EXISTS (
+                      SELECT 1 FROM chapters unpublished_work
+                      WHERE unpublished_work.work_id = w.work_id::uuid
+                        AND unpublished_work.published_at IS NOT NULL
+                    )
+                    AND q.chapter_sort_key <= 1.5
+                    AND NOT EXISTS (
+                      SELECT 1 FROM importer_chapter_mappings predecessor_mapping
+                      WHERE predecessor_mapping.work_id = w.work_id::uuid
+                        AND predecessor_mapping.chapter_sort_key < q.chapter_sort_key
+                        AND predecessor_mapping.is_gap = false
+                        AND predecessor_mapping.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
+                    )
+                  )
+                )
             ) AS claimable_cnt
           FROM importer_queue q
           LEFT JOIN importer_sources s ON s.id = q.source
