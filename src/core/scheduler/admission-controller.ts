@@ -925,18 +925,21 @@ export class AdmissionController {
       // for the rare case where there are not enough executable candidates.
       const loadP1Candidates = (includePaused: boolean) => this.runQuery(
         `WITH queue_candidate_groups AS MATERIALIZED (
-           SELECT payload->>'workId' AS work_id, source, COUNT(*) AS pending_jobs,
-             COUNT(*) FILTER (WHERE status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW())) AS queued_count,
-             COUNT(*) FILTER (WHERE status = 'PAUSED_BY_STAFF') AS paused_count,
-             MIN(chapter_sort_key) AS min_sort_key
-           FROM importer_queue
-           WHERE task_type='IMPORT_CHAPTER'
-             AND (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW())${includePaused ? " OR status = 'PAUSED_BY_STAFF'" : ''})
-             AND attempts < COALESCE(max_attempts,7)
-             AND priority >= 75 AND priority < 100
-             AND COALESCE(payload->>'staffForced', 'false') <> 'true'
-             AND NOT ((payload->>'workId') = ANY($1::text[]))
-           GROUP BY payload->>'workId', source
+           SELECT q.payload->>'workId' AS work_id, q.source, COUNT(*) AS pending_jobs,
+             COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) AS queued_count,
+             COUNT(*) FILTER (WHERE q.status = 'PAUSED_BY_STAFF') AS paused_count,
+             MIN(q.chapter_sort_key) AS min_sort_key
+           FROM importer_queue q
+           JOIN importer_sources s ON s.id = q.source
+           WHERE q.task_type='IMPORT_CHAPTER'
+             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())${includePaused ? " OR q.status = 'PAUSED_BY_STAFF'" : ''})
+             AND q.attempts < COALESCE(q.max_attempts,7)
+             AND q.priority >= 75 AND q.priority < 100
+             AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+             AND NOT ((q.payload->>'workId') = ANY($1::text[]))
+             AND s.enabled = true
+             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+           GROUP BY q.payload->>'workId', q.source
          ),
          queue_candidates AS MATERIALIZED (
            -- Rotate work selection independently from chapter number. Keep the
@@ -968,10 +971,7 @@ export class AdmissionController {
                 CASE WHEN q.rotation_rank <= $3 THEN q.rotation_rank ELSE 100 + q.frontier_rank END AS admission_rank
          FROM queue_candidates q
          JOIN works w ON w.id = q.work_id::uuid
-         JOIN importer_sources s ON s.id = q.source
          WHERE w.published = true
-           AND s.enabled = true
-           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
          -- One candidate from every source before a second candidate from any
          -- source. The bounded result remains diverse even with many sources.
          ORDER BY admission_rank, source
@@ -1423,20 +1423,23 @@ export class AdmissionController {
       const loadOnDemandCandidates = (includePaused: boolean) => {
         const query = `
         WITH queue_candidates AS MATERIALIZED (
-          SELECT payload->>'workId' AS work_id, source, COUNT(*) AS pending_jobs,
-            COUNT(*) FILTER (WHERE status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW())) AS queued_count,
-            COUNT(*) FILTER (WHERE status = 'PAUSED_BY_STAFF') AS paused_count,
-            MIN(chapter_sort_key) AS min_sort_key
-          FROM importer_queue
-          WHERE task_type='IMPORT_CHAPTER'
-            AND (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW())${includePaused ? " OR status = 'PAUSED_BY_STAFF'" : ''})
-            AND attempts < COALESCE(max_attempts,7)
-            AND priority >= ${isP1 ? 75 : 50} AND priority < ${maxPriority}
-            AND COALESCE(payload->>'staffForced', 'false') <> 'true'
-            AND ($1::text[] IS NULL OR source = ANY($1::text[]))
-            AND NOT ((payload->>'workId') = ANY($2::text[]))
-            AND ($3::text[] IS NULL OR NOT (source = ANY($3::text[])))
-          GROUP BY payload->>'workId', source
+          SELECT q.payload->>'workId' AS work_id, q.source, COUNT(*) AS pending_jobs,
+            COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) AS queued_count,
+            COUNT(*) FILTER (WHERE q.status = 'PAUSED_BY_STAFF') AS paused_count,
+            MIN(q.chapter_sort_key) AS min_sort_key
+          FROM importer_queue q
+          JOIN importer_sources s ON s.id = q.source
+          WHERE q.task_type='IMPORT_CHAPTER'
+            AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())${includePaused ? " OR q.status = 'PAUSED_BY_STAFF'" : ''})
+            AND q.attempts < COALESCE(q.max_attempts,7)
+            AND q.priority >= ${isP1 ? 75 : 50} AND q.priority < ${maxPriority}
+            AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+            AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
+            AND NOT ((q.payload->>'workId') = ANY($2::text[]))
+            AND ($3::text[] IS NULL OR NOT (q.source = ANY($3::text[])))
+            AND s.enabled = true
+            AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          GROUP BY q.payload->>'workId', q.source
         ), p1_rotation AS MATERIALIZED (
           SELECT ranked.*
           FROM (
@@ -1466,10 +1469,7 @@ export class AdmissionController {
                ${isP1 ? 'q.rotation_rank' : 'NULL::int AS rotation_rank'}
         FROM ${isP1 ? 'p1_rotation' : 'queue_candidates'} q
         JOIN works w ON w.id = q.work_id::uuid
-        JOIN importer_sources s ON s.id = q.source
         WHERE ${isP1 ? 'w.published = true' : 'w.published IS FALSE'}
-          AND s.enabled = true
-          AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
         ORDER BY q.source, q.min_sort_key ASC NULLS LAST
         LIMIT ${isP1 ? 64 : 10};
       `;
