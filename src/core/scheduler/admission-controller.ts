@@ -320,6 +320,29 @@ export class AdmissionController {
       };
     }
 
+    // Admission pressure is advisory; claims are the work-conserving path.
+    // When a bounded pool already has claim waiters, running the P1 frontier
+    // probe would consume the other connection and make those claims wait
+    // behind a query that cannot itself publish work. Defer the probe until
+    // the pool drains; this preserves P1-before-P2 ordering without allowing
+    // maintenance/admission to starve the chapter data plane.
+    const poolWaiters = Number((this.pool as any)?.waitingCount || 0);
+    if (poolWaiters > 0) {
+      return {
+        allowed: false,
+        reason: `YSQL_POOL_BUSY: ${poolWaiters} claim/query waiter(s)`,
+        metrics: {
+          p0Waiting: 0,
+          p1Claimable: 0,
+          p1AvailableChapters: 0,
+          p1WorksWaiting: 0,
+          p2ActiveCohortSize: 0,
+          p2UnfinishedCount: 0,
+          systemHealthy: true,
+        },
+      };
+    }
+
     // 2. NO_P0_WAITING (Real P0 releases: 100 <= priority < 1000; staff-forced >= 1000 belongs to chapter data plane)
     const p0Res = await this.runQuery(`
       SELECT COUNT(*) as p0_cnt
