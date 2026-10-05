@@ -1187,7 +1187,7 @@ export class WorkAffinityScheduler {
               AND active_chapter.chapter_sort_key = q.chapter_sort_key
           )
         ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE OF q SKIP LOCKED
         LIMIT 1
       )
       UPDATE importer_queue q
@@ -1461,7 +1461,7 @@ export class WorkAffinityScheduler {
               AND active_chapter.chapter_sort_key = q.chapter_sort_key
           )
         ${orderClause}
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE OF q SKIP LOCKED
         LIMIT 1
       )
       UPDATE importer_queue q
