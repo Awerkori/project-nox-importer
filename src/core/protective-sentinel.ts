@@ -705,8 +705,27 @@ export class ProtectiveSentinel {
       }
     }
 
+    // A 5xx is a real pressure signal while it is current, but the counter
+    // must not survive forever when the probe path has since gone quiet (for
+    // example after a transient edge/egress failure).  Keep the last event in
+    // `lastHttp5xx` for diagnosis, while expiring only the decision-driving
+    // consecutive count after the same bounded observation window used by the
+    // latency samples.  A new 5xx in the current cycle refreshes the timestamp
+    // and remains immediately effective.
+    const nowAfterProbes = Date.now();
+    if (
+      this.consecutive5xxCount > 0 &&
+      this.last5xxTimestamp !== null &&
+      nowAfterProbes - this.last5xxTimestamp > this.LATENCY_SAMPLE_WINDOW_MS
+    ) {
+      this.logger.info(
+        `[Site Probe Recovery] Expiring ${this.consecutive5xxCount} stale HTTP 5xx signal(s) after ${Math.round((nowAfterProbes - this.last5xxTimestamp) / 1000)}s without a new 5xx`
+      );
+      this.consecutive5xxCount = 0;
+    }
+
     // Compute rolling percentiles with time eviction (75s window)
-    const now = Date.now();
+    const now = nowAfterProbes;
     this.homeSamples = this.homeSamples.filter((s) => now - s.timestamp <= this.LATENCY_SAMPLE_WINDOW_MS);
     this.readerSamples = this.readerSamples.filter((s) => now - s.timestamp <= this.LATENCY_SAMPLE_WINDOW_MS);
 

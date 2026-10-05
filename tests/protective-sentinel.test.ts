@@ -112,6 +112,22 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect((sentinel as any).consecutive5xxCount).toBe(1);
   });
 
+  it('expires a stale 5xx decision signal without erasing its diagnostic timestamp', async () => {
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, undefined, mockPool);
+    const now = Date.now();
+
+    (sentinel as any).recordProbeResult('home', 90, 503, now - 76_000);
+    (sentinel as any).recordProbeResult('reader', 90, 502, now - 76_000);
+    (sentinel as any).recordProbeResult('home', 90, 503, now - 76_000);
+
+    await sentinel.evaluatePreSlaGuardRails();
+
+    const snapshot = sentinel.getPressureSnapshot();
+    expect(snapshot.consecutive5xx).toBe(0);
+    expect(snapshot.lastHttp5xx).toBe(now - 76_000);
+    expect(snapshot.siteHealth).not.toBe('RED');
+  });
+
   it('invalidates only a stale Reader probe target on 404', () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
     (sentinel as any).cachedReaderChapterId = 'stale-reader-id';
