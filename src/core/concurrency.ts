@@ -63,7 +63,9 @@ export class AsyncSemaphore {
   }
 
   release(): void {
-    if (this.activePermits === 0) throw new Error('Semaphore released without an active permit');
+    if (this.activePermits === 0) {
+      throw new Error(`Semaphore released without an active permit: ${this.name}`);
+    }
     this.activePermits--;
     telemetryCollector.updateLimiterConcurrency(this.name, this.activePermits, this.maxPermits);
     this.drain();
@@ -139,6 +141,23 @@ export class AsyncSemaphore {
   get queued(): number {
     return this.waitQueue.length;
   }
+}
+
+/**
+ * Create an idempotent release callback for a single acquired permit.
+ *
+ * Pipelines hand release callbacks across producer/consumer boundaries.  A
+ * cancellation race can legitimately make both the owner and a drain path
+ * attempt cleanup; the callback must release the permit at most once while
+ * still surfacing an invalid release from the semaphore itself.
+ */
+export function releasePermitOnce(semaphore: AsyncSemaphore): () => void {
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    semaphore.release();
+  };
 }
 
 // Every runner must acquire source before global capacity to avoid lock inversion.

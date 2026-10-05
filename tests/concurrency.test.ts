@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AsyncSemaphore, AdaptiveAutotuner } from '../src/core/concurrency.js';
+import { AsyncSemaphore, AdaptiveAutotuner, releasePermitOnce } from '../src/core/concurrency.js';
 import { diagnostics } from '../src/core/diagnostics.js';
 
 describe('Concurrency & Autotuner', () => {
@@ -70,6 +70,18 @@ describe('Concurrency & Autotuner', () => {
       expect(sem.available).toBe(4);
       sem.setCapacity(1);
       expect(sem.capacity).toBe(1);
+    });
+
+    it('releases a handoff permit at most once during cancellation/drain races', async () => {
+      const sem = new AsyncSemaphore(1, 'handoff_test');
+      await sem.acquire();
+      const release = releasePermitOnce(sem);
+
+      release();
+      release();
+
+      expect(sem.active).toBe(0);
+      expect(sem.available).toBe(1);
     });
   });
 

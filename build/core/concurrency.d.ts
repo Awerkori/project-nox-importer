@@ -32,6 +32,15 @@ export declare class AsyncSemaphore {
     get active(): number;
     get queued(): number;
 }
+/**
+ * Create an idempotent release callback for a single acquired permit.
+ *
+ * Pipelines hand release callbacks across producer/consumer boundaries.  A
+ * cancellation race can legitimately make both the owner and a drain path
+ * attempt cleanup; the callback must release the permit at most once while
+ * still surfacing an invalid release from the semaphore itself.
+ */
+export declare function releasePermitOnce(semaphore: AsyncSemaphore): () => void;
 export declare function withSourceChapterPermits<T>(source: AsyncSemaphore, global: AsyncSemaphore, fn: () => Promise<T>, signal?: AbortSignal): Promise<T>;
 export interface SourceConcurrencyConfig {
     maxChapters: number;
