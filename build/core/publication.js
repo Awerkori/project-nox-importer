@@ -349,13 +349,6 @@ export class PublicationBarrier {
              SELECT id, published_at, clock_timestamp(), date_trunc('minute', published_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC', is_fresh_release FROM visible
              ON CONFLICT (chapter_id) DO NOTHING
              RETURNING bucket_minute, is_fresh_release
-           ), bucket AS (
-             INSERT INTO importer_rate_buckets (bucket_minute, completed_jobs, fresh_visible, visible_published, updated_at)
-             SELECT bucket_minute, 0, CASE WHEN is_fresh_release THEN 1 ELSE 0 END, 1, clock_timestamp() FROM event
-             ON CONFLICT (bucket_minute) DO UPDATE
-             SET fresh_visible = importer_rate_buckets.fresh_visible + EXCLUDED.fresh_visible,
-                 visible_published = importer_rate_buckets.visible_published + EXCLUDED.visible_published,
-                 updated_at = EXCLUDED.updated_at
            ) SELECT true AS newly_visible, published_at FROM visible
            UNION ALL SELECT false AS newly_visible, published_at FROM chapters
            WHERE id = $1::uuid AND NOT EXISTS (SELECT 1 FROM visible)`, [chapterId, Boolean(isFreshRelease)]);
@@ -408,7 +401,11 @@ export class PublicationBarrier {
             }
             if (isNewlyVisible) {
                 try {
-                    this.onPublished?.(Boolean(isFreshRelease), true);
+                    // The durable publication event is committed with the chapter above.
+                    // Rate buckets are derived telemetry and are flushed outside this
+                    // transaction so all publications in the same minute do not contend
+                    // on one hot bucket row.
+                    this.onPublished?.(Boolean(isFreshRelease), false);
                 }
                 catch { }
             }

@@ -30,6 +30,9 @@ describe('atomic canonical publication events', () => {
     await expect((barrier as any).executePublish(work,chapter,new Date().toISOString(),undefined,true)).rejects.toThrow();
     expect((await db.query('SELECT published_at FROM chapters')).rows[0]).toEqual({published_at:null});
     expect((await db.query('SELECT * FROM importer_publication_events')).rows).toHaveLength(0);
+    // The durable event is part of the publication transaction. The derived
+    // rate bucket is deliberately outside that transaction to avoid a hot-row
+    // write bottleneck when several chapters publish in one minute.
     expect((await db.query('SELECT * FROM importer_rate_buckets')).rows).toHaveLength(0);
     await db.exec('ALTER TABLE works DROP CONSTRAINT reject_publication');
     const onPublished=vi.fn(); barrier.onPublished=onPublished;
@@ -37,8 +40,8 @@ describe('atomic canonical publication events', () => {
     // Reprocessing must not change fresh semantics or increment either counter.
     expect(await (barrier as any).executePublish(work,chapter,new Date().toISOString(),undefined,false)).toEqual({newlyVisible:false});
     expect(onPublished).toHaveBeenCalledTimes(1);
-    expect(onPublished).toHaveBeenCalledWith(true,true);
-    expect((await db.query('SELECT visible_published,fresh_visible FROM importer_rate_buckets')).rows).toEqual([{visible_published:1,fresh_visible:1}]);
+    expect(onPublished).toHaveBeenCalledWith(true, false);
+    expect((await db.query('SELECT visible_published,fresh_visible FROM importer_rate_buckets')).rows).toHaveLength(0);
     expect((await db.query('SELECT is_fresh_release FROM chapters')).rows[0]).toEqual({is_fresh_release:true});
     const correlation=await db.query(`SELECT c.published_at=e.transition_at AS same_clock,
       e.bucket_minute=date_trunc('minute',c.published_at) AS same_bucket
