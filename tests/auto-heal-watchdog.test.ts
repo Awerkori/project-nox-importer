@@ -4,6 +4,7 @@ process.env.YUGABYTE_PASSWORD = process.env.YUGABYTE_PASSWORD || 'mock-ci-passwo
 
 import {
   AutoHealWatchdog,
+  isCountedAutoRestart,
   type HealthPanelMetrics,
   type AutoRestartRecord,
 } from '../src/core/auto-heal-watchdog.js';
@@ -11,6 +12,21 @@ import { ImporterEngine } from '../src/core/engine.js';
 import { diagnostics } from '../src/core/diagnostics.js';
 
 describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)', () => {
+  it('does not consume restart budget with containment probes', () => {
+    expect(isCountedAutoRestart({
+      timestamp: new Date().toISOString(),
+      reason: 'CIRCUIT_CONTAINMENT_STALL: bounded recovery',
+      progressAgeSec: 1200,
+      eligibleJobs: 10,
+    })).toBe(false);
+    expect(isCountedAutoRestart({
+      timestamp: new Date().toISOString(),
+      reason: 'CRITICAL_STALL: controlled restart',
+      progressAgeSec: 1200,
+      eligibleJobs: 10,
+    })).toBe(true);
+  });
+
   it('coalesces concurrent health collectors and releases the guard after failure', async () => {
     const watchdog = Object.create(AutoHealWatchdog.prototype) as any;
     let release!: (value: any) => void;

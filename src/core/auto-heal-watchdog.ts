@@ -106,6 +106,13 @@ export interface AutoRestartRecord {
   eligibleJobs: number;
 }
 
+// Containment probes are recovery attempts, not process restarts. Counting
+// them against the one-hour restart budget keeps the circuit latched forever
+// when a real restart has already cooled down.
+export function isCountedAutoRestart(record: AutoRestartRecord): boolean {
+  return !record.reason.startsWith('CIRCUIT_CONTAINMENT_STALL:');
+}
+
 export interface AutoHealWatchdogOptions {
   pool: Pool;
   scheduler?: WorkAffinityScheduler;
@@ -634,7 +641,9 @@ export class AutoHealWatchdog {
 
     // 6. Recent Auto-Restarts and Circuit Breaker
     const recentRestarts = await this.getRecentAutoRestarts();
-    const restartsLast1h = recentRestarts.filter((r) => nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000);
+    const restartsLast1h = recentRestarts.filter((r) =>
+      isCountedAutoRestart(r) && nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000
+    );
     const autoRestartCount1h = restartsLast1h.length;
     this.circuitBreakerOpen = autoRestartCount1h >= 3;
 
@@ -1105,7 +1114,9 @@ export class AutoHealWatchdog {
 
       // Check Circuit Breaker & Persistent Cooldown from DB
       const recentRestarts = await this.getRecentAutoRestarts();
-      const restartsLast1h = recentRestarts.filter((r) => nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000);
+      const restartsLast1h = recentRestarts.filter((r) =>
+        isCountedAutoRestart(r) && nowMs - new Date(r.timestamp).getTime() <= 60 * 60 * 1000
+      );
       if (this.circuitBreakerOpen || restartsLast1h.length >= 3) {
         this.circuitBreakerOpen = true;
         this.autoHealState = 'CIRCUIT_OPEN';

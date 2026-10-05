@@ -31,6 +31,7 @@ import { AutoHealWatchdog, HealthPanelMetrics } from './auto-heal-watchdog.js';
 import { RateBucketTracker } from './rate-bucket-tracker.js';
 import {
   hasSuccessfulSourceRecovery,
+  isCatalogExecutionEligible,
   isSourceExecutionEligible,
   shouldProbePersistedSource,
 } from './source-eligibility.js';
@@ -2544,9 +2545,15 @@ export class ImporterEngine {
         await this.catalogMaintenanceLane.acquire();
         try {
           if (this.stopSignal) continue;
+          const allowedSources = await this.getEligibleCatalogSources();
+          if (allowedSources.length === 0) {
+            await this.sleep(5_000);
+            continue;
+          }
+
           const job = await this.queue.acquireNextJob(
             Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
-            undefined,
+            allowedSources,
             'DISCOVER_WORKS'
           );
           if (!job) {
@@ -2594,9 +2601,15 @@ export class ImporterEngine {
         await this.catalogMaintenanceLane.acquire();
         try {
           if (this.stopSignal) continue;
+          const allowedSources = await this.getEligibleCatalogSources();
+          if (allowedSources.length === 0) {
+            await this.sleep(5_000);
+            continue;
+          }
+
           const job = await this.queue.acquireNextJob(
             Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
-            undefined,
+            allowedSources,
             'SYNC_WORK'
           );
           if (!job) {
@@ -2613,6 +2626,25 @@ export class ImporterEngine {
         this.logger.error('Error in catalog sync worker lane', { error: err?.message });
         await this.sleep(5_000);
       }
+    }
+  }
+
+  private async getEligibleCatalogSources(): Promise<string[]> {
+    try {
+      const sources = await this.getSourceScheduleSnapshot();
+      if (!sources) return [];
+      return sources
+        .filter((src: any) => isCatalogExecutionEligible({
+          status: src.status,
+          enabled: src.enabled,
+          catalogDiscoveryEnabled: src.catalog_discovery_enabled,
+          blockedReason: src.blocked_reason,
+          blockedDetails: src.blocked_details,
+        }))
+        .map((src: any) => src.id);
+    } catch (err: any) {
+      this.logger.warn('Failed to load eligible catalog sources', { error: err?.message });
+      return [];
     }
   }
 

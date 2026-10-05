@@ -268,6 +268,7 @@ export declare class ImporterEngine {
      * Continuously claims SYNC_WORK jobs from the queue.
      */
     private runCatalogSyncWorker;
+    private getEligibleCatalogSources;
     /**
      * Executes a job with an active lease heartbeat and a bounded soft deadline.
      *

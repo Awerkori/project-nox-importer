@@ -17,5 +17,8 @@ export interface SourceHealthRecord {
 export declare function hasSuccessfulSourceRecovery(record: SourceHealthRecord): boolean;
 export declare function isSourceExecutionEligible(record: SourceHealthRecord, now?: number): boolean;
 export declare function shouldProbePersistedSource(record: SourceHealthRecord): boolean;
+/** Catalog discovery uses the same persisted health fence as chapter work.
+ * It is intentionally ACTIVE-only: expired cooldowns must be probed first. */
+export declare function isCatalogExecutionEligible(record: SourceHealthRecord, now?: number): boolean;
 /** SQL fragment for queries that use importer_sources as `s`. */
 export declare const SOURCE_EXECUTION_ELIGIBILITY_SQL = "(\n  (\n    s.status = 'ACTIVE'\n    AND (\n      s.blocked_reason IS NULL\n      OR s.blocked_details->>'probe_success' = 'true'\n      OR s.blocked_details->>'recovered_at' IS NOT NULL\n    )\n  )\n  OR (\n    s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED')\n    AND (\n      s.blocked_reason IS NULL\n      OR s.blocked_details->>'probe_success' = 'true'\n      OR s.blocked_details->>'recovered_at' IS NOT NULL\n    )\n    AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())\n  )\n)";

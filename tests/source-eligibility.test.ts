@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   hasSuccessfulSourceRecovery,
+  isCatalogExecutionEligible,
   isSourceExecutionEligible,
   shouldProbePersistedSource,
 } from '../src/core/source-eligibility.js';
@@ -31,6 +32,24 @@ describe('source eligibility policy', () => {
     expect(hasSuccessfulSourceRecovery(source)).toBe(true);
     expect(isSourceExecutionEligible(source)).toBe(true);
     expect(shouldProbePersistedSource(source)).toBe(false);
+  });
+
+  it('fails closed for catalog discovery on ACTIVE sources with stale blocks', () => {
+    expect(isCatalogExecutionEligible({
+      status: 'ACTIVE',
+      enabled: true,
+      catalogDiscoveryEnabled: true,
+      blockedReason: 'TIMEOUT_TARPIT',
+      blockedDetails: { last_checked_at: '2026-10-05T05:54:40.834Z' },
+    })).toBe(false);
+
+    expect(isCatalogExecutionEligible({
+      status: 'ACTIVE',
+      enabled: true,
+      catalogDiscoveryEnabled: true,
+      blockedReason: 'TIMEOUT_TARPIT',
+      blockedDetails: { probe_success: true, recovered_at: '2026-10-05T06:00:00.000Z' },
+    })).toBe(true);
   });
 
   it('allows an expired transient cooldown but not an active one', () => {

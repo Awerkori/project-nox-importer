@@ -62,6 +62,7 @@ export interface AutoRestartRecord {
     progressAgeSec: number;
     eligibleJobs: number;
 }
+export declare function isCountedAutoRestart(record: AutoRestartRecord): boolean;
 export interface AutoHealWatchdogOptions {
     pool: Pool;
     scheduler?: WorkAffinityScheduler;

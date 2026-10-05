@@ -47,6 +47,14 @@ export function shouldProbePersistedSource(record: SourceHealthRecord): boolean 
   return record.status === 'COOLDOWN' || record.status === 'DEGRADED' || record.status === 'PROBING';
 }
 
+/** Catalog discovery uses the same persisted health fence as chapter work.
+ * It is intentionally ACTIVE-only: expired cooldowns must be probed first. */
+export function isCatalogExecutionEligible(record: SourceHealthRecord, now = Date.now()): boolean {
+  if (record.enabled === false || record.catalogDiscoveryEnabled === false) return false;
+  if (record.status !== 'ACTIVE') return false;
+  return !record.blockedReason || hasSuccessfulSourceRecovery(record);
+}
+
 /** SQL fragment for queries that use importer_sources as `s`. */
 export const SOURCE_EXECUTION_ELIGIBILITY_SQL = `(
   (
