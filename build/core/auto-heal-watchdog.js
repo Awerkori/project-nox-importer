@@ -303,7 +303,14 @@ export class AutoHealWatchdog {
                   AND pq.task_type = 'IMPORT_CHAPTER'
                   AND pq.status IN ('QUEUED', 'RETRY', 'IMPORTING')
                   AND pq.chapter_sort_key < sw.frontier_sort_key
-              ) as has_predecessor_in_queue
+              ) as has_predecessor_in_queue,
+              EXISTS (
+                SELECT 1
+                FROM importer_chapter_mappings pg
+                WHERE pg.work_id = sw.work_id
+                  AND pg.chapter_sort_key < sw.frontier_sort_key
+                  AND pg.status = 'WAITING_FOR_GAP'
+              ) as has_predecessor_waiting_for_gap
             FROM staged_works sw
           )
           SELECT 
@@ -375,7 +382,11 @@ export class AutoHealWatchdog {
                             }
                             else {
                                 // Non-publishable work: WAITING_PREDECESSOR ONLY if there is a real predecessor in queue!
-                                const hasPredecessor = Boolean(row.has_predecessor_in_queue);
+                                // An explicit WAITING_FOR_GAP predecessor is a real ordering
+                                // dependency even when its upstream queue row has already been
+                                // exhausted.  It must not be counted as a stuck staged chapter;
+                                // the publication barrier still prevents bypassing the gap.
+                                const hasPredecessor = Boolean(row.has_predecessor_in_queue || row.has_predecessor_waiting_for_gap);
                                 if (hasPredecessor) {
                                     waitingPredecessorStaged += totalStaged;
                                     if (row.work_id && row.frontier_sort_key !== undefined) {

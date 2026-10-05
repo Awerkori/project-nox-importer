@@ -1147,6 +1147,43 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
     expect(metrics.waitingPredecessorStaged).toBe(0);
   });
 
+  it('classifies a staged frontier behind an explicit WAITING_FOR_GAP predecessor as waiting, not stuck', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes('started_age')) {
+        return { rows: [{ started_age: '60', completed_age: '60', fresh_age: '60', started_15m: '1', completed_15m: '1', fresh_15m: '1' }] };
+      }
+      if (sql.includes('eligible_cnt')) return { rows: [{ eligible_cnt: '0', importing_cnt: '0', retry_cnt: '0' }] };
+      if (sql.includes('staged_unique')) return { rows: [{ staged_unique: '2' }] };
+      if (sql.includes('staged_works')) {
+        return {
+          rows: [{
+            work_id: 'work-gap', frontier_sort_key: '28.0000', total_staged_chapters: '2',
+            max_published: '25.0000', has_predecessor_in_mapping: false,
+            has_predecessor_in_queue: false, has_predecessor_waiting_for_gap: true,
+            is_frontier_publishable: 0,
+          }],
+        };
+      }
+      if (sql.includes("key = 'active_works'")) return { rows: [{ value: JSON.stringify([]) }] };
+      if (sql.includes("key = 'importer_protective_stop'")) return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      if (sql.includes("key = 'importer_auto_restarts'")) return { rows: [{ value: JSON.stringify([]) }] };
+      return { rows: [] };
+    });
+
+    const metrics = await watchdog.collectTelemetry(true);
+    expect(metrics.publishableStaged).toBe(0);
+    expect(metrics.waitingPredecessorStaged).toBe(2);
+    expect(metrics.stuckStaged).toBe(0);
+  });
+
   // =========================================================================
   // CASO Q: Obra sem capítulos publicados, staged = 1, 2, 3, 4 => somente frontier (1) é ACTIONABLE
   // =========================================================================
