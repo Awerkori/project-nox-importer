@@ -201,6 +201,36 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(sql).toContain('importer_confirmed_gaps');
   });
 
+  it('claims an executable catalog P1 before on-demand admission when the active set is empty', async () => {
+    const catalogJob = {
+      id: 'catalog-p1-job',
+      source: 'pinkrosa',
+      priority: 75,
+      chapter_sort_key: 18,
+      payload: { workId: 'catalog-work', chapterNumber: 18, chapterTitle: 'Catalog P1' },
+    };
+    const query = vi.fn().mockImplementation((sql: string) => {
+      // Staff/P0/direct-work probes remain empty; the catalog fallback is the
+      // first path that can return this published-work candidate.
+      if (sql.includes('JOIN works w') && sql.includes('UPDATE importer_queue')) {
+        return { rows: [catalogJob] };
+      }
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    (scheduler as any).pool = { connect: vi.fn().mockResolvedValue(client) };
+    mockAdmissionController.admitNextWorkOnDemand = vi.fn().mockResolvedValue(null);
+
+    const acquired = await scheduler.acquireNextChapterJob({
+      workerId: 'catalog-first',
+      leaseDurationMinutes: 5,
+      allowedSources: ['pinkrosa'],
+    });
+
+    expect(acquired?.id).toBe('catalog-p1-job');
+    expect(mockAdmissionController.admitNextWorkOnDemand).not.toHaveBeenCalled();
+  });
+
   // =========================================================================
   // TEST B: Work Affinity (Progresso contínuo em obra admitida)
   // =========================================================================
