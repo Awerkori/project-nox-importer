@@ -86,9 +86,30 @@ describe('bounded admission snapshot', () => {
     let finish!:()=>void, calls=0;
     (c as any).executeAdmissionCycle=()=>{calls++;return new Promise<void>(r=>{finish=r;});};
     const first=c.runAdmissionCycle(),second=c.runAdmissionCycle();
-    expect(first).toBe(second); expect(calls).toBe(1);
+    expect(first).toBe(second); await Promise.resolve(); expect(calls).toBe(1);
     finish(); await first;
-    const third=c.runAdmissionCycle(); expect(calls).toBe(2); finish(); await third;
+    const third=c.runAdmissionCycle(); await Promise.resolve(); expect(calls).toBe(2); finish(); await third;
+  });
+
+  it('serializes periodic and on-demand scans on the bounded database pool', async () => {
+    const c = new AdmissionController({} as any, {} as any, { query: async () => ({ rows: [] }) });
+    let finishPeriodic!: () => void;
+    let onDemandStarted = false;
+    (c as any).executeAdmissionCycle = () => new Promise<void>((resolve) => { finishPeriodic = resolve; });
+    (c as any).executeOnDemandAdmission = async () => {
+      onDemandStarted = true;
+      return null;
+    };
+
+    const periodic = c.runAdmissionCycle();
+    const onDemand = c.admitNextWorkOnDemand('P1', ['hanamiheaven']);
+    await Promise.resolve();
+    expect(onDemandStarted).toBe(false);
+
+    finishPeriodic();
+    await periodic;
+    await onDemand;
+    expect(onDemandStarted).toBe(true);
   });
 
   it('does not admit P2 work beyond the effective chapter capacity', async () => {
