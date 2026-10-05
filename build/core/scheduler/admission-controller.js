@@ -824,7 +824,8 @@ export class AdmissionController {
                     // Older test doubles and persisted snapshots do not expose the
                     // source/canonical-aware count.  Fall back to the legacy queued
                     // count there, while production uses the bounded claimable count.
-                    const claimableCnt = qRow?.claimable_cnt !== undefined
+                    const hasClaimableSnapshot = qRow?.claimable_cnt !== undefined;
+                    const claimableCnt = hasClaimableSnapshot
                         ? parseInt(qRow.claimable_cnt || '0', 10)
                         : queuedCnt;
                     const importingCnt = parseInt(qRow?.importing_cnt || '0', 10);
@@ -933,7 +934,7 @@ export class AdmissionController {
                     // can use the slot for another executable frontier.  The queue rows
                     // remain intact and will be eligible for a later admission cycle
                     // when their source/predecessor recovers.
-                    if (claimableCnt === 0 && importingCnt === 0 && retryCnt === 0 && (queuedCnt > 0 || pausedCnt > 0)) {
+                    if (hasClaimableSnapshot && claimableCnt === 0 && importingCnt === 0 && (queuedCnt > 0 || pausedCnt > 0 || retryCnt > 0)) {
                         this.logger.info(`[ACTIVE_SET_VACATED] Work ${work.workTitle} (${work.workId}) has no source/canonical-eligible chapter; rotating empty executable window.`);
                         this.stateStore.removeActiveWork(work.workId);
                         this.triggerImmediateReplenishment('WORK_NO_EXECUTABLE_FRONTIER');
