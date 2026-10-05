@@ -135,6 +135,19 @@ describe('bounded admission snapshot', () => {
     });
   });
 
+  it('defers the advisory P1 pressure probe while claims are waiting for the bounded pool', async () => {
+    const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
+    const sentinel={isProtectiveStopActive:async()=>false} as any;
+    let queries = 0;
+    const pool={waitingCount:2, connect:async()=>({query:async()=>{queries++; return {rows:[]};}, release:()=>{}}), query:async()=>{queries++; return {rows:[]};}};
+    const c=new AdmissionController(state,sentinel,pool);
+    await expect(c.canAdmitNewWork()).resolves.toMatchObject({
+      allowed:false,
+      reason:'YSQL_POOL_BUSY: 2 claim/query waiter(s)',
+    });
+    expect(queries).toBe(0);
+  });
+
   it('holds P2 admission whenever a visible work still has P1 backlog, including paused window jobs', async () => {
     const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
     const sentinel={isProtectiveStopActive:async()=>false} as any;
