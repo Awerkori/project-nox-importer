@@ -29,6 +29,11 @@ import { telemetryCollector } from './telemetry-collector.js';
 import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from './scheduler/index.js';
 import { AutoHealWatchdog, HealthPanelMetrics } from './auto-heal-watchdog.js';
 import { RateBucketTracker } from './rate-bucket-tracker.js';
+import {
+  hasSuccessfulSourceRecovery,
+  isSourceExecutionEligible,
+  shouldProbePersistedSource,
+} from './source-eligibility.js';
 import { performance } from 'node:perf_hooks';
 import { randomUUID } from 'node:crypto';
 
@@ -1127,12 +1132,16 @@ export class ImporterEngine {
       try {
         const { data: cooldownSources, error } = await this.supabase
           .from('importer_sources')
-          .select('id, name, status, base_url, cooldown_until, blocked_reason')
-          .in('status', ['COOLDOWN', 'DEGRADED', 'PROBING']);
+          .select('id, name, status, base_url, cooldown_until, blocked_reason, blocked_details, last_health_check_at')
+          .in('status', ['ACTIVE', 'COOLDOWN', 'DEGRADED', 'PROBING']);
 
         if (!error && cooldownSources && cooldownSources.length > 0) {
           const now = Date.now();
-          for (const src of cooldownSources) {
+          for (const src of cooldownSources.filter((candidate: any) => shouldProbePersistedSource({
+            status: candidate.status,
+            blockedReason: candidate.blocked_reason,
+            blockedDetails: candidate.blocked_details,
+          }))) {
             if (this.stopSignal) break;
 
             const cooldownUntil = src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0;
@@ -1892,6 +1901,8 @@ export class ImporterEngine {
     catalogDiscoveryEnabled: boolean;
     status: string;
     cooldownUntil: number;
+    blockedReason: string | null;
+    blockedDetails: Record<string, unknown> | null;
     cachedAt: number;
   }>();
   private async getEligibleChapterSources(): Promise<string[]> {
@@ -1900,20 +1911,19 @@ export class ImporterEngine {
       try {
         let { data: srcs } = await this.supabase
           .from('importer_sources')
-          .select('id, enabled, chapter_ingestion_enabled, status, cooldown_until')
+          .select('id, enabled, chapter_ingestion_enabled, status, cooldown_until, blocked_reason, blocked_details')
           .eq('chapter_ingestion_enabled', true);
 
         if (srcs && srcs.length > 0) {
           const activeIds = srcs
-            .filter((s: any) => {
-              if (s.enabled === false) return false;
-              if (s.status === 'ACTIVE') return true;
-              if (['COOLDOWN', 'PROBING', 'DEGRADED'].includes(s.status)) {
-                if (!s.cooldown_until) return true;
-                return new Date(s.cooldown_until).getTime() <= now;
-              }
-              return false;
-            })
+            .filter((s: any) => isSourceExecutionEligible({
+              status: s.status,
+              enabled: s.enabled,
+              chapterIngestionEnabled: s.chapter_ingestion_enabled,
+              cooldownUntil: s.cooldown_until ? new Date(s.cooldown_until).getTime() : null,
+              blockedReason: s.blocked_reason,
+              blockedDetails: s.blocked_details,
+            }, now))
             .map((s: any) => s.id);
           this.activeSourcesCache = { sources: activeIds, cachedAt: now };
         }
@@ -1971,7 +1981,7 @@ export class ImporterEngine {
     if (!cached || now - cached.cachedAt > 10_000) {
       let { data: src } = await this.supabase
         .from('importer_sources')
-        .select('status, enabled, cooldown_until, chapter_ingestion_enabled, catalog_discovery_enabled')
+        .select('status, enabled, cooldown_until, chapter_ingestion_enabled, catalog_discovery_enabled, blocked_reason, blocked_details')
         .eq('id', source)
         .maybeSingle();
 
@@ -1982,6 +1992,8 @@ export class ImporterEngine {
           catalogDiscoveryEnabled: (src as any).catalog_discovery_enabled === true || (src as any).catalog_discovery_enabled === 1,
           status: src.status || 'ACTIVE',
           cooldownUntil: src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0,
+          blockedReason: (src as any).blocked_reason ?? null,
+          blockedDetails: (src as any).blocked_details ?? null,
           cachedAt: now,
         };
         this.sourceStatusCache.set(source, cached);
@@ -1993,6 +2005,14 @@ export class ImporterEngine {
 
     if (taskType === 'IMPORT_CHAPTER') {
       if (!cached.chapterIngestionEnabled) return false;
+      if (!isSourceExecutionEligible({
+        status: cached.status,
+        enabled: cached.enabled,
+        chapterIngestionEnabled: cached.chapterIngestionEnabled,
+        cooldownUntil: cached.cooldownUntil,
+        blockedReason: cached.blockedReason,
+        blockedDetails: cached.blockedDetails,
+      }, now)) return false;
       if (
         cached.status === 'PAUSED' ||
         cached.status === 'DISABLED' ||
@@ -2007,6 +2027,10 @@ export class ImporterEngine {
     } else {
       if (!cached.catalogDiscoveryEnabled) return false;
       if (cached.status !== 'ACTIVE') return false;
+      if (cached.blockedReason && !hasSuccessfulSourceRecovery({
+        blockedReason: cached.blockedReason,
+        blockedDetails: cached.blockedDetails,
+      })) return false;
     }
 
     return true;
@@ -2903,11 +2927,14 @@ export class ImporterEngine {
           status: sourceCached.status,
           enabled: sourceCached.enabled,
           cooldown_until: sourceCached.cooldownUntil ? new Date(sourceCached.cooldownUntil).toISOString() : null,
+          chapter_ingestion_enabled: sourceCached.chapterIngestionEnabled,
+          blocked_reason: sourceCached.blockedReason,
+          blocked_details: sourceCached.blockedDetails,
         };
       } else {
         const { data } = await this.supabase
           .from('importer_sources')
-          .select('id, status, cooldown_until, enabled, chapter_ingestion_enabled, catalog_discovery_enabled')
+          .select('id, status, cooldown_until, enabled, chapter_ingestion_enabled, catalog_discovery_enabled, blocked_reason, blocked_details')
           .eq('id', job.source)
           .maybeSingle();
         sourceRec = data;
@@ -2918,12 +2945,33 @@ export class ImporterEngine {
             catalogDiscoveryEnabled: data.catalog_discovery_enabled === true || data.catalog_discovery_enabled === 1,
             status: data.status || 'ACTIVE',
             cooldownUntil: data.cooldown_until ? new Date(data.cooldown_until).getTime() : 0,
+            blockedReason: data.blocked_reason ?? null,
+            blockedDetails: data.blocked_details ?? null,
             cachedAt: Date.now(),
           });
         }
       }
 
       if (sourceRec) {
+        if (sourceRec.status === 'ACTIVE' && !isSourceExecutionEligible({
+          status: sourceRec.status,
+          enabled: sourceRec.enabled,
+          chapterIngestionEnabled: sourceRec.chapter_ingestion_enabled !== false,
+          cooldownUntil: sourceRec.cooldown_until ? new Date(sourceRec.cooldown_until).getTime() : 0,
+          blockedReason: sourceRec.blocked_reason,
+          blockedDetails: sourceRec.blocked_details,
+        })) {
+          this.logger.warn(`Parking job ${job.id}: source ${job.source} is not eligible for execution`, {
+            status: sourceRec.status,
+            blockedReason: sourceRec.blocked_reason,
+          });
+          await this.queue.releaseJob(
+            job.id,
+            'BLOCKED_BY_UPSTREAM',
+            'Source health policy has not confirmed this source as executable',
+          );
+          return;
+        }
         if (sourceRec.status === 'UPSTREAM_BLOCKED') {
           // If this is a chapter import job, check if other healthy sources exist for the work
           let hasHealthyFallback = false;
@@ -2985,6 +3033,8 @@ export class ImporterEngine {
               catalogDiscoveryEnabled: true,
               status: 'ACTIVE',
               cooldownUntil: 0,
+              blockedReason: null,
+              blockedDetails: null,
               cachedAt: Date.now(),
             });
             this.circuitBreaker.reset(job.source);

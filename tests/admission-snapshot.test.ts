@@ -39,8 +39,8 @@ describe('bounded admission snapshot', () => {
       await db.exec(`CREATE TABLE importer_queue (task_type text,status text,payload jsonb,attempts int,max_attempts int,chapter_sort_key numeric);
         CREATE TABLE chapters (work_id uuid,number numeric,published_at timestamptz);
         CREATE TABLE importer_chapter_mappings (work_id uuid,status text,chapter_sort_key numeric);
-        CREATE TABLE importer_sources (id text PRIMARY KEY,status text,cooldown_until timestamptz);
-        INSERT INTO importer_sources VALUES ('s','ACTIVE',NULL);`);
+        CREATE TABLE importer_sources (id text PRIMARY KEY,status text,cooldown_until timestamptz,enabled boolean,blocked_reason text,blocked_details jsonb);
+        INSERT INTO importer_sources (id,status,cooldown_until,enabled,blocked_reason,blocked_details) VALUES ('s','ACTIVE',NULL,true,NULL,NULL);`);
       const id='00000000-0000-0000-0000-000000000001', empty='00000000-0000-0000-0000-000000000002';
       for (const [status,attempts,key] of [['QUEUED',0,3],['QUEUED',7,2],['IMPORTING',1,4],['PAUSED_BY_STAFF',0,5],['COMPLETED',0,1]]) {
         await db.query(`INSERT INTO importer_queue VALUES ('IMPORT_CHAPTER',$1,$2, $3,7,$4)`,[status,JSON.stringify({workId:id}),attempts,key]);

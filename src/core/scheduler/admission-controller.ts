@@ -21,6 +21,7 @@ import {
   SchedulerLane,
   WorkSchedulerState,
 } from './types.js';
+import { isSourceExecutionEligible, SOURCE_EXECUTION_ELIGIBILITY_SQL } from '../source-eligibility.js';
 
 // P1 is the shared existing-catalog lane.  A one-chapter admission window is
 // deliberately a *scheduling* fairness quantum, not a media/DB resource
@@ -452,7 +453,7 @@ export class AdmissionController {
           AND q.priority >= 75 AND q.priority < 100
           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
           AND s.enabled = true
-          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
+          AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
         LIMIT 1
       `);
       const candidate = ready.rows[0];
@@ -471,7 +472,7 @@ export class AdmissionController {
           AND q.priority >= 75 AND q.priority < 100
           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
           AND s.enabled = true
-          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
+          AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
         LIMIT 1
       `);
       this.p1BacklogSnapshot = {
@@ -647,7 +648,8 @@ export class AdmissionController {
       // One bounded snapshot for the active cohort; no cache of editorial state.
       // Keep indexed work predicates inside each aggregate to avoid scanning the hot queue.
       const snapshot = await this.runQuery(`
-        SELECT w.work_id, q.*, p.*, m.*, s.status AS source_status, s.cooldown_until
+        SELECT w.work_id, q.*, p.*, m.*, s.status AS source_status, s.cooldown_until,
+               s.blocked_reason AS source_blocked_reason, s.blocked_details AS source_blocked_details
         FROM unnest($1::text[], $2::text[]) AS w(work_id, source)
         CROSS JOIN LATERAL (
           SELECT COUNT(*) FILTER (WHERE status='QUEUED' AND attempts < COALESCE(max_attempts,7)) AS queued_cnt,
@@ -757,13 +759,20 @@ export class AdmissionController {
           }
 
           // Check primary source health
-          const srcRow = { status: qRow.source_status, cooldown_until: qRow.cooldown_until };
-          const isSourceBlocked = srcRow && (
-            srcRow.status === 'DISABLED' ||
-            srcRow.status === 'PAUSED' ||
-            srcRow.status === 'DEGRADED' ||
-            (srcRow.status === 'COOLDOWN' && srcRow.cooldown_until && new Date(srcRow.cooldown_until) > new Date())
-          );
+          const srcRow = {
+            status: qRow.source_status,
+            cooldown_until: qRow.cooldown_until,
+            blocked_reason: qRow.source_blocked_reason,
+            blocked_details: qRow.source_blocked_details,
+          };
+          const isSourceBlocked = srcRow && !isSourceExecutionEligible({
+            status: srcRow.status,
+            enabled: true,
+            chapterIngestionEnabled: true,
+            cooldownUntil: srcRow.cooldown_until ? new Date(srcRow.cooldown_until).getTime() : null,
+            blockedReason: srcRow.blocked_reason,
+            blockedDetails: srcRow.blocked_details,
+          });
 
           if (isSourceBlocked) {
             this.logger.info(`Work ${work.workTitle} (${work.workId}) marked BLOCKED (source ${work.primarySource} in cooldown/blocked). Vacating active slot.`);
@@ -962,7 +971,7 @@ export class AdmissionController {
          JOIN importer_sources s ON s.id = q.source
          WHERE w.published = true
            AND s.enabled = true
-           AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
+           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
          -- One candidate from every source before a second candidate from any
          -- source. The bounded result remains diverse even with many sources.
          ORDER BY admission_rank, source
@@ -1147,7 +1156,7 @@ export class AdmissionController {
            AND (q.status IN ('QUEUED', 'RETRY')${includePaused ? " OR q.status = 'PAUSED_BY_STAFF'" : ''})
            AND w.published IS FALSE
            AND s.enabled = true
-           AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
+           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
            AND NOT ((q.payload->>'workId') = ANY($1::text[]))
          GROUP BY (q.payload->>'workId'), w.title, q.source, w.created_at
          )
@@ -1460,7 +1469,7 @@ export class AdmissionController {
         JOIN importer_sources s ON s.id = q.source
         WHERE ${isP1 ? 'w.published = true' : 'w.published IS FALSE'}
           AND s.enabled = true
-          AND (s.status = 'ACTIVE' OR (s.status IN ('COOLDOWN', 'PROBING', 'DEGRADED') AND (s.cooldown_until IS NULL OR s.cooldown_until <= NOW())))
+          AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
         ORDER BY q.source, q.min_sort_key ASC NULLS LAST
         LIMIT ${isP1 ? 64 : 10};
       `;
