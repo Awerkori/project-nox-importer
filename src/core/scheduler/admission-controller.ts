@@ -458,6 +458,16 @@ export class AdmissionController {
               AND predecessor.payload->>'workId' = q.payload->>'workId'
               AND predecessor.chapter_sort_key < q.chapter_sort_key
               AND predecessor.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+              AND NOT EXISTS (
+                SELECT 1
+                FROM chapters predecessor_canonical
+                WHERE predecessor_canonical.work_id = (q.payload->>'workId')::uuid
+                  AND predecessor_canonical.published_at IS NOT NULL
+                  AND (
+                    predecessor_canonical.number = NULLIF(predecessor.payload->>'chapterNumber', '')::numeric
+                    OR predecessor_canonical.number = predecessor.chapter_sort_key
+                  )
+              )
           )
           AND (
             (pub.max_published IS NOT NULL AND q.chapter_sort_key <= pub.max_published + 1.5)
@@ -911,6 +921,16 @@ export class AdmissionController {
                     AND predecessor.payload->>'workId' = q.payload->>'workId'
                     AND predecessor.chapter_sort_key < q.chapter_sort_key
                     AND predecessor.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM chapters predecessor_canonical
+                      WHERE predecessor_canonical.work_id = (q.payload->>'workId')::uuid
+                        AND predecessor_canonical.published_at IS NOT NULL
+                        AND (
+                          predecessor_canonical.number = NULLIF(predecessor.payload->>'chapterNumber', '')::numeric
+                          OR predecessor_canonical.number = predecessor.chapter_sort_key
+                        )
+                    )
                 )
                 AND NOT EXISTS (
                   SELECT 1 FROM importer_chapter_mappings staged_frontier

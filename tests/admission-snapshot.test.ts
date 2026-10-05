@@ -52,6 +52,7 @@ describe('bounded admission snapshot', () => {
       /loadOnDemandCandidates\(false\)[\s\S]{0,180}loadOnDemandCandidates\(true\)/,
     );
     expect(source).toContain("predecessor.chapter_sort_key < q.chapter_sort_key");
+    expect(source).toContain('predecessor_canonical.published_at IS NOT NULL');
     expect(source).toContain("staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')");
   });
 
