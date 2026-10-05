@@ -33,3 +33,39 @@ describe('ImporterQueue dedupe revival', () => {
     expect(mock.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'QUEUED', attempts: 0 }));
   });
 });
+
+describe('ImporterQueue transient publication barrier recovery', () => {
+  it('requeues only a barrier-failed job whose mapping is still pending', async () => {
+    const updates: any[] = [];
+    const failed = [{
+      id: 'job-1', source: 'mangaflix', priority: 75, attempts: 5,
+      payload: { workId: 'work-1' }, chapter_sort_key: 47,
+      last_error: 'PublicationSafetyBarrier is CLOSED/RECOVERING',
+    }];
+    const from = vi.fn((table: string) => {
+      if (table === 'importer_queue') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnThis(),
+            ilike: vi.fn().mockReturnThis(),
+            order: vi.fn().mockReturnThis(),
+            limit: vi.fn().mockResolvedValue({ data: failed, error: null }),
+          }),
+          update: vi.fn((value: any) => {
+            updates.push(value);
+            return { eq: vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) }) };
+          }),
+        };
+      }
+      return {
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockReturnThis(),
+          maybeSingle: vi.fn().mockResolvedValue({ data: { id: 'mapping-1' }, error: null }),
+        }),
+      };
+    });
+    const queue = new ImporterQueue({ from } as any, 'test-worker');
+    await expect(queue.recoverPublicationBarrierFailures()).resolves.toBe(1);
+    expect(updates[0]).toMatchObject({ status: 'QUEUED', attempts: 0, retry_reason: 'PUBLICATION_BARRIER_RECOVERY' });
+  });
+});

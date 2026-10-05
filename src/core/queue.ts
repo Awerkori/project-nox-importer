@@ -515,4 +515,69 @@ export class ImporterQueue {
       return { recovered: 0, failed: 0 };
     }
   }
+
+  /**
+   * Reopens chapter jobs that were permanently failed by an older build while
+   * the publication safety barrier was CLOSED/RECOVERING.  That condition is
+   * transient: the current engine parks the job in QUEUED instead.  Only a
+   * matching non-gap PENDING mapping is revived, so already completed/gap
+   * mappings and unrelated failures remain untouched.  Source health is still
+   * enforced by processJob, which parks blocked sources safely.
+   */
+  async recoverPublicationBarrierFailures(limit = 100): Promise<number> {
+    try {
+      const { data: failed, error } = await this.supabase
+        .from('importer_queue')
+        .select('id, source, priority, attempts, payload, chapter_sort_key, last_error')
+        .eq('task_type', 'IMPORT_CHAPTER')
+        .eq('status', 'FAILED')
+        .ilike('last_error', '%PublicationSafetyBarrier%')
+        .order('updated_at', { ascending: true })
+        .limit(limit);
+      if (error || !failed?.length) return 0;
+
+      let recovered = 0;
+      for (const job of failed) {
+        const workId = job.payload?.workId;
+        if (!workId || job.chapter_sort_key === null || job.chapter_sort_key === undefined) continue;
+
+        const { data: mapping, error: mappingError } = await this.supabase
+          .from('importer_chapter_mappings')
+          .select('id')
+          .eq('work_id', workId)
+          .eq('source', job.source)
+          .eq('chapter_sort_key', job.chapter_sort_key)
+          .eq('status', 'PENDING')
+          .eq('is_gap', false)
+          .maybeSingle();
+        if (mappingError || !mapping) continue;
+
+        const { error: updateError } = await this.supabase
+          .from('importer_queue')
+          .update({
+            status: 'QUEUED',
+            attempts: 0,
+            last_error: null,
+            last_error_at: null,
+            retry_reason: 'PUBLICATION_BARRIER_RECOVERY',
+            locked_by: null,
+            locked_at: null,
+            lease_expires_at: null,
+            next_run_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', job.id)
+          .eq('status', 'FAILED');
+        if (!updateError) recovered++;
+      }
+
+      if (recovered > 0) {
+        this.logger.info('Reopened chapter jobs failed only by the transient publication barrier', { recovered });
+      }
+      return recovered;
+    } catch (err: any) {
+      this.logger.warn('Publication barrier failure recovery skipped', { error: err?.message });
+      return 0;
+    }
+  }
 }

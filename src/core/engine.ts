@@ -731,6 +731,11 @@ export class ImporterEngine {
       // 2. Sweep any staged publications left over from previous instance
       await this.publicationBarrier.sweepStagedPublications();
 
+      // Older builds could exhaust a retry budget while the publication
+      // barrier was intentionally closed, leaving a PENDING mapping with no
+      // executable queue row. Reopen only that exact transient failure.
+      await this.queue.recoverPublicationBarrierFailures();
+
       // 3. Recover stalled 502 retries with long delays from previous exponential backoff policy
       await this.recoverStalled502Retries();
     } catch (err: any) {
@@ -1190,6 +1195,7 @@ export class ImporterEngine {
           // scheduler-side hard cap keeps this startup/periodic pass bounded.
           await (this.scheduler as any).runControlledExhaustedJobCleanup(500);
         }
+        await this.queue.recoverPublicationBarrierFailures();
       } catch (err: any) {
         this.logger.warn('Error during redundant job cleanup loop', { error: err?.message });
       }
