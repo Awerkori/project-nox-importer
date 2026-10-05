@@ -9,7 +9,7 @@ import { Logger } from './logger.js';
 import { withSourceChapterPermits } from './concurrency.js';
 import { readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
-import { AdaptiveAutotuner, AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS, resolveChapterUploadConcurrency } from './concurrency.js';
+import { AdaptiveAutotuner, AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS, releasePermitOnce, resolveChapterUploadConcurrency } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
 import { RetryPolicy, ProviderDownloadError, InvalidMediaError, PermanentDataError } from './retry-policy.js';
 import { ExistingWorksReconciler } from './reconciliation.js';
@@ -3961,10 +3961,12 @@ export class ImporterEngine {
                                 const buf0 = performance.now();
                                 let reservation;
                                 let bufferedSemaphoreAcquired = false;
+                                let releaseBufferedPermit = () => { };
                                 try {
                                     reservation = await this.autotuner.reserveBufferBudget(2.0 * 1024 * 1024, pipelineSignal);
                                     await bufferedPageSemaphore.acquire(pipelineSignal);
                                     bufferedSemaphoreAcquired = true;
+                                    releaseBufferedPermit = releasePermitOnce(bufferedPageSemaphore);
                                 }
                                 catch (acquireError) {
                                     // A deadline/lease abort can fire between these two awaits.
@@ -4100,7 +4102,7 @@ export class ImporterEngine {
                                         notifyConsumer();
                                         break;
                                     }
-                                    readyQueue.push({ index: idx, pageBytes, releaseBuffer: () => bufferedPageSemaphore.release() });
+                                    readyQueue.push({ index: idx, pageBytes, releaseBuffer: releaseBufferedPermit });
                                     bufferTransferred = true;
                                     notifyConsumer();
                                 }
@@ -4114,7 +4116,7 @@ export class ImporterEngine {
                                             reservation.release();
                                         }
                                         if (bufferedSemaphoreAcquired) {
-                                            bufferedPageSemaphore.release();
+                                            releaseBufferedPermit();
                                         }
                                     }
                                 }
