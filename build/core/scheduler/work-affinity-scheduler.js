@@ -1686,26 +1686,125 @@ export class WorkAffinityScheduler {
                 if (Date.now() - this.lastAnyPublicationTime < 3 * 60_000)
                     return;
                 const activeWorkIds = this.stateStore.getActiveWorks().map((w) => w.workId);
+                // This watchdog is a safety signal, not a reporting aggregate.  The
+                // previous COUNT/COUNT(DISTINCT) query walked the whole chapter queue
+                // (hundreds of thousands of rows) and could monopolize the bounded DB
+                // pool while every worker was waiting to claim.  Use bounded existence
+                // probes instead: each branch can stop at its first matching row and
+                // still preserves the recovery decision.
+                const frontierEligibility = `
+          AND NOT EXISTS (
+            SELECT 1
+            FROM importer_queue predecessor
+            WHERE predecessor.task_type = 'IMPORT_CHAPTER'
+              AND predecessor.payload->>'workId' = q.payload->>'workId'
+              AND predecessor.chapter_sort_key < q.chapter_sort_key
+              AND predecessor.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM importer_chapter_mappings staged_frontier
+            WHERE staged_frontier.work_id = (q.payload->>'workId')::uuid
+              AND staged_frontier.chapter_sort_key = q.chapter_sort_key
+              AND staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')
+          )
+          AND (
+            (pub.max_published IS NOT NULL AND q.chapter_sort_key <= pub.max_published + 1.5)
+            OR EXISTS (
+              SELECT 1
+              FROM importer_confirmed_gaps gap
+              WHERE gap.work_id = (q.payload->>'workId')::uuid
+                AND gap.start_sort_key <= COALESCE(pub.max_published + 1, 1)
+                AND gap.end_sort_key >= q.chapter_sort_key - 1
+            )
+            OR (
+              q.chapter_sort_key <= 1.5
+              AND pub.max_published IS NULL
+              AND NOT EXISTS (
+                SELECT 1
+                FROM importer_chapter_mappings predecessor_mapping
+                WHERE predecessor_mapping.work_id = (q.payload->>'workId')::uuid
+                  AND predecessor_mapping.chapter_sort_key < q.chapter_sort_key
+                  AND predecessor_mapping.is_gap = false
+                  AND predecessor_mapping.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
+              )
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM chapters canonical_chapter
+            WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
+              AND canonical_chapter.published_at IS NOT NULL
+              AND (
+                canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
+                OR canonical_chapter.number = q.chapter_sort_key
+              )
+          )`;
                 const statsRes = await this.runQuery(this.pool, `
-          SELECT 
-            COUNT(CASE WHEN q.status = 'QUEUED' AND s.enabled = true AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL} THEN 1 END) as claimable_now,
-            COUNT(CASE WHEN q.status = 'RETRY' AND q.next_run_at <= NOW() AND s.enabled = true AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL} THEN 1 END) as retry_due,
-            COUNT(CASE WHEN q.status = 'IMPORTING' THEN 1 END) as importing_cnt,
-            COUNT(DISTINCT CASE WHEN s.enabled = true AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL} THEN (q.payload->>'workId') END) as valid_waiting_works,
-            COUNT(CASE WHEN (q.payload->>'workId') = ANY($1::text[]) THEN 1 END) as active_work_pending
-          FROM importer_queue q
-          LEFT JOIN importer_sources s ON s.id = q.source
-          WHERE q.task_type = 'IMPORT_CHAPTER'
-            AND q.status IN ('QUEUED', 'RETRY', 'IMPORTING');
+          SELECT
+            EXISTS (
+              SELECT 1
+              FROM importer_queue q
+              JOIN importer_sources s ON s.id = q.source
+              LEFT JOIN LATERAL (
+                SELECT MAX(c.number) AS max_published
+                FROM chapters c
+                WHERE c.work_id = (q.payload->>'workId')::uuid
+                  AND c.published_at IS NOT NULL
+              ) pub ON TRUE
+              WHERE q.task_type = 'IMPORT_CHAPTER'
+                AND q.status = 'QUEUED'
+                AND s.enabled = true
+                AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+                ${frontierEligibility}
+            ) AS claimable_now,
+            EXISTS (
+              SELECT 1
+              FROM importer_queue q
+              JOIN importer_sources s ON s.id = q.source
+              LEFT JOIN LATERAL (
+                SELECT MAX(c.number) AS max_published
+                FROM chapters c
+                WHERE c.work_id = (q.payload->>'workId')::uuid
+                  AND c.published_at IS NOT NULL
+              ) pub ON TRUE
+              WHERE q.task_type = 'IMPORT_CHAPTER'
+                AND q.status = 'RETRY'
+                AND q.next_run_at <= NOW()
+                AND s.enabled = true
+                AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+                ${frontierEligibility}
+            ) AS retry_due,
+            EXISTS (
+              SELECT 1
+              FROM importer_queue q
+              WHERE q.task_type = 'IMPORT_CHAPTER' AND q.status = 'IMPORTING'
+            ) AS importing_cnt,
+            EXISTS (
+              SELECT 1
+              FROM importer_queue q
+              JOIN importer_sources s ON s.id = q.source
+              WHERE q.task_type = 'IMPORT_CHAPTER'
+                AND q.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+                AND s.enabled = true
+                AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+            ) AS valid_waiting_works,
+            EXISTS (
+              SELECT 1
+              FROM importer_queue q
+              WHERE q.task_type = 'IMPORT_CHAPTER'
+                AND q.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+                AND (q.payload->>'workId') = ANY($1::text[])
+            ) AS active_work_pending
         `, [activeWorkIds.length > 0 ? activeWorkIds : ['00000000-0000-0000-0000-000000000000']]);
-                const stagedRes = await this.runQuery(this.pool, `SELECT COUNT(*) as staged_cnt FROM importer_chapter_mappings WHERE status = 'STAGED'`);
+                const stagedRes = await this.runQuery(this.pool, `SELECT EXISTS (SELECT 1 FROM importer_chapter_mappings WHERE status = 'STAGED') AS staged_cnt`);
                 const row = statsRes.rows[0];
-                const claimableNow = parseInt(row?.claimable_now || '0', 10);
-                const retryDue = parseInt(row?.retry_due || '0', 10);
-                const importingCnt = parseInt(row?.importing_cnt || '0', 10);
-                const validWaitingWorks = parseInt(row?.valid_waiting_works || '0', 10);
-                const activeWorkPending = parseInt(row?.active_work_pending || '0', 10);
-                const stagedCnt = parseInt(stagedRes.rows[0]?.staged_cnt || '0', 10);
+                const claimableNow = row?.claimable_now ? 1 : 0;
+                const retryDue = row?.retry_due ? 1 : 0;
+                const importingCnt = row?.importing_cnt ? 1 : 0;
+                const validWaitingWorks = row?.valid_waiting_works ? 1 : 0;
+                const activeWorkPending = row?.active_work_pending ? 1 : 0;
+                const stagedCnt = stagedRes.rows[0]?.staged_cnt ? 1 : 0;
                 const hasSafeWork = claimableNow > 0 || retryDue > 0 || validWaitingWorks > 0 || activeWorkPending > 0 || stagedCnt > 0;
                 if (hasSafeWork) {
                     const elapsedPubMs = Date.now() - this.lastAnyPublicationTime;
