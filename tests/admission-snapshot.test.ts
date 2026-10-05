@@ -341,6 +341,55 @@ describe('bounded admission snapshot', () => {
     } finally { await db.close(); }
   });
 
+  it('reopens a transient frontier only after a newer source recovery', async () => {
+    const db = new PGlite();
+    try {
+      const work = '00000000-0000-0000-0000-000000000033';
+      await db.exec(`
+        CREATE TABLE importer_queue (
+          id integer PRIMARY KEY, task_type text, status text, source text,
+          payload jsonb, retry_reason text, last_error text, attempts integer,
+          chapter_sort_key numeric,
+          last_error_at timestamptz, last_recovered_error text, recovered_at timestamptz,
+          updated_at timestamptz, locked_by text, locked_at timestamptz,
+          lease_expires_at timestamptz, cancel_requested boolean, next_run_at timestamptz
+        );
+        CREATE TABLE importer_chapter_mappings (
+          id integer PRIMARY KEY, work_id uuid, source text, source_chapter_id text,
+          status text, is_gap boolean, last_error text, updated_at timestamptz
+        );
+        CREATE TABLE importer_sources (
+          id text PRIMARY KEY, status text, enabled boolean, blocked_details jsonb,
+          updated_at timestamptz
+        );
+        CREATE TABLE chapters (work_id uuid, number numeric, published_at timestamptz);
+        CREATE TABLE importer_staff_requests (work_id uuid, status text);
+        INSERT INTO importer_sources VALUES
+          ('recovered','ACTIVE',true,'{"recovered_at":"2026-10-05T20:00:00Z"}',now()),
+          ('not-recovered','ACTIVE',true,NULL,now());
+        INSERT INTO importer_queue (id,task_type,status,source,payload,retry_reason,last_error,attempts,last_error_at,updated_at)
+          VALUES
+            (1,'IMPORT_CHAPTER','FAILED','recovered','{"workId":"${work}","sourceChapterId":"ch-1","chapterNumber":29}',
+              'TRANSIENT_NETWORK','[RETRY_BUDGET_EXHAUSTED] timeout',5,now()-interval '2 days',now()-interval '2 days'),
+            (2,'IMPORT_CHAPTER','FAILED','not-recovered','{"workId":"${work}","sourceChapterId":"ch-2","chapterNumber":30}',
+              'TRANSIENT_NETWORK','[RETRY_BUDGET_EXHAUSTED] timeout',5,now()-interval '2 days',now()-interval '2 days');
+        INSERT INTO importer_chapter_mappings (id,work_id,source,source_chapter_id,status,is_gap)
+          VALUES (11,'${work}','recovered','ch-1','PENDING',false),(12,'${work}','not-recovered','ch-2','PENDING',false);
+      `);
+      const controller = new AdmissionController({ getConfig: () => ({}) } as any, {} as any, {
+        query: (sql: string, params?: any[]) => db.query(sql, params),
+      });
+
+      await expect((controller as any).recoverSourceRecoveredTransientFailures()).resolves.toBe(1);
+      const { rows } = await db.query<any>(`SELECT q.id,q.status,q.retry_reason,m.status mapping_status
+        FROM importer_queue q JOIN importer_chapter_mappings m ON m.id=q.id+10 ORDER BY q.id`);
+      expect(rows).toEqual([
+        { id: 1, status: 'QUEUED', retry_reason: 'SOURCE_RECOVERY_RETRY', mapping_status: 'PENDING' },
+        { id: 2, status: 'FAILED', retry_reason: 'TRANSIENT_NETWORK', mapping_status: 'PENDING' },
+      ]);
+    } finally { await db.close(); }
+  });
+
   it('treats every visible legacy below-P1 work as P1 before P2 discovery', () => {
     const source = readFileSync('src/core/scheduler/admission-controller.ts', 'utf8');
     expect(source.indexOf('await this.repairVisibleP2LifecycleBacklog();'))

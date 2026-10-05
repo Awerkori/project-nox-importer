@@ -71,6 +71,7 @@ export class AdmissionController {
   // canonical frontier does not remain permanently invisible to admission.
   private orphanCancelledRecoveryAt = 0;
   private legacyTransientFailureRecoveryAt = 0;
+  private sourceRecoveredFailureRecoveryAt = 0;
 
   private getP1AdmissionCursors(): Record<string, string> {
     const getter = (this.stateStore as any).getP1AdmissionCursors;
@@ -848,6 +849,101 @@ export class AdmissionController {
   }
 
   /**
+   * Reopen a transient frontier only after its source has demonstrably
+   * recovered.  A failed predecessor can otherwise leave every later
+   * canonical chapter behind a permanent barrier even though the source is
+   * healthy again.  The source-row update is the recovery edge: a retry is
+   * eligible once, and a second failure is not reopened until a newer source
+   * probe records another recovery.  Permanent failures and failures without
+   * a source recovery marker remain terminal.
+   */
+  private async recoverSourceRecoveredTransientFailures(): Promise<number> {
+    const now = Date.now();
+    if (now - this.sourceRecoveredFailureRecoveryAt < 60_000) return 0;
+    this.sourceRecoveredFailureRecoveryAt = now;
+
+    try {
+      const result = await this.runQuery(`
+        WITH candidates AS MATERIALIZED (
+          SELECT q.id, m.id AS mapping_id
+          FROM importer_queue q
+          JOIN importer_chapter_mappings m
+            ON m.work_id::text = q.payload->>'workId'
+           AND m.source = q.source
+           AND m.source_chapter_id = q.payload->>'sourceChapterId'
+          JOIN importer_sources s ON s.id = q.source
+          WHERE q.task_type = 'IMPORT_CHAPTER'
+            AND q.status = 'FAILED'
+            AND q.retry_reason = 'TRANSIENT_NETWORK'
+            AND q.last_error ILIKE '%RETRY_BUDGET_EXHAUSTED%'
+            AND q.updated_at < NOW() - INTERVAL '1 minute'
+            AND m.status IN ('PENDING', 'FAILED')
+            AND m.is_gap IS FALSE
+            AND s.enabled = TRUE
+            AND s.status = 'ACTIVE'
+            AND s.blocked_details->>'recovered_at' IS NOT NULL
+            AND s.updated_at > COALESCE(q.last_error_at, q.updated_at)
+            AND NOT EXISTS (
+              SELECT 1
+              FROM chapters c
+              WHERE c.work_id = (q.payload->>'workId')::uuid
+                AND c.published_at IS NOT NULL
+                AND (
+                  c.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
+                  OR c.number = q.chapter_sort_key
+                )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM importer_staff_requests sr
+              WHERE sr.work_id::text = q.payload->>'workId'
+                AND sr.status IN ('QUEUED', 'IMPORTING', 'RETRYING', 'ACTIVE')
+            )
+          ORDER BY q.updated_at ASC, q.id ASC
+          LIMIT 50
+          FOR UPDATE OF q, m SKIP LOCKED
+        ), revived_mappings AS (
+          UPDATE importer_chapter_mappings m
+          SET status = CASE WHEN m.status = 'FAILED' THEN 'QUEUED' ELSE m.status END,
+              last_error = NULL,
+              updated_at = NOW()
+          FROM candidates c
+          WHERE m.id = c.mapping_id
+          RETURNING m.id
+        ), revived_jobs AS (
+          UPDATE importer_queue q
+          SET status = 'QUEUED',
+              attempts = 0,
+              locked_by = NULL,
+              locked_at = NULL,
+              lease_expires_at = NULL,
+              cancel_requested = FALSE,
+              next_run_at = NOW(),
+              last_error = NULL,
+              last_error_at = NULL,
+              retry_reason = 'SOURCE_RECOVERY_RETRY',
+              last_recovered_error = 'Reopened transient frontier after source recovery probe',
+              recovered_at = NOW(),
+              updated_at = NOW()
+          FROM candidates c
+          WHERE q.id = c.id
+            AND EXISTS (SELECT 1 FROM revived_mappings m WHERE m.id = c.mapping_id)
+          RETURNING q.id
+        )
+        SELECT COUNT(*)::int AS recovered FROM revived_jobs;
+      `);
+      const recovered = Number(result.rows[0]?.recovered || 0);
+      if (recovered > 0) {
+        this.logger.warn('[SOURCE_RECOVERY_TRANSIENT_RETRY] Reopened failed frontiers after source recovery', { recovered });
+      }
+      return recovered;
+    } catch (err: any) {
+      this.logger.warn('[SOURCE_RECOVERY_TRANSIENT_RETRY] Query failed; no rows changed', { error: err?.message });
+      return 0;
+    }
+  }
+
+  /**
    * Executes a single admission reconciliation cycle.
    */
   runAdmissionCycle(): Promise<void> {
@@ -882,6 +978,7 @@ export class AdmissionController {
     // by discovery during the first post-deploy cycle.
     await this.recoverOrphanedCancelledChapterJobs();
     await this.recoverLegacyTransientFailures();
+    await this.recoverSourceRecoveredTransientFailures();
     await this.repairVisibleP2LifecycleBacklog();
 
     // Step 1: Reconcile current active works (check caught-up, in-flight, queued)
