@@ -53,6 +53,11 @@ describe('bounded admission snapshot', () => {
     expect(source).toMatch(
       /loadOnDemandCandidates\(false\)[\s\S]{0,180}loadOnDemandCandidates\(true\)/,
     );
+    const onDemandStart = source.indexOf('const loadOnDemandCandidates =');
+    const onDemandSql = source.slice(onDemandStart, onDemandStart + 10000);
+    expect(onDemandSql).toMatch(/eligible_sources AS MATERIALIZED[\s\S]{0,700}CROSS JOIN LATERAL/);
+    expect(onDemandSql).toMatch(/LIMIT \$5/);
+    expect(onDemandSql).not.toMatch(/FROM importer_queue q[\s\S]{0,1200}GROUP BY q\.payload->>'workId', q\.source/);
     expect(source).toContain("predecessor.chapter_sort_key < q.chapter_sort_key");
     expect(source).toContain('predecessor_canonical.published_at IS NOT NULL');
     expect(source).toContain("staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')");
