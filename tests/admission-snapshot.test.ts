@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
 import { readFileSync } from 'node:fs';
 import { AdmissionController } from '../src/core/scheduler/admission-controller.js';
@@ -146,6 +146,21 @@ describe('bounded admission snapshot', () => {
       reason:'YSQL_POOL_BUSY: 2 claim/query waiter(s)',
     });
     expect(queries).toBe(0);
+  });
+
+  it('defers the full admission/recovery cycle while the bounded pool is occupied', async () => {
+    const state = { getConfig: () => ({ enabled: true, shadowMode: false }) } as any;
+    const sentinel = { isProtectiveStopActive: async () => false } as any;
+    const pool = {
+      totalCount: 2,
+      idleCount: 0,
+      waitingCount: 3,
+      query: async () => { throw new Error('maintenance query must be deferred'); },
+    };
+    const controller = new AdmissionController(state, sentinel, pool);
+    const recovery = vi.spyOn(controller as any, 'recoverOrphanedCancelledChapterJobs');
+    await controller.runAdmissionCycle();
+    expect(recovery).not.toHaveBeenCalled();
   });
 
   it('holds P2 admission whenever a visible work still has P1 backlog, including paused window jobs', async () => {

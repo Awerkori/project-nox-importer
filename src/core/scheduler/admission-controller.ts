@@ -97,7 +97,7 @@ export class AdmissionController {
     const rawPool = pool || (process.env.NODE_ENV === 'test'
       ? { query: async () => ({ rows: [] }) }
       : getYugabytePool());
-    if (typeof rawPool.connect === 'function') {
+    if (typeof rawPool.connect === 'function' || typeof rawPool.query === 'function') {
       this.pool = rawPool;
     } else {
       this.pool = {
@@ -123,6 +123,22 @@ export class AdmissionController {
       }
     }
     throw new Error('Pool has neither query nor connect');
+  }
+
+  /**
+   * Admission is control-plane work.  Never start a broad reconciliation or
+   * recovery query while the bounded pool is already servicing/waiting for
+   * chapter claims.  Claims are the work-conserving data plane; letting a
+   * maintenance scan take the last idle connection can leave every chapter
+   * slot parked in WAITING_CLAIM_DB.  The next cycle retries automatically
+   * once the pool drains, so this is backpressure, not a disabled recovery.
+   */
+  private isPoolUnderClaimPressure(): boolean {
+    const pool = this.pool as any;
+    const waiting = Number(pool?.waitingCount || 0);
+    const total = Number(pool?.totalCount || 0);
+    const idle = Number(pool?.idleCount || 0);
+    return waiting > 0 || (total > 0 && idle < total);
   }
 
   /**
@@ -997,18 +1013,31 @@ export class AdmissionController {
       return;
     }
 
+    // Do not let control-plane scans consume the bounded pool while claims
+    // are active or queued.  A later scheduled/vacancy cycle will retry.
+    if (this.isPoolUnderClaimPressure()) {
+      this.logger.debug('[ADMISSION_DEFERRED_POOL_PRESSURE] claim/query demand is using the bounded pool');
+      return;
+    }
+
     // Run before P1/P2 admission so legacy visible works cannot be bypassed
     // by discovery during the first post-deploy cycle.
     await this.recoverOrphanedCancelledChapterJobs();
+    if (this.isPoolUnderClaimPressure()) return;
     await this.recoverLegacyTransientFailures();
+    if (this.isPoolUnderClaimPressure()) return;
     await this.recoverSourceRecoveredTransientFailures();
+    if (this.isPoolUnderClaimPressure()) return;
     await this.repairVisibleP2LifecycleBacklog();
+    if (this.isPoolUnderClaimPressure()) return;
 
     // Step 1: Reconcile current active works (check caught-up, in-flight, queued)
     await this.reconcileActiveWorks();
+    if (this.isPoolUnderClaimPressure()) return;
 
     // Step 2: Replenish active sets if below capacity
     await this.replenishActiveSets();
+    if (this.isPoolUnderClaimPressure()) return;
 
     // Step 3: Maintain sliding admission windows for all active works
     await this.maintainSlidingWindows();

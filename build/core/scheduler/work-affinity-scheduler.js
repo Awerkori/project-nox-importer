@@ -393,6 +393,14 @@ export class WorkAffinityScheduler {
         }
         throw new Error('Target pool or client has neither query nor connect');
     }
+    /** Maintenance probes must yield to chapter claims on the bounded pool. */
+    isPoolUnderClaimPressure() {
+        const pool = this.pool;
+        const waiting = Number(pool?.waitingCount || 0);
+        const total = Number(pool?.totalCount || 0);
+        const idle = Number(pool?.idleCount || 0);
+        return waiting > 0 || (total > 0 && idle < total);
+    }
     /**
      * Initializes state and synchronizes in-flight counts from DB.
      */
@@ -1710,6 +1718,11 @@ export class WorkAffinityScheduler {
                 // Publication itself proves liveness. Do not scan the entire queue every minute
                 // while it is progressing; still check before the existing 5m warning threshold.
                 if (Date.now() - this.lastAnyPublicationTime < 3 * 60_000)
+                    return;
+                // This is a safety probe, not a claim-path dependency. If chapter claims
+                // are queued on the bounded pool, defer one tick instead of consuming the
+                // last connection with a staged-frontier scan and starving the data plane.
+                if (this.isPoolUnderClaimPressure())
                     return;
                 const activeWorkIds = this.stateStore.getActiveWorks().map((w) => w.workId);
                 // This watchdog is a safety signal, not a reporting aggregate.  The
