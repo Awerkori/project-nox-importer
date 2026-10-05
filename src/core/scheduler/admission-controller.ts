@@ -1920,39 +1920,52 @@ export class AdmissionController {
       const isP1 = lane === 'P1';
       const maxPriority = isP1 ? 100 : 75;
       const loadOnDemandCandidates = (includePaused: boolean) => {
+        // This path is called from failed claim attempts.  Keep it bounded by
+        // source; the old queue-wide GROUP BY scanned the whole backlog on
+        // every vacancy and contended directly with the claims it was meant
+        // to unblock.  The source window is deliberately small because the
+        // JS frontier check below still selects the final work.
         const query = `
-        WITH queue_candidates AS MATERIALIZED (
+        WITH eligible_sources AS MATERIALIZED (
+          SELECT s.id
+          FROM importer_sources s
+          WHERE s.enabled = true
+            AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+            AND ($1::text[] IS NULL OR s.id = ANY($1::text[]))
+            AND ($3::text[] IS NULL OR NOT (s.id = ANY($3::text[])))
+        ), source_window AS MATERIALIZED (
+          SELECT q.*
+          FROM eligible_sources s
+          CROSS JOIN LATERAL (
+            SELECT q.*
+            FROM importer_queue q
+            WHERE q.source = s.id
+              AND q.task_type = 'IMPORT_CHAPTER'
+              AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())${includePaused ? " OR q.status = 'PAUSED_BY_STAFF'" : ''})
+              AND q.attempts < COALESCE(q.max_attempts,7)
+              AND q.priority >= ${isP1 ? 75 : 50} AND q.priority < ${maxPriority}
+              AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+              AND NOT ((q.payload->>'workId') = ANY($2::text[]))
+              AND q.payload->>'workId' IS NOT NULL
+            ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC NULLS LAST
+            LIMIT $5
+          ) q
+        ), queue_candidates AS MATERIALIZED (
           SELECT q.payload->>'workId' AS work_id, q.source, COUNT(*) AS pending_jobs,
             COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) AS queued_count,
             COUNT(*) FILTER (WHERE q.status = 'PAUSED_BY_STAFF') AS paused_count,
             MIN(q.chapter_sort_key) AS min_sort_key
-          FROM importer_queue q
-          JOIN importer_sources s ON s.id = q.source
-          WHERE q.task_type='IMPORT_CHAPTER'
-            AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())${includePaused ? " OR q.status = 'PAUSED_BY_STAFF'" : ''})
-            AND q.attempts < COALESCE(q.max_attempts,7)
-            AND q.priority >= ${isP1 ? 75 : 50} AND q.priority < ${maxPriority}
-            AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
-            AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
-            AND NOT ((q.payload->>'workId') = ANY($2::text[]))
-            AND ($3::text[] IS NULL OR NOT (q.source = ANY($3::text[])))
-            AND s.enabled = true
-            AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
-            -- A queue row may survive after another source has already
-            -- published the canonical chapter.  Do not admit that stale row
-            -- as a live work: the claim path correctly rejects it, but
-            -- admitting it first would occupy the only P1 window and make
-            -- every spare-capacity pass rotate the same non-executable work.
-            AND NOT EXISTS (
-              SELECT 1
-              FROM chapters canonical_chapter
-              WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
-                AND canonical_chapter.published_at IS NOT NULL
-                AND (
-                  canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
-                  OR canonical_chapter.number = q.chapter_sort_key
-                )
-            )
+          FROM source_window q
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM chapters canonical_chapter
+            WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
+              AND canonical_chapter.published_at IS NOT NULL
+              AND (
+                canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
+                OR canonical_chapter.number = q.chapter_sort_key
+              )
+          )
           GROUP BY q.payload->>'workId', q.source
         ), p1_rotation AS MATERIALIZED (
           SELECT ranked.*
@@ -1994,11 +2007,12 @@ export class AdmissionController {
         LIMIT ${isP1 ? 64 : 10};
       `;
         return this.runQuery(query, [
-        allowedSources && allowedSources.length > 0 ? allowedSources : null,
-        activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
-        saturatedSources.length > 0 ? saturatedSources : null,
-        JSON.stringify(this.getP1AdmissionCursors()),
-      ]);
+          allowedSources && allowedSources.length > 0 ? allowedSources : null,
+          activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
+          saturatedSources.length > 0 ? saturatedSources : null,
+          JSON.stringify(this.getP1AdmissionCursors()),
+          16,
+        ]);
       };
 
       let res = await loadOnDemandCandidates(false);
