@@ -89,6 +89,11 @@ export class ImporterQueue {
             existing &&
             (existing.status === 'FAILED' ||
               existing.status === 'CANCELLED' ||
+              // A staff cancellation aborts the attempt but the engine restores
+              // its chapter mapping to QUEUED. Allow the next reconciliation to
+              // revive that dedupe row; otherwise the mapping remains queued
+              // forever with no executable queue job.
+              existing.status === 'CANCELLED_BY_STAFF' ||
               (existing.status === 'RETRY' && existing.source !== source))
           ) {
             let revPrio = Math.max(existing.priority || 10, priority);
