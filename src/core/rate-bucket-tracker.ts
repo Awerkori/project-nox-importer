@@ -116,19 +116,44 @@ export class RateBucketTracker {
     }
 
     try {
-      const res = await this.pool.query(`
-        SELECT
-          COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '1 minute'), 0)::int AS visible_1m,
-          COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '5 minutes'), 0)::int AS visible_5m,
-          COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '10 minutes'), 0)::int AS visible_10m,
-          COALESCE(SUM(fresh_visible) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '5 minutes'), 0)::int AS fresh_5m,
-          COALESCE(SUM(completed_jobs) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '5 minutes'), 0)::int AS completed_5m,
-          COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '30 minutes'), 0)::int AS visible_30m,
-          COALESCE(SUM(fresh_visible) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '30 minutes'), 0)::int AS fresh_30m,
-          COALESCE(SUM(completed_jobs) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '30 minutes'), 0)::int AS completed_30m
-        FROM importer_rate_buckets
-        WHERE bucket_minute >= NOW() - INTERVAL '30 minutes'
-      `);
+      // Publication events are the canonical source for visible throughput.
+      // The derived minute bucket is intentionally not read for publication
+      // counts: concurrent publishers used to contend on its single current
+      // row while committing a chapter. Keep bucket reads only for the
+      // non-canonical completed-job counters.
+      let res;
+      try {
+        res = await this.pool.query(`
+          SELECT
+            COALESCE(COUNT(*) FILTER (WHERE e.transition_at >= NOW() - INTERVAL '1 minute'), 0)::int AS visible_1m,
+            COALESCE(COUNT(*) FILTER (WHERE e.transition_at >= NOW() - INTERVAL '5 minutes'), 0)::int AS visible_5m,
+            COALESCE(COUNT(*) FILTER (WHERE e.transition_at >= NOW() - INTERVAL '10 minutes'), 0)::int AS visible_10m,
+            COALESCE(COUNT(*) FILTER (WHERE e.is_fresh_release AND e.transition_at >= NOW() - INTERVAL '5 minutes'), 0)::int AS fresh_5m,
+            COALESCE((SELECT SUM(completed_jobs) FROM importer_rate_buckets WHERE bucket_minute >= NOW() - INTERVAL '5 minutes'), 0)::int AS completed_5m,
+            COALESCE(COUNT(*) FILTER (WHERE e.transition_at >= NOW() - INTERVAL '30 minutes'), 0)::int AS visible_30m,
+            COALESCE(COUNT(*) FILTER (WHERE e.is_fresh_release AND e.transition_at >= NOW() - INTERVAL '30 minutes'), 0)::int AS fresh_30m,
+            COALESCE((SELECT SUM(completed_jobs) FROM importer_rate_buckets WHERE bucket_minute >= NOW() - INTERVAL '30 minutes'), 0)::int AS completed_30m
+          FROM importer_publication_events e
+          WHERE e.bucket_minute >= NOW() - INTERVAL '30 minutes'
+        `);
+      } catch (eventErr) {
+        // Older installations may not have the durable event table yet. Keep
+        // the pre-event bucket query as a compatibility fallback; production
+        // uses the event-backed path above.
+        res = await this.pool.query(`
+          SELECT
+            COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '1 minute'), 0)::int AS visible_1m,
+            COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '5 minutes'), 0)::int AS visible_5m,
+            COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '10 minutes'), 0)::int AS visible_10m,
+            COALESCE(SUM(fresh_visible) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '5 minutes'), 0)::int AS fresh_5m,
+            COALESCE(SUM(completed_jobs) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '5 minutes'), 0)::int AS completed_5m,
+            COALESCE(SUM(visible_published) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '30 minutes'), 0)::int AS visible_30m,
+            COALESCE(SUM(fresh_visible) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '30 minutes'), 0)::int AS fresh_30m,
+            COALESCE(SUM(completed_jobs) FILTER (WHERE bucket_minute >= NOW() - INTERVAL '30 minutes'), 0)::int AS completed_30m
+          FROM importer_rate_buckets
+          WHERE bucket_minute >= NOW() - INTERVAL '30 minutes'
+        `);
+      }
 
       const row = res.rows[0] || {};
       const visible1m = Number(row.visible_1m) || 0;

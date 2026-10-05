@@ -64,6 +64,7 @@ describe('RateBucketTracker', () => {
     const rates = await tracker.getRecentRates(true);
 
     expect(mockPool.query).toHaveBeenCalledTimes(1);
+    expect(queries[0].sql).toContain('FROM importer_publication_events');
     // Canonical visible publications (not fresh or completed) drive Cap/min.
     expect(rates.rate1m).toBe(3);
     // visible_5m = 10 -> 10 / 5 = 2.0 chapters/min
