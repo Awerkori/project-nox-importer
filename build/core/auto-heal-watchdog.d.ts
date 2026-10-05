@@ -122,6 +122,8 @@ export declare class AutoHealWatchdog {
     private lastTelemetryAt;
     private telemetryCacheTtlMs;
     private lastDeepStagedAt;
+    private lastStaleMappingRecoveryAt;
+    private staleMappingRecoveryFlight;
     private classificationCursor;
     private lastCoverageResetAt;
     private classifiedSinceReset;
