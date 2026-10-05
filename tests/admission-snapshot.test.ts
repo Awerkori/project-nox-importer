@@ -39,6 +39,8 @@ describe('bounded admission snapshot', () => {
     expect(source).toMatch(
       /loadOnDemandCandidates\(false\)[\s\S]{0,180}loadOnDemandCandidates\(true\)/,
     );
+    expect(source).toContain("predecessor.chapter_sort_key < q.chapter_sort_key");
+    expect(source).toContain("staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')");
   });
 
   it('preserves per-work counts, attempt limits and frontiers with one SQL roundtrip', async () => {
@@ -46,7 +48,8 @@ describe('bounded admission snapshot', () => {
     try {
       await db.exec(`CREATE TABLE importer_queue (task_type text,status text,payload jsonb,attempts int,max_attempts int,chapter_sort_key numeric,source text,next_run_at timestamptz);
         CREATE TABLE chapters (work_id uuid,number numeric,published_at timestamptz);
-        CREATE TABLE importer_chapter_mappings (work_id uuid,status text,chapter_sort_key numeric);
+        CREATE TABLE importer_chapter_mappings (work_id uuid,status text,chapter_sort_key numeric,is_gap boolean DEFAULT false);
+        CREATE TABLE importer_confirmed_gaps (work_id uuid,start_sort_key numeric,end_sort_key numeric);
         CREATE TABLE importer_sources (id text PRIMARY KEY,status text,cooldown_until timestamptz,enabled boolean,blocked_reason text,blocked_details jsonb);
         INSERT INTO importer_sources (id,status,cooldown_until,enabled,blocked_reason,blocked_details) VALUES ('s','ACTIVE',NULL,true,NULL,NULL);`);
       const id='00000000-0000-0000-0000-000000000001', empty='00000000-0000-0000-0000-000000000002';
@@ -54,7 +57,7 @@ describe('bounded admission snapshot', () => {
         await db.query(`INSERT INTO importer_queue VALUES ('IMPORT_CHAPTER',$1,$2, $3,7,$4,'s',now())`,[status,JSON.stringify({workId:id}),attempts,key]);
       }
       await db.query(`INSERT INTO chapters VALUES ($1,1,now()),($1,2,now()),($1,3,NULL)`,[id]);
-      await db.query(`INSERT INTO importer_chapter_mappings VALUES ($1,'STAGED',4),($1,'COMPLETED',1),($1,'PENDING',5)`,[id]);
+      await db.query(`INSERT INTO importer_chapter_mappings (work_id,status,chapter_sort_key) VALUES ($1,'STAGED',4),($1,'COMPLETED',1),($1,'PENDING',5)`,[id]);
       const sql=readFileSync('src/core/scheduler/admission-controller.ts','utf8')
         .split('const snapshot = await this.runQuery(`')[1]
         .split('`, [activeWorks')[0]
