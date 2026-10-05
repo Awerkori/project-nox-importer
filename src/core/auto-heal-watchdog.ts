@@ -847,8 +847,22 @@ export class AutoHealWatchdog {
 
     // 2. Publication Health Dimension (based on fresh visible chapters and staged backlog)
     let publicationHealth: PublicationHealth;
+    // A staged frontier with no publishable chapter can be blocked entirely by
+    // upstream predecessors. When processing is still making real progress,
+    // that is an expected publication wait, not a worker stall: restarting the
+    // importer cannot make an unavailable predecessor appear. Keep the
+    // distinction explicit so the watchdog does not enter CRITICAL_STALL just
+    // because the last visible chapter is old while fresh jobs are completing.
+    const blockedOnlyByPredecessors =
+      publishableStaged === 0 &&
+      stuckStaged > 0 &&
+      waitingPredecessorStaged === 0 &&
+      unclassifiedStaged === 0;
+
     if (params.lastFreshVisibleAgeSec <= PROGRESS_HEALTHY_MAX_SEC) {
       publicationHealth = 'HEALTHY';
+    } else if (blockedOnlyByPredecessors && processingHealth !== 'CRITICAL_STALL') {
+      publicationHealth = 'NO_FRESH_EXPECTED';
     } else if (params.lastFreshVisibleAgeSec <= PROGRESS_DEGRADED_MAX_SEC) {
       publicationHealth = 'DEGRADED';
     } else if (params.recentCompletionsAreDedupeOnly && publishableStaged === 0 && stuckStaged === 0 && unclassifiedStaged === 0) {

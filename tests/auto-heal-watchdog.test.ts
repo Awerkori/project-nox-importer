@@ -1035,6 +1035,32 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
     expect(['DEGRADED', 'STALLED', 'CRITICAL_STALL']).toContain(res.status);
   });
 
+  it('não reinicia por ausência de publicação quando o processamento avança e a frente está bloqueada por predecessor', () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+
+    const res = watchdog.evaluateMultidimensionalHealth({
+      eligibleJobs: 12000,
+      importingCount: 3,
+      lastCompletedAgeSec: 60,
+      lastFreshVisibleAgeSec: 4 * 60 * 60,
+      protectiveStopActive: false,
+      publishableStaged: 0,
+      waitingPredecessorStaged: 0,
+      stuckStaged: 150,
+      unclassifiedStaged: 0,
+    });
+
+    expect(res.processingHealth).toBe('HEALTHY');
+    expect(res.publicationHealth).toBe('NO_FRESH_EXPECTED');
+    expect(res.status).toBe('HEALTHY');
+  });
+
   // =========================================================================
   // CASO P: Work A staged aguardando predecessor inexistente; Work B possui 50 RETRY => Work A continua STUCK
   // =========================================================================
