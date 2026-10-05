@@ -18,6 +18,8 @@ export declare class SchedulerStateStore {
     private saveDebounceTimer;
     private p1CursorSaveDebounceTimer;
     constructor(pool?: any);
+    /** Settings refresh is control-plane work and must yield to chapter claims. */
+    private isPoolUnderClaimPressure;
     /**
      * Initializes state by creating table if missing and loading existing records.
      */
