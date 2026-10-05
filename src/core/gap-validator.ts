@@ -372,6 +372,51 @@ export async function confirmUpstreamGapInterval(
     }
   } catch {}
 
+  // A worker crash can leave an IMPORTING mapping without chapter bytes or a
+  // live queue lease. Treat that row as stale before checking alternatives;
+  // otherwise it permanently masquerades as an available predecessor and
+  // blocks every staged frontier for the work. This is bounded and fail-safe:
+  // live IMPORTING/PROCESSING queue work and mappings with a chapter_id are
+  // never touched.
+  try {
+    await client.query(
+      `WITH stale AS (
+         SELECT m.id
+         FROM importer_chapter_mappings m
+         WHERE m.work_id = $1::uuid
+           AND m.chapter_sort_key >= $2::numeric
+           AND m.chapter_sort_key <= $3::numeric
+           AND m.status = 'IMPORTING'
+           AND m.chapter_id IS NULL
+           AND m.updated_at < NOW() - INTERVAL '15 minutes'
+           AND NOT EXISTS (
+             SELECT 1 FROM importer_queue q
+             WHERE q.task_type = 'IMPORT_CHAPTER'
+               AND q.source = m.source
+               AND q.status IN ('IMPORTING', 'PROCESSING')
+               AND (
+                 q.payload->>'sourceChapterId' = m.source_chapter_id
+                 OR (q.chapter_sort_key = m.chapter_sort_key
+                     AND q.payload->>'workId' = m.work_id::text)
+               )
+           )
+         ORDER BY m.updated_at ASC
+         LIMIT 100
+       )
+       UPDATE importer_chapter_mappings m
+       SET status = 'FAILED',
+           is_page_provider = false,
+           last_error = 'STALE_IMPORTING_MAPPING_RECONCILED',
+           updated_at = NOW()
+       FROM stale
+       WHERE m.id = stale.id;`,
+      [workId, startSortKey, endSortKey],
+    );
+  } catch {
+    // Gap confirmation remains fail-closed below if any authoritative lookup
+    // fails; stale cleanup is an optimization, never a prerequisite.
+  }
+
   // 2. Check if any alternative source already has ANY chapter in this interval
   try {
     const altCheck = await client.query(
@@ -517,5 +562,4 @@ export async function confirmUpstreamGapInterval(
     };
   }
 }
-
 

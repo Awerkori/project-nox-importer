@@ -3,9 +3,36 @@ import {
   isTransientError,
   validatePermanentGapCandidate,
   markPermanentGapSafely,
+  confirmUpstreamGapInterval,
 } from '../src/core/gap-validator.js';
 
 describe('Project Nox — Gap Safety & Permanent Absence Invariant Tests', () => {
+  it('reconciles only stale IMPORTING mappings before confirming a structural gap', async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn().mockImplementation(async (sql: string) => {
+        queries.push(sql);
+        if (sql.includes('FROM importer_work_mappings')) return { rows: [{ source: 'source-b' }] };
+        return { rows: [] };
+      }),
+    };
+
+    const result = await confirmUpstreamGapInterval(client, {
+      workId: '11111111-2222-3333-4444-555555555555',
+      startSortKey: 2,
+      endSortKey: 4,
+      primarySource: 'source-a',
+    });
+
+    expect(result.confirmed).toBe(true);
+    const cleanup = queries.find((sql) => sql.includes('STALE_IMPORTING_MAPPING_RECONCILED'));
+    expect(cleanup).toBeDefined();
+    expect(cleanup).toContain("m.status = 'IMPORTING'");
+    expect(cleanup).toContain('m.chapter_id IS NULL');
+    expect(cleanup).toContain("q.status IN ('IMPORTING', 'PROCESSING')");
+    expect(cleanup).toContain("INTERVAL '15 minutes'");
+  });
+
   describe('Transient Error Classifier', () => {
     it('prohibits 403 Forbidden as permanent gap', () => {
       expect(isTransientError(403)).toBe(true);
