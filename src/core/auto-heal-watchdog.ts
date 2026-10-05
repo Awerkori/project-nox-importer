@@ -1239,6 +1239,59 @@ export class AutoHealWatchdog {
     }
   }
 
+  private async reconcileStaleChapterMappings(): Promise<void> {
+    try {
+      const staleMappingRes = await this.pool.query(`
+        WITH stale AS (
+          SELECT m.id
+          FROM importer_chapter_mappings m
+          WHERE m.status = 'IMPORTING'
+            AND m.chapter_id IS NULL
+            AND m.updated_at < NOW() - INTERVAL '15 minutes'
+            AND NOT EXISTS (
+              SELECT 1 FROM importer_queue aq
+              WHERE aq.task_type = 'IMPORT_CHAPTER'
+                AND aq.source = m.source
+                AND aq.status IN ('IMPORTING', 'PROCESSING')
+                AND (
+                  aq.payload->>'sourceChapterId' = m.source_chapter_id
+                  OR (aq.chapter_sort_key = m.chapter_sort_key
+                      AND aq.payload->>'workId' = m.work_id::text)
+                )
+            )
+          ORDER BY m.updated_at ASC
+          LIMIT 250
+        )
+        UPDATE importer_chapter_mappings m
+        SET status = 'FAILED',
+            is_page_provider = false,
+            last_error = CASE
+              WHEN EXISTS (
+                SELECT 1 FROM importer_queue sq
+                WHERE sq.task_type = 'IMPORT_CHAPTER'
+                  AND sq.source = m.source
+                  AND sq.status = 'CANCELLED_BY_STAFF'
+                  AND (
+                    sq.payload->>'sourceChapterId' = m.source_chapter_id
+                    OR (sq.chapter_sort_key = m.chapter_sort_key
+                        AND sq.payload->>'workId' = m.work_id::text)
+                  )
+              ) THEN 'STALE_IMPORTING_MAPPING_STAFF_CANCELLED'
+              ELSE 'STALE_IMPORTING_MAPPING_RECONCILED'
+            END,
+            updated_at = NOW()
+        FROM stale
+        WHERE m.id = stale.id
+        RETURNING m.source, m.chapter_sort_key;
+      `);
+      if (staleMappingRes.rows.length > 0) {
+        this.logger.info(`[Stale mapping recovery] Reconciled ${staleMappingRes.rows.length} old IMPORTING mapping(s) without live queue work.`);
+      }
+    } catch (e: any) {
+      this.logger.warn('[Stale mapping recovery] Query failed; no mapping state changed', { error: e?.message });
+    }
+  }
+
   /**
    * NÍVEL 1 — RECONCILIAÇÃO LEVE
    */
@@ -1287,6 +1340,11 @@ export class AutoHealWatchdog {
         this.logger.warn('[Level 1] Admission cycle failed', { error: e?.message });
       }
     }
+
+    // Run this on the frequent bounded reconciliation rung as well as the
+    // deeper stuck-state audit, so a restart-circuit cooldown cannot postpone
+    // cleanup of mappings that permanently block canonical frontiers.
+    await this.reconcileStaleChapterMappings();
 
     // 5. If publication is stalled or publishable staged chapters exist, trigger safe bounded sweep (cooldown: max 1 per 3m)
     const nowMs = Date.now();
@@ -1338,56 +1396,7 @@ export class AutoHealWatchdog {
       });
     }
 
-    // A crashed chapter worker can leave its mapping in IMPORTING even after
-    // the queue lease is fenced/reclaimed. That stale mapping is not a
-    // chapter and must not block canonical gap/frontier validation forever.
-    // Only old rows without a chapter and without live queue work are touched.
-    // Staff-cancelled rows become FAILED (never requeued); normal discovery
-    // can recreate them later without resurrecting a cancelled job.
-    try {
-      const staleMappingRes = await this.pool.query(`
-        UPDATE importer_chapter_mappings m
-        SET status = 'FAILED',
-            is_page_provider = false,
-            last_error = CASE
-              WHEN EXISTS (
-                SELECT 1
-                FROM importer_queue sq
-                WHERE sq.task_type = 'IMPORT_CHAPTER'
-                  AND sq.source = m.source
-                  AND sq.status = 'CANCELLED_BY_STAFF'
-                  AND (
-                    sq.payload->>'sourceChapterId' = m.source_chapter_id
-                    OR (sq.chapter_sort_key = m.chapter_sort_key
-                        AND sq.payload->>'workId' = m.work_id::text)
-                  )
-              ) THEN 'STALE_IMPORTING_MAPPING_STAFF_CANCELLED'
-              ELSE 'STALE_IMPORTING_MAPPING_RECONCILED'
-            END,
-            updated_at = NOW()
-        WHERE m.status = 'IMPORTING'
-          AND m.chapter_id IS NULL
-          AND m.updated_at < NOW() - INTERVAL '15 minutes'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM importer_queue aq
-            WHERE aq.task_type = 'IMPORT_CHAPTER'
-              AND aq.source = m.source
-              AND aq.status IN ('IMPORTING', 'PROCESSING')
-              AND (
-                aq.payload->>'sourceChapterId' = m.source_chapter_id
-                OR (aq.chapter_sort_key = m.chapter_sort_key
-                    AND aq.payload->>'workId' = m.work_id::text)
-              )
-          )
-        RETURNING source, chapter_sort_key;
-      `);
-      if (staleMappingRes.rows.length > 0) {
-        this.logger.info(`[Level 2] Reconciled ${staleMappingRes.rows.length} stale IMPORTING chapter mapping(s) without live queue work.`);
-      }
-    } catch (e: any) {
-      this.logger.warn('[Level 2] Stale chapter mapping reconciliation failed', { error: e?.message });
-    }
+    await this.reconcileStaleChapterMappings();
 
     // 2. Audit active works: Evict empty works (0 claimable, 0 in-flight) from active set
     try {
