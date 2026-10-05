@@ -1113,6 +1113,64 @@ export class WorkAffinityScheduler {
                      (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork)
       .map((w) => w.workId);
 
+    // When the persisted active set is empty, do not run the expensive
+    // on-demand admission GROUP BY before trying a bounded catalog claim. A
+    // published P1 row can be claimed directly and will rehydrate the active
+    // set; otherwise every idle slot repeats the large admission scan before
+    // reaching the same catalog fallback.
+    const disallowedCatalogWorkIds = Array.from(new Set([
+      ...fullWorkIds,
+      ...Array.from(this.stagedBlockedWorks.keys()).filter((wId) => this.isWorkStagedBlocked(wId)),
+      ...Array.from(this.unclaimableWorksCooldown.keys()).filter((wId) => this.isWorkUnclaimable(wId)),
+    ]));
+    let catalogAllowedSources = allowedSources;
+    if (this.sourcePermitProvider && catalogAllowedSources && catalogAllowedSources.length > 0) {
+      const permitted = catalogAllowedSources.filter((s) => this.sourcePermitProvider!(s) > 0);
+      if (permitted.length > 0) catalogAllowedSources = permitted;
+    }
+    const claimCatalogP1 = async (): Promise<any | null> => {
+      const tCat0 = performance.now();
+      this.genericClaimAttempts++;
+      const job = await this.claimCatalogP1Job(this.pool, {
+        workerId: options.workerId,
+        leaseMin,
+        allowedSources: catalogAllowedSources,
+        disallowedWorkIds: disallowedCatalogWorkIds,
+        telemetry,
+      });
+      telemetry.catalogFallbackMs = Math.round((performance.now() - tCat0) * 10) / 10;
+      return job;
+    };
+    const finishCatalogP1 = (catalogP1Job: any): any => {
+      this.highPriorityConsecutiveClaims = 0;
+      this.genericClaimSuccesses++;
+      const waitTimeMs = performance.now() - t0;
+      telemetry.totalAcquireMs = Math.round(waitTimeMs * 10) / 10;
+      catalogP1Job._acquireTelemetry = telemetry;
+      const workId = catalogP1Job.payload?.workId || '';
+      this.onJobStarted(workId, catalogP1Job.chapter_sort_key);
+      this.p1Count1h++;
+      this.logDecision({
+        jobId: catalogP1Job.id,
+        workId,
+        workTitle: catalogP1Job.payload?.chapterTitle || 'Catalog P1 Backfill',
+        chapterNumber: catalogP1Job.payload?.chapterNumber ?? 0,
+        chapterSortKey: catalogP1Job.chapter_sort_key ?? 0,
+        lane: SchedulerLane.P1_BACKFILL,
+        reason: 'CATALOG_P1_BACKFILL_CLAIM',
+        workState: 'FILLING',
+        source: catalogP1Job.source,
+        waitTimeMs: Math.round(waitTimeMs * 10) / 10,
+        decisionTime: new Date().toISOString(),
+      });
+      return catalogP1Job;
+    };
+
+    if (activeWorkIds.length === 0) {
+      const directCatalogJob = await claimCatalogP1();
+      if (directCatalogJob) return finishCatalogP1(directCatalogJob);
+    }
+
     let fallbackJob = null;
     if (activeWorkIds.length > 0) {
       telemetry.worksTested += activeWorkIds.length;
@@ -1190,56 +1248,10 @@ export class WorkAffinityScheduler {
     // When currently tracked active P1 and P2 works cannot supply a job,
     // claim from ANY published catalog work
     // -------------------------------------------------------------
-    const tCat0 = performance.now();
-    this.genericClaimAttempts++;
-
-    const disallowedCatalogWorkIds = Array.from(new Set([
-      ...fullWorkIds,
-      ...Array.from(this.stagedBlockedWorks.keys()).filter((wId) => this.isWorkStagedBlocked(wId)),
-      ...Array.from(this.unclaimableWorksCooldown.keys()).filter((wId) => this.isWorkUnclaimable(wId)),
-    ]));
-
-    let catalogAllowedSources = allowedSources;
-    if (this.sourcePermitProvider && catalogAllowedSources && catalogAllowedSources.length > 0) {
-      const permitted = catalogAllowedSources.filter((s) => this.sourcePermitProvider!(s) > 0);
-      if (permitted.length > 0) catalogAllowedSources = permitted;
-    }
-
-    const catalogP1Job = await this.claimCatalogP1Job(this.pool, {
-      workerId: options.workerId,
-      leaseMin,
-      allowedSources: catalogAllowedSources,
-      disallowedWorkIds: disallowedCatalogWorkIds,
-      telemetry,
-    });
-    telemetry.catalogFallbackMs = Math.round((performance.now() - tCat0) * 10) / 10;
+    const catalogP1Job = await claimCatalogP1();
 
     if (catalogP1Job) {
-      this.highPriorityConsecutiveClaims = 0;
-      this.genericClaimSuccesses++;
-      const waitTimeMs = performance.now() - t0;
-      telemetry.totalAcquireMs = Math.round(waitTimeMs * 10) / 10;
-      catalogP1Job._acquireTelemetry = telemetry;
-
-      const workId = catalogP1Job.payload?.workId || '';
-      this.onJobStarted(workId, catalogP1Job.chapter_sort_key);
-      this.p1Count1h++;
-
-      const decision: SchedulerDecision = {
-        jobId: catalogP1Job.id,
-        workId,
-        workTitle: catalogP1Job.payload?.chapterTitle || 'Catalog P1 Backfill',
-        chapterNumber: catalogP1Job.payload?.chapterNumber ?? 0,
-        chapterSortKey: catalogP1Job.chapter_sort_key ?? 0,
-        lane: SchedulerLane.P1_BACKFILL,
-        reason: 'CATALOG_P1_BACKFILL_CLAIM',
-        workState: 'FILLING',
-        source: catalogP1Job.source,
-        waitTimeMs: Math.round(waitTimeMs * 10) / 10,
-        decisionTime: new Date().toISOString(),
-      };
-      this.logDecision(decision);
-      return catalogP1Job;
+      return finishCatalogP1(catalogP1Job);
     }
 
     // A reservation only defers the high lanes for one real normal-lane
