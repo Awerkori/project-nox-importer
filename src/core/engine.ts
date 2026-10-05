@@ -735,6 +735,7 @@ export class ImporterEngine {
       // barrier was intentionally closed, leaving a PENDING mapping with no
       // executable queue row. Reopen only that exact transient failure.
       await this.queue.recoverPublicationBarrierFailures();
+      await this.queue.recoverReservationLimitFailures();
 
       // 3. Recover stalled 502 retries with long delays from previous exponential backoff policy
       await this.recoverStalled502Retries();
@@ -1196,6 +1197,7 @@ export class ImporterEngine {
           await (this.scheduler as any).runControlledExhaustedJobCleanup(500);
         }
         await this.queue.recoverPublicationBarrierFailures();
+        await this.queue.recoverReservationLimitFailures();
       } catch (err: any) {
         this.logger.warn('Error during redundant job cleanup loop', { error: err?.message });
       }
