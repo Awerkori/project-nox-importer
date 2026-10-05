@@ -40,6 +40,15 @@ export declare class AdmissionController {
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
     /**
+     * Admission is control-plane work.  Never start a broad reconciliation or
+     * recovery query while the bounded pool is already servicing/waiting for
+     * chapter claims.  Claims are the work-conserving data plane; letting a
+     * maintenance scan take the last idle connection can leave every chapter
+     * slot parked in WAITING_CLAIM_DB.  The next cycle retries automatically
+     * once the pool drains, so this is backpressure, not a disabled recovery.
+     */
+    private isPoolUnderClaimPressure;
+    /**
      * Keep one executable P1 chapter per active work. Older scheduler versions
      * could leave an entire backfill window (or more) QUEUED, then replenish it
      * before it drained. That made the durable source cursor fair only on

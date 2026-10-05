@@ -105,6 +105,8 @@ export declare class WorkAffinityScheduler {
     clearWorkStagedBlocked(workId: string): void;
     constructor(stateStore: SchedulerStateStore, admissionController: AdmissionController, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
+    /** Maintenance probes must yield to chapter claims on the bounded pool. */
+    private isPoolUnderClaimPressure;
     /**
      * Initializes state and synchronizes in-flight counts from DB.
      */
