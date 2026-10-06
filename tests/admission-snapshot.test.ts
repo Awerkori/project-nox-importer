@@ -31,6 +31,7 @@ describe('bounded admission snapshot', () => {
     expect(periodicAdmissionSql).toMatch(/eligible_sources AS MATERIALIZED[\s\S]{0,700}SOURCE_EXECUTION_ELIGIBILITY_SQL/);
     expect(periodicAdmissionSql).toMatch(/FROM eligible_sources s[\s\S]{0,700}CROSS JOIN LATERAL/);
     expect(periodicAdmissionSql).toMatch(/LIMIT \$5/);
+    expect(periodicAdmissionSql).toContain('ORDER BY q.created_at ASC NULLS LAST, q.id ASC');
     expect(periodicAdmissionSql).toContain('canonical_chapter.published_at IS NOT NULL');
     expect(periodicAdmissionSql).toMatch(/GROUP BY q\.payload->>'workId', q\.source/);
     expect(source).toMatch(/WHERE rotation_rank <= \$3 OR frontier_rank <= \$3/);
@@ -57,6 +58,7 @@ describe('bounded admission snapshot', () => {
     const onDemandSql = source.slice(onDemandStart, onDemandStart + 10000);
     expect(onDemandSql).toMatch(/eligible_sources AS MATERIALIZED[\s\S]{0,700}CROSS JOIN LATERAL/);
     expect(onDemandSql).toMatch(/LIMIT \$5/);
+    expect(onDemandSql).toContain('ORDER BY q.created_at ASC NULLS LAST, q.id ASC');
     expect(onDemandSql).not.toMatch(/FROM importer_queue q[\s\S]{0,1200}GROUP BY q\.payload->>'workId', q\.source/);
     expect(source).toContain("predecessor.chapter_sort_key < q.chapter_sort_key");
     expect(source).toContain('predecessor_canonical.published_at IS NOT NULL');
