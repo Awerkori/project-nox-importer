@@ -726,7 +726,7 @@ export class WorkAffinityScheduler {
       waitTimeMs: Math.round(waitTimeMs * 10) / 10,
       decisionTime: new Date().toISOString(),
     };
-    this.logDecision(decision);
+    this.logDecision(decision); if (waitTimeMs > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
     return staffForcedJob;
   }
 
@@ -862,7 +862,7 @@ export class WorkAffinityScheduler {
           waitTimeMs: Math.round(waitTimeMs * 10) / 10,
           decisionTime: new Date().toISOString(),
         };
-        this.logDecision(decision);
+        this.logDecision(decision); if (waitTimeMs > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
         return p0Job;
       } else {
         // The selected work may have raced another runner or lost its source
@@ -961,7 +961,7 @@ export class WorkAffinityScheduler {
           waitTimeMs: Math.round(waitTimeMs * 10) / 10,
           decisionTime: new Date().toISOString(),
         };
-        this.logDecision(decision);
+        this.logDecision(decision); if (waitTimeMs > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
         return gapJob;
       }
     }
@@ -1034,7 +1034,7 @@ export class WorkAffinityScheduler {
           waitTimeMs: Math.round(waitTimeMs * 10) / 10,
           decisionTime: new Date().toISOString(),
         };
-        this.logDecision(decision);
+        this.logDecision(decision); if (waitTimeMs > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
         return p1Job;
       }
 
@@ -1092,7 +1092,7 @@ export class WorkAffinityScheduler {
             waitTimeMs: Math.round(waitTimeMs * 10) / 10,
             decisionTime: new Date().toISOString(),
           };
-          this.logDecision(decision);
+          this.logDecision(decision); if (waitTimeMs > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
           return p1Job;
         }
       }
@@ -1163,7 +1163,7 @@ export class WorkAffinityScheduler {
           waitTimeMs: Math.round(waitTimeMs * 10) / 10,
           decisionTime: new Date().toISOString(),
         };
-        this.logDecision(decision);
+        this.logDecision(decision); if (waitTimeMs > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
         return p2Job;
       }
 
@@ -1219,7 +1219,7 @@ export class WorkAffinityScheduler {
             waitTimeMs: Math.round(waitTimeMs * 10) / 10,
             decisionTime: new Date().toISOString(),
           };
-          this.logDecision(decision);
+          this.logDecision(decision); if (waitTimeMs > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
           return p2Job;
         }
       }
@@ -1366,7 +1366,7 @@ export class WorkAffinityScheduler {
         waitTimeMs: Math.round(waitTimeMs * 10) / 10,
         decisionTime: new Date().toISOString(),
       };
-      this.logDecision(decision);
+      this.logDecision(decision); if (waitTimeMs > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
       return fallbackJob;
     }
 
@@ -1392,7 +1392,7 @@ export class WorkAffinityScheduler {
       return this.executeIntelligentClaim(options, t0);
     }
 
-    this.emptyClaimAttempts++;
+    this.emptyClaimAttempts++; if (performance.now() - t0 > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] NULL_RETURN ${JSON.stringify(telemetry)}`);
     return null;
   }
 
