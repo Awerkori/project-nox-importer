@@ -2100,7 +2100,7 @@ export class AdmissionController {
                     return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
                 });
                 const isCandidateFrontierValid = (workId, minSort, maxPub) => {
-                    if (isP1 ? (maxPub === -1 || minSort <= maxPub + 1.5) : minSort <= 1.5)
+                    if (minSort <= (maxPub === -1 ? 1.5 : maxPub + 1.5))
                         return true;
                     const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
                     const gapEnd = minSort - 1;
