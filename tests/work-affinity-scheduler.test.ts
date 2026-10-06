@@ -25,6 +25,7 @@ import { WorkAffinityScheduler } from '../src/core/scheduler/work-affinity-sched
 import {
   shouldReserveLowerPriorityAfterHighBurst,
   shouldRunCatalogFallbackAgain,
+  shouldStartCatalogProbe,
 } from '../src/core/scheduler/work-affinity-scheduler.js';
 
 describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
@@ -32,6 +33,13 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(shouldRunCatalogFallbackAgain(true, true)).toBe(false);
     expect(shouldRunCatalogFallbackAgain(true, false)).toBe(true);
     expect(shouldRunCatalogFallbackAgain(false, true)).toBe(true);
+  });
+
+  it('serializes catalog probes and enforces the short hand-off interval', () => {
+    expect(shouldStartCatalogProbe(1_000, 0, false)).toBe(true);
+    expect(shouldStartCatalogProbe(1_999, 1_000, false)).toBe(false);
+    expect(shouldStartCatalogProbe(2_000, 1_000, false)).toBe(true);
+    expect(shouldStartCatalogProbe(10_000, 0, true)).toBe(false);
   });
 
   let mockPool: any;

@@ -31,6 +31,13 @@ export declare function shouldReserveP0AfterStaffBurst(consecutiveStaffClaims: n
  */
 export declare function shouldRunCatalogFallbackAgain(activeWorkIdsEmpty: boolean, alreadyAttempted: boolean): boolean;
 /**
+ * Catalog fallback is deliberately serialized because each probe performs
+ * distributed Yugabyte reads.  A caller may try again after the interval when
+ * the previous probe found no row, but concurrent probes must not pile up on
+ * the bounded pool.
+ */
+export declare function shouldStartCatalogProbe(nowMs: number, lastProbeAtMs: number, inFlight: boolean, minIntervalMs?: number): boolean;
+/**
  * Staff and P0 are order-only lanes, but an endless stream of either must not
  * make already-admitted P1/P2 work mathematically impossible to finish.  One
  * normal-lane claim after a bounded high-priority burst preserves the normal
@@ -58,6 +65,9 @@ export declare class WorkAffinityScheduler {
     private rrIndexP1;
     private rrIndexP2;
     private rrCatalogSourceIndex;
+    private catalogProbeInFlight;
+    private lastCatalogProbeAt;
+    private readonly catalogProbeMinIntervalMs;
     private publicationBarrier?;
     private sourcePermitProvider?;
     private chapterCapacityProvider;
