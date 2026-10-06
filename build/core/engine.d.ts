@@ -119,6 +119,7 @@ export declare class ImporterEngine {
     private activeSourcesCache;
     private sourceScheduleSnapshot;
     private sourceScheduleSnapshotFlight;
+    private sourceRecoveryProbeCursor;
     private catalogBackfillCursor;
     private knownCoveredWorks;
     private lastProgressTimestamp;
@@ -213,6 +214,13 @@ export declare class ImporterEngine {
      * Restores expired cooldowns immediately through production admission probe.
      */
     private runSourceCooldownProbeLoop;
+    /**
+     * Probe a bounded, rotating subset of ACTIVE-with-block / COOLDOWN / DEGRADED
+     * sources.  The old loop awaited every candidate serially.  A single
+     * tarpit probe could therefore postpone recovery of all later sources for
+     * minutes or hours, leaving recoverable backlogs permanently ineligible.
+     */
+    private probeDueSourceRecoveries;
     /**
      * Periodic atomic background cleanup of redundant queue jobs (runs every 5 min).
      * Safely marks queued/retrying jobs as COMPLETED with CANONICAL_ALREADY_SATISFIED
