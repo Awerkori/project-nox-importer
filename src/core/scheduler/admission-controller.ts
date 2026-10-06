@@ -1638,6 +1638,7 @@ export class AdmissionController {
         };
 
         const contiguous = candidateRows.filter((cand: any) => {
+          if (parseInt(cand.queued_count || '0', 10) === 0) return false;
           const maxPub = pubMap.get(cand.work_id) ?? -1;
           const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
           return isContiguousOrConfirmed(cand.work_id, minSort, maxPub);
@@ -1647,6 +1648,7 @@ export class AdmissionController {
         // only attempted after all immediately-contiguous candidates.
         if (contiguous.length < backfillSlotsAvailable) {
           for (const cand of candidateRows) {
+            if (parseInt(cand.queued_count || '0', 10) === 0) continue;
             if (contiguous.some((c: any) => c.work_id === cand.work_id)) continue;
             const maxPub = pubMap.get(cand.work_id) ?? -1;
             const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
@@ -2147,6 +2149,7 @@ export class AdmissionController {
 
       const findOnDemandFrontier = async (candidateRows: any[]): Promise<any | null> => {
         if (candidateRows.length === 0) return null;
+        this.logger.info(`[DEBUG_ADM_CANDIDATES] ${JSON.stringify(candidateRows.map(c => ({w:c.work_id, q:c.queued_count})))}`);
         const candWorkIds = candidateRows.map((r: any) => r.work_id);
         const pubMap = new Map<string, number>();
         const pubRes = await this.runQuery(
@@ -2206,6 +2209,7 @@ export class AdmissionController {
         };
 
         let match = candidateRows.find((cand: any) => {
+          if (parseInt(cand.queued_count || '0', 10) === 0) return false;
           const maxPub = pubMap.get(cand.work_id) ?? -1;
           const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
           return isCandidateFrontierValid(cand.work_id, minSort, maxPub);
@@ -2214,6 +2218,7 @@ export class AdmissionController {
 
         // Only the bounded source window is considered for gap confirmation.
         for (const cand of candidateRows) {
+          if (parseInt(cand.queued_count || '0', 10) === 0) continue;
           const maxPub = pubMap.get(cand.work_id) ?? -1;
           const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
           const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
