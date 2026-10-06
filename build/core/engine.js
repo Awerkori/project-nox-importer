@@ -171,6 +171,20 @@ export class NarrativePageUnavailableError extends Error {
         this.name = 'NarrativePageUnavailableError';
     }
 }
+/**
+ * A deadline/lease cancellation is not evidence that a narrative page is
+ * absent upstream.  The media pipeline can observe the abort while draining
+ * its producer/consumer queues and otherwise wrap it as a narrative-page
+ * failure.  Preserve the cancellation reason so the queue takes its bounded
+ * retry path instead of permanently recording a false chapter gap.
+ */
+export function getJobAbortError(signal) {
+    if (!signal?.aborted)
+        return null;
+    return signal.reason instanceof Error
+        ? signal.reason
+        : new Error('Job execution aborted');
+}
 export class ImporterEngine {
     supabase;
     storage;
@@ -4466,6 +4480,13 @@ export class ImporterEngine {
                 if (pipelineError) {
                     // Type assertion: TS can't track mutations from async closures (producer/consumer)
                     const resolvedError = pipelineError;
+                    // Do not turn a controlled deadline or lost-lease cancellation into
+                    // a cross-provider rescue or a terminal 404/gap.  Neither action is
+                    // justified after this execution epoch has been cancelled; the
+                    // canonical retry policy owns the safe requeue/backoff decision.
+                    const jobAbortError = getJobAbortError(jobSignal);
+                    if (jobAbortError)
+                        throw jobAbortError;
                     const isRescueCandidate = resolvedError instanceof NarrativePageUnavailableError ||
                         resolvedError instanceof InvalidMediaError ||
                         resolvedError.name === 'InvalidMediaError' ||
