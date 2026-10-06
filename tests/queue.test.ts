@@ -78,7 +78,7 @@ describe('ImporterQueue transient reservation-limit recovery', () => {
     await expect(queue.recoverReservationLimitFailures(25)).resolves.toBe(1);
     expect(sql).toHaveBeenCalledTimes(1);
     expect(sql.mock.calls[0][1]).toEqual([25]);
-    expect(sql.mock.calls[0][0]).toContain('FOR UPDATE OF q SKIP LOCKED');
+    expect(sql.mock.calls[0][0]).toContain("q.status = 'FAILED'");
     expect(sql.mock.calls[0][0]).toContain("m.status = 'PENDING'");
     expect(sql.mock.calls[0][0]).toContain("m.is_gap IS FALSE");
   });

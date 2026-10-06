@@ -586,8 +586,12 @@ export class ImporterQueue {
     try {
       // Direct YSQL is the production path. Keep the queue/mapping repair in a
       // single bounded statement so a slow or exhausted pool cannot leave the
-      // canonical predecessor and its queue row half-reconciled. The
-      // PostgREST-shaped fallback below remains for gateway/test clients.
+      // canonical predecessor and its queue row half-reconciled. The state
+      // predicate on the UPDATE makes concurrent recovery callers idempotent;
+      // avoiding SKIP LOCKED here is intentional because Yugabyte can otherwise
+      // repeatedly skip an eligible frontier while the scheduler briefly
+      // inspects the same queue range. The PostgREST-shaped fallback below
+      // remains for gateway/test clients.
       const directSql = (this.supabase as any)?.sql;
       if (typeof directSql === 'function') {
         const result = await directSql.call(this.supabase, `
@@ -605,7 +609,6 @@ export class ImporterQueue {
               AND m.is_gap IS FALSE
             ORDER BY q.updated_at ASC, q.id ASC
             LIMIT $1
-            FOR UPDATE OF q SKIP LOCKED
           ), revived AS (
             UPDATE importer_queue q
             SET status = 'QUEUED',
