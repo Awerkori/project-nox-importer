@@ -30,6 +30,7 @@ describe('bounded admission snapshot', () => {
     const periodicAdmissionSql = source.slice(periodicAdmissionStart, periodicAdmissionStart + 10000);
     expect(periodicAdmissionSql).toMatch(/eligible_sources AS MATERIALIZED[\s\S]{0,700}SOURCE_EXECUTION_ELIGIBILITY_SQL/);
     expect(periodicAdmissionSql).toMatch(/FROM eligible_sources s[\s\S]{0,700}CROSS JOIN LATERAL/);
+    expect(periodicAdmissionSql).toContain('s.id = ANY($6::text[])');
     expect(periodicAdmissionSql).toMatch(/LIMIT \$5/);
     expect(periodicAdmissionSql).toContain('ORDER BY q.created_at ASC NULLS LAST, q.id ASC');
     expect(periodicAdmissionSql).toContain('canonical_chapter.published_at IS NOT NULL');
@@ -57,6 +58,7 @@ describe('bounded admission snapshot', () => {
     const onDemandStart = source.indexOf('const loadOnDemandCandidates =');
     const onDemandSql = source.slice(onDemandStart, onDemandStart + 10000);
     expect(onDemandSql).toMatch(/eligible_sources AS MATERIALIZED[\s\S]{0,700}CROSS JOIN LATERAL/);
+    expect(onDemandSql).toContain('s.id = ANY($6::text[])');
     expect(onDemandSql).toMatch(/LIMIT \$5/);
     expect(onDemandSql).toContain('ORDER BY q.created_at ASC NULLS LAST, q.id ASC');
     expect(onDemandSql).not.toMatch(/FROM importer_queue q[\s\S]{0,1200}GROUP BY q\.payload->>'workId', q\.source/);
@@ -278,6 +280,9 @@ describe('bounded admission snapshot', () => {
     const sentinel = { isProtectiveStopActive: async () => false } as any;
     const pool = {
       query: async (sql: string, params: any[] = []) => {
+        if (sql.includes('ORDER BY CASE WHEN $2::text IS NULL OR s.id > $2::text')) {
+          return { rows: [{ id: 's' }] };
+        }
         if (sql.includes('WITH eligible_sources AS MATERIALIZED')) {
           const includesPaused = sql.includes("OR q.status = 'PAUSED_BY_STAFF'");
           if (includesPaused) {

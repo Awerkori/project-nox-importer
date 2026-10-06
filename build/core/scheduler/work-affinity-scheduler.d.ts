@@ -38,6 +38,16 @@ export declare function shouldRunCatalogFallbackAgain(activeWorkIdsEmpty: boolea
  */
 export declare function shouldStartCatalogProbe(nowMs: number, lastProbeAtMs: number, inFlight: boolean, minIntervalMs?: number): boolean;
 /**
+ * Return one fair, bounded source slice for a catalog fallback probe.  The
+ * fallback is a work-conserving escape hatch, not a reason to fan one claim
+ * out over every provider on the bounded YSQL pool.  Advancing the cursor on
+ * each probe guarantees all eligible sources receive an opportunity.
+ */
+export declare function selectRotatingSourceWindow(sources: string[], cursor: number, limit: number): {
+    sources: string[];
+    nextCursor: number;
+};
+/**
  * Staff and P0 are order-only lanes, but an endless stream of either must not
  * make already-admitted P1/P2 work mathematically impossible to finish.  One
  * normal-lane claim after a bounded high-priority burst preserves the normal
@@ -68,6 +78,8 @@ export declare class WorkAffinityScheduler {
     private catalogProbeInFlight;
     private lastCatalogProbeAt;
     private readonly catalogProbeMinIntervalMs;
+    private readonly catalogProbeSourceWindowSize;
+    private readonly catalogProbeRowsPerSource;
     private publicationBarrier?;
     private sourcePermitProvider?;
     private chapterCapacityProvider;
