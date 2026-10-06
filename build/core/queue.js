@@ -477,57 +477,80 @@ export class ImporterQueue {
     /** Reopen old reservation-limit failures when their canonical mapping is still pending. */
     async recoverReservationLimitFailures(limit = 100) {
         try {
-            // Direct YSQL is the production path. Keep the queue/mapping repair in a
-            // single bounded statement so a slow or exhausted pool cannot leave the
-            // canonical predecessor and its queue row half-reconciled. The state
-            // predicate on the UPDATE makes concurrent recovery callers idempotent;
-            // avoiding SKIP LOCKED here is intentional because Yugabyte can otherwise
-            // repeatedly skip an eligible frontier while the scheduler briefly
-            // inspects the same queue range. The PostgREST-shaped fallback below
-            // remains for gateway/test clients.
+            // Direct YSQL is the production path. Keep recovery bounded and avoid a
+            // planner-wide queue/mapping join: the queue has thousands of terminal
+            // failures, while only a small subset are reservation races. Select a
+            // bounded failure window, resolve its mappings with a parameterized VALUES
+            // list, then update only still-FAILED rows. Every write remains guarded by
+            // the pending mapping check, so concurrent recovery callers are idempotent.
             const directSql = this.supabase?.sql;
             if (typeof directSql === 'function') {
-                const result = await directSql.call(this.supabase, `
-          WITH failed AS MATERIALIZED (
-            SELECT q.id, q.source, q.payload, q.chapter_sort_key
-            FROM importer_queue q
-            WHERE q.task_type = 'IMPORT_CHAPTER'
-              AND q.status = 'FAILED'
-              AND q.last_error LIKE 'Concurrent reservation limit:%'
-            ORDER BY q.updated_at ASC, q.id ASC
-            LIMIT $1
-          ), candidates AS MATERIALIZED (
-            SELECT f.id
-            FROM failed f
-            WHERE EXISTS (
+                const scanLimit = Math.max(limit, 500);
+                const failedResult = await directSql.call(this.supabase, `
+          SELECT id, source, payload, chapter_sort_key, last_error
+          FROM importer_queue
+          WHERE task_type = 'IMPORT_CHAPTER'
+            AND status = 'FAILED'
+            AND last_error LIKE 'Concurrent reservation limit:%'
+          ORDER BY updated_at ASC, id ASC
+          LIMIT $1
+        `, [scanLimit]);
+                const failed = (failedResult?.rows || []).filter((job) => typeof job?.payload?.workId === 'string'
+                    && job.chapter_sort_key !== null
+                    && job.chapter_sort_key !== undefined);
+                if (!failed.length)
+                    return 0;
+                const values = [];
+                const mappingParams = [];
+                for (const [index, job] of failed.entries()) {
+                    const offset = index * 3;
+                    values.push(`($${offset + 1}::text, $${offset + 2}::text, $${offset + 3}::numeric)`);
+                    mappingParams.push(job.payload.workId, job.source, job.chapter_sort_key);
+                }
+                const mappingResult = await directSql.call(this.supabase, `
+          SELECT m.work_id::text AS work_id, m.source, m.chapter_sort_key::text AS chapter_sort_key
+          FROM importer_chapter_mappings m
+          JOIN (VALUES ${values.join(', ')}) AS requested(work_id, source, chapter_sort_key)
+            ON requested.work_id = m.work_id::text
+           AND requested.source = m.source
+           AND requested.chapter_sort_key::numeric = m.chapter_sort_key
+          WHERE m.status = 'PENDING'
+            AND m.is_gap IS FALSE
+        `, mappingParams);
+                const eligible = new Set((mappingResult?.rows || []).map((row) => `${row.work_id}|${row.source}|${row.chapter_sort_key}`));
+                const ids = failed
+                    .filter((job) => eligible.has(`${job.payload.workId}|${job.source}|${job.chapter_sort_key}`))
+                    .slice(0, limit)
+                    .map((job) => job.id);
+                if (!ids.length)
+                    return 0;
+                const revived = await directSql.call(this.supabase, `
+          UPDATE importer_queue q
+          SET status = 'QUEUED',
+              attempts = 0,
+              last_error = NULL,
+              last_error_at = NULL,
+              retry_reason = 'RESERVATION_LIMIT_RECOVERY',
+              locked_by = NULL,
+              locked_at = NULL,
+              lease_expires_at = NULL,
+              next_run_at = NOW(),
+              updated_at = NOW()
+          WHERE q.id = ANY($1::uuid[])
+            AND q.status = 'FAILED'
+            AND q.last_error LIKE 'Concurrent reservation limit:%'
+            AND EXISTS (
               SELECT 1
               FROM importer_chapter_mappings m
-              WHERE m.work_id::text = f.payload->>'workId'
-                AND m.source = f.source
-                AND m.chapter_sort_key = f.chapter_sort_key
+              WHERE m.work_id::text = q.payload->>'workId'
+                AND m.source = q.source
+                AND m.chapter_sort_key = q.chapter_sort_key
                 AND m.status = 'PENDING'
                 AND m.is_gap IS FALSE
             )
-          ), revived AS (
-            UPDATE importer_queue q
-            SET status = 'QUEUED',
-                attempts = 0,
-                last_error = NULL,
-                last_error_at = NULL,
-                retry_reason = 'RESERVATION_LIMIT_RECOVERY',
-                locked_by = NULL,
-                locked_at = NULL,
-                lease_expires_at = NULL,
-                next_run_at = NOW(),
-                updated_at = NOW()
-            FROM candidates c
-            WHERE q.id = c.id
-              AND q.status = 'FAILED'
-            RETURNING q.id
-          )
-          SELECT COUNT(*)::int AS recovered FROM revived
-        `, [limit]);
-                const recovered = Number(result?.rows?.[0]?.recovered || 0);
+          RETURNING q.id
+        `, [ids]);
+                const recovered = Number(revived?.rowCount ?? revived?.rows?.length ?? 0);
                 if (recovered > 0)
                     this.logger.info('Reopened reservation-limit chapter failures', { recovered });
                 return recovered;

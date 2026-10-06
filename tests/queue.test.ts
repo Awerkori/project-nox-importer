@@ -72,16 +72,20 @@ describe('ImporterQueue transient publication barrier recovery', () => {
 
 describe('ImporterQueue transient reservation-limit recovery', () => {
   it('uses one bounded direct SQL reconciliation on the production YSQL client', async () => {
-    const sql = vi.fn().mockResolvedValue({ rows: [{ recovered: 1 }] });
+    const sql = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ id: 'job-2', source: 'megahentai', payload: { workId: 'work-2' }, chapter_sort_key: 3 }] })
+      .mockResolvedValueOnce({ rows: [{ work_id: 'work-2', source: 'megahentai', chapter_sort_key: '3' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'job-2' }], rowCount: 1 });
     const queue = new ImporterQueue({ sql } as any, 'test-worker');
 
     await expect(queue.recoverReservationLimitFailures(25)).resolves.toBe(1);
-    expect(sql).toHaveBeenCalledTimes(1);
-    expect(sql.mock.calls[0][1]).toEqual([25]);
-    expect(sql.mock.calls[0][0]).toContain('failed AS MATERIALIZED');
-    expect(sql.mock.calls[0][0]).toContain("q.status = 'FAILED'");
-    expect(sql.mock.calls[0][0]).toContain("m.status = 'PENDING'");
-    expect(sql.mock.calls[0][0]).toContain("m.is_gap IS FALSE");
+    expect(sql).toHaveBeenCalledTimes(3);
+    expect(sql.mock.calls[0][1]).toEqual([500]);
+    expect(sql.mock.calls[0][0]).toContain("last_error LIKE 'Concurrent reservation limit:%'");
+    expect(sql.mock.calls[1][0]).toContain('JOIN (VALUES');
+    expect(sql.mock.calls[1][0]).toContain("m.status = 'PENDING'");
+    expect(sql.mock.calls[2][0]).toContain('ANY($1::uuid[])');
+    expect(sql.mock.calls[2][0]).toContain("m.is_gap IS FALSE");
   });
 
   it('requeues only a reservation-failed job whose mapping is still pending', async () => {
