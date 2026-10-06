@@ -21,12 +21,16 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     })).toBe(false);
   });
 
-  it('defers catalog maintenance when nearly all chapter-claim permits are active', () => {
+  it('defers catalog maintenance whenever a chapter claim is in flight', () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
     engine.chapterClaimPhaseReady = true;
     engine.chapterClaimGate = { active: 4, queued: 0, capacity: 5 };
     expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
     engine.chapterClaimGate = { active: 3, queued: 0, capacity: 5 };
+    expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
+    engine.chapterClaimGate = { active: 1, queued: 0, capacity: 5 };
+    expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
+    engine.chapterClaimGate = { active: 0, queued: 0, capacity: 5 };
     expect(engine.shouldDeferCatalogMaintenance()).toBe(false);
     engine.chapterClaimGate = { active: 0, queued: 1, capacity: 5 };
     expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
