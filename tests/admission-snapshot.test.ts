@@ -365,15 +365,15 @@ describe('bounded admission snapshot', () => {
       const id = '00000000-0000-0000-0000-000000000013';
       await db.exec(`
         CREATE TABLE importer_queue (
-          id integer PRIMARY KEY, task_type text, status text, payload jsonb,
+          id integer PRIMARY KEY, task_type text, source text, status text, payload jsonb,
           priority integer, chapter_sort_key numeric, next_run_at timestamptz,
           updated_at timestamptz
         );
         INSERT INTO importer_queue VALUES
-          (1, 'IMPORT_CHAPTER', 'QUEUED', '{"workId":"${id}"}', 75, 1, now(), now()),
-          (2, 'IMPORT_CHAPTER', 'QUEUED', '{"workId":"${id}"}', 75, 2, now(), now()),
-          (3, 'IMPORT_CHAPTER', 'QUEUED', '{"workId":"${id}"}', 75, 3, now(), now()),
-          (4, 'IMPORT_CHAPTER', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 75, 4, now(), now());
+          (1, 'IMPORT_CHAPTER', 'source-a', 'QUEUED', '{"workId":"${id}"}', 75, 1, now(), now()),
+          (2, 'IMPORT_CHAPTER', 'source-a', 'QUEUED', '{"workId":"${id}"}', 75, 2, now(), now()),
+          (3, 'IMPORT_CHAPTER', 'source-a', 'QUEUED', '{"workId":"${id}"}', 75, 3, now(), now()),
+          (4, 'IMPORT_CHAPTER', 'source-a', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 75, 4, now(), now());
       `);
       const controller = new AdmissionController({} as any, {} as any, {
         query: (sql: string, params?: any[]) => db.query(sql, params),
@@ -388,6 +388,35 @@ describe('bounded admission snapshot', () => {
         { status: 'PAUSED_BY_STAFF', chapter_sort_key: '2' },
         { status: 'PAUSED_BY_STAFF', chapter_sort_key: '3' },
         { status: 'PAUSED_BY_STAFF', chapter_sort_key: '4' },
+      ]);
+    } finally { await db.close(); }
+  });
+
+  it('keeps a P1 admission on its eligible source instead of reopening a lower blocked-source row', async () => {
+    const db = new PGlite();
+    try {
+      const id = '00000000-0000-0000-0000-000000000016';
+      await db.exec(`
+        CREATE TABLE importer_queue (
+          id integer PRIMARY KEY, task_type text, source text, status text, payload jsonb,
+          priority integer, chapter_sort_key numeric, next_run_at timestamptz,
+          updated_at timestamptz
+        );
+        INSERT INTO importer_queue VALUES
+          (1, 'IMPORT_CHAPTER', 'blocked-source', 'QUEUED', '{"workId":"${id}"}', 75, 1, now(), now()),
+          (2, 'IMPORT_CHAPTER', 'healthy-source', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 75, 2, now(), now());
+      `);
+      const controller = new AdmissionController({} as any, {} as any, {
+        query: (sql: string, params?: any[]) => db.query(sql, params),
+      });
+
+      await expect((controller as any).enforceP1FairWindow(id, 'healthy-source')).resolves.toBe(1);
+      const { rows } = await db.query<any>(
+        `SELECT source, status, chapter_sort_key FROM importer_queue ORDER BY chapter_sort_key`,
+      );
+      expect(rows).toEqual([
+        { source: 'blocked-source', status: 'PAUSED_BY_STAFF', chapter_sort_key: '1' },
+        { source: 'healthy-source', status: 'QUEUED', chapter_sort_key: '2' },
       ]);
     } finally { await db.close(); }
   });
@@ -432,13 +461,13 @@ describe('bounded admission snapshot', () => {
       const id = '00000000-0000-0000-0000-000000000015';
       await db.exec(`
         CREATE TABLE importer_queue (
-          id integer PRIMARY KEY, task_type text, status text, payload jsonb,
+          id integer PRIMARY KEY, task_type text, source text, status text, payload jsonb,
           priority integer, chapter_sort_key numeric, next_run_at timestamptz,
           updated_at timestamptz
         );
         INSERT INTO importer_queue VALUES
-          (1, 'IMPORT_CHAPTER', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 75, 34, now(), now()),
-          (2, 'IMPORT_CHAPTER', 'QUEUED', '{"workId":"${id}"}', 75, 36, now(), now());
+          (1, 'IMPORT_CHAPTER', 'source-a', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 75, 34, now(), now()),
+          (2, 'IMPORT_CHAPTER', 'source-a', 'QUEUED', '{"workId":"${id}"}', 75, 36, now(), now());
       `);
       const controller = new AdmissionController({} as any, {} as any, {
         query: (sql: string, params?: any[]) => db.query(sql, params),
