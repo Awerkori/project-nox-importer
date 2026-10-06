@@ -303,7 +303,7 @@ export class AdmissionController {
    * 
    * Se false: obra permanece WAITING_ADMISSION.
    */
-  async canAdmitNewWork(): Promise<{
+  async canAdmitNewWork(options: { allowDuringClaimPressure?: boolean } = {}): Promise<{
     allowed: boolean;
     reason: string;
     metrics: {
@@ -343,7 +343,7 @@ export class AdmissionController {
     // the pool drains; this preserves P1-before-P2 ordering without allowing
     // maintenance/admission to starve the chapter data plane.
     const poolWaiters = Number((this.pool as any)?.waitingCount || 0);
-    if (poolWaiters > 0) {
+    if (poolWaiters > 0 && !options.allowDuringClaimPressure) {
       return {
         allowed: false,
         reason: `YSQL_POOL_BUSY: ${poolWaiters} claim/query waiter(s)`,
@@ -1016,7 +1016,14 @@ export class AdmissionController {
     // Do not let control-plane scans consume the bounded pool while claims
     // are active or queued.  A later scheduled/vacancy cycle will retry.
     if (this.isPoolUnderClaimPressure()) {
-      this.logger.debug('[ADMISSION_DEFERRED_POOL_PRESSURE] claim/query demand is using the bounded pool');
+      // Claims are the work-conserving data plane, but a pool waiter must not
+      // permanently starve P2 discovery when the bounded P1 probe has no
+      // executable catalog frontier. This path performs exactly one bounded
+      // P1 probe followed by the bounded P2 source-window admission; it does
+      // not run reconciliation, recovery, GROUP BY maintenance, or paused
+      // backlog scans. A real P1 frontier still wins in canAdmitNewWork().
+      await this.executeOnDemandAdmission('P2', undefined, true);
+      this.logger.debug('[ADMISSION_P2_PRESSURE_PROBE] bounded P2 admission attempted while claims are waiting');
       return;
     }
 
@@ -1931,7 +1938,8 @@ export class AdmissionController {
 
   private async executeOnDemandAdmission(
     preferredLane?: 'P1' | 'P2',
-    allowedSources?: string[]
+    allowedSources?: string[],
+    allowDuringClaimPressure = false,
   ): Promise<ActiveWork | null> {
     const config = this.stateStore.getConfig();
     if (!config.enabled && !config.shadowMode) return null;
@@ -1954,7 +1962,7 @@ export class AdmissionController {
 
     for (const lane of lanesToTry) {
       if (lane === 'P2') {
-        const gate = await this.canAdmitNewWork();
+        const gate = await this.canAdmitNewWork({ allowDuringClaimPressure });
         if (!gate.allowed) {
           this.logger.debug(`[ADMISSION_GATE_HOLD] admitNextWorkOnDemand blocked for P2: ${gate.reason}`);
           continue;
