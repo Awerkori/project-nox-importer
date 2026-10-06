@@ -319,4 +319,33 @@ describe('UPSTREAM_BLOCKED Isolation, Job Parking & Cross-Provider Fallback', ()
     expect(failure).toHaveBeenCalledTimes(1);
     expect(updates.at(-1).status).toBe('COOLDOWN');
   });
+
+  it('does not let OPEN circuits starve later blocked sources from recovery probes', async () => {
+    const candidates = [
+      { id: 'old-open-1', name: 'Old open 1', status: 'UPSTREAM_BLOCKED' },
+      { id: 'old-open-2', name: 'Old open 2', status: 'UPSTREAM_BLOCKED' },
+      { id: 'mangotoons', name: 'Mango Toons', status: 'UPSTREAM_BLOCKED' },
+      { id: 'later-source', name: 'Later source', status: 'UPSTREAM_BLOCKED' },
+    ];
+    const query: any = {
+      select: vi.fn().mockReturnThis(),
+      in: vi.fn().mockReturnThis(),
+      order: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue({ data: candidates, error: null }),
+    };
+    mockSupabase = { from: vi.fn(() => query) };
+    engine = new ImporterEngine(mockSupabase, storage, registry, rateLimiter, config);
+
+    vi.spyOn((engine as any).sharedNetworkDetector, 'isSharedBlockActive').mockReturnValue(false);
+    vi.spyOn((engine as any).circuitBreaker, 'canExecute').mockImplementation((id: string) =>
+      id === 'mangotoons' || id === 'later-source'
+    );
+    const probe = vi.spyOn(engine, 'probeSourceHealth').mockResolvedValue();
+
+    await engine.checkBlockedSourcesHealth();
+
+    expect(query.limit).toHaveBeenCalledWith(32);
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(probe.mock.calls.map(([source]) => source.id)).toEqual(['mangotoons', 'later-source']);
+  });
 });
