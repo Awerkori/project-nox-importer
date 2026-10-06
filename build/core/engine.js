@@ -1541,6 +1541,12 @@ export class ImporterEngine {
                 break;
             if (!this.circuitBreaker.canExecute(src.id))
                 continue;
+            // Do not spend the bounded probe budget on candidates that the shared
+            // network detector will immediately suppress. Otherwise the same
+            // datacenter-blocked rows can consume both slots on every cycle and
+            // starve provider-specific recovery probes behind them.
+            if (this.sharedNetworkDetector.isSharedBlockActiveFor(src.blocked_reason))
+                continue;
             if (probesStarted >= 2)
                 break;
             probesStarted += 1;
