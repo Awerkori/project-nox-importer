@@ -503,23 +503,23 @@ export class ImporterQueue {
                 const values = [];
                 const mappingParams = [];
                 for (const [index, job] of failed.entries()) {
-                    const offset = index * 3;
-                    values.push(`($${offset + 1}::text, $${offset + 2}::text, $${offset + 3}::numeric)`);
-                    mappingParams.push(job.payload.workId, job.source, job.chapter_sort_key);
+                    const offset = index * 4;
+                    values.push(`($${offset + 1}::uuid, $${offset + 2}::text, $${offset + 3}::text, $${offset + 4}::numeric)`);
+                    mappingParams.push(job.id, job.payload.workId, job.source, job.chapter_sort_key);
                 }
                 const mappingResult = await directSql.call(this.supabase, `
-          SELECT m.work_id::text AS work_id, m.source, m.chapter_sort_key::text AS chapter_sort_key
+          SELECT requested.queue_id
           FROM importer_chapter_mappings m
-          JOIN (VALUES ${values.join(', ')}) AS requested(work_id, source, chapter_sort_key)
+          JOIN (VALUES ${values.join(', ')}) AS requested(queue_id, work_id, source, chapter_sort_key)
             ON requested.work_id = m.work_id::text
            AND requested.source = m.source
            AND requested.chapter_sort_key::numeric = m.chapter_sort_key
           WHERE m.status = 'PENDING'
             AND m.is_gap IS FALSE
         `, mappingParams);
-                const eligible = new Set((mappingResult?.rows || []).map((row) => `${row.work_id}|${row.source}|${row.chapter_sort_key}`));
-                const ids = failed
-                    .filter((job) => eligible.has(`${job.payload.workId}|${job.source}|${job.chapter_sort_key}`))
+                const eligible = new Set((mappingResult?.rows || []).map((row) => String(row.queue_id)));
+                const ids = failed.slice(0, scanLimit)
+                    .filter((job) => eligible.has(String(job.id)))
                     .slice(0, limit)
                     .map((job) => job.id);
                 if (!ids.length)
