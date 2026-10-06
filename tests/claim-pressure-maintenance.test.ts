@@ -34,4 +34,23 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     engine.chapterClaimGate = { active: 0, queued: 0, capacity: 5 };
     expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
   });
+
+  it('keeps maintenance deferred until every startup chapter slot has attempted a claim', () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    engine.config = { MAX_CONCURRENT_CHAPTERS: 5, TESTED_CONCURRENCY_CEILING: 32 };
+    engine.chapterClaimPhaseReady = false;
+    engine.chapterClaimStartupSlots = new Set<number>();
+
+    for (const slot of [0, 1, 2, 3]) {
+      engine.markChapterClaimPhaseAttempt(slot);
+      expect(engine.chapterClaimPhaseReady).toBe(false);
+      engine.chapterClaimGate = { active: 0, queued: 0, capacity: 5 };
+      expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
+    }
+
+    engine.markChapterClaimPhaseAttempt(4);
+    expect(engine.chapterClaimPhaseReady).toBe(true);
+    engine.chapterClaimGate = { active: 0, queued: 0, capacity: 5 };
+    expect(engine.shouldDeferCatalogMaintenance()).toBe(false);
+  });
 });
