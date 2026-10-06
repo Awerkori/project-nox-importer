@@ -125,7 +125,13 @@ export class AdmissionController {
         const waiting = Number(pool?.waitingCount || 0);
         const total = Number(pool?.totalCount || 0);
         const idle = Number(pool?.idleCount || 0);
-        return waiting > 0 || (total > 0 && idle < total);
+        // An occupied connection is not, by itself, claim pressure.  The old
+        // `idle < total` check classified the normal state (one claim using one
+        // connection while another was idle) as pressure and skipped every
+        // reconciliation cycle.  That allowed durable active_works entries to
+        // remain stale indefinitely.  Only a real pool queue, or a pool with no
+        // idle connection at all, must defer control-plane work.
+        return waiting > 0 || (total > 0 && idle === 0);
     }
     /**
      * Keep one executable P1 chapter per active work. Older scheduler versions

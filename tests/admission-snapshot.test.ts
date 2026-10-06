@@ -165,6 +165,29 @@ describe('bounded admission snapshot', () => {
     expect(p2Probe).toHaveBeenCalledWith('P2', undefined, true);
   });
 
+  it('reconciles stale active works when a claim uses one connection but another is idle', async () => {
+    const state = { getConfig: () => ({ enabled: true, shadowMode: false }) } as any;
+    const sentinel = { isProtectiveStopActive: async () => false } as any;
+    const pool = {
+      totalCount: 2,
+      idleCount: 1,
+      waitingCount: 0,
+      query: async () => ({ rows: [] }),
+    };
+    const controller = new AdmissionController(state, sentinel, pool);
+    const reconcile = vi.spyOn(controller as any, 'reconcileActiveWorks').mockResolvedValue(undefined);
+    vi.spyOn(controller as any, 'recoverOrphanedCancelledChapterJobs').mockResolvedValue(undefined);
+    vi.spyOn(controller as any, 'recoverLegacyTransientFailures').mockResolvedValue(undefined);
+    vi.spyOn(controller as any, 'recoverSourceRecoveredTransientFailures').mockResolvedValue(undefined);
+    vi.spyOn(controller as any, 'repairVisibleP2LifecycleBacklog').mockResolvedValue(undefined);
+    vi.spyOn(controller as any, 'replenishActiveSets').mockResolvedValue(undefined);
+    vi.spyOn(controller as any, 'maintainSlidingWindows').mockResolvedValue(undefined);
+
+    await controller.runAdmissionCycle();
+
+    expect(reconcile).toHaveBeenCalledTimes(1);
+  });
+
   it('allows the bounded pressure P2 probe only after the real P1 probe is empty', async () => {
     const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
     const sentinel={isProtectiveStopActive:async()=>false} as any;
