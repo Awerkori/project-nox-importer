@@ -1479,9 +1479,12 @@ export class AdmissionController {
          ),
          source_window AS MATERIALIZED (
            -- Keep the hot path bounded by source and use the existing
-           -- (source,status,task_type,created_at) access path. Canonical
-           -- filtering stays outside this window so a correlated chapter
-           -- lookup cannot turn each source probe into a table scan.
+           -- (source,status,task_type,created_at) access path.  Ordering by
+           -- priority/chapter here looked semantically attractive but forced
+           -- YSQL to sort a full per-source backlog before applying LIMIT;
+           -- with a large source that held a bounded pool client for the
+           -- statement timeout and starved claims.  The later bounded
+           -- frontier/contiguity pass still decides canonical executability.
            SELECT q.*
            FROM eligible_sources s
            CROSS JOIN LATERAL (
@@ -1495,7 +1498,7 @@ export class AdmissionController {
                AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
                AND NOT ((q.payload->>'workId') = ANY($1::text[]))
                AND q.payload->>'workId' IS NOT NULL
-             ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC NULLS LAST
+             ORDER BY q.created_at ASC NULLS LAST, q.id ASC
              LIMIT $5
            ) q
          ),
@@ -2014,11 +2017,11 @@ export class AdmissionController {
       const isP1 = lane === 'P1';
       const maxPriority = isP1 ? 100 : 75;
       const loadOnDemandCandidates = (includePaused: boolean) => {
-        // This path is called from failed claim attempts.  Keep it bounded by
-        // source; the old queue-wide GROUP BY scanned the whole backlog on
-        // every vacancy and contended directly with the claims it was meant
-        // to unblock.  The source window is deliberately small because the
-        // JS frontier check below still selects the final work.
+        // This path is called from failed claim attempts. Keep it bounded by
+        // source and ordered on the existing source/status/task/created_at
+        // index; sorting the entire source backlog by chapter number before
+        // LIMIT can otherwise consume a bounded YSQL client for 25 seconds.
+        // The JS frontier check below remains the canonical authority.
         const query = `
         WITH eligible_sources AS MATERIALIZED (
           SELECT s.id
@@ -2041,7 +2044,7 @@ export class AdmissionController {
               AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
               AND NOT ((q.payload->>'workId') = ANY($2::text[]))
               AND q.payload->>'workId' IS NOT NULL
-            ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC NULLS LAST
+            ORDER BY q.created_at ASC NULLS LAST, q.id ASC
             LIMIT $5
           ) q
         ), queue_candidates AS MATERIALIZED (
