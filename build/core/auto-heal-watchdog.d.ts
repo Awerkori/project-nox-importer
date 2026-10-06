@@ -63,6 +63,16 @@ export interface AutoRestartRecord {
     eligibleJobs: number;
 }
 export declare function isCountedAutoRestart(record: AutoRestartRecord): boolean;
+/**
+ * Heavy staged-frontier diagnostics may yield to real chapter claims when a
+ * previous snapshot is available.  This is deliberately a pure policy helper
+ * so the pressure gate cannot regress silently.
+ */
+export declare function shouldDeferHeavyStagedClassification(params: {
+    cachedTelemetryAvailable: boolean;
+    healthyState: boolean;
+    claimPressureHigh: boolean;
+}): boolean;
 export interface AutoHealWatchdogOptions {
     pool: Pool;
     scheduler?: WorkAffinityScheduler;
@@ -71,6 +81,12 @@ export interface AutoHealWatchdogOptions {
     publicationBarrier?: PublicationBarrier;
     safetyBarrier?: PublicationSafetyBarrier;
     autotuner?: AdaptiveAutotuner;
+    /**
+     * Returns true while the bounded chapter-claim phase is under pressure.
+     * Heavy staged classification must yield to real chapter claims because it
+     * shares the same bounded YSQL pool.
+     */
+    isChapterClaimPressureHigh?: () => boolean;
     /**
      * Returns false when the engine cannot safely quiesce. A deferred recovery
      * is deliberately not counted as a restart: counting it would open the
@@ -102,6 +118,7 @@ export declare class AutoHealWatchdog {
     private publicationBarrier?;
     private safetyBarrier?;
     private autotuner?;
+    private isChapterClaimPressureHigh?;
     private onControlledRestart?;
     private intervalMs;
     private workerId;

@@ -28,6 +28,14 @@ export function isCountedAutoRestart(record) {
     return !record.reason.startsWith('CIRCUIT_CONTAINMENT_STALL:');
 }
 /**
+ * Heavy staged-frontier diagnostics may yield to real chapter claims when a
+ * previous snapshot is available.  This is deliberately a pure policy helper
+ * so the pressure gate cannot regress silently.
+ */
+export function shouldDeferHeavyStagedClassification(params) {
+    return !params.healthyState && params.cachedTelemetryAvailable && params.claimPressureHigh;
+}
+/**
  * AutoHealWatchdog
  *
  * Implements permanent autonomous recovery for Project Nox Importer:
@@ -49,6 +57,7 @@ export class AutoHealWatchdog {
     publicationBarrier;
     safetyBarrier;
     autotuner;
+    isChapterClaimPressureHigh;
     onControlledRestart;
     intervalMs;
     workerId;
@@ -83,6 +92,7 @@ export class AutoHealWatchdog {
         this.publicationBarrier = options.publicationBarrier;
         this.safetyBarrier = options.safetyBarrier;
         this.autotuner = options.autotuner;
+        this.isChapterClaimPressureHigh = options.isChapterClaimPressureHigh;
         this.onControlledRestart = options.onControlledRestart;
         this.intervalMs = options.intervalMs ?? 60_000;
         this.workerId = options.workerId ?? 'discloud-importer-1';
@@ -237,7 +247,18 @@ export class AutoHealWatchdog {
             lastCompletedAgeSec <= 600 &&
             lastFreshVisibleAgeSec <= 1800 &&
             (nowMs - this.lastDeepStagedAt < 300_000);
-        if (isHealthyState && this.cachedTelemetry) {
+        // The staged-frontier classification is intentionally expensive (GROUP
+        // BY + per-work predecessor/publication checks).  When all/most chapter
+        // claim permits are active, running it on the same bounded pool can make
+        // every real claim wait behind diagnostics.  Reuse the last classification
+        // snapshot until claim pressure subsides; this is observability
+        // backpressure, not a change to publication eligibility.
+        const deferDeepStagedClassification = shouldDeferHeavyStagedClassification({
+            healthyState: isHealthyState,
+            cachedTelemetryAvailable: this.cachedTelemetry !== null,
+            claimPressureHigh: Boolean(this.isChapterClaimPressureHigh?.()),
+        });
+        if ((isHealthyState || deferDeepStagedClassification) && this.cachedTelemetry) {
             // Lightweight Healthy Path: pipeline actively processing and publishing, skip heavy keyset pagination and stuck audits
             stagedUnique = this.cachedTelemetry.stagedUnique;
             publishableStaged = this.cachedTelemetry.publishableStaged;

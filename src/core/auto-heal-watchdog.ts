@@ -113,6 +113,19 @@ export function isCountedAutoRestart(record: AutoRestartRecord): boolean {
   return !record.reason.startsWith('CIRCUIT_CONTAINMENT_STALL:');
 }
 
+/**
+ * Heavy staged-frontier diagnostics may yield to real chapter claims when a
+ * previous snapshot is available.  This is deliberately a pure policy helper
+ * so the pressure gate cannot regress silently.
+ */
+export function shouldDeferHeavyStagedClassification(params: {
+  cachedTelemetryAvailable: boolean;
+  healthyState: boolean;
+  claimPressureHigh: boolean;
+}): boolean {
+  return !params.healthyState && params.cachedTelemetryAvailable && params.claimPressureHigh;
+}
+
 export interface AutoHealWatchdogOptions {
   pool: Pool;
   scheduler?: WorkAffinityScheduler;
@@ -121,6 +134,12 @@ export interface AutoHealWatchdogOptions {
   publicationBarrier?: PublicationBarrier;
   safetyBarrier?: PublicationSafetyBarrier;
   autotuner?: AdaptiveAutotuner;
+  /**
+   * Returns true while the bounded chapter-claim phase is under pressure.
+   * Heavy staged classification must yield to real chapter claims because it
+   * shares the same bounded YSQL pool.
+   */
+  isChapterClaimPressureHigh?: () => boolean;
   /**
    * Returns false when the engine cannot safely quiesce. A deferred recovery
    * is deliberately not counted as a restart: counting it would open the
@@ -153,6 +172,7 @@ export class AutoHealWatchdog {
   private publicationBarrier?: PublicationBarrier;
   private safetyBarrier?: PublicationSafetyBarrier;
   private autotuner?: AdaptiveAutotuner;
+  private isChapterClaimPressureHigh?: () => boolean;
   private onControlledRestart?: (reason: string, metrics: HealthPanelMetrics) => Promise<boolean | void>;
   private intervalMs: number;
   private workerId: string;
@@ -195,6 +215,7 @@ export class AutoHealWatchdog {
     this.publicationBarrier = options.publicationBarrier;
     this.safetyBarrier = options.safetyBarrier;
     this.autotuner = options.autotuner;
+    this.isChapterClaimPressureHigh = options.isChapterClaimPressureHigh;
     this.onControlledRestart = options.onControlledRestart;
     this.intervalMs = options.intervalMs ?? 60_000;
     this.workerId = options.workerId ?? 'discloud-importer-1';
@@ -360,7 +381,19 @@ export class AutoHealWatchdog {
       lastFreshVisibleAgeSec <= 1800 &&
       (nowMs - this.lastDeepStagedAt < 300_000);
 
-    if (isHealthyState && this.cachedTelemetry) {
+    // The staged-frontier classification is intentionally expensive (GROUP
+    // BY + per-work predecessor/publication checks).  When all/most chapter
+    // claim permits are active, running it on the same bounded pool can make
+    // every real claim wait behind diagnostics.  Reuse the last classification
+    // snapshot until claim pressure subsides; this is observability
+    // backpressure, not a change to publication eligibility.
+    const deferDeepStagedClassification = shouldDeferHeavyStagedClassification({
+      healthyState: isHealthyState,
+      cachedTelemetryAvailable: this.cachedTelemetry !== null,
+      claimPressureHigh: Boolean(this.isChapterClaimPressureHigh?.()),
+    });
+
+    if ((isHealthyState || deferDeepStagedClassification) && this.cachedTelemetry) {
       // Lightweight Healthy Path: pipeline actively processing and publishing, skip heavy keyset pagination and stuck audits
       stagedUnique = this.cachedTelemetry.stagedUnique;
       publishableStaged = this.cachedTelemetry.publishableStaged;
