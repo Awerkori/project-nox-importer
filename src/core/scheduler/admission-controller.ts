@@ -587,8 +587,7 @@ export class AdmissionController {
             WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
               AND canonical_chapter.published_at IS NOT NULL
               AND (
-                canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
-                OR canonical_chapter.number = q.chapter_sort_key
+                canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key)
               )
           )`;
 
@@ -1170,7 +1169,7 @@ export class AdmissionController {
                   SELECT 1 FROM chapters canonical_chapter
                   WHERE canonical_chapter.work_id = w.work_id::uuid
                     AND canonical_chapter.published_at IS NOT NULL
-                    AND (canonical_chapter.number = NULLIF(candidate.payload->>'chapterNumber', '')::numeric OR canonical_chapter.number = candidate.chapter_sort_key)
+                    AND (canonical_chapter.number = COALESCE(NULLIF(candidate.payload->>'chapterNumber', '')::numeric, candidate.chapter_sort_key))
                 )
                 AND NOT EXISTS (
                   SELECT 1 FROM importer_queue predecessor
@@ -1546,8 +1545,7 @@ export class AdmissionController {
                WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
                  AND canonical_chapter.published_at IS NOT NULL
                  AND (
-                   canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
-                   OR canonical_chapter.number = q.chapter_sort_key
+                   canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key)
                  )
              )
            GROUP BY q.payload->>'workId', q.source
@@ -1781,8 +1779,7 @@ export class AdmissionController {
              WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
                AND canonical_chapter.published_at IS NOT NULL
                AND (
-                 canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
-                 OR canonical_chapter.number = q.chapter_sort_key
+                 canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key)
                )
            )
            AND NOT ((q.payload->>'workId') = ANY($1::text[]))
@@ -2095,8 +2092,7 @@ export class AdmissionController {
             WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
               AND canonical_chapter.published_at IS NOT NULL
               AND (
-                canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
-                OR canonical_chapter.number = q.chapter_sort_key
+                canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key)
               )
           )
           GROUP BY q.payload->>'workId', q.source
