@@ -198,7 +198,7 @@ export class SourceAdmissionGate {
     await sleep(300);
 
     // STAGE 3: WORK DETAILS (using real work from catalog)
-    const testWork = discoveredWorks[0];
+    let testWork = discoveredWorks[0];
     const t2 = Date.now();
     try {
       if (typeof adapter.fetchWorkDetails === 'function') {
@@ -245,23 +245,53 @@ export class SourceAdmissionGate {
     try {
       chapters = await adapter.fetchChapters(testWork.sourceWorkId);
       if (chapters.length === 0) {
-        stages.push({
-          stage: 'CHAPTERS',
-          status: 'FAIL',
-          durationMs: Date.now() - t3,
-          detail: '0 chapters found for work',
-        });
-        return {
-          sourceId,
-          timestamp: nowIso,
-          overallStatus: 'FAIL',
-          stages,
-          recommendedState: 'UPSTREAM_BLOCKED',
-          classification: 'API_BLOCK',
-          cfRay,
-          safeRate: 0,
-          isAsnBlock: false,
-        };
+        // A catalog search can legitimately return a placeholder, one-shot,
+        // or otherwise empty work before a usable work.  Treating that first
+        // result as an upstream outage permanently blocked otherwise healthy
+        // sources.  Try a small bounded number of additional catalog results
+        // before classifying the source; this is still a read-only probe and
+        // never bypasses an upstream challenge.
+        let selected: { work: any; details: any; chapters: any[] } | null = null;
+        for (const candidate of discoveredWorks.slice(1, 4)) {
+          try {
+            const candidateDetails = typeof adapter.fetchWorkDetails === 'function'
+              ? await adapter.fetchWorkDetails(candidate.sourceWorkId)
+              : candidate;
+            const candidateChapters = await adapter.fetchChapters(candidate.sourceWorkId);
+            if (candidateChapters.length > 0) {
+              selected = { work: candidate, details: candidateDetails, chapters: candidateChapters };
+              break;
+            }
+          } catch {
+            // Continue to the next bounded candidate. A single malformed or
+            // empty catalog entry is not enough evidence to block the source.
+          }
+        }
+
+        if (selected) {
+          testWork = selected.work;
+          chapters = selected.chapters;
+          const detailsStage = stages.find((stage) => stage.stage === 'DETAILS');
+          if (detailsStage) detailsStage.detail = `Title: ${selected.details?.title || selected.work.title}`;
+        } else {
+          stages.push({
+            stage: 'CHAPTERS',
+            status: 'FAIL',
+            durationMs: Date.now() - t3,
+            detail: 'No chapters found in bounded sample of catalog works',
+          });
+          return {
+            sourceId,
+            timestamp: nowIso,
+            overallStatus: 'FAIL',
+            stages,
+            recommendedState: 'UPSTREAM_BLOCKED',
+            classification: 'API_BLOCK',
+            cfRay,
+            safeRate: 0,
+            isAsnBlock: false,
+          };
+        }
       }
 
       stages.push({
