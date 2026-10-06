@@ -375,4 +375,32 @@ describe('UPSTREAM_BLOCKED Isolation, Job Parking & Cross-Provider Fallback', ()
 
     expect(probe.mock.calls.map(([source]) => source.id)).toEqual(['mangotoons', 'turnstile-source']);
   });
+
+  it('rotates a bounded recovery-probe window instead of serializing every stale source', async () => {
+    const candidates = [
+      { id: 'stale-active-a', name: 'A', status: 'ACTIVE', blocked_reason: 'TIMEOUT_TARPIT', blocked_details: null, cooldown_until: null },
+      { id: 'future-cooldown', name: 'Future', status: 'COOLDOWN', blocked_reason: 'API_BLOCK', blocked_details: null, cooldown_until: new Date(Date.now() + 60_000).toISOString() },
+      { id: 'stale-active-b', name: 'B', status: 'ACTIVE', blocked_reason: 'TIMEOUT_TARPIT', blocked_details: null, cooldown_until: null },
+      { id: 'stale-active-c', name: 'C', status: 'ACTIVE', blocked_reason: 'API_BLOCK', blocked_details: null, cooldown_until: null },
+    ];
+    const query: any = {
+      select: vi.fn().mockReturnThis(),
+      in: vi.fn().mockReturnThis(),
+      order: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue({ data: candidates, error: null }),
+    };
+    mockSupabase = { from: vi.fn(() => query) };
+    engine = new ImporterEngine(mockSupabase, storage, registry, rateLimiter, config);
+    const probe = vi.spyOn(engine, 'probeSourceHealth').mockResolvedValue();
+
+    const first = await (engine as any).probeDueSourceRecoveries();
+    expect(first).toBe(2);
+    expect(query.limit).toHaveBeenCalledWith(32);
+    expect(probe.mock.calls.map(([source]) => source.id)).toEqual(['stale-active-a', 'stale-active-b']);
+
+    probe.mockClear();
+    const second = await (engine as any).probeDueSourceRecoveries();
+    expect(second).toBe(2);
+    expect(probe.mock.calls.map(([source]) => source.id)).toEqual(['stale-active-c', 'stale-active-a']);
+  });
 });

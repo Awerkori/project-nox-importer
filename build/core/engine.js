@@ -221,6 +221,10 @@ export class ImporterEngine {
     // discovery and catalog backfill instead of making two full-table reads every minute.
     sourceScheduleSnapshot = { sources: [], cachedAt: 0 };
     sourceScheduleSnapshotFlight = null;
+    // Recovery probes are network-heavy and may run for several admission
+    // stages.  Rotate their small window so one slow/stale provider cannot
+    // serialize every other source's recovery indefinitely.
+    sourceRecoveryProbeCursor = 0;
     catalogBackfillCursor = 0;
     knownCoveredWorks = new Set();
     lastProgressTimestamp = Date.now();
@@ -1048,34 +1052,61 @@ export class ImporterEngine {
             if (this.stopSignal)
                 break;
             try {
-                const { data: cooldownSources, error } = await this.supabase
-                    .from('importer_sources')
-                    .select('id, name, status, base_url, cooldown_until, blocked_reason, blocked_details, last_health_check_at')
-                    .in('status', ['ACTIVE', 'COOLDOWN', 'DEGRADED', 'PROBING']);
-                if (!error && cooldownSources && cooldownSources.length > 0) {
-                    const now = Date.now();
-                    for (const src of cooldownSources.filter((candidate) => shouldProbePersistedSource({
-                        status: candidate.status,
-                        blockedReason: candidate.blocked_reason,
-                        blockedDetails: candidate.blocked_details,
-                    }))) {
-                        if (this.stopSignal)
-                            break;
-                        const cooldownUntil = src.cooldown_until ? new Date(src.cooldown_until).getTime() : 0;
-                        if (src.status === 'COOLDOWN' && now < cooldownUntil) {
-                            // Still within cooldown period, skip until expiry
-                            continue;
-                        }
-                        // Cooldown expired or DEGRADED: probe for auto-healing to ACTIVE
-                        await this.probeSourceHealth(src);
-                    }
-                }
+                await this.probeDueSourceRecoveries();
             }
             catch (err) {
                 this.logger.warn('Error during source cooldown auto-probe loop', { error: err?.message });
             }
             await this.sleep(30_000);
         }
+    }
+    /**
+     * Probe a bounded, rotating subset of ACTIVE-with-block / COOLDOWN / DEGRADED
+     * sources.  The old loop awaited every candidate serially.  A single
+     * tarpit probe could therefore postpone recovery of all later sources for
+     * minutes or hours, leaving recoverable backlogs permanently ineligible.
+     */
+    async probeDueSourceRecoveries() {
+        let query = this.supabase
+            .from('importer_sources')
+            .select('id, name, status, base_url, cooldown_until, blocked_reason, blocked_details, last_health_check_at')
+            .in('status', ['ACTIVE', 'COOLDOWN', 'DEGRADED', 'PROBING']);
+        if (typeof query.order === 'function') {
+            query = query.order('last_health_check_at', { ascending: true, nullsFirst: true });
+        }
+        if (typeof query.limit === 'function')
+            query = query.limit(32);
+        const { data: sources, error } = await query;
+        if (error || !sources || sources.length === 0)
+            return 0;
+        const now = Date.now();
+        const candidates = sources.filter((candidate) => {
+            if (!shouldProbePersistedSource({
+                status: candidate.status,
+                blockedReason: candidate.blocked_reason,
+                blockedDetails: candidate.blocked_details,
+            }))
+                return false;
+            const cooldownUntil = candidate.cooldown_until ? new Date(candidate.cooldown_until).getTime() : 0;
+            return candidate.status !== 'COOLDOWN' || cooldownUntil <= now;
+        });
+        if (candidates.length === 0)
+            return 0;
+        const start = this.sourceRecoveryProbeCursor % candidates.length;
+        const selected = [];
+        let scanned = 0;
+        while (scanned < candidates.length && selected.length < 2 && !this.stopSignal) {
+            const candidate = candidates[(start + scanned) % candidates.length];
+            scanned++;
+            if (this.sourceProbesInFlight.has(candidate.id))
+                continue;
+            selected.push(candidate);
+        }
+        this.sourceRecoveryProbeCursor = (start + Math.max(1, scanned)) % candidates.length;
+        if (selected.length === 0)
+            return 0;
+        await Promise.allSettled(selected.map((source) => this.probeSourceHealth(source)));
+        return selected.length;
     }
     /**
      * Periodic atomic background cleanup of redundant queue jobs (runs every 5 min).
