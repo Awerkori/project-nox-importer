@@ -124,6 +124,21 @@ export function shouldStartCatalogProbe(nowMs, lastProbeAtMs, inFlight, minInter
     return !inFlight && nowMs - lastProbeAtMs >= minIntervalMs;
 }
 /**
+ * Return one fair, bounded source slice for a catalog fallback probe.  The
+ * fallback is a work-conserving escape hatch, not a reason to fan one claim
+ * out over every provider on the bounded YSQL pool.  Advancing the cursor on
+ * each probe guarantees all eligible sources receive an opportunity.
+ */
+export function selectRotatingSourceWindow(sources, cursor, limit) {
+    const unique = Array.from(new Set(sources));
+    if (unique.length === 0 || limit <= 0)
+        return { sources: [], nextCursor: 0 };
+    const start = ((cursor % unique.length) + unique.length) % unique.length;
+    const take = Math.min(limit, unique.length);
+    const selected = Array.from({ length: take }, (_, offset) => unique[(start + offset) % unique.length]);
+    return { sources: selected, nextCursor: (start + take) % unique.length };
+}
+/**
  * Staff and P0 are order-only lanes, but an endless stream of either must not
  * make already-admitted P1/P2 work mathematically impossible to finish.  One
  * normal-lane claim after a bounded high-priority burst preserves the normal
@@ -164,6 +179,8 @@ export class WorkAffinityScheduler {
     catalogProbeInFlight = false;
     lastCatalogProbeAt = 0;
     catalogProbeMinIntervalMs = 1_000;
+    catalogProbeSourceWindowSize = 8;
+    catalogProbeRowsPerSource = 64;
     publicationBarrier;
     sourcePermitProvider;
     chapterCapacityProvider = () => 1;
@@ -1239,9 +1256,34 @@ export class WorkAffinityScheduler {
     async executeClaimCatalogQuery(client, opts) {
         const disallowedChapterKeys = opts.disallowedChapterKeys || Array.from(this.inFlightChapterKeys);
         const query = `
-      WITH to_lock AS (
+      WITH eligible_sources AS MATERIALIZED (
+        SELECT s.id
+        FROM importer_sources s
+        WHERE s.enabled = true
+          AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          AND ($1::text[] IS NULL OR s.id = ANY($1::text[]))
+        ORDER BY s.id ASC
+        LIMIT $7
+      ),
+      source_window AS MATERIALIZED (
+        SELECT candidate.id
+        FROM eligible_sources s
+        CROSS JOIN LATERAL (
+          SELECT q.id
+          FROM importer_queue q
+          WHERE q.source = s.id
+            AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
+            AND q.task_type = 'IMPORT_CHAPTER'
+            AND q.attempts < COALESCE(q.max_attempts, 7)
+          -- Uses idx_importer_queue_fetch; canonical selection remains below.
+          ORDER BY q.created_at ASC NULLS LAST, q.id ASC
+          LIMIT $6
+        ) candidate
+      ),
+      to_lock AS (
         SELECT q.id
-        FROM importer_queue q
+        FROM source_window windowed
+        JOIN importer_queue q ON q.id = windowed.id
         JOIN works w ON w.id = (q.payload->>'workId')::uuid
         JOIN importer_sources s ON s.id = q.source
         LEFT JOIN LATERAL (
@@ -1261,7 +1303,6 @@ export class WorkAffinityScheduler {
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
           ${CANONICAL_FRONTIER_CLAIM_FILTER}
-          AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
           AND NOT EXISTS (
@@ -1295,6 +1336,8 @@ export class WorkAffinityScheduler {
             disallowedChapterKeys.length > 0 ? disallowedChapterKeys : null,
             opts.workerId,
             opts.leaseMin,
+            this.catalogProbeRowsPerSource,
+            this.catalogProbeSourceWindowSize,
         ], opts.telemetry);
         if (res.rows.length === 0)
             return null;
@@ -1349,17 +1392,10 @@ export class WorkAffinityScheduler {
                 if (permitted.length > 0)
                     candidateSources = permitted;
             }
-            // Try fair single-source claim first across concurrent runners to eliminate source lock-step contention
-            if (candidateSources && candidateSources.length > 1) {
-                const offset = (this.rrCatalogSourceIndex++) % candidateSources.length;
-                const targetSource = candidateSources[offset];
-                const singleRes = await this.executeClaimCatalogQuery(client, {
-                    ...opts,
-                    allowedSources: [targetSource],
-                    disallowedChapterKeys,
-                });
-                if (singleRes)
-                    return singleRes;
+            if (candidateSources && candidateSources.length > 0) {
+                const window = selectRotatingSourceWindow(candidateSources, this.rrCatalogSourceIndex, this.catalogProbeSourceWindowSize);
+                this.rrCatalogSourceIndex = window.nextCursor;
+                candidateSources = window.sources;
             }
             return await this.executeClaimCatalogQuery(client, {
                 ...opts,

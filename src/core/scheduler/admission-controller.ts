@@ -59,6 +59,13 @@ export class AdmissionController {
   // the authority for work order; it merely avoids choosing the first source
   // alphabetically on every spare-capacity pass.
   private lastOnDemandP1Source: string | null = null;
+  // Admission queries use a per-source indexed window.  Sampling every
+  // healthy source in one cycle turns a five-slot controller into dozens of
+  // distributed reads, which can starve the claims the controller exists to
+  // feed.  Rotate a small source subset instead; this is scheduling fairness,
+  // not a resource limit or health classification.
+  private p1SourceWindowCursor: string | null = null;
+  private readonly p1SourceWindowSize = 10;
   // A previous scheduler generation could vacate a visible P2 work after its
   // first window, leaving the rest of its queue at priority 50. Repair that
   // legacy state in small work-scoped batches; never scan or rewrite the P2
@@ -93,6 +100,22 @@ export class AdmissionController {
 
   public setSourcePermitProvider(provider: (source: string) => number): void {
     this.sourcePermitProvider = provider;
+  }
+
+  private async getP1SourceWindow(allowedSources?: string[]): Promise<string[]> {
+    const result = await this.runQuery(
+      `SELECT s.id
+       FROM importer_sources s
+       WHERE s.enabled = true
+         AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+         AND ($1::text[] IS NULL OR s.id = ANY($1::text[]))
+       ORDER BY CASE WHEN $2::text IS NULL OR s.id > $2::text THEN 0 ELSE 1 END, s.id ASC
+       LIMIT $3`,
+      [allowedSources && allowedSources.length > 0 ? allowedSources : null, this.p1SourceWindowCursor, this.p1SourceWindowSize],
+    );
+    const sources = result.rows.map((row: any) => String(row.id)).filter(Boolean);
+    if (sources.length > 0) this.p1SourceWindowCursor = sources[sources.length - 1];
+    return sources;
   }
 
   constructor(
@@ -1465,6 +1488,7 @@ export class AdmissionController {
     // 1. Replenish P1 Backfill Works
     if (backfillSlotsAvailable > 0) {
       const activeIds = activeWorks.map((w) => w.workId);
+      const p1SourceWindow = await this.getP1SourceWindow();
       // The normal path must only inspect executable work.  Including the
       // entire PAUSED_BY_STAFF backlog here turns every 4s admission cycle
       // into a full GROUP BY over hundreds of thousands of rows, competing
@@ -1476,6 +1500,7 @@ export class AdmissionController {
            FROM importer_sources s
            WHERE s.enabled = true
              AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+             AND s.id = ANY($6::text[])
          ),
          source_window AS MATERIALIZED (
            -- Keep the hot path bounded by source and use the existing
@@ -1563,6 +1588,7 @@ export class AdmissionController {
           4,
           JSON.stringify(this.getP1AdmissionCursors()),
           Math.max(64, backfillSlotsAvailable * 32),
+          p1SourceWindow,
         ]
       );
       const resolveP1Frontiers = async (candidateRows: any[]) => {
@@ -2015,6 +2041,8 @@ export class AdmissionController {
         }
       }
       const isP1 = lane === 'P1';
+      const p1SourceWindow = isP1 ? await this.getP1SourceWindow(allowedSources) : null;
+      if (isP1 && p1SourceWindow?.length === 0) continue;
       const maxPriority = isP1 ? 100 : 75;
       const loadOnDemandCandidates = (includePaused: boolean) => {
         // This path is called from failed claim attempts. Keep it bounded by
@@ -2030,6 +2058,7 @@ export class AdmissionController {
             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
             AND ($1::text[] IS NULL OR s.id = ANY($1::text[]))
             AND ($3::text[] IS NULL OR NOT (s.id = ANY($3::text[])))
+            AND ($6::text[] IS NULL OR s.id = ANY($6::text[]))
         ), source_window AS MATERIALIZED (
           SELECT q.*
           FROM eligible_sources s
@@ -2109,6 +2138,7 @@ export class AdmissionController {
           saturatedSources.length > 0 ? saturatedSources : null,
           JSON.stringify(this.getP1AdmissionCursors()),
           16,
+          p1SourceWindow,
         ]);
       };
 

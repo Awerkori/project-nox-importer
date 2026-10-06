@@ -30,6 +30,8 @@ export declare class AdmissionController {
     private p1BacklogProbeFlight;
     private p1BacklogSnapshot;
     private lastOnDemandP1Source;
+    private p1SourceWindowCursor;
+    private readonly p1SourceWindowSize;
     private visibleP2LifecycleRepairComplete;
     private orphanCancelledRecoveryAt;
     private legacyTransientFailureRecoveryAt;
@@ -41,6 +43,7 @@ export declare class AdmissionController {
     private getP1AdmissionCursors;
     private advanceP1AdmissionCursor;
     setSourcePermitProvider(provider: (source: string) => number): void;
+    private getP1SourceWindow;
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
     /**

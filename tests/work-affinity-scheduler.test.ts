@@ -26,6 +26,7 @@ import {
   shouldReserveLowerPriorityAfterHighBurst,
   shouldRunCatalogFallbackAgain,
   shouldStartCatalogProbe,
+  selectRotatingSourceWindow,
 } from '../src/core/scheduler/work-affinity-scheduler.js';
 
 describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
@@ -40,6 +41,15 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(shouldStartCatalogProbe(1_999, 1_000, false)).toBe(false);
     expect(shouldStartCatalogProbe(2_000, 1_000, false)).toBe(true);
     expect(shouldStartCatalogProbe(10_000, 0, true)).toBe(false);
+  });
+
+  it('rotates a bounded catalog source window without starving later sources', () => {
+    expect(selectRotatingSourceWindow(['a', 'b', 'c', 'd'], 0, 2)).toEqual({
+      sources: ['a', 'b'], nextCursor: 2,
+    });
+    expect(selectRotatingSourceWindow(['a', 'b', 'c', 'd'], 2, 2)).toEqual({
+      sources: ['c', 'd'], nextCursor: 0,
+    });
   });
 
   let mockPool: any;
@@ -853,6 +863,9 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     // Mock DB queries: work has 0 queued, 0 importing, 0 paused, but unimported = 10
     const mockClient = {
       query: vi.fn().mockImplementation((queryText: string, params: any[]) => {
+        if (queryText.includes('ORDER BY CASE WHEN $2::text IS NULL OR s.id > $2::text')) {
+          return { rows: [{ id: 'kuro' }] };
+        }
         // Work queue reconciliation query: 0 queued, 0 importing
         if (queryText.includes('queued_cnt') || queryText.includes('paused_cnt')) {
           return { rows: params[0].map((work_id: string) => ({ work_id, queued_cnt:'0', importing_cnt:'0', paused_cnt:'0', min_sort_key:null, pub_cnt:'10', max_pub:'10', unimported_cnt:'10', source_status:'ACTIVE' })) };
