@@ -128,6 +128,15 @@ export function shouldReserveP0AfterStaffBurst(
 }
 
 /**
+ * When no tracked active work exists, the first catalog fallback already
+ * probes the full published catalog.  A second identical probe in the same
+ * claim attempt only doubles YSQL pressure when it returns no row.
+ */
+export function shouldRunCatalogFallbackAgain(activeWorkIdsEmpty: boolean, alreadyAttempted: boolean): boolean {
+  return !(activeWorkIdsEmpty && alreadyAttempted);
+}
+
+/**
  * Staff and P0 are order-only lanes, but an endless stream of either must not
  * make already-admitted P1/P2 work mathematically impossible to finish.  One
  * normal-lane claim after a bounded high-priority burst preserves the normal
@@ -1238,7 +1247,9 @@ export class WorkAffinityScheduler {
       return catalogP1Job;
     };
 
+    let catalogP1AlreadyChecked = false;
     if (activeWorkIds.length === 0) {
+      catalogP1AlreadyChecked = true;
       const directCatalogJob = await claimCatalogP1();
       if (directCatalogJob) return finishCatalogP1(directCatalogJob);
     }
@@ -1320,7 +1331,9 @@ export class WorkAffinityScheduler {
     // When currently tracked active P1 and P2 works cannot supply a job,
     // claim from ANY published catalog work
     // -------------------------------------------------------------
-    const catalogP1Job = await claimCatalogP1();
+    const catalogP1Job = shouldRunCatalogFallbackAgain(activeWorkIds.length === 0, catalogP1AlreadyChecked)
+      ? await claimCatalogP1()
+      : null;
 
     if (catalogP1Job) {
       return finishCatalogP1(catalogP1Job);
