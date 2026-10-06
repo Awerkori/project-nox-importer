@@ -2183,4 +2183,37 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
       expect.any(Object),
     );
   });
+
+  it('does not cancel a newly started import while the restart circuit is open', async () => {
+    const now = Date.now();
+    const pastRestarts: AutoRestartRecord[] = [
+      { timestamp: new Date(now - 45 * 60 * 1000).toISOString(), reason: 'CRITICAL_STALL', progressAgeSec: 1800, eligibleJobs: 100 },
+      { timestamp: new Date(now - 30 * 60 * 1000).toISOString(), reason: 'CRITICAL_STALL', progressAgeSec: 1800, eligibleJobs: 100 },
+      { timestamp: new Date(now - 9 * 60 * 1000).toISOString(), reason: 'CRITICAL_STALL', progressAgeSec: 1800, eligibleJobs: 100 },
+    ];
+    mockPool.query.mockImplementation((sql: string) => {
+      if (sql.includes("key = 'importer_auto_restarts'")) return { rows: [{ value: JSON.stringify(pastRestarts) }] };
+      return { rows: [] };
+    });
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+    (watchdog as any).lastLevel1At = now - 60_000;
+
+    await watchdog.executeRecoveryLadder({
+      status: 'STALLED', autoHealState: 'MONITORING', processingHealth: 'STALLED', publicationHealth: 'STALLED',
+      lastStartedAgeSec: 30, lastCompletedAgeSec: 20 * 60, lastFreshVisibleAgeSec: 20 * 60,
+      startedLast15m: 1, completedLast15m: 0, freshLast15m: 0, eligibleJobs: 25, claimableWorks: 1,
+      activeWorksCount: 1, zombieWorksCount: 0, importingCount: 1, retryCount: 0, stagedUnique: 0,
+      publishableStaged: 0, waitingPredecessorStaged: 0, stuckStaged: 0, lastAutoHealAt: null,
+      autoRestartCount1h: 3, circuitBreakerOpen: true, protectiveStopActive: false, rssMb: 0, pid: 1,
+      timestamp: new Date().toISOString(),
+    });
+
+    expect(onControlledRestart).not.toHaveBeenCalled();
+  });
 });

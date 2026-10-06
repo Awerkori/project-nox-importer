@@ -1073,6 +1073,19 @@ export class AutoHealWatchdog {
      * ceilings or retries at a high cadence.
      */
     async runCircuitContainment(metrics, recentRestarts, nowMs) {
+        // A containment pass is an escape hatch for a genuinely wedged epoch,
+        // not permission to abort work that has just started.  The global
+        // publication clock can be old while a healthy download/upload is in
+        // flight; cancelling it would turn a historical stall into a fresh
+        // retry-budget failure.  Once the current import has exceeded the same
+        // 12-minute bound used for controlled recovery, containment may resume.
+        if (metrics.lastStartedAgeSec < CONTROLLED_RESTART_AFTER_SEC) {
+            this.logger.info('[AUTO-RECOVERY CIRCUIT] Fresh in-flight work detected; deferring containment cancellation.', {
+                lastStartedAgeSec: metrics.lastStartedAgeSec,
+                importing: metrics.importingCount,
+            });
+            return;
+        }
         const latestRestartMs = recentRestarts.reduce((latest, record) => {
             const timestamp = new Date(record.timestamp).getTime();
             return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
