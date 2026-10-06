@@ -114,9 +114,22 @@ export class SourceAdmissionGate {
         const t1 = Date.now();
         let discoveredWorks = [];
         try {
+            const isPlaceholderWork = (work) => {
+                const sourceWorkId = String(work?.sourceWorkId || '').trim().toLocaleLowerCase();
+                if (!sourceWorkId)
+                    return true;
+                const normalized = sourceWorkId.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+|\/+$/g, '');
+                const terminal = normalized.split('/').pop() || normalized;
+                return new Set(['feed', 'page', 'order', 'manga', 'obra', 'projeto']).has(terminal);
+            };
             if (typeof adapter.searchWorks === 'function') {
                 try {
-                    discoveredWorks = await this.withStageTimeout('CATALOG_SEARCH', adapter.searchWorks('Solo'));
+                    const searchWorks = await this.withStageTimeout('CATALOG_SEARCH', adapter.searchWorks('Solo'));
+                    // Some WordPress/Madara search endpoints return a feed or pagination
+                    // link as the only result. Treat that as an unusable catalog result
+                    // and fall back to the adapter's bootstrap listing instead of
+                    // probing a fake work and parking a healthy source as API_BLOCK.
+                    discoveredWorks = (searchWorks || []).filter((work) => !isPlaceholderWork(work));
                 }
                 catch { }
             }

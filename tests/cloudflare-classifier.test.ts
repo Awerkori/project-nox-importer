@@ -271,6 +271,37 @@ describe('Cloudflare Classifier & Resilience Suite', () => {
       expect(mockAdapter.fetchChapterPages).toHaveBeenCalledWith('ch-1', 1);
     });
 
+    it('falls back to bootstrap catalog when search returns only a feed placeholder', async () => {
+      const gate = new SourceAdmissionGate();
+      const mockAdapter: SourceAdapter = {
+        id: 'feed-placeholder-source',
+        name: 'Feed Placeholder Source',
+        baseUrl: 'https://feed-placeholder.example.com',
+        searchWorks: vi.fn(async () => [
+          { sourceWorkId: 'feed', title: 'feed' },
+        ]),
+        fetchUpdatedWorks: vi.fn(async () => ({
+          works: [{ sourceWorkId: 'real-work', title: 'Real work', slug: 'real-work' }],
+          nextCursor: null,
+        })),
+        fetchWorkDetails: vi.fn(async () => ({ title: 'Real work', sourceWorkId: 'real-work' })),
+        fetchChapters: vi.fn(async (id: string) => id === 'real-work'
+          ? [{ sourceChapterId: 'ch-1', number: 1, pageCount: 1 }]
+          : []),
+        fetchChapterPages: vi.fn(async () => ['https://cdn.example.com/p1.jpg']),
+      };
+      const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+      const mockTransport = vi.fn(async (url: string) => url.includes('p1.jpg')
+        ? ({ ok: true, status: 200, headers: new Headers({ 'content-type': 'image/jpeg' }), arrayBuffer: async () => jpegBytes.buffer } as any)
+        : ({ ok: true, status: 200, headers: new Headers({ 'content-type': 'text/html' }), text: async () => '<html><body>Welcome</body></html>' } as any));
+
+      const report = await gate.executeProdProbe(mockAdapter, mockTransport);
+      expect(report.overallStatus).toBe('PASS');
+      expect(mockAdapter.fetchUpdatedWorks).toHaveBeenCalledWith(null, { mode: 'bootstrap' });
+      expect(mockAdapter.fetchChapters).toHaveBeenCalledWith('real-work');
+      expect(mockAdapter.fetchChapters).not.toHaveBeenCalledWith('feed');
+    });
+
     it('times out a hung adapter stage instead of freezing the source recovery queue', async () => {
       const gate = new SourceAdmissionGate(10);
       const mockAdapter: SourceAdapter = {
