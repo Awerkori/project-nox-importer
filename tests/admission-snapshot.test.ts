@@ -184,6 +184,24 @@ describe('bounded admission snapshot', () => {
     expect(calls.some((sql)=>sql.includes('w.published IS TRUE'))).toBe(true);
   });
 
+  it('does not let the broad paused-P1 fallback deadlock P2 while claims are under pressure', async () => {
+    const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
+    const sentinel={isProtectiveStopActive:async()=>false} as any;
+    const pool={waitingCount:2, query:async(sql:string)=> {
+      if (sql.includes('priority >= 100')) return {rows:[{p0_cnt:'0'}]};
+      if (sql.includes("q.status = 'PAUSED_BY_STAFF'")) {
+        throw new Error('paused backlog scan must be skipped under claim pressure');
+      }
+      if (sql.includes("status = 'IMPORTING'")) return {rows:[{cnt:'0'}]};
+      return {rows:[]};
+    }};
+    const c=new AdmissionController(state,sentinel,pool);
+    await expect((c as any).canAdmitNewWork({allowDuringClaimPressure:true})).resolves.toMatchObject({
+      allowed:true,
+      reason:'CAN_ADMIT_NEW_WORK_ALLOWED',
+    });
+  });
+
   it('holds P2 admission whenever a visible work still has P1 backlog, including paused window jobs', async () => {
     const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
     const sentinel={isProtectiveStopActive:async()=>false} as any;
