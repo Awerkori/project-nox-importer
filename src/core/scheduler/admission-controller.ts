@@ -388,7 +388,7 @@ export class AdmissionController {
     // assigned when they were first discovered.  This is deliberately based
     // on the canonical work visibility, not latest_chapter_published_at: that
     // denormalized timestamp may legitimately be null for older works.
-    const p1 = await this.getP1BacklogSnapshot();
+    const p1 = await this.getP1BacklogSnapshot(options);
     if (p1.available > 0) {
       return {
         allowed: false,
@@ -486,7 +486,7 @@ export class AdmissionController {
    * not a catalog aggregate: admission only needs to know whether P1 must go
    * first, and a full COUNT(DISTINCT ...) scan would compete with imports.
    */
-  private async getP1BacklogSnapshot(): Promise<{ claimable: number; available: number; works: number }> {
+  private async getP1BacklogSnapshot(options: { allowDuringClaimPressure?: boolean } = {}): Promise<{ claimable: number; available: number; works: number }> {
     const now = Date.now();
     if (now - this.p1BacklogProbeAt < 2_000) return this.p1BacklogSnapshot;
     if (this.p1BacklogProbeFlight) return this.p1BacklogProbeFlight;
@@ -578,6 +578,18 @@ export class AdmissionController {
       const candidate = ready.rows[0];
       if (candidate) {
         this.p1BacklogSnapshot = { claimable: 1, available: 1, works: 1 };
+        this.p1BacklogProbeAt = Date.now();
+        return this.p1BacklogSnapshot;
+      }
+      // PAUSED_BY_STAFF rows are not executable by the claim path. They are
+      // useful for the normal maintenance cycle, but probing that historical
+      // backlog requires a broad scan and can consume the last bounded pool
+      // connection while claims are waiting. Under claim pressure the
+      // work-conserving P2 probe must not turn this advisory fallback into a
+      // permanent admission deadlock; the next non-pressure cycle will still
+      // inspect paused P1 backlog before admitting new catalog work.
+      if (options.allowDuringClaimPressure) {
+        this.p1BacklogSnapshot = { claimable: 0, available: 0, works: 0 };
         this.p1BacklogProbeAt = Date.now();
         return this.p1BacklogSnapshot;
       }
