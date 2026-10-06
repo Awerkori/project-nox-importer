@@ -85,6 +85,14 @@ export declare class NarrativePageUnavailableError extends Error {
     originalError: string;
     constructor(source: string, pageIndex: number, totalPages: number, originalError: string);
 }
+/**
+ * A deadline/lease cancellation is not evidence that a narrative page is
+ * absent upstream.  The media pipeline can observe the abort while draining
+ * its producer/consumer queues and otherwise wrap it as a narrative-page
+ * failure.  Preserve the cancellation reason so the queue takes its bounded
+ * retry path instead of permanently recording a false chapter gap.
+ */
+export declare function getJobAbortError(signal?: AbortSignal): Error | null;
 export declare class ImporterEngine {
     private supabase;
     private storage;
