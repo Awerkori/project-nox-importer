@@ -72,6 +72,14 @@ export class AdmissionController {
   private orphanCancelledRecoveryAt = 0;
   private legacyTransientFailureRecoveryAt = 0;
   private sourceRecoveredFailureRecoveryAt = 0;
+  // A continuously busy bounded pool must not permanently starve the one
+  // reconciliation pass that can retire stale active_works entries.  Allow a
+  // single bounded maintenance pass after sustained pressure, then keep the
+  // normal claim-first backpressure until the next interval.
+  private claimPressureSince = 0;
+  private lastPressureMaintenanceAt = 0;
+  private static readonly PRESSURE_MAINTENANCE_AFTER_MS = 30_000;
+  private static readonly PRESSURE_MAINTENANCE_INTERVAL_MS = 60_000;
 
   private getP1AdmissionCursors(): Record<string, string> {
     const getter = (this.stateStore as any).getP1AdmissionCursors;
@@ -145,6 +153,19 @@ export class AdmissionController {
     // remain stale indefinitely.  Only a real pool queue, or a pool with no
     // idle connection at all, must defer control-plane work.
     return waiting > 0 || (total > 0 && idle === 0);
+  }
+
+  private shouldRunPressureMaintenance(): boolean {
+    const now = Date.now();
+    if (!this.isPoolUnderClaimPressure()) {
+      this.claimPressureSince = 0;
+      return false;
+    }
+    if (this.claimPressureSince === 0) this.claimPressureSince = now;
+    if (now - this.claimPressureSince < AdmissionController.PRESSURE_MAINTENANCE_AFTER_MS) return false;
+    if (now - this.lastPressureMaintenanceAt < AdmissionController.PRESSURE_MAINTENANCE_INTERVAL_MS) return false;
+    this.lastPressureMaintenanceAt = now;
+    return true;
   }
 
   /**
@@ -1033,7 +1054,7 @@ export class AdmissionController {
 
     // Do not let control-plane scans consume the bounded pool while claims
     // are active or queued.  A later scheduled/vacancy cycle will retry.
-    if (this.isPoolUnderClaimPressure()) {
+    if (this.isPoolUnderClaimPressure() && !this.shouldRunPressureMaintenance()) {
       // Claims are the work-conserving data plane, but a pool waiter must not
       // permanently starve P2 discovery when the bounded P1 probe has no
       // executable catalog frontier. This path performs exactly one bounded
@@ -1042,6 +1063,17 @@ export class AdmissionController {
       // backlog scans. A real P1 frontier still wins in canAdmitNewWork().
       await this.executeOnDemandAdmission('P2', undefined, true);
       this.logger.debug('[ADMISSION_P2_PRESSURE_PROBE] bounded P2 admission attempted while claims are waiting');
+      return;
+    }
+
+    // If claim pressure remains continuous, one bounded reconciliation pass is
+    // necessary to retire stale active_works and replenish a legitimate
+    // frontier.  Do not run the broad recovery/scanning chain in this escape
+    // hatch; it is intentionally limited to the active-work snapshot and its
+    // bounded replenishment.
+    if (this.isPoolUnderClaimPressure()) {
+      this.logger.warn('[ADMISSION_PRESSURE_MAINTENANCE] sustained claim pressure; running bounded active-work reconciliation');
+      await this.runPressureMaintenance();
       return;
     }
 
@@ -1066,6 +1098,11 @@ export class AdmissionController {
 
     // Step 3: Maintain sliding admission windows for all active works
     await this.maintainSlidingWindows();
+  }
+
+  private async runPressureMaintenance(): Promise<void> {
+    await this.reconcileActiveWorks();
+    await this.replenishActiveSets();
   }
 
   /**

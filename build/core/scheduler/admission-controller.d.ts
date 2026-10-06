@@ -34,6 +34,10 @@ export declare class AdmissionController {
     private orphanCancelledRecoveryAt;
     private legacyTransientFailureRecoveryAt;
     private sourceRecoveredFailureRecoveryAt;
+    private claimPressureSince;
+    private lastPressureMaintenanceAt;
+    private static readonly PRESSURE_MAINTENANCE_AFTER_MS;
+    private static readonly PRESSURE_MAINTENANCE_INTERVAL_MS;
     private getP1AdmissionCursors;
     private advanceP1AdmissionCursor;
     setSourcePermitProvider(provider: (source: string) => number): void;
@@ -48,6 +52,7 @@ export declare class AdmissionController {
      * once the pool drains, so this is backpressure, not a disabled recovery.
      */
     private isPoolUnderClaimPressure;
+    private shouldRunPressureMaintenance;
     /**
      * Keep one executable P1 chapter per active work. Older scheduler versions
      * could leave an entire backfill window (or more) QUEUED, then replenish it
@@ -154,6 +159,7 @@ export declare class AdmissionController {
     runAdmissionCycle(): Promise<void>;
     private enqueueAdmissionOperation;
     private executeAdmissionCycle;
+    private runPressureMaintenance;
     /**
      * Step 1: Reconciles all currently tracked active works.
      * Updates their progress, checks if they reached CAUGHT_UP, detects barrier gaps.

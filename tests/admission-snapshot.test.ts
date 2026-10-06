@@ -165,6 +165,28 @@ describe('bounded admission snapshot', () => {
     expect(p2Probe).toHaveBeenCalledWith('P2', undefined, true);
   });
 
+  it('runs one bounded reconciliation after sustained pool pressure', async () => {
+    const state = { getConfig: () => ({ enabled: true, shadowMode: false }) } as any;
+    const sentinel = { isProtectiveStopActive: async () => false } as any;
+    const pool = {
+      totalCount: 2,
+      idleCount: 0,
+      waitingCount: 3,
+      query: async () => ({ rows: [] }),
+    };
+    const controller = new AdmissionController(state, sentinel, pool);
+    (controller as any).claimPressureSince = Date.now() - 31_000;
+    const reconcile = vi.spyOn(controller as any, 'reconcileActiveWorks').mockResolvedValue(undefined);
+    const replenish = vi.spyOn(controller as any, 'replenishActiveSets').mockResolvedValue(undefined);
+    const p2Probe = vi.spyOn(controller as any, 'executeOnDemandAdmission').mockResolvedValue(null);
+
+    await controller.runAdmissionCycle();
+
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(replenish).toHaveBeenCalledTimes(1);
+    expect(p2Probe).not.toHaveBeenCalled();
+  });
+
   it('reconciles stale active works when a claim uses one connection but another is idle', async () => {
     const state = { getConfig: () => ({ enabled: true, shadowMode: false }) } as any;
     const sentinel = { isProtectiveStopActive: async () => false } as any;
