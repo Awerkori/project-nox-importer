@@ -224,6 +224,10 @@ export class ImporterEngine {
   // released before source download/Telegram work, so it never reduces the
   // configured chapter concurrency.
   private chapterClaimGate: AsyncSemaphore;
+  // Maintenance must not win the startup race against the first real chapter
+  // claim.  Once one claim attempt has completed (success or empty), the
+  // normal pressure gate below governs maintenance fairly.
+  private chapterClaimPhaseReady = false;
   // Discovery and catalog sync are maintenance lanes. They must not each hold
   // a DB client beside chapter claims, publication and site traffic.
   private catalogMaintenanceLane = new AsyncSemaphore(1, 'catalog_maintenance_lane');
@@ -2345,6 +2349,7 @@ export class ImporterEngine {
         // B. Find sources that currently have available capacity (outside mutex)
         let eligibleSources = await this.getEligibleChapterSources();
         if (eligibleSources.length === 0) {
+          this.chapterClaimPhaseReady = true;
           releaseGlobal();
           releaseClaimGate();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
@@ -2368,7 +2373,9 @@ export class ImporterEngine {
               leaseDurationMinutes: Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
               allowedSources: eligibleSources,
             });
+            this.chapterClaimPhaseReady = true;
           } catch (acquireErr: any) {
+            this.chapterClaimPhaseReady = true;
             this.logger.warn(`Error acquiring chapter job: ${acquireErr?.message}`);
             break;
           }
@@ -2706,6 +2713,7 @@ export class ImporterEngine {
    * saturating the bounded claim gate.
    */
   private shouldDeferCatalogMaintenance(): boolean {
+    if (!this.chapterClaimPhaseReady) return true;
     return this.chapterClaimGate.queued > 0 ||
       this.chapterClaimGate.active >= Math.max(1, this.chapterClaimGate.capacity - 1);
   }

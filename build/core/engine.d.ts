@@ -104,6 +104,7 @@ export declare class ImporterEngine {
     private activeChapterExecutions;
     private chapterClaimMutex;
     private chapterClaimGate;
+    private chapterClaimPhaseReady;
     private catalogMaintenanceLane;
     private activeSourcesCache;
     private sourceScheduleSnapshot;
