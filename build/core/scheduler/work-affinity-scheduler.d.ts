@@ -25,6 +25,12 @@ export declare function isActiveChapterClaimConflict(error: any): boolean;
  */
 export declare function shouldReserveP0AfterStaffBurst(consecutiveStaffClaims: number, antiStarvationRatio: number, hasP0Candidate: boolean): boolean;
 /**
+ * When no tracked active work exists, the first catalog fallback already
+ * probes the full published catalog.  A second identical probe in the same
+ * claim attempt only doubles YSQL pressure when it returns no row.
+ */
+export declare function shouldRunCatalogFallbackAgain(activeWorkIdsEmpty: boolean, alreadyAttempted: boolean): boolean;
+/**
  * Staff and P0 are order-only lanes, but an endless stream of either must not
  * make already-admitted P1/P2 work mathematically impossible to finish.  One
  * normal-lane claim after a bounded high-priority burst preserves the normal

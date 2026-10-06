@@ -22,9 +22,18 @@ import {
 import { SchedulerStateStore } from '../src/core/scheduler/state-store.js';
 import { AdmissionController } from '../src/core/scheduler/admission-controller.js';
 import { WorkAffinityScheduler } from '../src/core/scheduler/work-affinity-scheduler.js';
-import { shouldReserveLowerPriorityAfterHighBurst } from '../src/core/scheduler/work-affinity-scheduler.js';
+import {
+  shouldReserveLowerPriorityAfterHighBurst,
+  shouldRunCatalogFallbackAgain,
+} from '../src/core/scheduler/work-affinity-scheduler.js';
 
 describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
+  it('does not repeat an empty catalog fallback in the same claim attempt', () => {
+    expect(shouldRunCatalogFallbackAgain(true, true)).toBe(false);
+    expect(shouldRunCatalogFallbackAgain(true, false)).toBe(true);
+    expect(shouldRunCatalogFallbackAgain(false, true)).toBe(true);
+  });
+
   let mockPool: any;
   let mockStateStore: any;
   let mockAdmissionController: any;
