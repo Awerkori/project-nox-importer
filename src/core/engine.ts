@@ -1741,7 +1741,7 @@ export class ImporterEngine {
     this.sourceProbesInFlight.add(src.id);
 
     // If shared network incident is active, suppress probe storms
-    if (this.sharedNetworkDetector.isSharedBlockActive()) {
+    if (this.sharedNetworkDetector.isSharedBlockActiveFor(src.blocked_reason as CloudflareClassification | null)) {
       this.logger.warn(`Shared network block is currently active on datacenter network. Suppressing probe for ${src.id}.`);
       this.sourceProbesInFlight.delete(src.id);
       return;
