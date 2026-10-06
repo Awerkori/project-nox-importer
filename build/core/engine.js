@@ -58,6 +58,23 @@ export function resolveChapterClaimConcurrency(globalConcurrency, dbPoolMax) {
     void dbPoolMax;
     return Math.max(1, global);
 }
+/**
+ * Claims are validated before an execution permit is taken, so the nominal
+ * claim gate can be wider than the YSQL pool when the importer is healthy.
+ * When the governor temporarily lowers execution capacity, however, allowing
+ * every nominal slot to run the expensive claim query creates a stampede:
+ * only one can ultimately take the reduced execution permit.  Keep the
+ * DB-backed claim phase no wider than the current effective capacity.
+ */
+export function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency, effectiveChapterConcurrency) {
+    const configured = Number.isFinite(configuredClaimConcurrency)
+        ? Math.max(1, Math.floor(configuredClaimConcurrency))
+        : 1;
+    const effective = Number.isFinite(effectiveChapterConcurrency)
+        ? Math.max(1, Math.floor(effectiveChapterConcurrency))
+        : 1;
+    return Math.min(configured, effective);
+}
 export function computeInternalLivenessState(params) {
     const tripwire = params.rssTripwireMb ?? 380;
     if (params.isStopActive || params.rssMb >= tripwire) {
@@ -2136,6 +2153,7 @@ export class ImporterEngine {
                 // that pool instead of being made permanently idle by a pool-sized
                 // second semaphore.
                 telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
+                this.chapterClaimGate.setCapacity(resolveEffectiveClaimGateCapacity(this.config.MAX_CONCURRENT_CHAPTERS || 5, globalSem.capacity));
                 if (!this.chapterClaimGate.tryAcquire()) {
                     telemetryCollector.setSlotState(slotIndex, 'IDLE');
                     await this.sleep(50 + Math.floor(Math.random() * 50));
