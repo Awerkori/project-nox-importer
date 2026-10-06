@@ -21,7 +21,12 @@ export interface ProbeReport {
     isAsnBlock: boolean;
 }
 export declare class SourceAdmissionGate {
+    private readonly stageTimeoutMs;
     private logger;
+    /** Bound each provider stage so one hung adapter cannot freeze recovery for
+     * every other source. Provider-level fetch timeouts remain in force. */
+    constructor(stageTimeoutMs?: number);
+    private withStageTimeout;
     /**
      * Executes a strict production probe directly from the current runtime environment.
      * Tests: Base URL -> Catalog -> Details -> Chapters -> Pages -> Image Download.
