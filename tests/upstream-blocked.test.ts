@@ -348,4 +348,31 @@ describe('UPSTREAM_BLOCKED Isolation, Job Parking & Cross-Provider Fallback', ()
     expect(probe).toHaveBeenCalledTimes(2);
     expect(probe.mock.calls.map(([source]) => source.id)).toEqual(['mangotoons', 'later-source']);
   });
+
+  it('does not spend the probe budget on candidates suppressed by a shared network incident', async () => {
+    const candidates = [
+      { id: 'datacenter-blocked', name: 'Datacenter blocked', status: 'UPSTREAM_BLOCKED', blocked_reason: 'CLOUDFLARE_DATACENTER_BLOCK' },
+      { id: 'js-challenge', name: 'JS challenge', status: 'UPSTREAM_BLOCKED', blocked_reason: 'JS_CHALLENGE' },
+      { id: 'mangotoons', name: 'Mango Toons', status: 'UPSTREAM_BLOCKED', blocked_reason: 'API_BLOCK' },
+      { id: 'turnstile-source', name: 'Turnstile source', status: 'UPSTREAM_BLOCKED', blocked_reason: 'TURNSTILE' },
+    ];
+    const query: any = {
+      select: vi.fn().mockReturnThis(),
+      in: vi.fn().mockReturnThis(),
+      order: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue({ data: candidates, error: null }),
+    };
+    mockSupabase = { from: vi.fn(() => query) };
+    engine = new ImporterEngine(mockSupabase, storage, registry, rateLimiter, config);
+
+    vi.spyOn((engine as any).circuitBreaker, 'canExecute').mockReturnValue(true);
+    vi.spyOn((engine as any).sharedNetworkDetector, 'isSharedBlockActiveFor').mockImplementation(
+      (reason: string) => reason === 'CLOUDFLARE_DATACENTER_BLOCK' || reason === 'JS_CHALLENGE',
+    );
+    const probe = vi.spyOn(engine, 'probeSourceHealth').mockResolvedValue();
+
+    await engine.checkBlockedSourcesHealth();
+
+    expect(probe.mock.calls.map(([source]) => source.id)).toEqual(['mangotoons', 'turnstile-source']);
+  });
 });
