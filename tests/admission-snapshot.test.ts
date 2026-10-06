@@ -35,7 +35,7 @@ describe('bounded admission snapshot', () => {
     expect(periodicAdmissionSql).toMatch(/GROUP BY q\.payload->>'workId', q\.source/);
     expect(source).toMatch(/WHERE rotation_rank <= \$3 OR frontier_rank <= \$3/);
     expect(source).toMatch(
-      /loadP1Candidates\(false\)[\s\S]{0,180}loadP1Candidates\(true\)/,
+      /loadP1Candidates\(false\)[\s\S]{0,500}contiguousCandidates\.length < backfillSlotsAvailable[\s\S]{0,300}loadP1Candidates\(true\)/,
     );
     // Admission must not rotate a work solely because a stale queue row is
     // still present after another source published its canonical chapter.
@@ -51,7 +51,7 @@ describe('bounded admission snapshot', () => {
       /loadP2Candidates\(false\)[\s\S]{0,180}loadP2Candidates\(true\)/,
     );
     expect(source).toMatch(
-      /loadOnDemandCandidates\(false\)[\s\S]{0,180}loadOnDemandCandidates\(true\)/,
+      /loadOnDemandCandidates\(false\)[\s\S]{0,500}if \(!match\)[\s\S]{0,200}loadOnDemandCandidates\(true\)/,
     );
     const onDemandStart = source.indexOf('const loadOnDemandCandidates =');
     const onDemandSql = source.slice(onDemandStart, onDemandStart + 10000);
@@ -261,6 +261,49 @@ describe('bounded admission snapshot', () => {
       reason:'P1_BACKLOG_WAITING: existing catalog work must advance before P2 admission',
       metrics:{p1Claimable:1,p1AvailableChapters:1,p1WorksWaiting:1},
     });
+  });
+
+  it('falls back to a paused P1 frontier when a non-empty queued window is entirely behind a gap', async () => {
+    const admitted: any[] = [];
+    const badWork = '00000000-0000-0000-0000-000000000041';
+    const pausedFrontierWork = '00000000-0000-0000-0000-000000000042';
+    let pausedWindowQueries = 0;
+    const state = {
+      getConfig: () => ({ enabled: true, shadowMode: false }),
+      getActiveWorks: () => [],
+      setActiveWork: (work: any) => admitted.push(work),
+    } as any;
+    const sentinel = { isProtectiveStopActive: async () => false } as any;
+    const pool = {
+      query: async (sql: string, params: any[] = []) => {
+        if (sql.includes('WITH eligible_sources AS MATERIALIZED')) {
+          const includesPaused = sql.includes("OR q.status = 'PAUSED_BY_STAFF'");
+          if (includesPaused) {
+            pausedWindowQueries++;
+            return { rows: [{ work_id: pausedFrontierWork, title: 'Paused frontier', source: 's', pending_jobs: '1', queued_count: '0', min_sort_key: '2' }] };
+          }
+          return { rows: [{ work_id: badWork, title: 'Gap work', source: 's', pending_jobs: '1', queued_count: '1', min_sort_key: '5' }] };
+        }
+        if (sql.includes('SELECT work_id::text, COALESCE(MAX(number), -1)')) {
+          return { rows: (params[0] || []).map((work_id: string) => ({ work_id, max_pub: '1' })) };
+        }
+        if (sql.includes('FROM importer_confirmed_gaps')) return { rows: [] };
+        // Keep the gap validator fail-closed for the non-contiguous queued row.
+        if (sql.includes("WHERE (payload->>'workId') = $1")) {
+          return { rows: [{ source: 's', chapter_sort_key: '2', status: 'QUEUED' }] };
+        }
+        return { rows: [] };
+      },
+    };
+    const controller = new AdmissionController(state, sentinel, pool as any);
+    vi.spyOn(controller as any, 'enforceP1FairWindow').mockResolvedValue(1);
+
+    const result = await (controller as any).executeOnDemandAdmission('P1', ['s']);
+
+    expect(pausedWindowQueries).toBe(1);
+    expect(result).toMatchObject({ workId: pausedFrontierWork, lane: 'P1', primarySource: 's' });
+    expect(admitted).toHaveLength(1);
+    expect(admitted[0]).toMatchObject({ workId: pausedFrontierWork, queuedChapters: 1 });
   });
 
   it('keeps paused/retry backlog active and persists the P2-to-P1 transition after first publication', async () => {
