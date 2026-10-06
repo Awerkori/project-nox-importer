@@ -339,6 +339,33 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(sqlCalls[0]).toContain('canonical_chapter.number = q.chapter_sort_key');
   });
 
+  it('vacates a stale P2 active entry after repeated exact claim misses', () => {
+    const workId = 'stale-p2-work';
+    mockStateStore.setActiveWork({
+      workId,
+      workTitle: 'Stale P2',
+      lane: 'P2',
+      state: 'FILLING',
+      primarySource: 'source',
+      admittedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+      totalChapters: 1,
+      publishedChapters: 0,
+      queuedChapters: 1,
+      inFlightChapters: 0,
+      frontierSortKey: 1,
+      criticalGapSortKey: null,
+      criticalGapUnblockCount: 0,
+    });
+
+    (scheduler as any).noteP2ClaimMiss(workId);
+    (scheduler as any).noteP2ClaimMiss(workId);
+    expect(mockStateStore.getActiveWork(workId)).toBeDefined();
+    (scheduler as any).noteP2ClaimMiss(workId);
+    expect(mockStateStore.getActiveWork(workId)).toBeUndefined();
+    expect(mockStateStore.removeActiveWork).toHaveBeenCalledWith(workId);
+  });
+
   // =========================================================================
   // TEST C: Fairness & Max Inflight per Work (MAX_INFLIGHT_PER_WORK = 2)
   // =========================================================================
