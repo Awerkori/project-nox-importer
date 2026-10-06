@@ -1700,14 +1700,22 @@ export class ImporterEngine {
     // Recovery checks are deliberately small and staggered. COOLDOWN and
     // DEGRADED sources are owned by the dedicated expiry loop.
     if (typeof (query as any).order === 'function') query = (query as any).order('last_health_check_at', { ascending: true, nullsFirst: true });
-    if (typeof (query as any).limit === 'function') query = (query as any).limit(2);
+    // Fetch a bounded candidate window before applying the in-memory circuit
+    // breaker filter. Limiting to the first two rows and only then skipping
+    // OPEN circuits can starve every later source indefinitely: the same
+    // blocked rows remain oldest forever while healthy sources (for example a
+    // recovered API source) never receive a probe.
+    if (typeof (query as any).limit === 'function') query = (query as any).limit(32);
     const { data: blockedSources, error } = await query;
 
     if (error || !blockedSources || blockedSources.length === 0) return;
 
+    let probesStarted = 0;
     for (const src of blockedSources) {
       if (this.stopSignal) break;
       if (!this.circuitBreaker.canExecute(src.id)) continue;
+      if (probesStarted >= 2) break;
+      probesStarted += 1;
       await this.probeSourceHealth(src);
     }
   }
