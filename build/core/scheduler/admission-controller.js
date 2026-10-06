@@ -1471,7 +1471,7 @@ export class AdmissionController {
                AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
                AND NOT ((q.payload->>'workId') = ANY($1::text[]))
                AND q.payload->>'workId' IS NOT NULL
-             ORDER BY q.created_at ASC NULLS LAST, q.id ASC
+             ORDER BY q.priority DESC, q.chapter_sort_key ASC
              LIMIT $5
            ) q
          ),
@@ -1983,7 +1983,7 @@ export class AdmissionController {
               AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
               AND NOT ((q.payload->>'workId') = ANY($2::text[]))
               AND q.payload->>'workId' IS NOT NULL
-            ORDER BY q.created_at ASC NULLS LAST, q.id ASC
+            ORDER BY q.priority DESC, q.chapter_sort_key ASC
             LIMIT $5
           ) q
         ), queue_candidates AS MATERIALIZED (
