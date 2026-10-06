@@ -30,8 +30,7 @@ const CANONICAL_PUBLISHED_CLAIM_FILTER = `
             WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
               AND canonical_chapter.published_at IS NOT NULL
               AND (
-                canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
-                OR canonical_chapter.number = q.chapter_sort_key
+                canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key)
               )
           )`;
 // Never spend a chapter slot on a later frontier while an earlier chapter is
@@ -1928,8 +1927,7 @@ export class WorkAffinityScheduler {
             WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
               AND canonical_chapter.published_at IS NOT NULL
               AND (
-                canonical_chapter.number = NULLIF(q.payload->>'chapterNumber', '')::numeric
-                OR canonical_chapter.number = q.chapter_sort_key
+                canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key)
               )
           )`;
                 const statsRes = await this.runQuery(this.pool, `
