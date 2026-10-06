@@ -65,9 +65,11 @@ export declare class WorkAffinityScheduler {
     private staffCandidateProbeFlight;
     private readonly staffCandidateProbeTtlMs;
     private unclaimableWorksCooldown;
+    private p2ClaimMisses;
     markWorkUnclaimable(workId: string, ttlMs?: number): void;
     isWorkUnclaimable(workId: string): boolean;
     clearWorkUnclaimable(workId: string): void;
+    private noteP2ClaimMiss;
     private p0WaitTimes;
     private p0Count1h;
     private p1Count1h;
