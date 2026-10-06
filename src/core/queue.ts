@@ -592,14 +592,28 @@ export class ImporterQueue {
       // the pending mapping check, so concurrent recovery callers are idempotent.
       const directSql = (this.supabase as any)?.sql;
       if (typeof directSql === 'function') {
-        const scanLimit = Math.max(limit, 500);
+        // Start from the status/updated_at index, then inspect the bounded
+        // recent failure window for the legacy reservation signature.  A
+        // direct `last_error LIKE` predicate over every historical FAILED row
+        // repeatedly timed out on YSQL and held a pool client that claims
+        // need. Reservation failures are transient and are created by the
+        // current runtime, so the recent window is the only population that
+        // needs prompt recovery; historical rows remain intact and never get
+        // rewritten by this maintenance path.
+        const scanLimit = Math.max(limit * 4, 100);
         const failedResult = await directSql.call(this.supabase, `
+          WITH recent_failed AS MATERIALIZED (
+            SELECT id, source, payload, chapter_sort_key, last_error, task_type
+            FROM importer_queue
+            WHERE status = 'FAILED'
+              AND updated_at >= NOW() - INTERVAL '7 days'
+            ORDER BY updated_at DESC, id DESC
+            LIMIT $1
+          )
           SELECT id, source, payload, chapter_sort_key, last_error
-          FROM importer_queue
+          FROM recent_failed
           WHERE task_type = 'IMPORT_CHAPTER'
-            AND status = 'FAILED'
             AND last_error LIKE 'Concurrent reservation limit:%'
-          ORDER BY updated_at ASC, id ASC
           LIMIT $1
         `, [scanLimit]);
         const failed = (failedResult?.rows || []).filter((job: any) =>

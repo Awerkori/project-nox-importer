@@ -80,7 +80,10 @@ describe('ImporterQueue transient reservation-limit recovery', () => {
 
     await expect(queue.recoverReservationLimitFailures(25)).resolves.toBe(1);
     expect(sql).toHaveBeenCalledTimes(3);
-    expect(sql.mock.calls[0][1]).toEqual([500]);
+    expect(sql.mock.calls[0][1]).toEqual([100]);
+    expect(sql.mock.calls[0][0]).toContain('WITH recent_failed AS MATERIALIZED');
+    expect(sql.mock.calls[0][0]).toContain("status = 'FAILED'");
+    expect(sql.mock.calls[0][0]).toContain("updated_at >= NOW() - INTERVAL '7 days'");
     expect(sql.mock.calls[0][0]).toContain("last_error LIKE 'Concurrent reservation limit:%'");
     expect(sql.mock.calls[1][0]).toContain('JOIN (VALUES');
     expect(sql.mock.calls[1][0]).toContain('requested(queue_id, work_id, source, chapter_sort_key)');
