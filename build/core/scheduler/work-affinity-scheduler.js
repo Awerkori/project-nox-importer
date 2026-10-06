@@ -115,6 +115,15 @@ export function shouldRunCatalogFallbackAgain(activeWorkIdsEmpty, alreadyAttempt
     return !(activeWorkIdsEmpty && alreadyAttempted);
 }
 /**
+ * Catalog fallback is deliberately serialized because each probe performs
+ * distributed Yugabyte reads.  A caller may try again after the interval when
+ * the previous probe found no row, but concurrent probes must not pile up on
+ * the bounded pool.
+ */
+export function shouldStartCatalogProbe(nowMs, lastProbeAtMs, inFlight, minIntervalMs = 1_000) {
+    return !inFlight && nowMs - lastProbeAtMs >= minIntervalMs;
+}
+/**
  * Staff and P0 are order-only lanes, but an endless stream of either must not
  * make already-admitted P1/P2 work mathematically impossible to finish.  One
  * normal-lane claim after a bounded high-priority burst preserves the normal
@@ -147,6 +156,14 @@ export class WorkAffinityScheduler {
     rrIndexP1 = 0;
     rrIndexP2 = 0;
     rrCatalogSourceIndex = 0;
+    // Catalog fallback is a safety net, not a per-slot polling loop. Its
+    // bounded frontier query still performs distributed index reads on
+    // Yugabyte, so duplicate probes can starve publication/claim traffic on
+    // the intentionally small pool. Keep one probe in flight and allow a
+    // short hand-off window for the winning claim to hydrate active work state.
+    catalogProbeInFlight = false;
+    lastCatalogProbeAt = 0;
+    catalogProbeMinIntervalMs = 1_000;
     publicationBarrier;
     sourcePermitProvider;
     chapterCapacityProvider = () => 1;
@@ -1318,30 +1335,41 @@ export class WorkAffinityScheduler {
      * Distributes concurrent worker claims across multiple available sources to prevent lock-step saturation.
      */
     async claimCatalogP1Job(client, opts) {
-        const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
-        let candidateSources = opts.allowedSources;
-        if (this.sourcePermitProvider && candidateSources && candidateSources.length > 0) {
-            const permitted = candidateSources.filter((s) => this.sourcePermitProvider(s) > 0);
-            if (permitted.length > 0)
-                candidateSources = permitted;
+        const now = Date.now();
+        if (!shouldStartCatalogProbe(now, this.lastCatalogProbeAt, this.catalogProbeInFlight, this.catalogProbeMinIntervalMs)) {
+            return null;
         }
-        // Try fair single-source claim first across concurrent runners to eliminate source lock-step contention
-        if (candidateSources && candidateSources.length > 1) {
-            const offset = (this.rrCatalogSourceIndex++) % candidateSources.length;
-            const targetSource = candidateSources[offset];
-            const singleRes = await this.executeClaimCatalogQuery(client, {
+        this.catalogProbeInFlight = true;
+        this.lastCatalogProbeAt = now;
+        try {
+            const disallowedChapterKeys = Array.from(this.inFlightChapterKeys);
+            let candidateSources = opts.allowedSources;
+            if (this.sourcePermitProvider && candidateSources && candidateSources.length > 0) {
+                const permitted = candidateSources.filter((s) => this.sourcePermitProvider(s) > 0);
+                if (permitted.length > 0)
+                    candidateSources = permitted;
+            }
+            // Try fair single-source claim first across concurrent runners to eliminate source lock-step contention
+            if (candidateSources && candidateSources.length > 1) {
+                const offset = (this.rrCatalogSourceIndex++) % candidateSources.length;
+                const targetSource = candidateSources[offset];
+                const singleRes = await this.executeClaimCatalogQuery(client, {
+                    ...opts,
+                    allowedSources: [targetSource],
+                    disallowedChapterKeys,
+                });
+                if (singleRes)
+                    return singleRes;
+            }
+            return await this.executeClaimCatalogQuery(client, {
                 ...opts,
-                allowedSources: [targetSource],
+                allowedSources: candidateSources,
                 disallowedChapterKeys,
             });
-            if (singleRes)
-                return singleRes;
         }
-        return this.executeClaimCatalogQuery(client, {
-            ...opts,
-            allowedSources: candidateSources,
-            disallowedChapterKeys,
-        });
+        finally {
+            this.catalogProbeInFlight = false;
+        }
     }
     /**
      * Helper to atomically claim 1 STAFF_FORCED job with SKIP LOCKED.
