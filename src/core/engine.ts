@@ -224,10 +224,12 @@ export class ImporterEngine {
   // released before source download/Telegram work, so it never reduces the
   // configured chapter concurrency.
   private chapterClaimGate: AsyncSemaphore;
-  // Maintenance must not win the startup race against the first real chapter
-  // claim.  Once one claim attempt has completed (success or empty), the
-  // normal pressure gate below governs maintenance fairly.
+  // Maintenance must not win the startup race against the initial chapter
+  // claim wave.  Waiting for one claim is not enough: the first slot can
+  // finish while the remaining slots are still holding DB-backed claim
+  // work, allowing a heavy maintenance scan to re-enter too early.
   private chapterClaimPhaseReady = false;
+  private chapterClaimStartupSlots = new Set<number>();
   // Discovery and catalog sync are maintenance lanes. They must not each hold
   // a DB client beside chapter claims, publication and site traffic.
   private catalogMaintenanceLane = new AsyncSemaphore(1, 'catalog_maintenance_lane');
@@ -2243,6 +2245,8 @@ export class ImporterEngine {
       Math.min(this.config.MAX_CONCURRENT_CHAPTERS || 5, this.config.TESTED_CONCURRENCY_CEILING || 32)
     );
     this.logger.info(`Starting shared chapter runner pool (${slotsCount} slots for target concurrency ${slotsCount})`);
+    this.chapterClaimPhaseReady = false;
+    this.chapterClaimStartupSlots.clear();
     telemetryCollector.configureChapterSlots(slotsCount, () => this.autotuner.getGlobalChapterSemaphore().capacity);
     this.logger.info('RUNTIME_FINGERPRINT', {
       nodeVersion: process.version, environment: process.env.NODE_ENV || 'production',
@@ -2349,7 +2353,7 @@ export class ImporterEngine {
         // B. Find sources that currently have available capacity (outside mutex)
         let eligibleSources = await this.getEligibleChapterSources();
         if (eligibleSources.length === 0) {
-          this.chapterClaimPhaseReady = true;
+          this.markChapterClaimPhaseAttempt(slotIndex);
           releaseGlobal();
           releaseClaimGate();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
@@ -2373,9 +2377,9 @@ export class ImporterEngine {
               leaseDurationMinutes: Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
               allowedSources: eligibleSources,
             });
-            this.chapterClaimPhaseReady = true;
+            this.markChapterClaimPhaseAttempt(slotIndex);
           } catch (acquireErr: any) {
-            this.chapterClaimPhaseReady = true;
+            this.markChapterClaimPhaseAttempt(slotIndex);
             this.logger.warn(`Error acquiring chapter job: ${acquireErr?.message}`);
             break;
           }
@@ -2716,6 +2720,16 @@ export class ImporterEngine {
     if (!this.chapterClaimPhaseReady) return true;
     return this.chapterClaimGate.queued > 0 ||
       this.chapterClaimGate.active >= Math.max(1, this.chapterClaimGate.capacity - 1);
+  }
+
+  private markChapterClaimPhaseAttempt(slotIndex: number): void {
+    if (this.chapterClaimPhaseReady) return;
+    this.chapterClaimStartupSlots.add(slotIndex);
+    const configuredSlots = Math.max(
+      1,
+      Math.min(this.config.MAX_CONCURRENT_CHAPTERS || 5, this.config.TESTED_CONCURRENCY_CEILING || 32),
+    );
+    this.chapterClaimPhaseReady = this.chapterClaimStartupSlots.size >= configuredSlots;
   }
 
   private async getEligibleCatalogSources(): Promise<string[]> {

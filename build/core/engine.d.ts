@@ -105,6 +105,7 @@ export declare class ImporterEngine {
     private chapterClaimMutex;
     private chapterClaimGate;
     private chapterClaimPhaseReady;
+    private chapterClaimStartupSlots;
     private catalogMaintenanceLane;
     private activeSourcesCache;
     private sourceScheduleSnapshot;
@@ -277,6 +278,7 @@ export declare class ImporterEngine {
      * saturating the bounded claim gate.
      */
     private shouldDeferCatalogMaintenance;
+    private markChapterClaimPhaseAttempt;
     private getEligibleCatalogSources;
     /**
      * Executes a job with an active lease heartbeat and a bounded soft deadline.
