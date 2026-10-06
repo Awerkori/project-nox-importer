@@ -34,7 +34,9 @@ describe('runtime leadership lease', () => {
     expect(sql).toContain("$2::text");
     expect(params[0]).toBe('importer_runtime_leader');
     expect(sql).toContain("expires_at");
+    expect(sql).toContain("started_at");
     expect(params[1]).toMatch(/^discloud-importer-1@/);
+    expect(params[3]).toMatch(/T/);
     expect((engine as any).config.WORKER_ID).toBe(params[1]);
   });
 

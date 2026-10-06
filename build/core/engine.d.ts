@@ -120,6 +120,7 @@ export declare class ImporterEngine {
     private isRestarting;
     private dbPool;
     private runtimeInstanceId;
+    private runtimeBootedAt;
     private isRuntimeLeader;
     private runtimeLeadershipTimer;
     private runtimeLeadershipRenewing;

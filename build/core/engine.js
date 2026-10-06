@@ -218,6 +218,7 @@ export class ImporterEngine {
     // is allowed to claim work.  The per-boot id also fences queue heartbeats
     // from a previous process that shared the configured worker name.
     runtimeInstanceId = '';
+    runtimeBootedAt = new Date();
     isRuntimeLeader = false;
     runtimeLeadershipTimer = null;
     runtimeLeadershipRenewing = false;
@@ -467,12 +468,13 @@ export class ImporterEngine {
         try {
             const pool = (this.dbPool && typeof this.dbPool.query === 'function') ? this.dbPool : getYugabytePool();
             const result = await pool.query(`INSERT INTO settings AS leader (key, value)
-         VALUES ($1, json_build_object('owner', $2::text, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text)
+         VALUES ($1, json_build_object('owner', $2::text, 'started_at', $4::timestamptz, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text)
          ON CONFLICT (key) DO UPDATE
-         SET value = json_build_object('owner', $2::text, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text
+         SET value = json_build_object('owner', $2::text, 'started_at', $4::timestamptz, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text
          WHERE (leader.value::jsonb->>'owner') = $2::text
             OR COALESCE((leader.value::jsonb->>'expires_at')::timestamptz, 'epoch'::timestamptz) <= NOW()
-         RETURNING value`, [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS]);
+            OR COALESCE((leader.value::jsonb->>'started_at')::timestamptz, 'epoch'::timestamptz) < $4::timestamptz
+         RETURNING value`, [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS, this.runtimeBootedAt.toISOString()]);
             const acquired = result.rows.length > 0;
             if (acquired && !this.isRuntimeLeader) {
                 this.isRuntimeLeader = true;
@@ -498,9 +500,9 @@ export class ImporterEngine {
             try {
                 const pool = (this.dbPool && typeof this.dbPool.query === 'function') ? this.dbPool : getYugabytePool();
                 const result = await pool.query(`UPDATE settings
-           SET value = json_build_object('owner', $2::text, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text
+           SET value = json_build_object('owner', $2::text, 'started_at', $4::timestamptz, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text
            WHERE key = $1 AND (value::jsonb->>'owner') = $2::text
-           RETURNING value`, [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS]);
+           RETURNING value`, [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS, this.runtimeBootedAt.toISOString()]);
                 if (result.rows.length === 0) {
                     this.isRuntimeLeader = false;
                     this.logger.error('[RUNTIME_LEADER_LOST] Leadership lease was not renewed; gating all new claims.');
