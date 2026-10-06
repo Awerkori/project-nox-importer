@@ -2199,7 +2199,7 @@ export class AdmissionController {
         });
 
         const isCandidateFrontierValid = (workId: string, minSort: number, maxPub: number): boolean => {
-          if (isP1 ? (maxPub === -1 || minSort <= maxPub + 1.5) : minSort <= 1.5) return true;
+          if (minSort <= (maxPub === -1 ? 1.5 : maxPub + 1.5)) return true;
           const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
           const gapEnd = minSort - 1;
           return (gapsMap.get(workId) || []).some((g) => g.start <= gapStart && g.end >= gapEnd);
