@@ -1685,16 +1685,30 @@ export class ImporterEngine {
                     this.consecutiveUnderutilizedCycles++;
                     if (this.consecutiveUnderutilizedCycles >= 2 && canSpendDbOnUnderutilizationRecovery) {
                         try {
-                            const qCountRes = await this.dbPool.query(`
-                SELECT COUNT(*) as claimable_cnt
-                FROM importer_queue q
-                JOIN importer_sources s ON s.id = q.source
-                WHERE q.status = 'QUEUED' AND q.task_type = 'IMPORT_CHAPTER' AND s.enabled = true
-              `);
-                            const claimable = parseInt(qCountRes.rows[0]?.claimable_cnt || '0', 10);
-                            if (claimable > 0) {
-                                this.logger.warn(`[ADMISSION_UNDERUTILIZATION] Productive slot ratio: ${slotSnapshot.productiveSlotRatio}% (< 70%) for >60s with ${claimable} claimable jobs in queue. Triggering immediate admission replenishment.`);
-                                await this.admissionController.runAdmissionCycle();
+                            const dbPoolState = this.dbPool;
+                            const claimPoolUnderPressure = Number(dbPoolState?.waitingCount || 0) > 0 ||
+                                (Number(dbPoolState?.totalCount || 0) > 0 &&
+                                    Number(dbPoolState?.idleCount || 0) < Number(dbPoolState?.totalCount || 0));
+                            // This is an advisory recovery hint, never a reason to spend a
+                            // bounded YSQL connection while chapter claims are waiting.
+                            // The old COUNT(*) scanned the hot queue on every underutilized
+                            // cycle and could starve the claim path. A single bounded
+                            // existence probe is sufficient to decide whether to nudge
+                            // admission once the pool is available.
+                            if (!claimPoolUnderPressure) {
+                                const qProbeRes = await this.dbPool.query(`
+                  SELECT 1
+                  FROM importer_queue q
+                  JOIN importer_sources s ON s.id = q.source
+                  WHERE q.status = 'QUEUED'
+                    AND q.task_type = 'IMPORT_CHAPTER'
+                    AND s.enabled = true
+                  LIMIT 1
+                `);
+                                if (qProbeRes.rows.length > 0) {
+                                    this.logger.warn(`[ADMISSION_UNDERUTILIZATION] Productive slot ratio: ${slotSnapshot.productiveSlotRatio}% (< 70%) with queued work detected. Triggering immediate admission replenishment.`);
+                                    await this.admissionController.runAdmissionCycle();
+                                }
                             }
                         }
                         catch { }
