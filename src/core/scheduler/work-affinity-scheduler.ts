@@ -846,6 +846,21 @@ export class WorkAffinityScheduler {
     const p1Works = activeWorks.filter((w) => w.lane === 'P1');
     const p2Works = activeWorks.filter((w) => w.lane === 'P2');
 
+    // Reconcile a narrow stale-P1 shape before lane filtering. A persisted
+    // inFlight counter can keep a P1 in the active set even after its only
+    // queue row was terminally completed; such a work may also be marked
+    // staged-blocked and never reach the normal claim-miss branch.
+    for (const active of p1Works) {
+      if (
+        active.state === 'FILLING' &&
+        active.queuedChapters === 0 &&
+        (active.inFlightChapters || 0) > 0 &&
+        this.getInFlightCount(active.workId) === 0
+      ) {
+        this.noteStaleActiveWorkClaimMiss(active.workId);
+      }
+    }
+
     // Check critical gaps first (only for sources with available permits, excluding already in-flight keys)
     const tCrit0 = performance.now();
     const criticalWorks = p1Works.filter(
