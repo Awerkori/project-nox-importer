@@ -198,6 +198,11 @@ export class WorkAffinityScheduler {
 
   // In-memory unclaimable work cooldown (avoids hammering depleted/unready works)
   private unclaimableWorksCooldown = new Map<string, number>();
+  // A work can remain in the persisted active set after its last queued row
+  // was canonically satisfied by another source. Keep a small miss counter so
+  // repeated, exact claim misses evict only stale P2 state instead of making
+  // every slot retry the same work forever.
+  private p2ClaimMisses = new Map<string, number>();
 
   public markWorkUnclaimable(workId: string, ttlMs: number = 15000): void {
     this.unclaimableWorksCooldown.set(workId, Date.now() + ttlMs);
@@ -215,6 +220,25 @@ export class WorkAffinityScheduler {
 
   public clearWorkUnclaimable(workId: string): void {
     this.unclaimableWorksCooldown.delete(workId);
+  }
+
+  private noteP2ClaimMiss(workId: string): void {
+    const misses = (this.p2ClaimMisses.get(workId) || 0) + 1;
+    this.p2ClaimMisses.set(workId, misses);
+    if (misses < 3 || this.getInFlightCount(workId) > 0) return;
+
+    const active = this.stateStore.getActiveWork(workId);
+    if (active?.lane !== 'P2' || active.state !== 'FILLING') return;
+
+    // claimSingleJob already applied the canonical/source/frontier filters;
+    // three misses with no local in-flight job therefore mean this active
+    // cohort entry has no executable queue row left. Vacate it so the next
+    // admission cycle can select healthy work instead of spinning on stale
+    // state. No queue/database mutation is performed here.
+    this.stateStore.removeActiveWork(workId);
+    this.unclaimableWorksCooldown.delete(workId);
+    this.p2ClaimMisses.delete(workId);
+    this.logger.warn('[P2_STALE_WORK_VACATED] Active P2 work had no claimable frontier after repeated bounded misses', { workId, misses });
   }
 
   // Performance telemetry
@@ -936,6 +960,7 @@ export class WorkAffinityScheduler {
 
       // Target work had no claimable job: short transient backoff (500ms)
       this.markWorkUnclaimable(targetWork.workId, 500);
+      this.noteP2ClaimMiss(targetWork.workId);
 
       // 2. Instead of sequential individual queries (which would do 5-10 queries),
       // batch query all remaining candidates in ONE single query!
