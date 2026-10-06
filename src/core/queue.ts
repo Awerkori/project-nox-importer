@@ -584,6 +584,52 @@ export class ImporterQueue {
   /** Reopen old reservation-limit failures when their canonical mapping is still pending. */
   async recoverReservationLimitFailures(limit = 100): Promise<number> {
     try {
+      // Direct YSQL is the production path. Keep the queue/mapping repair in a
+      // single bounded statement so a slow or exhausted pool cannot leave the
+      // canonical predecessor and its queue row half-reconciled. The
+      // PostgREST-shaped fallback below remains for gateway/test clients.
+      const directSql = (this.supabase as any)?.sql;
+      if (typeof directSql === 'function') {
+        const result = await directSql.call(this.supabase, `
+          WITH candidates AS MATERIALIZED (
+            SELECT q.id
+            FROM importer_queue q
+            JOIN importer_chapter_mappings m
+              ON m.work_id::text = q.payload->>'workId'
+             AND m.source = q.source
+             AND m.chapter_sort_key = q.chapter_sort_key
+            WHERE q.task_type = 'IMPORT_CHAPTER'
+              AND q.status = 'FAILED'
+              AND q.last_error LIKE 'Concurrent reservation limit:%'
+              AND m.status = 'PENDING'
+              AND m.is_gap IS FALSE
+            ORDER BY q.updated_at ASC, q.id ASC
+            LIMIT $1
+            FOR UPDATE OF q SKIP LOCKED
+          ), revived AS (
+            UPDATE importer_queue q
+            SET status = 'QUEUED',
+                attempts = 0,
+                last_error = NULL,
+                last_error_at = NULL,
+                retry_reason = 'RESERVATION_LIMIT_RECOVERY',
+                locked_by = NULL,
+                locked_at = NULL,
+                lease_expires_at = NULL,
+                next_run_at = NOW(),
+                updated_at = NOW()
+            FROM candidates c
+            WHERE q.id = c.id
+              AND q.status = 'FAILED'
+            RETURNING q.id
+          )
+          SELECT COUNT(*)::int AS recovered FROM revived
+        `, [limit]);
+        const recovered = Number(result?.rows?.[0]?.recovered || 0);
+        if (recovered > 0) this.logger.info('Reopened reservation-limit chapter failures', { recovered });
+        return recovered;
+      }
+
       const { data: failed, error } = await this.supabase
         .from('importer_queue')
         .select('id, source, payload, chapter_sort_key')
