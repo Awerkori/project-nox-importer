@@ -865,7 +865,6 @@ export class WorkAffinityScheduler {
             }
             // Target work had no claimable job: short transient backoff (500ms)
             this.markWorkUnclaimable(targetWork.workId, 500);
-            this.noteP2ClaimMiss(targetWork.workId);
             // 2. Instead of sequential individual queries (which would do 5-10 queries),
             // batch query all remaining candidates in ONE single query!
             const remainingCandidates = readyP1Works.filter((w) => w.workId !== targetWork.workId && !this.isWorkUnclaimable(w.workId));
@@ -974,6 +973,7 @@ export class WorkAffinityScheduler {
             }
             // Target work had no claimable job: short transient backoff (500ms)
             this.markWorkUnclaimable(targetWork.workId, 500);
+            this.noteP2ClaimMiss(targetWork.workId);
             const remainingCandidates = readyP2Works.filter((w) => w.workId !== targetWork.workId && !this.isWorkUnclaimable(w.workId));
             if (remainingCandidates.length > 0) {
                 telemetry.p2WorkAttempts++;
