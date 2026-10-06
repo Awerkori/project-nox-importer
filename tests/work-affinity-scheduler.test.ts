@@ -358,12 +358,38 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
       criticalGapUnblockCount: 0,
     });
 
-    (scheduler as any).noteP2ClaimMiss(workId);
-    (scheduler as any).noteP2ClaimMiss(workId);
+    (scheduler as any).noteStaleActiveWorkClaimMiss(workId);
+    (scheduler as any).noteStaleActiveWorkClaimMiss(workId);
     expect(mockStateStore.getActiveWork(workId)).toBeDefined();
-    (scheduler as any).noteP2ClaimMiss(workId);
+    (scheduler as any).noteStaleActiveWorkClaimMiss(workId);
     expect(mockStateStore.getActiveWork(workId)).toBeUndefined();
     expect(mockStateStore.removeActiveWork).toHaveBeenCalledWith(workId);
+  });
+
+  it('vacates a stale P1 entry with only a persisted in-flight counter', () => {
+    const workId = 'stale-p1-work';
+    mockStateStore.setActiveWork({
+      workId,
+      workTitle: 'Stale P1',
+      lane: 'P1',
+      state: 'FILLING',
+      primarySource: 'source',
+      admittedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+      totalChapters: 1,
+      publishedChapters: 0,
+      queuedChapters: 0,
+      inFlightChapters: 1,
+      frontierSortKey: 1,
+      criticalGapSortKey: null,
+      criticalGapUnblockCount: 0,
+    });
+
+    (scheduler as any).noteStaleActiveWorkClaimMiss(workId);
+    (scheduler as any).noteStaleActiveWorkClaimMiss(workId);
+    expect(mockStateStore.getActiveWork(workId)).toBeDefined();
+    (scheduler as any).noteStaleActiveWorkClaimMiss(workId);
+    expect(mockStateStore.getActiveWork(workId)).toBeUndefined();
   });
 
   // =========================================================================
