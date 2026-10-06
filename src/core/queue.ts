@@ -595,20 +595,26 @@ export class ImporterQueue {
       const directSql = (this.supabase as any)?.sql;
       if (typeof directSql === 'function') {
         const result = await directSql.call(this.supabase, `
-          WITH candidates AS MATERIALIZED (
-            SELECT q.id
+          WITH failed AS MATERIALIZED (
+            SELECT q.id, q.source, q.payload, q.chapter_sort_key
             FROM importer_queue q
-            JOIN importer_chapter_mappings m
-              ON m.work_id::text = q.payload->>'workId'
-             AND m.source = q.source
-             AND m.chapter_sort_key = q.chapter_sort_key
             WHERE q.task_type = 'IMPORT_CHAPTER'
               AND q.status = 'FAILED'
               AND q.last_error LIKE 'Concurrent reservation limit:%'
-              AND m.status = 'PENDING'
-              AND m.is_gap IS FALSE
             ORDER BY q.updated_at ASC, q.id ASC
             LIMIT $1
+          ), candidates AS MATERIALIZED (
+            SELECT f.id
+            FROM failed f
+            WHERE EXISTS (
+              SELECT 1
+              FROM importer_chapter_mappings m
+              WHERE m.work_id::text = f.payload->>'workId'
+                AND m.source = f.source
+                AND m.chapter_sort_key = f.chapter_sort_key
+                AND m.status = 'PENDING'
+                AND m.is_gap IS FALSE
+            )
           ), revived AS (
             UPDATE importer_queue q
             SET status = 'QUEUED',
