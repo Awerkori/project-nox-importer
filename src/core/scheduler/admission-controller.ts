@@ -180,76 +180,61 @@ export class AdmissionController {
    * frontier safety retain their existing semantics.
    */
   private async enforceP1FairWindow(workId: string): Promise<number> {
-    const capped = await this.runQuery(
-      `WITH ranked AS (
+    // The fair window is a *canonical frontier* window.  Looking only at
+    // already-QUEUED rows can leave a later chapter QUEUED while its lower
+    // predecessor remains PAUSED_BY_STAFF.  The claim fence then rejects the
+    // later row (correctly), but admission believes the work already owns its
+    // one chapter and repeatedly forms an unclaimable cohort.  Rank both
+    // non-terminal window states together, preserving only the lowest
+    // executable candidate as QUEUED.  RETRY is deliberately not rewritten:
+    // it retains its retry/backoff semantics and the claim fence still keeps
+    // a later retry behind the promoted predecessor.
+    const normalized = await this.runQuery(
+      `WITH ranked AS MATERIALIZED (
          SELECT id,
-                ROW_NUMBER() OVER (ORDER BY chapter_sort_key ASC NULLS LAST, id ASC) AS position
+                status AS prior_status,
+                CASE WHEN ROW_NUMBER() OVER (ORDER BY chapter_sort_key ASC NULLS LAST, id ASC) <= $2
+                     THEN 'QUEUED' ELSE 'PAUSED_BY_STAFF' END AS target_status
          FROM importer_queue
          WHERE task_type = 'IMPORT_CHAPTER'
            AND (payload->>'workId') = $1
-           AND status = 'QUEUED'
+           AND status IN ('QUEUED', 'PAUSED_BY_STAFF')
            AND priority >= 75 AND priority < 100
            AND COALESCE(payload->>'staffForced', 'false') <> 'true'
-       )
-       UPDATE importer_queue q
-       SET status = 'PAUSED_BY_STAFF',
-           updated_at = NOW()
-       FROM ranked r
-       WHERE q.id = r.id
-         AND r.position > $2
-       RETURNING q.id;`,
-      [workId, P1_FAIR_WINDOW_CHAPTERS],
-    );
-
-    const promoted = await this.runQuery(
-      `WITH existing AS (
-         SELECT COUNT(*) FILTER (WHERE status = 'QUEUED') AS queued_count,
-                COUNT(*) FILTER (WHERE status = 'RETRY') AS retry_count
-         FROM importer_queue
-         WHERE task_type = 'IMPORT_CHAPTER'
-           AND (payload->>'workId') = $1
-           AND status IN ('QUEUED', 'RETRY')
-           AND priority >= 75 AND priority < 100
-           AND COALESCE(payload->>'staffForced', 'false') <> 'true'
-       ), to_promote AS (
-         SELECT q.id
-         FROM importer_queue q
-         CROSS JOIN existing e
-         WHERE q.task_type = 'IMPORT_CHAPTER'
-           AND (q.payload->>'workId') = $1
-           AND q.status = 'PAUSED_BY_STAFF'
-           AND q.priority >= 75 AND q.priority < 100
-           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
-           AND e.queued_count = 0
-           AND e.retry_count = 0
-         ORDER BY q.chapter_sort_key ASC NULLS LAST, q.id ASC
-         LIMIT $2
-       ), promoted AS (
+       ), normalized AS (
          UPDATE importer_queue q
-         SET status = 'QUEUED',
-             priority = 75,
-             next_run_at = NOW(),
+         SET status = r.target_status,
+             priority = CASE WHEN r.target_status = 'QUEUED' THEN 75 ELSE q.priority END,
+             next_run_at = CASE WHEN r.target_status = 'QUEUED' THEN NOW() ELSE q.next_run_at END,
              updated_at = NOW()
-         FROM to_promote p
-         WHERE q.id = p.id
-         RETURNING q.id
+         FROM ranked r
+         WHERE q.id = r.id
+           AND q.status IS DISTINCT FROM r.target_status
+         RETURNING q.id, r.prior_status, r.target_status
        )
-       SELECT (e.queued_count + (SELECT COUNT(*) FROM promoted))::int AS queued_count
-       FROM existing e;`,
+       SELECT COUNT(*) FILTER (WHERE target_status = 'QUEUED')::int AS queued_count,
+              COUNT(*) FILTER (WHERE prior_status = 'QUEUED' AND target_status = 'PAUSED_BY_STAFF')::int AS capped_count,
+              COUNT(*) FILTER (WHERE prior_status = 'PAUSED_BY_STAFF' AND target_status = 'QUEUED')::int AS promoted_count
+       FROM ranked;`,
       [workId, P1_FAIR_WINDOW_CHAPTERS],
     );
 
-    if (capped.rows.length > 0) {
+    const capped = parseInt(normalized.rows[0]?.capped_count || '0', 10);
+    const promoted = parseInt(normalized.rows[0]?.promoted_count || '0', 10);
+    if (capped > 0) {
       this.logger.info('[P1_FAIR_WINDOW_CAPPED]', {
         workId,
         kept: P1_FAIR_WINDOW_CHAPTERS,
-        paused: capped.rows.length,
+        paused: capped,
       });
     }
+    if (promoted > 0) {
+      this.logger.info('[P1_CANONICAL_FRONTIER_PROMOTED]', { workId, promoted });
+    }
 
-    // A retained retry is intentionally represented as zero QUEUED here; the
-    // normal retry claim path remains responsible for it.
-    return parseInt(promoted.rows[0]?.queued_count || '0', 10);
+    // A retained retry is intentionally not counted as a new QUEUED window;
+    // the normal retry claim path remains responsible for it.
+    return parseInt(normalized.rows[0]?.queued_count || '0', 10);
   }
 
   /**

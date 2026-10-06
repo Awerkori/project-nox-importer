@@ -419,6 +419,35 @@ describe('bounded admission snapshot', () => {
     }
   });
 
+  it('promotes the canonical paused frontier ahead of a later queued P1 row', async () => {
+    const db = new PGlite();
+    try {
+      const id = '00000000-0000-0000-0000-000000000015';
+      await db.exec(`
+        CREATE TABLE importer_queue (
+          id integer PRIMARY KEY, task_type text, status text, payload jsonb,
+          priority integer, chapter_sort_key numeric, next_run_at timestamptz,
+          updated_at timestamptz
+        );
+        INSERT INTO importer_queue VALUES
+          (1, 'IMPORT_CHAPTER', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 75, 34, now(), now()),
+          (2, 'IMPORT_CHAPTER', 'QUEUED', '{"workId":"${id}"}', 75, 36, now(), now());
+      `);
+      const controller = new AdmissionController({} as any, {} as any, {
+        query: (sql: string, params?: any[]) => db.query(sql, params),
+      });
+
+      await expect((controller as any).enforceP1FairWindow(id)).resolves.toBe(1);
+      const { rows } = await db.query<any>(
+        `SELECT status, chapter_sort_key FROM importer_queue ORDER BY chapter_sort_key`,
+      );
+      expect(rows).toEqual([
+        { status: 'QUEUED', chapter_sort_key: '34' },
+        { status: 'PAUSED_BY_STAFF', chapter_sort_key: '36' },
+      ]);
+    } finally { await db.close(); }
+  });
+
   it('revives only legacy cancelled rows whose canonical mapping is still queued', async () => {
     const db = new PGlite();
     try {
