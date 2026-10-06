@@ -270,6 +270,12 @@ export declare class ImporterEngine {
      * Continuously claims SYNC_WORK jobs from the queue.
      */
     private runCatalogSyncWorker;
+    /**
+     * Maintenance lanes are best-effort.  Never let them occupy the only
+     * remaining YSQL/claim opportunity while chapter claims are queued or nearly
+     * saturating the bounded claim gate.
+     */
+    private shouldDeferCatalogMaintenance;
     private getEligibleCatalogSources;
     /**
      * Executes a job with an active lease heartbeat and a bounded soft deadline.

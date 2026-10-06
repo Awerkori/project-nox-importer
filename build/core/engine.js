@@ -311,6 +311,8 @@ export class ImporterEngine {
             publicationBarrier: this.publicationBarrier,
             safetyBarrier: this.safetyBarrier,
             autotuner: this.autotuner,
+            isChapterClaimPressureHigh: () => this.chapterClaimGate.queued > 0 ||
+                this.chapterClaimGate.active >= Math.max(1, this.chapterClaimGate.capacity - 1),
             workerId: this.config.WORKER_ID,
             onControlledRestart: async (reason, metrics) => {
                 // Preserve a deferred restart result.  A false means live chapter
@@ -842,6 +844,8 @@ export class ImporterEngine {
         // continue through their dedicated paths.
         const pressure = this.protectiveSentinel.getPressureSnapshot();
         if (pressure.siteHealth !== 'GREEN' || pressure.pressureScore > 0)
+            return;
+        if (this.shouldDeferCatalogMaintenance())
             return;
         const isDiscoveryAllowed = await this.isDiscoveryAllowed();
         if (!isDiscoveryAllowed)
@@ -2322,6 +2326,10 @@ export class ImporterEngine {
                     await this.sleep(1_000);
                     continue;
                 }
+                if (this.shouldDeferCatalogMaintenance()) {
+                    await this.sleep(1_000);
+                    continue;
+                }
                 if (await this.protectiveSentinel.isProtectiveStopActive()) {
                     await this.sleep(3000);
                     continue;
@@ -2337,18 +2345,24 @@ export class ImporterEngine {
                 try {
                     if (this.stopSignal)
                         continue;
-                    const allowedSources = await this.getEligibleCatalogSources();
-                    if (allowedSources.length === 0) {
-                        await this.sleep(5_000);
-                        continue;
-                    }
-                    const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), allowedSources, 'DISCOVER_WORKS');
-                    if (!job) {
+                    if (this.shouldDeferCatalogMaintenance()) {
                         idle = true;
                     }
                     else {
-                        this.logger.info(`[Discovery Lane] Acquired ${job.task_type} for source ${job.source} (Job: ${job.id})`);
-                        await this.executeJobDirectly(job);
+                        const allowedSources = await this.getEligibleCatalogSources();
+                        if (allowedSources.length === 0) {
+                            idle = true;
+                        }
+                        else {
+                            const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), allowedSources, 'DISCOVER_WORKS');
+                            if (!job) {
+                                idle = true;
+                            }
+                            else {
+                                this.logger.info(`[Discovery Lane] Acquired ${job.task_type} for source ${job.source} (Job: ${job.id})`);
+                                await this.executeJobDirectly(job);
+                            }
+                        }
                     }
                 }
                 finally {
@@ -2375,6 +2389,10 @@ export class ImporterEngine {
                     await this.sleep(1_000);
                     continue;
                 }
+                if (this.shouldDeferCatalogMaintenance()) {
+                    await this.sleep(1_000);
+                    continue;
+                }
                 if (await this.protectiveSentinel.isProtectiveStopActive()) {
                     await this.sleep(3000);
                     continue;
@@ -2388,18 +2406,24 @@ export class ImporterEngine {
                 try {
                     if (this.stopSignal)
                         continue;
-                    const allowedSources = await this.getEligibleCatalogSources();
-                    if (allowedSources.length === 0) {
-                        await this.sleep(5_000);
-                        continue;
-                    }
-                    const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), allowedSources, 'SYNC_WORK');
-                    if (!job) {
+                    if (this.shouldDeferCatalogMaintenance()) {
                         idle = true;
                     }
                     else {
-                        this.logger.info(`[Sync Lane] Acquired ${job.task_type} for source ${job.source} (Job: ${job.id})`);
-                        await this.executeJobDirectly(job);
+                        const allowedSources = await this.getEligibleCatalogSources();
+                        if (allowedSources.length === 0) {
+                            idle = true;
+                        }
+                        else {
+                            const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), allowedSources, 'SYNC_WORK');
+                            if (!job) {
+                                idle = true;
+                            }
+                            else {
+                                this.logger.info(`[Sync Lane] Acquired ${job.task_type} for source ${job.source} (Job: ${job.id})`);
+                                await this.executeJobDirectly(job);
+                            }
+                        }
                     }
                 }
                 finally {
@@ -2412,6 +2436,15 @@ export class ImporterEngine {
                 await this.sleep(5_000);
             }
         }
+    }
+    /**
+     * Maintenance lanes are best-effort.  Never let them occupy the only
+     * remaining YSQL/claim opportunity while chapter claims are queued or nearly
+     * saturating the bounded claim gate.
+     */
+    shouldDeferCatalogMaintenance() {
+        return this.chapterClaimGate.queued > 0 ||
+            this.chapterClaimGate.active >= Math.max(1, this.chapterClaimGate.capacity - 1);
     }
     async getEligibleCatalogSources() {
         try {
