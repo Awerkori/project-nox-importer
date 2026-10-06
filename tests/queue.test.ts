@@ -71,6 +71,18 @@ describe('ImporterQueue transient publication barrier recovery', () => {
 });
 
 describe('ImporterQueue transient reservation-limit recovery', () => {
+  it('uses one bounded direct SQL reconciliation on the production YSQL client', async () => {
+    const sql = vi.fn().mockResolvedValue({ rows: [{ recovered: 1 }] });
+    const queue = new ImporterQueue({ sql } as any, 'test-worker');
+
+    await expect(queue.recoverReservationLimitFailures(25)).resolves.toBe(1);
+    expect(sql).toHaveBeenCalledTimes(1);
+    expect(sql.mock.calls[0][1]).toEqual([25]);
+    expect(sql.mock.calls[0][0]).toContain('FOR UPDATE OF q SKIP LOCKED');
+    expect(sql.mock.calls[0][0]).toContain("m.status = 'PENDING'");
+    expect(sql.mock.calls[0][0]).toContain("m.is_gap IS FALSE");
+  });
+
   it('requeues only a reservation-failed job whose mapping is still pending', async () => {
     const updates: any[] = [];
     const failed = [{
