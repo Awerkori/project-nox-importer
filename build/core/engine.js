@@ -2612,15 +2612,38 @@ export class ImporterEngine {
             ? Math.min(4 * 60 * 1000, Math.max(150 * 1000, pageCountHint * 4 * 1000))
             : 3 * 60 * 1000;
         let jobTimeoutTimer = null;
-        const deadlinePromise = new Promise((_, reject) => {
+        // This is deliberately a *soft* deadline.  Aborting the signal asks every
+        // subordinate operation to stop, but Promise.race alone cannot stop a
+        // promise that is already inside I/O.  Returning from this method before
+        // that promise settles would release the slot/source permits while the
+        // old job can still call onSourceStageComplete, causing a double release
+        // and briefly exceeding the bounded execution capacity.
+        const deadlinePromise = new Promise((resolve) => {
             jobTimeoutTimer = setTimeout(() => {
                 jobAbortController.abort(new Error(`Job ${job.id} exceeded its bounded execution deadline`));
-                reject(new Error(`JobExecutionTimeout: Job ${job.id} (${job.task_type}) exceeded safety limit of ${Math.round(maxJobDurationMs / 60000)} minutes`));
+                this.logger.warn('[JOB_SOFT_DEADLINE] Abort requested; retaining lease and permits until execution settles', {
+                    jobId: job.id,
+                    source: job.source,
+                    taskType: job.task_type,
+                    deadlineMs: maxJobDurationMs,
+                });
+                resolve('deadline');
             }, maxJobDurationMs);
         });
         try {
             const executionPromise = this.processJob(job, () => staffCancellationRequested, extraTiming, jobAbortController.signal);
-            await Promise.race([executionPromise, deadlinePromise]);
+            const result = await Promise.race([
+                executionPromise.then(() => 'settled'),
+                deadlinePromise,
+            ]);
+            // Keep the heartbeat and all caller-owned permits until the aborted
+            // operation itself has completed its cleanup.  A compliant I/O path
+            // settles quickly after AbortSignal; a non-compliant path remains
+            // conservatively bounded by its original slot rather than becoming a
+            // zombie that races a replacement job.
+            if (result === 'deadline') {
+                await executionPromise;
+            }
         }
         finally {
             if (jobTimeoutTimer)
