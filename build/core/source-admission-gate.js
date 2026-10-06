@@ -1,7 +1,28 @@
 import { CloudflareClassifier } from './cloudflare-classifier.js';
 import { Logger } from './logger.js';
 export class SourceAdmissionGate {
+    stageTimeoutMs;
     logger = new Logger('SourceAdmissionGate');
+    /** Bound each provider stage so one hung adapter cannot freeze recovery for
+     * every other source. Provider-level fetch timeouts remain in force. */
+    constructor(stageTimeoutMs = 20_000) {
+        this.stageTimeoutMs = stageTimeoutMs;
+    }
+    async withStageTimeout(stage, operation) {
+        let timer;
+        try {
+            return await Promise.race([
+                operation,
+                new Promise((_, reject) => {
+                    timer = setTimeout(() => reject(new Error(`Admission probe stage ${stage} timed out after ${this.stageTimeoutMs}ms`)), this.stageTimeoutMs);
+                }),
+            ]);
+        }
+        finally {
+            if (timer)
+                clearTimeout(timer);
+        }
+    }
     /**
      * Executes a strict production probe directly from the current runtime environment.
      * Tests: Base URL -> Catalog -> Details -> Chapters -> Pages -> Image Download.
@@ -95,13 +116,13 @@ export class SourceAdmissionGate {
         try {
             if (typeof adapter.searchWorks === 'function') {
                 try {
-                    discoveredWorks = await adapter.searchWorks('Solo');
+                    discoveredWorks = await this.withStageTimeout('CATALOG_SEARCH', adapter.searchWorks('Solo'));
                 }
                 catch { }
             }
             if ((!discoveredWorks || discoveredWorks.length === 0) && typeof adapter.fetchUpdatedWorks === 'function') {
                 try {
-                    const catRes = await adapter.fetchUpdatedWorks(null, { mode: 'bootstrap' });
+                    const catRes = await this.withStageTimeout('CATALOG_BOOTSTRAP', adapter.fetchUpdatedWorks(null, { mode: 'bootstrap' }));
                     discoveredWorks = catRes?.works || [];
                 }
                 catch { }
@@ -157,7 +178,7 @@ export class SourceAdmissionGate {
         const t2 = Date.now();
         try {
             if (typeof adapter.fetchWorkDetails === 'function') {
-                const details = await adapter.fetchWorkDetails(testWork.sourceWorkId);
+                const details = await this.withStageTimeout('DETAILS', adapter.fetchWorkDetails(testWork.sourceWorkId));
                 stages.push({
                     stage: 'DETAILS',
                     status: 'PASS',
@@ -198,7 +219,7 @@ export class SourceAdmissionGate {
         const t3 = Date.now();
         let chapters = [];
         try {
-            chapters = await adapter.fetchChapters(testWork.sourceWorkId);
+            chapters = await this.withStageTimeout('CHAPTERS', adapter.fetchChapters(testWork.sourceWorkId));
             if (chapters.length === 0) {
                 // A catalog search can legitimately return a placeholder, one-shot,
                 // or otherwise empty work before a usable work.  Treating that first
@@ -210,9 +231,9 @@ export class SourceAdmissionGate {
                 for (const candidate of discoveredWorks.slice(1, 4)) {
                     try {
                         const candidateDetails = typeof adapter.fetchWorkDetails === 'function'
-                            ? await adapter.fetchWorkDetails(candidate.sourceWorkId)
+                            ? await this.withStageTimeout('DETAILS_ALTERNATE', adapter.fetchWorkDetails(candidate.sourceWorkId))
                             : candidate;
-                        const candidateChapters = await adapter.fetchChapters(candidate.sourceWorkId);
+                        const candidateChapters = await this.withStageTimeout('CHAPTERS_ALTERNATE', adapter.fetchChapters(candidate.sourceWorkId));
                         if (candidateChapters.length > 0) {
                             selected = { work: candidate, details: candidateDetails, chapters: candidateChapters };
                             break;
@@ -282,7 +303,7 @@ export class SourceAdmissionGate {
         const t4 = Date.now();
         let pages = [];
         try {
-            pages = await adapter.fetchChapterPages(testChapter.sourceChapterId, testChapter.number);
+            pages = await this.withStageTimeout('PAGES', adapter.fetchChapterPages(testChapter.sourceChapterId, testChapter.number));
             if (pages.length === 0) {
                 stages.push({
                     stage: 'PAGES',
@@ -333,7 +354,9 @@ export class SourceAdmissionGate {
         const testImageUrl = typeof pages[0] === 'string' ? pages[0] : pages[0]?.imageUrl;
         const t5 = Date.now();
         try {
-            const imgHeaders = adapter.getImageHeaders ? await adapter.getImageHeaders(testImageUrl) : {};
+            const imgHeaders = adapter.getImageHeaders
+                ? await this.withStageTimeout('IMAGE_HEADERS', Promise.resolve(adapter.getImageHeaders(testImageUrl)))
+                : {};
             const imgRes = await transport(testImageUrl, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',

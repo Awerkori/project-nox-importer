@@ -258,5 +258,33 @@ describe('Cloudflare Classifier & Resilience Suite', () => {
       expect(mockAdapter.fetchChapters).toHaveBeenCalledWith('real-work');
       expect(mockAdapter.fetchChapterPages).toHaveBeenCalledWith('ch-1', 1);
     });
+
+    it('times out a hung adapter stage instead of freezing the source recovery queue', async () => {
+      const gate = new SourceAdmissionGate(10);
+      const mockAdapter: SourceAdapter = {
+        id: 'hung-source',
+        name: 'Hung Source',
+        baseUrl: 'https://hung.example.com',
+        searchWorks: vi.fn(() => new Promise<any[]>(() => {})),
+        fetchUpdatedWorks: undefined as any,
+        fetchWorkDetails: vi.fn(),
+        fetchChapters: vi.fn(),
+        fetchChapterPages: vi.fn(),
+      };
+      const mockTransport = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'text/html' }),
+        text: async () => '<html><body>Welcome</body></html>',
+      } as any));
+
+      const started = Date.now();
+      const report = await gate.executeProdProbe(mockAdapter, mockTransport);
+
+      expect(report.overallStatus).toBe('FAIL');
+      expect(report.stages.at(-1)?.stage).toBe('CATALOG');
+      expect(report.stages.at(-1)?.detail).toContain('Catalog/Search returned 0 works');
+      expect(Date.now() - started).toBeLessThan(1_000);
+    });
   });
 });
