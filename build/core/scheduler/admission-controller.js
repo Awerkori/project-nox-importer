@@ -187,20 +187,27 @@ export class AdmissionController {
      * per-source cursor. A retry remains ahead of a new promotion so retry and
      * frontier safety retain their existing semantics.
      */
-    async enforceP1FairWindow(workId) {
+    async enforceP1FairWindow(workId, admittedSource) {
         // The fair window is a *canonical frontier* window.  Looking only at
         // already-QUEUED rows can leave a later chapter QUEUED while its lower
         // predecessor remains PAUSED_BY_STAFF.  The claim fence then rejects the
         // later row (correctly), but admission believes the work already owns its
         // one chapter and repeatedly forms an unclaimable cohort.  Rank both
         // non-terminal window states together, preserving only the lowest
-        // executable candidate as QUEUED.  RETRY is deliberately not rewritten:
+        // candidate from the healthy source that admitted this work as QUEUED.
+        // A lower row from another source may be blocked, stale, or merely an
+        // alternate mapping; reopening it instead would strand the valid source
+        // frontier while falsely keeping this work active. RETRY is deliberately not rewritten:
         // it retains its retry/backoff semantics and the claim fence still keeps
         // a later retry behind the promoted predecessor.
         const normalized = await this.runQuery(`WITH ranked AS MATERIALIZED (
          SELECT id,
                 status AS prior_status,
-                CASE WHEN ROW_NUMBER() OVER (ORDER BY chapter_sort_key ASC NULLS LAST, id ASC) <= $2
+                CASE WHEN ($3::text IS NULL OR source = $3::text)
+                           AND ROW_NUMBER() OVER (
+                             PARTITION BY CASE WHEN $3::text IS NULL THEN '' ELSE source END
+                             ORDER BY chapter_sort_key ASC NULLS LAST, id ASC
+                           ) <= $2
                      THEN 'QUEUED' ELSE 'PAUSED_BY_STAFF' END AS target_status
          FROM importer_queue
          WHERE task_type = 'IMPORT_CHAPTER'
@@ -222,7 +229,7 @@ export class AdmissionController {
        SELECT COUNT(*) FILTER (WHERE target_status = 'QUEUED')::int AS queued_count,
               COUNT(*) FILTER (WHERE prior_status = 'QUEUED' AND target_status = 'PAUSED_BY_STAFF')::int AS capped_count,
               COUNT(*) FILTER (WHERE prior_status = 'PAUSED_BY_STAFF' AND target_status = 'QUEUED')::int AS promoted_count
-       FROM ranked;`, [workId, P1_FAIR_WINDOW_CHAPTERS]);
+       FROM ranked;`, [workId, P1_FAIR_WINDOW_CHAPTERS, admittedSource ?? null]);
         const capped = parseInt(normalized.rows[0]?.capped_count || '0', 10);
         const promoted = parseInt(normalized.rows[0]?.promoted_count || '0', 10);
         if (capped > 0) {
@@ -1311,7 +1318,7 @@ export class AdmissionController {
                     // have more than the fairness quantum open. New P1 admissions are
                     // normalized below before they enter the active set.
                     if (work.lane === 'P1' && work.criticalGapSortKey === null && queuedCnt > P1_FAIR_WINDOW_CHAPTERS) {
-                        work.queuedChapters = await this.enforceP1FairWindow(work.workId);
+                        work.queuedChapters = await this.enforceP1FairWindow(work.workId, work.primarySource);
                         this.stateStore.setActiveWork(work);
                         continue;
                     }
@@ -1655,7 +1662,7 @@ export class AdmissionController {
                     criticalGapSortKey: null,
                     criticalGapUnblockCount: 0,
                 };
-                newWork.queuedChapters = await this.enforceP1FairWindow(newWork.workId);
+                newWork.queuedChapters = await this.enforceP1FairWindow(newWork.workId, cand.source);
                 this.stateStore.setActiveWork(newWork);
                 this.advanceP1AdmissionCursor(cand.source, cand.work_id);
                 sourceCounts.set(cand.source, srcCount + 1);
@@ -2165,7 +2172,7 @@ export class AdmissionController {
                     criticalGapUnblockCount: 0,
                 };
                 if (isP1) {
-                    newWork.queuedChapters = await this.enforceP1FairWindow(newWork.workId);
+                    newWork.queuedChapters = await this.enforceP1FairWindow(newWork.workId, cand.source);
                     // The P1 query is restricted to rotation_rank=1. This admission is
                     // therefore real circular progress, not a frontier leap: persist
                     // it so the same work cannot be immediately re-admitted after it
