@@ -319,7 +319,7 @@ export class ImporterEngine {
             safetyBarrier: this.safetyBarrier,
             autotuner: this.autotuner,
             isChapterClaimPressureHigh: () => this.chapterClaimGate.queued > 0 ||
-                this.chapterClaimGate.active >= Math.max(1, this.chapterClaimGate.capacity - 1),
+                this.chapterClaimGate.active > 0,
             workerId: this.config.WORKER_ID,
             onControlledRestart: async (reason, metrics) => {
                 // Preserve a deferred restart result.  A false means live chapter
@@ -2459,7 +2459,7 @@ export class ImporterEngine {
         if (!this.chapterClaimPhaseReady)
             return true;
         return this.chapterClaimGate.queued > 0 ||
-            this.chapterClaimGate.active >= Math.max(1, this.chapterClaimGate.capacity - 1);
+            this.chapterClaimGate.active > 0;
     }
     markChapterClaimPhaseAttempt(slotIndex) {
         if (this.chapterClaimPhaseReady)
