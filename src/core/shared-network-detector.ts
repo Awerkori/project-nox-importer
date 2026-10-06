@@ -70,6 +70,20 @@ export class SharedNetworkDetector {
     return this.activeIncident;
   }
 
+  /**
+   * A shared datacenter incident must not starve probes for unrelated
+   * provider-specific failures. API_BLOCK and TURNSTILE are still probed
+   * safely (the admission probe itself remains bounded and can keep them
+   * blocked), while datacenter/ASN blocks continue to suppress probe storms.
+   */
+  public isSharedBlockActiveFor(classification?: CloudflareClassification | null): boolean {
+    if (!this.isSharedBlockActive()) return false;
+    if (classification && classification !== 'CLOUDFLARE_DATACENTER_BLOCK' && classification !== 'DATACENTER_ASN_BLOCK' && classification !== 'JS_CHALLENGE') {
+      return false;
+    }
+    return true;
+  }
+
   public getIncidentSummary() {
     return {
       active: this.activeIncident,

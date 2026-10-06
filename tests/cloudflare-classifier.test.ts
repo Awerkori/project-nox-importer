@@ -148,6 +148,18 @@ describe('Cloudflare Classifier & Resilience Suite', () => {
       expect(summary.active).toBe(true);
       expect(summary.affectedSources.length).toBe(5);
     });
+
+    it('does not suppress bounded probes for provider-specific API or Turnstile failures', () => {
+      const detector = new SharedNetworkDetector(60_000, 5);
+      for (let i = 1; i <= 5; i++) {
+        detector.recordBlockEvent({ sourceId: `src-${i}`, classification: 'CLOUDFLARE_DATACENTER_BLOCK' });
+      }
+
+      expect(detector.isSharedBlockActiveFor('CLOUDFLARE_DATACENTER_BLOCK')).toBe(true);
+      expect(detector.isSharedBlockActiveFor('JS_CHALLENGE')).toBe(true);
+      expect(detector.isSharedBlockActiveFor('API_BLOCK')).toBe(false);
+      expect(detector.isSharedBlockActiveFor('TURNSTILE')).toBe(false);
+    });
   });
 
   describe('SourceAdmissionGate', () => {
