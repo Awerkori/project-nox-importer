@@ -74,7 +74,7 @@ describe('ImporterQueue transient reservation-limit recovery', () => {
   it('uses one bounded direct SQL reconciliation on the production YSQL client', async () => {
     const sql = vi.fn()
       .mockResolvedValueOnce({ rows: [{ id: 'job-2', source: 'megahentai', payload: { workId: 'work-2' }, chapter_sort_key: 3 }] })
-      .mockResolvedValueOnce({ rows: [{ work_id: 'work-2', source: 'megahentai', chapter_sort_key: '3' }] })
+      .mockResolvedValueOnce({ rows: [{ queue_id: 'job-2' }] })
       .mockResolvedValueOnce({ rows: [{ id: 'job-2' }], rowCount: 1 });
     const queue = new ImporterQueue({ sql } as any, 'test-worker');
 
@@ -83,6 +83,7 @@ describe('ImporterQueue transient reservation-limit recovery', () => {
     expect(sql.mock.calls[0][1]).toEqual([500]);
     expect(sql.mock.calls[0][0]).toContain("last_error LIKE 'Concurrent reservation limit:%'");
     expect(sql.mock.calls[1][0]).toContain('JOIN (VALUES');
+    expect(sql.mock.calls[1][0]).toContain('requested(queue_id, work_id, source, chapter_sort_key)');
     expect(sql.mock.calls[1][0]).toContain("m.status = 'PENDING'");
     expect(sql.mock.calls[2][0]).toContain('ANY($1::uuid[])');
     expect(sql.mock.calls[2][0]).toContain("m.is_gap IS FALSE");
