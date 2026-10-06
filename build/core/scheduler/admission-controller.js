@@ -1515,67 +1515,58 @@ export class AdmissionController {
                 JSON.stringify(this.getP1AdmissionCursors()),
                 Math.max(64, backfillSlotsAvailable * 32),
             ]);
-            let candidatesRes = await loadP1Candidates(false);
-            if (candidatesRes.rows.length < backfillSlotsAvailable) {
-                candidatesRes = await loadP1Candidates(true);
-            }
-            // Fast frontier check: query max_published for candidate works only
-            const candidateWorkIds = candidatesRes.rows.map((r) => r.work_id);
-            const pubMap = new Map();
-            if (candidateWorkIds.length > 0) {
-                const pubRes = await this.runQuery(`SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
-           FROM chapters
-           WHERE work_id = ANY($1::uuid[]) AND published_at IS NOT NULL
-           GROUP BY work_id`, [candidateWorkIds]);
-                for (const pr of pubRes.rows) {
-                    pubMap.set(pr.work_id, parseFloat(pr.max_pub));
+            const resolveP1Frontiers = async (candidateRows) => {
+                // A non-empty QUEUED window is not necessarily executable: it can be
+                // wholly behind a canonical gap. Evaluate the actual frontier before
+                // deciding whether the bounded PAUSED_BY_STAFF fallback is needed.
+                const candidateWorkIds = candidateRows.map((r) => r.work_id);
+                const pubMap = new Map();
+                if (candidateWorkIds.length > 0) {
+                    const pubRes = await this.runQuery(`SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
+             FROM chapters
+             WHERE work_id = ANY($1::uuid[]) AND published_at IS NOT NULL
+             GROUP BY work_id`, [candidateWorkIds]);
+                    for (const pr of pubRes.rows)
+                        pubMap.set(pr.work_id, parseFloat(pr.max_pub));
                 }
-            }
-            // Check confirmed gaps for candidate works
-            const gapsMap = new Map();
-            if (candidateWorkIds.length > 0) {
-                try {
-                    const gapsRes = await this.runQuery(`SELECT work_id::text, start_sort_key, end_sort_key
-             FROM importer_confirmed_gaps
-             WHERE work_id = ANY($1::uuid[])`, [candidateWorkIds]);
-                    for (const gr of gapsRes.rows) {
-                        const arr = gapsMap.get(gr.work_id) || [];
-                        arr.push({ start: parseFloat(gr.start_sort_key), end: parseFloat(gr.end_sort_key) });
-                        gapsMap.set(gr.work_id, arr);
+                const gapsMap = new Map();
+                if (candidateWorkIds.length > 0) {
+                    try {
+                        const gapsRes = await this.runQuery(`SELECT work_id::text, start_sort_key, end_sort_key
+               FROM importer_confirmed_gaps
+               WHERE work_id = ANY($1::uuid[])`, [candidateWorkIds]);
+                        for (const gr of gapsRes.rows) {
+                            const arr = gapsMap.get(gr.work_id) || [];
+                            arr.push({ start: parseFloat(gr.start_sort_key), end: parseFloat(gr.end_sort_key) });
+                            gapsMap.set(gr.work_id, arr);
+                        }
                     }
+                    catch { }
                 }
-                catch { }
-            }
-            const isContiguousOrConfirmed = (workId, minSort, maxPub) => {
-                if (maxPub === -1) {
-                    if (minSort <= 1.5)
+                const isContiguousOrConfirmed = (workId, minSort, maxPub) => {
+                    if (maxPub === -1 ? minSort <= 1.5 : minSort <= maxPub + 1.5)
                         return true;
-                }
-                else {
-                    if (minSort <= maxPub + 1.5)
-                        return true;
-                }
-                const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
-                const gapEnd = minSort - 1;
-                const intervals = gapsMap.get(workId) || [];
-                return intervals.some((g) => g.start <= gapStart && g.end >= gapEnd);
-            };
-            // Keep contiguous or confirmed candidates
-            const contiguousCandidates = candidatesRes.rows.filter((cand) => {
-                const maxPub = pubMap.get(cand.work_id) ?? -1;
-                const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
-                return isContiguousOrConfirmed(cand.work_id, minSort, maxPub);
-            });
-            // Try confirming upstream gaps for non-contiguous candidates if slots need replenishment
-            if (contiguousCandidates.length < backfillSlotsAvailable) {
-                for (const cand of candidatesRes.rows) {
-                    if (contiguousCandidates.some((c) => c.work_id === cand.work_id))
-                        continue;
-                    const maxPub = pubMap.get(cand.work_id) ?? -1;
-                    const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
                     const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
                     const gapEnd = minSort - 1;
-                    if (gapStart <= gapEnd) {
+                    return (gapsMap.get(workId) || []).some((g) => g.start <= gapStart && g.end >= gapEnd);
+                };
+                const contiguous = candidateRows.filter((cand) => {
+                    const maxPub = pubMap.get(cand.work_id) ?? -1;
+                    const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
+                    return isContiguousOrConfirmed(cand.work_id, minSort, maxPub);
+                });
+                // Gap confirmation remains bounded to the small source window. It is
+                // only attempted after all immediately-contiguous candidates.
+                if (contiguous.length < backfillSlotsAvailable) {
+                    for (const cand of candidateRows) {
+                        if (contiguous.some((c) => c.work_id === cand.work_id))
+                            continue;
+                        const maxPub = pubMap.get(cand.work_id) ?? -1;
+                        const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
+                        const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+                        const gapEnd = minSort - 1;
+                        if (gapStart > gapEnd)
+                            continue;
                         try {
                             const conf = await confirmUpstreamGapInterval(this.pool, {
                                 workId: cand.work_id,
@@ -1584,12 +1575,25 @@ export class AdmissionController {
                                 primarySource: cand.source,
                                 reason: 'ADMISSION_CANDIDATE_GAP_CONFIRM',
                             });
-                            if (conf.confirmed) {
-                                contiguousCandidates.push(cand);
-                            }
+                            if (conf.confirmed)
+                                contiguous.push(cand);
                         }
                         catch { }
                     }
+                }
+                return contiguous;
+            };
+            let candidatesRes = await loadP1Candidates(false);
+            let contiguousCandidates = await resolveP1Frontiers(candidatesRes.rows);
+            // A queued candidate list can be full while every row is behind a gap.
+            // In that case the old `rows.length` guard skipped the paused frontier
+            // that would actually make progress, leaving the P2 gate held forever.
+            if (contiguousCandidates.length < backfillSlotsAvailable) {
+                const pausedCandidates = await loadP1Candidates(true);
+                const pausedContiguous = await resolveP1Frontiers(pausedCandidates.rows);
+                if (pausedContiguous.length >= contiguousCandidates.length) {
+                    candidatesRes = pausedCandidates;
+                    contiguousCandidates = pausedContiguous;
                 }
             }
             // Sort candidates by source permit headroom and diversity (Section 8 & 11)
@@ -2020,26 +2024,18 @@ export class AdmissionController {
                     16,
                 ]);
             };
-            let res = await loadOnDemandCandidates(false);
-            if (res.rows.length === 0) {
-                res = await loadOnDemandCandidates(true);
-            }
-            if (res.rows.length === 0)
-                continue;
-            const candWorkIds = res.rows.map((r) => r.work_id);
-            const pubMap = new Map();
-            if (candWorkIds.length > 0) {
+            const findOnDemandFrontier = async (candidateRows) => {
+                if (candidateRows.length === 0)
+                    return null;
+                const candWorkIds = candidateRows.map((r) => r.work_id);
+                const pubMap = new Map();
                 const pubRes = await this.runQuery(`SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
            FROM chapters
            WHERE work_id = ANY($1::uuid[]) AND published_at IS NOT NULL
            GROUP BY work_id`, [candWorkIds]);
-                for (const pr of pubRes.rows) {
+                for (const pr of pubRes.rows)
                     pubMap.set(pr.work_id, parseFloat(pr.max_pub));
-                }
-            }
-            // Check confirmed gaps
-            const gapsMap = new Map();
-            if (candWorkIds.length > 0) {
+                const gapsMap = new Map();
                 try {
                     const gapsRes = await this.runQuery(`SELECT work_id::text, start_sort_key, end_sort_key
              FROM importer_confirmed_gaps
@@ -2051,82 +2047,83 @@ export class AdmissionController {
                     }
                 }
                 catch { }
-            }
-            // Sort candidate rows by permit headroom and diversity. P1 has exactly
-            // one circular candidate per source here, so this cannot re-admit a
-            // large work by a lower frontier before unseen work gets its turn.
-            const p1Sources = isP1
-                ? Array.from(new Set(res.rows.map((row) => String(row.source)))).sort()
-                : [];
-            const nextP1SourceRank = (source) => {
-                if (!isP1 || p1Sources.length === 0)
-                    return 0;
-                if (!this.lastOnDemandP1Source)
-                    return p1Sources.indexOf(source);
-                const firstAfterCursor = p1Sources.findIndex((candidate) => candidate > this.lastOnDemandP1Source);
-                const start = firstAfterCursor >= 0 ? firstAfterCursor : 0;
-                const index = p1Sources.indexOf(source);
-                return (index - start + p1Sources.length) % p1Sources.length;
-            };
-            res.rows.sort((a, b) => {
-                const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
-                const permitsB = this.sourcePermitProvider ? this.sourcePermitProvider(b.source) : 1;
-                const activeA = sourceCounts.get(a.source) || 0;
-                const activeB = sourceCounts.get(b.source) || 0;
-                if ((permitsA > 0) !== (permitsB > 0)) {
-                    return permitsA > 0 ? -1 : 1;
-                }
-                if (activeA !== activeB) {
-                    return activeA - activeB;
-                }
-                const sourceRankA = nextP1SourceRank(a.source);
-                const sourceRankB = nextP1SourceRank(b.source);
-                if (sourceRankA !== sourceRankB)
-                    return sourceRankA - sourceRankB;
-                return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
-            });
-            const isCandidateFrontierValid = (workId, minSort, maxPub) => {
-                if (isP1) {
-                    if (maxPub === -1 || minSort <= maxPub + 1.5)
+                // Sort candidates by source permit headroom and diversity. P1 has one
+                // circular candidate per source, so this preserves its cursor fairness.
+                const p1Sources = isP1
+                    ? Array.from(new Set(candidateRows.map((row) => String(row.source)))).sort()
+                    : [];
+                const nextP1SourceRank = (source) => {
+                    if (!isP1 || p1Sources.length === 0)
+                        return 0;
+                    if (!this.lastOnDemandP1Source)
+                        return p1Sources.indexOf(source);
+                    const firstAfterCursor = p1Sources.findIndex((candidate) => candidate > this.lastOnDemandP1Source);
+                    const start = firstAfterCursor >= 0 ? firstAfterCursor : 0;
+                    return (p1Sources.indexOf(source) - start + p1Sources.length) % p1Sources.length;
+                };
+                candidateRows.sort((a, b) => {
+                    const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
+                    const permitsB = this.sourcePermitProvider ? this.sourcePermitProvider(b.source) : 1;
+                    const activeA = sourceCounts.get(a.source) || 0;
+                    const activeB = sourceCounts.get(b.source) || 0;
+                    if ((permitsA > 0) !== (permitsB > 0))
+                        return permitsA > 0 ? -1 : 1;
+                    if (activeA !== activeB)
+                        return activeA - activeB;
+                    const sourceRankA = nextP1SourceRank(a.source);
+                    const sourceRankB = nextP1SourceRank(b.source);
+                    if (sourceRankA !== sourceRankB)
+                        return sourceRankA - sourceRankB;
+                    return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
+                });
+                const isCandidateFrontierValid = (workId, minSort, maxPub) => {
+                    if (isP1 ? (maxPub === -1 || minSort <= maxPub + 1.5) : minSort <= 1.5)
                         return true;
-                }
-                else {
-                    if (minSort <= 1.5)
-                        return true;
-                }
-                const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
-                const gapEnd = minSort - 1;
-                const intervals = gapsMap.get(workId) || [];
-                return intervals.some((g) => g.start <= gapStart && g.end >= gapEnd);
-            };
-            let match = res.rows.find((cand) => {
-                const maxPub = pubMap.get(cand.work_id) ?? -1;
-                const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
-                return isCandidateFrontierValid(cand.work_id, minSort, maxPub);
-            });
-            // If no match found directly, attempt confirmUpstreamGapInterval on top candidates
-            if (!match && res.rows.length > 0) {
-                for (const cand of res.rows) {
+                    const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+                    const gapEnd = minSort - 1;
+                    return (gapsMap.get(workId) || []).some((g) => g.start <= gapStart && g.end >= gapEnd);
+                };
+                let match = candidateRows.find((cand) => {
+                    const maxPub = pubMap.get(cand.work_id) ?? -1;
+                    const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
+                    return isCandidateFrontierValid(cand.work_id, minSort, maxPub);
+                });
+                if (match)
+                    return match;
+                // Only the bounded source window is considered for gap confirmation.
+                for (const cand of candidateRows) {
                     const maxPub = pubMap.get(cand.work_id) ?? -1;
                     const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
                     const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
                     const gapEnd = minSort - 1;
-                    if (gapStart <= gapEnd) {
-                        try {
-                            const conf = await confirmUpstreamGapInterval(this.pool, {
-                                workId: cand.work_id,
-                                startSortKey: gapStart,
-                                endSortKey: gapEnd,
-                                primarySource: cand.source,
-                                reason: 'ON_DEMAND_ADMISSION_GAP_CONFIRM',
-                            });
-                            if (conf.confirmed) {
-                                match = cand;
-                                break;
-                            }
-                        }
-                        catch { }
+                    if (gapStart > gapEnd)
+                        continue;
+                    try {
+                        const conf = await confirmUpstreamGapInterval(this.pool, {
+                            workId: cand.work_id,
+                            startSortKey: gapStart,
+                            endSortKey: gapEnd,
+                            primarySource: cand.source,
+                            reason: 'ON_DEMAND_ADMISSION_GAP_CONFIRM',
+                        });
+                        if (conf.confirmed)
+                            return cand;
                     }
+                    catch { }
+                }
+                return null;
+            };
+            let res = await loadOnDemandCandidates(false);
+            let match = await findOnDemandFrontier(res.rows);
+            // A non-empty QUEUED source window may contain only rows behind a gap.
+            // Retry the existing bounded paused-window path when no candidate is
+            // actually executable, rather than treating row presence as progress.
+            if (!match) {
+                const pausedRes = await loadOnDemandCandidates(true);
+                const pausedMatch = await findOnDemandFrontier(pausedRes.rows);
+                if (pausedMatch) {
+                    res = pausedRes;
+                    match = pausedMatch;
                 }
             }
             if (match) {
