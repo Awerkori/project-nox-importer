@@ -87,7 +87,9 @@ export declare class AdmissionController {
      *
      * Se false: obra permanece WAITING_ADMISSION.
      */
-    canAdmitNewWork(): Promise<{
+    canAdmitNewWork(options?: {
+        allowDuringClaimPressure?: boolean;
+    }): Promise<{
         allowed: boolean;
         reason: string;
         metrics: {
