@@ -26,6 +26,15 @@ export declare function resolveBufferBudgetBytes(value?: string | undefined): nu
  * validation, so pool wait cannot consume chapter capacity.
  */
 export declare function resolveChapterClaimConcurrency(globalConcurrency: number, dbPoolMax: number): number;
+/**
+ * Claims are validated before an execution permit is taken, so the nominal
+ * claim gate can be wider than the YSQL pool when the importer is healthy.
+ * When the governor temporarily lowers execution capacity, however, allowing
+ * every nominal slot to run the expensive claim query creates a stampede:
+ * only one can ultimately take the reduced execution permit.  Keep the
+ * DB-backed claim phase no wider than the current effective capacity.
+ */
+export declare function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency: number, effectiveChapterConcurrency: number): number;
 export type InternalLivenessState = 'HEALTHY_IDLE' | 'HEALTHY_WORKING' | 'BACKPRESSURED' | 'STALLED';
 export type ExternalLivenessState = InternalLivenessState | 'DEAD';
 export declare function computeInternalLivenessState(params: {
