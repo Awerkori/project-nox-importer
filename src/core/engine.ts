@@ -687,6 +687,11 @@ export class ImporterEngine {
     // 5c. Launch background controlled redundant job cleanup loop (every 30s)
     this.runRedundantJobCleanupLoop();
 
+    // Keep transient reservation-limit recovery independent from the broader
+    // cleanup chain. A slow/blocked maintenance query must not leave a
+    // PENDING canonical frontier permanently behind a FAILED queue row.
+    this.runReservationRecoveryLoop();
+
     // 6. Launch periodic existing works reconciliation loop (every 15 min)
     this.runReconciliationLoop();
 
@@ -1211,6 +1216,10 @@ export class ImporterEngine {
       if (this.stopSignal) break;
 
       try {
+        // Run the bounded frontier repair before optional maintenance work so
+        // a slow cleanup cannot postpone recovery of a canonical predecessor.
+        await this.queue.recoverReservationLimitFailures();
+        await this.queue.recoverPublicationBarrierFailures();
         if (typeof (this.scheduler as any).runControlledRedundantJobCleanup === 'function') {
           await (this.scheduler as any).runControlledRedundantJobCleanup(200);
         }
@@ -1219,12 +1228,28 @@ export class ImporterEngine {
           // scheduler-side hard cap keeps this startup/periodic pass bounded.
           await (this.scheduler as any).runControlledExhaustedJobCleanup(500);
         }
-        await this.queue.recoverPublicationBarrierFailures();
-        await this.queue.recoverReservationLimitFailures();
       } catch (err: any) {
         this.logger.warn('Error during redundant job cleanup loop', { error: err?.message });
       }
       await this.sleep(300_000);
+    }
+  }
+
+  /**
+   * Dedicated bounded repair for chapter frontiers that were parked by a
+   * transient SOURCE/WORK reservation race. This intentionally does not
+   * revive permanent failures: ImporterQueue checks the still-PENDING,
+   * non-gap canonical mapping before requeueing each row.
+   */
+  private async runReservationRecoveryLoop(): Promise<void> {
+    await this.sleep(15_000);
+    while (!this.stopSignal) {
+      try {
+        await this.queue.recoverReservationLimitFailures();
+      } catch (err: any) {
+        this.logger.warn('Error during dedicated reservation-limit recovery loop', { error: err?.message });
+      }
+      await this.sleep(60_000);
     }
   }
 

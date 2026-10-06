@@ -212,6 +212,13 @@ export declare class ImporterEngine {
      */
     private runRedundantJobCleanupLoop;
     /**
+     * Dedicated bounded repair for chapter frontiers that were parked by a
+     * transient SOURCE/WORK reservation race. This intentionally does not
+     * revive permanent failures: ImporterQueue checks the still-PENDING,
+     * non-gap canonical mapping before requeueing each row.
+     */
+    private runReservationRecoveryLoop;
+    /**
      * Periodic existing works reconciliation loop
      * Handles high-priority staff requests, on-demand admin reconciliations, and periodic catalog health batches.
      */
