@@ -25,6 +25,7 @@ export declare class AdmissionController {
     setChapterCapacityProvider(provider: () => number): void;
     private admissionInFlight;
     private demandFlights;
+    private deadWorksCache;
     private admissionOperationTail;
     private p1BacklogProbeAt;
     private p1BacklogProbeFlight;
