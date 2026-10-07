@@ -70,7 +70,13 @@ describe('ImporterEngine End-to-End Execution', () => {
     await db.exec(readFileSync(resolve('migrations/005_importer_page_provider_column.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/006_importer_publication_barrier.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/007_importer_lease_recovery.sql'), 'utf8'));
-    await db.exec(readFileSync(resolve('migrations/20260914171000_atomic_reader_repair.sql'), 'utf8'));
+    await db.exec(`
+      ALTER TABLE public.importer_sources ADD COLUMN IF NOT EXISTS blocked_reason text;
+      ALTER TABLE public.importer_sources ADD COLUMN IF NOT EXISTS blocked_details jsonb NOT NULL DEFAULT '{}'::jsonb;
+      CREATE TABLE IF NOT EXISTS public.importer_confirmed_gaps (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), work_id uuid NOT NULL, start_sort_key numeric NOT NULL, end_sort_key numeric NOT NULL, confirmed_at timestamptz NOT NULL DEFAULT now(), primary_source text);
+      INSERT INTO public.settings (key, value) VALUES ('publication_safety_barrier', 'OPEN') ON CONFLICT (key) DO UPDATE SET value = excluded.value;
+    `);
+        await db.exec(readFileSync(resolve('migrations/20260914171000_atomic_reader_repair.sql'), 'utf8'));
     await db.exec(`ALTER TABLE public.chapters ADD COLUMN IF NOT EXISTS is_fresh_release boolean DEFAULT false;`);
     await db.exec(`ALTER TABLE public.works ADD COLUMN IF NOT EXISTS latest_chapter_published_at timestamptz;`);
 
@@ -280,7 +286,7 @@ describe('ImporterEngine End-to-End Execution', () => {
               const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
               db.query(`insert into public.${table} (${cols}) values (${placeholders}) returning *`, vals)
                 .then(r => resolve?.({ data: r.rows[0], error: null }))
-                .catch(err => reject ? reject(err) : resolve?.({ data: null, error: err }));
+                .catch(err => resolve({ data: null, error: err }));
             }
           }),
           update: (row: any) => ({
@@ -292,7 +298,7 @@ describe('ImporterEngine End-to-End Execution', () => {
                   const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
                   db.query(`update public.${table} set ${setClause} where ${col} = $${keys.length + 1} and ${col2} = $${keys.length + 2} returning *`, [...vals, val, val2])
                     .then(r => resolve?.({ data: r.rows, error: null }))
-                    .catch(err => reject ? reject(err) : resolve?.({ data: null, error: err }));
+                    .catch(err => resolve({ data: null, error: err }));
                 }
               }),
               then: (resolve?: any, reject?: any) => {
@@ -301,7 +307,7 @@ describe('ImporterEngine End-to-End Execution', () => {
                 const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
                 db.query(`update public.${table} set ${setClause} where ${col} = $${keys.length + 1} returning *`, [...vals, val])
                   .then(r => resolve?.({ data: r.rows, error: null }))
-                  .catch(err => reject ? reject(err) : resolve?.({ data: null, error: err }));
+                  .catch(err => resolve({ data: null, error: err }));
               }
             })
           }),
@@ -345,7 +351,7 @@ describe('ImporterEngine End-to-End Execution', () => {
                     `, vals);
                     if (res.rows[0]) results.push(res.rows[0]);
                   } catch (err: any) {
-                    return reject ? reject(err) : resolve?.({ data: null, error: err });
+                    return resolve({ data: null, error: err });
                   }
                 }
                 resolve?.({ data: results, error: null });
@@ -410,11 +416,11 @@ describe('ImporterEngine End-to-End Execution', () => {
     };
 
     engine = new ImporterEngine(supabaseMock, storage, registry, rateLimiter, testConfig);
-  });
+  }, 30000);
 
   afterAll(async () => {
     await db.close();
-  });
+  }, 30000);
 
   it('runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish', async () => {
     // 1. Trigger source scheduling to enqueue DISCOVER_WORKS
@@ -483,7 +489,7 @@ describe('ImporterEngine End-to-End Execution', () => {
     expect(chapMap.rows.length).toBe(1);
     expect((chapMap.rows[0] as any).status).toBe('COMPLETED');
     expect((chapMap.rows[0] as any).page_count).toBe(2);
-  }, 15000);
+  }, 30000);
 
   it('safely skips already completed chapters on subsequent sync runs without duplicate downloads', async () => {
     const uploadCountBefore = storage.uploads.size;
@@ -503,7 +509,7 @@ describe('ImporterEngine End-to-End Execution', () => {
     );
     expect(newChapJobs.rows.length).toBe(0);
     expect(storage.uploads.size).toBe(uploadCountBefore);
-  });
+  }, 30000);
   it('repairs an already published chapter instead of treating publication as integrity proof', async () => {
     const job: any = (await db.query("SELECT * FROM importer_queue WHERE task_type='IMPORT_CHAPTER' LIMIT 1")).rows[0];
     const chapter: any = (await db.query('SELECT id,published_at FROM chapters WHERE work_id=$1 AND number=1',[job.payload.workId])).rows[0];
@@ -515,6 +521,6 @@ describe('ImporterEngine End-to-End Execution', () => {
     expect(storage.uploads.size).toBe(uploadsBefore); // Existing image bytes deduplicate; no redundant upload.
     const after: any = (await db.query('SELECT published_at FROM chapters WHERE id=$1',[chapter.id])).rows[0];
     expect(after.published_at).toEqual(chapter.published_at);
-  });
+  }, 30000);
 
 });

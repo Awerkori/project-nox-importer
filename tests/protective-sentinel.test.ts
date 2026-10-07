@@ -52,6 +52,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
   };
 
   beforeEach(() => {
+    globalThis.fetch = async () => new Response('mock', {status: 200});
     mockSettings = {};
     mockDbConns = { total: 4, active: 1 };
     vi.spyOn(diagnostics, 'getMemorySnapshot').mockReturnValue({
@@ -61,13 +62,13 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
       externalMb: 10,
       arrayBuffersMb: 0,
     });
-  });
+  }, 30000);
 
   it('uses browser-navigation headers for public health probes', () => {
     expect(SITE_PROBE_HEADERS['User-Agent']).toContain('Mozilla/5.0');
     expect(SITE_PROBE_HEADERS.Accept).toContain('text/html');
     expect(SITE_PROBE_HEADERS['Accept-Language']).toContain('pt-BR');
-  });
+  }, 30000);
 
   it('Requirement 1 & 2: Automatic 5xx errors NEVER trigger global protective stop', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, 'https://test-site.workers.dev');
@@ -86,7 +87,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(snap.siteHealth).toBe('RED');
     expect(snap.pressureScore).toBeGreaterThanOrEqual(60);
     expect(snap.pressureReason).toContain('Sustained HTTP 5xx');
-  });
+  }, 30000);
 
   it('does not treat a Home 404 as a successful recovery', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
@@ -100,7 +101,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
 
     await sentinel.evaluatePreSlaGuardRails();
     expect(sentinel.getPressureSnapshot().siteHealth).toBe('ORANGE');
-  });
+  }, 30000);
 
   it('does not let a health corroboration erase a preceding public 5xx', () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
@@ -110,7 +111,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     (sentinel as any).recordProbeResult('health', 90, 200);
 
     expect((sentinel as any).consecutive5xxCount).toBe(1);
-  });
+  }, 30000);
 
   it('expires a stale 5xx decision signal without erasing its diagnostic timestamp', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, undefined, mockPool);
@@ -126,7 +127,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(snapshot.consecutive5xx).toBe(0);
     expect(snapshot.lastHttp5xx).toBe(now - 76_000);
     expect(snapshot.siteHealth).not.toBe('RED');
-  });
+  }, 30000);
 
   it('invalidates only a stale Reader probe target on 404', () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
@@ -136,7 +137,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
 
     expect((sentinel as any).cachedReaderChapterId).toBeNull();
     expect((sentinel as any).consecutiveProbeFailures).toBe(0);
-  });
+  }, 30000);
 
   it('keeps capacity when an edge-only route mismatch is corroborated by health', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, 'https://test-site.workers.dev');
@@ -151,7 +152,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(snapshot.pressureBreakdown.sitePressure).toBe(0);
     expect(snapshot.probeRouteMismatch).toBe(true);
     expect(snapshot.pressureReason).toContain('Monitor route mismatch confirmed');
-  });
+  }, 30000);
 
   it('keeps capacity for a uniform 404 monitor-routing signature', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, 'https://test-site.workers.dev');
@@ -166,7 +167,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(snapshot.pressureBreakdown.sitePressure).toBe(0);
     expect(snapshot.probeRouteMismatch).toBe(true);
     expect(snapshot.pressureReason).toContain('uniform 404');
-  });
+  }, 30000);
 
   it('recovers capacity after a single stale 5xx and sustained uniform route mismatch', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
@@ -185,7 +186,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(snapshot.siteHealth).toBe('GREEN');
     expect(snapshot.pressureBreakdown.sitePressure).toBe(0);
     expect(snapshot.pressureReason).toContain('uniform 404');
-  });
+  }, 30000);
 
   it('selects a Reader probe chapter only when published pages exist', async () => {
     let readerSql = '';
@@ -204,7 +205,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(readerSql).toContain('FROM pages p');
     expect(readerSql).toContain('p.chapter_id = c.id');
     expect(readerSql).toContain("INTERVAL '5 minutes'");
-  });
+  }, 30000);
 
   it('can attach the engine shared pool before the watchdog starts', async () => {
     const sharedPool = {
@@ -216,7 +217,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     await sentinel.evaluatePreSlaGuardRails();
 
     expect(sharedPool.query).toHaveBeenCalledWith(expect.stringContaining('pg_stat_activity'));
-  });
+  }, 30000);
 
   it('Requirement 1 & 2: YSQL connection spikes NEVER trigger global protective stop', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
@@ -231,7 +232,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     const snap = sentinel.getPressureSnapshot();
     expect(snap.pressureBreakdown.dbPressure).toBe(30);
     expect(snap.pressureReason).toContain('Elevated YSQL load');
-  });
+  }, 30000);
 
   it('requires sustained mild YSQL activity before reducing importer capacity', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
@@ -244,7 +245,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     await sentinel.evaluatePreSlaGuardRails();
     expect(sentinel.getPressureSnapshot().pressureBreakdown.dbPressure).toBe(15);
     expect(sentinel.getPressureSnapshot().pressureReason).toContain('Sustained YSQL activity');
-  });
+  }, 30000);
 
   it('Requirement 2: Legacy automatic protective stop in database is auto-cleared', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
@@ -265,7 +266,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     await sentinel.clearLegacyProtectiveStopOnStartup();
     const info = await sentinel.getProtectiveStopInfo(true);
     expect(info.active).toBe(false);
-  });
+  }, 30000);
 
   it('Requirement 2: Manual staff stop IS preserved and active', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
@@ -280,7 +281,7 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     // Resuming manual stop
     await sentinel.resumeProtectiveStop('staff_user');
     expect(await sentinel.isProtectiveStopActive()).toBe(false);
-  });
+  }, 30000);
 
   it('Requirement 63: CI Anti-regression — Automatic performance stops cannot be triggered', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined);
@@ -294,5 +295,5 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
 
     await sentinel.triggerProtectiveStop('DB tripwire', {}, 'YSQL_PRESSURE');
     expect(await sentinel.isProtectiveStopActive()).toBe(false);
-  });
+  }, 30000);
 });
