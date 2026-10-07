@@ -35,6 +35,15 @@ export declare function resolveChapterClaimConcurrency(globalConcurrency: number
  * DB-backed claim phase no wider than the current effective capacity.
  */
 export declare function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency: number, effectiveChapterConcurrency: number): number;
+/**
+ * A null scheduler result means every priority lane and the bounded catalog
+ * fallback were just checked without finding executable work. Repeating that
+ * DB-heavy scan after the historical 50-150ms sleep crowds out real claims on
+ * the two-connection YSQL pool. Back off proportionally to the exhausted scan
+ * but cap it at 1.1s including jitter, so a newly discovered P0 is never
+ * delayed long and no priority rule is changed.
+ */
+export declare function resolveEmptySchedulerBackoffMs(schedulerAcquireMs: number, random?: () => number): number;
 export type InternalLivenessState = 'HEALTHY_IDLE' | 'HEALTHY_WORKING' | 'BACKPRESSURED' | 'STALLED';
 export type ExternalLivenessState = InternalLivenessState | 'DEAD';
 export declare function computeInternalLivenessState(params: {
