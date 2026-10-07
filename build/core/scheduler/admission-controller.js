@@ -2110,7 +2110,7 @@ export class AdmissionController {
             const findOnDemandFrontier = async (candidateRows) => {
                 if (candidateRows.length === 0)
                     return null;
-                this.logger.info(`[DEBUG_ADM_CANDIDATES] ${JSON.stringify(candidateRows.map(c => ({ w: c.work_id, q: c.queued_count })))}`);
+                this.logger.info(`[DEBUG_ADM_CANDIDATES] CacheSize: ${this.deadWorksCache.size} | Cands: ${JSON.stringify(candidateRows.map(c => ({ w: c.work_id, q: c.queued_count })))}`);
                 const candWorkIds = candidateRows.map((r) => r.work_id);
                 const pubMap = new Map();
                 const pubRes = await this.runQuery(`SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
@@ -2196,7 +2196,9 @@ export class AdmissionController {
                         else
                             this.deadWorksCache.set(cand.work_id, Date.now());
                     }
-                    catch { }
+                    catch {
+                        this.deadWorksCache.set(cand.work_id, Date.now());
+                    }
                 }
                 return null;
             };
