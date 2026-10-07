@@ -42,6 +42,7 @@ export class AdmissionController {
   }
   private admissionInFlight: Promise<void> | null = null;
   private demandFlights = new Map<string, Promise<ActiveWork | null>>();
+  private deadWorksCache = new Map<string, number>();
   // Periodic reconciliation and on-demand admission both execute bounded
   // GROUP BY/frontier queries against the same small YSQL pool. Keep them on
   // one FIFO lane so a vacancy cannot start a second scan while the periodic
@@ -281,6 +282,7 @@ export class AdmissionController {
 
   stop(): void {
     this.isRunning = false;
+    this.deadWorksCache.clear();
     if (this.immediateReplenishTimer) clearTimeout(this.immediateReplenishTimer);
     this.immediateReplenishTimer = null;
     if (this.loopTimer) {
@@ -1055,6 +1057,8 @@ export class AdmissionController {
   }
 
   private async executeAdmissionCycle(): Promise<void> {
+    const now = Date.now();
+    for (const [wid, ts] of this.deadWorksCache.entries()) { if (now - ts > 10 * 60 * 1000) this.deadWorksCache.delete(wid); }
     const config = this.stateStore.getConfig();
     if (!config.enabled && !config.shadowMode) {
       return;
@@ -1529,6 +1533,7 @@ export class AdmissionController {
                AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
                AND NOT ((q.payload->>'workId') = ANY($1::text[]))
                AND q.payload->>'workId' IS NOT NULL
+               AND NOT ((q.payload->>'workId') = ANY($7::text[]))
              ORDER BY q.priority DESC, q.chapter_sort_key ASC
              LIMIT $5
            ) q
@@ -1594,6 +1599,7 @@ export class AdmissionController {
           JSON.stringify(this.getP1AdmissionCursors()),
           Math.max(64, backfillSlotsAvailable * 32),
           p1SourceWindow,
+          Array.from(this.deadWorksCache.keys()).length > 0 ? Array.from(this.deadWorksCache.keys()) : ['00000000-0000-0000-0000-000000000000']
         ]
       );
       const resolveP1Frontiers = async (candidateRows: any[]) => {
@@ -1664,6 +1670,7 @@ export class AdmissionController {
                 reason: 'ADMISSION_CANDIDATE_GAP_CONFIRM',
               });
               if (conf.confirmed) contiguous.push(cand);
+              else this.deadWorksCache.set(cand.work_id, Date.now());
             } catch {}
           }
         }
@@ -2079,6 +2086,7 @@ export class AdmissionController {
               AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
               AND NOT ((q.payload->>'workId') = ANY($2::text[]))
               AND q.payload->>'workId' IS NOT NULL
+              AND NOT ((q.payload->>'workId') = ANY($7::text[]))
             ORDER BY q.priority DESC, q.chapter_sort_key ASC
             LIMIT $5
           ) q
@@ -2144,6 +2152,7 @@ export class AdmissionController {
           JSON.stringify(this.getP1AdmissionCursors()),
           16,
           p1SourceWindow,
+          Array.from(this.deadWorksCache.keys()).length > 0 ? Array.from(this.deadWorksCache.keys()) : ['00000000-0000-0000-0000-000000000000']
         ]);
       };
 
@@ -2233,6 +2242,7 @@ export class AdmissionController {
               reason: 'ON_DEMAND_ADMISSION_GAP_CONFIRM',
             });
             if (conf.confirmed) return cand;
+            else this.deadWorksCache.set(cand.work_id, Date.now());
           } catch {}
         }
         return null;

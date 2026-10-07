@@ -33,6 +33,7 @@ export class AdmissionController {
     }
     admissionInFlight = null;
     demandFlights = new Map();
+    deadWorksCache = new Map();
     // Periodic reconciliation and on-demand admission both execute bounded
     // GROUP BY/frontier queries against the same small YSQL pool. Keep them on
     // one FIFO lane so a vacancy cannot start a second scan while the periodic
@@ -260,6 +261,7 @@ export class AdmissionController {
     }
     stop() {
         this.isRunning = false;
+        this.deadWorksCache.clear();
         if (this.immediateReplenishTimer)
             clearTimeout(this.immediateReplenishTimer);
         this.immediateReplenishTimer = null;
@@ -1015,6 +1017,11 @@ export class AdmissionController {
             .finally(release);
     }
     async executeAdmissionCycle() {
+        const now = Date.now();
+        for (const [wid, ts] of this.deadWorksCache.entries()) {
+            if (now - ts > 10 * 60 * 1000)
+                this.deadWorksCache.delete(wid);
+        }
         const config = this.stateStore.getConfig();
         if (!config.enabled && !config.shadowMode) {
             return;
@@ -1470,6 +1477,7 @@ export class AdmissionController {
                AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
                AND NOT ((q.payload->>'workId') = ANY($1::text[]))
                AND q.payload->>'workId' IS NOT NULL
+               AND NOT ((q.payload->>'workId') = ANY($7::text[]))
              ORDER BY q.priority DESC, q.chapter_sort_key ASC
              LIMIT $5
            ) q
@@ -1534,6 +1542,7 @@ export class AdmissionController {
                 JSON.stringify(this.getP1AdmissionCursors()),
                 Math.max(64, backfillSlotsAvailable * 32),
                 p1SourceWindow,
+                Array.from(this.deadWorksCache.keys()).length > 0 ? Array.from(this.deadWorksCache.keys()) : ['00000000-0000-0000-0000-000000000000']
             ]);
             const resolveP1Frontiers = async (candidateRows) => {
                 // A non-empty QUEUED window is not necessarily executable: it can be
@@ -1601,6 +1610,8 @@ export class AdmissionController {
                             });
                             if (conf.confirmed)
                                 contiguous.push(cand);
+                            else
+                                this.deadWorksCache.set(cand.work_id, Date.now());
                         }
                         catch { }
                     }
@@ -1984,6 +1995,7 @@ export class AdmissionController {
               AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
               AND NOT ((q.payload->>'workId') = ANY($2::text[]))
               AND q.payload->>'workId' IS NOT NULL
+              AND NOT ((q.payload->>'workId') = ANY($7::text[]))
             ORDER BY q.priority DESC, q.chapter_sort_key ASC
             LIMIT $5
           ) q
@@ -2049,6 +2061,7 @@ export class AdmissionController {
                     JSON.stringify(this.getP1AdmissionCursors()),
                     16,
                     p1SourceWindow,
+                    Array.from(this.deadWorksCache.keys()).length > 0 ? Array.from(this.deadWorksCache.keys()) : ['00000000-0000-0000-0000-000000000000']
                 ]);
             };
             const findOnDemandFrontier = async (candidateRows) => {
@@ -2140,6 +2153,8 @@ export class AdmissionController {
                         });
                         if (conf.confirmed)
                             return cand;
+                        else
+                            this.deadWorksCache.set(cand.work_id, Date.now());
                     }
                     catch { }
                 }
