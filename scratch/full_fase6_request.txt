@@ -1,0 +1,623 @@
+<USER_REQUEST>
+FASE 6 — CORRIGIR O CLAIM PATH REAL + REDUZIR DB ROUND-TRIPS ATÉ ~10 FRESH CAP/MIN
+
+PR #95 APROVADO.
+
+Mudanças confirmadas:
+
+- DB I/O saiu do chapterClaimMutex;
+- mutex wait/hold praticamente zeraram;
+- zombie active works corrigidas;
+- site e Yugabyte permanecem saudáveis.
+
+PORÉM:
+
+FRESH NEW VISIBLE:
+3.75/min
+
+TOTAL VISIBLE:
+4.47/min
+
+TARGET:
+>=10 FRESH/min
+
+Portanto NÃO ENCERRAR.
+
+============================================================
+0. SEGURANÇA URGENTE
+============================================================
+
+Antes de qualquer otimização:
+
+A main atual ainda contém YUGABYTE_PASSWORD hardcoded/default em:
+
+src/config.ts
+
+NÃO imprimir o valor.
+
+Tratar como segredo comprometido.
+
+Fazer:
+
+1. rotacionar a senha Yugabyte;
+2. remover qualquer senha real/default do código;
+3. exigir YUGABYTE_PASSWORD via variável de ambiente/secret;
+4. confirmar que a credencial antiga não funciona mais;
+5. verificar outros defaults sensíveis no mesmo arquivo.
+
+Não colocar novo segredo em commit/log.
+
+Entrega:
+
+YUGABYTE SECRET ROTATED:
+YES/NO
+
+OLD SECRET INVALID:
+YES/NO
+
+HARDCODED DB PASSWORD IN MAIN:
+0 / NUMBER
+
+============================================================
+1. CORRIGIR A INTERPRETAÇÃO DE claim_db_ms
+============================================================
+
+O relatório diz:
+
+SPECIFIC CLAIM P50:
+10.8s
+
+Isso NÃO corresponde necessariamente a uma query SQL.
+
+No engine.ts atual:
+
+tDb0
+-> scheduler.acquireNextChapterJob(...)
+-> claimDbMs
+
+Logo claimDbMs mede TODO o scheduler acquire path.
+
+Esse path pode executar sequencialmente:
+
+STAFF_FORCED
+P0 probe
+criticalWorks[]
+readyP1Works[]
+readyP2Works[]
+active fallback
+admitNextWorkOnDemand
+catalog fallback
+
+Portanto renomear/medir corretamente:
+
+SCHEDULER_ACQUIRE_TOTAL_MS
+
+e separar de:
+
+POOL_WAIT_MS
+SQL_EXEC_MS
+CLAIM_SINGLE_JOB_SQL_MS
+
+============================================================
+2. INSTRUMENTAR O ACQUIRE PATH
+============================================================
+
+Para cada acquire bem-sucedido registrar:
+
+STAFF_CHECK_MS:
+P0_PROBE_MS:
+
+CRITICAL_WORK_ATTEMPTS:
+CRITICAL_WORK_TIME_MS:
+
+P1_WORK_ATTEMPTS:
+P1_WORK_TIME_MS:
+
+P2_WORK_ATTEMPTS:
+P2_WORK_TIME_MS:
+
+ACTIVE_FALLBACK_MS:
+
+ADMISSION_ON_DEMAND_MS:
+
+CATALOG_FALLBACK_MS:
+
+POOL_WAIT_TOTAL_MS:
+
+SQL_EXEC_TOTAL_MS:
+
+TOTAL_QUERIES_PER_SUCCESSFUL_CLAIM:
+
+TOTAL_ACQUIRE_MS:
+
+Não gerar query extra apenas para telemetria.
+
+Usar timers no código existente.
+
+============================================================
+3. QUANTAS QUERIES CUSTAM UM CAPÍTULO?
+============================================================
+
+Hoje uma query individual anteriormente custava dezenas de ms.
+
+Mas acquire total agora custa ~10–15s.
+
+Quero saber:
+
+QUERIES / SUCCESSFUL CLAIM P50:
+QUERIES / SUCCESSFUL CLAIM P95:
+
+FAILED SPECIFIC CLAIMS / SUCCESS:
+
+WORKS TESTED BEFORE SUCCESS P50/P95:
+
+Se para conseguir 1 capítulo estamos testando:
+
+10
+20
+30
+
+obras sequencialmente no Yugabyte:
+
+ESSA É A CAUSA.
+
+============================================================
+4. CLAIMABLE ACTIVE WORKS = 0 NÃO É “SAUDÁVEL”
+============================================================
+
+O relatório declarou:
+
+CLAIMABLE ACTIVE WORKS: 0
+STATUS: SAUDÁVEL
+
+Isso precisa ser revisado.
+
+Com backlog saudável, o active set deveria conter obras capazes de fornecer frontier AGORA.
+
+Informar:
+
+ACTIVE WORKS TOTAL:
+
+ACTIVE CLAIMABLE NOW:
+
+ACTIVE BLOCKED:
+
+ACTIVE STAGED_BLOCKED:
+
+ACTIVE SOURCE_BLOCKED:
+
+ACTIVE MAX_INFLIGHT:
+
+ACTIVE NO_JOB:
+
+ON-DEMAND ADMISSIONS/MIN:
+
+EVICTIONS/MIN:
+
+Se:
+
+ACTIVE CLAIMABLE = 0
+
+e workers dependem continuamente de:
+
+admitNextWorkOnDemand()
+
+temos churn no Active Set.
+
+============================================================
+5. MANTER READY WORKS DE VERDADE
+============================================================
+
+Objetivo:
+
+quando um worker fica livre, ele deve ter uma pequena lista de obras já conhecidas como:
+
+SOURCE HEALTHY
+FRONTIER CLAIMABLE
+NOT STAGED BLOCKED
+BELOW maxInflightPerWork
+
+e fazer UM claim indexado.
+
+Não deve:
+
+percorrer dezenas de active works
+fazendo SELECT até achar uma que funciona.
+
+Se necessário:
+
+manter um ready set/queue em memória baseado no estado que já existe.
+
+NÃO criar scan global novo.
+
+NÃO criar query pesada de ranking.
+
+NÃO usar array_position.
+
+============================================================
+6. FAIRNESS E PRIORIDADES CONTINUAM OBRIGATÓRIAS
+============================================================
+
+Preservar:
+
+STAFF_FORCED >>> P0 >>> P1 > P2 > P3
+
+e fairness entre obras.
+
+Uma ready queue NÃO pode permitir que:
+
+P2 passe STAFF_FORCED/P0
+
+ou
+
+capítulo posterior pule frontier canônica.
+
+============================================================
+7. POOL — MEDIR ANTES DE ALTERAR
+============================================================
+
+O relatório falou:
+
+DIRECT_DB_POOL_MAX:
+2 (ou 4)
+
+Isso é ambíguo.
+
+O código possui configuração diferente.
+
+Quero o valor EFETIVO em produção:
+
+DIRECT_DB_POOL_MAX EFFECTIVE:
+
+POOL TOTAL:
+POOL IDLE:
+POOL WAITING:
+
+POOL CHECKOUT WAIT P50/P95:
+
+SQL EXEC P50/P95:
+
+Não aumentar pool ainda.
+
+============================================================
+8. queuedWaitingAvg = 17.4
+============================================================
+
+Foi reportado:
+
+~17 queries esperando conexão em média.
+
+Isso é forte sinal de fan-out excessivo de queries.
+
+Primeiro reduzir:
+
+queries por successful claim
++
+round-trips desnecessários
+
+ANTES de aumentar conexões.
+
+Não mascarar um scheduler fazendo 20 queries/capítulo com pool maior.
+
+============================================================
+9. CLAIM TARGET
+============================================================
+
+Depois do fix do scheduler:
+
+SCHEDULER ACQUIRE TOTAL P50:
+< 250ms desejado
+
+P95:
+< 750ms
+
+CLAIM_SINGLE_JOB SQL P50:
+<100ms
+
+POOL WAIT P50:
+ideal <50ms
+
+ON-DEMAND ADMISSION:
+não deve ocorrer em quase todo capítulo.
+
+============================================================
+10. DEPOIS DO CLAIM, ATACAR DB PERSISTENCE
+============================================================
+
+SOMENTE se:
+
+SCHEDULER_ACQUIRE P50 <250ms
+
+e
+
+FRESH NEW VISIBLE ainda <10/min
+
+então analisar:
+
+DB PUBLISH/PERSISTENCE ~22s.
+
+Separar exatamente:
+
+CHAPTER UPSERT:
+PAGES UPSERT:
+MAPPING UPDATE:
+QUEUE UPDATE:
+PUBLICATION BARRIER CHECK:
+PUBLISH UPDATE:
+WORK UPDATE:
+TRANSACTION COMMIT:
+
+Para cada um:
+
+CALLS/CHAPTER
+POOL WAIT
+SQL EXEC
+TOTAL TIME
+
+============================================================
+11. REDUZIR ROUND-TRIPS DO DB
+============================================================
+
+Se houver operações independentes e seguras:
+
+batch
+ou
+paralelizar de forma limitada.
+
+Preferir:
+
+1 batch SQL
+
+em vez de:
+
+20–30 queries pequenas sequenciais.
+
+NÃO aumentar carga bruta no Yugabyte.
+
+Objetivo:
+
+menos round-trips
+com mesmo número ou menos de operações lógicas.
+
+============================================================
+12. NÃO AUMENTAR POOL CEGAMENTE
+============================================================
+
+Yugabyte Aeon possui limite baixo e o SITE compartilha o cluster.
+
+Não aumentar DIRECT_DB_POOL_MAX como primeira correção.
+
+Somente considerar +1 conexão se, DEPOIS de reduzir query fan-out:
+
+POOL WAIT continuar sendo gargalo dominante
+
+e:
+
+CPU saudável
+connections com margem
+site rápido
+0 timeouts.
+
+Qualquer teste deve ser pequeno e reversível.
+
+============================================================
+13. DOWNLOAD / TELEGRAM
+============================================================
+
+Hoje temos aproximadamente:
+
+DOWNLOAD:
+~23s avg
+
+TELEGRAM:
+~22s avg
+
+Antes de mexer nesses limites, confirmar se eles já se sobrepõem parcialmente.
+
+Não somar tempos de estágio cegamente se:
+
+downloads
+e uploads
+
+executam pipeline concorrente por páginas.
+
+Medir wall-clock real:
+
+DOWNLOAD_START -> LAST_DOWNLOAD
+UPLOAD_START -> LAST_UPLOAD
+
+e overlap entre os dois.
+
+============================================================
+14. MATEMÁTICA CORRETA
+============================================================
+
+Meta com 8 workers:
+
+10/min
+
+exige:
+
+MEAN SLOT OCCUPANCY <=48s
+
+Hoje:
+
+~67.8s.
+
+Precisamos remover aproximadamente:
+
+20s/capítulo de wall-clock.
+
+Candidatos medidos:
+
+scheduler acquire:
+~11s
+
+DB persistence:
+~22s
+
+Primeiro eliminar custo artificial do scheduler.
+
+Depois reavaliar.
+
+============================================================
+15. FRESH É A MÉTRICA PRINCIPAL
+============================================================
+
+Continuar separando:
+
+FRESH NEW VISIBLE
+CASCADE
+TOTAL VISIBLE
+
+Meta:
+
+>=10 FRESH NEW VISIBLE/MIN
+
+Não usar cascade para bater target.
+
+============================================================
+16. VALIDAÇÃO
+============================================================
+
+Uma mudança cirúrgica por vez.
+
+Após scheduler fix:
+
+janela de 5 minutos.
+
+Entregar:
+
+ACTIVE CLAIMABLE WORKS:
+
+ON-DEMAND ADMISSIONS/MIN:
+
+WORKS TESTED PER SUCCESSFUL CLAIM P50/P95:
+
+QUERIES PER SUCCESSFUL CLAIM P50/P95:
+
+SCHEDULER ACQUIRE P50/P95:
+
+POOL WAIT P50/P95:
+
+CLAIM SQL EXEC P50/P95:
+
+ACTIVE PROCESSING:
+
+BLOCKED:
+
+IDLE:
+
+SUM:
+8.00
+
+MEAN SLOT OCCUPANCY:
+
+CHAPTER STARTED/MIN:
+
+CHAPTER COMPLETED/MIN:
+
+FRESH NEW VISIBLE/MIN:
+
+CASCADE/MIN:
+
+YUGABYTE CPU AVG/P95/PEAK:
+
+YSQL CONNECTIONS:
+
+POOL TIMEOUTS:
+
+HOME P50/P95:
+
+READER P50/P95:
+
+============================================================
+17. SE AINDA <10
+============================================================
+
+Se acquire cair para <250ms
+mas Fresh ainda ficar <10:
+
+não mexer novamente no scheduler.
+
+Atacar o próximo maior componente REAL:
+
+DB persistence.
+
+Usar breakdown de pool wait vs query execution.
+
+============================================================
+18. NÃO REPETIR INCIDENTES ANTERIORES
+============================================================
+
+PROIBIDO:
+
+array_position em ORDER BY hot path
+full scan periódico
+GROUP BY global frequente
+correlated NOT EXISTS no claim
+mutex envolvendo I/O
+aumentar worker count
+aumentar pool cegamente
+marcar gap falso
+limpar dados para melhorar benchmark.
+
+============================================================
+ENTREGA FINAL
+============================================================
+
+PR95 VERIFIED:
+YES
+
+SECRET FIXED:
+YES/NO
+
+CLAIM_DB_METRIC WAS MISLABELED:
+YES/NO
+
+ACTIVE CLAIMABLE BEFORE:
+
+ACTIVE CLAIMABLE AFTER:
+
+QUERIES PER CLAIM BEFORE:
+
+QUERIES PER CLAIM AFTER:
+
+SCHEDULER ACQUIRE BEFORE:
+~10.8s P50
+
+SCHEDULER ACQUIRE AFTER:
+
+POOL WAIT BEFORE:
+
+POOL WAIT AFTER:
+
+MEAN SLOT OCCUPANCY BEFORE:
+67.8s
+
+MEAN SLOT OCCUPANCY AFTER:
+
+FRESH NEW VISIBLE BEFORE:
+3.75/min
+
+FRESH NEW VISIBLE AFTER:
+
+YUGABYTE CPU:
+
+SITE FAST:
+YES/NO
+
+TARGET >=10 FRESH:
+PASS/FAIL
+
+FINAL:
+
+10 CAP/MIN HEALTHY BASELINE RESTORED
+
+ou
+
+EXACT NEXT BOTTLENECK
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-09-25T02:11:55-03:00.
+</ADDITIONAL_METADATA>

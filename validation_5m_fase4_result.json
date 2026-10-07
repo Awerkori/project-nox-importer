@@ -1,0 +1,223 @@
+{
+  "durationMinutes": 5.65,
+  "avgUsefulWorkers": 12.47,
+  "claimMetrics": {
+    "specificAttempts": 44,
+    "specificSuccesses": 30,
+    "genericAttempts": 0,
+    "genericSuccesses": 0,
+    "emptyAttempts": 0,
+    "specificClaimP50": 0,
+    "specificClaimP95": 0
+  },
+  "mutexStats": {
+    "waitP50": 6943.5,
+    "waitP95": 37582.8,
+    "holdP50": 8014.6,
+    "holdP95": 13656,
+    "samples": 36
+  },
+  "avgSlotStates": {
+    "IDLE": 0.01,
+    "ACTIVE_DB": 2.35,
+    "ACTIVE_ENCODE": 0,
+    "ACTIVE_SOURCE": 2.72,
+    "WAITING_MUTEX": 0.78,
+    "ACTIVE_DOWNLOAD": 0.85,
+    "ACTIVE_TELEGRAM": 0.43,
+    "WAITING_BARRIER": 0.23,
+    "WAITING_CLAIM_DB": 0.63,
+    "WAITING_SOURCE_PERMIT": 0
+  },
+  "slotOccupancy": {
+    "p50Sec": 75,
+    "p95Sec": 117.3,
+    "meanSec": 78.3,
+    "avgBusyWorkers": 8,
+    "theoreticalCapacityPerMin": 6.13
+  },
+  "throughput": {
+    "chapterStartedPerMin": 5.31,
+    "chapterCompletedPerMin": 5.31,
+    "stagedPerMin": 0.18,
+    "newPublishedPerMin": 6.55,
+    "newVisiblePerMin": 6.55,
+    "cascadePerMin": 8.15,
+    "directPubPerMin": 0,
+    "totalCompleted": 30,
+    "totalPublished": 37,
+    "totalStaged": 1,
+    "cascadeCount": 46
+  },
+  "yugabyte": {
+    "cpuAvgPercent": 12.8,
+    "cpuP95Percent": 57.6,
+    "cpuPeakPercent": 59.6,
+    "ysqlConnectionsAvg": 3.1,
+    "poolTimeouts": 0
+  },
+  "siteLatencies": {
+    "home": {
+      "p50": 114.3,
+      "p95": 278.5,
+      "p99": 498.6,
+      "min": 77.5,
+      "max": 498.6,
+      "avg": 139.2
+    },
+    "reader": {
+      "p50": 37.8,
+      "p95": 151.6,
+      "p99": 180.3,
+      "min": 27.2,
+      "max": 180.3,
+      "avg": 46.5
+    }
+  },
+  "dataIntegrity": {
+    "emptyPages": 0,
+    "duplicateChapters": 0,
+    "status": "PASS"
+  },
+  "jobProfile": {
+    "stages": {
+      "claim": {
+        "avg": 20283.6,
+        "max": 55745,
+        "p50": 18139,
+        "p75": 24512,
+        "p95": 42105,
+        "p99": 55745
+      },
+      "dbWait": {
+        "avg": 0,
+        "max": 0,
+        "p50": 0,
+        "p75": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "encode": {
+        "avg": 0,
+        "max": 0,
+        "p50": 0,
+        "p75": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "claimDb": {
+        "avg": 6708.4,
+        "max": 12665,
+        "p50": 6586,
+        "p95": 12031,
+        "p99": 12665
+      },
+      "download": {
+        "avg": 16797.5,
+        "max": 73480,
+        "p50": 10597,
+        "p75": 23314,
+        "p95": 44934,
+        "p99": 73480
+      },
+      "metadata": {
+        "avg": 0,
+        "max": 0,
+        "p50": 0,
+        "p75": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "dbPublish": {
+        "avg": 25122.6,
+        "max": 59824,
+        "p50": 21235,
+        "p75": 26642,
+        "p95": 49332,
+        "p99": 59824
+      },
+      "mutexWait": {
+        "avg": 9015.3,
+        "max": 37583,
+        "p50": 6505,
+        "p95": 29178,
+        "p99": 37583
+      },
+      "otherWait": {
+        "avg": 6594.7,
+        "max": 22490,
+        "p50": 5708,
+        "p75": 13207,
+        "p95": 21843,
+        "p99": 22490
+      },
+      "sourceFetch": {
+        "avg": 0,
+        "max": 0,
+        "p50": 0,
+        "p75": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "rateLimitWait": {
+        "avg": 2604.4,
+        "max": 24828,
+        "p50": 633,
+        "p75": 1223,
+        "p95": 18097,
+        "p99": 24828
+      },
+      "semaphoreWait": {
+        "avg": 33.4,
+        "max": 178,
+        "p50": 9,
+        "p75": 58,
+        "p95": 171,
+        "p99": 178
+      },
+      "pageResolution": {
+        "avg": 0,
+        "max": 0,
+        "p50": 0,
+        "p75": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "telegramUpload": {
+        "avg": 15825.8,
+        "max": 28702,
+        "p50": 16132,
+        "p75": 17010,
+        "p95": 27757,
+        "p99": 28702
+      }
+    },
+    "totalDuration": {
+      "avg": 57998.3,
+      "max": 108557,
+      "p50": 55189,
+      "p95": 86537
+    },
+    "totalCompleted": 34
+  },
+  "activeWorkers": {
+    "avg": 8,
+    "p50": 8,
+    "p75": 8,
+    "p95": 8,
+    "peak": 8,
+    "distribution": {
+      "0": 0,
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "4": 0,
+      "5": 0,
+      "6": 1,
+      "7": 26,
+      "8": 3776
+    },
+    "timeWith8ActivePercent": 99.3,
+    "timeWithLessThan6Percent": 0
+  }
+}

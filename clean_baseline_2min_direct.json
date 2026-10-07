@@ -1,0 +1,31 @@
+{
+  "durationMinutes": 2,
+  "totalSamples": 24,
+  "ysql": {
+    "avg": "8.0",
+    "p95": 8,
+    "peak": 8
+  },
+  "hyperdrive": {
+    "avg": "1.1",
+    "p95": 2,
+    "peak": 2
+  },
+  "directImporter": {
+    "avg": "0.9",
+    "p95": 1,
+    "peak": 1
+  },
+  "ybCpu": {
+    "avg": "7.6",
+    "p95": "52.1",
+    "peak": "62.1"
+  },
+  "site": {
+    "home_p95": 85,
+    "reader_p95": 78,
+    "media_p95": 50
+  },
+  "idleInTxViolations": 0,
+  "blockingLockViolations": 0
+}

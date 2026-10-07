@@ -1,0 +1,1110 @@
+{
+  "elapsedSec": 10797,
+  "elapsedMin": 179.95,
+  "totalDurationSec": 10800,
+  "targetDurationHours": 3,
+  "completed": 2039,
+  "capPerMin": 11.3,
+  "failed": 0,
+  "stuck": 0,
+  "activeWorkers": 12,
+  "queued": 7822,
+  "totalYsql": 9,
+  "discloudCpu": 29.42,
+  "discloudRam": 237.58984375,
+  "homeTtfb": 136,
+  "readerTtfb": 64,
+  "mediaTtfb": 54,
+  "isStopped": false,
+  "lastSampleTime": "2026-09-21T19:35:24.303Z",
+  "checkpoints": [
+    {
+      "checkpointNumber": 1,
+      "elapsedMinutes": 5,
+      "window": "0m - 5m",
+      "chaptersImported": 52,
+      "pagesStored": 565,
+      "pagesPerSec": 1.86,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 51,
+        "P2": 1
+      },
+      "ttfbAvgMs": {
+        "home": 120,
+        "reader": 92,
+        "media": 58
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7210,
+        "IMPORTING": 13,
+        "RETRY": 8,
+        "PAUSED_BY_STAFF": 193894,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 30.23,
+        "ramMb": 206.703125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 2,
+      "elapsedMinutes": 10.3,
+      "window": "5m - 10m",
+      "chaptersImported": 60,
+      "pagesStored": 997,
+      "pagesPerSec": 3.12,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 56,
+        "P2": 4
+      },
+      "ttfbAvgMs": {
+        "home": 134,
+        "reader": 66,
+        "media": 63
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7187,
+        "IMPORTING": 12,
+        "RETRY": 9,
+        "PAUSED_BY_STAFF": 193857,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 30.62,
+        "ramMb": 233.328125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 3,
+      "elapsedMinutes": 15.2,
+      "window": "10m - 15m",
+      "chaptersImported": 31,
+      "pagesStored": 2128,
+      "pagesPerSec": 6.76,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 45,
+        "P2": 1
+      },
+      "ttfbAvgMs": {
+        "home": 151,
+        "reader": 83,
+        "media": 48
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7146,
+        "IMPORTING": 12,
+        "RETRY": 9,
+        "PAUSED_BY_STAFF": 193854,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 31.29,
+        "ramMb": 216.703125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 4,
+      "elapsedMinutes": 20.5,
+      "window": "15m - 20m",
+      "chaptersImported": 11,
+      "pagesStored": 438,
+      "pagesPerSec": 1.37,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 11,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 150,
+        "reader": 70,
+        "media": 67
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7168,
+        "IMPORTING": 2,
+        "RETRY": 9,
+        "PAUSED_BY_STAFF": 193854,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 2.53,
+        "ramMb": 170.484375
+      },
+      "brokenCovers": 0,
+      "protectiveStop": true
+    },
+    {
+      "checkpointNumber": 5,
+      "elapsedMinutes": 25.9,
+      "window": "20m - 25m",
+      "chaptersImported": 28,
+      "pagesStored": 655,
+      "pagesPerSec": 2.02,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 26,
+        "P2": 2
+      },
+      "ttfbAvgMs": {
+        "home": 159,
+        "reader": 72,
+        "media": 86
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7183,
+        "IMPORTING": 3,
+        "RETRY": 10,
+        "PAUSED_BY_STAFF": 193808,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 30.47,
+        "ramMb": 199.5390625
+      },
+      "brokenCovers": 0,
+      "protectiveStop": true
+    },
+    {
+      "checkpointNumber": 6,
+      "elapsedMinutes": 31.2,
+      "window": "25m - 30m",
+      "chaptersImported": 24,
+      "pagesStored": 445,
+      "pagesPerSec": 1.39,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 19,
+        "P2": 1
+      },
+      "ttfbAvgMs": {
+        "home": 164,
+        "reader": 75,
+        "media": 60
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7162,
+        "IMPORTING": 10,
+        "RETRY": 10,
+        "PAUSED_BY_STAFF": 193799,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 31.32,
+        "ramMb": 207.41796875
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 7,
+      "elapsedMinutes": 36.5,
+      "window": "30m - 35m",
+      "chaptersImported": 9,
+      "pagesStored": 346,
+      "pagesPerSec": 1.08,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 8,
+        "P2": 1
+      },
+      "ttfbAvgMs": {
+        "home": 179,
+        "reader": 68,
+        "media": 70
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7177,
+        "IMPORTING": 0,
+        "RETRY": 10,
+        "PAUSED_BY_STAFF": 193799,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 1.71,
+        "ramMb": 191.91796875
+      },
+      "brokenCovers": 0,
+      "protectiveStop": true
+    },
+    {
+      "checkpointNumber": 8,
+      "elapsedMinutes": 41.5,
+      "window": "35m - 40m",
+      "chaptersImported": 30,
+      "pagesStored": 311,
+      "pagesPerSec": 1.04,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 25,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 185,
+        "reader": 76,
+        "media": 85
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7330,
+        "IMPORTING": 2,
+        "RETRY": 10,
+        "PAUSED_BY_STAFF": 193789,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 0.21,
+        "ramMb": 170.26953125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": true
+    },
+    {
+      "checkpointNumber": 9,
+      "elapsedMinutes": 46.9,
+      "window": "40m - 45m",
+      "chaptersImported": 52,
+      "pagesStored": 641,
+      "pagesPerSec": 2.03,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 42,
+        "P2": 1
+      },
+      "ttfbAvgMs": {
+        "home": 210,
+        "reader": 114,
+        "media": 60
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7319,
+        "IMPORTING": 12,
+        "RETRY": 10,
+        "PAUSED_BY_STAFF": 193739,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 30.62,
+        "ramMb": 212.53125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 10,
+      "elapsedMinutes": 51.9,
+      "window": "45m - 50m",
+      "chaptersImported": 63,
+      "pagesStored": 624,
+      "pagesPerSec": 2.08,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 43,
+        "P2": 3
+      },
+      "ttfbAvgMs": {
+        "home": 129,
+        "reader": 83,
+        "media": 61
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7290,
+        "IMPORTING": 13,
+        "RETRY": 10,
+        "PAUSED_BY_STAFF": 193706,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 4.39,
+        "ramMb": 49.72265625
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 11,
+      "elapsedMinutes": 57.3,
+      "window": "50m - 55m",
+      "chaptersImported": 86,
+      "pagesStored": 687,
+      "pagesPerSec": 2.15,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 67,
+        "P2": 2
+      },
+      "ttfbAvgMs": {
+        "home": 143,
+        "reader": 112,
+        "media": 71
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7456,
+        "IMPORTING": 2,
+        "RETRY": 11,
+        "PAUSED_BY_STAFF": 193632,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 6.4,
+        "ramMb": 96.24609375
+      },
+      "brokenCovers": 0,
+      "protectiveStop": true
+    },
+    {
+      "checkpointNumber": 12,
+      "elapsedMinutes": 62.6,
+      "window": "55m - 60m",
+      "chaptersImported": 83,
+      "pagesStored": 913,
+      "pagesPerSec": 2.85,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 63,
+        "P2": 10
+      },
+      "ttfbAvgMs": {
+        "home": 107,
+        "reader": 74,
+        "media": 73
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7405,
+        "IMPORTING": 11,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 193591,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 28.34,
+        "ramMb": 130.8984375
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 13,
+      "elapsedMinutes": 68,
+      "window": "60m - 65m",
+      "chaptersImported": 86,
+      "pagesStored": 1203,
+      "pagesPerSec": 3.77,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 73,
+        "P2": 13
+      },
+      "ttfbAvgMs": {
+        "home": 115,
+        "reader": 76,
+        "media": 64
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7408,
+        "IMPORTING": 10,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 193542,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 28.51,
+        "ramMb": 142.59375
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 14,
+      "elapsedMinutes": 73,
+      "window": "65m - 70m",
+      "chaptersImported": 77,
+      "pagesStored": 1207,
+      "pagesPerSec": 4.02,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 62,
+        "P2": 14
+      },
+      "ttfbAvgMs": {
+        "home": 105,
+        "reader": 73,
+        "media": 68
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7787,
+        "IMPORTING": 13,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 193462,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 29.37,
+        "ramMb": 143.78125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 15,
+      "elapsedMinutes": 78.3,
+      "window": "70m - 75m",
+      "chaptersImported": 25,
+      "pagesStored": 296,
+      "pagesPerSec": 0.93,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 18,
+        "P2": 5
+      },
+      "ttfbAvgMs": {
+        "home": 114,
+        "reader": 99,
+        "media": 57
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7809,
+        "IMPORTING": 0,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 193453,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 0.17,
+        "ramMb": 137.32421875
+      },
+      "brokenCovers": 0,
+      "protectiveStop": true
+    },
+    {
+      "checkpointNumber": 16,
+      "elapsedMinutes": 83.3,
+      "window": "75m - 80m",
+      "chaptersImported": 35,
+      "pagesStored": 332,
+      "pagesPerSec": 1.1,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 25,
+        "P2": 1
+      },
+      "ttfbAvgMs": {
+        "home": 108,
+        "reader": 75,
+        "media": 60
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7953,
+        "IMPORTING": 10,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 193422,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 18.2,
+        "ramMb": 147.05078125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 17,
+      "elapsedMinutes": 88.7,
+      "window": "80m - 85m",
+      "chaptersImported": 100,
+      "pagesStored": 853,
+      "pagesPerSec": 2.67,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 63,
+        "P2": 8
+      },
+      "ttfbAvgMs": {
+        "home": 97,
+        "reader": 68,
+        "media": 67
+      },
+      "worksCreated": -1,
+      "queueStatus": {
+        "QUEUED": 7928,
+        "IMPORTING": 10,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 193371,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 24.49,
+        "ramMb": 155.9375
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 18,
+      "elapsedMinutes": 94,
+      "window": "85m - 90m",
+      "chaptersImported": 103,
+      "pagesStored": 946,
+      "pagesPerSec": 2.96,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 65,
+        "P2": 8
+      },
+      "ttfbAvgMs": {
+        "home": 123,
+        "reader": 72,
+        "media": 67
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 8019,
+        "IMPORTING": 13,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 193281,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 3.89,
+        "ramMb": 48.66796875
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 19,
+      "elapsedMinutes": 99.4,
+      "window": "90m - 95m",
+      "chaptersImported": 38,
+      "pagesStored": 783,
+      "pagesPerSec": 2.44,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 22,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 94,
+        "reader": 95,
+        "media": 54
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 8087,
+        "IMPORTING": 22,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 193250,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 23.57,
+        "ramMb": 123.73828125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 20,
+      "elapsedMinutes": 104.7,
+      "window": "95m - 100m",
+      "chaptersImported": 82,
+      "pagesStored": 1213,
+      "pagesPerSec": 3.8,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 40,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 100,
+        "reader": 72,
+        "media": 53
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 8141,
+        "IMPORTING": 9,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 193183,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 30.09,
+        "ramMb": 158.87109375
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 21,
+      "elapsedMinutes": 110.1,
+      "window": "100m - 105m",
+      "chaptersImported": 75,
+      "pagesStored": 1452,
+      "pagesPerSec": 4.54,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 43,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 117,
+        "reader": 76,
+        "media": 68
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 8140,
+        "IMPORTING": 11,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 193112,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 29.53,
+        "ramMb": 134.7890625
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 22,
+      "elapsedMinutes": 115.4,
+      "window": "105m - 110m",
+      "chaptersImported": 71,
+      "pagesStored": 1194,
+      "pagesPerSec": 3.72,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 40,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 61,
+        "reader": 81,
+        "media": 70
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 8140,
+        "IMPORTING": 7,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 193042,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 20.79,
+        "ramMb": 142.47265625
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 23,
+      "elapsedMinutes": 120.8,
+      "window": "110m - 115m",
+      "chaptersImported": 105,
+      "pagesStored": 1151,
+      "pagesPerSec": 3.61,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 43,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 65,
+        "reader": 69,
+        "media": 62
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 8100,
+        "IMPORTING": 11,
+        "RETRY": 13,
+        "PAUSED_BY_STAFF": 192976,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 29.01,
+        "ramMb": 144.10546875
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 24,
+      "elapsedMinutes": 126.1,
+      "window": "115m - 120m",
+      "chaptersImported": 67,
+      "pagesStored": 944,
+      "pagesPerSec": 2.95,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 39,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 104,
+        "reader": 71,
+        "media": 65
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 8168,
+        "IMPORTING": 13,
+        "RETRY": 15,
+        "PAUSED_BY_STAFF": 192927,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 29.29,
+        "ramMb": 156.42578125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 25,
+      "elapsedMinutes": 131.5,
+      "window": "120m - 125m",
+      "chaptersImported": 76,
+      "pagesStored": 1119,
+      "pagesPerSec": 3.5,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 55,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 108,
+        "reader": 94,
+        "media": 58
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 8127,
+        "IMPORTING": 12,
+        "RETRY": 15,
+        "PAUSED_BY_STAFF": 192894,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 31.4,
+        "ramMb": 158.609375
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 26,
+      "elapsedMinutes": 136.5,
+      "window": "125m - 130m",
+      "chaptersImported": 72,
+      "pagesStored": 959,
+      "pagesPerSec": 3.2,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 53,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 110,
+        "reader": 83,
+        "media": 72
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 8097,
+        "IMPORTING": 6,
+        "RETRY": 15,
+        "PAUSED_BY_STAFF": 192858,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 7.41,
+        "ramMb": 154.95703125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 27,
+      "elapsedMinutes": 141.8,
+      "window": "130m - 135m",
+      "chaptersImported": 64,
+      "pagesStored": 917,
+      "pagesPerSec": 2.87,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 47,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 89,
+        "reader": 84,
+        "media": 50
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 8063,
+        "IMPORTING": 6,
+        "RETRY": 15,
+        "PAUSED_BY_STAFF": 192829,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 30.29,
+        "ramMb": 162.26953125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": true
+    },
+    {
+      "checkpointNumber": 28,
+      "elapsedMinutes": 147.2,
+      "window": "135m - 140m",
+      "chaptersImported": 49,
+      "pagesStored": 677,
+      "pagesPerSec": 2.11,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 36,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 85,
+        "reader": 78,
+        "media": 66
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 8036,
+        "IMPORTING": 10,
+        "RETRY": 15,
+        "PAUSED_BY_STAFF": 192802,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 20.42,
+        "ramMb": 152.21875
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 29,
+      "elapsedMinutes": 152.5,
+      "window": "140m - 145m",
+      "chaptersImported": 54,
+      "pagesStored": 686,
+      "pagesPerSec": 2.15,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 36,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 108,
+        "reader": 86,
+        "media": 55
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7999,
+        "IMPORTING": 12,
+        "RETRY": 15,
+        "PAUSED_BY_STAFF": 192784,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 31.03,
+        "ramMb": 256.74609375
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 30,
+      "elapsedMinutes": 157.9,
+      "window": "145m - 150m",
+      "chaptersImported": 61,
+      "pagesStored": 939,
+      "pagesPerSec": 2.94,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 48,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 97,
+        "reader": 79,
+        "media": 70
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7959,
+        "IMPORTING": 13,
+        "RETRY": 14,
+        "PAUSED_BY_STAFF": 192763,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 30.38,
+        "ramMb": 230.01171875
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 31,
+      "elapsedMinutes": 163.2,
+      "window": "150m - 155m",
+      "chaptersImported": 61,
+      "pagesStored": 828,
+      "pagesPerSec": 2.59,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 52,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 117,
+        "reader": 72,
+        "media": 48
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7934,
+        "IMPORTING": 13,
+        "RETRY": 14,
+        "PAUSED_BY_STAFF": 192726,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 29.72,
+        "ramMb": 227.84375
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 32,
+      "elapsedMinutes": 168.6,
+      "window": "155m - 160m",
+      "chaptersImported": 62,
+      "pagesStored": 813,
+      "pagesPerSec": 2.54,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 51,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 97,
+        "reader": 79,
+        "media": 56
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7889,
+        "IMPORTING": 15,
+        "RETRY": 15,
+        "PAUSED_BY_STAFF": 192706,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 14.91,
+        "ramMb": 197.11328125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 33,
+      "elapsedMinutes": 173.9,
+      "window": "160m - 165m",
+      "chaptersImported": 63,
+      "pagesStored": 837,
+      "pagesPerSec": 2.63,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 53,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 140,
+        "reader": 229,
+        "media": 53
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7871,
+        "IMPORTING": 13,
+        "RETRY": 15,
+        "PAUSED_BY_STAFF": 192663,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 33.89,
+        "ramMb": 210.85546875
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 34,
+      "elapsedMinutes": 179.3,
+      "window": "165m - 170m",
+      "chaptersImported": 59,
+      "pagesStored": 843,
+      "pagesPerSec": 2.63,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 50,
+        "P2": 0
+      },
+      "ttfbAvgMs": {
+        "home": 140,
+        "reader": 75,
+        "media": 50
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7823,
+        "IMPORTING": 13,
+        "RETRY": 15,
+        "PAUSED_BY_STAFF": 192653,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 31.45,
+        "ramMb": 203.140625
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    }
+  ]
+}

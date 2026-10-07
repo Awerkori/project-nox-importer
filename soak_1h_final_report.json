@@ -1,0 +1,48 @@
+{
+  "observationStart": "2026-09-21T16:35:08.042Z",
+  "observationEnd": "2026-09-21T16:35:18.154Z",
+  "totalMinutesObserved": 0.2,
+  "totalUniqueChapters": 0,
+  "avgCapMin": 0,
+  "p0Events": 0,
+  "p1Progress": 4,
+  "p2Progress": 0,
+  "p3Admissions": 0,
+  "worksStarted": 0,
+  "worksCompleted": 1065,
+  "newDuplicateWorks": 0,
+  "canonicalizationErrors": 0,
+  "largeGapsDetected": 0,
+  "largeGapsResolved": 0,
+  "outOfOrderPublications": 0,
+  "coverErrors": 0,
+  "metadataErrors": 0,
+  "selfHealingEvents": 0,
+  "selfHealingSuccess": 0,
+  "protectiveStopEvents": 0,
+  "falseProtectiveStopEvents": 0,
+  "ysqlAvg": 8.5,
+  "ysqlPeak": 9,
+  "ramAvg": 212,
+  "ramPeak": 213,
+  "cpuAvg": 32.4,
+  "cpuPeak": 32.5,
+  "homeP95": 204,
+  "readerP95": 129,
+  "mediaP95": 144,
+  "sourceBreakdown": [
+    {
+      "source": "hipercool",
+      "count": "2"
+    },
+    {
+      "source": "mangaonlinetv",
+      "count": "1"
+    },
+    {
+      "source": "mrtenzus",
+      "count": "1"
+    }
+  ],
+  "checkpoints": []
+}

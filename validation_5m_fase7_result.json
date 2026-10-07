@@ -1,0 +1,105 @@
+{
+  "durationMinutes": 5.63,
+  "poolConfiguration": {
+    "poolMaxBefore": 2,
+    "poolMaxAfter": 3,
+    "workers": 8,
+    "safetyStatus": "ALL SAFETY GUARDS PASS (CPU <1%, YSQL 4/13, 0 timeouts)"
+  },
+  "claimMetrics": {
+    "poolWaitBefore": "~4.9s P50",
+    "poolWaitP50": 2635,
+    "poolWaitP95": 4989,
+    "schedulerAcquireBefore": "~9.0s P50",
+    "schedulerAcquireTotalP50": 3770,
+    "schedulerAcquireTotalP95": 9148,
+    "schedulerSqlTotalP50": 430,
+    "schedulerSqlTotalP95": 806,
+    "claimLockSqlP50": 1065,
+    "claimLockSqlP95": 2201,
+    "totalQueriesPerSuccessfulClaimP50": 3,
+    "totalQueriesPerSuccessfulClaimP95": 4
+  },
+  "mutexStats": {
+    "waitP50": 0,
+    "waitP95": 0,
+    "holdP50": 0,
+    "holdP95": 0.1
+  },
+  "avgSlotStates": {
+    "WAITING_MUTEX": 0.01,
+    "WAITING_CLAIM_DB": 0.64,
+    "WAITING_SOURCE_PERMIT": 0,
+    "ACTIVE_SOURCE": 2.7,
+    "ACTIVE_DOWNLOAD": 1.22,
+    "ACTIVE_ENCODE": 0,
+    "ACTIVE_TELEGRAM": 0.45,
+    "ACTIVE_DB": 2.57,
+    "WAITING_BARRIER": 0.25,
+    "IDLE": 0.16,
+    "ACTIVE_PROCESSING": 7.35,
+    "BLOCKED": 0.45,
+    "SUM": 8
+  },
+  "slotOccupancy": {
+    "meanSecBefore": 78.1,
+    "meanSecAfter": 55,
+    "p50Sec": 54.5,
+    "p95Sec": 77.5
+  },
+  "throughput": {
+    "chapterStartedPerMin": 10.83,
+    "completedBefore": "6.40/min",
+    "chapterCompletedPerMin": 8.52,
+    "freshBefore": "2.49/min",
+    "freshNewVisiblePerMin": 5.15,
+    "cascadePerMin": 1.24,
+    "totalVisiblePerMin": 6.39,
+    "immediatePublishRatioBefore": "38.9%",
+    "immediatePublishRatioPercent": 91.7,
+    "uniqueStagedPerMin": 0,
+    "stagedMappingRowsPerMin": 0.53,
+    "totalCompleted": 48,
+    "totalPublished": 36,
+    "publishedImmediatelyCount": 44,
+    "freshNewVisibleCount": 29,
+    "cascadeCount": 7,
+    "uniqueStagedCount": 0,
+    "stagedMappingRows": 3,
+    "totalStarted": 61
+  },
+  "yugabyte": {
+    "cpuAvgPercent": 0,
+    "cpuP95Percent": 0,
+    "cpuPeakPercent": 0,
+    "ysqlConnectionsTotalAvg": 3.9,
+    "ysqlConnectionsActiveAvg": 1.2,
+    "ysqlConnectionsIdleAvg": 2.7,
+    "maxIdleInTransaction": 0,
+    "maxLongQueries": 0,
+    "poolTimeouts": 0
+  },
+  "siteLatencies": {
+    "home": {
+      "p50": 95,
+      "p95": 390,
+      "p99": 435,
+      "min": 80,
+      "max": 435,
+      "avg": 132.3
+    },
+    "reader": {
+      "p50": 33,
+      "p95": 160,
+      "p99": 172,
+      "min": 25,
+      "max": 172,
+      "avg": 41.5
+    }
+  },
+  "dataIntegrity": {
+    "emptyPages": 0,
+    "duplicateChapters": 0,
+    "status": "PASS"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "sampleIdx": 120,
+  "startIso": "2026-09-22T15:00:53.921Z",
+  "startTime": 1790089253952,
+  "elapsedSec": 1789,
+  "elapsedMin": 29.82,
+  "remainingSec": 11,
+  "uniquePubs": 321,
+  "uniqueCapPerMin": 10.77,
+  "processedJobs": 272,
+  "processedJobsPerMin": 9.12,
+  "shortCircuitedDuplicates": 45,
+  "importingWorkers": 12,
+  "queuedJobs": 10419,
+  "failedJobs": 4,
+  "staged": {
+    "total": 1295,
+    "deltaSinceStart": -127,
+    "gt5m": 1293,
+    "gt15m": 1292,
+    "gt30m": 1291,
+    "gt60m": 1242
+  },
+  "siteLatency": {
+    "homeP50": 55,
+    "homeP95": 157,
+    "catalogP50": 55,
+    "catalogP95": 116,
+    "workP50": 53,
+    "workP95": 127,
+    "readerP50": 51,
+    "readerP95": 115,
+    "mediaP50": 53,
+    "mediaP95": 67,
+    "samplesCount": {
+      "home": 120,
+      "catalog": 120,
+      "work": 120,
+      "reader": 120,
+      "media": 120
+    }
+  },
+  "infra": {
+    "ysqlTotalConns": 10,
+    "ysqlImporterConns": 4,
+    "ysqlHyperdriveConns": 1,
+    "discloudCpu": 24.2,
+    "discloudRam": 218.9921875
+  }
+}

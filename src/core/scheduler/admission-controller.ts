@@ -2206,7 +2206,7 @@ export class AdmissionController {
 
       const findOnDemandFrontier = async (candidateRows: any[]): Promise<any | null> => {
         if (candidateRows.length === 0) return null;
-        this.logger.info(`[DEBUG_ADM_CANDIDATES] ${JSON.stringify(candidateRows.map(c => ({w:c.work_id, q:c.queued_count})))}`);
+        this.logger.info(`[DEBUG_ADM_CANDIDATES] CacheSize: ${this.deadWorksCache.size} | Cands: ${JSON.stringify(candidateRows.map(c => ({w:c.work_id, q:c.queued_count})))}`);
         const candWorkIds = candidateRows.map((r: any) => r.work_id);
         const pubMap = new Map<string, number>();
         const pubRes = await this.runQuery(
@@ -2293,7 +2293,7 @@ export class AdmissionController {
             });
             if (conf.confirmed) return cand;
             else this.deadWorksCache.set(cand.work_id, Date.now());
-          } catch {}
+          } catch { this.deadWorksCache.set(cand.work_id, Date.now()); }
         }
         return null;
       };

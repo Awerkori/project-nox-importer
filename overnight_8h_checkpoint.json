@@ -1,0 +1,827 @@
+{
+  "startTime": "2026-09-22T03:40:41.628Z",
+  "targetEndTime": "2026-09-22T11:40:41.628Z",
+  "lastUpdated": "2026-09-22T11:10:45.692Z",
+  "totalCheckpoints": 16,
+  "latestSnapshot": {
+    "timestamp": "2026-09-22T11:10:46.660Z",
+    "elapsedMinutes": 450.08,
+    "uniqueCanonicalPublished": 3123,
+    "totalCanonicalPublished": 3123,
+    "uniquePublishedCapMinCumulative": 6.94,
+    "uniquePublishedCapMin5m": 5.4,
+    "uniquePublishedCapMin15m": 6.6,
+    "p0Claims": 0,
+    "p1Claims": 5360,
+    "p2Claims": 1,
+    "p3Claims": 1061,
+    "p3Admissions": 0,
+    "enteredStaged": 641,
+    "leftStaged": 4254,
+    "netStagedChange": -3613,
+    "newDuplicateWorks": 0,
+    "newDuplicateChapters": 0,
+    "queueState": {
+      "p0Waiting": 0,
+      "p1Claimable": 1750,
+      "currentlyImporting": 16,
+      "retrying": 58
+    },
+    "ysql": {
+      "totalConnections": 8,
+      "activeConnections": 3
+    },
+    "protectiveStopActive": false,
+    "routes": {
+      "home": {
+        "p50": 266,
+        "p95": 278,
+        "errors": 0
+      },
+      "catalog": {
+        "p50": 264,
+        "p95": 278,
+        "errors": 0
+      },
+      "work": {
+        "p50": 270,
+        "p95": 281,
+        "errors": 0
+      },
+      "reader": {
+        "p50": 272,
+        "p95": 589,
+        "errors": 0
+      },
+      "media": {
+        "p50": 259,
+        "p95": 271,
+        "errors": 0
+      }
+    }
+  },
+  "history": [
+    {
+      "timestamp": "2026-09-22T03:40:42.938Z",
+      "elapsedMinutes": 0.1,
+      "uniqueCanonicalPublished": 0,
+      "totalCanonicalPublished": 0,
+      "uniquePublishedCapMinCumulative": 0,
+      "uniquePublishedCapMin5m": 3.4,
+      "uniquePublishedCapMin15m": 4.6,
+      "p0Claims": 0,
+      "p1Claims": 0,
+      "p2Claims": 0,
+      "p3Claims": 0,
+      "p3Admissions": 0,
+      "enteredStaged": 0,
+      "leftStaged": 0,
+      "netStagedChange": 0,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 5691,
+        "currentlyImporting": 9,
+        "retrying": 33
+      },
+      "ysql": {
+        "totalConnections": 9,
+        "activeConnections": 3
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 275,
+          "p95": 595,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 268,
+          "p95": 328,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T04:10:53.851Z",
+      "elapsedMinutes": 30.2,
+      "uniqueCanonicalPublished": 189,
+      "totalCanonicalPublished": 189,
+      "uniquePublishedCapMinCumulative": 6.26,
+      "uniquePublishedCapMin5m": 5.2,
+      "uniquePublishedCapMin15m": 6.67,
+      "p0Claims": 0,
+      "p1Claims": 185,
+      "p2Claims": 0,
+      "p3Claims": 0,
+      "p3Admissions": 0,
+      "enteredStaged": 56,
+      "leftStaged": 364,
+      "netStagedChange": -308,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 5459,
+        "currentlyImporting": 11,
+        "retrying": 36
+      },
+      "ysql": {
+        "totalConnections": 9,
+        "activeConnections": 1
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 269,
+          "p95": 628,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 263,
+          "p95": 333,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T04:40:47.570Z",
+      "elapsedMinutes": 60.1,
+      "uniqueCanonicalPublished": 433,
+      "totalCanonicalPublished": 433,
+      "uniquePublishedCapMinCumulative": 7.2,
+      "uniquePublishedCapMin5m": 8,
+      "uniquePublishedCapMin15m": 8.13,
+      "p0Claims": 0,
+      "p1Claims": 332,
+      "p2Claims": 0,
+      "p3Claims": 0,
+      "p3Admissions": 0,
+      "enteredStaged": 97,
+      "leftStaged": 728,
+      "netStagedChange": -631,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 5232,
+        "currentlyImporting": 11,
+        "retrying": 37
+      },
+      "ysql": {
+        "totalConnections": 9,
+        "activeConnections": 3
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 265,
+          "p95": 575,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 268,
+          "p95": 325,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T05:10:55.806Z",
+      "elapsedMinutes": 90.24,
+      "uniqueCanonicalPublished": 657,
+      "totalCanonicalPublished": 657,
+      "uniquePublishedCapMinCumulative": 7.28,
+      "uniquePublishedCapMin5m": 5.8,
+      "uniquePublishedCapMin15m": 6.73,
+      "p0Claims": 0,
+      "p1Claims": 457,
+      "p2Claims": 0,
+      "p3Claims": 2,
+      "p3Admissions": 0,
+      "enteredStaged": 123,
+      "leftStaged": 1026,
+      "netStagedChange": -903,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 5025,
+        "currentlyImporting": 10,
+        "retrying": 37
+      },
+      "ysql": {
+        "totalConnections": 10,
+        "activeConnections": 2
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 268,
+          "p95": 668,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 264,
+          "p95": 347,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T05:40:51.882Z",
+      "elapsedMinutes": 120.17,
+      "uniqueCanonicalPublished": 854,
+      "totalCanonicalPublished": 854,
+      "uniquePublishedCapMinCumulative": 7.11,
+      "uniquePublishedCapMin5m": 6.2,
+      "uniquePublishedCapMin15m": 6.67,
+      "p0Claims": 0,
+      "p1Claims": 622,
+      "p2Claims": 0,
+      "p3Claims": 0,
+      "p3Admissions": 0,
+      "enteredStaged": 161,
+      "leftStaged": 1291,
+      "netStagedChange": -1130,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 4880,
+        "currentlyImporting": 7,
+        "retrying": 39
+      },
+      "ysql": {
+        "totalConnections": 9,
+        "activeConnections": 1
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 266,
+          "p95": 619,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 289,
+          "p95": 338,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T06:10:50.988Z",
+      "elapsedMinutes": 150.16,
+      "uniqueCanonicalPublished": 1062,
+      "totalCanonicalPublished": 1062,
+      "uniquePublishedCapMinCumulative": 7.07,
+      "uniquePublishedCapMin5m": 8,
+      "uniquePublishedCapMin15m": 7.33,
+      "p0Claims": 0,
+      "p1Claims": 714,
+      "p2Claims": 0,
+      "p3Claims": 1,
+      "p3Admissions": 0,
+      "enteredStaged": 230,
+      "leftStaged": 1519,
+      "netStagedChange": -1289,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 4644,
+        "currentlyImporting": 9,
+        "retrying": 40
+      },
+      "ysql": {
+        "totalConnections": 9,
+        "activeConnections": 1
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 276,
+          "p95": 631,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 266,
+          "p95": 339,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T06:40:51.527Z",
+      "elapsedMinutes": 180.16,
+      "uniqueCanonicalPublished": 1272,
+      "totalCanonicalPublished": 1272,
+      "uniquePublishedCapMinCumulative": 7.06,
+      "uniquePublishedCapMin5m": 6,
+      "uniquePublishedCapMin15m": 6.47,
+      "p0Claims": 0,
+      "p1Claims": 833,
+      "p2Claims": 0,
+      "p3Claims": 2,
+      "p3Admissions": 0,
+      "enteredStaged": 283,
+      "leftStaged": 1801,
+      "netStagedChange": -1518,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 4463,
+        "currentlyImporting": 11,
+        "retrying": 43
+      },
+      "ysql": {
+        "totalConnections": 9,
+        "activeConnections": 1
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 285,
+          "p95": 583,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 280,
+          "p95": 336,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T07:10:54.155Z",
+      "elapsedMinutes": 210.21,
+      "uniqueCanonicalPublished": 1472,
+      "totalCanonicalPublished": 1472,
+      "uniquePublishedCapMinCumulative": 7,
+      "uniquePublishedCapMin5m": 6.6,
+      "uniquePublishedCapMin15m": 6.93,
+      "p0Claims": 0,
+      "p1Claims": 847,
+      "p2Claims": 0,
+      "p3Claims": 5,
+      "p3Admissions": 0,
+      "enteredStaged": 318,
+      "leftStaged": 2055,
+      "netStagedChange": -1737,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 4334,
+        "currentlyImporting": 14,
+        "retrying": 49
+      },
+      "ysql": {
+        "totalConnections": 8,
+        "activeConnections": 1
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 225,
+          "p95": 631,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 219,
+          "p95": 287,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T07:40:54.533Z",
+      "elapsedMinutes": 240.22,
+      "uniqueCanonicalPublished": 1690,
+      "totalCanonicalPublished": 1690,
+      "uniquePublishedCapMinCumulative": 7.04,
+      "uniquePublishedCapMin5m": 6.6,
+      "uniquePublishedCapMin15m": 7.4,
+      "p0Claims": 0,
+      "p1Claims": 849,
+      "p2Claims": 0,
+      "p3Claims": 6,
+      "p3Admissions": 0,
+      "enteredStaged": 334,
+      "leftStaged": 2335,
+      "netStagedChange": -2001,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 4303,
+        "currentlyImporting": 12,
+        "retrying": 53
+      },
+      "ysql": {
+        "totalConnections": 9,
+        "activeConnections": 1
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 269,
+          "p95": 2173,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 266,
+          "p95": 329,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T08:10:54.503Z",
+      "elapsedMinutes": 270.21,
+      "uniqueCanonicalPublished": 1882,
+      "totalCanonicalPublished": 1882,
+      "uniquePublishedCapMinCumulative": 6.96,
+      "uniquePublishedCapMin5m": 6.6,
+      "uniquePublishedCapMin15m": 6.6,
+      "p0Claims": 0,
+      "p1Claims": 854,
+      "p2Claims": 0,
+      "p3Claims": 6,
+      "p3Admissions": 0,
+      "enteredStaged": 354,
+      "leftStaged": 2584,
+      "netStagedChange": -2230,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 4293,
+        "currentlyImporting": 14,
+        "retrying": 55
+      },
+      "ysql": {
+        "totalConnections": 9,
+        "activeConnections": 1
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 222,
+          "p95": 572,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 226,
+          "p95": 293,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T08:29:22.921Z",
+      "elapsedMinutes": 288.69,
+      "uniqueCanonicalPublished": 2001,
+      "totalCanonicalPublished": 2001,
+      "uniquePublishedCapMinCumulative": 6.93,
+      "uniquePublishedCapMin5m": 6.6,
+      "uniquePublishedCapMin15m": 6.6,
+      "p0Claims": 0,
+      "p1Claims": 3888,
+      "p2Claims": 1,
+      "p3Claims": 455,
+      "p3Admissions": 0,
+      "enteredStaged": 375,
+      "leftStaged": 2749,
+      "netStagedChange": -2374,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 1482,
+        "currentlyImporting": 13,
+        "retrying": 54
+      },
+      "ysql": {
+        "totalConnections": 8,
+        "activeConnections": 1
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 272,
+          "p95": 303,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 264,
+          "p95": 268,
+          "errors": 0
+        },
+        "work": {
+          "p50": 273,
+          "p95": 277,
+          "errors": 0
+        },
+        "reader": {
+          "p50": 263,
+          "p95": 330,
+          "errors": 0
+        },
+        "media": {
+          "p50": 260,
+          "p95": 284,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T09:10:52.538Z",
+      "elapsedMinutes": 330.18,
+      "uniqueCanonicalPublished": 2272,
+      "totalCanonicalPublished": 2272,
+      "uniquePublishedCapMinCumulative": 6.88,
+      "uniquePublishedCapMin5m": 6.2,
+      "uniquePublishedCapMin15m": 6.27,
+      "p0Claims": 0,
+      "p1Claims": 4283,
+      "p2Claims": 1,
+      "p3Claims": 593,
+      "p3Admissions": 0,
+      "enteredStaged": 435,
+      "leftStaged": 3128,
+      "netStagedChange": -2693,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 1805,
+        "currentlyImporting": 15,
+        "retrying": 58
+      },
+      "ysql": {
+        "totalConnections": 10,
+        "activeConnections": 1
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 1050,
+          "p95": 3263,
+          "errors": 1
+        },
+        "catalog": {
+          "p50": 262,
+          "p95": 296,
+          "errors": 0
+        },
+        "work": {
+          "p50": 270,
+          "p95": 285,
+          "errors": 0
+        },
+        "reader": {
+          "p50": 261,
+          "p95": 269,
+          "errors": 0
+        },
+        "media": {
+          "p50": 257,
+          "p95": 265,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T09:40:54.513Z",
+      "elapsedMinutes": 360.21,
+      "uniqueCanonicalPublished": 2503,
+      "totalCanonicalPublished": 2503,
+      "uniquePublishedCapMinCumulative": 6.95,
+      "uniquePublishedCapMin5m": 8,
+      "uniquePublishedCapMin15m": 7.6,
+      "p0Claims": 0,
+      "p1Claims": 4664,
+      "p2Claims": 1,
+      "p3Claims": 668,
+      "p3Admissions": 0,
+      "enteredStaged": 483,
+      "leftStaged": 3451,
+      "netStagedChange": -2968,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 1795,
+        "currentlyImporting": 11,
+        "retrying": 57
+      },
+      "ysql": {
+        "totalConnections": 9,
+        "activeConnections": 1
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 264,
+          "p95": 266,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 268,
+          "p95": 287,
+          "errors": 0
+        },
+        "work": {
+          "p50": 280,
+          "p95": 292,
+          "errors": 0
+        },
+        "reader": {
+          "p50": 259,
+          "p95": 280,
+          "errors": 0
+        },
+        "media": {
+          "p50": 258,
+          "p95": 274,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T10:10:46.910Z",
+      "elapsedMinutes": 390.09,
+      "uniqueCanonicalPublished": 2700,
+      "totalCanonicalPublished": 2700,
+      "uniquePublishedCapMinCumulative": 6.92,
+      "uniquePublishedCapMin5m": 5.2,
+      "uniquePublishedCapMin15m": 6.13,
+      "p0Claims": 0,
+      "p1Claims": 4961,
+      "p2Claims": 1,
+      "p3Claims": 786,
+      "p3Admissions": 0,
+      "enteredStaged": 558,
+      "leftStaged": 3709,
+      "netStagedChange": -3151,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 1774,
+        "currentlyImporting": 10,
+        "retrying": 57
+      },
+      "ysql": {
+        "totalConnections": 9,
+        "activeConnections": 1
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 210,
+          "p95": 220,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 206,
+          "p95": 221,
+          "errors": 0
+        },
+        "work": {
+          "p50": 219,
+          "p95": 231,
+          "errors": 0
+        },
+        "reader": {
+          "p50": 209,
+          "p95": 221,
+          "errors": 0
+        },
+        "media": {
+          "p50": 205,
+          "p95": 209,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T10:40:52.341Z",
+      "elapsedMinutes": 420.18,
+      "uniqueCanonicalPublished": 2910,
+      "totalCanonicalPublished": 2910,
+      "uniquePublishedCapMinCumulative": 6.93,
+      "uniquePublishedCapMin5m": 8.2,
+      "uniquePublishedCapMin15m": 7.13,
+      "p0Claims": 0,
+      "p1Claims": 5183,
+      "p2Claims": 1,
+      "p3Claims": 927,
+      "p3Admissions": 0,
+      "enteredStaged": 622,
+      "leftStaged": 3975,
+      "netStagedChange": -3353,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 1759,
+        "currentlyImporting": 10,
+        "retrying": 58
+      },
+      "ysql": {
+        "totalConnections": 9,
+        "activeConnections": 2
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 268,
+          "p95": 271,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 266,
+          "p95": 272,
+          "errors": 0
+        },
+        "work": {
+          "p50": 272,
+          "p95": 275,
+          "errors": 0
+        },
+        "reader": {
+          "p50": 265,
+          "p95": 272,
+          "errors": 0
+        },
+        "media": {
+          "p50": 260,
+          "p95": 263,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "timestamp": "2026-09-22T11:10:46.660Z",
+      "elapsedMinutes": 450.08,
+      "uniqueCanonicalPublished": 3123,
+      "totalCanonicalPublished": 3123,
+      "uniquePublishedCapMinCumulative": 6.94,
+      "uniquePublishedCapMin5m": 5.4,
+      "uniquePublishedCapMin15m": 6.6,
+      "p0Claims": 0,
+      "p1Claims": 5360,
+      "p2Claims": 1,
+      "p3Claims": 1061,
+      "p3Admissions": 0,
+      "enteredStaged": 641,
+      "leftStaged": 4254,
+      "netStagedChange": -3613,
+      "newDuplicateWorks": 0,
+      "newDuplicateChapters": 0,
+      "queueState": {
+        "p0Waiting": 0,
+        "p1Claimable": 1750,
+        "currentlyImporting": 16,
+        "retrying": 58
+      },
+      "ysql": {
+        "totalConnections": 8,
+        "activeConnections": 3
+      },
+      "protectiveStopActive": false,
+      "routes": {
+        "home": {
+          "p50": 266,
+          "p95": 278,
+          "errors": 0
+        },
+        "catalog": {
+          "p50": 264,
+          "p95": 278,
+          "errors": 0
+        },
+        "work": {
+          "p50": 270,
+          "p95": 281,
+          "errors": 0
+        },
+        "reader": {
+          "p50": 272,
+          "p95": 589,
+          "errors": 0
+        },
+        "media": {
+          "p50": 259,
+          "p95": 271,
+          "errors": 0
+        }
+      }
+    }
+  ]
+}

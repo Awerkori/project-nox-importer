@@ -1,0 +1,33 @@
+{
+  "observationWindow": {
+    "t0": "2026-09-22T18:14:51.688Z",
+    "tEnd": "2026-09-22T18:24:44.742Z",
+    "durationSeconds": 593,
+    "durationMinutes": "9.88"
+  },
+  "throughput": {
+    "uniqueCanonicalPublished": 99,
+    "canonicalCapMin": 10.02
+  },
+  "memory": {
+    "avgRssMb": 139,
+    "peakRssMb": 191,
+    "avgActiveBufferedMb": 0,
+    "peakActiveBufferedMb": 0,
+    "avgReservedBufferedMb": 0,
+    "peakReservedBufferedMb": 0,
+    "backpressureWaitP50Ms": 5001,
+    "backpressureWaitP95Ms": 10208,
+    "oomsObserved": 0,
+    "restartsObserved": 2
+  },
+  "timings": {
+    "avgChapterDurationMs": 46635,
+    "avgDownloadMs": 19381,
+    "avgUploadMs": 28545,
+    "avgDbMs": 19011,
+    "avgSemWaitMs": 15430,
+    "avgRateLimitWaitMs": 5848
+  },
+  "bottleneckDiagnosis": "backpressure"
+}

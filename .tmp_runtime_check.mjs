@@ -1,0 +1,12 @@
+import 'dotenv/config';
+import pg from 'pg';
+const pool = new pg.Pool({host:process.env.YUGABYTE_HOST,port:+(process.env.YUGABYTE_PORT||5433),user:process.env.YUGABYTE_USER,password:process.env.YUGABYTE_PASSWORD,database:process.env.YUGABYTE_DATABASE,ssl:{rejectUnauthorized:false}});
+for (const sql of [`SELECT column_name FROM information_schema.columns WHERE table_name='importer_telemetry' ORDER BY ordinal_position`,`SELECT * FROM importer_telemetry ORDER BY created_at DESC LIMIT 5`]) { try { const r=await pool.query(sql); console.log(JSON.stringify(r.rows,null,2)); } catch(e) { console.log('query skipped:',e.message); } }
+const r=await pool.query(`SELECT table_name,column_name FROM information_schema.columns WHERE column_name ILIKE '%build%' OR column_name ILIKE '%commit%' OR column_name ILIKE '%version%' ORDER BY table_name,column_name`); console.log(JSON.stringify(r.rows,null,2));
+const w=await pool.query(`SELECT worker_id,MIN(created_at) AS first_seen,MAX(created_at) AS last_seen,COUNT(*)::int AS samples FROM importer_telemetry WHERE created_at > NOW()-INTERVAL '2 hours' GROUP BY worker_id ORDER BY first_seen DESC`); console.log(JSON.stringify(w.rows,null,2));
+const l=await pool.query(`SELECT * FROM importer_telemetry WHERE worker_id='discloud-importer-1@19-6cb3376c' ORDER BY created_at DESC LIMIT 5`); console.log(JSON.stringify(l.rows,null,2));
+const c=await pool.query(`SELECT COUNT(*) FILTER (WHERE status='ACTIVE' AND blocked_reason IS NOT NULL AND blocked_details->>'probe_success' IS DISTINCT FROM 'true' AND blocked_details->>'recovered_at' IS NULL)::int AS active_blocked, COUNT(*) FILTER (WHERE status='ACTIVE')::int AS active, COUNT(*) FILTER (WHERE status IN ('UPSTREAM_BLOCKED','COOLDOWN','DEGRADED','PROBING'))::int AS recovering_or_blocked FROM importer_sources`); console.log(JSON.stringify(c.rows,null,2));
+const a=await pool.query(`SELECT sync_status,COUNT(*)::int AS count FROM importer_work_mappings GROUP BY sync_status ORDER BY count DESC`); console.log(JSON.stringify(a.rows,null,2));
+const s=await pool.query(`SELECT id,status,blocked_reason,last_health_check_at,updated_at FROM importer_sources WHERE status='ACTIVE' AND blocked_reason IS NOT NULL ORDER BY last_health_check_at NULLS FIRST LIMIT 30`); console.log(JSON.stringify(s.rows,null,2));
+const q=await pool.query(`SELECT status,COUNT(*)::int AS count FROM importer_queue WHERE task_type='IMPORT_CHAPTER' GROUP BY status ORDER BY count DESC`); console.log(JSON.stringify(q.rows,null,2));
+await pool.end();

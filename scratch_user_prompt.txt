@@ -1,0 +1,803 @@
+<USER_REQUEST>
+# PROJECT NOX IMPORTER — RECUPERAR >10 CAP/MIN SUSTENTADOS
+
+BASELINE ATUAL CONFIRMADO:
+
+CAP/MIN: 6.67
+UNIQUE PUBLICATIONS: 20 / 180s
+WORKERS ATIVOS OBSERVADOS: 6–8 / 18
+MAX_INFLIGHT_PER_WORK: 2
+READER P95: 130ms
+SITE: HEALTHY
+IMPORTER: RUNNING
+
+Agora quero otimizar PERFORMANCE.
+
+NÃO quero mais mudanças arquiteturais no scheduler salvo se uma medição provar gargalo estrutural.
+
+META OFICIAL:
+>= 10.0 CAP/MIN SUSTENTADOS POR 30 MINUTOS
+
+IDEAL:
+10–12 CAP/MIN
+
+NÃO quero pico de 30 segundos.
+NÃO quero benchmark artificial enganoso.
+
+Quero produção REAL sustentada.
+
+============================================================
+1. NÃO SACRIFICAR SEGURANÇA
+============================================================
+
+A meta de >10 cap/min NÃO pode quebrar:
+
+- Home;
+- Reader;
+- Media;
+- YugabyteDB;
+- Telegram;
+- Publication Barrier;
+- prioridade P0;
+- dedupe;
+- work affinity;
+- fairness;
+- self-healing;
+- Protective Sentinel.
+
+Preservar inicialmente:
+
+MAX_CONCURRENT_CHAPTERS=18
+DIRECT_DB_POOL_MAX=4
+Telegram Direct
+PROTECTIVE_STOP
+auto-healing
+
+Não aumentar recursos cegamente.
+
+============================================================
+2. PRIMEIRO ENCONTRAR O GARGALO REAL
+============================================================
+
+Antes de modificar concorrência:
+
+medir o caminho completo de um capítulo.
+
+Separar:
+
+QUEUE WAIT
+CLAIM WAIT
+SOURCE FETCH
+PAGE DISCOVERY
+DOWNLOAD
+TRANSCODE / WEBP
+TELEGRAM UPLOAD
+DB WRITE
+PUBLICATION BARRIER
+COMPLETION → NEXT CLAIM
+
+Para cada etapa:
+
+P50
+P95
+% DO TEMPO TOTAL
+
+Responder primeiro:
+
+CURRENT BOTTLENECK:
+
+SECONDARY BOTTLENECK:
+
+WORKER STARVATION SOURCE:
+
+Não otimizar por intuição.
+
+============================================================
+3. UTILIZAR MELHOR OS 18 WORKERS
+============================================================
+
+Baseline confirmado:
+
+6–8 workers ativos
+10–12 workers ociosos
+
+com backlog disponível.
+
+Isso é o primeiro ponto a investigar.
+
+Objetivo inicial:
+
+se houver:
+
+- backlog válido;
+- sources saudáveis;
+- capacidade disponível;
+- site/infra saudável;
+
+buscar:
+
+BUSY WORKERS P50 >= 14
+
+e tentar:
+
+BUSY WORKERS P95 >= 16
+
+NÃO é obrigatório 18/18.
+
+Rate limits e segurança prevalecem.
+
+Mas 6–8/18 com backlog grande NÃO é aceitável sem causa técnica comprovada.
+
+============================================================
+4. EXPLICAR CADA WORKER OCIOSO
+============================================================
+
+Para cada amostra, classificar slots ociosos em:
+
+NO_WORK
+SOURCE_RATE_LIMIT
+PER_WORK_LIMIT
+SOURCE_LIMIT
+ADMISSION_WAIT
+SLIDING_WINDOW_EMPTY
+DOWNLOAD_CAPACITY
+TELEGRAM_CAPACITY
+DB_WAIT
+PROTECTIVE_STOP
+OTHER
+
+Quero saber exatamente por que existe ociosidade.
+
+============================================================
+5. NÃO DEIXAR ACTIVE SET LIMITAR THROUGHPUT
+============================================================
+
+Se P1 atual não consegue alimentar workers suficientes:
+
+admitir mais obras P1 saudáveis de forma controlada.
+
+Se P1 não consegue utilizar a capacidade segura:
+
+permitir P2.
+
+Não quero worker parado simplesmente porque:
+
+- active set ficou pequeno;
+- uma obra entrou em cooldown;
+- sliding window esvaziou;
+- admission controller ainda não promoveu outra obra.
+
+Continuar respeitando work affinity.
+
+============================================================
+6. SOURCE DIVERSITY REAL
+============================================================
+
+Não depender quase completamente de uma source.
+
+Com múltiplas sources saudáveis:
+
+distribuir carga entre domínios diferentes que tenham backlog válido.
+
+Para cada source medir:
+
+SOURCE:
+CAP/MIN:
+AVG CHAPTER SIZE:
+AVG PAGES:
+AVG DURATION:
+RATE LIMIT:
+CURRENT INFLIGHT:
+ERROR RATE:
+429:
+CLOUDFLARE/TURNSTILE:
+CAPACITY AVAILABLE:
+
+Objetivo:
+
+usar paralelismo entre sources independentes.
+
+============================================================
+7. MAX_INFLIGHT_PER_WORK
+============================================================
+
+Configuração atual:
+
+MAX_INFLIGHT_PER_WORK = 2
+
+Primeiro tentar melhorar throughput através de:
+
+- mais obras saudáveis;
+- melhor admission;
+- melhor sliding window;
+- source diversity;
+- menor tempo morto.
+
+DEPOIS testar de forma CONTROLADA:
+
+MAX_INFLIGHT_PER_WORK = 3
+
+Comparar:
+
+2 VS 3
+
+Não alterar permanentemente para 3 sem benchmark.
+
+Validar:
+
+- ordem;
+- staging;
+- fairness;
+- source limits;
+- site;
+- Telegram;
+- memória;
+- duplicatas.
+
+Se 3 não trouxer benefício real:
+
+voltar para 2.
+
+============================================================
+8. SOURCE CAPACITY CONTINUA SOBERANA
+============================================================
+
+Não confundir:
+
+MAX_INFLIGHT_PER_WORK
+
+com:
+
+SOURCE CONCURRENCY.
+
+Mesmo se obra puder ter 3 capítulos em voo:
+
+respeitar capacidade da source.
+
+Nunca buscar throughput causando:
+
+429
+FloodWait
+Turnstile
+Cloudflare block
+timeout storm.
+
+============================================================
+9. P0 CONTINUA ABSOLUTO
+============================================================
+
+Mesmo buscando >10 cap/min:
+
+P0 sempre consulta primeiro no próximo slot livre.
+
+P1/P2 só usam o slot se nenhum P0 claimable existir.
+
+Não sacrificar lançamentos novos para benchmark.
+
+Medir:
+
+P0 DETECT→CLAIM P50
+P0 DETECT→CLAIM P95
+
+============================================================
+10. OTIMIZAR SLIDING WINDOW
+============================================================
+
+Verificar se a janela atual está limitando alimentação dos workers.
+
+Testar controladamente:
+
+8
+12
+16
+
+jobs por obra.
+
+Comparar:
+
+CLAIM GAPS
+WORKER IDLE TIME
+DB QUERY COST
+QUEUE SIZE
+CAP/MIN
+
+Escolher a menor janela que mantém os workers alimentados.
+
+Não colocar centenas de capítulos elegíveis por obra.
+
+============================================================
+11. REMOVER TEMPO MORTO ENTRE JOBS
+============================================================
+
+Medir:
+
+JOB COMPLETED
+→ NEXT CLAIM
+
+P50:
+P95:
+
+Quero claim praticamente imediato quando existir trabalho seguro.
+
+Investigar:
+
+- scheduler loop;
+- admission loop;
+- DB roundtrip;
+- source semaphore;
+- sliding window;
+- lease cleanup.
+
+============================================================
+12. TELEGRAM
+============================================================
+
+Produção recente chegou a aproximadamente:
+
+~105 MB/min
+≈ 1.75 MB/s
+
+O limite configurado é muito maior.
+
+Auditar:
+
+UPLOAD CONCURRENCY REAL
+BOT UTILIZATION
+CHANNEL SHARD UTILIZATION
+UPLOAD QUEUE WAIT
+BANDWIDTH LIMITER WAIT
+UPLOAD P50
+UPLOAD P95
+TELEGRAM ERRORS
+429/FLOODWAIT
+
+Não aumentar upload limit antes de provar que Telegram é gargalo.
+
+============================================================
+13. DOWNLOAD
+============================================================
+
+Configuração:
+
+DOWNLOAD_INFLIGHT_CONCURRENCY=64
+
+Medir:
+
+ACTIVE DOWNLOADS P50
+ACTIVE DOWNLOADS P95
+DOWNLOAD WAIT P50
+DOWNLOAD WAIT P95
+
+Se usamos apenas uma fração da capacidade porque o scheduler não alimenta a pipeline:
+
+corrigir alimentação.
+
+============================================================
+14. TRANSCODE / WEBP
+============================================================
+
+Os capítulos atuais podem ter:
+
+~15–16 MB ou mais.
+
+Medir:
+
+TRANSCODE P50
+TRANSCODE P95
+TRANSCODE QUEUE
+CPU DURING TRANSCODE
+
+Se CPU estiver baixa e houver fila:
+
+avaliar paralelismo.
+
+Não aumentar concorrência se CPU já for gargalo.
+
+============================================================
+15. BANCO
+============================================================
+
+DIRECT_DB_POOL_MAX=4 permanece inicialmente.
+
+Medir:
+
+DB POOL WAIT P50
+DB POOL WAIT P95
+QUERY P50
+QUERY P95
+YSQL CONNECTIONS AVG
+YSQL CONNECTIONS PEAK
+
+Tripwire:
+
+12/13
+
+Operação normal desejada:
+
+<= 11/13
+
+Só alterar pool se ficar comprovado que ele é gargalo dominante.
+
+============================================================
+16. BENCHMARKS A/B
+============================================================
+
+Executar mudanças UMA POR VEZ.
+
+BASELINE:
+configuração atual.
+
+TESTE A:
+corrigir worker starvation/utilização.
+
+TESTE B:
+active set/admission mais eficiente.
+
+TESTE C:
+sliding window.
+
+TESTE D:
+MAX_INFLIGHT_PER_WORK 2 vs 3.
+
+TESTE E:
+combinação vencedora.
+
+Para cada teste registrar:
+
+CAP/MIN
+BUSY WORKERS P50
+BUSY WORKERS P95
+PAGES/MIN
+MB/MIN
+AVG MB/CAP
+AVG PAGES/CAP
+HOME P95
+READER P95
+MEDIA P95
+YSQL AVG
+YSQL PEAK
+RAM
+CPU
+ERROR RATE
+429/FLOODWAIT
+DUPLICATES
+
+Não mudar várias variáveis juntas antes de saber qual trouxe ganho.
+
+============================================================
+17. TRIAGEM CURTA VS HOMOLOGAÇÃO REAL
+============================================================
+
+Testes de:
+
+3–5 minutos
+
+podem ser usados apenas para eliminar configurações ruins.
+
+NÃO usar como homologação final.
+
+Configuração vencedora precisa rodar:
+
+>= 30 MINUTOS
+
+sob produção real.
+
+============================================================
+18. META MATEMÁTICA
+============================================================
+
+Para >=10 cap/min durante 30 minutos:
+
+mínimo:
+
+300 CAPÍTULOS ÚNICOS / 30 MIN
+
+Ideal:
+
+330 capítulos
+= 11 cap/min
+
+360 capítulos
+= 12 cap/min
+
+Contar apenas capítulos canônicos efetivamente publicados.
+
+Não contar:
+
+retries
+duplicate events
+staged
+telemetry duplicada.
+
+============================================================
+19. NORMALIZAR PELO PESO DOS CAPÍTULOS
+============================================================
+
+Reportar também:
+
+AVG PAGES/CAP
+P95 PAGES/CAP
+
+AVG MB/CAP
+P95 MB/CAP
+
+PAGES/MIN
+MB/MIN
+
+Se uma rodada tiver capítulos muito mais pesados:
+
+mostrar claramente.
+
+Mas ainda tentar alcançar >=10 cap/min se houver capacidade segura ociosa.
+
+============================================================
+20. AUTO-TUNING LOCAL
+============================================================
+
+Pode adaptar dinamicamente:
+
+ACTIVE P1 WORKS
+ACTIVE P2 WORKS
+SLIDING WINDOW
+PER-WORK CONCURRENCY
+
+quando houver evidência.
+
+Não alterar silenciosamente:
+
+18 workers
+DB pool
+upload global limit
+
+sem benchmark e justificativa.
+
+============================================================
+21. NÃO ACEITAR "CAPÍTULOS PESADOS" COMO RESPOSTA FINAL
+============================================================
+
+Se não atingir 10 cap/min:
+
+não responder apenas:
+
+"capítulos atuais são maiores".
+
+Quero decomposição matemática:
+
+MAX SAFE CAP/MIN ESTIMATED:
+
+BOTTLENECK:
+
+BOTTLENECK CAPACITY:
+
+CURRENT UTILIZATION:
+
+CAPACITY REQUIRED FOR 10 CAP/MIN:
+
+CURRENT CAPACITY:
+
+SHORTFALL:
+
+EXACT CHANGE REQUIRED:
+
+Se 10 for impossível sob os guard rails atuais:
+
+provar matematicamente.
+
+============================================================
+22. SELF-HEALING CONTINUA OBRIGATÓRIO
+============================================================
+
+Otimização não pode quebrar:
+
+publication watchdog
+auto admission
+stale lease recovery
+source isolation
+auto-resume
+scheduler recovery
+
+Se houver backlog e capítulos pararem:
+
+o importer deve continuar se diagnosticando e recuperando sozinho.
+
+============================================================
+23. PROTECTIVE_STOP
+============================================================
+
+Preservar.
+
+Mas só parar globalmente quando existir risco real para site/infra.
+
+Não quero parada por:
+
+- source local;
+- worker individual;
+- scheduler recuperável;
+- edge spike sem pressão correlacionada.
+
+Se site realmente sofrer:
+
+parar antes de ultrapassar SLA.
+
+============================================================
+24. CRITÉRIO DE SUCESSO
+============================================================
+
+APROVADO somente se:
+
+FINAL 30M CAP/MIN >= 10.0
+
+e:
+
+P0 saudável
+zero duplicatas
+Publication Barrier saudável
+Telegram sem 429/FloodWait
+YSQL abaixo de 12/13
+Home saudável
+Reader saudável
+Media saudável
+auto-healing saudável
+sem PROTECTIVE_STOP causado pela configuração vencedora.
+
+============================================================
+25. RELATÓRIO FINAL
+============================================================
+
+Responder exatamente:
+
+BASELINE CAP/MIN: 6.67
+
+BASELINE BUSY WORKERS: 6–8 / 18
+
+CURRENT BOTTLENECK:
+
+SECONDARY BOTTLENECK:
+
+FINAL 5M CAP/MIN:
+
+FINAL 15M CAP/MIN:
+
+FINAL 30M CAP/MIN:
+
+30M UNIQUE CHAPTERS:
+
+AVG PAGES/CAP:
+
+P95 PAGES/CAP:
+
+AVG MB/CAP:
+
+P95 MB/CAP:
+
+PAGES/MIN:
+
+MB/MIN:
+
+BUSY WORKERS P50:
+
+BUSY WORKERS P95:
+
+IDLE WORKERS P50:
+
+IDLE WORKERS P95:
+
+IDLE REASONS:
+
+ACTIVE P1 WORKS:
+
+ACTIVE P2 WORKS:
+
+MAX_INFLIGHT_PER_WORK BEFORE:
+
+MAX_INFLIGHT_PER_WORK FINAL:
+
+SLIDING WINDOW BEFORE:
+
+SLIDING WINDOW FINAL:
+
+SOURCE COUNT CONTRIBUTING:
+
+TOP SOURCE CONTRIBUTIONS:
+
+JOB COMPLETION→NEXT CLAIM P50:
+
+JOB COMPLETION→NEXT CLAIM P95:
+
+DOWNLOAD ACTIVE P50:
+
+DOWNLOAD ACTIVE P95:
+
+DOWNLOAD BOTTLENECK:
+
+TELEGRAM UPLOAD P50:
+
+TELEGRAM UPLOAD P95:
+
+TELEGRAM UTILIZATION:
+
+TRANSCODE P50:
+
+TRANSCODE P95:
+
+TRANSCODE BOTTLENECK:
+
+DB POOL WAIT P50:
+
+DB POOL WAIT P95:
+
+YSQL AVG:
+
+YSQL PEAK:
+
+RAM AVG:
+
+RAM PEAK:
+
+CPU AVG:
+
+CPU PEAK:
+
+HOME P95:
+
+READER P95:
+
+MEDIA P95:
+
+P0 DETECT→CLAIM P50:
+
+P0 DETECT→CLAIM P95:
+
+TELEGRAM 429/FLOODWAIT:
+
+SOURCE 429:
+
+DUPLICATE PUBLICATIONS:
+
+PUBLICATION BARRIER HEALTH:
+
+PROTECTIVE STOP EVENTS:
+
+SELF-HEALING EVENTS:
+
+BOTTLENECK BEFORE:
+
+BOTTLENECK AFTER:
+
+MAX SAFE CAP/MIN ESTIMATED:
+
+TARGET >=10 CAP/MIN ACHIEVED: YES/NO
+
+============================================================
+REGRA FINAL
+============================================================
+
+Eu quero:
+
+VELOCIDADE + INTELIGÊNCIA + SEGURANÇA.
+
+Não quero recuperar 10–12 cap/min voltando ao comportamento antigo de espalhar capítulos aleatoriamente.
+
+Preservar:
+
+P0 > P1 > P2 > P3
+work affinity
+fairness
+dedupe
+self-healing
+Publication Barrier
+
+mas utilizar toda capacidade SEGURA disponível.
+
+BASELINE:
+6.67 CAP/MIN
+
+META MÍNIMA:
+>= 10.0 CAP/MIN SUSTENTADOS POR 30 MINUTOS
+
+META IDEAL:
+10–12 CAP/MIN SUSTENTADOS.
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-09-21T01:14:51-03:00.
+</ADDITIONAL_METADATA>

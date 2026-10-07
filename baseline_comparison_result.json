@@ -1,0 +1,111 @@
+{
+  "passive": {
+    "ysqlAvg": "7.0",
+    "ysqlP95": 9,
+    "ysqlPeak": 9,
+    "hypAvg": "3.0",
+    "hypPeak": 5,
+    "cpuAvg": "40.5",
+    "cpuP95": "85.6",
+    "cpuPeak": "85.6",
+    "maxIdleInTx": 0,
+    "homeP95": 589,
+    "readerP95": 305,
+    "mediaP95": 191,
+    "samplesCount": 10
+  },
+  "instrumented": {
+    "ysqlAvg": "7.0",
+    "ysqlP95": 9,
+    "ysqlPeak": 9,
+    "hypAvg": "3.1",
+    "hypPeak": 5,
+    "cpuAvg": "35.4",
+    "cpuP95": "83.7",
+    "cpuPeak": "95.1",
+    "maxIdleInTx": 0,
+    "homeP95": 682,
+    "readerP95": 454,
+    "mediaP95": 444,
+    "samplesCount": 45,
+    "cpuSpikesCount": 4,
+    "cpuSpikesSample": [
+      {
+        "timestamp": "2026-09-20T01:19:02.536Z",
+        "cpu": "80.8%",
+        "totalConns": 6,
+        "culprits": [
+          {
+            "app": "Cloudflare Hyperdrive",
+            "state": "idle",
+            "query": "SELECT value FROM \"settings\" WHERE \"key\" = $1 LIMIT 1"
+          },
+          {
+            "app": "",
+            "state": "active",
+            "query": "\n          SELECT pid, application_name, state, query\n          FROM pg_stat_activity\n          WHER"
+          },
+          {
+            "app": "Cloudflare Hyperdrive",
+            "state": "idle",
+            "query": "SELECT value FROM app_settings WHERE key = 'importer_publication_safety_barrier' LIMIT 1"
+          }
+        ]
+      },
+      {
+        "timestamp": "2026-09-20T01:19:43.280Z",
+        "cpu": "85.3%",
+        "totalConns": 9,
+        "culprits": [
+          {
+            "app": "Cloudflare Hyperdrive",
+            "state": "idle",
+            "query": "select \"scans\".\"id\", \"scans\".\"name\", \"scans\".\"slug\" from \"work_scans\" inner join \"scans\" on \"work_sc"
+          },
+          {
+            "app": "Cloudflare Hyperdrive",
+            "state": "idle",
+            "query": "\n          WITH to_lock AS (\n            SELECT id\n            FROM importer_queue\n            WHERE"
+          },
+          {
+            "app": "",
+            "state": "active",
+            "query": "\n          SELECT pid, application_name, state, query\n          FROM pg_stat_activity\n          WHER"
+          },
+          {
+            "app": "Cloudflare Hyperdrive",
+            "state": "idle",
+            "query": "INSERT INTO \"importer_chapter_mappings\" (\"source\", \"source_chapter_id\", \"work_id\", \"work_mapping_id\""
+          }
+        ]
+      },
+      {
+        "timestamp": "2026-09-20T01:20:04.155Z",
+        "cpu": "95.1%",
+        "totalConns": 7,
+        "culprits": [
+          {
+            "app": "Cloudflare Hyperdrive",
+            "state": "idle",
+            "query": "select \"scans\".\"id\", \"scans\".\"name\", \"scans\".\"slug\" from \"work_scans\" inner join \"scans\" on \"work_sc"
+          },
+          {
+            "app": "Cloudflare Hyperdrive",
+            "state": "idle",
+            "query": "INSERT INTO \"importer_chapter_mappings\" (\"source\", \"source_chapter_id\", \"work_id\", \"work_mapping_id\""
+          },
+          {
+            "app": "",
+            "state": "active",
+            "query": "\n          SELECT pid, application_name, state, query\n          FROM pg_stat_activity\n          WHER"
+          },
+          {
+            "app": "Cloudflare Hyperdrive",
+            "state": "idle",
+            "query": "select \"works\".\"id\", \"works\".\"slug\", \"works\".\"title\", \"works\".\"aliases\", \"works\".\"synopsis\", \"works\""
+          }
+        ]
+      }
+    ]
+  }
+}

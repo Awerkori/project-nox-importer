@@ -1,0 +1,25 @@
+{
+  "sampleCount": 155,
+  "lastUpdated": "2026-09-21T21:27:16.232Z",
+  "reader": {
+    "keepaliveP50": 72,
+    "keepaliveP95": 113,
+    "freshP50": 115,
+    "freshP95": 155,
+    "samples": 155
+  },
+  "media": {
+    "keepaliveP50": 63,
+    "keepaliveP95": 99,
+    "freshP50": 110,
+    "freshP95": 147,
+    "samples": 155
+  },
+  "home": {
+    "keepaliveP50": 54,
+    "keepaliveP95": 138,
+    "freshP50": 101,
+    "freshP95": 133,
+    "samples": 155
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "windowDurationMinutes": "9.15",
+  "sampleCount": 30,
+  "readySourcesAvg": 49.03,
+  "readyWorksAvg": 555.6,
+  "chapterInflightAvg": 2,
+  "chapterInflightMax": 6,
+  "controlPlaneInflightAvg": 4.13,
+  "totalDbImportingAvg": 6.93,
+  "workerStates": {
+    "activeDownload": 0.1,
+    "activeUpload": 0.13,
+    "activeDb": 1.77,
+    "waitingRateLimit": 0,
+    "waitingSource": 0,
+    "waitingBarrier": 6,
+    "waitingJob": 0,
+    "idle": 0,
+    "sum": 8
+  },
+  "throughput": {
+    "claimedPerMin": "0.11",
+    "downloadedPerMin": "0.55",
+    "storedPerMin": "0.55",
+    "newPublishedPerMin": "0.44",
+    "cascadePublishedPerMin": "0.00",
+    "totalVisiblePerMin": "0.44"
+  },
+  "latencies": {
+    "endToEndP50Sec": 0,
+    "endToEndP95Sec": 0,
+    "chapterTimeouts": 0,
+    "homeP50Ms": 123,
+    "obraP50Ms": 45,
+    "readerP50Ms": 45,
+    "meP50Ms": 701,
+    "adminP50Ms": 8000
+  },
+  "ysql": {
+    "total": 4,
+    "active": 2.1,
+    "idle": 1.9,
+    "idleInTx": 0,
+    "poolTimeouts": 0
+  },
+  "discloud": {
+    "cpuAvg": 7.17,
+    "cpuPeak": 31.5,
+    "ramAvgMb": 107.29,
+    "ramPeakMb": 143.3
+  }
+}
