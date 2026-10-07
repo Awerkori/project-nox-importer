@@ -528,6 +528,23 @@ export class AdaptiveAutotuner {
     this.globalChapterSemaphore = new AsyncSemaphore(this.currentConcurrency, 'global_chapter_semaphore');
     this.globalMediaSemaphore = new AsyncSemaphore(mediaConcurrency, 'telegram_media_semaphore');
     this.globalInflightRequestSemaphore = new AsyncSemaphore(inflightConcurrency, 'global_download_inflight_semaphore');
+    // The byte budget is independent from the 12-page semaphore. Expose its
+    // live committed/reserved split so a full page semaphore is not mistaken
+    // for byte-budget pressure (or vice-versa).
+    telemetryCollector.registerLimiter('memory_backpressure', () => {
+      const committed = this.activeBufferedBytes;
+      const reserved = this.reservedBufferedBytes;
+      const occupied = committed + reserved;
+      return {
+        configuredCapacity: this.config.maxBufferedBytes,
+        currentCapacity: this.config.maxBufferedBytes,
+        active: occupied,
+        available: Math.max(0, this.config.maxBufferedBytes - occupied),
+        waiters: this.reservationWaiters.length,
+        activeBufferedBytes: committed,
+        reservedBufferedBytes: reserved,
+      };
+    });
   }
 
   getHealthyConcurrencyFloor(): number {
