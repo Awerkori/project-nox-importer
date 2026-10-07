@@ -1,0 +1,118 @@
+{
+  "durationMinutes": 6.2,
+  "poolConfiguration": {
+    "configuredMax": 3,
+    "workers": 8,
+    "safetyStatus": "VIOLATION: Idle in transaction detected: 1"
+  },
+  "avgUsefulWorkers": 15.27,
+  "claimMetrics": {
+    "specificAttempts": 92,
+    "specificSuccesses": 40,
+    "genericAttempts": 0,
+    "genericSuccesses": 0,
+    "emptyAttempts": 0,
+    "schedulerAcquireTotalP50": 4581,
+    "schedulerAcquireTotalP95": 16984,
+    "poolWaitP50": 3680,
+    "poolWaitP95": 11555,
+    "schedulerSqlTotalP50": 469,
+    "schedulerSqlTotalP95": 954,
+    "claimLockPoolWaitP50": 1184,
+    "claimLockPoolWaitP95": 2589,
+    "claimLockSqlExecP50": 159,
+    "claimLockSqlExecP95": 411,
+    "totalQueriesPerSuccessfulClaimP50": 3,
+    "totalQueriesPerSuccessfulClaimP95": 5,
+    "activeWorksTestedPerClaimP50": 2,
+    "activeWorksTestedPerClaimP95": 4
+  },
+  "mutexStats": {
+    "waitP50": 0,
+    "waitP95": 2.6,
+    "holdP50": 0,
+    "holdP95": 0.1,
+    "samples": 69
+  },
+  "avgSlotStates": {
+    "ACTIVE_SOURCE": 2.61,
+    "ACTIVE_DOWNLOAD": 1.26,
+    "ACTIVE_ENCODE": 0,
+    "ACTIVE_TELEGRAM": 0.45,
+    "ACTIVE_DB": 1.88,
+    "ACTIVE_PROCESSING": 6.2,
+    "WAITING_CLAIM_DB": 1.22,
+    "WAITING_BARRIER": 0.32,
+    "WAITING_MUTEX": 0.06,
+    "WAITING_SOURCE_PERMIT": 0,
+    "BLOCKED": 1.6,
+    "IDLE": 0.2,
+    "SUM": 8
+  },
+  "slotOccupancy": {
+    "meanSec": 57.6,
+    "p50Sec": 58.3,
+    "p95Sec": 76.2,
+    "avgActiveProcessing": 6.2,
+    "avgBlocked": 1.6,
+    "avgIdle": 0.2,
+    "theoreticalCapacityPerMin": 8.33
+  },
+  "activeWorksHealth": {
+    "claimableActiveWorksAvg": 16.2,
+    "zombieActiveWorksMax": 0,
+    "zombieActiveWorksStatus": "PASS (0 ZOMBIES)"
+  },
+  "throughput": {
+    "chapterStartedPerMin": 8.06,
+    "chapterCompletedPerMin": 7.09,
+    "freshNewVisiblePerMin": 4.67,
+    "cascadePerMin": 1.29,
+    "totalVisiblePerMin": 5.96,
+    "immediatePublishRatioPercent": 84.1,
+    "uniqueStagedPerMin": 0,
+    "stagedMappingRowsPerMin": 0.16,
+    "totalCompleted": 44,
+    "totalPublished": 37,
+    "publishedImmediatelyCount": 37,
+    "freshNewVisibleCount": 29,
+    "cascadeCount": 8,
+    "uniqueStagedCount": 0,
+    "stagedMappingRows": 1,
+    "totalStarted": 50
+  },
+  "yugabyte": {
+    "cpuAvgPercent": 0,
+    "cpuP95Percent": 0,
+    "cpuPeakPercent": 0,
+    "ysqlConnectionsTotalAvg": 4.2,
+    "ysqlConnectionsActiveAvg": 1.3,
+    "ysqlConnectionsIdleAvg": 2.8,
+    "maxIdleInTransaction": 1,
+    "maxLongQueries": 0,
+    "poolTimeouts": 0
+  },
+  "siteLatencies": {
+    "home": {
+      "p50": 88.3,
+      "p95": 355.1,
+      "p99": 3049.7,
+      "min": 74.4,
+      "max": 3049.7,
+      "avg": 198.9
+    },
+    "reader": {
+      "p50": 32.3,
+      "p95": 52,
+      "p99": 132.5,
+      "min": 24.9,
+      "max": 132.5,
+      "avg": 36.3
+    }
+  },
+  "dataIntegrity": {
+    "emptyPages": 0,
+    "duplicateChapters": 0,
+    "status": "PASS"
+  }
+}

@@ -1,0 +1,138 @@
+{
+  "durationSec": 301,
+  "totalNewPublished": 55,
+  "canonicalCapMin": 10.96,
+  "avgRssMb": "114.7",
+  "peakRssMb": 125,
+  "avgActiveMb": "0.0",
+  "peakActiveMb": "0.0",
+  "avgReservedMb": "0.0",
+  "peakReservedMb": "0.0",
+  "peakCommittedMb": "0.0",
+  "peakMaxObservedMb": "0.0",
+  "oomCount": 0,
+  "samplesCount": 11,
+  "samples": [
+    {
+      "elapsedSec": 0,
+      "newPublished": 0,
+      "currentCapMin": 0,
+      "rss": null,
+      "activeBufMb": null,
+      "reservedBufMb": null,
+      "committedBufMb": null,
+      "maxObservedMb": null,
+      "concurrency": null
+    },
+    {
+      "elapsedSec": 28,
+      "newPublished": 3,
+      "currentCapMin": 6.43,
+      "rss": null,
+      "activeBufMb": 0,
+      "reservedBufMb": 0,
+      "committedBufMb": 0,
+      "maxObservedMb": 0,
+      "concurrency": null
+    },
+    {
+      "elapsedSec": 55,
+      "newPublished": 15,
+      "currentCapMin": 16.36,
+      "rss": 106,
+      "activeBufMb": 0,
+      "reservedBufMb": 0,
+      "committedBufMb": 0,
+      "maxObservedMb": 0,
+      "concurrency": null
+    },
+    {
+      "elapsedSec": 83,
+      "newPublished": 19,
+      "currentCapMin": 13.73,
+      "rss": 108,
+      "activeBufMb": 0,
+      "reservedBufMb": 0,
+      "committedBufMb": 0,
+      "maxObservedMb": 0,
+      "concurrency": null
+    },
+    {
+      "elapsedSec": 110,
+      "newPublished": 26,
+      "currentCapMin": 14.18,
+      "rss": 111,
+      "activeBufMb": 0,
+      "reservedBufMb": 0,
+      "committedBufMb": 0,
+      "maxObservedMb": 0,
+      "concurrency": null
+    },
+    {
+      "elapsedSec": 137,
+      "newPublished": 27,
+      "currentCapMin": 11.82,
+      "rss": 111,
+      "activeBufMb": 0,
+      "reservedBufMb": 0,
+      "committedBufMb": 0,
+      "maxObservedMb": 0,
+      "concurrency": null
+    },
+    {
+      "elapsedSec": 165,
+      "newPublished": 31,
+      "currentCapMin": 11.27,
+      "rss": 113,
+      "activeBufMb": 0,
+      "reservedBufMb": 0,
+      "committedBufMb": 0,
+      "maxObservedMb": 0,
+      "concurrency": null
+    },
+    {
+      "elapsedSec": 192,
+      "newPublished": 34,
+      "currentCapMin": 10.63,
+      "rss": 125,
+      "activeBufMb": 0,
+      "reservedBufMb": 0,
+      "committedBufMb": 0,
+      "maxObservedMb": 0,
+      "concurrency": null
+    },
+    {
+      "elapsedSec": 219,
+      "newPublished": 41,
+      "currentCapMin": 11.23,
+      "rss": 116,
+      "activeBufMb": 0,
+      "reservedBufMb": 0,
+      "committedBufMb": 0,
+      "maxObservedMb": 0,
+      "concurrency": null
+    },
+    {
+      "elapsedSec": 247,
+      "newPublished": 44,
+      "currentCapMin": 10.69,
+      "rss": 121,
+      "activeBufMb": 0,
+      "reservedBufMb": 0,
+      "committedBufMb": 0,
+      "maxObservedMb": 0,
+      "concurrency": null
+    },
+    {
+      "elapsedSec": 274,
+      "newPublished": 50,
+      "currentCapMin": 10.95,
+      "rss": 121,
+      "activeBufMb": 0,
+      "reservedBufMb": 0,
+      "committedBufMb": 0,
+      "maxObservedMb": 0,
+      "concurrency": null
+    }
+  ]
+}

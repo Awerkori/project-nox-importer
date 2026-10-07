@@ -1,0 +1,1253 @@
+[
+  {
+    "extensionId": "acervoeremita",
+    "name": "AcervoEremita",
+    "baseUrl": "https://acervoeremita.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "acervohentai",
+    "name": "Acervo Hentai",
+    "baseUrl": "https://acervohentai.com",
+    "theme": "madaralegacy",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "amuy",
+    "name": "Amuy",
+    "baseUrl": "https://apenasmaisumyaoi.com",
+    "theme": "madaralegacy",
+    "versionCode": 4,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "animexnovel",
+    "name": "AnimeXNovel",
+    "baseUrl": "https://www.animexnovel.com",
+    "theme": "custom",
+    "versionCode": 20,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "apecomics",
+    "name": "Capitoons",
+    "baseUrl": "https://capitoons.com",
+    "theme": "mangawork",
+    "versionCode": 44,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "apenasumafa",
+    "name": "Apenas Uma Fã",
+    "baseUrl": "https://apenasuma-fa.blogspot.com",
+    "theme": "zeistmanga",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "argoscomics",
+    "name": "Argos Comics",
+    "baseUrl": "https://aniargos.com",
+    "theme": "custom",
+    "versionCode": 60,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "argosscan",
+    "name": "Argos Scan",
+    "baseUrl": "https://argoscomics.online",
+    "theme": "custom",
+    "versionCode": 30,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "arthurscan",
+    "name": "Arthur Scan",
+    "baseUrl": "https://arthurscan.xyz",
+    "theme": "madaralegacy",
+    "versionCode": 7,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "astratoons",
+    "name": "Astratoons",
+    "baseUrl": "https://new.astratoons.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "auratoons",
+    "name": "AuraToons",
+    "baseUrl": "https://auratoons.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "azuretoons",
+    "name": "Azuretoons",
+    "baseUrl": "https://azuretoons.com",
+    "theme": "custom",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "bakai",
+    "name": "Bakai",
+    "baseUrl": "https://bakai.org",
+    "theme": "custom",
+    "versionCode": 19,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "blackoutcomics",
+    "name": "Blackout Comics",
+    "baseUrl": "https://blackoutcomics.com",
+    "theme": "custom",
+    "versionCode": 12,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "bladetoons",
+    "name": "Bladetoons",
+    "baseUrl": "https://bladetoons.com",
+    "theme": "mangotheme",
+    "versionCode": 4,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "borutoexplorer",
+    "name": "Boruto Explorer",
+    "baseUrl": "https://leitor.borutoexplorer.com.br",
+    "theme": "madara",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "brasilhentai",
+    "name": "Brasil Hentai",
+    "baseUrl": "https://brasilhentai.com",
+    "theme": "custom",
+    "versionCode": 5,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "bryaoi",
+    "name": "BR Yaoi",
+    "baseUrl": "https://bryaoi.com",
+    "theme": "custom",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "cafecomyaoi",
+    "name": "Café com Yaoi",
+    "baseUrl": "https://cafecomyaoi.com.br",
+    "theme": "madara",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "cerisescans",
+    "name": "Cerise Scan",
+    "baseUrl": "https://loverstoon.net",
+    "theme": "custom",
+    "versionCode": 64,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "corujatoon",
+    "name": "CorujaToon",
+    "baseUrl": "https://corujatoon.com",
+    "theme": "custom",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "covenscan",
+    "name": "Coven Scan",
+    "baseUrl": "https://covendasbruxonas.com",
+    "theme": "madaralegacy",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "drakz",
+    "name": "Drakz",
+    "baseUrl": "https://drakz.online",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "dropescan",
+    "name": "Drope Scan",
+    "baseUrl": "https://beta.dropescan.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "egotoons",
+    "name": "Ego Toons",
+    "baseUrl": "https://egotoons.com",
+    "theme": "custom",
+    "versionCode": 9,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "erosect",
+    "name": "Ero Sect",
+    "baseUrl": "https://erosect.xyz",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "euphoriascan",
+    "name": "Euphoria Scan",
+    "baseUrl": "https://euphoriascan.com",
+    "theme": "madara",
+    "versionCode": 0,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "exhentainetbr",
+    "name": "ExHentai.net.br",
+    "baseUrl": "https://exhentai.net.br",
+    "theme": "custom",
+    "versionCode": 4,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "fenixproject",
+    "name": "Fenix Project",
+    "baseUrl": "https://fenixproject.site",
+    "theme": "madaralegacy",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "fleurblanche",
+    "name": "Fleur Blanche",
+    "baseUrl": "https://fbsquadx.com",
+    "theme": "madara",
+    "versionCode": 5,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "fliptru",
+    "name": "Fliptru",
+    "baseUrl": "https://fliptru.com.br",
+    "theme": "custom",
+    "versionCode": 4,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "flowermanga",
+    "name": "FlowerManga.net",
+    "baseUrl": "https://flowermangas.net",
+    "theme": "madara",
+    "versionCode": 4,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "galaxscanlator",
+    "name": "GALAX Scans",
+    "baseUrl": "https://galaxscanlator.blogspot.com",
+    "theme": "zeistmanga",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "geasscomics",
+    "name": "Geass Comics",
+    "baseUrl": "https://geasscomics.xyz",
+    "theme": "custom",
+    "versionCode": 5,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "ghostscan",
+    "name": "Ghost Scan",
+    "baseUrl": "https://ghostscan.xyz",
+    "theme": "madara",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "hanmokkuscan",
+    "name": "Hanmokku Scan",
+    "baseUrl": "https://hanmokkuscan.blogspot.com",
+    "theme": "zeistmanga",
+    "versionCode": 0,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "hentaifusion",
+    "name": "Hentai Fusion",
+    "baseUrl": "https://hentaifusion.me",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "hentaihome",
+    "name": "Hentai Home",
+    "baseUrl": "https://www.hentaihome.net",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "hentaiseason",
+    "name": "Hentai Season",
+    "baseUrl": "https://hentaiseason.com",
+    "theme": "gattsu",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "hentaitokyo",
+    "name": "Hentai Tokyo",
+    "baseUrl": "https://hentaitokyo.net",
+    "theme": "gattsu",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "hipercool",
+    "name": "HipercooL",
+    "baseUrl": "",
+    "theme": "hiper",
+    "versionCode": 55,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "hipertoon",
+    "name": "Hipertoon",
+    "baseUrl": "https://hipertoon.com",
+    "theme": "hiper",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "horahentai",
+    "name": "Hora Hentai",
+    "baseUrl": "https://horahentai.com",
+    "theme": "custom",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "hotcabaretscan",
+    "name": "Hot Cabaret Scan",
+    "baseUrl": "https://hotcabaretscan.com",
+    "theme": "madara",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "hqnow",
+    "name": "HQ Now!",
+    "baseUrl": "https://www.hq-now.com",
+    "theme": "custom",
+    "versionCode": 8,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "huntersscans",
+    "name": "Hunters Scans",
+    "baseUrl": "https://readhunters.xyz",
+    "theme": "madaralegacy",
+    "versionCode": 12,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "imperiodabritannia",
+    "name": "Sagrado Imp\\u00e9rio da Britannia",
+    "baseUrl": "https://imperiodabritannia.net",
+    "theme": "mangotheme",
+    "versionCode": 53,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "inkapk",
+    "name": "Inkapk",
+    "baseUrl": "https://inkapk.net",
+    "theme": "madaralegacy",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "inkscan",
+    "name": "Ink Scan",
+    "baseUrl": "https://inkscann.live",
+    "theme": "custom",
+    "versionCode": 4,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "instahentai",
+    "name": "InstaHentai",
+    "baseUrl": "https://instahentai.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "jondomingues",
+    "name": "Jon Domingues",
+    "baseUrl": "https://jondomingues.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "kamisamaexplorer",
+    "name": "Kami Sama Explorer",
+    "baseUrl": "https://leitor.kamisama.com.br",
+    "theme": "madara",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "karikari",
+    "name": "KariKari",
+    "baseUrl": "https://karikari.app",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "kivaratoons",
+    "name": "KivaraToons",
+    "baseUrl": "https://kivaratoons.com",
+    "theme": "custom",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "kuromangas",
+    "name": "KuroMangas",
+    "baseUrl": "https://kuromangas.com",
+    "theme": "custom",
+    "versionCode": 17,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "leitordemangas",
+    "name": "Leitor de Mangas",
+    "baseUrl": "https://leitordemangas.com",
+    "theme": "aurora",
+    "versionCode": 54,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "leituramanga",
+    "name": "Leitura Manga",
+    "baseUrl": "https://leituramanga.net",
+    "theme": "custom",
+    "versionCode": 6,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "ler999",
+    "name": "Ler 999",
+    "baseUrl": "https://ler999.blogspot.com",
+    "theme": "zeistmanga",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "lermangas",
+    "name": "Ler Mangas",
+    "baseUrl": "https://lermangas.me",
+    "theme": "madaralegacy",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "littletyrant",
+    "name": "Little Tyrant",
+    "baseUrl": "https://tiraninha.world",
+    "theme": "madaralegacy",
+    "versionCode": 13,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "lycantoons",
+    "name": "Lycan Toons",
+    "baseUrl": "https://lycantoons.com",
+    "theme": "custom",
+    "versionCode": 12,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "maidscan",
+    "name": "Maid Scan",
+    "baseUrl": "https://empreguetes.wtf",
+    "theme": "greenshit",
+    "versionCode": 51,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mangadash",
+    "name": "MangaDash",
+    "baseUrl": "https://mangadash.net",
+    "theme": "custom",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mangaflix",
+    "name": "Manga Flix",
+    "baseUrl": "https://mangaflix.net",
+    "theme": "custom",
+    "versionCode": 4,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mangalivre",
+    "name": "ToonLivre",
+    "baseUrl": "https://toonlivre.net",
+    "theme": "custom",
+    "versionCode": 90,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mangalivreblog",
+    "name": "Manga Livre Blog",
+    "baseUrl": "https://mangalivre.blog",
+    "theme": "custom",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mangalivreorg",
+    "name": "MangaLivre.org",
+    "baseUrl": "https://mangalivre.org",
+    "theme": "custom",
+    "versionCode": 9,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mangalivreto",
+    "name": "Manga Livre.to",
+    "baseUrl": "https://mangalivre.to",
+    "theme": "madara",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "manganight",
+    "name": "Manga Night",
+    "baseUrl": "https://www.manganight.com.br",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "manganyx",
+    "name": "Manga NXY",
+    "baseUrl": "https://manganyx.org",
+    "theme": "aurora",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mangaonline",
+    "name": "Manga Online RED",
+    "baseUrl": "https://mangaonline.red",
+    "theme": "custom",
+    "versionCode": 60,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mangaonlinegreen",
+    "name": "Manga Online GREEN",
+    "baseUrl": "https://mangaonline.green",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "mangaonlinetv",
+    "name": "Manga Online tv",
+    "baseUrl": "https://mangaonline.tv",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "mangasbrasuka",
+    "name": "Mangas Brasuka",
+    "baseUrl": "https://mangasbrasuka.org",
+    "theme": "aurora",
+    "versionCode": 57,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mangastop",
+    "name": "Manga Stop",
+    "baseUrl": "https://mangastop.net",
+    "theme": "mangathemesia",
+    "versionCode": 47,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mangeek",
+    "name": "ManGeek",
+    "baseUrl": "https://mangeek.app",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mangotoons",
+    "name": "Mango Toons",
+    "baseUrl": "https://mangotoons.com",
+    "theme": "mangotheme",
+    "versionCode": 6,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "manhastro",
+    "name": "Manhastro",
+    "baseUrl": "https://manhastro.net",
+    "theme": "custom",
+    "versionCode": 59,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mediocretoons",
+    "name": "Mediocre Toons",
+    "baseUrl": "https://mediocrescan.com",
+    "theme": "custom",
+    "versionCode": 20,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "megahentai",
+    "name": "MegaHentai",
+    "baseUrl": "https://megahentai.biz",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "minitwoscan",
+    "name": "MiniTwo Scan",
+    "baseUrl": "https://minitwoscan.com",
+    "theme": "madara",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "montetai",
+    "name": "Monte Tai",
+    "baseUrl": "https://montetaiscanlator.xyz",
+    "theme": "madaralegacy",
+    "versionCode": 5,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mrtenzus",
+    "name": "MR Tenzus",
+    "baseUrl": "https://mrtenzus.com",
+    "theme": "madara",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mugiwarasoficial",
+    "name": "Mugiwaras Oficial",
+    "baseUrl": "https://mugiwarasoficial.org",
+    "theme": "aurora",
+    "versionCode": 57,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "muitohentai",
+    "name": "Muito Hentai",
+    "baseUrl": "https://www.muitohentai.com",
+    "theme": "custom",
+    "versionCode": 4,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "mundohentai",
+    "name": "Mundo Hentai",
+    "baseUrl": "https://mundohentaioficial.com",
+    "theme": "custom",
+    "versionCode": 10,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "nebulosascan",
+    "name": "Nebulosa Scan",
+    "baseUrl": "https://nebulosascan.com",
+    "theme": "madara",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "nexusmangas",
+    "name": "Nexus Mangas",
+    "baseUrl": "https://www.nexusmangas.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "nhentaibr",
+    "name": "NHentai.net.br",
+    "baseUrl": "https://nhentai.net.br",
+    "theme": "custom",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "ninjascan",
+    "name": "Ninja Scan",
+    "baseUrl": "https://ninjacomics.xyz",
+    "theme": "madara",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "nocturnesummer",
+    "name": "Nocturne Summer",
+    "baseUrl": "https://nocfsb.com",
+    "theme": "madaralegacy",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "noindexscan",
+    "name": "Hanami Heaven",
+    "baseUrl": "https://hanamiheaven.org",
+    "theme": "madaralegacy",
+    "versionCode": 5,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "onereader",
+    "name": "OneReader",
+    "baseUrl": "https://onereader.net",
+    "theme": "custom",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "osakascan",
+    "name": "Osaka Scan",
+    "baseUrl": "https://www.osakascan.com",
+    "theme": "zeistmanga",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "pinkrosa",
+    "name": "Pink Rosa",
+    "baseUrl": "https://scanpinkrosa.blogspot.com",
+    "theme": "zeistmanga",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "pinkseaunicorn",
+    "name": "Pink Sea Unicorn",
+    "baseUrl": "https://psunicorn.com",
+    "theme": "madaralegacy",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "pizzariascan",
+    "name": "PizzariaScan",
+    "baseUrl": "https://pizzariacomics.com",
+    "theme": "mangawork",
+    "versionCode": 47,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "plumacomics",
+    "name": "Pluma Comics",
+    "baseUrl": "https://plumacomics.cloud",
+    "theme": "custom",
+    "versionCode": 51,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "pointzerotoons",
+    "name": "Kitsune Yako",
+    "baseUrl": "https://kitsuneyako.com",
+    "theme": "mangathemesia",
+    "versionCode": 4,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "portalyaoi",
+    "name": "Portal Yaoi",
+    "baseUrl": "https://portalyaoi.com",
+    "theme": "madara",
+    "versionCode": 4,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "randomscan",
+    "name": "Lura Toon",
+    "baseUrl": "https://luratoons.net",
+    "theme": "custom",
+    "versionCode": 59,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "remangas",
+    "name": "NixManga",
+    "baseUrl": "https://noxmangas.org",
+    "theme": "custom",
+    "versionCode": 56,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "revistasequadrinhos",
+    "name": "Revistas e Quadrinhos",
+    "baseUrl": "https://revistasequadrinhos.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "rfdragonscan",
+    "name": "RF Dragon Scan",
+    "baseUrl": "https://rfdragonscan.net",
+    "theme": "custom",
+    "versionCode": 14,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "risentoons",
+    "name": "Risentoons",
+    "baseUrl": "https://risentoons.xyz",
+    "theme": "custom",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "roxinha",
+    "name": "Roxinha",
+    "baseUrl": "https://roxinha.online",
+    "theme": "custom",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "saikaiscan",
+    "name": "Saikai Scan",
+    "baseUrl": "https://housesaikai.net",
+    "theme": "custom",
+    "versionCode": 13,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "sexkomix",
+    "name": "SexKomix 2",
+    "baseUrl": "https://sexkomix2.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "shadowmanga",
+    "name": "Shadow Manga",
+    "baseUrl": "https://shadow-mang.onrender.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "shiraiscans",
+    "name": "Shirai Scans",
+    "baseUrl": "https://shiraixis.space",
+    "theme": "custom",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "slimereadunoriginal",
+    "name": "SlimeRead (unoriginal)",
+    "baseUrl": "https://slimeread.app",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "spectralscan",
+    "name": "Nexus Toons",
+    "baseUrl": "https://nx-toons.xyz",
+    "theme": "custom",
+    "versionCode": 62,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "sssscanlator",
+    "name": "Yomu Comics",
+    "baseUrl": "https://yomu.com.br",
+    "theme": "custom",
+    "versionCode": 61,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "starlightscan",
+    "name": "Starlight Scan",
+    "baseUrl": "https://starligthscan.com",
+    "theme": "mangathemesia",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "taimumangas",
+    "name": "TaimuMangas",
+    "baseUrl": "https://beta.taimumangas.com",
+    "theme": "custom",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "taiyo",
+    "name": "Taiyō",
+    "baseUrl": "https://taiyo.moe",
+    "theme": "custom",
+    "versionCode": 11,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "tankouhentai",
+    "name": "Tankou Hentai",
+    "baseUrl": "https://tankouhentai.com",
+    "theme": "madara",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "taosect",
+    "name": "Tao Sect",
+    "baseUrl": "https://taosect.com",
+    "theme": "custom",
+    "versionCode": 22,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "temakimangas",
+    "name": "Temaki mangás",
+    "baseUrl": "https://temakimangas.blogspot.com",
+    "theme": "zeistmanga",
+    "versionCode": 0,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "terceiroz",
+    "name": "Terceiro Z",
+    "baseUrl": "https://terceiroz.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "thehentai",
+    "name": "TheHentai",
+    "baseUrl": "https://thehentai.net",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "tiamanhwa",
+    "name": "Tia Manhwa",
+    "baseUrl": "https://tiamanhwa.com",
+    "theme": "madaralegacy",
+    "versionCode": 5,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "timelinecomics",
+    "name": "Timeline Comics",
+    "baseUrl": "https://timelinecomics.blogspot.com",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "tomato",
+    "name": "Tomato",
+    "baseUrl": "https://prod-api.tomatoanimes.com",
+    "theme": "custom",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "toonbr",
+    "name": "ToonBr",
+    "baseUrl": "https://beta.toonbr.com",
+    "theme": "custom",
+    "versionCode": 4,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "traducoesdolipe",
+    "name": "Traduções do Lipe",
+    "baseUrl": "https://traducoesdolipe.blogspot.com",
+    "theme": "zeistmanga",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "tsundokutraducoes",
+    "name": "Tsundoku Traduções",
+    "baseUrl": "https://tsundoku.com.br",
+    "theme": "mangathemesia",
+    "versionCode": 10,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "universohentai",
+    "name": "Universo Hentai",
+    "baseUrl": "https://universohentai.com",
+    "theme": "gattsu",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "valkyuri",
+    "name": "ValkYuri",
+    "baseUrl": "https://valkyuri.com",
+    "theme": "custom",
+    "versionCode": 2,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  },
+  {
+    "extensionId": "vegitoons",
+    "name": "Vegitoons",
+    "baseUrl": "https://vegitoons.black",
+    "theme": "greenshit",
+    "versionCode": 0,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "verdinha",
+    "name": "Verdinha",
+    "baseUrl": "https://verdinha.wtf",
+    "theme": "greenshit",
+    "versionCode": 0,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "wolftoon",
+    "name": "Wolftoon",
+    "baseUrl": "https://wolftoon.lovable.app",
+    "theme": "custom",
+    "versionCode": 5,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "xxxyaoi",
+    "name": "XXX Yaoi",
+    "baseUrl": "https://3xyaoi.com",
+    "theme": "madara",
+    "versionCode": 8,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "yaoifanclub",
+    "name": "Yaoi Fan Club",
+    "baseUrl": "https://www.yaoifanclub.com",
+    "theme": "zeistmanga",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "yomumangas",
+    "name": "Yomu Mangás",
+    "baseUrl": "https://yomumangas.com",
+    "theme": "custom",
+    "versionCode": 7,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "yugenmangas",
+    "name": "Yugen Mangás",
+    "baseUrl": "",
+    "theme": "custom",
+    "versionCode": 52,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "yuriverso",
+    "name": "Yuri on Air",
+    "baseUrl": "https://yurionair.top",
+    "theme": "madara",
+    "versionCode": 5,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "zettahq",
+    "name": "ZettaHQ",
+    "baseUrl": "https://zettahq.com",
+    "theme": "custom",
+    "versionCode": 3,
+    "inAwerkori": true,
+    "inKeiyoushi": true
+  },
+  {
+    "extensionId": "zinnes",
+    "name": "Zinnes",
+    "baseUrl": "https://www.zinnes.com.br",
+    "theme": "custom",
+    "versionCode": 1,
+    "inAwerkori": true,
+    "inKeiyoushi": false
+  }
+]

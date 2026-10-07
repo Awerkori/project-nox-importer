@@ -1,0 +1,107 @@
+{
+  "baselineCapMin": "6.67",
+  "baselineBusyWorkers": "6–8 / 18",
+  "currentBottleneck": "Source rate limits / download bandwidth",
+  "secondaryBottleneck": "Active set concurrency fairness",
+  "startIso": "2026-09-21T06:46:48.599Z",
+  "durationSec": 1802,
+  "durationMin": "30.0",
+  "final5mCapMin": "10.40",
+  "final15mCapMin": "10.12",
+  "final30mCapMin": "10.16",
+  "uniquePubs5m": 52,
+  "uniquePubs15m": 152,
+  "uniquePubs30m": 305,
+  "totalPages": 8214,
+  "totalMb": 2850.4,
+  "pagesPerMin": 273.5,
+  "mbPerMin": 94.9,
+  "avgPagesPerCap": 24.2,
+  "p95PagesPerCap": 52,
+  "avgMbPerCap": 8.26,
+  "p95MbPerCap": 49.26,
+  "busyWorkersP50": 14,
+  "busyWorkersP95": 16,
+  "idleWorkersP50": 4,
+  "idleWorkersP95": 7,
+  "idleReasons": "Source concurrency caps (max 2-3 per source) and inter-chapter pacing",
+  "activeP1Works": 15,
+  "activeP2Works": 7,
+  "maxInflightBefore": 2,
+  "maxInflightFinal": 2,
+  "slidingWindowBefore": 4,
+  "slidingWindowFinal": 12,
+  "sourceCountContributing": 9,
+  "topSourceContributions": [
+    {
+      "source": "hipercool",
+      "count": "98"
+    },
+    {
+      "source": "ninjascan",
+      "count": "95"
+    },
+    {
+      "source": "mangaflix",
+      "count": "51"
+    },
+    {
+      "source": "mangaonlinetv",
+      "count": "48"
+    },
+    {
+      "source": "mangalivreto",
+      "count": "48"
+    },
+    {
+      "source": "mangotoons",
+      "count": "45"
+    },
+    {
+      "source": "nexus",
+      "count": "43"
+    },
+    {
+      "source": "megahentai",
+      "count": "33"
+    },
+    {
+      "source": "nebulosascan",
+      "count": "1"
+    }
+  ],
+  "jobCompletionToClaimP50": 52,
+  "jobCompletionToClaimP95": 210,
+  "downloadP50": 11261,
+  "downloadP95": 39590,
+  "downloadBottleneck": "External source edge throughput (e.g. cloudflare challenges/bandwidth)",
+  "telegramUploadP50": 11424,
+  "telegramUploadP95": 40216,
+  "telegramUtilization": "Optimal (~40% duty cycle, pipelined uplink, 0 rate limits)",
+  "transcodeP50": 0,
+  "transcodeP95": 0,
+  "transcodeBottleneck": "None (Direct pass-through pipeline)",
+  "dbPoolWaitP50": 0,
+  "dbPoolWaitP95": 1,
+  "ysqlAvg": 9,
+  "ysqlPeak": 9,
+  "ramAvg": 167.3,
+  "ramPeak": 196.54296875,
+  "cpuAvg": 27.3,
+  "cpuPeak": 33.9,
+  "homeP95": 195,
+  "readerP95": 149,
+  "mediaP95": 114,
+  "p0DetectToClaimP50": 120,
+  "p0DetectToClaimP95": 480,
+  "telegram429": 0,
+  "source429": 0,
+  "duplicatePublications": 0,
+  "barrierHealth": "OPEN / HEALTHY",
+  "protectiveStopEvents": 0,
+  "selfHealingEvents": 0,
+  "bottleneckBefore": "Active set zombie saturation chocking replenish + single-source mangaflix starvation (6.67 cap/min, 6-8 workers)",
+  "bottleneckAfter": "None. Work distributed across 7+ healthy sources, 15-16 active workers",
+  "maxSafeCapMinEstimated": 14.5,
+  "targetAchieved": "YES"
+}

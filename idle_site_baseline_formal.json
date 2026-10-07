@@ -1,0 +1,46 @@
+{
+  "home": {
+    "min": 39,
+    "p50": 48,
+    "p90": 59,
+    "p95": 61,
+    "p99": 386,
+    "max": 386,
+    "avg": "60.1"
+  },
+  "reader": {
+    "min": 40,
+    "p50": 45,
+    "p90": 61,
+    "p95": 69,
+    "p99": 558,
+    "max": 558,
+    "avg": "59.1"
+  },
+  "media": {
+    "min": 36,
+    "p50": 42,
+    "p90": 251,
+    "p95": 282,
+    "p99": 537,
+    "max": 537,
+    "avg": "78.7"
+  },
+  "httpErrorRate": "0.00%",
+  "totalRequests": 150,
+  "errors": 0,
+  "targets": {
+    "home": {
+      "p95Target": 250,
+      "met": true
+    },
+    "reader": {
+      "p95Target": 150,
+      "met": true
+    },
+    "media": {
+      "p95Target": 120,
+      "met": false
+    }
+  }
+}

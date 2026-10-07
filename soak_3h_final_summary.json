@@ -1,0 +1,52 @@
+{
+  "observationStart": "2026-09-21T16:35:40Z",
+  "observationEnd": "2026-09-21T19:36:16.378Z",
+  "wallClockMinutes": 180,
+  "totalUniqueChaptersPublished": 1627,
+  "totalChaptersProcessed": 2039,
+  "totalChaptersFromCheckpoints": 2014,
+  "totalPagesStored": 28942,
+  "sustainedThroughputCapMin": "11.33",
+  "laneDistribution": {
+    "P0": 0,
+    "P1": 1470,
+    "P2": 75
+  },
+  "prioStats": {
+    "50": {
+      "completed": 76,
+      "failed": 0,
+      "claimLatencySec": 0
+    },
+    "70": {
+      "completed": 3,
+      "failed": 0,
+      "claimLatencySec": 0
+    },
+    "75": {
+      "completed": 865,
+      "failed": 0,
+      "claimLatencySec": 493293.58283475
+    },
+    "80": {
+      "completed": 618,
+      "failed": 0,
+      "claimLatencySec": 14265.74584975
+    },
+    "85": {
+      "completed": 1,
+      "failed": 0,
+      "claimLatencySec": 0
+    },
+    "95": {
+      "completed": 480,
+      "failed": 0,
+      "claimLatencySec": 105615.119148
+    }
+  },
+  "duplicateWorks": 0,
+  "duplicateChapters": 0,
+  "caughtUpWorks": "295",
+  "incompleteWorks": "6297",
+  "totalCheckpoints": 34
+}

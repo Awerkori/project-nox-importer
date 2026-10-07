@@ -1,0 +1,160 @@
+{
+  "validationMode": "OFFICIAL_POST_FIX_30M_VALIDATION",
+  "startIso": "2026-09-22T15:00:53.921Z",
+  "endIso": "2026-09-22T15:30:58.622Z",
+  "durationSec": 1804,
+  "durationMin": 30.07,
+  "throughput": {
+    "uniqueCanonicalPublished": 325,
+    "uniqueCanonicalPublishedCapPerMin": 10.81,
+    "targetCapPerMin": 10,
+    "targetPassed": true,
+    "totalJobsCompleted": 275,
+    "totalJobsPerMin": 9.15,
+    "duplicateProviderShortCircuited": 45
+  },
+  "siteSla": {
+    "home": {
+      "p50": 55,
+      "p95": 157,
+      "p99": 225,
+      "max": 239,
+      "sla": 250,
+      "passed": true,
+      "sampleCount": 120
+    },
+    "catalog": {
+      "p50": 55,
+      "p95": 116,
+      "p99": 170,
+      "max": 177,
+      "sla": 250,
+      "passed": true,
+      "sampleCount": 120
+    },
+    "work": {
+      "p50": 53,
+      "p95": 127,
+      "p99": 206,
+      "max": 261,
+      "sla": 250,
+      "passed": true,
+      "sampleCount": 120
+    },
+    "reader": {
+      "p50": 51,
+      "p95": 115,
+      "p99": 134,
+      "max": 262,
+      "sla": 150,
+      "passed": true,
+      "sampleCount": 120
+    },
+    "media": {
+      "p50": 53,
+      "p95": 67,
+      "p99": 74,
+      "max": 79,
+      "sla": 120,
+      "passed": true,
+      "sampleCount": 120
+    }
+  },
+  "stagedQueue": {
+    "initial": 1422,
+    "final": 1295,
+    "delta": -127,
+    "gt5m": 1292,
+    "gt15m": 1291,
+    "gt30m": 1290,
+    "gt60m": 1243
+  },
+  "integrity": {
+    "duplicatePublications": 0,
+    "duplicateWorks": 0,
+    "passed": true
+  },
+  "infra": {
+    "ysqlAvg": 9.4,
+    "ysqlPeak": 11,
+    "ysqlLimit": 13,
+    "discloudCpuAvg": 24.9,
+    "discloudCpuPeak": 34.53,
+    "discloudRamAvg": 256.7,
+    "discloudRamPeak": 452.3515625
+  },
+  "contributingSources": [
+    {
+      "source": "manhastro",
+      "count": "57"
+    },
+    {
+      "source": "hotcabaretscan",
+      "count": "37"
+    },
+    {
+      "source": "mrtenzus",
+      "count": "35"
+    },
+    {
+      "source": "mangaflix",
+      "count": "31"
+    },
+    {
+      "source": "fleurblanche",
+      "count": "23"
+    },
+    {
+      "source": "ninjascan",
+      "count": "17"
+    },
+    {
+      "source": "taimumangas",
+      "count": "16"
+    },
+    {
+      "source": "hipercool",
+      "count": "12"
+    },
+    {
+      "source": "instahentai",
+      "count": "11"
+    },
+    {
+      "source": "mangalivreto",
+      "count": "7"
+    },
+    {
+      "source": "megahentai",
+      "count": "6"
+    },
+    {
+      "source": "hanamiheaven",
+      "count": "5"
+    },
+    {
+      "source": "montetai",
+      "count": "5"
+    },
+    {
+      "source": "vegitoons",
+      "count": "4"
+    },
+    {
+      "source": "nocturnesummer",
+      "count": "4"
+    },
+    {
+      "source": "mangaonlinetv",
+      "count": "3"
+    },
+    {
+      "source": "kuro",
+      "count": "1"
+    },
+    {
+      "source": "mangotoons",
+      "count": "1"
+    }
+  ]
+}

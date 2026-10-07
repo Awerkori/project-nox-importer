@@ -1,0 +1,93 @@
+{
+  "durationMinutes": 5.6,
+  "avgUsefulWorkers": 8.73,
+  "claimMetrics": {
+    "specificAttempts": 274,
+    "specificSuccesses": 47,
+    "genericAttempts": 0,
+    "genericSuccesses": 0,
+    "emptyAttempts": 0,
+    "specificClaimP50": 10870,
+    "specificClaimP95": 14601
+  },
+  "mutexStats": {
+    "waitP50": 0,
+    "waitP95": 0,
+    "holdP50": 0,
+    "holdP95": 0.1,
+    "samples": 140
+  },
+  "avgSlotStates": {
+    "WAITING_MUTEX": 0.02,
+    "WAITING_CLAIM_DB": 1.63,
+    "WAITING_SOURCE_PERMIT": 0,
+    "ACTIVE_SOURCE": 2.43,
+    "ACTIVE_DOWNLOAD": 1.02,
+    "ACTIVE_ENCODE": 0,
+    "ACTIVE_TELEGRAM": 0.3,
+    "ACTIVE_DB": 2.17,
+    "WAITING_BARRIER": 0.25,
+    "IDLE": 0.18,
+    "ACTIVE_PROCESSING": 5.92,
+    "BLOCKED": 1.9,
+    "SUM": 8
+  },
+  "slotOccupancy": {
+    "meanSec": 67.8,
+    "p50Sec": 63.4,
+    "p95Sec": 90.8,
+    "avgActiveProcessing": 5.92,
+    "avgBlocked": 1.9,
+    "avgIdle": 0.18,
+    "theoreticalCapacityPerMin": 7.08
+  },
+  "activeWorksHealth": {
+    "claimableActiveWorksAvg": 0,
+    "zombieActiveWorksMax": 0,
+    "zombieActiveWorksStatus": "PASS (0 ZOMBIES)"
+  },
+  "throughput": {
+    "chapterStartedPerMin": 6.08,
+    "chapterCompletedPerMin": 5,
+    "stagedPerMin": 0.36,
+    "freshNewVisiblePerMin": 3.75,
+    "cascadePerMin": 0.71,
+    "totalVisiblePerMin": 4.47,
+    "totalCompleted": 28,
+    "totalPublished": 25,
+    "freshNewVisibleCount": 21,
+    "cascadeCount": 4,
+    "totalStaged": 2,
+    "totalStarted": 34
+  },
+  "yugabyte": {
+    "cpuAvgPercent": 0,
+    "cpuP95Percent": 0,
+    "cpuPeakPercent": 0,
+    "ysqlConnectionsAvg": 2.9,
+    "poolTimeouts": 0
+  },
+  "siteLatencies": {
+    "home": {
+      "p50": 95.4,
+      "p95": 232.5,
+      "p99": 304,
+      "min": 76.5,
+      "max": 304,
+      "avg": 104.6
+    },
+    "reader": {
+      "p50": 35,
+      "p95": 45.9,
+      "p99": 135.8,
+      "min": 29.6,
+      "max": 135.8,
+      "avg": 38.6
+    }
+  },
+  "dataIntegrity": {
+    "emptyPages": 0,
+    "duplicateChapters": 0,
+    "status": "PASS"
+  }
+}

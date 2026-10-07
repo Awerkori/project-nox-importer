@@ -1,0 +1,85 @@
+{
+  "elapsedSec": 701,
+  "elapsedMin": 11.68,
+  "durationSec": 3600,
+  "completed": 125,
+  "capPerMin": 10.7,
+  "failed": 0,
+  "stuck": 0,
+  "activeWorkers": 7,
+  "queued": 7179,
+  "totalYsql": 9,
+  "discloudCpu": 29.79,
+  "discloudRam": 179.79296875,
+  "homeTtfb": 147,
+  "readerTtfb": 71,
+  "mediaTtfb": 60,
+  "isStopped": false,
+  "lastSampleTime": "2026-09-21T16:47:09.073Z",
+  "checkpoints": [
+    {
+      "checkpointNumber": 1,
+      "elapsedMinutes": 5,
+      "window": "0m - 5m",
+      "chaptersImported": 52,
+      "pagesStored": 565,
+      "pagesPerSec": 1.86,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 51,
+        "P2": 1
+      },
+      "ttfbAvgMs": {
+        "home": 120,
+        "reader": 92,
+        "media": 58
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7210,
+        "IMPORTING": 13,
+        "RETRY": 8,
+        "PAUSED_BY_STAFF": 193894,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 30.23,
+        "ramMb": 206.703125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    },
+    {
+      "checkpointNumber": 2,
+      "elapsedMinutes": 10.3,
+      "window": "5m - 10m",
+      "chaptersImported": 60,
+      "pagesStored": 997,
+      "pagesPerSec": 3.12,
+      "laneDistribution": {
+        "P0": 0,
+        "P1": 56,
+        "P2": 4
+      },
+      "ttfbAvgMs": {
+        "home": 134,
+        "reader": 66,
+        "media": 63
+      },
+      "worksCreated": 0,
+      "queueStatus": {
+        "QUEUED": 7187,
+        "IMPORTING": 12,
+        "RETRY": 9,
+        "PAUSED_BY_STAFF": 193857,
+        "WAITING_ADMISSION": 6405
+      },
+      "discloud": {
+        "cpu": 30.62,
+        "ramMb": 233.328125
+      },
+      "brokenCovers": 0,
+      "protectiveStop": false
+    }
+  ]
+}
