@@ -1498,6 +1498,7 @@ export class AdmissionController {
                  )
              )
            GROUP BY q.payload->>'workId', q.source
+           HAVING COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) > 0
          ),
          queue_candidates AS MATERIALIZED (
            -- Rotate work selection independently from chapter number. Keep the
@@ -1580,8 +1581,6 @@ export class AdmissionController {
                     return (gapsMap.get(workId) || []).some((g) => g.start <= gapStart && g.end >= gapEnd);
                 };
                 const contiguous = candidateRows.filter((cand) => {
-                    if (parseInt(cand.queued_count || '0', 10) === 0)
-                        return false;
                     const maxPub = pubMap.get(cand.work_id) ?? -1;
                     const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
                     return isContiguousOrConfirmed(cand.work_id, minSort, maxPub);
@@ -1590,8 +1589,6 @@ export class AdmissionController {
                 // only attempted after all immediately-contiguous candidates.
                 if (contiguous.length < backfillSlotsAvailable) {
                     for (const cand of candidateRows) {
-                        if (parseInt(cand.queued_count || '0', 10) === 0)
-                            continue;
                         if (contiguous.some((c) => c.work_id === cand.work_id))
                             continue;
                         const maxPub = pubMap.get(cand.work_id) ?? -1;
@@ -2015,6 +2012,7 @@ export class AdmissionController {
               )
           )
           GROUP BY q.payload->>'workId', q.source
+          HAVING COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) > 0
         ), p1_rotation AS MATERIALIZED (
           SELECT ranked.*
           FROM (
@@ -2125,8 +2123,6 @@ export class AdmissionController {
                     return (gapsMap.get(workId) || []).some((g) => g.start <= gapStart && g.end >= gapEnd);
                 };
                 let match = candidateRows.find((cand) => {
-                    if (parseInt(cand.queued_count || '0', 10) === 0)
-                        return false;
                     const maxPub = pubMap.get(cand.work_id) ?? -1;
                     const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
                     return isCandidateFrontierValid(cand.work_id, minSort, maxPub);
@@ -2135,8 +2131,6 @@ export class AdmissionController {
                     return match;
                 // Only the bounded source window is considered for gap confirmation.
                 for (const cand of candidateRows) {
-                    if (parseInt(cand.queued_count || '0', 10) === 0)
-                        continue;
                     const maxPub = pubMap.get(cand.work_id) ?? -1;
                     const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
                     const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
