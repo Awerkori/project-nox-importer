@@ -633,6 +633,12 @@ export class TelemetryCollector {
         const dbPublishTimes = this.chapters.map(c => c.db_publish_ms);
         const rateLimitTimes = this.chapters.map(c => c.rate_limit_wait_ms);
         const semWaitTimes = this.chapters.map(c => c.semaphore_wait_ms);
+        const bufferReservationWaitTimes = this.chapters.map(c => c.buffer_reservation_wait_aggregate_ms || 0);
+        const bufferedPagePermitWaitTimes = this.chapters.map(c => c.buffered_page_permit_wait_aggregate_ms || 0);
+        const bufferReservationHoldTimes = this.chapters.map(c => c.buffer_reservation_hold_aggregate_ms || 0);
+        const readyQueueDwellTimes = this.chapters.map(c => c.ready_queue_dwell_aggregate_ms || 0);
+        const bufferReservationWaitEvents = this.chapters.map(c => c.buffer_reservation_wait_events || 0);
+        const bufferedPagePermitWaitEvents = this.chapters.map(c => c.buffered_page_permit_wait_events || 0);
         const otherWaitTimes = this.chapters.map(c => c.other_wait_ms);
         const totalJobTimes = this.chapters.map(c => c.totalDurationMs);
         const totalSlotOccupancyTimes = this.chapters.map(c => c.totalSlotOccupancyMs || (c.totalDurationMs + c.claim_acquire_ms));
@@ -819,6 +825,16 @@ export class TelemetryCollector {
                     rateLimitWait: { avg: avg(rateLimitTimes), p50: percentile(rateLimitTimes, 0.50), p75: percentile(rateLimitTimes, 0.75), p95: percentile(rateLimitTimes, 0.95), p99: percentile(rateLimitTimes, 0.99), max: rateLimitTimes.length ? Math.max(...rateLimitTimes) : 0 },
                     semaphoreWait: { avg: avg(semWaitTimes), p50: percentile(semWaitTimes, 0.50), p75: percentile(semWaitTimes, 0.75), p95: percentile(semWaitTimes, 0.95), p99: percentile(semWaitTimes, 0.99), max: semWaitTimes.length ? Math.max(...semWaitTimes) : 0 },
                     otherWait: { avg: avg(otherWaitTimes), p50: percentile(otherWaitTimes, 0.50), p75: percentile(otherWaitTimes, 0.75), p95: percentile(otherWaitTimes, 0.95), p99: percentile(otherWaitTimes, 0.99), max: otherWaitTimes.length ? Math.max(...otherWaitTimes) : 0 },
+                },
+                pageBuffer: {
+                    // Aggregate durations may exceed chapter wall time because multiple
+                    // page producers overlap. Event counts make that explicit.
+                    reservationWaitAggregateMs: { avg: avg(bufferReservationWaitTimes), p50: percentile(bufferReservationWaitTimes, 0.50), p95: percentile(bufferReservationWaitTimes, 0.95), max: bufferReservationWaitTimes.length ? Math.max(...bufferReservationWaitTimes) : 0 },
+                    bufferedPagePermitWaitAggregateMs: { avg: avg(bufferedPagePermitWaitTimes), p50: percentile(bufferedPagePermitWaitTimes, 0.50), p95: percentile(bufferedPagePermitWaitTimes, 0.95), max: bufferedPagePermitWaitTimes.length ? Math.max(...bufferedPagePermitWaitTimes) : 0 },
+                    reservationHoldAggregateMs: { avg: avg(bufferReservationHoldTimes), p50: percentile(bufferReservationHoldTimes, 0.50), p95: percentile(bufferReservationHoldTimes, 0.95), max: bufferReservationHoldTimes.length ? Math.max(...bufferReservationHoldTimes) : 0 },
+                    readyQueueDwellAggregateMs: { avg: avg(readyQueueDwellTimes), p50: percentile(readyQueueDwellTimes, 0.50), p95: percentile(readyQueueDwellTimes, 0.95), max: readyQueueDwellTimes.length ? Math.max(...readyQueueDwellTimes) : 0 },
+                    reservationWaitEvents: { avg: avg(bufferReservationWaitEvents), p50: percentile(bufferReservationWaitEvents, 0.50), p95: percentile(bufferReservationWaitEvents, 0.95), total: bufferReservationWaitEvents.reduce((sum, value) => sum + value, 0) },
+                    bufferedPagePermitWaitEvents: { avg: avg(bufferedPagePermitWaitEvents), p50: percentile(bufferedPagePermitWaitEvents, 0.50), p95: percentile(bufferedPagePermitWaitEvents, 0.95), total: bufferedPagePermitWaitEvents.reduce((sum, value) => sum + value, 0) },
                 },
             },
             schedulerAcquireBreakdown: {

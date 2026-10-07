@@ -89,6 +89,30 @@ describe('bounded runtime telemetry', () => {
     } finally { c.stop(); }
   });
 
+  it('reports page-buffer pressure separately from additive chapter wall time', () => {
+    const c = collector();
+    try {
+      c.recordChapterMetric({
+        jobId: 'buffer-job', source: 'source', chapterNumber: 1, pageCount: 2, totalBytes: 200,
+        totalDurationMs: 1000, totalSlotOccupancyMs: 1000, claim_acquire_ms: 0, mutex_wait_ms: 0,
+        claim_db_ms: 0, metadata_load_ms: 0, source_fetch_ms: 0, page_resolution_ms: 0,
+        download_ms: 0, encode_ms: 0, telegram_upload_ms: 0, db_wait_ms: 0, db_publish_ms: 0,
+        rate_limit_wait_ms: 0, semaphore_wait_ms: 0, other_wait_ms: 0,
+        buffer_reservation_wait_aggregate_ms: 400,
+        buffered_page_permit_wait_aggregate_ms: 50,
+        buffer_reservation_hold_aggregate_ms: 900,
+        ready_queue_dwell_aggregate_ms: 300,
+        buffer_reservation_wait_events: 2,
+        buffered_page_permit_wait_events: 1,
+        timestamp: new Date().toISOString(),
+      });
+      const pageBuffer = (c.getSnapshotReport() as any).jobProfile.pageBuffer;
+      expect(pageBuffer.reservationWaitAggregateMs).toMatchObject({p50: 400, p95: 400});
+      expect(pageBuffer.readyQueueDwellAggregateMs).toMatchObject({p50: 300, p95: 300});
+      expect(pageBuffer.reservationWaitEvents).toMatchObject({total: 2});
+    } finally { c.stop(); }
+  });
+
   it('coalesces flushes and expires old persisted sessions across restarts', async () => {
     const c = collector();
     const queries: string[] = [];

@@ -4278,6 +4278,12 @@ export class ImporterEngine {
     let chRateLimitWaitMs = 0;
     let chDownloadSemWaitMs = 0;
     let chTelegramSemWaitMs = 0;
+    let chBufferReservationWaitMs = 0;
+    let chBufferedPagePermitWaitMs = 0;
+    let chBufferReservationHoldMs = 0;
+    let chReadyQueueDwellMs = 0;
+    let chBufferReservationWaitEvents = 0;
+    let chBufferedPagePermitWaitEvents = 0;
     let metadataLoadMs = 0;
     let mediaPipelineWallMs = 0;
     // Shared by producers, bounded to this job; heartbeat cancellation remains independent.
@@ -4681,6 +4687,8 @@ export class ImporterEngine {
           index: number;
           releaseBuffer: () => void;
           pageBytes: Uint8Array;
+          reservationAcquiredAt: number;
+          queuedAt: number;
         }
 
         const readyQueue: DownloadedPage[] = [];
@@ -4761,12 +4769,22 @@ export class ImporterEngine {
             let reservation: BufferReservation | undefined;
             let bufferedSemaphoreAcquired = false;
             let releaseBufferedPermit = () => {};
+            let reservationAcquiredAt = 0;
             try {
+              const reservationWait0 = performance.now();
               reservation = await this.autotuner.reserveBufferBudget(
                 2.0 * 1024 * 1024,
                 pipelineSignal
               );
+              const reservationWaitMs = performance.now() - reservationWait0;
+              chBufferReservationWaitMs += reservationWaitMs;
+              if (reservationWaitMs >= 1) chBufferReservationWaitEvents++;
+              reservationAcquiredAt = performance.now();
+              const bufferedPermitWait0 = performance.now();
               await bufferedPageSemaphore.acquire(pipelineSignal);
+              const bufferedPermitWaitMs = performance.now() - bufferedPermitWait0;
+              chBufferedPagePermitWaitMs += bufferedPermitWaitMs;
+              if (bufferedPermitWaitMs >= 1) chBufferedPagePermitWaitEvents++;
               bufferedSemaphoreAcquired = true;
               releaseBufferedPermit = releasePermitOnce(bufferedPageSemaphore);
             } catch (acquireError) {
@@ -4926,7 +4944,13 @@ export class ImporterEngine {
               break;
             }
 
-            readyQueue.push({ index: idx, pageBytes, releaseBuffer: releaseBufferedPermit });
+            readyQueue.push({
+              index: idx,
+              pageBytes,
+              releaseBuffer: releaseBufferedPermit,
+              reservationAcquiredAt,
+              queuedAt: performance.now(),
+            });
             bufferTransferred = true;
             notifyConsumer();
             } finally {
@@ -4980,6 +5004,8 @@ export class ImporterEngine {
 
             const item = readyQueue.shift();
             if (!item) continue;
+
+            chReadyQueueDwellMs += performance.now() - item.queuedAt;
 
             let pageBytes: Uint8Array | null = item.pageBytes;
             let uploadDuration = 0;
@@ -5045,6 +5071,7 @@ export class ImporterEngine {
                 ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
                 pageBytes = null;
               }
+              chBufferReservationHoldMs += performance.now() - item.reservationAcquiredAt;
               item.releaseBuffer();
             }
           }
@@ -5494,6 +5521,12 @@ export class ImporterEngine {
         db_publish_ms: Math.round(tDb),
         rate_limit_wait_ms: Math.round(chRateLimitWaitMs),
         semaphore_wait_ms: Math.round(extraTiming?.semWaitMs || 0) + Math.round(chDownloadSemWaitMs) + Math.round(chTelegramSemWaitMs),
+        buffer_reservation_wait_aggregate_ms: Math.round(chBufferReservationWaitMs),
+        buffered_page_permit_wait_aggregate_ms: Math.round(chBufferedPagePermitWaitMs),
+        buffer_reservation_hold_aggregate_ms: Math.round(chBufferReservationHoldMs),
+        ready_queue_dwell_aggregate_ms: Math.round(chReadyQueueDwellMs),
+        buffer_reservation_wait_events: chBufferReservationWaitEvents,
+        buffered_page_permit_wait_events: chBufferedPagePermitWaitEvents,
         other_wait_ms: Math.max(0, Math.round(chTotalDuration - (metadataLoadMs + sourceFetchMs + pageResolutionMs + mediaPipelineWallMs + tCoverCheck + tDb))),
         barrier_wait_ms: tBarrierCheck + tPublishUpdate + tCascade,
         timestamp: new Date().toISOString(),

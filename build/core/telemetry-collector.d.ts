@@ -42,6 +42,12 @@ export interface ChapterMetricRecord {
     db_publish_ms: number;
     rate_limit_wait_ms: number;
     semaphore_wait_ms: number;
+    buffer_reservation_wait_aggregate_ms?: number;
+    buffered_page_permit_wait_aggregate_ms?: number;
+    buffer_reservation_hold_aggregate_ms?: number;
+    ready_queue_dwell_aggregate_ms?: number;
+    buffer_reservation_wait_events?: number;
+    buffered_page_permit_wait_events?: number;
     other_wait_ms: number;
     barrier_wait_ms?: number;
     slowReason?: string;
@@ -90,6 +96,8 @@ export declare class TelemetryCollector {
         active: number;
         available: number;
         waiters: number;
+        activeBufferedBytes?: number;
+        reservedBufferedBytes?: number;
     }): void;
     unregisterLimiter(name: string): void;
     stop(): void;
@@ -439,6 +447,44 @@ export declare class TelemetryCollector {
                     max: number;
                 };
             };
+            pageBuffer: {
+                reservationWaitAggregateMs: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    max: number;
+                };
+                bufferedPagePermitWaitAggregateMs: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    max: number;
+                };
+                reservationHoldAggregateMs: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    max: number;
+                };
+                readyQueueDwellAggregateMs: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    max: number;
+                };
+                reservationWaitEvents: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    total: number;
+                };
+                bufferedPagePermitWaitEvents: {
+                    avg: number;
+                    p50: number;
+                    p95: number;
+                    total: number;
+                };
+            };
         };
         schedulerAcquireBreakdown: {
             totalMs: {
@@ -560,6 +606,12 @@ export declare class TelemetryCollector {
             db_publish_ms: number;
             rate_limit_wait_ms: number;
             semaphore_wait_ms: number;
+            buffer_reservation_wait_aggregate_ms?: number;
+            buffered_page_permit_wait_aggregate_ms?: number;
+            buffer_reservation_hold_aggregate_ms?: number;
+            ready_queue_dwell_aggregate_ms?: number;
+            buffer_reservation_wait_events?: number;
+            buffered_page_permit_wait_events?: number;
             other_wait_ms: number;
             barrier_wait_ms?: number;
             timestamp: string;
