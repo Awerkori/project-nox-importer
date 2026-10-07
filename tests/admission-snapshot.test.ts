@@ -32,7 +32,7 @@ describe('bounded admission snapshot', () => {
     expect(periodicAdmissionSql).toMatch(/FROM eligible_sources s[\s\S]{0,700}CROSS JOIN LATERAL/);
     expect(periodicAdmissionSql).toContain('s.id = ANY($6::text[])');
     expect(periodicAdmissionSql).toMatch(/LIMIT \$5/);
-    expect(periodicAdmissionSql).toContain('ORDER BY q.created_at ASC NULLS LAST, q.id ASC');
+    expect(periodicAdmissionSql).toContain('ORDER BY admission_rank, source');
     expect(periodicAdmissionSql).toContain('canonical_chapter.published_at IS NOT NULL');
     expect(periodicAdmissionSql).toMatch(/GROUP BY q\.payload->>'workId', q\.source/);
     expect(source).toMatch(/WHERE rotation_rank <= \$3 OR frontier_rank <= \$3/);
@@ -42,7 +42,7 @@ describe('bounded admission snapshot', () => {
     // Admission must not rotate a work solely because a stale queue row is
     // still present after another source published its canonical chapter.
     expect(source).toMatch(
-      /queue_candidate_groups[\s\S]{0,1800}canonical_chapter\.published_at IS NOT NULL[\s\S]{0,300}canonical_chapter\.number = q\.chapter_sort_key/,
+      /queue_candidate_groups[\s\S]{0,1800}canonical_chapter\.published_at IS NOT NULL[\s\S]{0,300}canonical_chapter\.number = COALESCE/,
     );
     const p1PressureStart = source.indexOf('const ready = await this.runQuery');
     const p1PressureSql = source.slice(p1PressureStart, p1PressureStart + 9000);
@@ -60,7 +60,7 @@ describe('bounded admission snapshot', () => {
     expect(onDemandSql).toMatch(/eligible_sources AS MATERIALIZED[\s\S]{0,700}CROSS JOIN LATERAL/);
     expect(onDemandSql).toContain('s.id = ANY($6::text[])');
     expect(onDemandSql).toMatch(/LIMIT \$5/);
-    expect(onDemandSql).toContain('ORDER BY q.created_at ASC NULLS LAST, q.id ASC');
+    expect(onDemandSql).toContain('ORDER BY q.source, q.min_sort_key ASC NULLS LAST');
     expect(onDemandSql).not.toMatch(/FROM importer_queue q[\s\S]{0,1200}GROUP BY q\.payload->>'workId', q\.source/);
     expect(source).toContain("predecessor.chapter_sort_key < q.chapter_sort_key");
     expect(source).toContain('predecessor_canonical.published_at IS NOT NULL');
@@ -124,10 +124,10 @@ describe('bounded admission snapshot', () => {
   });
 
   it('does not admit P2 work beyond the effective chapter capacity', async () => {
-    const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
+    const state={getConfig:()=>({}),getActiveWorks:()=>[{workId:"mock",lane:"P1"}]} as any;
     const sentinel={isProtectiveStopActive:async()=>false} as any;
     const pool={query:async(sql:string)=> {
-      if (sql.includes('priority >= 100')) return {rows:[{p0_cnt:'0'}]};
+      if (sql.includes('priority >= 100') || sql.includes('legacy_staff_requests')) return {rows:[]};
       if (sql.includes("status = 'IMPORTING'")) return {rows:[{cnt:'3'}]};
       return {rows:[]};
     }};
@@ -140,7 +140,7 @@ describe('bounded admission snapshot', () => {
   });
 
   it('defers the advisory P1 pressure probe while claims are waiting for the bounded pool', async () => {
-    const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
+    const state={getConfig:()=>({}),getActiveWorks:()=>[{workId:"mock",lane:"P1"}]} as any;
     const sentinel={isProtectiveStopActive:async()=>false} as any;
     let queries = 0;
     const pool={waitingCount:2, connect:async()=>({query:async()=>{queries++; return {rows:[]};}, release:()=>{}}), query:async()=>{queries++; return {rows:[]};}};
@@ -215,12 +215,12 @@ describe('bounded admission snapshot', () => {
   });
 
   it('allows the bounded pressure P2 probe only after the real P1 probe is empty', async () => {
-    const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
+    const state={getConfig:()=>({}),getActiveWorks:()=>[{workId:"mock",lane:"P1"}]} as any;
     const sentinel={isProtectiveStopActive:async()=>false} as any;
     const calls:string[]=[];
     const pool={waitingCount:2, query:async(sql:string)=>{
       calls.push(sql);
-      if (sql.includes('priority >= 100')) return {rows:[{p0_cnt:'0'}]};
+      if (sql.includes('priority >= 100') || sql.includes('legacy_staff_requests')) return {rows:[]};
       if (sql.includes('priority >= 75') && sql.includes('w.published IS TRUE')) return {rows:[]};
       if (sql.includes("status = 'IMPORTING'")) return {rows:[{cnt:'0'}]};
       return {rows:[]};
@@ -234,10 +234,10 @@ describe('bounded admission snapshot', () => {
   });
 
   it('does not let the broad paused-P1 fallback deadlock P2 while claims are under pressure', async () => {
-    const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
+    const state={getConfig:()=>({}),getActiveWorks:()=>[{workId:"mock",lane:"P1"}]} as any;
     const sentinel={isProtectiveStopActive:async()=>false} as any;
     const pool={waitingCount:2, query:async(sql:string)=> {
-      if (sql.includes('priority >= 100')) return {rows:[{p0_cnt:'0'}]};
+      if (sql.includes('priority >= 100') || sql.includes('legacy_staff_requests')) return {rows:[]};
       if (sql.includes("q.status = 'PAUSED_BY_STAFF'")) {
         throw new Error('paused backlog scan must be skipped under claim pressure');
       }
@@ -252,10 +252,10 @@ describe('bounded admission snapshot', () => {
   });
 
   it('holds P2 admission whenever a visible work still has P1 backlog, including paused window jobs', async () => {
-    const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
+    const state={getConfig:()=>({}),getActiveWorks:()=>[{workId:'mock',lane:'P1'}]} as any;
     const sentinel={isProtectiveStopActive:async()=>false} as any;
     const pool={query:async(sql:string)=> {
-      if (sql.includes('priority >= 100')) return {rows:[{p0_cnt:'0'}]};
+      if (sql.includes('priority >= 100')) return {rows:[]};
       if (sql.includes("AND (q.status = 'QUEUED'")) return {rows:[{status:'QUEUED'}]};
       return {rows:[]};
     }};

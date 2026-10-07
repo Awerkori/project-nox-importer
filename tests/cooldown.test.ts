@@ -79,6 +79,7 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
     await db.query(`insert into public.settings (key, value) values ('catalog_discovery_enabled', 'ENABLED') on conflict (key) do update set value = 'ENABLED'`);
 
     supabaseMock = {
+      pool: db,
       from: (table: string) => {
         let filters: Array<{ col: string; op: string; val: any }> = [];
         let limitVal: number | null = null;
@@ -199,6 +200,7 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
       rateLimiter,
       config
     );
+    (engine as any).dbPool = db;
     queue = (engine as any).queue;
   });
 
@@ -222,10 +224,12 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
     // Put nexus in COOLDOWN until 1 hour in future
     const future = new Date(Date.now() + 3600 * 1000).toISOString();
     await db.query(`update public.importer_sources set status = 'COOLDOWN', cooldown_until = $1 where id = 'nexus'`, [future]);
+    (engine as any).sourceScheduleSnapshot.cachedAt = 0;
 
     // Clear queue
     await db.query(`delete from public.importer_queue`);
 
+    (engine as any).sourceScheduleSnapshot.cachedAt = 0;
     await (engine as any).scheduleSources();
 
     const queued = await db.query(`select * from public.importer_queue where source = 'nexus'`);
@@ -241,6 +245,7 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
       where id = 'nexus'
     `, [past]);
 
+    (engine as any).sourceScheduleSnapshot.cachedAt = 0;
     await (engine as any).scheduleSources();
 
     // Verify source status flipped back to ACTIVE and cooldown_until is cleared
@@ -264,9 +269,11 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
         ('DISCOVER_WORKS', 'nexus', 'nexus:stale:3', 'QUEUED', now() - interval '2 hours')
     `);
 
+    (engine as any).sourceScheduleSnapshot.cachedAt = 0;
     await (engine as any).scheduleSources();
 
     const stale = await db.query(`select status from public.importer_queue where source = 'nexus' and dedupe_key like 'nexus:stale:%'`);
+
     expect(stale.rows).toHaveLength(3);
     expect(stale.rows.every((row: any) => row.status === 'SUPERSEDED')).toBe(true);
     const replacement = await db.query(`select count(*)::int as count from public.importer_queue where source = 'nexus' and task_type = 'DISCOVER_WORKS' and status = 'QUEUED'`);

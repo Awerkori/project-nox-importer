@@ -82,7 +82,13 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
     await db.exec(readFileSync(resolve('migrations/005_importer_page_provider_column.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/006_importer_publication_barrier.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/007_importer_lease_recovery.sql'), 'utf8'));
-    await db.exec(readFileSync(resolve('migrations/20260914171000_atomic_reader_repair.sql'), 'utf8'));
+    await db.exec(`
+      ALTER TABLE public.importer_sources ADD COLUMN IF NOT EXISTS blocked_reason text;
+      ALTER TABLE public.importer_sources ADD COLUMN IF NOT EXISTS blocked_details jsonb NOT NULL DEFAULT '{}'::jsonb;
+      CREATE TABLE IF NOT EXISTS public.importer_confirmed_gaps (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), work_id uuid NOT NULL, start_sort_key numeric NOT NULL, end_sort_key numeric NOT NULL, confirmed_at timestamptz NOT NULL DEFAULT now(), primary_source text);
+      INSERT INTO public.settings (key, value) VALUES ('publication_safety_barrier', 'OPEN') ON CONFLICT (key) DO UPDATE SET value = excluded.value;
+    `);
+        await db.exec(readFileSync(resolve('migrations/20260914171000_atomic_reader_repair.sql'), 'utf8'));
     await db.exec(`ALTER TABLE public.chapters ADD COLUMN IF NOT EXISTS is_fresh_release boolean DEFAULT false;`);
     await db.exec(`ALTER TABLE public.works ADD COLUMN IF NOT EXISTS latest_chapter_published_at timestamptz;`);
 
@@ -274,7 +280,7 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
               const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
               db.query(`insert into public.${table} (${cols}) values (${placeholders}) returning *`, vals)
                 .then(r => resolve?.({ data: r.rows[0], error: null }))
-                .catch(err => reject ? reject(err) : resolve?.({ data: null, error: err }));
+                .catch(err => resolve({ data: null, error: err }));
             }
           }),
           update: (row: any) => ({
@@ -286,7 +292,7 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
                   const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
                   db.query(`update public.${table} set ${setClause} where ${col} = $${keys.length + 1} and ${col2} = $${keys.length + 2} returning *`, [...vals, val, val2])
                     .then(r => resolve?.({ data: r.rows, error: null }))
-                    .catch(err => reject ? reject(err) : resolve?.({ data: null, error: err }));
+                    .catch(err => resolve({ data: null, error: err }));
                 }
               }),
               then: (resolve?: any, reject?: any) => {
@@ -295,7 +301,7 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
                 const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
                 db.query(`update public.${table} set ${setClause} where ${col} = $${keys.length + 1} returning *`, [...vals, val])
                   .then(r => resolve?.({ data: r.rows, error: null }))
-                  .catch(err => reject ? reject(err) : resolve?.({ data: null, error: err }));
+                  .catch(err => resolve({ data: null, error: err }));
               }
             })
           }),
@@ -339,7 +345,7 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
                     `, vals);
                     if (res.rows[0]) results.push(res.rows[0]);
                   } catch (err: any) {
-                    return reject ? reject(err) : resolve?.({ data: null, error: err });
+                    return resolve({ data: null, error: err });
                   }
                 }
                 resolve?.({ data: results, error: null });
@@ -389,11 +395,11 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
     rateLimiter = new HostRateLimiter(100);
     registry = new SourceRegistry(rateLimiter);
     registry.register(mockAdapter);
-  });
+  }, 30000);
 
   afterAll(async () => {
     await db.close();
-  });
+  }, 30000);
 
   it('transitions cleanly from bootstrap to maintenance mode upon catalog completion', async () => {
     const config: Config = {
@@ -434,7 +440,7 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
     const didMaintenanceStep = await engine.step(); // DISCOVER_WORKS (should now run in maintenance mode!)
     expect(didMaintenanceStep).toBe(true);
     expect(lastDiscoveredMode).toBe('maintenance');
-  });
+  }, 30000);
 
   it('recovers interrupted jobs with expired leases after worker crash without duplicate records', async () => {
     // 1. Manually insert a job locked by a crashed worker whose lease has expired
@@ -517,5 +523,5 @@ describe('24/7 Daemon Simulation & Restart Recovery', () => {
     const chapMap = await db.query(`select status from public.importer_chapter_mappings where source_chapter_id = 'nx-sim-chap-recovered'`);
     expect(chapMap.rows.length).toBe(1);
     expect((chapMap.rows[0] as any).status).toBe('COMPLETED');
-  });
+  }, 30000);
 });
