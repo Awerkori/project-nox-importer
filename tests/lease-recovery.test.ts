@@ -42,7 +42,13 @@ describe('Generic Lease Recovery System', () => {
     await db.exec(readFileSync(resolve('migrations/005_importer_page_provider_column.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/006_importer_publication_barrier.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/007_importer_lease_recovery.sql'), 'utf8'));
-    await db.exec(`ALTER TABLE public.works ADD COLUMN IF NOT EXISTS latest_chapter_published_at timestamptz;`);
+    await db.exec(`
+      ALTER TABLE public.importer_sources ADD COLUMN IF NOT EXISTS blocked_reason text;
+      ALTER TABLE public.importer_sources ADD COLUMN IF NOT EXISTS blocked_details jsonb NOT NULL DEFAULT '{}'::jsonb;
+      CREATE TABLE IF NOT EXISTS public.importer_confirmed_gaps (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), work_id uuid NOT NULL, start_sort_key numeric NOT NULL, end_sort_key numeric NOT NULL, confirmed_at timestamptz NOT NULL DEFAULT now(), primary_source text);
+      INSERT INTO public.settings (key, value) VALUES ('publication_safety_barrier', 'OPEN') ON CONFLICT (key) DO UPDATE SET value = excluded.value;
+    `);
+        await db.exec(`ALTER TABLE public.works ADD COLUMN IF NOT EXISTS latest_chapter_published_at timestamptz;`);
     await db.exec(readFileSync(resolve('migrations/010_importer_absolute_priority.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/011_persistent_jobs_and_staff_priority.sql'), 'utf8'));
 

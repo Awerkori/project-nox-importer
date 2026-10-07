@@ -43,7 +43,13 @@ describe('Project Nox — Definitive Releases Rule (Casos A a G)', () => {
     await db.exec(readFileSync(resolve('migrations/005_importer_page_provider_column.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/006_importer_publication_barrier.sql'), 'utf8'));
     await db.exec(readFileSync(resolve('migrations/007_importer_lease_recovery.sql'), 'utf8'));
-    await db.exec(`ALTER TABLE public.chapters ADD COLUMN IF NOT EXISTS is_fresh_release boolean DEFAULT false;`);
+    await db.exec(`
+      ALTER TABLE public.importer_sources ADD COLUMN IF NOT EXISTS blocked_reason text;
+      ALTER TABLE public.importer_sources ADD COLUMN IF NOT EXISTS blocked_details jsonb NOT NULL DEFAULT '{}'::jsonb;
+      CREATE TABLE IF NOT EXISTS public.importer_confirmed_gaps (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), work_id uuid NOT NULL, start_sort_key numeric NOT NULL, end_sort_key numeric NOT NULL, confirmed_at timestamptz NOT NULL DEFAULT now(), primary_source text);
+      INSERT INTO public.settings (key, value) VALUES ('publication_safety_barrier', 'OPEN') ON CONFLICT (key) DO UPDATE SET value = excluded.value;
+    `);
+        await db.exec(`ALTER TABLE public.chapters ADD COLUMN IF NOT EXISTS is_fresh_release boolean DEFAULT false;`);
     await db.exec(readFileSync(resolve('migrations/20260921133000_fix_releases_and_triggers.sql'), 'utf8'));
 
     await db.query(`insert into auth.users (id, email, email_confirmed_at) values ($1, 'bot@projectnox.com', now())`, [botUserId]);

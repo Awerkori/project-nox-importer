@@ -363,7 +363,7 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(sqlCalls).toHaveLength(1);
     expect(sqlCalls[0]).toContain('canonical_chapter.work_id = (q.payload->>\'workId\')::uuid');
     expect(sqlCalls[0]).toContain('canonical_chapter.published_at IS NOT NULL');
-    expect(sqlCalls[0]).toContain('canonical_chapter.number = q.chapter_sort_key');
+    expect(sqlCalls[0]).toContain("canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key)");
   });
 
   it('vacates a stale P2 active entry after repeated exact claim misses', () => {

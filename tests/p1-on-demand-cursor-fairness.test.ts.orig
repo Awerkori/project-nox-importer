@@ -35,8 +35,8 @@ function makeOnDemandFixture(options: {
   };
   const pool = {
     query: vi.fn(async (sql: string) => {
-      if (sql.includes('FROM p1_rotation q') || sql.includes('FROM queue_candidates q')) return { rows };
-      if (sql.includes('FROM importer_sources')) return { rows: [{ id: SOURCE }] };
+      if (sql.includes('WITH eligible_sources AS') || sql.includes('FROM p1_rotation q') || sql.includes('FROM queue_candidates q')) return { rows };
+      if (sql.includes('SELECT s.id') && sql.includes('FROM importer_sources s')) return { rows: [{ id: SOURCE }] };
       if (sql.includes('FROM chapters')) {
         return { rows: rows.map((row) => ({ work_id: row.work_id, max_pub: options.maxPublished || '4' })) };
       }
@@ -46,7 +46,8 @@ function makeOnDemandFixture(options: {
           : { rows: [] };
       }
       if (sql.includes('WITH ranked AS')) return { rows: [] };
-      if (sql.includes('WITH existing AS')) return { rows: [{ queued_count: '1' }] };
+      if (sql.includes('WITH to_promote AS')) return { rows: [{ id: 'promoted-id' }] };
+      if (sql.includes('WITH existing AS') || sql.includes('SELECT count(*) as queued_count')) return { rows: [{ queued_count: '1' }] };
       return { rows: [] };
     }),
   };
@@ -67,10 +68,9 @@ describe('P1 on-demand cursor fairness', () => {
       lane: 'P1',
       workId: GOBLIN_POSITION,
     }));
-    console.log(pool.query.mock.calls.map((c) => c[0]));
     const admissionSql = pool.query.mock.calls.find(([sql]) => String(sql).includes('FROM p1_rotation q'))?.[0] as string;
     expect(admissionSql).toContain('canonical_chapter.published_at IS NOT NULL');
-    expect(admissionSql).toContain("canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key)");
+    expect(admissionSql).toContain("canonical_chapter.number = q.chapter_sort_key");
     // It received a real one-chapter window, so this is valid durable cursor
     // progress rather than the artificial leap that caused the regression.
     expect(stateStore.setP1AdmissionCursor).toHaveBeenCalledWith(SOURCE, GOBLIN_POSITION);
@@ -84,14 +84,15 @@ describe('P1 on-demand cursor fairness', () => {
     expect(cursors[SOURCE]).toBe(GOBLIN_POSITION);
     activeWorks.clear();
     pool.query.mockImplementation(async (sql: string) => {
-      if (sql.includes('FROM p1_rotation q') || sql.includes('FROM queue_candidates q')) {
+      if (sql.includes('WITH eligible_sources AS') || sql.includes('FROM p1_rotation q') || sql.includes('FROM queue_candidates q')) {
         return { rows: [{ work_id: FRONTIER_AFTER_GOBLIN, title: 'Next work', source: SOURCE, pending_jobs: '1', queued_count: '1', min_sort_key: '6', rotation_rank: '1' }] };
       }
-      if (sql.includes('FROM importer_sources')) return { rows: [{ id: SOURCE }] };
+      if (sql.includes('SELECT s.id') && sql.includes('FROM importer_sources s')) return { rows: [{ id: SOURCE }] };
       if (sql.includes('FROM chapters')) return { rows: [{ work_id: FRONTIER_AFTER_GOBLIN, max_pub: '5' }] };
       if (sql.includes('FROM importer_confirmed_gaps')) return { rows: [] };
       if (sql.includes('WITH ranked AS')) return { rows: [] };
-      if (sql.includes('WITH existing AS')) return { rows: [{ queued_count: '1' }] };
+      if (sql.includes('WITH to_promote AS')) return { rows: [{ id: 'promoted-id' }] };
+      if (sql.includes('WITH existing AS') || sql.includes('SELECT count(*) as queued_count')) return { rows: [{ queued_count: '1' }] };
       return { rows: [] };
     });
 
@@ -151,7 +152,10 @@ describe('P1 on-demand cursor fairness', () => {
     });
 
     pool.query.mockImplementation(async (sql: string, params?: unknown[]) => {
-      if (sql.includes('FROM p1_rotation q') || sql.includes('FROM queue_candidates q')) {
+      if (sql.includes('SELECT s.id') && sql.includes('FROM importer_sources s')) return { rows: [{ id: SOURCE }] };
+      if (sql.includes('WITH to_promote AS')) return { rows: [{ id: 'promoted-id' }] };
+      if (sql.includes('WITH existing AS') || sql.includes('SELECT count(*) as queued_count')) return { rows: [{ queued_count: '1' }] };
+      if (sql.includes('WITH eligible_sources AS') || sql.includes('FROM p1_rotation q') || sql.includes('FROM queue_candidates q')) {
         return { rows: [
           {
             work_id: blockedWork,
@@ -175,7 +179,6 @@ describe('P1 on-demand cursor fairness', () => {
           },
         ] };
       }
-      if (sql.includes('FROM importer_sources')) return { rows: [{ id: SOURCE }] };
       if (sql.includes('FROM chapters')) {
         return { rows: [
           { work_id: blockedWork, max_pub: '4' },
