@@ -5978,9 +5978,10 @@ export class ImporterEngine {
 
     // If Cloudflare 403 or network error occurred and internal bridge is configured, fallback to bridge
     if ((fetchError || res?.status === 403) && this.config.NOX_STORAGE_BRIDGE_TOKEN && isKuro) {
+      let bridgeSignal: AbortSignal | undefined;
       try {
         const bridgeUrl = `${(this.config.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev').replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
-        const bridgeSignal = AbortSignal.any([
+        bridgeSignal = AbortSignal.any([
           this.abortController.signal,
           ...(options?.signal ? [options.signal] : []),
           AbortSignal.timeout(timeoutDuration),
@@ -6011,7 +6012,7 @@ export class ImporterEngine {
                 throw new InvalidMediaError(url, `Bridge image declared content-length exceeds 20MB limit`);
               }
               if (options?.reservation && bridgeBytes > options.reservation.reservedBytes) {
-                await options.reservation.upgrade(bridgeBytes);
+                await options.reservation.upgrade(bridgeBytes, bridgeSignal);
               }
             }
           }
@@ -6021,6 +6022,9 @@ export class ImporterEngine {
           });
         }
       } catch (bridgeErr: any) {
+        if (bridgeSignal?.aborted || this.abortController.signal.aborted || options?.signal?.aborted) {
+          throw bridgeErr;
+        }
         this.logger.warn(`Failed image download via bridge for ${url}`, { error: bridgeErr?.message });
       }
     }
@@ -6048,7 +6052,7 @@ export class ImporterEngine {
           throw new InvalidMediaError(url, `Image declared content-length (${Math.round(declaredBytes / 1024 / 1024)}MB) exceeds maximum safe limit of 20MB`);
         }
         if (options?.reservation && declaredBytes > options.reservation.reservedBytes) {
-          await options.reservation.upgrade(declaredBytes);
+          await options.reservation.upgrade(declaredBytes, responseSignal || options?.signal);
         }
       }
     }
