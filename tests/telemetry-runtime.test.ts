@@ -126,6 +126,27 @@ describe('bounded runtime telemetry', () => {
     } finally { c.stop(); }
   });
 
+  it('attributes empty scheduler scans separately from claims', () => {
+    const c = collector();
+    try {
+      c.recordSchedulerAcquireAttempt(120, 'CLAIMED');
+      c.recordSchedulerAcquireAttempt(800, 'EMPTY');
+      c.recordSchedulerAcquireAttempt(1000, 'EMPTY');
+      c.recordSchedulerAcquireAttempt(40, 'ERROR');
+
+      expect((c.getSnapshotReport() as any).schedulerAcquireOutcomes).toMatchObject({
+        attempts: 4,
+        claimed: 1,
+        empty: 2,
+        errors: 1,
+        emptyPercent: 50,
+        claimedMs: { p50: 120 },
+        emptyMs: { p50: 1000, p95: 1000 },
+        errorMs: { p50: 40 },
+      });
+    } finally { c.stop(); }
+  });
+
   it('coalesces flushes and expires old persisted sessions across restarts', async () => {
     const c = collector();
     const queries: string[] = [];

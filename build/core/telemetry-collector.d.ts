@@ -71,6 +71,7 @@ export interface SlotStateRecord {
     stateEnteredAt: number;
     stateDurationMs: Record<SlotStateType, number>;
 }
+export type SchedulerAcquireOutcome = 'CLAIMED' | 'EMPTY' | 'ERROR';
 export declare class TelemetryCollector {
     private static instance;
     private logger;
@@ -119,9 +120,13 @@ export declare class TelemetryCollector {
     private dbSqlTotalMs;
     private completedChapterCount;
     private dbQueryFingerprints;
+    private schedulerClaimedAcquireSamples;
+    private schedulerEmptyAcquireSamples;
+    private schedulerErrorAcquireSamples;
     recordDbQuery(ms: number, fingerprint?: string): void;
     recordDbHold(ms: number): void;
     recordDbTransaction(ms: number): void;
+    recordSchedulerAcquireAttempt(ms: number, outcome: SchedulerAcquireOutcome): void;
     private telegramActiveUploads;
     private telegramActiveUploadsSamples;
     private telegramPageUploadMsSamples;
@@ -568,6 +573,28 @@ export declare class TelemetryCollector {
                 p95: number;
             };
             catalogFallbackMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+        };
+        schedulerAcquireOutcomes: {
+            attempts: number;
+            claimed: number;
+            empty: number;
+            errors: number;
+            emptyPercent: number;
+            claimedMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            emptyMs: {
+                avg: number;
+                p50: number;
+                p95: number;
+            };
+            errorMs: {
                 avg: number;
                 p50: number;
                 p95: number;

@@ -2489,12 +2489,18 @@ export class ImporterEngine {
               allowedSources: eligibleSources,
             });
             this.markChapterClaimPhaseAttempt(slotIndex);
+            schedulerAcquireTotalMs = performance.now() - tDb0;
+            telemetryCollector.recordSchedulerAcquireAttempt(
+              schedulerAcquireTotalMs,
+              candidateJob ? 'CLAIMED' : 'EMPTY',
+            );
           } catch (acquireErr: any) {
             this.markChapterClaimPhaseAttempt(slotIndex);
+            schedulerAcquireTotalMs = performance.now() - tDb0;
+            telemetryCollector.recordSchedulerAcquireAttempt(schedulerAcquireTotalMs, 'ERROR');
             this.logger.warn(`Error acquiring chapter job: ${acquireErr?.message}`);
             break;
           }
-          schedulerAcquireTotalMs = performance.now() - tDb0;
 
           if (!candidateJob) {
             break;
