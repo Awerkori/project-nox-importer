@@ -828,12 +828,12 @@ export class WorkAffinityScheduler {
         telemetry,
       });
 
+      this.rrIndexP0 = (startIdx + 1) % p0WorkIds.length;
       if (p0Job) {
         // A P0 claim consumes the bounded reservation and begins a fresh
         // Staff burst. It has used the exact same normal claim path/limits.
         this.staffConsecutiveClaims = 0;
         this.highPriorityConsecutiveClaims++;
-        this.rrIndexP0 = (startIdx + 1) % p0WorkIds.length;
         this.genericClaimSuccesses++;
         const waitTimeMs = performance.now() - t0;
         telemetry.p0ProbeMs = Math.round((performance.now() - tP0_0) * 10) / 10;
@@ -1008,10 +1008,10 @@ export class WorkAffinityScheduler {
         telemetry,
       });
 
+      this.rrIndexP1 = (startIdx + 1) % readyP1Works.length;
       if (p1Job) {
         this.highPriorityConsecutiveClaims = 0;
         this.specificClaimSuccesses++;
-        this.rrIndexP1 = (startIdx + 1) % readyP1Works.length;
         const waitTimeMs = performance.now() - t0;
         this.onJobStarted(targetWork.workId, p1Job.chapter_sort_key);
         this.p1Count1h++;
@@ -1137,10 +1137,10 @@ export class WorkAffinityScheduler {
         telemetry,
       });
 
+      this.rrIndexP2 = (startIdx + 1) % readyP2Works.length;
       if (p2Job) {
         this.highPriorityConsecutiveClaims = 0;
         this.specificClaimSuccesses++;
-        this.rrIndexP2 = (startIdx + 1) % readyP2Works.length;
         const waitTimeMs = performance.now() - t0;
         this.onJobStarted(targetWork.workId, p2Job.chapter_sort_key);
         this.p2Count1h++;
