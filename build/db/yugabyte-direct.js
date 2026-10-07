@@ -10,6 +10,21 @@ import { telemetryCollector } from '../core/telemetry-collector.js';
 import { performance } from 'node:perf_hooks';
 const logger = new Logger('YugabyteDirect');
 let pool = null;
+/**
+ * A bounded, parameter-free SQL class for runtime telemetry. Do not return
+ * raw SQL: values and unbounded query text do not belong in diagnostics.
+ */
+function getSqlFingerprint(queryArg) {
+    const sql = String(typeof queryArg === 'string' ? queryArg : queryArg?.text || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const command = sql.match(/^([A-Z]+)/i)?.[1]?.toUpperCase() || 'UNKNOWN';
+    const rpc = sql.match(/^SELECT\s+([a-z_][a-z0-9_]*)\s*\(/i)?.[1];
+    if (rpc)
+        return `SELECT rpc:${rpc}`;
+    const target = sql.match(/\b(?:FROM|INTO|UPDATE|DELETE\s+FROM)\s+((?:public\.)?[a-z_][a-z0-9_]*)/i)?.[1];
+    return target ? `${command} ${target.toLowerCase()}` : command;
+}
 const EMBEDDED_YUGABYTE_CA = `-----BEGIN CERTIFICATE-----
 MIIGxDCCBKygAwIBAgITF8MQH/VpOvqeGxybP3vBoEPj0TANBgkqhkiG9w0BAQsF
 ADCBhDELMAkGA1UEBhMCVVMxCzAJBgNVBAgTAkNBMRIwEAYDVQQHEwlTdW5ueXZh
@@ -140,8 +155,9 @@ export function getYugabytePool() {
         client.query = (...args) => {
             const start = performance.now();
             const command = String(typeof args[0] === 'string' ? args[0] : args[0]?.text || '').trim().split(/\s+/, 1)[0].toUpperCase();
+            const fingerprint = getSqlFingerprint(args[0]);
             const finish = () => {
-                telemetryCollector.recordDbQuery(performance.now() - start);
+                telemetryCollector.recordDbQuery(performance.now() - start, fingerprint);
                 if (command === 'BEGIN')
                     transactionStarted = start;
                 if ((command === 'COMMIT' || command === 'ROLLBACK') && transactionStarted) {

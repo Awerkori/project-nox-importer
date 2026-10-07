@@ -118,7 +118,8 @@ export declare class TelemetryCollector {
     private dbQueryCount;
     private dbSqlTotalMs;
     private completedChapterCount;
-    recordDbQuery(ms: number): void;
+    private dbQueryFingerprints;
+    recordDbQuery(ms: number, fingerprint?: string): void;
     recordDbHold(ms: number): void;
     recordDbTransaction(ms: number): void;
     private telegramActiveUploads;
@@ -218,6 +219,15 @@ export declare class TelemetryCollector {
             totalConnections: number | undefined;
             idleConnections: number | undefined;
             waitingClients: number | undefined;
+            topQueryClasses: {
+                fingerprint: string;
+                count: number;
+                totalMs: number;
+                avgMs: number;
+                p50Ms: number;
+                p95Ms: number;
+                maxMs: number;
+            }[];
         };
         avgSlotStates: {
             ACTIVE_PROCESSING: number;

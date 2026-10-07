@@ -109,7 +109,30 @@ export class TelemetryCollector {
     dbQueryCount = 0;
     dbSqlTotalMs = 0;
     completedChapterCount = 0;
-    recordDbQuery(ms) { this.dbSqlSamples.push(ms); this.dbQueryCount++; this.dbSqlTotalMs += ms; }
+    // Query classes are intentionally bounded and parameter-free. This is
+    // diagnostic attribution, not a query log.
+    dbQueryFingerprints = new Map();
+    recordDbQuery(ms, fingerprint = 'UNKNOWN') {
+        this.dbSqlSamples.push(ms);
+        this.dbQueryCount++;
+        this.dbSqlTotalMs += ms;
+        const label = fingerprint.slice(0, 120) || 'UNKNOWN';
+        let bucket = this.dbQueryFingerprints.get(label);
+        if (!bucket) {
+            // Keep a stable aggregate once the bounded catalog is full rather than
+            // allowing uncommon SQL shapes to grow memory unbounded.
+            const key = this.dbQueryFingerprints.size < 64 ? label : 'OTHER';
+            bucket = this.dbQueryFingerprints.get(key);
+            if (!bucket) {
+                bucket = { count: 0, totalMs: 0, maxMs: 0, samples: new BoundedSamples() };
+                this.dbQueryFingerprints.set(key, bucket);
+            }
+        }
+        bucket.count++;
+        bucket.totalMs += ms;
+        bucket.maxMs = Math.max(bucket.maxMs, ms);
+        bucket.samples.push(ms);
+    }
     recordDbHold(ms) { this.dbHoldSamples.push(ms); }
     recordDbTransaction(ms) { this.dbTransactionSamples.push(ms); }
     // 3. Telegram Storage Telemetry
@@ -169,6 +192,7 @@ export class TelemetryCollector {
         this.dbPoolTotalWaitMs = 0;
         this.dbPoolMaxWaitMs = 0;
         this.dbQueryCount = this.dbSqlTotalMs = this.completedChapterCount = 0;
+        this.dbQueryFingerprints.clear();
         this.dbSqlSamples = new BoundedSamples();
         this.dbHoldSamples = new BoundedSamples();
         this.dbTransactionSamples = new BoundedSamples();
@@ -757,6 +781,18 @@ export class TelemetryCollector {
                 transactionP50Ms: percentile(this.dbTransactionSamples, 0.50), transactionP95Ms: percentile(this.dbTransactionSamples, 0.95),
                 poolMax: this.poolRef?.options.max, totalConnections: this.poolRef?.totalCount,
                 idleConnections: this.poolRef?.idleCount, waitingClients: this.poolRef?.waitingCount,
+                topQueryClasses: [...this.dbQueryFingerprints.entries()]
+                    .sort(([, a], [, b]) => b.totalMs - a.totalMs)
+                    .slice(0, 20)
+                    .map(([fingerprint, stat]) => ({
+                    fingerprint,
+                    count: stat.count,
+                    totalMs: Math.round(stat.totalMs),
+                    avgMs: avg(stat.samples),
+                    p50Ms: percentile(stat.samples, 0.50),
+                    p95Ms: percentile(stat.samples, 0.95),
+                    maxMs: Math.round(stat.maxMs),
+                })),
             },
             avgSlotStates: {
                 ...avgSlotStates,

@@ -113,6 +113,19 @@ describe('bounded runtime telemetry', () => {
     } finally { c.stop(); }
   });
 
+  it('keeps only bounded parameter-free database query classes', () => {
+    const c = collector();
+    try {
+      c.recordDbQuery(50, 'SELECT chapters');
+      c.recordDbQuery(25, 'SELECT chapters');
+      c.recordDbQuery(100, 'UPDATE importer_queue');
+      const top = (c.getSnapshotReport() as any).database.topQueryClasses;
+      expect(top[0]).toMatchObject({fingerprint: 'UPDATE importer_queue', count: 1, totalMs: 100});
+      expect(top[1]).toMatchObject({fingerprint: 'SELECT chapters', count: 2, totalMs: 75});
+      expect(top[1].p95Ms).toBe(50);
+    } finally { c.stop(); }
+  });
+
   it('coalesces flushes and expires old persisted sessions across restarts', async () => {
     const c = collector();
     const queries: string[] = [];
