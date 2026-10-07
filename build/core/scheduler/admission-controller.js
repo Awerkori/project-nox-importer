@@ -2175,14 +2175,13 @@ export class AdmissionController {
                 if (match)
                     return match;
                 // Only the bounded source window is considered for gap confirmation.
-                // We evaluate gaps concurrently to avoid 30s delays when multiple sources are blocked.
-                const gapChecks = await Promise.all(candidateRows.map(async (cand) => {
+                for (const cand of candidateRows) {
                     const maxPub = pubMap.get(cand.work_id) ?? -1;
                     const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
                     const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
                     const gapEnd = minSort - 1;
                     if (gapStart > gapEnd) {
-                        return { cand, confirmed: true };
+                        return cand;
                     }
                     try {
                         const conf = await confirmUpstreamGapInterval(this.pool, {
@@ -2192,21 +2191,12 @@ export class AdmissionController {
                             primarySource: cand.source,
                             reason: 'ON_DEMAND_ADMISSION_GAP_CONFIRM',
                         });
-                        if (conf.confirmed) {
-                            return { cand, confirmed: true };
-                        }
-                        else {
+                        if (conf.confirmed)
+                            return cand;
+                        else
                             this.deadWorksCache.set(cand.work_id, Date.now());
-                            return { cand, confirmed: false };
-                        }
                     }
-                    catch {
-                        return { cand, confirmed: false };
-                    }
-                }));
-                for (const check of gapChecks) {
-                    if (check.confirmed)
-                        return check.cand;
+                    catch { }
                 }
                 return null;
             };
