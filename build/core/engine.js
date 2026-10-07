@@ -3996,6 +3996,20 @@ export class ImporterEngine {
         let tUpload = 0;
         let tDb = 0;
         let totalBytes = 0;
+        // A deadline is intentionally a safety valve, not a throughput signal.
+        // Keep a tiny in-memory snapshot so an abort tells us where the job was
+        // actually waiting without changing the producer/consumer behavior.
+        const deadlineSnapshot = {
+            stage: 'PREPARING',
+            source: effectiveSource,
+            expectedPages: 0,
+            nextDownloadIndex: 0,
+            downloadedPages: 0,
+            uploadedPages: 0,
+            readyQueuePages: 0,
+            activeProducers: 0,
+            activeConsumers: 0,
+        };
         let successfulExecution = false;
         let lastRescuedError = null;
         let validPages = [];
@@ -4027,11 +4041,37 @@ export class ImporterEngine {
                 allSourceCandidates = allSourceCandidates.slice(1);
         }
         metadataLoadMs = performance.now() - metaStart - pageResolutionMs;
+        const onJobAbort = () => {
+            const reason = jobSignal?.reason;
+            const message = reason instanceof Error ? reason.message : String(reason || '');
+            if (!message.includes('bounded execution deadline'))
+                return;
+            this.logger.warn('[JOB_DEADLINE_DIAGNOSTIC] Pipeline snapshot at deadline', {
+                jobId: job.id,
+                source: deadlineSnapshot.source,
+                chapterNumber,
+                stage: deadlineSnapshot.stage,
+                elapsedMs: Date.now() - tStart,
+                expectedPages: deadlineSnapshot.expectedPages,
+                nextDownloadIndex: deadlineSnapshot.nextDownloadIndex,
+                downloadedPages: deadlineSnapshot.downloadedPages,
+                uploadedPages: deadlineSnapshot.uploadedPages,
+                readyQueuePages: deadlineSnapshot.readyQueuePages,
+                activeProducers: deadlineSnapshot.activeProducers,
+                activeConsumers: deadlineSnapshot.activeConsumers,
+                bufferedBytes: ImporterEngine.activeBufferedBytes,
+                downloadMs: Math.round(tDownload),
+                uploadMs: Math.round(tUpload),
+                dbMs: Math.round(tDb),
+            });
+        };
+        jobSignal?.addEventListener('abort', onJobAbort, { once: true });
         try {
             for (let candidateIdx = 0; candidateIdx < allSourceCandidates.length; candidateIdx++) {
                 const candidate = allSourceCandidates[candidateIdx];
                 effectiveSource = candidate.source;
                 effectiveSourceChapterId = candidate.sourceChapterId;
+                deadlineSnapshot.source = effectiveSource;
                 if (candidate.mappingId) {
                     effectiveWorkMappingId = candidate.mappingId;
                 }
@@ -4077,6 +4117,7 @@ export class ImporterEngine {
                 let pageUrls = [];
                 let primaryError = null;
                 const sourceFetchStart = performance.now();
+                deadlineSnapshot.stage = 'FETCHING_PAGE_MANIFEST';
                 try {
                     pageUrls = await callProvider(() => adapter.fetchChapterPages(effectiveSourceChapterId, chapterNumber));
                 }
@@ -4106,6 +4147,8 @@ export class ImporterEngine {
                 }
                 const pageResolutionStart = performance.now();
                 const expectedCount = pageUrls.length;
+                deadlineSnapshot.stage = 'PREPARING_MEDIA_PIPELINE';
+                deadlineSnapshot.expectedPages = expectedCount;
                 this.supabase.from('importer_queue').update({
                     progress_total: expectedCount,
                     progress_stage: 'DOWNLOADING',
@@ -4185,6 +4228,7 @@ export class ImporterEngine {
                             ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
                             discarded.releaseBuffer();
                         }
+                        deadlineSnapshot.readyQueuePages = readyQueue.length;
                     }
                     while (consumerResolvers.length > 0) {
                         const resolve = consumerResolvers.shift();
@@ -4212,6 +4256,7 @@ export class ImporterEngine {
                 };
                 // Producer: downloads raw page bytes from source CDN into memory
                 const producer = async () => {
+                    deadlineSnapshot.activeProducers++;
                     try {
                         while (!this.stopSignal && !pipelineError && !isCancelled?.() && !jobSignal?.aborted) {
                             // Safe Checkpoint: cancellation check
@@ -4221,6 +4266,7 @@ export class ImporterEngine {
                                 break;
                             }
                             const idx = nextDownloadIndex++;
+                            deadlineSnapshot.nextDownloadIndex = nextDownloadIndex;
                             if (idx >= expectedCount) {
                                 break;
                             }
@@ -4338,6 +4384,7 @@ export class ImporterEngine {
                                             const dlMs = Date.now() - d0;
                                             tDownload += dlMs;
                                             chDownloadMs += dlMs;
+                                            deadlineSnapshot.downloadedPages++;
                                             telemetryCollector.recordImageDownload(effectiveSource, dlMs, pageBytes.length);
                                             totalBytes += pageBytes.length;
                                             reservation?.commit(pageBytes.length);
@@ -4401,6 +4448,7 @@ export class ImporterEngine {
                                         reservationAcquiredAt,
                                         queuedAt: performance.now(),
                                     });
+                                    deadlineSnapshot.readyQueuePages = readyQueue.length;
                                     bufferTransferred = true;
                                     notifyConsumer();
                                 }
@@ -4429,12 +4477,14 @@ export class ImporterEngine {
                             pipelineError = err;
                     }
                     finally {
+                        deadlineSnapshot.activeProducers--;
                         notifyConsumer();
                     }
                 };
                 let completedUploadsCount = 0;
                 // Consumer: uploads downloaded pages to Storage Bridge / Telegram concurrently
                 const consumer = async () => {
+                    deadlineSnapshot.activeConsumers++;
                     try {
                         while (!this.stopSignal && !pipelineError && !isCancelled?.() && !jobSignal?.aborted) {
                             if (isCancelled?.() || jobSignal?.aborted) {
@@ -4456,6 +4506,7 @@ export class ImporterEngine {
                             const item = readyQueue.shift();
                             if (!item)
                                 continue;
+                            deadlineSnapshot.readyQueuePages = readyQueue.length;
                             chReadyQueueDwellMs += performance.now() - item.queuedAt;
                             let pageBytes = item.pageBytes;
                             let uploadDuration = 0;
@@ -4497,6 +4548,7 @@ export class ImporterEngine {
                                     mediaRecordsToInsert.push(res.mediaRecord);
                                 }
                                 completedUploadsCount++;
+                                deadlineSnapshot.uploadedPages = completedUploadsCount;
                                 diagnostics.updateJobProgress(job.id, completedUploadsCount);
                             }
                             catch (err) {
@@ -4522,6 +4574,7 @@ export class ImporterEngine {
                             pipelineError = err;
                     }
                     finally {
+                        deadlineSnapshot.activeConsumers--;
                         notifyConsumer();
                     }
                 };
@@ -4529,6 +4582,7 @@ export class ImporterEngine {
                     telemetryCollector.setSlotState(extraTiming.slotIndex, 'ACTIVE_DOWNLOAD', `${effectiveSource} ch ${chapterNumber}`);
                 }
                 pageResolutionMs += performance.now() - pageResolutionStart;
+                deadlineSnapshot.stage = 'MEDIA_PIPELINE';
                 telemetry.tDownloadStart = Date.now();
                 const mediaPipelineStart = performance.now();
                 const producerPromises = Array.from({ length: downloadConcurrency }, () => producer());
@@ -4538,6 +4592,7 @@ export class ImporterEngine {
                     await Promise.all(producerPromises);
                     telemetry.tDownloadEnd = Date.now();
                     allDownloadsFinished = true;
+                    deadlineSnapshot.stage = 'DRAINING_UPLOADS';
                     notifyConsumer();
                     // Source I/O is complete. Release only the source permit acquired
                     // for this job; global chapter and media semaphores still bound the
@@ -4548,6 +4603,7 @@ export class ImporterEngine {
                     }
                     await Promise.all(consumerPromises);
                     telemetry.tUploadEnd = Date.now();
+                    deadlineSnapshot.stage = 'PERSISTING_AND_PUBLISHING';
                     telemetry.totalBytesDown = totalBytes;
                     telemetry.pages = expectedCount;
                 }
@@ -5004,6 +5060,7 @@ export class ImporterEngine {
             throw err;
         }
         finally {
+            jobSignal?.removeEventListener('abort', onJobAbort);
             diagnostics.unregisterJob(job.id);
         }
     }
