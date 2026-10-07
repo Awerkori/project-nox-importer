@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   resolveChapterClaimConcurrency,
+  resolveEmptySchedulerBackoffMs,
   resolveEffectiveClaimGateCapacity,
 } from '../src/core/engine.js';
 
@@ -22,5 +23,13 @@ describe('chapter claim concurrency', () => {
     expect(resolveEffectiveClaimGateCapacity(5, 1)).toBe(1);
     expect(resolveEffectiveClaimGateCapacity(1, 5)).toBe(1);
     expect(resolveEffectiveClaimGateCapacity(5, 0)).toBe(1);
+  });
+
+  it('backs off only boundedly after an exhausted scheduler scan', () => {
+    expect(resolveEmptySchedulerBackoffMs(0, () => 0)).toBe(250);
+    expect(resolveEmptySchedulerBackoffMs(1_000, () => 0.5)).toBe(300);
+    expect(resolveEmptySchedulerBackoffMs(4_000, () => 0)).toBe(1_000);
+    expect(resolveEmptySchedulerBackoffMs(20_000, () => 0.999)).toBe(1_099);
+    expect(resolveEmptySchedulerBackoffMs(Number.NaN, () => 0)).toBe(250);
   });
 });

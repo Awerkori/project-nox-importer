@@ -95,6 +95,24 @@ export function resolveEffectiveClaimGateCapacity(
   return Math.min(configured, effective);
 }
 
+/**
+ * A null scheduler result means every priority lane and the bounded catalog
+ * fallback were just checked without finding executable work. Repeating that
+ * DB-heavy scan after the historical 50-150ms sleep crowds out real claims on
+ * the two-connection YSQL pool. Back off proportionally to the exhausted scan
+ * but cap it at 1.1s including jitter, so a newly discovered P0 is never
+ * delayed long and no priority rule is changed.
+ */
+export function resolveEmptySchedulerBackoffMs(
+  schedulerAcquireMs: number,
+  random: () => number = Math.random,
+): number {
+  const elapsed = Number.isFinite(schedulerAcquireMs) ? Math.max(0, schedulerAcquireMs) : 0;
+  const baseMs = Math.max(250, Math.min(1000, Math.round(elapsed / 4)));
+  const jitter = Math.max(0, Math.min(0.999, random()));
+  return baseMs + Math.floor(jitter * 100);
+}
+
 export type InternalLivenessState = 'HEALTHY_IDLE' | 'HEALTHY_WORKING' | 'BACKPRESSURED' | 'STALLED';
 export type ExternalLivenessState = InternalLivenessState | 'DEAD';
 
@@ -2559,7 +2577,13 @@ export class ImporterEngine {
           releaseGlobal();
           releaseClaimGate();
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
-          const emptyBackoffMs = 50 + Math.floor(Math.random() * 100);
+          // Only an exhausted scheduler scan gets the proportional backoff.
+          // A claimed job that lost an in-memory reservation can be retried on
+          // the historical short cadence because source capacity may free at
+          // any moment.
+          const emptyBackoffMs = !candidateJob
+            ? resolveEmptySchedulerBackoffMs(schedulerAcquireTotalMs)
+            : 50 + Math.floor(Math.random() * 100);
           await this.sleep(emptyBackoffMs);
           continue;
         }
