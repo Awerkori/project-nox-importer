@@ -311,6 +311,34 @@ export class BufferReservation {
     }
 }
 /**
+ * Admit a page pipeline producer without letting page-permit waiters consume
+ * the byte budget. The page permit bounds the number of producers that may
+ * hold a reservation, while BufferReservation continues to enforce the hard
+ * byte ceiling and streaming upgrades. If byte admission is aborted after a
+ * page permit was acquired, both resources are returned immediately.
+ */
+export async function acquirePageBufferAdmission(pageSemaphore, autotuner, requestedBytes, signal) {
+    let releasePagePermit = null;
+    let reservation;
+    try {
+        const pagePermitStart = performance.now();
+        await pageSemaphore.acquire(signal);
+        const pagePermitWaitMs = performance.now() - pagePermitStart;
+        releasePagePermit = releasePermitOnce(pageSemaphore);
+        const reservationStart = performance.now();
+        reservation = await autotuner.reserveBufferBudget(requestedBytes, signal);
+        const reservationWaitMs = performance.now() - reservationStart;
+        return { reservation, releasePagePermit, pagePermitWaitMs, reservationWaitMs };
+    }
+    catch (error) {
+        if (reservation && !reservation.isCommitted && !reservation.isReleased) {
+            reservation.release();
+        }
+        releasePagePermit?.();
+        throw error;
+    }
+}
+/**
  * AdaptiveAutotuner: The SINGLE Authority for Global Chapter Concurrency.
  * INVARIANT: GLOBAL_CONCURRENCY_WRITERS = 1.
  * Automatic performance stop is strictly prohibited; capacity never drops below 1.
