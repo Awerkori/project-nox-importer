@@ -2234,7 +2234,9 @@ export class AdmissionController {
           const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
           const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
           const gapEnd = minSort - 1;
-          if (gapStart > gapEnd) continue;
+          if (gapStart > gapEnd) {
+            return cand;
+          }
           try {
             const conf = await confirmUpstreamGapInterval(this.pool, {
               workId: cand.work_id,
