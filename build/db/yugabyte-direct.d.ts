@@ -1,5 +1,10 @@
 import pg from 'pg';
 import type { GatewayJob, PublishBatchParams } from '../core/gateway-client.js';
+/**
+ * A bounded, parameter-free SQL class for runtime telemetry. Do not return
+ * raw SQL: values and unbounded query text do not belong in diagnostics.
+ */
+export declare function getSqlFingerprint(queryArg: unknown): string;
 export declare function getYugabytePool(): pg.Pool;
 export declare function closeYugabytePool(): Promise<void>;
 export declare function testConnection(): Promise<{
