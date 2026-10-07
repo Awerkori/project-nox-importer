@@ -25,6 +25,12 @@ describe('chapter claim concurrency', () => {
     expect(resolveEffectiveClaimGateCapacity(5, 0)).toBe(1);
   });
 
+  it('coalesces only exhausted scheduler scans and restores normal claim width for work', () => {
+    expect(resolveEffectiveClaimGateCapacity(5, 5, true)).toBe(1);
+    expect(resolveEffectiveClaimGateCapacity(5, 3, true)).toBe(1);
+    expect(resolveEffectiveClaimGateCapacity(5, 5, false)).toBe(5);
+  });
+
   it('backs off only boundedly after an exhausted scheduler scan', () => {
     expect(resolveEmptySchedulerBackoffMs(0, () => 0)).toBe(250);
     expect(resolveEmptySchedulerBackoffMs(1_000, () => 0.5)).toBe(300);
