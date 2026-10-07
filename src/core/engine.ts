@@ -85,6 +85,7 @@ export function resolveChapterClaimConcurrency(globalConcurrency: number, dbPool
 export function resolveEffectiveClaimGateCapacity(
   configuredClaimConcurrency: number,
   effectiveChapterConcurrency: number,
+  emptySchedulerScanMode = false,
 ): number {
   const configured = Number.isFinite(configuredClaimConcurrency)
     ? Math.max(1, Math.floor(configuredClaimConcurrency))
@@ -92,6 +93,12 @@ export function resolveEffectiveClaimGateCapacity(
   const effective = Number.isFinite(effectiveChapterConcurrency)
     ? Math.max(1, Math.floor(effectiveChapterConcurrency))
     : 1;
+  // An exhausted scheduler scan has already checked every priority lane and
+  // the bounded fallback. Keep exactly one probe in flight until a candidate
+  // appears, rather than letting every execution slot repeat the same
+  // DB-heavy empty scan against the two-connection pool. A real candidate
+  // immediately restores the normal, work-conserving claim width below.
+  if (emptySchedulerScanMode) return 1;
   return Math.min(configured, effective);
 }
 
@@ -277,6 +284,14 @@ export class ImporterEngine {
   // released before source download/Telegram work, so it never reduces the
   // configured chapter concurrency.
   private chapterClaimGate: AsyncSemaphore;
+  // Empty scheduler results are shared between runner slots. This is not an
+  // execution limit: it only coalesces redundant DB probes while every lane
+  // has just returned no candidate, and is cleared as soon as one claim is
+  // found. The revision prevents a late concurrent NULL from re-entering
+  // empty mode after another slot already found work.
+  private emptySchedulerScanMode = false;
+  private nextEmptySchedulerProbeAt = 0;
+  private emptySchedulerScanRevision = 0;
   // Maintenance must not win the startup race against the initial chapter
   // claim wave.  Waiting for one claim is not enough: the first slot can
   // finish while the remaining slots are still holding DB-backed claim
@@ -2454,11 +2469,20 @@ export class ImporterEngine {
         // YSQL pool remains bounded independently; slots may queue briefly on
         // that pool instead of being made permanently idle by a pool-sized
         // second semaphore.
+        const emptyProbeDelayMs = this.emptySchedulerScanMode
+          ? this.nextEmptySchedulerProbeAt - Date.now()
+          : 0;
+        if (emptyProbeDelayMs > 0) {
+          telemetryCollector.setSlotState(slotIndex, 'IDLE');
+          await this.sleep(Math.min(emptyProbeDelayMs, 100));
+          continue;
+        }
         telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
         this.chapterClaimGate.setCapacity(
           resolveEffectiveClaimGateCapacity(
             this.config.MAX_CONCURRENT_CHAPTERS || 5,
             globalSem.capacity,
+            this.emptySchedulerScanMode,
           ),
         );
         if (!this.chapterClaimGate.tryAcquire()) {
@@ -2494,12 +2518,14 @@ export class ImporterEngine {
         let reservation: { reserved: boolean; reason: string | null; sourceSem: any } = { reserved: false, reason: null, sourceSem: null };
         let schedulerAcquireTotalMs = 0;
         let mutexWaitMs = 0;
+        let emptyScanRevision: number | null = null;
 
         for (let claimAttempt = 0; claimAttempt < 3; claimAttempt++) {
           if (eligibleSources.length === 0) break;
 
           telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
           const tDb0 = performance.now();
+          const scanRevision = this.emptySchedulerScanRevision;
           try {
             candidateJob = await this.scheduler.acquireNextChapterJob({
               workerId: this.config.WORKER_ID,
@@ -2521,8 +2547,22 @@ export class ImporterEngine {
           }
 
           if (!candidateJob) {
+            emptyScanRevision = scanRevision;
             break;
           }
+
+          // A candidate means the empty snapshot is no longer authoritative.
+          // Restore the normal claim width immediately so all execution slots
+          // can refill without changing the chapter-concurrency ceiling.
+          this.emptySchedulerScanRevision++;
+          this.emptySchedulerScanMode = false;
+          this.nextEmptySchedulerProbeAt = 0;
+          this.chapterClaimGate.setCapacity(
+            resolveEffectiveClaimGateCapacity(
+              this.config.MAX_CONCURRENT_CHAPTERS || 5,
+              globalSem.capacity,
+            ),
+          );
 
           // D. Short In-Memory Reservation Mutex (< 0.05ms, ZERO DB I/O, ZERO Network, ZERO Await)
           telemetryCollector.setSlotState(slotIndex, 'WAITING_MUTEX');
@@ -2584,6 +2624,10 @@ export class ImporterEngine {
           const emptyBackoffMs = !candidateJob
             ? resolveEmptySchedulerBackoffMs(schedulerAcquireTotalMs)
             : 50 + Math.floor(Math.random() * 100);
+          if (!candidateJob && emptyScanRevision === this.emptySchedulerScanRevision) {
+            this.emptySchedulerScanMode = true;
+            this.nextEmptySchedulerProbeAt = Date.now() + emptyBackoffMs;
+          }
           await this.sleep(emptyBackoffMs);
           continue;
         }
