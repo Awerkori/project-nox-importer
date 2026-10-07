@@ -34,7 +34,7 @@ export declare function resolveChapterClaimConcurrency(globalConcurrency: number
  * only one can ultimately take the reduced execution permit.  Keep the
  * DB-backed claim phase no wider than the current effective capacity.
  */
-export declare function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency: number, effectiveChapterConcurrency: number): number;
+export declare function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency: number, effectiveChapterConcurrency: number, emptySchedulerScanMode?: boolean): number;
 /**
  * A null scheduler result means every priority lane and the bounded catalog
  * fallback were just checked without finding executable work. Repeating that
@@ -130,6 +130,9 @@ export declare class ImporterEngine {
     private activeChapterExecutions;
     private chapterClaimMutex;
     private chapterClaimGate;
+    private emptySchedulerScanMode;
+    private nextEmptySchedulerProbeAt;
+    private emptySchedulerScanRevision;
     private chapterClaimPhaseReady;
     private chapterClaimStartupSlots;
     private catalogMaintenanceLane;
