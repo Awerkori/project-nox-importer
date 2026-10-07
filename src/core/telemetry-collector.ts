@@ -94,6 +94,8 @@ export interface SlotStateRecord {
   stateDurationMs: Record<SlotStateType, number>;
 }
 
+export type SchedulerAcquireOutcome = 'CLAIMED' | 'EMPTY' | 'ERROR';
+
 interface DbQueryFingerprintRecord {
   count: number;
   totalMs: number;
@@ -223,6 +225,13 @@ export class TelemetryCollector {
   // Query classes are intentionally bounded and parameter-free. This is
   // diagnostic attribution, not a query log.
   private dbQueryFingerprints = new Map<string, DbQueryFingerprintRecord>();
+  // Claim attempts that do not yield a chapter never reach ChapterMetricRecord.
+  // Keep them separately so pool pressure can be attributed to useful work
+  // versus exhausted scheduler scans. These samples are bounded like the
+  // other runtime measurements and carry no work/source identifiers.
+  private schedulerClaimedAcquireSamples: number[] = new BoundedSamples();
+  private schedulerEmptyAcquireSamples: number[] = new BoundedSamples();
+  private schedulerErrorAcquireSamples: number[] = new BoundedSamples();
 
   public recordDbQuery(ms: number, fingerprint = 'UNKNOWN'): void {
     this.dbSqlSamples.push(ms);
@@ -248,6 +257,13 @@ export class TelemetryCollector {
   }
   public recordDbHold(ms: number) { this.dbHoldSamples.push(ms); }
   public recordDbTransaction(ms: number) { this.dbTransactionSamples.push(ms); }
+
+  public recordSchedulerAcquireAttempt(ms: number, outcome: SchedulerAcquireOutcome): void {
+    const durationMs = Math.max(0, ms);
+    if (outcome === 'CLAIMED') this.schedulerClaimedAcquireSamples.push(durationMs);
+    else if (outcome === 'EMPTY') this.schedulerEmptyAcquireSamples.push(durationMs);
+    else this.schedulerErrorAcquireSamples.push(durationMs);
+  }
 
   // 3. Telegram Storage Telemetry
   private telegramActiveUploads = 0;
@@ -1067,6 +1083,18 @@ export class TelemetryCollector {
         activeFallbackMs: { avg: avg(activeFallbackTimes), p50: percentile(activeFallbackTimes, 0.50), p95: percentile(activeFallbackTimes, 0.95) },
         admissionOnDemandMs: { avg: avg(admissionOnDemandTimes), p50: percentile(admissionOnDemandTimes, 0.50), p95: percentile(admissionOnDemandTimes, 0.95) },
         catalogFallbackMs: { avg: avg(catalogFallbackTimes), p50: percentile(catalogFallbackTimes, 0.50), p95: percentile(catalogFallbackTimes, 0.95) },
+      },
+      schedulerAcquireOutcomes: {
+        attempts: this.schedulerClaimedAcquireSamples.length + this.schedulerEmptyAcquireSamples.length + this.schedulerErrorAcquireSamples.length,
+        claimed: this.schedulerClaimedAcquireSamples.length,
+        empty: this.schedulerEmptyAcquireSamples.length,
+        errors: this.schedulerErrorAcquireSamples.length,
+        emptyPercent: (this.schedulerClaimedAcquireSamples.length + this.schedulerEmptyAcquireSamples.length + this.schedulerErrorAcquireSamples.length) > 0
+          ? Math.round((this.schedulerEmptyAcquireSamples.length / (this.schedulerClaimedAcquireSamples.length + this.schedulerEmptyAcquireSamples.length + this.schedulerErrorAcquireSamples.length)) * 1000) / 10
+          : 0,
+        claimedMs: { avg: avg(this.schedulerClaimedAcquireSamples), p50: percentile(this.schedulerClaimedAcquireSamples, 0.50), p95: percentile(this.schedulerClaimedAcquireSamples, 0.95) },
+        emptyMs: { avg: avg(this.schedulerEmptyAcquireSamples), p50: percentile(this.schedulerEmptyAcquireSamples, 0.50), p95: percentile(this.schedulerEmptyAcquireSamples, 0.95) },
+        errorMs: { avg: avg(this.schedulerErrorAcquireSamples), p50: percentile(this.schedulerErrorAcquireSamples, 0.50), p95: percentile(this.schedulerErrorAcquireSamples, 0.95) },
       },
       slowestChapters,
       sourceDistribution: sourceDist,
