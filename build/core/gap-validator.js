@@ -258,6 +258,38 @@ export async function confirmUpstreamGapInterval(client, params) {
     }
     // 1. Get all mapped sources for this work
     let sourcesChecked = [primarySource];
+    // 1. Check if any job exists in importer_queue for this interval
+    try {
+        const qCheck = await client.query(`SELECT source, chapter_sort_key, status
+       FROM importer_queue
+       WHERE (payload->>'workId') = $1
+         AND chapter_sort_key >= $2::numeric
+         AND chapter_sort_key <= $3::numeric
+         AND status IN ('QUEUED', 'RETRY', 'IMPORTING', 'FAILED', 'PAUSED_BY_STAFF')
+         AND task_type = 'IMPORT_CHAPTER'
+       ORDER BY chapter_sort_key ASC
+       LIMIT 1;`, [workId, startSortKey, endSortKey]);
+        if (qCheck?.rows && qCheck.rows.length > 0) {
+            const qRow = qCheck.rows[0];
+            return {
+                confirmed: false,
+                reason: `JOB_EXISTS_IN_QUEUE: Job for chapter ${qRow.chapter_sort_key} exists in queue on source ${qRow.source}`,
+                sourcesChecked,
+                alternativeSourceFound: {
+                    source: qRow.source,
+                    chapterSortKey: parseFloat(qRow.chapter_sort_key),
+                    status: qRow.status,
+                },
+            };
+        }
+    }
+    catch (err) {
+        return {
+            confirmed: false,
+            reason: `QUEUE_CHECK_FAILED: ${err?.message}`,
+            sourcesChecked,
+        };
+    }
     try {
         const srcRes = await client.query(`SELECT source FROM importer_work_mappings WHERE work_id = $1::uuid`, [workId]);
         if (srcRes?.rows && srcRes.rows.length > 0) {
@@ -336,37 +368,6 @@ export async function confirmUpstreamGapInterval(client, params) {
         return {
             confirmed: false,
             reason: `ALTERNATIVE_SOURCE_CHECK_FAILED: ${err?.message}`,
-            sourcesChecked,
-        };
-    }
-    // 3. Check if any job exists in importer_queue for this interval
-    try {
-        const qCheck = await client.query(`SELECT source, chapter_sort_key, status
-       FROM importer_queue
-       WHERE (payload->>'workId') = $1
-         AND chapter_sort_key >= $2::numeric
-         AND chapter_sort_key <= $3::numeric
-         AND status IN ('QUEUED', 'RETRY', 'IMPORTING')
-       ORDER BY chapter_sort_key ASC
-       LIMIT 1;`, [workId, startSortKey, endSortKey]);
-        if (qCheck?.rows && qCheck.rows.length > 0) {
-            const qRow = qCheck.rows[0];
-            return {
-                confirmed: false,
-                reason: `JOB_EXISTS_IN_QUEUE: Job for chapter ${qRow.chapter_sort_key} exists in queue on source ${qRow.source}`,
-                sourcesChecked,
-                alternativeSourceFound: {
-                    source: qRow.source,
-                    chapterSortKey: parseFloat(qRow.chapter_sort_key),
-                    status: qRow.status,
-                },
-            };
-        }
-    }
-    catch (err) {
-        return {
-            confirmed: false,
-            reason: `QUEUE_CHECK_FAILED: ${err?.message}`,
             sourcesChecked,
         };
     }

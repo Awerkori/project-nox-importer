@@ -1019,7 +1019,7 @@ export class AdmissionController {
     async executeAdmissionCycle() {
         const now = Date.now();
         for (const [wid, ts] of this.deadWorksCache.entries()) {
-            if (now - ts > 10 * 60 * 1000)
+            if (now - ts > 60 * 60 * 1000)
                 this.deadWorksCache.delete(wid);
         }
         const config = this.stateStore.getConfig();
