@@ -138,6 +138,20 @@ export declare class BufferReservation {
     commit(actualBytes: number): void;
     release(): void;
 }
+export interface PageBufferAdmission {
+    reservation: BufferReservation;
+    releasePagePermit: () => void;
+    pagePermitWaitMs: number;
+    reservationWaitMs: number;
+}
+/**
+ * Admit a page pipeline producer without letting page-permit waiters consume
+ * the byte budget. The page permit bounds the number of producers that may
+ * hold a reservation, while BufferReservation continues to enforce the hard
+ * byte ceiling and streaming upgrades. If byte admission is aborted after a
+ * page permit was acquired, both resources are returned immediately.
+ */
+export declare function acquirePageBufferAdmission(pageSemaphore: AsyncSemaphore, autotuner: AdaptiveAutotuner, requestedBytes: number, signal?: AbortSignal): Promise<PageBufferAdmission>;
 /**
  * AdaptiveAutotuner: The SINGLE Authority for Global Chapter Concurrency.
  * INVARIANT: GLOBAL_CONCURRENCY_WRITERS = 1.

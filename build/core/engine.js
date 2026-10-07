@@ -9,7 +9,7 @@ import { Logger } from './logger.js';
 import { withSourceChapterPermits } from './concurrency.js';
 import { readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
-import { AdaptiveAutotuner, AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS, releasePermitOnce, resolveChapterUploadConcurrency } from './concurrency.js';
+import { acquirePageBufferAdmission, AdaptiveAutotuner, AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS, resolveChapterUploadConcurrency } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
 import { RetryPolicy, ProviderDownloadError, InvalidMediaError, PermanentDataError } from './retry-policy.js';
 import { ExistingWorksReconciler } from './reconciliation.js';
@@ -4206,26 +4206,27 @@ export class ImporterEngine {
                                 let releaseBufferedPermit = () => { };
                                 let reservationAcquiredAt = 0;
                                 try {
-                                    const reservationWait0 = performance.now();
-                                    reservation = await this.autotuner.reserveBufferBudget(2.0 * 1024 * 1024, pipelineSignal);
-                                    const reservationWaitMs = performance.now() - reservationWait0;
-                                    chBufferReservationWaitMs += reservationWaitMs;
-                                    if (reservationWaitMs >= 1)
+                                    // Do not let producers that are only waiting for a page slot
+                                    // reserve 2 MiB each. At the 12-page limit, acquiring the page
+                                    // permit first bounds outstanding reservations to actual page
+                                    // pipeline capacity, while the byte reservation remains the
+                                    // authoritative hard memory ceiling.
+                                    const admission = await acquirePageBufferAdmission(bufferedPageSemaphore, this.autotuner, 2.0 * 1024 * 1024, pipelineSignal);
+                                    reservation = admission.reservation;
+                                    chBufferReservationWaitMs += admission.reservationWaitMs;
+                                    if (admission.reservationWaitMs >= 1)
                                         chBufferReservationWaitEvents++;
                                     reservationAcquiredAt = performance.now();
-                                    const bufferedPermitWait0 = performance.now();
-                                    await bufferedPageSemaphore.acquire(pipelineSignal);
-                                    const bufferedPermitWaitMs = performance.now() - bufferedPermitWait0;
-                                    chBufferedPagePermitWaitMs += bufferedPermitWaitMs;
-                                    if (bufferedPermitWaitMs >= 1)
+                                    chBufferedPagePermitWaitMs += admission.pagePermitWaitMs;
+                                    if (admission.pagePermitWaitMs >= 1)
                                         chBufferedPagePermitWaitEvents++;
                                     bufferedSemaphoreAcquired = true;
-                                    releaseBufferedPermit = releasePermitOnce(bufferedPageSemaphore);
+                                    releaseBufferedPermit = admission.releasePagePermit;
                                 }
                                 catch (acquireError) {
-                                    // A deadline/lease abort can fire between these two awaits.
-                                    // Return the first permit before propagating the abort so the
-                                    // next job cannot inherit a permanently reduced buffer budget.
+                                    // acquirePageBufferAdmission has already returned any acquired
+                                    // page permit and incomplete byte reservation on cancellation.
+                                    // Keep this guard for a future admission implementation.
                                     if (reservation && !reservation.isCommitted && !reservation.isReleased) {
                                         reservation.release();
                                     }
