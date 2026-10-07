@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AdaptiveAutotuner, BufferReservation } from '../src/core/concurrency.js';
+import { acquirePageBufferAdmission, AdaptiveAutotuner, AsyncSemaphore, BufferReservation } from '../src/core/concurrency.js';
 import { readImageBody } from '../src/core/bounded-body.js';
 import { diagnostics } from '../src/core/diagnostics.js';
 import { InvalidMediaError } from '../src/core/retry-policy.js';
@@ -41,6 +41,55 @@ describe('Atomic Buffer Reservation & Streaming Backpressure', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('does not reserve bytes while waiting for a buffered-page permit', async () => {
+    const twoMb = 2 * 1024 * 1024;
+    const autotuner = new AdaptiveAutotuner({
+      maxBufferedBytes: 4 * 1024 * 1024,
+      rssSoftLimitMb: 330,
+    });
+    const pageSemaphore = new AsyncSemaphore(1, 'test_buffered_page_permit');
+
+    const first = await acquirePageBufferAdmission(pageSemaphore, autotuner, twoMb);
+    let second: Awaited<ReturnType<typeof acquirePageBufferAdmission>> | undefined;
+    const secondPromise = acquirePageBufferAdmission(pageSemaphore, autotuner, twoMb)
+      .then((admission) => { second = admission; });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(pageSemaphore.active).toBe(1);
+    expect(autotuner.getReservedBytes()).toBe(twoMb);
+
+    first.reservation.release();
+    first.releasePagePermit();
+    await secondPromise;
+
+    expect(second).toBeDefined();
+    expect(autotuner.getReservedBytes()).toBe(twoMb);
+    second!.reservation.release();
+    second!.releasePagePermit();
+    expect(autotuner.getCommittedBytes()).toBe(0);
+  });
+
+  it('returns a page permit when byte admission is aborted', async () => {
+    const twoMb = 2 * 1024 * 1024;
+    const autotuner = new AdaptiveAutotuner({
+      maxBufferedBytes: twoMb,
+      rssSoftLimitMb: 330,
+    });
+    const pageSemaphore = new AsyncSemaphore(1, 'test_page_permit_abort');
+    const heldReservation = await autotuner.reserveBufferBudget(twoMb);
+    const controller = new AbortController();
+    const pending = acquirePageBufferAdmission(pageSemaphore, autotuner, twoMb, controller.signal);
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(pageSemaphore.active).toBe(1);
+    controller.abort(new Error('test abort'));
+    await expect(pending).rejects.toThrow('test abort');
+
+    expect(pageSemaphore.active).toBe(0);
+    expect(autotuner.getReservedBytes()).toBe(twoMb);
+    heldReservation.release();
   });
 
   it('prevents TOCTOU: 8 concurrent 2MB requests on 10MB budget (2MB active) admit exactly 4 and queue 4', async () => {
