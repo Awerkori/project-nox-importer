@@ -55,6 +55,15 @@ type DownloadRequestTrace = {
   emit: (event: string, meta?: Record<string, unknown>) => void;
 };
 
+type PageReservationTrace = DownloadRequestTrace & {
+  getSnapshot: () => {
+    state: string;
+    reservedBytes: number | null;
+    acquiredAt: string | null;
+    released: boolean;
+  };
+};
+
 // A deliberately narrow diagnostic switch: it is inert unless both variables
 // are configured and observes only the first matching job in this process.
 // This keeps a one-case investigation from becoming a media-request log.
@@ -62,6 +71,117 @@ const downloadRequestTraceEnabled = process.env.NOX_DOWNLOAD_REQUEST_TRACE === '
 const downloadRequestTraceSource = process.env.NOX_DOWNLOAD_REQUEST_TRACE_SOURCE?.trim().toLowerCase();
 let tracedDownloadRequestJobId: string | null = null;
 const downloadRequestTraceLogger = new Logger('DownloadRequestTrace');
+
+// One bounded, opt-in diagnostic for the logical buffer-reservation lifecycle.
+// It observes one natural job only and records no URLs, headers beyond
+// Content-Length, or media payload. It does not participate in admission,
+// cancellation, retries, or resource accounting.
+const pageReservationTraceEnabled = process.env.NOX_PAGE_RESERVATION_TRACE === '1';
+let tracedPageReservationJobId: string | null = null;
+const pageReservationTraceLogger = new Logger('PageReservationTrace');
+
+function createPageReservationTrace(
+  jobId: string,
+  source: string,
+  chapterNumber: number,
+  pageIndex: number,
+  totalPages: number,
+): PageReservationTrace | undefined {
+  if (!pageReservationTraceEnabled) return undefined;
+
+  if (!tracedPageReservationJobId) {
+    tracedPageReservationJobId = jobId;
+    pageReservationTraceLogger.info('PAGE_RESERVATION_TRACE_JOB_SELECTED', {
+      jobId,
+      source,
+      chapterNumber,
+      totalPages,
+    });
+  }
+  if (tracedPageReservationJobId !== jobId) return undefined;
+
+  const base = {
+    jobId,
+    source,
+    chapterNumber,
+    pageIndex,
+    pageNumber: pageIndex + 1,
+    totalPages,
+    producerAttempt: 0,
+  };
+  const startedAt = Date.now();
+  let previousEventAt = startedAt;
+  let reservationAcquiredAt: number | null = null;
+  let reservedBytes: number | null = null;
+  let state = 'PRODUCER_ASSIGNED';
+  let released = false;
+
+  const nextStateForEvent = (event: string): string | null => {
+    if (event === 'PAGE_RESERVATION_ACQUIRED' || event === 'PAGE_RESERVATION_REACQUIRED') return 'RESERVED';
+    if (event === 'PAGE_GLOBAL_DOWNLOAD_PERMIT_WAIT_STARTED') return 'WAITING_GLOBAL_DOWNLOAD_PERMIT';
+    if (event === 'PAGE_GLOBAL_DOWNLOAD_PERMIT_ACQUIRED' || event === 'DOWNLOAD_REQUEST_STARTED') return 'FETCHING';
+    if (event === 'DOWNLOAD_REQUEST_HEADERS') return 'HEADERS_RECEIVED';
+    if (event.includes('RESERVATION_UPGRADE_STARTED')) return 'WAITING_RESERVATION_UPGRADE';
+    if (event.includes('RESERVATION_UPGRADE_COMPLETED')) return 'AWAITING_BODY';
+    if (event === 'DOWNLOAD_REQUEST_FIRST_BODY_CHUNK') return 'READING_BODY';
+    if (event === 'DOWNLOAD_REQUEST_BODY_COMPLETED') return 'BODY_COMPLETED';
+    if (event === 'PAGE_RESERVATION_COMMITTED') return 'COMMITTED';
+    if (event === 'PAGE_RESERVATION_RELEASED') return 'RELEASED';
+    return null;
+  };
+
+  const emit = (event: string, meta: Record<string, unknown> = {}) => {
+    const now = Date.now();
+    const candidateBytes = [meta.reservedBytes, meta.toBytes, meta.reservationBytes]
+      .find((value): value is number => typeof value === 'number' && Number.isFinite(value));
+    if (candidateBytes !== undefined) reservedBytes = candidateBytes;
+    if (event === 'PAGE_RESERVATION_ACQUIRED' || event === 'PAGE_RESERVATION_REACQUIRED') {
+      reservationAcquiredAt = now;
+      released = false;
+    }
+    if (event === 'PAGE_RESERVATION_RELEASED') released = true;
+    const previousState = state;
+    state = nextStateForEvent(event) || state;
+    pageReservationTraceLogger.info('PAGE_RESERVATION_TRACE', {
+      ...base,
+      event,
+      observedAt: new Date(now).toISOString(),
+      sincePreviousEventMs: now - previousEventAt,
+      sinceProducerAssignedMs: now - startedAt,
+      sinceReservationAcquireMs: reservationAcquiredAt === null ? null : now - reservationAcquiredAt,
+      previousState,
+      reservationState: state,
+      reservationBytes: reservedBytes,
+      ...meta,
+    });
+    previousEventAt = now;
+  };
+
+  return {
+    ...base,
+    emit,
+    getSnapshot: () => ({
+      state,
+      reservedBytes,
+      acquiredAt: reservationAcquiredAt === null ? null : new Date(reservationAcquiredAt).toISOString(),
+      released,
+    }),
+  };
+}
+
+function mergeDownloadRequestTraces(
+  ...traces: Array<DownloadRequestTrace | undefined>
+): DownloadRequestTrace | undefined {
+  const active = traces.filter((trace): trace is DownloadRequestTrace => Boolean(trace));
+  if (active.length === 0) return undefined;
+  const primary = active[0];
+  return {
+    ...primary,
+    emit: (event, meta) => {
+      for (const trace of active) trace.emit(event, meta);
+    },
+  };
+}
 
 function createDownloadRequestTrace(
   jobId: string,
@@ -4640,6 +4760,10 @@ export class ImporterEngine {
       activeProducers: 0,
       activeConsumers: 0,
     };
+    // This set exists only while the opt-in page-reservation trace is active.
+    // It lets a bounded job abort describe the exact lifecycle state that was
+    // holding each logical reservation, without changing the abort path.
+    const activePageReservationTraces = new Set<PageReservationTrace>();
 
     let successfulExecution = false;
     let lastRescuedError: string | null = null;
@@ -4679,6 +4803,12 @@ export class ImporterEngine {
       const reason = jobSignal?.reason;
       const message = reason instanceof Error ? reason.message : String(reason || '');
       if (!message.includes('bounded execution deadline')) return;
+      for (const trace of activePageReservationTraces) {
+        trace.emit('PAGE_RESERVATION_ABORTED', {
+          abortReason: 'BOUNDED_EXECUTION_DEADLINE',
+          stateAtAbort: trace.getSnapshot(),
+        });
+      }
       this.logger.warn('[JOB_DEADLINE_DIAGNOSTIC] Pipeline snapshot at deadline', {
         jobId: job.id,
         source: deadlineSnapshot.source,
@@ -4873,6 +5003,7 @@ export class ImporterEngine {
           pageBytes: Uint8Array;
           reservationAcquiredAt: number;
           queuedAt: number;
+          reservationTrace?: PageReservationTrace;
         }
 
         const readyQueue: DownloadedPage[] = [];
@@ -4883,6 +5014,18 @@ export class ImporterEngine {
         let failed404Count = 0;
         const consumerResolvers: Array<() => void> = [];
 
+        const releasePageReservationTrace = (
+          trace: PageReservationTrace | undefined,
+          reason: string,
+          meta: Record<string, unknown> = {},
+        ) => {
+          if (!trace) return;
+          if (!trace.getSnapshot().released) {
+            trace.emit('PAGE_RESERVATION_RELEASED', { reason, ...meta });
+          }
+          activePageReservationTraces.delete(trace);
+        };
+
         const notifyConsumer = () => {
           if (pipelineError || this.stopSignal || isCancelled?.() || jobSignal?.aborted) {
             bufferedWaitAbort.abort();
@@ -4891,6 +5034,9 @@ export class ImporterEngine {
               this.autotuner.releaseActiveBufferedBytes(discarded.pageBytes.length);
               ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
               discarded.releaseBuffer();
+              releasePageReservationTrace(discarded.reservationTrace, 'READY_QUEUE_ABORT', {
+                actualBytes: discarded.pageBytes.length,
+              });
             }
             deadlineSnapshot.readyQueuePages = readyQueue.length;
           }
@@ -4921,6 +5067,7 @@ export class ImporterEngine {
         // Producer: downloads raw page bytes from source CDN into memory
         const producer = async () => {
           deadlineSnapshot.activeProducers++;
+          let activeReservationTrace: PageReservationTrace | undefined;
           try {
             while (!this.stopSignal && !pipelineError && !isCancelled?.() && !jobSignal?.aborted) {
             // Safe Checkpoint: cancellation check
@@ -4954,6 +5101,7 @@ export class ImporterEngine {
             try {
             const buf0 = performance.now();
             let reservation: BufferReservation | undefined;
+            let reservationTrace: PageReservationTrace | undefined;
             let bufferedSemaphoreAcquired = false;
             let releaseBufferedPermit = () => {};
             let reservationAcquiredAt = 0;
@@ -4977,6 +5125,20 @@ export class ImporterEngine {
               if (admission.pagePermitWaitMs >= 1) chBufferedPagePermitWaitEvents++;
               bufferedSemaphoreAcquired = true;
               releaseBufferedPermit = admission.releasePagePermit;
+              reservationTrace = createPageReservationTrace(
+                job.id,
+                effectiveSource,
+                chapterNumber,
+                idx,
+                expectedCount,
+              );
+              activeReservationTrace = reservationTrace;
+              if (reservationTrace) activePageReservationTraces.add(reservationTrace);
+              reservationTrace?.emit('PAGE_RESERVATION_ACQUIRED', {
+                reservationBytes: reservation.reservedBytes,
+                pagePermitWaitMs: Math.round(admission.pagePermitWaitMs),
+                reservationWaitMs: Math.round(admission.reservationWaitMs),
+              });
             } catch (acquireError) {
               // acquirePageBufferAdmission has already returned any acquired
               // page permit and incomplete byte reservation on cancellation.
@@ -5040,8 +5202,14 @@ export class ImporterEngine {
                 const inf0 = performance.now();
                 // Source and buffer capacity have already been admitted, so
                 // only the shared network permit may be held here.
+                reservationTrace?.emit('PAGE_GLOBAL_DOWNLOAD_PERMIT_WAIT_STARTED', {
+                  producerAttempt: attempts,
+                });
                 pageBytes = await globalInflightRequestSemaphore.runExclusive(async () => {
                   chDownloadSemWaitMs += (performance.now() - inf0);
+                  reservationTrace?.emit('PAGE_GLOBAL_DOWNLOAD_PERMIT_ACQUIRED', {
+                    producerAttempt: attempts,
+                  });
                   telemetryCollector.trackActiveDownload(1);
                   try {
                     return await callProvider(() =>
@@ -5049,13 +5217,16 @@ export class ImporterEngine {
                         timeoutMs,
                         freshConnection,
                         reservation,
-                        requestTrace: createDownloadRequestTrace(
-                          job.id,
-                          effectiveSource,
-                          chapterNumber,
-                          idx,
-                          expectedCount,
-                          attempts,
+                        requestTrace: mergeDownloadRequestTraces(
+                          createDownloadRequestTrace(
+                            job.id,
+                            effectiveSource,
+                            chapterNumber,
+                            idx,
+                            expectedCount,
+                            attempts,
+                          ),
+                          reservationTrace,
                         ),
                         // The producer owns the chapter-level retry policy:
                         // four bounded attempts, manifest refresh, and
@@ -5079,6 +5250,10 @@ export class ImporterEngine {
                 totalBytes += pageBytes.length;
                 reservation?.commit(pageBytes.length);
                 reservationCommitted = true;
+                reservationTrace?.emit('PAGE_RESERVATION_COMMITTED', {
+                  actualBytes: pageBytes.length,
+                  reservedBytes: reservation?.reservedBytes ?? null,
+                });
                 ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
 
                 if (attempts > 1) {
@@ -5096,15 +5271,31 @@ export class ImporterEngine {
               } catch (err: any) {
                 lastErr = err;
                 telemetryCollector.recordDownloadError(attempts < 4);
+                let reservationReleaseTraced = false;
+                if (reservation?.isReleased) {
+                  reservationTrace?.emit('PAGE_RESERVATION_RELEASED', {
+                    reason: 'FETCH_OR_BODY_FAILURE',
+                    reservationBytes: reservation.reservedBytes,
+                  });
+                  reservationReleaseTraced = true;
+                }
                 if (err instanceof InvalidMediaError) {
                   break;
                 }
                 if (attempts < 4 && !this.stopSignal && !pipelineError && !jobSignal?.aborted) {
                   if (reservation?.isReleased) {
+                    reservationTrace?.emit('PAGE_RESERVATION_REACQUIRE_WAIT_STARTED', {
+                      producerAttempt: attempts + 1,
+                    });
                     reservation = await this.autotuner.reserveBufferBudget(
                       2.0 * 1024 * 1024,
                       pipelineSignal
                     );
+                    reservationTrace?.emit('PAGE_RESERVATION_REACQUIRED', {
+                      reservationBytes: reservation.reservedBytes,
+                      producerAttempt: attempts + 1,
+                      previousReservationReleased: reservationReleaseTraced,
+                    });
                   }
                   await this.sleep(400 * attempts);
                 }
@@ -5149,9 +5340,11 @@ export class ImporterEngine {
               releaseBuffer: releaseBufferedPermit,
               reservationAcquiredAt,
               queuedAt: performance.now(),
+              reservationTrace,
             });
             deadlineSnapshot.readyQueuePages = readyQueue.length;
             bufferTransferred = true;
+            activeReservationTrace = undefined;
             notifyConsumer();
             } finally {
               if (!bufferTransferred) {
@@ -5164,6 +5357,15 @@ export class ImporterEngine {
                 if (bufferedSemaphoreAcquired) {
                   releaseBufferedPermit();
                 }
+                releasePageReservationTrace(
+                  reservationTrace,
+                  reservationCommitted ? 'POST_COMMIT_WITHOUT_READY_QUEUE' : 'PRE_COMMIT_EXIT',
+                  {
+                    actualBytes: pageBytes?.length ?? null,
+                    reservationReleased: reservation?.isReleased ?? null,
+                  },
+                );
+                activeReservationTrace = undefined;
               }
             }
             } finally {
@@ -5171,6 +5373,13 @@ export class ImporterEngine {
             }
           }
         } catch (err: any) {
+          if (activeReservationTrace) {
+            activeReservationTrace.emit('PAGE_RESERVATION_PRODUCER_ENDED_BEFORE_TRANSFER', {
+              errorType: classifyDownloadTraceError(err),
+              stateAtEnd: activeReservationTrace.getSnapshot(),
+            });
+            activePageReservationTraces.delete(activeReservationTrace);
+          }
           if (!pipelineError) pipelineError = err;
         } finally {
           deadlineSnapshot.activeProducers--;
@@ -5277,6 +5486,10 @@ export class ImporterEngine {
               }
               chBufferReservationHoldMs += performance.now() - item.reservationAcquiredAt;
               item.releaseBuffer();
+              releasePageReservationTrace(item.reservationTrace, 'CONSUMER_FINISHED', {
+                actualBytes: item.pageBytes.length,
+                uploadDurationMs: Math.round(uploadDuration),
+              });
             }
           }
         } catch (err: any) {
@@ -5327,6 +5540,9 @@ export class ImporterEngine {
               this.autotuner.releaseActiveBufferedBytes(leftover.pageBytes.length);
               ImporterEngine.activeBufferedBytes = this.autotuner.getBufferedBytes();
               leftover.releaseBuffer();
+              releasePageReservationTrace(leftover.reservationTrace, 'PIPELINE_DRAIN', {
+                actualBytes: leftover.pageBytes.length,
+              });
             }
           }
         }
