@@ -1,0 +1,41 @@
+Limit  (cost=381.06..606.82 rows=1 width=33) (actual time=28794.491..28794.498 rows=1 loops=1)
+  ->  Incremental Sort  (cost=381.06..260231.70 rows=1151 width=33) (actual time=28794.489..28794.495 rows=1 loops=1)
+        Sort Key: importer_queue.priority DESC, importer_queue.chapter_sort_key, importer_queue.next_run_at
+        Presorted Key: importer_queue.priority, importer_queue.chapter_sort_key
+        Full-sort Groups: 1  Sort Method: quicksort  Average Memory: 25kB  Peak Memory: 25kB
+        ->  Nested Loop Anti Join  (cost=155.14..260179.91 rows=1151 width=33) (actual time=476.525..28794.473 rows=2 loops=1)
+              ->  YB Batched Nested Loop Anti Join  (cost=126.94..195549.78 rows=1151 width=414) (actual time=476.157..28708.502 rows=2 loops=1)
+                    Join Filter: ((p.chapter_sort_key < importer_queue.chapter_sort_key) AND ((p.payload ->> 'workId'::text) = (importer_queue.payload ->> 'workId'::text)))
+                    Rows Removed by Join Filter: 1372520
+                    Sort Keys: importer_queue.priority DESC, importer_queue.chapter_sort_key
+                    ->  Nested Loop Left Join  (cost=98.73..146352.69 rows=1652 width=414) (actual time=475.228..19913.868 rows=1025 loops=1)
+                          Filter: ((importer_queue.chapter_sort_key > ($1)) OR (($1) IS NULL))
+                          ->  YB Batched Nested Loop Join  (cost=70.35..6859.86 rows=4908 width=414) (actual time=474.387..1985.395 rows=1025 loops=1)
+                                Join Filter: (importer_queue.id = q_base.id)
+                                Sort Keys: importer_queue.priority DESC, importer_queue.chapter_sort_key
+                                ->  YB Batched Nested Loop Join  (cost=49.24..5522.72 rows=4908 width=398) (actual time=473.658..1500.083 rows=1026 loops=1)
+                                      Join Filter: (importer_queue.source = s.id)
+                                      Sort Keys: importer_queue.priority DESC, importer_queue.chapter_sort_key
+                                      ->  Index Scan using idx_importer_queue_p1_claim on importer_queue  (cost=28.18..4260.59 rows=6974 width=408) (actual time=470.409..1057.441 rows=3075 loops=1)
+                                            Storage Filter: ((status = 'QUEUED'::text) OR ((status = 'RETRY'::text) AND (next_run_at <= now())))
+                                            Filter: (attempts < COALESCE(max_attempts, 7))
+                                      ->  Index Scan using importer_sources_pkey on importer_sources s  (cost=21.06..184.85 rows=38 width=11) (actual time=92.183..92.191 rows=2 loops=4)
+                                            Index Cond: (id = ANY (ARRAY[importer_queue.source, $3, $4, ..., $1025]))
+                                            Storage Filter: (enabled AND ((blocked_reason IS NULL) OR ((blocked_details ->> 'probe_success'::text) = 'true'::text) OR ((blocked_details ->> 'recovered_at'::text) IS NOT NULL)) AND ((status = 'ACTIVE'::text) OR ((status = ANY ('{COOLDOWN,PROBING,DEGRADED}'::text[])) AND ((cooldown_until IS NULL) OR (cooldown_until <= now())))))
+                                ->  Index Scan using importer_queue_pkey on importer_queue q_base  (cost=21.10..266.18 rows=1024 width=16) (actual time=240.173..240.519 rows=513 loops=2)
+                                      Index Cond: (id = ANY (ARRAY[importer_queue.id, $1027, $1028, ..., $2049]))
+                          ->  Result  (cost=28.39..28.40 rows=1 width=32) (actual time=17.426..17.426 rows=1 loops=1025)
+                                InitPlan 1 (returns $1)
+                                  ->  Limit  (cost=28.18..28.39 rows=1 width=5) (actual time=17.356..17.417 rows=1 loops=1025)
+                                        ->  Index Scan Backward using chapters_work_id_number_key on chapters c  (cost=28.18..32.74 rows=22 width=5) (actual time=16.838..16.838 rows=1 loops=1025)
+                                              Index Cond: ((work_id = (($0 ->> 'workId'::text))::uuid) AND (number IS NOT NULL))
+                                              Storage Filter: (published_at IS NOT NULL)
+                    ->  Index Scan using idx_importer_queue_work_id on importer_queue p  (cost=28.20..30442.77 rows=2614 width=370) (actual time=1753.515..1757.411 rows=689 loops=2)
+                          Index Cond: ((payload ->> 'workId'::text) = ANY (ARRAY[(importer_queue.payload ->> 'workId'::text), ($2051 ->> 'workId'::text), ($2052 ->> 'workId'::text), ..., ($3073 ->> 'workId'::text)]))
+                          Storage Filter: (status = ANY ('{QUEUED,RETRY,IMPORTING,BLOCKED_BY_UPSTREAM}'::text[]))
+              ->  Index Scan using idx_importer_queue_work_id on importer_queue a  (cost=28.20..56.14 rows=1 width=386) (actual time=42.937..42.937 rows=0 loops=2)
+                    Index Cond: ((payload ->> 'workId'::text) = (importer_queue.payload ->> 'workId'::text))
+                    Storage Filter: ((status = 'IMPORTING'::text) AND (id <> importer_queue.id) AND (chapter_sort_key = importer_queue.chapter_sort_key))
+Planning Time: 84.682 ms
+Execution Time: 28796.339 ms
+Peak Memory Usage: 10857 kB

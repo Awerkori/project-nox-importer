@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import type { WorkAffinityScheduler } from './scheduler/work-affinity-scheduler.js';
+import { type WorkAffinityScheduler } from './scheduler/work-affinity-scheduler.js';
 import type { AdmissionController } from './scheduler/admission-controller.js';
 import type { ProtectiveSentinel } from './protective-sentinel.js';
 import type { PublicationBarrier } from './publication.js';

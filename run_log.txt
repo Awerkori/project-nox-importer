@@ -1,0 +1,392 @@
+check-build	Set up job	﻿2026-10-08T23:06:07.8710644Z Current runner version: '2.337.0'
+check-build	Set up job	2026-10-08T23:06:07.8747578Z ##[group]Runner Image Provisioner
+check-build	Set up job	2026-10-08T23:06:07.8748952Z Hosted Compute Agent
+check-build	Set up job	2026-10-08T23:06:07.8750208Z Version: 20261002.596
+check-build	Set up job	2026-10-08T23:06:07.8751408Z Commit: c3d12f3313a95f25162a1503be624f3b0617f8c0
+check-build	Set up job	2026-10-08T23:06:07.8752608Z Build Date: 2026-10-02T22:28:27Z
+check-build	Set up job	2026-10-08T23:06:07.8753866Z Worker ID: {7b44c238-8d55-4893-83e2-cf9265c89c5b}
+check-build	Set up job	2026-10-08T23:06:07.8755084Z Region: eastus
+check-build	Set up job	2026-10-08T23:06:07.8755895Z Cloud: Azure
+check-build	Set up job	2026-10-08T23:06:07.8756912Z ##[endgroup]
+check-build	Set up job	2026-10-08T23:06:07.8759066Z ##[group]Operating System
+check-build	Set up job	2026-10-08T23:06:07.8760516Z Ubuntu
+check-build	Set up job	2026-10-08T23:06:07.8761447Z 24.04.5
+check-build	Set up job	2026-10-08T23:06:07.8762226Z LTS
+check-build	Set up job	2026-10-08T23:06:07.8763164Z ##[endgroup]
+check-build	Set up job	2026-10-08T23:06:07.8764184Z ##[group]Runner Image
+check-build	Set up job	2026-10-08T23:06:07.8765234Z Image: ubuntu-24.04
+check-build	Set up job	2026-10-08T23:06:07.8766178Z Version: 20261004.327.1
+check-build	Set up job	2026-10-08T23:06:07.8768001Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20261004.327/images/ubuntu/Ubuntu2404-Readme.md
+check-build	Set up job	2026-10-08T23:06:07.8771342Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20261004.327
+check-build	Set up job	2026-10-08T23:06:07.8773066Z ##[endgroup]
+check-build	Set up job	2026-10-08T23:06:07.8775132Z ##[group]GITHUB_TOKEN Permissions
+check-build	Set up job	2026-10-08T23:06:07.8778046Z Contents: read
+check-build	Set up job	2026-10-08T23:06:07.8778959Z Metadata: read
+check-build	Set up job	2026-10-08T23:06:07.8780257Z Packages: read
+check-build	Set up job	2026-10-08T23:06:07.8781244Z ##[endgroup]
+check-build	Set up job	2026-10-08T23:06:07.8784450Z Secret source: Actions
+check-build	Set up job	2026-10-08T23:06:07.8786024Z Cache mode: write
+check-build	Set up job	2026-10-08T23:06:07.8787125Z Prepare workflow directory
+check-build	Set up job	2026-10-08T23:06:07.9279011Z Prepare all required actions
+check-build	Set up job	2026-10-08T23:06:07.9352611Z Getting action download info
+check-build	Set up job	2026-10-08T23:06:08.1505688Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+check-build	Set up job	2026-10-08T23:06:08.2623300Z Download action repository 'actions/setup-node@v4' (SHA:49933ea5288caeca8642d1e84afbd3f7d6820020)
+check-build	Set up job	2026-10-08T23:06:08.4580805Z Complete job name: check-build
+check-build	Run actions/checkout@v4	﻿2026-10-08T23:06:08.5372422Z ##[group]Run actions/checkout@v4
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5373338Z with:
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5373828Z   repository: Awerkori/project-nox-importer
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5378011Z   token: ***
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5378453Z   ssh-strict: true
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5378898Z   ssh-user: git
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5379340Z   persist-credentials: true
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5380141Z   clean: true
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5380600Z   sparse-checkout-cone-mode: true
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5381132Z   fetch-depth: 1
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5381560Z   fetch-tags: false
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5382012Z   show-progress: true
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5382465Z   lfs: false
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5382893Z   submodules: false
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5383346Z   set-safe-directory: true
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5383863Z   allow-unsafe-pr-checkout: false
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.5384666Z ##[endgroup]
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6455013Z Syncing repository: Awerkori/project-nox-importer
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6457451Z ##[group]Getting Git version info
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6458474Z Working directory is '/home/runner/work/project-nox-importer/project-nox-importer'
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6461131Z [command]/usr/bin/git version
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6582005Z git version 2.55.0
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6609332Z ##[endgroup]
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6623225Z Temporarily overriding HOME='/home/runner/work/_temp/9ed7810b-68fd-4dbf-a4f2-6e850ffa0075' before making global git config changes
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6625577Z Adding repository directory to the temporary git global config as a safe directory
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6638141Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/project-nox-importer/project-nox-importer
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6725857Z Deleting the contents of '/home/runner/work/project-nox-importer/project-nox-importer'
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6737308Z ##[group]Initializing the repository
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6741338Z [command]/usr/bin/git init /home/runner/work/project-nox-importer/project-nox-importer
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6856402Z hint: Using 'master' as the name for the initial branch. This default branch name
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6858564Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6860610Z hint: to use in all of your new repositories, which will suppress this warning,
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6862354Z hint: call:
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6863469Z hint:
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6864824Z hint: 	git config --global init.defaultBranch <name>
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6866281Z hint:
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6867660Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6869917Z hint: 'development'. The just-created branch can be renamed via this command:
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6871631Z hint:
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6872708Z hint: 	git branch -m <name>
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6873968Z hint:
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6875473Z hint: Disable this message with "git config set advice.defaultBranchName false"
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6878013Z Initialized empty Git repository in /home/runner/work/project-nox-importer/project-nox-importer/.git/
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6882236Z [command]/usr/bin/git remote add origin https://github.com/Awerkori/project-nox-importer
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6941633Z ##[endgroup]
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6942895Z ##[group]Disabling automatic garbage collection
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6946400Z [command]/usr/bin/git config --local gc.auto 0
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6991495Z ##[endgroup]
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6992894Z ##[group]Setting up auth
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.6999843Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.7036406Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.7476119Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.7513023Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.7738757Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.7778157Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.8008299Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.8051464Z ##[endgroup]
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.8052970Z ##[group]Fetching the repository
+check-build	Run actions/checkout@v4	2026-10-08T23:06:08.8063617Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +9464fc5ff7a215b2f8b4ac005ec85a11f72e1106:refs/remotes/pull/350/merge
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.2430964Z From https://github.com/Awerkori/project-nox-importer
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.2432388Z  * [new ref]         9464fc5ff7a215b2f8b4ac005ec85a11f72e1106 -> pull/350/merge
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.2435688Z ##[endgroup]
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.2437223Z ##[group]Determining the checkout info
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.2438919Z ##[endgroup]
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.2451005Z [command]/usr/bin/git sparse-checkout disable
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.2507172Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.2548390Z ##[group]Checking out the ref
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.2553735Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/350/merge
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3523585Z Note: switching to 'refs/remotes/pull/350/merge'.
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3524834Z 
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3525514Z You are in 'detached HEAD' state. You can look around, make experimental
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3527017Z changes and commit them, and you can discard any commits you make in this
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3528494Z state without impacting any branches by switching back to a branch.
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3529354Z 
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3530593Z If you want to create a new branch to retain commits you create, you may
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3532983Z do so (now or later) by using -c with the switch command. Example:
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3533984Z 
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3534370Z   git switch -c <new-branch-name>
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3534995Z 
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3535373Z Or undo this operation with:
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3535939Z 
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3536268Z   git switch -
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3536972Z 
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3537842Z Turn off this advice by setting config variable advice.detachedHead to false
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3538919Z 
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3540310Z HEAD is now at 9464fc5 Merge 4a501a12d0f3d7cbc61b19ea66c5c850fd600744 into 45722e5702e8d17f189680c5641be5a59ead1aea
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3544177Z ##[endgroup]
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3582958Z [command]/usr/bin/git log -1 --format=%H
+check-build	Run actions/checkout@v4	2026-10-08T23:06:09.3611610Z 9464fc5ff7a215b2f8b4ac005ec85a11f72e1106
+check-build	Setup Node.js	﻿2026-10-08T23:06:09.4029772Z ##[group]Run actions/setup-node@v4
+check-build	Setup Node.js	2026-10-08T23:06:09.4031182Z with:
+check-build	Setup Node.js	2026-10-08T23:06:09.4032117Z   node-version: 20
+check-build	Setup Node.js	2026-10-08T23:06:09.4033137Z   always-auth: false
+check-build	Setup Node.js	2026-10-08T23:06:09.4034214Z   check-latest: false
+check-build	Setup Node.js	2026-10-08T23:06:09.4045543Z   token: ***
+check-build	Setup Node.js	2026-10-08T23:06:09.4046515Z ##[endgroup]
+check-build	Setup Node.js	2026-10-08T23:06:09.5675943Z Attempting to download 20...
+check-build	Setup Node.js	2026-10-08T23:06:09.5789896Z (node:2278) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+check-build	Setup Node.js	2026-10-08T23:06:09.5794927Z (Use `node --trace-deprecation ...` to show where the warning was created)
+check-build	Setup Node.js	2026-10-08T23:06:10.0338011Z Acquiring 20.20.2 - x64 from https://github.com/actions/node-versions/releases/download/20.20.2-23521894959/node-20.20.2-linux-x64.tar.gz
+check-build	Setup Node.js	2026-10-08T23:06:10.5288839Z Extracting ...
+check-build	Setup Node.js	2026-10-08T23:06:10.5418729Z [command]/usr/bin/tar xz --strip 1 --warning=no-unknown-keyword --overwrite -C /home/runner/work/_temp/107db46c-81a2-4729-b1b0-7dac1b1146c8 -f /home/runner/work/_temp/2d2a5e7b-f1d3-42b7-b028-0a894e8bf1b7
+check-build	Setup Node.js	2026-10-08T23:06:11.5620916Z Adding to the cache ...
+check-build	Setup Node.js	2026-10-08T23:06:13.4897152Z ##[group]Environment details
+check-build	Setup Node.js	2026-10-08T23:06:13.7170165Z node: v20.20.2
+check-build	Setup Node.js	2026-10-08T23:06:13.7171037Z npm: 10.8.2
+check-build	Setup Node.js	2026-10-08T23:06:13.7171699Z yarn: 1.22.22
+check-build	Setup Node.js	2026-10-08T23:06:13.7172584Z ##[endgroup]
+check-build	Install Dependencies	﻿2026-10-08T23:06:13.7375023Z ##[group]Run npm ci
+check-build	Install Dependencies	2026-10-08T23:06:13.7375385Z ^[[36;1mnpm ci^[[0m
+check-build	Install Dependencies	2026-10-08T23:06:13.7632273Z shell: /usr/bin/bash -e {0}
+check-build	Install Dependencies	2026-10-08T23:06:13.7632684Z ##[endgroup]
+check-build	Install Dependencies	2026-10-08T23:06:14.2059859Z npm warn EBADENGINE Unsupported engine {
+check-build	Install Dependencies	2026-10-08T23:06:14.2060865Z npm warn EBADENGINE   package: '@puppeteer/browsers@3.2.2',
+check-build	Install Dependencies	2026-10-08T23:06:14.2061639Z npm warn EBADENGINE   required: { node: '>=22.12.0' },
+check-build	Install Dependencies	2026-10-08T23:06:14.2062846Z npm warn EBADENGINE   current: { node: 'v20.20.2', npm: '10.8.2' }
+check-build	Install Dependencies	2026-10-08T23:06:14.2063580Z npm warn EBADENGINE }
+check-build	Install Dependencies	2026-10-08T23:06:14.2064119Z npm warn EBADENGINE Unsupported engine {
+check-build	Install Dependencies	2026-10-08T23:06:14.2064768Z npm warn EBADENGINE   package: '@supabase/auth-js@2.116.0',
+check-build	Install Dependencies	2026-10-08T23:06:14.2065717Z npm warn EBADENGINE   required: { node: '>=22.0.0' },
+check-build	Install Dependencies	2026-10-08T23:06:14.2066589Z npm warn EBADENGINE   current: { node: 'v20.20.2', npm: '10.8.2' }
+check-build	Install Dependencies	2026-10-08T23:06:14.2067156Z npm warn EBADENGINE }
+check-build	Install Dependencies	2026-10-08T23:06:14.2067504Z npm warn EBADENGINE Unsupported engine {
+check-build	Install Dependencies	2026-10-08T23:06:14.2068336Z npm warn EBADENGINE   package: '@supabase/functions-js@2.116.0',
+check-build	Install Dependencies	2026-10-08T23:06:14.2069126Z npm warn EBADENGINE   required: { node: '>=22.0.0' },
+check-build	Install Dependencies	2026-10-08T23:06:14.2069989Z npm warn EBADENGINE   current: { node: 'v20.20.2', npm: '10.8.2' }
+check-build	Install Dependencies	2026-10-08T23:06:14.2070689Z npm warn EBADENGINE }
+check-build	Install Dependencies	2026-10-08T23:06:14.2071129Z npm warn EBADENGINE Unsupported engine {
+check-build	Install Dependencies	2026-10-08T23:06:14.2071620Z npm warn EBADENGINE   package: '@supabase/postgrest-js@2.116.0',
+check-build	Install Dependencies	2026-10-08T23:06:14.2072120Z npm warn EBADENGINE   required: { node: '>=22.0.0' },
+check-build	Install Dependencies	2026-10-08T23:06:14.2072639Z npm warn EBADENGINE   current: { node: 'v20.20.2', npm: '10.8.2' }
+check-build	Install Dependencies	2026-10-08T23:06:14.2073026Z npm warn EBADENGINE }
+check-build	Install Dependencies	2026-10-08T23:06:14.2073399Z npm warn EBADENGINE Unsupported engine {
+check-build	Install Dependencies	2026-10-08T23:06:14.2074290Z npm warn EBADENGINE   package: '@supabase/realtime-js@2.116.0',
+check-build	Install Dependencies	2026-10-08T23:06:14.2075664Z npm warn EBADENGINE   required: { node: '>=22.0.0' },
+check-build	Install Dependencies	2026-10-08T23:06:14.2076553Z npm warn EBADENGINE   current: { node: 'v20.20.2', npm: '10.8.2' }
+check-build	Install Dependencies	2026-10-08T23:06:14.2077236Z npm warn EBADENGINE }
+check-build	Install Dependencies	2026-10-08T23:06:14.2077706Z npm warn EBADENGINE Unsupported engine {
+check-build	Install Dependencies	2026-10-08T23:06:14.2078448Z npm warn EBADENGINE   package: '@supabase/storage-js@2.116.0',
+check-build	Install Dependencies	2026-10-08T23:06:14.2079214Z npm warn EBADENGINE   required: { node: '>=22.0.0' },
+check-build	Install Dependencies	2026-10-08T23:06:14.2080327Z npm warn EBADENGINE   current: { node: 'v20.20.2', npm: '10.8.2' }
+check-build	Install Dependencies	2026-10-08T23:06:14.2080999Z npm warn EBADENGINE }
+check-build	Install Dependencies	2026-10-08T23:06:14.2081535Z npm warn EBADENGINE Unsupported engine {
+check-build	Install Dependencies	2026-10-08T23:06:14.2082315Z npm warn EBADENGINE   package: '@supabase/supabase-js@2.116.0',
+check-build	Install Dependencies	2026-10-08T23:06:14.2083096Z npm warn EBADENGINE   required: { node: '>=22.0.0' },
+check-build	Install Dependencies	2026-10-08T23:06:14.2083930Z npm warn EBADENGINE   current: { node: 'v20.20.2', npm: '10.8.2' }
+check-build	Install Dependencies	2026-10-08T23:06:14.2084551Z npm warn EBADENGINE }
+check-build	Install Dependencies	2026-10-08T23:06:14.2101656Z npm warn EBADENGINE Unsupported engine {
+check-build	Install Dependencies	2026-10-08T23:06:14.2102373Z npm warn EBADENGINE   package: 'puppeteer-core@25.11.0',
+check-build	Install Dependencies	2026-10-08T23:06:14.2102897Z npm warn EBADENGINE   required: { node: '>=22.12.0' },
+check-build	Install Dependencies	2026-10-08T23:06:14.2103414Z npm warn EBADENGINE   current: { node: 'v20.20.2', npm: '10.8.2' }
+check-build	Install Dependencies	2026-10-08T23:06:14.2103820Z npm warn EBADENGINE }
+check-build	Install Dependencies	2026-10-08T23:06:15.5947601Z npm warn deprecated @esbuild-kit/esm-loader@2.6.5: Merged into tsx: https://tsx.hirok.io
+check-build	Install Dependencies	2026-10-08T23:06:15.6060043Z npm warn deprecated @esbuild-kit/core-utils@3.3.2: Merged into tsx: https://tsx.hirok.io
+check-build	Install Dependencies	2026-10-08T23:06:18.1836327Z 
+check-build	Install Dependencies	2026-10-08T23:06:18.1837196Z added 138 packages, and audited 139 packages in 4s
+check-build	Install Dependencies	2026-10-08T23:06:18.1997382Z 
+check-build	Install Dependencies	2026-10-08T23:06:18.1998151Z 27 packages are looking for funding
+check-build	Install Dependencies	2026-10-08T23:06:18.1998794Z   run `npm fund` for details
+check-build	Install Dependencies	2026-10-08T23:06:18.1999085Z 
+check-build	Install Dependencies	2026-10-08T23:06:18.2000272Z 8 vulnerabilities (5 moderate, 1 high, 2 critical)
+check-build	Install Dependencies	2026-10-08T23:06:18.2008373Z 
+check-build	Install Dependencies	2026-10-08T23:06:18.2010391Z To address issues that do not require attention, run:
+check-build	Install Dependencies	2026-10-08T23:06:18.2011475Z   npm audit fix
+check-build	Install Dependencies	2026-10-08T23:06:18.2011972Z 
+check-build	Install Dependencies	2026-10-08T23:06:18.2013148Z To address all issues (including breaking changes), run:
+check-build	Install Dependencies	2026-10-08T23:06:18.2013843Z   npm audit fix --force
+check-build	Install Dependencies	2026-10-08T23:06:18.2014105Z 
+check-build	Install Dependencies	2026-10-08T23:06:18.2014341Z Run `npm audit` for details.
+check-build	Rebuild Project	﻿2026-10-08T23:06:18.2244719Z ##[group]Run npm run build
+check-build	Rebuild Project	2026-10-08T23:06:18.2245147Z ^[[36;1mnpm run build^[[0m
+check-build	Rebuild Project	2026-10-08T23:06:18.2322319Z shell: /usr/bin/bash -e {0}
+check-build	Rebuild Project	2026-10-08T23:06:18.2322656Z ##[endgroup]
+check-build	Rebuild Project	2026-10-08T23:06:18.3645052Z 
+check-build	Rebuild Project	2026-10-08T23:06:18.3646578Z > project-nox-importer@1.0.0 build
+check-build	Rebuild Project	2026-10-08T23:06:18.3647490Z > tsc && node scripts/build-id.mjs
+check-build	Rebuild Project	2026-10-08T23:06:18.3647879Z 
+check-build	Run Liveness & Auto-Heal Test Suite	﻿2026-10-08T23:06:26.2536081Z ##[group]Run npx vitest run tests/auto-heal-watchdog.test.ts
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:26.2536582Z ^[[36;1mnpx vitest run tests/auto-heal-watchdog.test.ts^[[0m
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:26.2612100Z shell: /usr/bin/bash -e {0}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:26.2612436Z env:
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:26.2612709Z   YUGABYTE_PASSWORD: test-ci-placeholder-password
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:26.2613316Z ##[endgroup]
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:26.9212215Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:26.9230542Z ^[[1m^[[46m RUN ^[[49m^[[22m ^[[36mv3.2.7 ^[[39m^[[90m/home/runner/work/project-nox-importer/project-nox-importer^[[39m
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:26.9231426Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2431173Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso A: eligible backlog + active works stale + zero claim => watchdog recupera sem restart prematuro
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2434491Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.240Z","level":"INFO","context":"AutoHealWatchdog","message":"[Stale mapping recovery] Reconciled 1 old IMPORTING mapping(s) without live queue work."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2435643Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2442952Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso A: eligible backlog + active works stale + zero claim => watchdog recupera sem restart prematuro
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2447600Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.243Z","level":"WARN","context":"AutoHealWatchdog","message":"🔧 [AUTO-HEAL NÍVEL 1] Initiating Light Reconciliation (Stall age: 22m, Eligible: 50)..."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2449026Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2451801Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso A: eligible backlog + active works stale + zero claim => watchdog recupera sem restart prematuro
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2455543Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.243Z","level":"INFO","context":"AutoHealWatchdog","message":"[Stale mapping recovery] Reconciled 1 old IMPORTING mapping(s) without live queue work."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2457017Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2459442Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso A: eligible backlog + active works stale + zero claim => watchdog recupera sem restart prematuro
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2463170Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.244Z","level":"INFO","context":"AutoHealWatchdog","message":"✅ [AUTO-HEAL NÍVEL 1] Light reconciliation executed. Awaiting progress..."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2464373Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2471662Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso B: expired importing lease + worker morto => job recuperado para QUEUED preservando attempts
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2475443Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.246Z","level":"INFO","context":"AutoHealWatchdog","message":"[Level 2] Safely reclaimed 1 expired lease job(s) back to QUEUED:","meta":{"jobs":["kuro:5"]}}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2476805Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2487438Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mreconciles stale IMPORTING mappings without resurrecting live or staff-cancelled work
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2491320Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.248Z","level":"INFO","context":"AutoHealWatchdog","message":"[Stale mapping recovery] Reconciled 1 old IMPORTING mapping(s) without live queue work."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2492735Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2520591Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso E: source outage geral com >=3 restarts em 1h => AUTO-RECOVERY CIRCUIT OPEN, sem restart infinito
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2524511Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.251Z","level":"WARN","context":"AutoHealWatchdog","message":"🔧 [AUTO-HEAL NÍVEL 1] Initiating Light Reconciliation (Stall age: 33m, Eligible: 100)..."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2526539Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2528910Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso E: source outage geral com >=3 restarts em 1h => AUTO-RECOVERY CIRCUIT OPEN, sem restart infinito
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2532971Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.251Z","level":"INFO","context":"AutoHealWatchdog","message":"✅ [AUTO-HEAL NÍVEL 1] Light reconciliation executed. Awaiting progress..."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2534271Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2548295Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso G: persistent cross-process 15m cooldown => restart bloqueado mesmo em novo processo
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2552367Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.254Z","level":"WARN","context":"AutoHealWatchdog","message":"🔧 [AUTO-HEAL NÍVEL 1] Initiating Light Reconciliation (Stall age: 35m, Eligible: 100)..."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2554261Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2556664Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso G: persistent cross-process 15m cooldown => restart bloqueado mesmo em novo processo
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2560396Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.254Z","level":"INFO","context":"AutoHealWatchdog","message":"✅ [AUTO-HEAL NÍVEL 1] Light reconciliation executed. Awaiting progress..."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2561641Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2568661Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso H: processing saudável mas publicação travada (>30m) com novos capítulos => detecta PUBLICATION_STALL / CRITICAL_STALL
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2573985Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.256Z","level":"ERROR","context":"AutoHealWatchdog","message":"🚨 [AUTO-HEAL NÍVEL 3] SUSTAINED_STALL: 0 completions/fresh for 35m while 50 jobs eligible (processing: HEALTHY, publication: CRITICAL_STALL). Initiating controlled graceful self-restart..."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2576028Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2622236Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso J: graceful bounded restart => drain de in-flight, pool fechado, timeout <=10s, exit(1)
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2624538Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.261Z","level":"ERROR","context":"Engine","message":"🚨 [IN_PROCESS_SOFT_RESTART] Initiating in-process soft restart. Reason: Test graceful shutdown","meta":{"reason":"Test graceful shutdown","pid":2439,"uptimeSeconds":1}}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.2625461Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6646664Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso J: graceful bounded restart => drain de in-flight, pool fechado, timeout <=10s, exit(1)
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6650948Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.662Z","level":"INFO","context":"Engine","message":"[CONTROLLED SELF-RESTART] In-flight jobs successfully drained in 401ms."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6653208Z {"timestamp":"2026-10-08T23:06:28.663Z","level":"INFO","context":"AutoHealWatchdog","message":"AutoHealWatchdog stopped"}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6654344Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6676956Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso L: eligible=0, importing=0, staged publishable=5, freshAge > 30m => status CRITICAL_STALL (NÃO IDLE) e sweep acionado
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6681353Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso L: eligible=0, importing=0, staged publishable=5, freshAge > 30m => status CRITICAL_STALL (NÃO IDLE) e sweep acionado
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6685484Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.667Z","level":"INFO","context":"AutoHealWatchdog","message":"[Level 1] Publication recovery sweep: published 3 staged chapter(s) safely through barrier."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6686711Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6688076Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso L: eligible=0, importing=0, staged publishable=5, freshAge > 30m => status CRITICAL_STALL (NÃO IDLE) e sweep acionado
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6690267Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.667Z","level":"INFO","context":"AutoHealWatchdog","message":"✅ [AUTO-HEAL NÍVEL 1] Light reconciliation executed. Awaiting progress..."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6690925Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6692758Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.667Z","level":"WARN","context":"AutoHealWatchdog","message":"🔧 [AUTO-HEAL NÍVEL 1] Initiating Light Reconciliation (Stall age: 35m, Eligible: 0)..."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6694002Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6718910Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso N: correlated dedupe com jobs mistos (dedupe + fresh_expected) => não silencia stall legítimo, publicationHealth STALLED
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6722249Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.671Z","level":"WARN","context":"AutoHealWatchdog","message":"🔧 [AUTO-HEAL NÍVEL 1] Initiating Light Reconciliation (Stall age: 20m, Eligible: 50)..."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6726362Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso N: correlated dedupe com jobs mistos (dedupe + fresh_expected) => não silencia stall legítimo, publicationHealth STALLED
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6730358Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.671Z","level":"INFO","context":"AutoHealWatchdog","message":"✅ [AUTO-HEAL NÍVEL 1] Light reconciliation executed. Awaiting progress..."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6731610Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6731876Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6876843Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso Y: unclassifiedStaged isolado com publishable=0 e stuck=0 NÃO causa restart (status DEGRADED, publicationHealth DEGRADED)
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6882059Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.686Z","level":"WARN","context":"AutoHealWatchdog","message":"⚠️ [AUTO-HEAL WARNING] Importer DEGRADED: Processing: CRITICAL_STALL (120m), Publication: DEGRADED (120m) while 0 jobs eligible. Monitoring closely."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6884272Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6913670Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mCaso BB: circuit breaker tripwire transitions autotuner to SURVIVAL mode (concurrency = 1)
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6918017Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.690Z","level":"ERROR","context":"AutoHealWatchdog","message":"🚨 [AUTO-RECOVERY CIRCUIT OPEN] Reached max 3 auto-restarts in 1h (Current count: 3). Suppressing rapid restarts while continuing bounded containment recovery."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6921829Z {"timestamp":"2026-10-08T23:06:28.690Z","level":"WARN","context":"AutoHealWatchdog","message":"[AUTO-RECOVERY CIRCUIT] Containment cooldown active; reconciliation remains enabled.","meta":{"waitMs":180000}}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6923421Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6973036Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mkeeps bounded recovery alive after the circuit cooldown instead of requiring human intervention
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6978159Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.696Z","level":"ERROR","context":"AutoHealWatchdog","message":"🚨 [AUTO-RECOVERY CIRCUIT OPEN] Reached max 3 auto-restarts in 1h (Current count: 3). Suppressing rapid restarts while continuing bounded containment recovery."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6980671Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6983357Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mkeeps bounded recovery alive after the circuit cooldown instead of requiring human intervention
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6987905Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.696Z","level":"WARN","context":"AutoHealWatchdog","message":"[AUTO-RECOVERY CIRCUIT] Bounded containment recovery completed; awaiting real publication progress."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6989225Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6993928Z ^[[90mstderr^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mdoes not cancel a newly started import while the restart circuit is open
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6997468Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.698Z","level":"ERROR","context":"AutoHealWatchdog","message":"🚨 [AUTO-RECOVERY CIRCUIT OPEN] Reached max 3 auto-restarts in 1h (Current count: 3). Suppressing rapid restarts while continuing bounded containment recovery."}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.6999478Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.7001809Z ^[[90mstdout^[[2m | tests/auto-heal-watchdog.test.ts^[[2m > ^[[22m^[[2mAutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22m^[[2mdoes not cancel a newly started import while the restart circuit is open
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.7005364Z ^[[22m^[[39m{"timestamp":"2026-10-08T23:06:28.698Z","level":"INFO","context":"AutoHealWatchdog","message":"[AUTO-RECOVERY CIRCUIT] Fresh in-flight work detected; deferring containment cancellation.","meta":{"lastStartedAgeSec":30,"importing":1}}
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.7006451Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.7025323Z  ^[[32m✓^[[39m tests/auto-heal-watchdog.test.ts ^[[2m(^[[22m^[[2m35 tests^[[22m^[[2m)^[[22m^[[33m 467^[[2mms^[[22m^[[39m
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.7028148Z    ^[[33m^[[2m✓^[[22m^[[39m AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A a N)^[[2m > ^[[22mCaso J: graceful bounded restart => drain de in-flight, pool fechado, timeout <=10s, exit(1) ^[[33m 406^[[2mms^[[22m^[[39m
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.7186326Z 
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.7189890Z ^[[2m Test Files ^[[22m ^[[1m^[[32m1 passed^[[39m^[[22m^[[90m (1)^[[39m
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.7191234Z ^[[2m      Tests ^[[22m ^[[1m^[[32m35 passed^[[39m^[[22m^[[90m (35)^[[39m
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.7192300Z ^[[2m   Start at ^[[22m 23:06:26
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.7193942Z ^[[2m   Duration ^[[22m 1.80s^[[2m (transform 879ms, setup 0ms, collect 1.08s, tests 467ms, environment 0ms, prepare 64ms)^[[22m
+check-build	Run Liveness & Auto-Heal Test Suite	2026-10-08T23:06:28.7195134Z 
+check-build	Check for stale build artifacts	﻿2026-10-08T23:06:28.8412269Z ##[group]Run if [ -n "$(git status --porcelain build/ ':!build/BUILD_ID')" ]; then
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.8412929Z ^[[36;1mif [ -n "$(git status --porcelain build/ ':!build/BUILD_ID')" ]; then^[[0m
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.8413397Z ^[[36;1m  echo "ERROR: The build/ directory is out of sync with src/."^[[0m
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.8413928Z ^[[36;1m  echo "You must run 'npm run build' locally and commit the updated build/ directory."^[[0m
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.8414395Z ^[[36;1m  git diff build/ ':!build/BUILD_ID'^[[0m
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.8414680Z ^[[36;1m  exit 1^[[0m
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.8414874Z ^[[36;1melse^[[0m
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.8415095Z ^[[36;1m  echo "Build directory is up to date."^[[0m
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.8415374Z ^[[36;1mfi^[[0m
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.8481061Z shell: /usr/bin/bash -e {0}
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.8481329Z ##[endgroup]
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9382308Z ERROR: The build/ directory is out of sync with src/.
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9383351Z You must run 'npm run build' locally and commit the updated build/ directory.
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9461779Z diff --git a/build/config.js b/build/config.js
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9482294Z index 38c88f3..bc746ef 100644
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9482838Z --- a/build/config.js
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9483289Z +++ b/build/config.js
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9483847Z @@ -35,7 +35,7 @@ const ConfigSchema = z.object({
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9484557Z      IMPORTER_USER_ID: z.string().uuid().optional(),
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9485811Z      WORKER_ID: z.string().min(1).default(() => `nox-worker-${process.pid}-${Math.random().toString(36).slice(2, 7)}`),
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9487031Z      POLL_INTERVAL_SECONDS: z.coerce.number().int().min(5).default(60),
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9488129Z -    QUEUE_LEASE_DURATION_SECONDS: z.coerce.number().int().min(30).default(300),
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9491333Z +    QUEUE_LEASE_DURATION_SECONDS: z.coerce.number().int().min(30).default(600),
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9492235Z      QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9493071Z      MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(128).default(10),
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9493687Z      ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(3),
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9494387Z diff --git a/build/core/engine.js b/build/core/engine.js
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9494913Z index 43d9d92..6737004 100644
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9495634Z --- a/build/core/engine.js
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9495902Z +++ b/build/core/engine.js
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9496451Z @@ -2970,7 +2970,7 @@ export class ImporterEngine {
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9497750Z          // Dynamic soft deadline: scales with page count if available, with a minimum of 2.5 minutes and maximum of 4 minutes.
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9499453Z          const pageCountHint = typeof job.payload?.pageCount === 'number' ? job.payload.pageCount : (job.progress_total || 40);
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9501027Z          const maxJobDurationMs = job.task_type === 'IMPORT_CHAPTER'
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9502092Z -            ? Math.min(4 * 60 * 1000, Math.max(150 * 1000, pageCountHint * 4 * 1000))
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9503141Z +            ? Math.min(8 * 60 * 1000, Math.max(150 * 1000, pageCountHint * 4 * 1000))
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9503765Z              : 3 * 60 * 1000;
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9504215Z          let jobTimeoutTimer = null;
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9504930Z          // This is deliberately a *soft* deadline.  Aborting the signal asks every
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9506239Z diff --git a/build/core/scheduler/work-affinity-scheduler.d.ts b/build/core/scheduler/work-affinity-scheduler.d.ts
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9507252Z index 5e34077..b9edf3d 100644
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9507935Z --- a/build/core/scheduler/work-affinity-scheduler.d.ts
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9511633Z +++ b/build/core/scheduler/work-affinity-scheduler.d.ts
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9512411Z @@ -16,6 +16,7 @@ import { ProtectiveSentinel } from '../protective-sentinel.js';
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9512971Z  import { AdmissionController } from './admission-controller.js';
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9513443Z  import { SchedulerStateStore } from './state-store.js';
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9514231Z  import { SchedulerDecision, SchedulerLane, SchedulerMetrics } from './types.js';
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9523483Z +export declare const CANONICAL_FRONTIER_CLAIM_FILTER = "\n          AND NOT EXISTS (\n            SELECT 1\n            FROM importer_queue predecessor\n            WHERE predecessor.task_type = 'IMPORT_CHAPTER'\n              AND predecessor.payload->>'workId' = q.payload->>'workId'\n              AND predecessor.chapter_sort_key < q.chapter_sort_key\n              AND predecessor.status IN ('QUEUED', 'RETRY', 'IMPORTING')\n              AND NOT EXISTS (\n                SELECT 1\n                FROM chapters predecessor_canonical\n                WHERE predecessor_canonical.work_id = (q.payload->>'workId')::uuid\n                  AND predecessor_canonical.published_at IS NOT NULL\n                  AND (\n                    predecessor_canonical.number = NULLIF(predecessor.payload->>'chapterNumber', '')::numeric\n                    OR predecessor_canonical.number = predecessor.chapter_sort_key\n                  )\n              )\n          )\n          AND NOT EXISTS (\n            SELECT 1\n            FROM importer_chapter_mappings staged_frontier\n            WHERE staged_frontier.work_id = (q.payload->>'workId')::uuid\n              AND staged_frontier.chapter_sort_key = q.chapter_sort_key\n              AND staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')\n          )\n          AND (\n            (pub.max_published IS NOT NULL AND q.chapter_sort_key <= pub.max_published + 1.5)\n            OR EXISTS (\n              SELECT 1\n              FROM importer_confirmed_gaps gap\n              WHERE gap.work_id = (q.payload->>'workId')::uuid\n                AND gap.start_sort_key <= COALESCE(pub.max_published + 1, 1)\n                AND gap.end_sort_key >= q.chapter_sort_key - 1\n            )\n            OR (\n              q.chapter_sort_key <= 1.5\n              AND pub.max_published IS NULL\n              AND NOT EXISTS (\n                SELECT 1\n                FROM importer_chapter_mappings predecessor_mapping\n                WHERE predecessor_mapping.work_id = (q.payload->>'workId')::uuid\n                  AND predecessor_mapping.chapter_sort_key < q.chapter_sort_key\n                  AND predecessor_mapping.is_gap = false\n                  AND predecessor_mapping.status NOT IN ('STAGED', 'WAITING_FOR_GAP')\n              )\n            )\n          )";
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9530697Z  export declare function isActiveChapterClaimConflict(error: any): boolean;
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9531128Z  /**
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9531482Z   * Staff requests own the scheduling order, not the resource budget. They are
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9532252Z diff --git a/build/core/scheduler/work-affinity-scheduler.js b/build/core/scheduler/work-affinity-scheduler.js
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9532810Z index f241006..ae093b7 100644
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9533169Z --- a/build/core/scheduler/work-affinity-scheduler.js
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9533594Z +++ b/build/core/scheduler/work-affinity-scheduler.js
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9534045Z @@ -38,7 +38,7 @@ const CANONICAL_PUBLISHED_CLAIM_FILTER = `
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9534526Z  // the same ordering rule, but the direct claim paths must enforce it too:
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9535161Z  // catalog fallback and a racing worker can otherwise bypass admission and
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9535864Z  // claim chapters that publication can never accept yet.
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9556202Z -const CANONICAL_FRONTIER_CLAIM_FILTER = `
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9556942Z +export const CANONICAL_FRONTIER_CLAIM_FILTER = `
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9557452Z            AND NOT EXISTS (
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9557710Z              SELECT 1
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9557989Z              FROM importer_queue predecessor
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9558408Z @@ -1343,7 +1343,7 @@ export class WorkAffinityScheduler {
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9558791Z              AND q.task_type = 'IMPORT_CHAPTER'
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9559175Z              AND q.attempts < COALESCE(q.max_attempts, 7)
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9559937Z            -- Uses idx_importer_queue_fetch; canonical selection remains below.
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9560670Z -          ORDER BY q.created_at ASC NULLS LAST, q.id ASC
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9561206Z +          ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9561631Z            LIMIT $6
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9561852Z          ) candidate
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9562057Z        ),
+check-build	Check for stale build artifacts	2026-10-08T23:06:28.9573168Z ##[error]Process completed with exit code 1.
+check-build	Post Run actions/checkout@v4	﻿2026-10-08T23:06:28.9738977Z Post job cleanup.
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.0670767Z [command]/usr/bin/git version
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.0721194Z git version 2.55.0
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.0770770Z Temporarily overriding HOME='/home/runner/work/_temp/5e14310b-8274-414a-9cf2-1ed042e8c286' before making global git config changes
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.0780849Z Adding repository directory to the temporary git global config as a safe directory
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.0800565Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/project-nox-importer/project-nox-importer
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.0825749Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.0872597Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.1144109Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.1176833Z http.https://github.com/.extraheader
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.1190072Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.1235669Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.1530690Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+check-build	Post Run actions/checkout@v4	2026-10-08T23:06:29.1561062Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+check-build	Complete job	﻿2026-10-08T23:06:29.1964263Z Cleaning up orphan processes
+check-build	Complete job	2026-10-08T23:06:29.2435830Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-node@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
