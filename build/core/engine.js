@@ -5269,7 +5269,19 @@ export class ImporterEngine {
             const tBarrierCheck = Math.round(pubResult.timings?.barrierCheckMs || 0);
             const tPublishUpdate = Math.round(pubResult.timings?.publishUpdateMs || 0);
             const tCascade = Math.round(pubResult.timings?.cascadeMs || 0);
-            this.logger.debug(`[DB_DIAGNOSTIC] ${effectiveSource} ch ${chapterNumber}: db_total=${tDb}ms (cover=${tCoverCheck}ms, ch_upsert=${tChapterUpsert}ms, pages_rpc=${tPagesRpc}ms, stage=${tStage}ms, barrier=${tBarrierCheck}ms, pub_update=${tPublishUpdate}ms, cascade=${tCascade}ms)`);
+            this.logger.info('DB_DIAGNOSTIC', {
+                jobId: job.id,
+                source: effectiveSource,
+                chapterNumber,
+                dbTotalMs: tDb,
+                coverCheckMs: tCoverCheck,
+                chapterUpsertMs: tChapterUpsert,
+                pagesRpcMs: tPagesRpc,
+                stageMs: tStage,
+                barrierCheckMs: tBarrierCheck,
+                publishUpdateMs: tPublishUpdate,
+                cascadeMs: tCascade,
+            });
             const downloadWallTimeMs = Math.max(0, (telemetry.tDownloadEnd || Date.now()) - (telemetry.tDownloadStart || Date.now()));
             const uploadWallTimeMs = Math.max(0, (telemetry.tUploadEnd || Date.now()) - (telemetry.tUploadStart || Date.now()));
             const mediaWallTimeMs = Math.max(0, (telemetry.tUploadEnd || Date.now()) - (telemetry.tDownloadStart || Date.now()));
@@ -5277,7 +5289,15 @@ export class ImporterEngine {
             const overlapRatio = (downloadWallTimeMs > 0 && uploadWallTimeMs > 0)
                 ? Math.min(1.0, Math.round((overlapMs / Math.min(downloadWallTimeMs, uploadWallTimeMs)) * 100) / 100)
                 : 0;
-            this.logger.debug(`[MEDIA_DIAGNOSTIC] ${effectiveSource} ch ${chapterNumber}: media_wall=${mediaWallTimeMs}ms, dl_wall=${downloadWallTimeMs}ms, up_wall=${uploadWallTimeMs}ms, overlap_ratio=${overlapRatio}`);
+            this.logger.info('MEDIA_DIAGNOSTIC', {
+                jobId: job.id,
+                source: effectiveSource,
+                chapterNumber,
+                mediaWallMs: mediaWallTimeMs,
+                downloadWallMs: downloadWallTimeMs,
+                uploadWallMs: uploadWallTimeMs,
+                overlapRatio,
+            });
             // Record fine-grained chapter job metric asynchronously
             void this.recordJobMetric({
                 workerId: this.config.WORKER_ID,

@@ -591,7 +591,11 @@ export class TelemetryCollector {
   public recordChapterMetric(record: ChapterMetricRecord) {
     this.completedChapterCount++;
     this.chapters.push(record);
-    this.logger.debug('CHAPTER_DIAGNOSTIC', record);
+    // This is one bounded summary per completed chapter.  It is intentionally
+    // visible at the production log level: the detailed stage fields are the
+    // evidence needed to distinguish a slow claim, media pipeline, or
+    // publication path without retaining page payloads or changing execution.
+    this.logger.info('CHAPTER_DIAGNOSTIC', record);
   }
 
   // --- Background Sampling ---
