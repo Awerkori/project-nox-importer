@@ -377,6 +377,30 @@ export class WorkCostEstimator {
   }
 }
 
+export type BufferReservationIntent = 'GENERIC' | 'PAGE_INITIAL' | 'COMPLETION';
+
+/**
+ * PAGE_INITIAL reservations may preserve room for one in-flight body to be
+ * promoted to its bounded completion size. COMPLETION is used only by an
+ * already-started page body whose current reservation is insufficient to
+ * reach a safe terminal state. Both intents still debit the same
+ * reservedBufferedBytes counter.
+ */
+export interface BufferReservationRequestOptions {
+  intent?: BufferReservationIntent;
+  completionHeadroomBytes?: number;
+}
+
+type BufferReservationWaiter = {
+  requestedBytes: number;
+  t0: number;
+  signal?: AbortSignal;
+  intent: BufferReservationIntent;
+  completionHeadroomBytes: number;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+};
+
 // RAII Token representing an atomic slice of the memory buffer budget.
 export class BufferReservation {
   private _released = false;
@@ -399,11 +423,15 @@ export class BufferReservation {
     return this._released;
   }
 
-  async upgrade(newBytes: number, signal?: AbortSignal): Promise<void> {
+  async upgrade(
+    newBytes: number,
+    signal?: AbortSignal,
+    options?: BufferReservationRequestOptions,
+  ): Promise<void> {
     if (this._released || this._committed) return;
     if (newBytes <= this._reservedBytes) return;
     const additional = newBytes - this._reservedBytes;
-    await this.autotuner.upgradeReservation(additional, signal);
+    await this.autotuner.upgradeReservation(additional, signal, options);
     this._reservedBytes = newBytes;
   }
 
@@ -432,6 +460,15 @@ export interface PageBufferAdmission {
   reservationWaitMs: number;
 }
 
+export interface PageBufferAdmissionOptions {
+  /**
+   * Reserve logical room for one active page body to reach its bounded
+   * completion reservation. This is an admission predicate, not a second
+   * byte counter.
+   */
+  completionHeadroomBytes?: number;
+}
+
 /**
  * Admit a page pipeline producer without letting page-permit waiters consume
  * the byte budget. The page permit bounds the number of producers that may
@@ -444,6 +481,7 @@ export async function acquirePageBufferAdmission(
   autotuner: AdaptiveAutotuner,
   requestedBytes: number,
   signal?: AbortSignal,
+  options?: PageBufferAdmissionOptions,
 ): Promise<PageBufferAdmission> {
   let releasePagePermit: (() => void) | null = null;
   let reservation: BufferReservation | undefined;
@@ -454,7 +492,12 @@ export async function acquirePageBufferAdmission(
     releasePagePermit = releasePermitOnce(pageSemaphore);
 
     const reservationStart = performance.now();
-    reservation = await autotuner.reserveBufferBudget(requestedBytes, signal);
+    reservation = await autotuner.reserveBufferBudget(requestedBytes, signal, {
+      intent: options?.completionHeadroomBytes && options.completionHeadroomBytes > 0
+        ? 'PAGE_INITIAL'
+        : 'GENERIC',
+      completionHeadroomBytes: options?.completionHeadroomBytes,
+    });
     const reservationWaitMs = performance.now() - reservationStart;
 
     return { reservation, releasePagePermit, pagePermitWaitMs, reservationWaitMs };
@@ -506,13 +549,7 @@ export class AdaptiveAutotuner {
   private activeBufferedBytes = 0;
   private reservedBufferedBytes = 0;
   private maxCommittedBytesObserved = 0;
-  private reservationWaiters: Array<{
-    requestedBytes: number;
-    t0: number;
-    signal?: AbortSignal;
-    resolve: (reservation: BufferReservation) => void;
-    reject: (err: any) => void;
-  }> = [];
+  private reservationWaiters: BufferReservationWaiter[] = [];
 
   // Window error counters
   private cycleErrors = 0;
@@ -771,13 +808,36 @@ export class AdaptiveAutotuner {
     return true;
   }
 
+  private canAdmitReservationWithIntent(
+    requestedBytes: number,
+    intent: BufferReservationIntent,
+    completionHeadroomBytes: number,
+  ): boolean {
+    if (!this.canAdmitReservation(requestedBytes)) return false;
+    if (intent !== 'PAGE_INITIAL' || completionHeadroomBytes <= 0) return true;
+
+    // Do not count this headroom separately. It is simply capacity that a
+    // speculative 2 MiB page admission is not allowed to consume, so one
+    // already-started body can later make a bounded, terminal reservation.
+    const totalCommitted = this.activeBufferedBytes + this.reservedBufferedBytes;
+    return totalCommitted + requestedBytes + completionHeadroomBytes <= this.config.maxBufferedBytes;
+  }
+
   async reserveBufferBudget(
     requestedBytes: number = 2 * 1024 * 1024,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: BufferReservationRequestOptions,
   ): Promise<BufferReservation> {
     signal?.throwIfAborted();
+    const intent = options?.intent || 'GENERIC';
+    const completionHeadroomBytes = intent === 'PAGE_INITIAL'
+      ? Math.max(0, options?.completionHeadroomBytes || 0)
+      : 0;
 
-    if (this.reservationWaiters.length === 0 && this.canAdmitReservation(requestedBytes)) {
+    if (
+      this.reservationWaiters.length === 0
+      && this.canAdmitReservationWithIntent(requestedBytes, intent, completionHeadroomBytes)
+    ) {
       this.reservedBufferedBytes += requestedBytes;
       this.updateMaxCommittedObserved();
       return new BufferReservation(this, requestedBytes);
@@ -787,11 +847,13 @@ export class AdaptiveAutotuner {
     return new Promise<BufferReservation>((resolve, reject) => {
       let intervalTimer: NodeJS.Timeout | null = null;
 
-      const waiter = {
+      const waiter: BufferReservationWaiter = {
         requestedBytes,
         t0,
         signal,
-        resolve: (reservation: BufferReservation) => {
+        intent,
+        completionHeadroomBytes,
+        resolve: () => {
           cleanup();
           const waitedMs = performance.now() - t0;
           telemetryCollector.recordLimiterWait('memory_backpressure', waitedMs, this.config.maxBufferedBytes);
@@ -800,9 +862,9 @@ export class AdaptiveAutotuner {
               `[Memory Backpressure] Admitted after ${Math.round(waitedMs)}ms wait (Active: ${Math.round(this.activeBufferedBytes / 1024 / 1024)}MB, Reserved: ${Math.round(this.reservedBufferedBytes / 1024 / 1024)}MB, RSS: ${diagnostics.getMemorySnapshot().rssMb}MB)`
             );
           }
-          resolve(reservation);
+          resolve(new BufferReservation(this, requestedBytes));
         },
-        reject: (err: any) => {
+        reject: (err: unknown) => {
           cleanup();
           reject(err);
         },
@@ -829,11 +891,19 @@ export class AdaptiveAutotuner {
     });
   }
 
-  async upgradeReservation(additionalBytes: number, signal?: AbortSignal): Promise<void> {
+  async upgradeReservation(
+    additionalBytes: number,
+    signal?: AbortSignal,
+    options?: BufferReservationRequestOptions,
+  ): Promise<void> {
     if (additionalBytes <= 0) return;
     signal?.throwIfAborted();
+    const intent = options?.intent || 'GENERIC';
 
-    if (this.reservationWaiters.length === 0 && this.canAdmitReservation(additionalBytes)) {
+    if (
+      this.reservationWaiters.length === 0
+      && this.canAdmitReservationWithIntent(additionalBytes, intent, 0)
+    ) {
       this.reservedBufferedBytes += additionalBytes;
       this.updateMaxCommittedObserved();
       return;
@@ -842,15 +912,17 @@ export class AdaptiveAutotuner {
     const t0 = performance.now();
     return new Promise<void>((resolve, reject) => {
       let intervalTimer: NodeJS.Timeout | null = null;
-      const waiter = {
+      const waiter: BufferReservationWaiter = {
         requestedBytes: additionalBytes,
         t0,
         signal,
+        intent,
+        completionHeadroomBytes: 0,
         resolve: () => {
           cleanup();
           resolve();
         },
-        reject: (err: any) => {
+        reject: (err: unknown) => {
           cleanup();
           reject(err);
         },
@@ -859,7 +931,7 @@ export class AdaptiveAutotuner {
       const cleanup = () => {
         if (intervalTimer) clearInterval(intervalTimer);
         signal?.removeEventListener('abort', onAbort);
-        const idx = this.reservationWaiters.indexOf(waiter as any);
+        const idx = this.reservationWaiters.indexOf(waiter);
         if (idx >= 0) this.reservationWaiters.splice(idx, 1);
       };
 
@@ -869,7 +941,7 @@ export class AdaptiveAutotuner {
       };
 
       signal?.addEventListener('abort', onAbort, { once: true });
-      this.reservationWaiters.push(waiter as any);
+      this.reservationWaiters.push(waiter);
 
       intervalTimer = setInterval(() => {
         this.drainReservationWaiters();
@@ -902,17 +974,51 @@ export class AdaptiveAutotuner {
 
   private drainReservationWaiters(): void {
     while (this.reservationWaiters.length > 0) {
-      const next = this.reservationWaiters[0];
-      if (this.canAdmitReservation(next.requestedBytes)) {
-        this.reservationWaiters.shift();
-        this.reservedBufferedBytes += next.requestedBytes;
-        this.updateMaxCommittedObserved();
-        const reservation = new BufferReservation(this, next.requestedBytes);
-        next.resolve(reservation);
-      } else {
-        break;
-      }
+      const nextIndex = this.getNextAdmissibleReservationWaiterIndex();
+      if (nextIndex < 0) break;
+
+      const [next] = this.reservationWaiters.splice(nextIndex, 1);
+      this.reservedBufferedBytes += next.requestedBytes;
+      this.updateMaxCommittedObserved();
+      next.resolve();
     }
+  }
+
+  private getNextAdmissibleReservationWaiterIndex(): number {
+    const first = this.reservationWaiters[0];
+    if (!first) return -1;
+    if (this.canAdmitReservationWithIntent(
+      first.requestedBytes,
+      first.intent,
+      first.completionHeadroomBytes,
+    )) {
+      return 0;
+    }
+
+    // A speculative page admission that cannot fit while retaining completion
+    // headroom must not trap an already-started body behind it. Only skip a
+    // contiguous prefix of PAGE_INITIAL waiters, and preserve FIFO within both
+    // initial admissions and completion promotions.
+    if (first.intent !== 'PAGE_INITIAL') return -1;
+    let completionIndex = 1;
+    while (
+      completionIndex < this.reservationWaiters.length
+      && this.reservationWaiters[completionIndex].intent === 'PAGE_INITIAL'
+    ) {
+      completionIndex++;
+    }
+    const completion = this.reservationWaiters[completionIndex];
+    if (
+      completion?.intent === 'COMPLETION'
+      && this.canAdmitReservationWithIntent(
+        completion.requestedBytes,
+        completion.intent,
+        completion.completionHeadroomBytes,
+      )
+    ) {
+      return completionIndex;
+    }
+    return -1;
   }
 
   trackBufferedBytes(bytes: number): void {

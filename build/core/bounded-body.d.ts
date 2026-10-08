@@ -18,7 +18,7 @@ export interface ReadImageBodyOptions {
             elapsedMs: number;
         }) => void;
         onReservationUpgrade?: (metrics: {
-            phase: 'HEADER' | 'STREAM';
+            phase: 'HEADER' | 'STREAM' | 'COMPLETION';
             state: 'STARTED' | 'COMPLETED';
             fromBytes: number;
             toBytes: number;
@@ -33,4 +33,5 @@ export interface ReadImageBodyOptions {
         }) => void;
     };
 }
+export declare const MAX_IMAGE_BODY_BYTES: number;
 export declare function readImageBody(response: Response, optionsOrMaxBytes?: number | ReadImageBodyOptions): Promise<Uint8Array>;

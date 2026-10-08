@@ -125,6 +125,18 @@ export interface AutotunerEvaluationContext {
 export declare class WorkCostEstimator {
     static estimateCost(pageCount?: number | null, historicalBytes?: number | null): number;
 }
+export type BufferReservationIntent = 'GENERIC' | 'PAGE_INITIAL' | 'COMPLETION';
+/**
+ * PAGE_INITIAL reservations may preserve room for one in-flight body to be
+ * promoted to its bounded completion size. COMPLETION is used only by an
+ * already-started page body whose current reservation is insufficient to
+ * reach a safe terminal state. Both intents still debit the same
+ * reservedBufferedBytes counter.
+ */
+export interface BufferReservationRequestOptions {
+    intent?: BufferReservationIntent;
+    completionHeadroomBytes?: number;
+}
 export declare class BufferReservation {
     private autotuner;
     private _reservedBytes;
@@ -134,7 +146,7 @@ export declare class BufferReservation {
     get reservedBytes(): number;
     get isCommitted(): boolean;
     get isReleased(): boolean;
-    upgrade(newBytes: number, signal?: AbortSignal): Promise<void>;
+    upgrade(newBytes: number, signal?: AbortSignal, options?: BufferReservationRequestOptions): Promise<void>;
     commit(actualBytes: number): void;
     release(): void;
 }
@@ -144,6 +156,14 @@ export interface PageBufferAdmission {
     pagePermitWaitMs: number;
     reservationWaitMs: number;
 }
+export interface PageBufferAdmissionOptions {
+    /**
+     * Reserve logical room for one active page body to reach its bounded
+     * completion reservation. This is an admission predicate, not a second
+     * byte counter.
+     */
+    completionHeadroomBytes?: number;
+}
 /**
  * Admit a page pipeline producer without letting page-permit waiters consume
  * the byte budget. The page permit bounds the number of producers that may
@@ -151,7 +171,7 @@ export interface PageBufferAdmission {
  * byte ceiling and streaming upgrades. If byte admission is aborted after a
  * page permit was acquired, both resources are returned immediately.
  */
-export declare function acquirePageBufferAdmission(pageSemaphore: AsyncSemaphore, autotuner: AdaptiveAutotuner, requestedBytes: number, signal?: AbortSignal): Promise<PageBufferAdmission>;
+export declare function acquirePageBufferAdmission(pageSemaphore: AsyncSemaphore, autotuner: AdaptiveAutotuner, requestedBytes: number, signal?: AbortSignal, options?: PageBufferAdmissionOptions): Promise<PageBufferAdmission>;
 /**
  * AdaptiveAutotuner: The SINGLE Authority for Global Chapter Concurrency.
  * INVARIANT: GLOBAL_CONCURRENCY_WRITERS = 1.
@@ -206,12 +226,14 @@ export declare class AdaptiveAutotuner {
     getEmaRate(): number;
     getThroughputTelemetry(context?: AutotunerEvaluationContext): ThroughputTelemetry;
     canAdmitReservation(requestedBytes: number): boolean;
-    reserveBufferBudget(requestedBytes?: number, signal?: AbortSignal): Promise<BufferReservation>;
-    upgradeReservation(additionalBytes: number, signal?: AbortSignal): Promise<void>;
+    private canAdmitReservationWithIntent;
+    reserveBufferBudget(requestedBytes?: number, signal?: AbortSignal, options?: BufferReservationRequestOptions): Promise<BufferReservation>;
+    upgradeReservation(additionalBytes: number, signal?: AbortSignal, options?: BufferReservationRequestOptions): Promise<void>;
     commitReservation(reservedBytes: number, actualBytes: number): void;
     releaseReservation(reservedBytes: number): void;
     releaseActiveBufferedBytes(actualBytes: number): void;
     private drainReservationWaiters;
+    private getNextAdmissibleReservationWaiterIndex;
     trackBufferedBytes(bytes: number): void;
     releaseBufferedBytes(bytes: number): void;
     getBufferedBytes(): number;

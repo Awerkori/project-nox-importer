@@ -7,7 +7,7 @@ import { CheckpointManager } from './checkpoint.js';
 import { processAndStoreMedia } from '../storage/media.js';
 import { Logger } from './logger.js';
 import { withSourceChapterPermits } from './concurrency.js';
-import { readImageBody } from './bounded-body.js';
+import { MAX_IMAGE_BODY_BYTES, readImageBody } from './bounded-body.js';
 import { diagnostics } from './diagnostics.js';
 import { acquirePageBufferAdmission, AdaptiveAutotuner, AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS, resolveChapterUploadConcurrency } from './concurrency.js';
 import { PublicationBarrier } from './publication.js';
@@ -28,6 +28,8 @@ import { performance } from 'node:perf_hooks';
 import { randomUUID } from 'node:crypto';
 export { computeCanonicalChapterKey };
 const DEFAULT_MAX_BUFFERED_BYTES = 64 * 1024 * 1024;
+const INITIAL_PAGE_BUFFER_RESERVATION_BYTES = 2 * 1024 * 1024;
+const PAGE_COMPLETION_HEADROOM_BYTES = MAX_IMAGE_BODY_BYTES - INITIAL_PAGE_BUFFER_RESERVATION_BYTES;
 const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
 const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
@@ -4581,7 +4583,7 @@ export class ImporterEngine {
                                     // permit first bounds outstanding reservations to actual page
                                     // pipeline capacity, while the byte reservation remains the
                                     // authoritative hard memory ceiling.
-                                    const admission = await acquirePageBufferAdmission(bufferedPageSemaphore, this.autotuner, 2.0 * 1024 * 1024, pipelineSignal);
+                                    const admission = await acquirePageBufferAdmission(bufferedPageSemaphore, this.autotuner, INITIAL_PAGE_BUFFER_RESERVATION_BYTES, pipelineSignal, { completionHeadroomBytes: PAGE_COMPLETION_HEADROOM_BYTES });
                                     reservation = admission.reservation;
                                     chBufferReservationWaitMs += admission.reservationWaitMs;
                                     if (admission.reservationWaitMs >= 1)
@@ -4729,7 +4731,10 @@ export class ImporterEngine {
                                                     reservationTrace?.emit('PAGE_RESERVATION_REACQUIRE_WAIT_STARTED', {
                                                         producerAttempt: attempts + 1,
                                                     });
-                                                    reservation = await this.autotuner.reserveBufferBudget(2.0 * 1024 * 1024, pipelineSignal);
+                                                    reservation = await this.autotuner.reserveBufferBudget(INITIAL_PAGE_BUFFER_RESERVATION_BYTES, pipelineSignal, {
+                                                        intent: 'PAGE_INITIAL',
+                                                        completionHeadroomBytes: PAGE_COMPLETION_HEADROOM_BYTES,
+                                                    });
                                                     reservationTrace?.emit('PAGE_RESERVATION_REACQUIRED', {
                                                         reservationBytes: reservation.reservedBytes,
                                                         producerAttempt: attempts + 1,
@@ -5673,7 +5678,7 @@ export class ImporterEngine {
                     if (bridgeLenStr) {
                         const bridgeBytes = parseInt(bridgeLenStr, 10);
                         if (!Number.isNaN(bridgeBytes)) {
-                            if (bridgeBytes > 20 * 1024 * 1024) {
+                            if (bridgeBytes > MAX_IMAGE_BODY_BYTES) {
                                 await bridgeRes.body?.cancel().catch(() => { });
                                 throw new InvalidMediaError(url, `Bridge image declared content-length exceeds 20MB limit`);
                             }
@@ -5684,7 +5689,7 @@ export class ImporterEngine {
                                     elapsedMs: Date.now() - bridgeRequestStartedAt,
                                 });
                                 try {
-                                    await options.reservation.upgrade(bridgeBytes, bridgeSignal);
+                                    await options.reservation.upgrade(bridgeBytes, bridgeSignal, { intent: 'COMPLETION' });
                                     emitTrace('DOWNLOAD_BRIDGE_RESERVATION_UPGRADE_COMPLETED', {
                                         reservedBytes: options.reservation.reservedBytes,
                                         elapsedMs: Date.now() - bridgeRequestStartedAt,
@@ -5769,7 +5774,7 @@ export class ImporterEngine {
         if (declaredLengthStr) {
             const declaredBytes = parseInt(declaredLengthStr, 10);
             if (!Number.isNaN(declaredBytes)) {
-                if (declaredBytes > 20 * 1024 * 1024) {
+                if (declaredBytes > MAX_IMAGE_BODY_BYTES) {
                     await res.body?.cancel().catch(() => { });
                     throw new InvalidMediaError(url, `Image declared content-length (${Math.round(declaredBytes / 1024 / 1024)}MB) exceeds maximum safe limit of 20MB`);
                 }
@@ -5780,7 +5785,7 @@ export class ImporterEngine {
                         elapsedMs: Date.now() - requestStartedAt,
                     });
                     try {
-                        await options.reservation.upgrade(declaredBytes, responseSignal || options?.signal);
+                        await options.reservation.upgrade(declaredBytes, responseSignal || options?.signal, { intent: 'COMPLETION' });
                         emitTrace('DOWNLOAD_REQUEST_RESERVATION_UPGRADE_COMPLETED', {
                             reservedBytes: options.reservation.reservedBytes,
                             elapsedMs: Date.now() - requestStartedAt,
