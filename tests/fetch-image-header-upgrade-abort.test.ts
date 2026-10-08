@@ -148,6 +148,10 @@ describe('header reservation upgrade cancellation', () => {
       'DOWNLOAD_BRIDGE_REQUEST_FIRST_BODY_CHUNK',
       'DOWNLOAD_BRIDGE_REQUEST_BODY_COMPLETED',
     ]);
-    expect(reservation.upgrade).toHaveBeenCalledWith(3 * 1024 * 1024, expect.any(AbortSignal));
+    expect(reservation.upgrade).toHaveBeenCalledWith(
+      3 * 1024 * 1024,
+      expect.any(AbortSignal),
+      { intent: 'COMPLETION' },
+    );
   });
 });

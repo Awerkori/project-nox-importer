@@ -153,125 +153,163 @@ describe('Atomic Buffer Reservation & Streaming Backpressure', () => {
     }
   });
 
-  // A) NO CONTENT-LENGTH: MAX=10MB, ACTIVE=4MB, RESERVATION=2MB, body=5MB. Dynamic upgrades prevent committed > 10MB.
-  it('A) NO CONTENT-LENGTH: dynamic upgrades prevent committed > 10MB during 5MB chunked read', async () => {
-    const maxBudget = 10 * 1024 * 1024; // 10 MB
-    const autotuner = new AdaptiveAutotuner({
-      maxBufferedBytes: maxBudget,
-      rssSoftLimitMb: 330,
-    });
+  it('completion-aware admission drains four unknown 10MB bodies within a 40MB budget', async () => {
+    const mib = 1024 * 1024;
+    const maxBudget = 40 * mib;
+    const initialBytes = 2 * mib;
+    const autotuner = new AdaptiveAutotuner({ maxBufferedBytes: maxBudget, rssSoftLimitMb: 330 });
+    const pageSemaphore = new AsyncSemaphore(12, 'completion_aware_page_permit');
+    const admissions = await Promise.all(Array.from({ length: 4 }, () => acquirePageBufferAdmission(
+      pageSemaphore,
+      autotuner,
+      initialBytes,
+      undefined,
+      { completionHeadroomBytes: 20 * mib - initialBytes },
+    )));
 
-    // 4 MB active already in use
-    const initialActive = 4 * 1024 * 1024;
-    autotuner.trackBufferedBytes(initialActive);
-
-    // Initial reservation of 2 MB -> Committed = 6 MB
-    const reservation = await autotuner.reserveBufferBudget(2 * 1024 * 1024);
-    expect(reservation.reservedBytes).toBe(2 * 1024 * 1024);
-    expect(autotuner.getCommittedBytes()).toBe(6 * 1024 * 1024);
-
-    // 5 MB body sent in 5 x 1 MB chunks without Content-Length
-    const { stream } = createChunkedStream(1 * 1024 * 1024, 5);
-    const response = new Response(stream); // Response has no content-length header
-    expect(response.headers.get('content-length')).toBeNull();
-
-    const bodyPromise = readImageBody(response, { reservation });
-    const body = await bodyPromise;
-
-    expect(body.byteLength).toBe(5 * 1024 * 1024);
-    // Reservation was dynamically upgraded from 2 MB to 5 MB
-    expect(reservation.reservedBytes).toBe(5 * 1024 * 1024);
-    expect(autotuner.getReservedBytes()).toBe(5 * 1024 * 1024);
-    // Total committed: 4 MB active + 5 MB reserved = 9 MB <= 10 MB maxBudget
-    expect(autotuner.getCommittedBytes()).toBe(9 * 1024 * 1024);
-    expect(autotuner.getMaxCommittedBytesObserved()).toBeLessThanOrEqual(maxBudget);
-
-    // Commit actual bytes: reserved drops to 0, active rises by 5MB (total 9MB committed)
-    reservation.commit(body.byteLength);
-    expect(reservation.isCommitted).toBe(true);
-    expect(autotuner.getReservedBytes()).toBe(0);
-    expect(autotuner.getBufferedBytes()).toBe(9 * 1024 * 1024);
-    expect(autotuner.getCommittedBytes()).toBe(9 * 1024 * 1024);
-    expect(autotuner.getMaxCommittedBytesObserved()).toBeLessThanOrEqual(maxBudget);
-
-    // Cleanup
-    autotuner.releaseActiveBufferedBytes(body.byteLength);
-    autotuner.releaseActiveBufferedBytes(initialActive);
-  });
-
-  // B) UNDERREPORTED CONTENT-LENGTH: header declared 2MB, body 6MB. Dynamic incremental upgrade.
-  it('B) UNDERREPORTED CONTENT-LENGTH: detects growth past 2MB header and reserves budget incrementally', async () => {
-    const maxBudget = 10 * 1024 * 1024; // 10 MB
-    const autotuner = new AdaptiveAutotuner({
-      maxBufferedBytes: maxBudget,
-      rssSoftLimitMb: 330,
-    });
-
-    const reservation = await autotuner.reserveBufferBudget(2 * 1024 * 1024);
-
-    // Response header falsely claims 2 MB, but body actually delivers 6 MB
-    const { stream } = createChunkedStream(1 * 1024 * 1024, 6);
-    const response = new Response(stream, {
-      headers: { 'content-length': String(2 * 1024 * 1024) },
-    });
-
-    const body = await readImageBody(response, { reservation });
-    expect(body.byteLength).toBe(6 * 1024 * 1024);
-    expect(reservation.reservedBytes).toBe(6 * 1024 * 1024);
-    expect(autotuner.getCommittedBytes()).toBe(6 * 1024 * 1024);
-    expect(autotuner.getMaxCommittedBytesObserved()).toBeLessThanOrEqual(maxBudget);
-
-    // Commit actual bytes succeeds with invariant check
-    reservation.commit(body.byteLength);
-    expect(autotuner.getBufferedBytes()).toBe(6 * 1024 * 1024);
-    autotuner.releaseActiveBufferedBytes(body.byteLength);
-  });
-
-  // C) MULTIPLE CHUNKED STREAMS: concurrent chunked streams never exceed MAX_BUFFERED_BYTES.
-  it('C) MULTIPLE CHUNKED STREAMS: concurrent chunked streams apply backpressure and never exceed max budget', async () => {
-    const maxBudget = 6 * 1024 * 1024; // 6 MB limit
-    const autotuner = new AdaptiveAutotuner({
-      maxBufferedBytes: maxBudget,
-      rssSoftLimitMb: 330,
-    });
-
-    // 3 concurrent chunked streams without Content-Length:
-    // Stream 1 = 1 MB (2 x 512KB)
-    // Stream 2 = 2 MB (4 x 512KB)
-    // Stream 3 = 4.5 MB (9 x 512KB)
-    // Total = 7.5 MB (exceeds 6 MB maxBudget)
-    const stream1 = createChunkedStream(512 * 1024, 2, 2);
-    const stream2 = createChunkedStream(512 * 1024, 4, 3);
-    const stream3 = createChunkedStream(512 * 1024, 9, 2);
-
-    let maxCommittedObserved = 0;
-    const interval = setInterval(() => {
-      const c = autotuner.getCommittedBytes();
-      if (c > maxCommittedObserved) maxCommittedObserved = c;
-    }, 1);
-
-    const runStream = async (s: { stream: ReadableStream<Uint8Array> }, initialReservation: number) => {
-      const reservation = await autotuner.reserveBufferBudget(initialReservation);
-      const res = new Response(s.stream);
-      const body = await readImageBody(res, { reservation });
-      reservation.commit(body.byteLength);
-      // Simulate post-commit pipeline processing before release
-      await new Promise((r) => setTimeout(r, 10));
+    const runBody = async (admission: Awaited<ReturnType<typeof acquirePageBufferAdmission>>) => {
+      const { stream } = createChunkedStream(mib, 10);
+      const body = await readImageBody(new Response(stream), { reservation: admission.reservation });
+      admission.reservation.commit(body.byteLength);
       autotuner.releaseActiveBufferedBytes(body.byteLength);
+      admission.releasePagePermit();
       return body.byteLength;
     };
 
-    // Run Stream 1 and 2, and start Stream 3 concurrently
-    const p1 = runStream(stream1, 1 * 1024 * 1024);
-    const p2 = runStream(stream2, 1 * 1024 * 1024);
-    const p3 = runStream(stream3, 1 * 1024 * 1024);
-
-    const results = await Promise.all([p1, p2, p3]);
-    clearInterval(interval);
-
-    expect(results).toEqual([1 * 1024 * 1024, 2 * 1024 * 1024, 4.5 * 1024 * 1024]);
-    expect(maxCommittedObserved).toBeLessThanOrEqual(maxBudget);
+    await expect(Promise.all(admissions.map(runBody))).resolves.toEqual([10 * mib, 10 * mib, 10 * mib, 10 * mib]);
     expect(autotuner.getMaxCommittedBytesObserved()).toBeLessThanOrEqual(maxBudget);
+    expect(autotuner.getCommittedBytes()).toBe(0);
+  });
+
+  it('does not let a twelfth speculative admission block a completion promotion', async () => {
+    const mib = 1024 * 1024;
+    const maxBudget = 40 * mib;
+    const initialBytes = 2 * mib;
+    const autotuner = new AdaptiveAutotuner({ maxBufferedBytes: maxBudget, rssSoftLimitMb: 330 });
+    const pageSemaphore = new AsyncSemaphore(12, 'completion_headroom_page_permit');
+    const options = { completionHeadroomBytes: 20 * mib - initialBytes };
+    const admissions = await Promise.all(Array.from({ length: 11 }, () => acquirePageBufferAdmission(
+      pageSemaphore, autotuner, initialBytes, undefined, options,
+    )));
+    let twelfthResolved = false;
+    const twelfth = acquirePageBufferAdmission(pageSemaphore, autotuner, initialBytes, undefined, options)
+      .then((admission) => {
+        twelfthResolved = true;
+        return admission;
+      });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(twelfthResolved).toBe(false);
+
+    const { stream } = createChunkedStream(mib, 10);
+    const body = await readImageBody(new Response(stream), { reservation: admissions[0].reservation });
+    admissions[0].reservation.commit(body.byteLength);
+    autotuner.releaseActiveBufferedBytes(body.byteLength);
+    admissions[0].releasePagePermit();
+
+    const twelfthAdmission = await twelfth;
+    expect(twelfthResolved).toBe(true);
+    expect(autotuner.getMaxCommittedBytesObserved()).toBeLessThanOrEqual(maxBudget);
+
+    for (const admission of admissions.slice(1)) {
+      admission.reservation.release();
+      admission.releasePagePermit();
+    }
+    twelfthAdmission.reservation.release();
+    twelfthAdmission.releasePagePermit();
+    expect(autotuner.getCommittedBytes()).toBe(0);
+  });
+
+  it('preserves FIFO fairness by admitting an initial waiter when its headroom fits before the next completion promotion', async () => {
+    const mib = 1024 * 1024;
+    const autotuner = new AdaptiveAutotuner({ maxBufferedBytes: 40 * mib, rssSoftLimitMb: 330 });
+    const pageSemaphore = new AsyncSemaphore(12, 'completion_fairness_page_permit');
+    const options = { completionHeadroomBytes: 18 * mib };
+    const admissions = await Promise.all(Array.from({ length: 11 }, () => acquirePageBufferAdmission(
+      pageSemaphore, autotuner, 2 * mib, undefined, options,
+    )));
+    const grantOrder: string[] = [];
+    const twelfth = acquirePageBufferAdmission(pageSemaphore, autotuner, 2 * mib, undefined, options)
+      .then((admission) => {
+        grantOrder.push('initial');
+        return admission;
+      });
+
+    await admissions[0].reservation.upgrade(20 * mib, undefined, { intent: 'COMPLETION' });
+    const nextCompletion = admissions[1].reservation.upgrade(20 * mib, undefined, { intent: 'COMPLETION' })
+      .then(() => grantOrder.push('completion'));
+
+    admissions[0].reservation.commit(10 * mib);
+    autotuner.releaseActiveBufferedBytes(10 * mib);
+    const twelfthAdmission = await twelfth;
+    await nextCompletion;
+
+    expect(grantOrder).toEqual(['initial', 'completion']);
+    expect(autotuner.getMaxCommittedBytesObserved()).toBeLessThanOrEqual(40 * mib);
+
+    for (const admission of admissions) {
+      if (!admission.reservation.isReleased && !admission.reservation.isCommitted) admission.reservation.release();
+      admission.releasePagePermit();
+    }
+    twelfthAdmission.reservation.release();
+    twelfthAdmission.releasePagePermit();
+    expect(autotuner.getCommittedBytes()).toBe(0);
+  });
+
+  it('keeps valid Content-Length reservations exact and promotes underreported bodies to completion capacity', async () => {
+    const mib = 1024 * 1024;
+    const autotuner = new AdaptiveAutotuner({ maxBufferedBytes: 40 * mib, rssSoftLimitMb: 330 });
+    const pageSemaphore = new AsyncSemaphore(12, 'declared_length_page_permit');
+    const options = { completionHeadroomBytes: 18 * mib };
+
+    const declared = await acquirePageBufferAdmission(pageSemaphore, autotuner, 2 * mib, undefined, options);
+    const declaredBody = await readImageBody(new Response(createChunkedStream(mib, 5).stream, {
+      headers: { 'content-length': String(5 * mib) },
+    }), { reservation: declared.reservation });
+    expect(declared.reservation.reservedBytes).toBe(5 * mib);
+    declared.reservation.commit(declaredBody.byteLength);
+    autotuner.releaseActiveBufferedBytes(declaredBody.byteLength);
+    declared.releasePagePermit();
+
+    const underreported = await acquirePageBufferAdmission(pageSemaphore, autotuner, 2 * mib, undefined, options);
+    const underreportedBody = await readImageBody(new Response(createChunkedStream(mib, 6).stream, {
+      headers: { 'content-length': String(2 * mib) },
+    }), { reservation: underreported.reservation });
+    expect(underreported.reservation.reservedBytes).toBe(20 * mib);
+    underreported.reservation.commit(underreportedBody.byteLength);
+    autotuner.releaseActiveBufferedBytes(underreportedBody.byteLength);
+    underreported.releasePagePermit();
+
+    expect(autotuner.getMaxCommittedBytesObserved()).toBeLessThanOrEqual(40 * mib);
+    expect(autotuner.getCommittedBytes()).toBe(0);
+  });
+
+  it('aborts an unknown body while waiting for completion promotion and releases its reservation', async () => {
+    const mib = 1024 * 1024;
+    const autotuner = new AdaptiveAutotuner({ maxBufferedBytes: 40 * mib, rssSoftLimitMb: 330 });
+    const pageSemaphore = new AsyncSemaphore(12, 'completion_abort_page_permit');
+    const options = { completionHeadroomBytes: 18 * mib };
+    const admissions = await Promise.all(Array.from({ length: 11 }, () => acquirePageBufferAdmission(
+      pageSemaphore, autotuner, 2 * mib, undefined, options,
+    )));
+
+    await admissions[0].reservation.upgrade(20 * mib, undefined, { intent: 'COMPLETION' });
+    const abort = new AbortController();
+    let cancelled = false;
+    const pending = readImageBody(new Response(new ReadableStream<Uint8Array>({
+      cancel() { cancelled = true; },
+    })), { reservation: admissions[1].reservation, signal: abort.signal });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    abort.abort(new Error('test completion abort'));
+    await expect(pending).rejects.toThrow('test completion abort');
+    expect(cancelled).toBe(true);
+    expect(admissions[1].reservation.isReleased).toBe(true);
+
+    for (const admission of admissions) {
+      if (!admission.reservation.isReleased && !admission.reservation.isCommitted) admission.reservation.release();
+      admission.releasePagePermit();
+    }
     expect(autotuner.getCommittedBytes()).toBe(0);
   });
 
