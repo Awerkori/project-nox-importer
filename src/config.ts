@@ -38,7 +38,7 @@ const ConfigSchema = z.object({
   IMPORTER_USER_ID: z.string().uuid().optional(),
   WORKER_ID: z.string().min(1).default(() => `nox-worker-${process.pid}-${Math.random().toString(36).slice(2, 7)}`),
   POLL_INTERVAL_SECONDS: z.coerce.number().int().min(5).default(60),
-  QUEUE_LEASE_DURATION_SECONDS: z.coerce.number().int().min(30).default(300),
+  QUEUE_LEASE_DURATION_SECONDS: z.coerce.number().int().min(30).default(600),
   QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
   MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(128).default(10),
   ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(3),

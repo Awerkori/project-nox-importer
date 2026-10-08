@@ -3343,7 +3343,7 @@ export class ImporterEngine {
     // Dynamic soft deadline: scales with page count if available, with a minimum of 2.5 minutes and maximum of 4 minutes.
     const pageCountHint = typeof job.payload?.pageCount === 'number' ? job.payload.pageCount : (job.progress_total || 40);
     const maxJobDurationMs = job.task_type === 'IMPORT_CHAPTER'
-      ? Math.min(4 * 60 * 1000, Math.max(150 * 1000, pageCountHint * 4 * 1000))
+      ? Math.min(8 * 60 * 1000, Math.max(150 * 1000, pageCountHint * 4 * 1000))
       : 3 * 60 * 1000;
     let jobTimeoutTimer: NodeJS.Timeout | null = null;
     // This is deliberately a *soft* deadline.  Aborting the signal asks every
