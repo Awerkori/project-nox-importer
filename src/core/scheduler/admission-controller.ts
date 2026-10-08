@@ -1391,91 +1391,20 @@ export class AdmissionController {
                s.blocked_reason AS source_blocked_reason, s.blocked_details AS source_blocked_details
         FROM unnest($1::text[], $2::text[]) AS w(work_id, source)
         CROSS JOIN LATERAL (
+          SELECT COUNT(*) AS pub_cnt, COALESCE(MAX(number),-1) AS max_pub
+          FROM chapters WHERE work_id=w.work_id::uuid AND published_at IS NOT NULL
+        ) p
+        CROSS JOIN LATERAL (
           SELECT COUNT(*) FILTER (WHERE q.status='QUEUED' AND q.attempts < COALESCE(q.max_attempts,7)) AS queued_cnt,
             COUNT(*) FILTER (WHERE q.status='IMPORTING') AS importing_cnt,
             COUNT(*) FILTER (WHERE q.status='PAUSED_BY_STAFF') AS paused_cnt,
             COUNT(*) FILTER (WHERE q.status='RETRY' AND q.attempts < COALESCE(q.max_attempts,7)) AS retry_cnt,
             MIN(q.chapter_sort_key) FILTER (WHERE q.status='QUEUED' AND q.attempts < COALESCE(q.max_attempts,7)) AS min_queued,
-            MIN(q.chapter_sort_key) FILTER (WHERE q.status IN ('QUEUED','RETRY','PAUSED_BY_STAFF') AND q.attempts < COALESCE(q.max_attempts,7)) AS min_sort_key,
-            CASE WHEN EXISTS (
-              -- This is only a zero/non-zero signal used to rotate an active
-              -- work.  The former COUNT(*) FILTER evaluated every queue row
-              -- and repeatedly held a pool connection for seconds.  EXISTS
-              -- preserves the exact frontier predicates but stops at the
-              -- first executable chapter.
-              SELECT 1
-              FROM importer_queue candidate
-              JOIN importer_sources s_candidate ON s_candidate.id = candidate.source
-              LEFT JOIN LATERAL (
-                SELECT MAX(c.number) AS max_published
-                FROM chapters c
-                WHERE c.work_id = w.work_id::uuid
-                  AND c.published_at IS NOT NULL
-              ) candidate_pub ON TRUE
-              WHERE candidate.task_type = 'IMPORT_CHAPTER'
-                AND candidate.payload->>'workId' = w.work_id
-                AND (candidate.status='QUEUED' OR (candidate.status='RETRY' AND candidate.next_run_at <= NOW()))
-                AND candidate.attempts < COALESCE(candidate.max_attempts,7)
-                AND s_candidate.enabled = true
-                AND (
-                  (s_candidate.status = 'ACTIVE' AND (s_candidate.blocked_reason IS NULL OR s_candidate.blocked_details->>'probe_success' = 'true' OR s_candidate.blocked_details->>'recovered_at' IS NOT NULL))
-                  OR (s_candidate.status IN ('COOLDOWN','PROBING','DEGRADED') AND (s_candidate.blocked_reason IS NULL OR s_candidate.blocked_details->>'probe_success' = 'true' OR s_candidate.blocked_details->>'recovered_at' IS NOT NULL) AND (s_candidate.cooldown_until IS NULL OR s_candidate.cooldown_until <= NOW()))
-                )
-                AND NOT EXISTS (
-                  SELECT 1 FROM chapters canonical_chapter
-                  WHERE canonical_chapter.work_id = w.work_id::uuid
-                    AND canonical_chapter.published_at IS NOT NULL
-                    AND (canonical_chapter.number = COALESCE(NULLIF(candidate.payload->>'chapterNumber', '')::numeric, candidate.chapter_sort_key))
-                )
-                AND NOT EXISTS (
-                  SELECT 1 FROM importer_queue predecessor
-                  WHERE predecessor.task_type = 'IMPORT_CHAPTER'
-                    AND predecessor.payload->>'workId' = candidate.payload->>'workId'
-                    AND predecessor.chapter_sort_key < candidate.chapter_sort_key
-                    AND predecessor.status IN ('QUEUED', 'RETRY', 'IMPORTING')
-                    AND NOT EXISTS (
-                      SELECT 1 FROM chapters predecessor_canonical
-                      WHERE predecessor_canonical.work_id = w.work_id::uuid
-                        AND predecessor_canonical.published_at IS NOT NULL
-                        AND (predecessor_canonical.number = NULLIF(predecessor.payload->>'chapterNumber', '')::numeric OR predecessor_canonical.number = predecessor.chapter_sort_key)
-                    )
-                )
-                AND NOT EXISTS (
-                  SELECT 1 FROM importer_chapter_mappings staged_frontier
-                  WHERE staged_frontier.work_id = w.work_id::uuid
-                    AND staged_frontier.chapter_sort_key = candidate.chapter_sort_key
-                    AND staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')
-                )
-                AND (
-                  (candidate_pub.max_published IS NOT NULL AND candidate.chapter_sort_key <= candidate_pub.max_published + 1.5)
-                  OR EXISTS (
-                    SELECT 1 FROM importer_confirmed_gaps gap
-                    WHERE gap.work_id = w.work_id::uuid
-                      AND gap.start_sort_key <= COALESCE(candidate_pub.max_published + 1, 1)
-                      AND gap.end_sort_key >= candidate.chapter_sort_key - 1
-                  )
-                  OR (
-                    candidate_pub.max_published IS NULL
-                    AND candidate.chapter_sort_key <= 1.5
-                    AND NOT EXISTS (
-                      SELECT 1 FROM importer_chapter_mappings predecessor_mapping
-                      WHERE predecessor_mapping.work_id = w.work_id::uuid
-                        AND predecessor_mapping.chapter_sort_key < candidate.chapter_sort_key
-                        AND predecessor_mapping.is_gap = false
-                        AND predecessor_mapping.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
-                    )
-                  )
-                )
-            ) THEN 1 ELSE 0 END AS claimable_cnt
+            MIN(q.chapter_sort_key) FILTER (WHERE q.status IN ('QUEUED','RETRY','PAUSED_BY_STAFF') AND q.attempts < COALESCE(q.max_attempts,7)) AS min_sort_key
           FROM importer_queue q
-          LEFT JOIN importer_sources s ON s.id = q.source
           WHERE q.task_type='IMPORT_CHAPTER' AND q.payload->>'workId'=w.work_id
             AND q.status IN ('QUEUED','IMPORTING','RETRY','PAUSED_BY_STAFF')
         ) q
-        CROSS JOIN LATERAL (
-          SELECT COUNT(*) AS pub_cnt, COALESCE(MAX(number),-1) AS max_pub
-          FROM chapters WHERE work_id=w.work_id::uuid AND published_at IS NOT NULL
-        ) p
         CROSS JOIN LATERAL (
           SELECT COUNT(*) FILTER (WHERE status='STAGED') AS staged_cnt,
             MIN(chapter_sort_key) FILTER (WHERE status='STAGED') AS min_staged,
@@ -1483,6 +1412,73 @@ export class AdmissionController {
           FROM importer_chapter_mappings WHERE work_id=w.work_id::uuid
         ) m
         LEFT JOIN importer_sources s ON s.id=w.source
+        LEFT JOIN LATERAL (
+          SELECT CASE WHEN EXISTS (
+            -- This is only a zero/non-zero signal used to rotate an active
+            -- work.  The former COUNT(*) FILTER evaluated every queue row
+            -- and repeatedly held a pool connection for seconds.  EXISTS
+            -- preserves the exact frontier predicates but stops at the
+            -- first executable chapter. Using p.max_pub filters the candidates
+            -- early instead of evaluating a subquery per queued row.
+            SELECT 1
+            FROM importer_queue candidate
+            JOIN importer_sources s_candidate ON s_candidate.id = candidate.source
+            WHERE candidate.task_type = 'IMPORT_CHAPTER'
+              AND candidate.payload->>'workId' = w.work_id
+              AND (candidate.status='QUEUED' OR (candidate.status='RETRY' AND candidate.next_run_at <= NOW()))
+              AND candidate.attempts < COALESCE(candidate.max_attempts,7)
+              AND s_candidate.enabled = true
+              AND (
+                (s_candidate.status = 'ACTIVE' AND (s_candidate.blocked_reason IS NULL OR s_candidate.blocked_details->>'probe_success' = 'true' OR s_candidate.blocked_details->>'recovered_at' IS NOT NULL))
+                OR (s_candidate.status IN ('COOLDOWN','PROBING','DEGRADED') AND (s_candidate.blocked_reason IS NULL OR s_candidate.blocked_details->>'probe_success' = 'true' OR s_candidate.blocked_details->>'recovered_at' IS NOT NULL) AND (s_candidate.cooldown_until IS NULL OR s_candidate.cooldown_until <= NOW()))
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM chapters canonical_chapter
+                WHERE canonical_chapter.work_id = w.work_id::uuid
+                  AND canonical_chapter.published_at IS NOT NULL
+                  AND (canonical_chapter.number = COALESCE(NULLIF(candidate.payload->>'chapterNumber', '')::numeric, candidate.chapter_sort_key))
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM importer_queue predecessor
+                WHERE predecessor.task_type = 'IMPORT_CHAPTER'
+                  AND predecessor.payload->>'workId' = candidate.payload->>'workId'
+                  AND predecessor.chapter_sort_key < candidate.chapter_sort_key
+                  AND predecessor.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM chapters predecessor_canonical
+                    WHERE predecessor_canonical.work_id = w.work_id::uuid
+                      AND predecessor_canonical.published_at IS NOT NULL
+                      AND (predecessor_canonical.number = NULLIF(predecessor.payload->>'chapterNumber', '')::numeric OR predecessor_canonical.number = predecessor.chapter_sort_key)
+                  )
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM importer_chapter_mappings staged_frontier
+                WHERE staged_frontier.work_id = w.work_id::uuid
+                  AND staged_frontier.chapter_sort_key = candidate.chapter_sort_key
+                  AND staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')
+              )
+              AND (
+                (p.max_pub >= 0 AND candidate.chapter_sort_key <= p.max_pub + 1.5)
+                OR EXISTS (
+                  SELECT 1 FROM importer_confirmed_gaps gap
+                  WHERE gap.work_id = w.work_id::uuid
+                    AND gap.start_sort_key <= COALESCE(NULLIF(p.max_pub, -1) + 1, 1)
+                    AND gap.end_sort_key >= candidate.chapter_sort_key - 1
+                )
+                OR (
+                  p.max_pub = -1
+                  AND candidate.chapter_sort_key <= 1.5
+                  AND NOT EXISTS (
+                    SELECT 1 FROM importer_chapter_mappings predecessor_mapping
+                    WHERE predecessor_mapping.work_id = w.work_id::uuid
+                      AND predecessor_mapping.chapter_sort_key < candidate.chapter_sort_key
+                      AND predecessor_mapping.is_gap = false
+                      AND predecessor_mapping.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
+                  )
+                )
+              )
+          ) THEN 1 ELSE 0 END AS claimable_cnt
+        ) c ON TRUE
       `, [activeWorks.map(w => w.workId), activeWorks.map(w => w.primarySource)]);
       const byWork = new Map<string, any>(snapshot.rows.map((r: any) => [r.work_id, r]));
       for (const work of activeWorks) {
