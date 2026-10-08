@@ -1,10 +1,90 @@
 import type { BufferReservation } from './concurrency.js';
 import { InvalidMediaError } from './retry-policy.js';
+import { performance } from 'node:perf_hooks';
 
 export interface ReadImageBodyOptions {
   maxBytes?: number;
   reservation?: BufferReservation;
   signal?: AbortSignal;
+}
+
+/**
+ * A one-shot, opt-in probe for the transient allocation made while stream
+ * chunks are copied into their final Uint8Array. It is deliberately disabled
+ * by default and records only sizes and process-memory counters: never media
+ * content, URLs, headers, or source identity.
+ */
+const bodyMemoryProbeEnabled = process.env.NOX_BODY_MEMORY_PROBE === '1';
+let bodyMemoryProbeConsumed = false;
+
+type BodyMemorySnapshot = {
+  rssBytes: number;
+  externalBytes: number;
+  arrayBuffersBytes: number;
+};
+
+type BodyMemoryProbe = {
+  contentLengthBytes: number | null;
+  chunkCount: number;
+  chunkBytes: number;
+  finalBytes: number;
+  beforeConcat: BodyMemorySnapshot;
+  afterAllocation?: BodyMemorySnapshot;
+  afterCopy?: BodyMemorySnapshot;
+  afterChunkRefsReleased?: BodyMemorySnapshot;
+  concatDurationMs?: number;
+};
+
+function captureBodyMemorySnapshot(): BodyMemorySnapshot {
+  const memory = process.memoryUsage();
+  return {
+    rssBytes: memory.rss,
+    externalBytes: memory.external,
+    arrayBuffersBytes: memory.arrayBuffers || 0,
+  };
+}
+
+function maybeStartBodyMemoryProbe(
+  contentLengthBytes: number | null,
+  chunkCount: number,
+  chunkBytes: number,
+): BodyMemoryProbe | null {
+  if (!bodyMemoryProbeEnabled || bodyMemoryProbeConsumed) return null;
+  bodyMemoryProbeConsumed = true;
+  return {
+    contentLengthBytes,
+    chunkCount,
+    chunkBytes,
+    finalBytes: chunkBytes,
+    beforeConcat: captureBodyMemorySnapshot(),
+  };
+}
+
+function emitBodyMemoryProbe(probe: BodyMemoryProbe): void {
+  const snapshots = [
+    probe.beforeConcat,
+    probe.afterAllocation,
+    probe.afterCopy,
+    probe.afterChunkRefsReleased,
+  ].filter((snapshot): snapshot is BodyMemorySnapshot => Boolean(snapshot));
+  const peakRssBytes = Math.max(...snapshots.map((snapshot) => snapshot.rssBytes));
+  const peakExternalBytes = Math.max(...snapshots.map((snapshot) => snapshot.externalBytes));
+  const peakArrayBuffersBytes = Math.max(...snapshots.map((snapshot) => snapshot.arrayBuffersBytes));
+
+  console.info('[BODY_MEMORY_PROBE]', JSON.stringify({
+    contentLengthBytes: probe.contentLengthBytes,
+    chunkCount: probe.chunkCount,
+    chunkBytes: probe.chunkBytes,
+    finalBytes: probe.finalBytes,
+    concatDurationMs: probe.concatDurationMs,
+    beforeConcat: probe.beforeConcat,
+    afterAllocation: probe.afterAllocation,
+    afterCopy: probe.afterCopy,
+    afterChunkRefsReleased: probe.afterChunkRefsReleased,
+    peakRssBytes,
+    peakExternalBytes,
+    peakArrayBuffersBytes,
+  }));
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -64,9 +144,11 @@ export async function readImageBody(
   const url = response.url || 'unknown';
 
   const declaredStr = response.headers.get('content-length');
+  let contentLengthBytes: number | null = null;
   if (declaredStr) {
     const declared = parseInt(declaredStr, 10);
     if (!Number.isNaN(declared) && declared > 0) {
+      contentLengthBytes = declared;
       if (declared > maxBytes) {
         await response.body?.cancel().catch(() => {});
         if (reservation && !reservation.isCommitted && !reservation.isReleased) {
@@ -88,6 +170,7 @@ export async function readImageBody(
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let length = 0;
+  let bodyMemoryProbe: BodyMemoryProbe | null = null;
 
   try {
     while (true) {
@@ -119,11 +202,18 @@ export async function readImageBody(
       chunks.push(value);
     }
 
+    bodyMemoryProbe = maybeStartBodyMemoryProbe(contentLengthBytes, chunks.length, length);
+    const concatStartedAt = bodyMemoryProbe ? performance.now() : 0;
     const result = new Uint8Array(length);
+    if (bodyMemoryProbe) bodyMemoryProbe.afterAllocation = captureBodyMemorySnapshot();
     let offset = 0;
     for (const chunk of chunks) {
       result.set(chunk, offset);
       offset += chunk.byteLength;
+    }
+    if (bodyMemoryProbe) {
+      bodyMemoryProbe.concatDurationMs = Math.round((performance.now() - concatStartedAt) * 1000) / 1000;
+      bodyMemoryProbe.afterCopy = captureBodyMemorySnapshot();
     }
     return result;
   } catch (error) {
@@ -136,6 +226,10 @@ export async function readImageBody(
     throw error;
   } finally {
     chunks.length = 0;
+    if (bodyMemoryProbe) {
+      bodyMemoryProbe.afterChunkRefsReleased = captureBodyMemorySnapshot();
+      emitBodyMemoryProbe(bodyMemoryProbe);
+    }
     try {
       reader.releaseLock();
     } catch {
