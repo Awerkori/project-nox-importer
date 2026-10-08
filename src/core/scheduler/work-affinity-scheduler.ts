@@ -101,6 +101,20 @@ const CANONICAL_FRONTIER_CLAIM_FILTER = `
             )
           )`;
 
+// Alternative-source queue rows may coexist for the same canonical chapter,
+// but one importing row already owns that frontier. Keep this predicate shared
+// by every claim path and by P0's executable-work probe so the probe never
+// advertises a work whose only eligible row cannot be claimed now.
+const CANONICAL_ACTIVE_CLAIM_FILTER = `
+          AND NOT EXISTS (
+            SELECT 1
+            FROM importer_queue active_chapter
+            WHERE active_chapter.task_type = 'IMPORT_CHAPTER'
+              AND active_chapter.status = 'IMPORTING'
+              AND (active_chapter.payload->>'workId') = (q.payload->>'workId')
+              AND active_chapter.chapter_sort_key = q.chapter_sort_key
+          )`;
+
 // Alternative-source jobs are retained for resilience, but exactly one may own
 // a canonical work/chapter while it is IMPORTING. The partial unique index in
 // the matching migration is the cross-runner fence for that invariant.
@@ -350,11 +364,21 @@ export class WorkAffinityScheduler {
           SELECT q.payload->>'workId' AS work_id
           FROM importer_queue q
           JOIN importer_sources s ON s.id = q.source
+          LEFT JOIN LATERAL (
+            SELECT MAX(c.number) AS max_published
+            FROM chapters c
+            WHERE c.work_id = (q.payload->>'workId')::uuid
+              AND c.published_at IS NOT NULL
+          ) pub ON TRUE
           WHERE (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
             AND q.task_type = 'IMPORT_CHAPTER'
+            AND q.attempts < COALESCE(q.max_attempts, 7)
             AND q.priority >= 100 AND q.priority < 1000
             AND s.enabled = true
             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+            ${CANONICAL_PUBLISHED_CLAIM_FILTER}
+            ${CANONICAL_FRONTIER_CLAIM_FILTER}
+            ${CANONICAL_ACTIVE_CLAIM_FILTER}
           GROUP BY q.payload->>'workId'
           ORDER BY MIN(q.next_run_at) ASC, MIN(q.chapter_sort_key) ASC NULLS LAST
           LIMIT 32;
@@ -1463,14 +1487,7 @@ export class WorkAffinityScheduler {
           ${CANONICAL_FRONTIER_CLAIM_FILTER}
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
-          AND NOT EXISTS (
-            SELECT 1
-            FROM importer_queue active_chapter
-            WHERE active_chapter.task_type = 'IMPORT_CHAPTER'
-              AND active_chapter.status = 'IMPORTING'
-              AND (active_chapter.payload->>'workId') = (q.payload->>'workId')
-              AND active_chapter.chapter_sort_key = q.chapter_sort_key
-          )
+          ${CANONICAL_ACTIVE_CLAIM_FILTER}
         ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
         FOR UPDATE OF q SKIP LOCKED
         LIMIT 1
@@ -1655,14 +1672,7 @@ export class WorkAffinityScheduler {
           )
           AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
           AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
-          AND NOT EXISTS (
-            SELECT 1
-            FROM importer_queue active_chapter
-            WHERE active_chapter.task_type = 'IMPORT_CHAPTER'
-              AND active_chapter.status = 'IMPORTING'
-              AND (active_chapter.payload->>'workId') = (q.payload->>'workId')
-              AND active_chapter.chapter_sort_key = q.chapter_sort_key
-          )
+          ${CANONICAL_ACTIVE_CLAIM_FILTER}
         ORDER BY
           CASE WHEN sr.work_id IS NOT NULL THEN 0 ELSE 1 END,
           COALESCE(array_position($6::text[], q.payload->>'workId'), 2147483647),
@@ -1795,14 +1805,7 @@ export class WorkAffinityScheduler {
           AND ($7::text[] IS NULL OR (q.payload->>'workId') = ANY($7::text[]))
           AND ($8::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($8::text[])))
           AND ($9::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($9::text[])))
-          AND NOT EXISTS (
-            SELECT 1
-            FROM importer_queue active_chapter
-            WHERE active_chapter.task_type = 'IMPORT_CHAPTER'
-              AND active_chapter.status = 'IMPORTING'
-              AND (active_chapter.payload->>'workId') = (q.payload->>'workId')
-              AND active_chapter.chapter_sort_key = q.chapter_sort_key
-          )
+          ${CANONICAL_ACTIVE_CLAIM_FILTER}
         ${orderClause}
         FOR UPDATE OF q SKIP LOCKED
         LIMIT 1
