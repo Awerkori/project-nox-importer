@@ -123,6 +123,34 @@ describe('bounded admission snapshot', () => {
     expect(onDemandStarted).toBe(true);
   });
 
+  it('reports FIFO queue delay separately from admission execution without changing serialization', async () => {
+    const state = { getActiveWorks: () => [] } as any;
+    const c = new AdmissionController(state, {} as any, { query: async () => ({ rows: [] }) });
+    const info = vi.fn();
+    (c as any).logger = { info };
+
+    let finishPeriodic!: () => void;
+    (c as any).executeAdmissionCycle = () => new Promise<void>((resolve) => { finishPeriodic = resolve; });
+    (c as any).executeOnDemandAdmission = async () => null;
+
+    const periodic = c.runAdmissionCycle();
+    const onDemand = c.admitNextWorkOnDemand('P1', ['hanamiheaven']);
+    await Promise.resolve();
+    finishPeriodic();
+    await Promise.all([periodic, onDemand]);
+
+    expect(info).toHaveBeenCalledWith('ADMISSION_CYCLE_TIMING', expect.objectContaining({
+      outcome: 'COMPLETE',
+      activeWorksBefore: 0,
+      activeWorksAfter: 0,
+    }));
+    expect(info).toHaveBeenCalledWith('ON_DEMAND_ADMISSION_TIMING', expect.objectContaining({
+      preferredLane: 'P1',
+      allowedSourceCount: 1,
+      outcome: 'NO_CANDIDATE',
+    }));
+  });
+
   it('does not admit P2 work beyond the effective chapter capacity', async () => {
     const state={getConfig:()=>({}),getActiveWorks:()=>[{workId:"mock",lane:"P1"}]} as any;
     const sentinel={isProtectiveStopActive:async()=>false} as any;

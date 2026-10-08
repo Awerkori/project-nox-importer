@@ -157,6 +157,13 @@ export class AdmissionController {
     throw new Error('Pool has neither query nor connect');
   }
 
+  private getActiveWorksCount(): number {
+    const getActiveWorks = (this.stateStore as any)?.getActiveWorks;
+    if (typeof getActiveWorks !== 'function') return 0;
+    const activeWorks = getActiveWorks.call(this.stateStore);
+    return Array.isArray(activeWorks) ? activeWorks.length : 0;
+  }
+
   /**
    * Admission is control-plane work.  Never start a broad reconciliation or
    * recovery query while the bounded pool is already servicing/waiting for
@@ -1088,7 +1095,28 @@ export class AdmissionController {
    */
   runAdmissionCycle(): Promise<void> {
     if (this.admissionInFlight) return this.admissionInFlight;
-    this.admissionInFlight = this.enqueueAdmissionOperation(() => this.executeAdmissionCycle())
+    const requestedAt = performance.now();
+    this.admissionInFlight = this.enqueueAdmissionOperation(async () => {
+      const queueWaitMs = Math.round(performance.now() - requestedAt);
+      const executionStart = performance.now();
+      const activeWorksBefore = this.getActiveWorksCount();
+      let cycleError: unknown;
+      try {
+        await this.executeAdmissionCycle();
+      } catch (error) {
+        cycleError = error;
+        throw error;
+      } finally {
+        this.logger.info('ADMISSION_CYCLE_TIMING', {
+          queueWaitMs,
+          executionMs: Math.round(performance.now() - executionStart),
+          activeWorksBefore,
+          activeWorksAfter: this.getActiveWorksCount(),
+          outcome: cycleError ? 'ERROR' : 'COMPLETE',
+          error: cycleError instanceof Error ? cycleError.message : undefined,
+        });
+      }
+    })
       .finally(() => { this.admissionInFlight = null; });
     return this.admissionInFlight;
   }
@@ -2062,7 +2090,34 @@ export class AdmissionController {
     const key = `${preferredLane || 'all'}:${[...(allowedSources || [])].sort().join(',')}`;
     const existing = this.demandFlights.get(key);
     if (existing) return existing;
-    const flight = this.enqueueAdmissionOperation(() => this.executeOnDemandAdmission(preferredLane, allowedSources))
+    const requestedAt = performance.now();
+    const flight = this.enqueueAdmissionOperation(async () => {
+      const queueWaitMs = Math.round(performance.now() - requestedAt);
+      const executionStart = performance.now();
+      const activeWorksBefore = this.getActiveWorksCount();
+      let admitted: ActiveWork | null = null;
+      let admissionError: unknown;
+      try {
+        admitted = await this.executeOnDemandAdmission(preferredLane, allowedSources);
+        return admitted;
+      } catch (error) {
+        admissionError = error;
+        throw error;
+      } finally {
+        this.logger.info('ON_DEMAND_ADMISSION_TIMING', {
+          preferredLane: preferredLane || 'all',
+          allowedSourceCount: allowedSources?.length || 0,
+          queueWaitMs,
+          executionMs: Math.round(performance.now() - executionStart),
+          activeWorksBefore,
+          activeWorksAfter: this.getActiveWorksCount(),
+          outcome: admissionError ? 'ERROR' : (admitted ? 'ADMITTED' : 'NO_CANDIDATE'),
+          admittedWorkId: admitted?.workId,
+          admittedLane: admitted?.lane,
+          error: admissionError instanceof Error ? admissionError.message : undefined,
+        });
+      }
+    })
       .finally(() => { this.demandFlights.delete(key); });
     this.demandFlights.set(key, flight);
     return flight;

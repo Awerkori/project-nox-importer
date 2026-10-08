@@ -47,6 +47,7 @@ export declare class AdmissionController {
     private getP1SourceWindow;
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
+    private getActiveWorksCount;
     /**
      * Admission is control-plane work.  Never start a broad reconciliation or
      * recovery query while the bounded pool is already servicing/waiting for
