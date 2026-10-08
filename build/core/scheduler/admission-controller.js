@@ -1704,7 +1704,7 @@ export class AdmissionController {
              AND q.payload->>'workId' IS NOT NULL
              AND NOT ((q.payload->>'workId') = ANY($7::text[]))
            ORDER BY q.priority DESC, q.chapter_sort_key ASC
-           LIMIT $5 * 10
+           LIMIT $5
          ),
          queue_candidate_groups AS MATERIALIZED (
            SELECT q.payload->>'workId' AS work_id, q.source, COUNT(*) AS pending_jobs,
@@ -1765,7 +1765,7 @@ export class AdmissionController {
                 Math.max(50, backfillSlotsAvailable * 5),
                 4,
                 JSON.stringify(this.getP1AdmissionCursors()),
-                Math.max(64, backfillSlotsAvailable * 32),
+                Math.max(64, backfillSlotsAvailable * 32) * 10,
                 p1SourceWindow,
                 Array.from(this.deadWorksCache.keys()).length > 0 ? Array.from(this.deadWorksCache.keys()) : ['00000000-0000-0000-0000-000000000000']
             ]);
@@ -2237,7 +2237,7 @@ export class AdmissionController {
             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
             AND ($1::text[] IS NULL OR s.id = ANY($1::text[]))
             AND ($3::text[] IS NULL OR NOT (s.id = ANY($3::text[])))
-            AND ($6::text[] IS NULL OR s.id = ANY($6::text[]))
+            AND ($5::text[] IS NULL OR s.id = ANY($5::text[]))
         ), source_window AS MATERIALIZED (
           SELECT q.*
           FROM importer_queue q
@@ -2249,7 +2249,7 @@ export class AdmissionController {
             AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
             AND NOT ((q.payload->>'workId') = ANY($2::text[]))
             AND q.payload->>'workId' IS NOT NULL
-            AND NOT ((q.payload->>'workId') = ANY($7::text[]))
+            AND NOT ((q.payload->>'workId') = ANY($6::text[]))
           ORDER BY q.priority DESC, q.chapter_sort_key ASC
           LIMIT 160
         ), queue_candidates AS MATERIALIZED (
@@ -2313,7 +2313,6 @@ export class AdmissionController {
                         activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
                         saturatedSources.length > 0 ? saturatedSources : null,
                         JSON.stringify(this.getP1AdmissionCursors()),
-                        16,
                         p1SourceWindow,
                         Array.from(this.deadWorksCache.keys()).length > 0 ? Array.from(this.deadWorksCache.keys()) : ['00000000-0000-0000-0000-000000000000']
                     ]);
