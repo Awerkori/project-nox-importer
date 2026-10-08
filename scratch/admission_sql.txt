@@ -1,0 +1,212 @@
+const loadP1Candidates = (includePaused: boolean) => this.runQuery(
+        `WITH eligible_sources AS MATERIALIZED (
+           SELECT s.*
+           FROM importer_sources s
+           WHERE s.enabled = true
+             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+             AND s.id = ANY($6::text[])
+         ),
+         queued_retry AS (
+           SELECT q.*
+           FROM importer_queue q
+           JOIN eligible_sources s ON s.id = q.source
+           WHERE q.task_type = 'IMPORT_CHAPTER'
+             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
+             AND q.attempts < COALESCE(q.max_attempts, 7)
+             AND q.priority >= 75 AND q.priority < 100
+             AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+             AND NOT ((q.payload->>'workId') = ANY($1::text[]))
+             AND q.payload->>'workId' IS NOT NULL
+             AND NOT ((q.payload->>'workId') = ANY($7::text[]))
+           ORDER BY q.priority DESC, q.chapter_sort_key ASC
+           LIMIT $5
+         )
+         ${includePaused ? `, paused AS (
+           SELECT q.*
+           FROM importer_queue q
+           JOIN eligible_sources s ON s.id = q.source
+           WHERE q.task_type = 'IMPORT_CHAPTER'
+             AND q.status = 'PAUSED_BY_STAFF'
+             AND q.attempts < COALESCE(q.max_attempts, 7)
+             AND q.priority >= 75 AND q.priority < 100
+             AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+             AND NOT ((q.payload->>'workId') = ANY($1::text[]))
+             AND q.payload->>'workId' IS NOT NULL
+             AND NOT ((q.payload->>'workId') = ANY($7::text[]))
+           ORDER BY q.priority DESC, q.chapter_sort_key ASC
+           LIMIT $5
+         )` : ''}
+         , source_window AS MATERIALIZED (
+           SELECT * FROM queued_retry
+           ${includePaused ? 'UNION ALL SELECT * FROM paused' : ''}
+           ORDER BY priority DESC, chapter_sort_key ASC
+           LIMIT $5
+         ),
+         queue_candidate_groups AS MATERIALIZED (
+           SELECT q.payload->>'workId' AS work_id, q.source, COUNT(*) AS pending_jobs,
+             COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) AS queued_count,
+             COUNT(*) FILTER (WHERE q.status = 'PAUSED_BY_STAFF') AS paused_count,
+             MIN(q.chapter_sort_key) AS min_sort_key
+           FROM source_window q
+           WHERE NOT EXISTS (
+               SELECT 1
+               FROM chapters canonical_chapter
+               WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
+                 AND canonical_chapter.published_at IS NOT NULL
+                 AND (
+                   canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key)
+                 )
+             )
+           GROUP BY q.payload->>'workId', q.source
+           HAVING COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) > 0
+         ),
+         queue_candidates AS MATERIALIZED (
+           -- Rotate work selection independently from chapter number. Keep the
+           -- earliest frontiers as a bounded fallback per source: the cursor
+           -- candidate can be parked behind an unresolved gap, so keeping a
+           -- small frontier window lets contiguity filtering find the next
+           -- executable work without scanning or admitting the whole source.
+           SELECT ranked.*
+           FROM (
+             SELECT g.*,
+             ROW_NUMBER() OVER (
+               PARTITION BY source
+               ORDER BY CASE WHEN work_id > COALESCE($4::jsonb ->> source, '') THEN 0 ELSE 1 END,
+                        work_id
+             ) AS rotation_rank,
+             ROW_NUMBER() OVER (
+               PARTITION BY source
+               ORDER BY min_sort_key ASC NULLS LAST, pending_jobs DESC
+             ) AS frontier_rank
+             FROM queue_candidate_groups g
+           ) ranked
+           WHERE rotation_rank <= $3 OR frontier_rank <= $3
+         )
+         SELECT q.work_id,
+                w.title,
+                q.source,
+                q.pending_jobs,
+                q.queued_count,
+                q.paused_count,
+                q.min_sort_key,
+                CASE WHEN q.rotation_rank <= $3 THEN q.rotation_rank ELSE 100 + q.frontier_rank END AS admission_rank
+         FROM queue_candidates q
+         JOIN works w ON w.id = q.work_id::uuid
+         WHERE w.published = true
+         -- One candidate from every source before a second candidate from any
+         -- source. The bounded result remains diverse even with many sources.
+         ORDER BY admission_rank, source
+         LIMIT $2`,
+        [
+          activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
+          Math.max(50, backfillSlotsAvailable * 5),
+          4,
+          JSON.stringify(this.getP1AdmissionCursors()),
+          Math.max(64, backfillSlotsAvailable * 32) * 10,
+          p1SourceWindow,
+          Array.from(this.deadWorksCache.keys()).length > 0 ? Array.from(this.deadWorksCache.keys()) : ['00000000-0000-0000-0000-000000000000']
+        ]
+      );
+      const resolveP1Frontiers = async (candidateRows: any[]) => {
+        // A non-empty QUEUED window is not necessarily executable: it can be
+        // wholly behind a canonical gap. Evaluate the actual frontier before
+        // deciding whether the bounded PAUSED_BY_STAFF fallback is needed.
+        const candidateWorkIds = candidateRows.map((r: any) => r.work_id);
+        const pubMap = new Map<string, number>();
+        if (candidateWorkIds.length > 0) {
+          const pubRes = await this.runQuery(
+            `SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
+             FROM chapters
+             WHERE work_id = ANY($1::uuid[]) AND published_at IS NOT NULL
+             GROUP BY work_id`,
+            [candidateWorkIds]
+          );
+          for (const pr of pubRes.rows) pubMap.set(pr.work_id, parseFloat(pr.max_pub));
+        }
+
+        const gapsMap = new Map<string, Array<{ start: number; end: number }>>();
+        if (candidateWorkIds.length > 0) {
+          try {
+            const gapsRes = await this.runQuery(
+              `SELECT work_id::text, start_sort_key, end_sort_key
+               FROM importer_confirmed_gaps
+               WHERE work_id = ANY($1::uuid[])`,
+              [candidateWorkIds]
+            );
+            for (const gr of gapsRes.rows) {
+              const arr = gapsMap.get(gr.work_id) || [];
+              arr.push({ start: parseFloat(gr.start_sort_key), end: parseFloat(gr.end_sort_key) });
+              gapsMap.set(gr.work_id, arr);
+            }
+          } catch {}
+        }
+
+        const isContiguousOrConfirmed = (workId: string, minSort: number, maxPub: number): boolean => {
+          if (maxPub === -1 ? minSort <= 1.5 : minSort <= maxPub + 1.5) return true;
+          const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+          const gapEnd = minSort - 1;
+          return (gapsMap.get(workId) || []).some((g) => g.start <= gapStart && g.end >= gapEnd);
+        };
+
+        const contiguous = candidateRows.filter((cand: any) => {
+          
+          const maxPub = pubMap.get(cand.work_id) ?? -1;
+          const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
+          return isContiguousOrConfirmed(cand.work_id, minSort, maxPub);
+        });
+
+        // Gap confirmation remains bounded to the small source window. It is
+        // only attempted after all immediately-contiguous candidates.
+        if (contiguous.length < backfillSlotsAvailable) {
+          for (const cand of candidateRows) {
+            
+            if (contiguous.some((c: any) => c.work_id === cand.work_id)) continue;
+            const maxPub = pubMap.get(cand.work_id) ?? -1;
+            const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
+            const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+            const gapEnd = minSort - 1;
+            if (gapStart > gapEnd) continue;
+            try {
+              const conf = await confirmUpstreamGapInterval(this.pool, {
+                workId: cand.work_id,
+                startSortKey: gapStart,
+                endSortKey: gapEnd,
+                primarySource: cand.source,
+                reason: 'ADMISSION_CANDIDATE_GAP_CONFIRM',
+              });
+              if (conf.confirmed) contiguous.push(cand);
+              else this.deadWorksCache.set(cand.work_id, Date.now());
+            } catch {}
+          }
+        }
+        return contiguous;
+      };
+
+      let candidatesRes = await loadP1Candidates(false);
+      let contiguousCandidates = await resolveP1Frontiers(candidatesRes.rows);
+      // A queued candidate list can be full while every row is behind a gap.
+      // In that case the old `rows.length` guard skipped the paused frontier
+      // that would actually make progress, leaving the P2 gate held forever.
+      if (contiguousCandidates.length < backfillSlotsAvailable) {
+        const pausedCandidates = await loadP1Candidates(true);
+        const pausedContiguous = await resolveP1Frontiers(pausedCandidates.rows);
+        if (pausedContiguous.length >= contiguousCandidates.length) {
+          candidatesRes = pausedCandidates;
+          contiguousCandidates = pausedContiguous;
+        }
+      }
+
+      // Sort candidates by source permit headroom and diversity (Section 8 & 11)
+      contiguousCandidates.sort((a: any, b: any) => {
+        const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
+        const permitsB = this.sourcePermitProvider ? this.sourcePermitProvider(b.source) : 1;
+        const activeA = sourceCounts.get(a.source) || 0;
+        const activeB = sourceCounts.get(b.source) || 0;
+
+        if ((permitsA > 0) !== (permitsB > 0)) {
+          return permitsA > 0 ? -1 : 1;
+        }
+        if (activeA !== activeB) {
+          return activeA - activeB;
+        }
+        const rankA =

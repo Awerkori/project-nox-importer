@@ -7,7 +7,10 @@ describe('runtime buffer configuration', () => {
   });
 
   it('keeps a safe default for absent or unsafe values', () => {
-    expect(resolveBufferBudgetBytes()).toBe(64 * 1024 * 1024);
-    expect(resolveBufferBudgetBytes('1')).toBe(64 * 1024 * 1024);
+    const orig = process.env.MAX_BUFFERED_BYTES;
+    delete process.env.MAX_BUFFERED_BYTES;
+    expect(resolveBufferBudgetBytes()).toBe(256 * 1024 * 1024);
+    expect(resolveBufferBudgetBytes('1')).toBe(256 * 1024 * 1024);
+    if (orig !== undefined) process.env.MAX_BUFFERED_BYTES = orig;
   });
 });

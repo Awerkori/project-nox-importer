@@ -1,0 +1,37 @@
+CTE Scan on candidate_works  (cost=69814.95..69816.95 rows=100 width=72) (actual time=21132.698..21133.438 rows=100 loops=1)
+  CTE candidate_works
+    ->  Limit  (cost=69814.70..69814.95 rows=100 width=72) (actual time=21132.695..21133.391 rows=100 loops=1)
+          ->  Sort  (cost=69814.70..69835.35 rows=8260 width=72) (actual time=21132.693..21133.360 rows=100 loops=1)
+                Sort Key: (min(q.next_run_at)), (min(q.chapter_sort_key))
+                Sort Method: top-N heapsort  Memory: 49kB
+                ->  Finalize GroupAggregate  (cost=67475.15..69499.01 rows=8260 width=72) (actual time=20636.320..21128.792 rows=1385 loops=1)
+                      Group Key: ((q.payload ->> 'workId'::text))
+                      ->  Gather Merge  (cost=67475.15..69340.39 rows=7382 width=72) (actual time=20636.289..21126.415 rows=3887 loops=1)
+                            Workers Planned: 2
+                            Workers Launched: 2
+                            ->  Partial GroupAggregate  (cost=65775.12..65858.17 rows=3691 width=72) (actual time=15387.079..15736.110 rows=1296 loops=3)
+                                  Group Key: ((q.payload ->> 'workId'::text))
+                                  ->  Sort  (cost=65775.12..65784.35 rows=3691 width=45) (actual time=15387.041..15487.886 rows=39582 loops=3)
+                                        Sort Key: ((q.payload ->> 'workId'::text))
+                                        Sort Method: external merge  Disk: 3536kB
+                                        Worker 0:  Sort Method: quicksort  Memory: 3946kB
+                                        Worker 1:  Sort Method: quicksort  Memory: 3657kB
+                                        ->  Hash Join  (cost=933.78..65556.43 rows=3691 width=45) (actual time=1389.702..14985.542 rows=39582 loops=3)
+                                              Hash Cond: (q.source = s.id)
+                                              ->  Parallel Hash Join  (cost=907.60..65470.09 rows=3761 width=388) (actual time=1361.017..14559.916 rows=39582 loops=3)
+                                                    Hash Cond: (((q.payload ->> 'workId'::text))::uuid = w.id)
+                                                    ->  Parallel Seq Scan on importer_queue q  (cost=21.10..64470.08 rows=19661 width=388) (actual time=1067.137..13533.093 rows=39819 loops=3)
+                                                          Storage Filter: ((priority >= 75) AND (priority < 100) AND (task_type = 'IMPORT_CHAPTER'::text) AND (status = 'PAUSED_BY_STAFF'::text))
+                                                          Filter: ((attempts < COALESCE(max_attempts, 7)) AND (COALESCE((payload ->> 'staffForced'::text), 'false'::text) <> 'true'::text))
+                                                          Rows Removed by Filter: 281
+                                                    ->  Parallel Hash  (cost=831.46..831.46 rows=4403 width=16) (actual time=264.456..264.457 rows=1482 loops=3)
+                                                          Buckets: 16384  Batches: 1  Memory Usage: 352kB
+                                                          ->  Parallel Index Scan using idx_works_published_views on works w  (cost=28.17..831.46 rows=4403 width=16) (actual time=788.762..791.317 rows=4445 loops=1)
+                                                                Index Cond: (published = true)
+                                              ->  Hash  (cost=25.52..25.52 rows=53 width=11) (actual time=27.169..27.170 rows=53 loops=3)
+                                                    Buckets: 1024  Batches: 1  Memory Usage: 11kB
+                                                    ->  Index Scan using importer_sources_pkey on importer_sources s  (cost=21.06..25.52 rows=53 width=11) (actual time=27.060..27.110 rows=53 loops=3)
+                                                          Storage Filter: enabled
+Planning Time: 1.175 ms
+Execution Time: 21200.388 ms
+Peak Memory Usage: 6996 kB

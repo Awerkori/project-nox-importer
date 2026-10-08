@@ -36,7 +36,7 @@ import {
 // claiming them first wastes a bounded chapter slot on I/O-free dedupe work.
 // Keep the same canonical identity used by validateClaimedJobPostMutex in the
 // claim predicates so stale rows are skipped before they consume a slot.
-const CANONICAL_PUBLISHED_CLAIM_FILTER = `
+export const CANONICAL_PUBLISHED_CLAIM_FILTER = `
           AND NOT EXISTS (
             SELECT 1
             FROM chapters canonical_chapter
@@ -105,7 +105,7 @@ export const CANONICAL_FRONTIER_CLAIM_FILTER = `
 // but one importing row already owns that frontier. Keep this predicate shared
 // by every claim path and by P0's executable-work probe so the probe never
 // advertises a work whose only eligible row cannot be claimed now.
-const CANONICAL_ACTIVE_CLAIM_FILTER = `
+export const CANONICAL_ACTIVE_CLAIM_FILTER = `
           AND NOT EXISTS (
             SELECT 1
             FROM importer_queue active_chapter
