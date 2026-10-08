@@ -362,7 +362,7 @@ export class AutoHealWatchdog {
               AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
               AND q.priority >= 50
               AND s.enabled = true
-              AND \${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+              AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
             GROUP BY q.payload->>'workId'
             ORDER BY MIN(q.chapter_sort_key) ASC NULLS LAST
             LIMIT 100

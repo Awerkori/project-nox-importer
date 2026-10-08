@@ -1,5 +1,6 @@
 import { Logger } from './logger.js';
 import { CANONICAL_FRONTIER_CLAIM_FILTER, CANONICAL_PUBLISHED_CLAIM_FILTER } from './scheduler/work-affinity-scheduler.js';
+import { SOURCE_EXECUTION_ELIGIBILITY_SQL } from './source-eligibility.js';
 import { diagnostics } from './diagnostics.js';
 // With eligible backlog, five concurrent chapters should yield observable
 // progress well before these bounds.  They intentionally sit above normal
@@ -232,7 +233,7 @@ export class AutoHealWatchdog {
               AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
               AND q.priority >= 50
               AND s.enabled = true
-              AND \${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+              AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
             GROUP BY q.payload->>'workId'
             ORDER BY MIN(q.chapter_sort_key) ASC NULLS LAST
             LIMIT 100
