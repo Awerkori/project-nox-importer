@@ -52,6 +52,37 @@ describe('header reservation upgrade cancellation', () => {
     await expect(pending).rejects.toThrow('job deadline');
   });
 
+  it('traces headers and an aborted reservation upgrade without changing its cancellation path', async () => {
+    const controller = new AbortController();
+    const tracked = makeAbortableReservation();
+    const events: Array<{ event: string; meta?: Record<string, unknown> }> = [];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('body', {
+      status: 200,
+      headers: { 'content-length': String(3 * 1024 * 1024) },
+    })));
+
+    const pending = createEngine().fetchImageBytes('https://cdn.example.test/page.jpg', 'unknown', {
+      maxAttempts: 1,
+      reservation: tracked.reservation,
+      signal: controller.signal,
+      requestTrace: {
+        jobId: 'job-1', source: 'megahentai', chapterNumber: 1, pageIndex: 0, totalPages: 13, producerAttempt: 1,
+        emit: (event: string, meta?: Record<string, unknown>) => events.push({ event, meta }),
+      },
+    });
+    await tracked.started;
+    controller.abort(new Error('job deadline'));
+
+    await expect(pending).rejects.toThrow('job deadline');
+    expect(events.map(({ event }) => event)).toEqual([
+      'DOWNLOAD_REQUEST_STARTED',
+      'DOWNLOAD_REQUEST_HEADERS',
+      'DOWNLOAD_REQUEST_RESERVATION_UPGRADE_STARTED',
+      'DOWNLOAD_REQUEST_FAILED',
+    ]);
+    expect(events.at(-1)?.meta).toMatchObject({ stage: 'RESERVATION_UPGRADE', abortReason: 'JOB_OR_PIPELINE_ABORT' });
+  });
+
   it('cancels a bridge Content-Length upgrade with the job signal', async () => {
     const controller = new AbortController();
     const tracked = makeAbortableReservation();

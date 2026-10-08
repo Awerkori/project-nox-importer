@@ -45,6 +45,74 @@ const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
 const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
 
+type DownloadRequestTrace = {
+  jobId: string;
+  source: string;
+  chapterNumber: number;
+  pageIndex: number;
+  totalPages: number;
+  producerAttempt: number;
+  emit: (event: string, meta?: Record<string, unknown>) => void;
+};
+
+// A deliberately narrow diagnostic switch: it is inert unless both variables
+// are configured and observes only the first matching job in this process.
+// This keeps a one-case investigation from becoming a media-request log.
+const downloadRequestTraceEnabled = process.env.NOX_DOWNLOAD_REQUEST_TRACE === '1';
+const downloadRequestTraceSource = process.env.NOX_DOWNLOAD_REQUEST_TRACE_SOURCE?.trim().toLowerCase();
+let tracedDownloadRequestJobId: string | null = null;
+const downloadRequestTraceLogger = new Logger('DownloadRequestTrace');
+
+function createDownloadRequestTrace(
+  jobId: string,
+  source: string,
+  chapterNumber: number,
+  pageIndex: number,
+  totalPages: number,
+  producerAttempt: number,
+): DownloadRequestTrace | undefined {
+  if (!downloadRequestTraceEnabled || !downloadRequestTraceSource) return undefined;
+  if (source.toLowerCase() !== downloadRequestTraceSource) return undefined;
+
+  if (!tracedDownloadRequestJobId) {
+    tracedDownloadRequestJobId = jobId;
+    downloadRequestTraceLogger.info('DOWNLOAD_REQUEST_TRACE_JOB_SELECTED', {
+      jobId,
+      source,
+      chapterNumber,
+      totalPages,
+    });
+  }
+  if (tracedDownloadRequestJobId !== jobId) return undefined;
+
+  const base = { jobId, source, chapterNumber, pageIndex, totalPages, producerAttempt };
+  return {
+    ...base,
+    emit: (event, meta) => downloadRequestTraceLogger.info(event, { ...base, ...meta }),
+  };
+}
+
+function classifyDownloadTraceAbort(
+  engineSignal: AbortSignal,
+  jobSignal: AbortSignal | undefined,
+  requestSignal: AbortSignal | undefined,
+): string | null {
+  if (jobSignal?.aborted) return 'JOB_OR_PIPELINE_ABORT';
+  if (engineSignal.aborted) return 'ENGINE_ABORT';
+  if (requestSignal?.aborted) {
+    return requestSignal.reason instanceof DOMException && requestSignal.reason.name === 'TimeoutError'
+      ? 'REQUEST_TIMEOUT'
+      : 'REQUEST_ABORTED';
+  }
+  return null;
+}
+
+function classifyDownloadTraceError(error: unknown): string {
+  if (error instanceof DOMException) return error.name;
+  if (error instanceof Error && error.name) return error.name;
+  return 'UNKNOWN_ERROR';
+}
+
 /**
  * The buffer budget is an operational limit, so it must be resolved where the
  * engine constructs the autotuner rather than being silently replaced by a
@@ -4981,6 +5049,14 @@ export class ImporterEngine {
                         timeoutMs,
                         freshConnection,
                         reservation,
+                        requestTrace: createDownloadRequestTrace(
+                          job.id,
+                          effectiveSource,
+                          chapterNumber,
+                          idx,
+                          expectedCount,
+                          attempts,
+                        ),
                         // The producer owns the chapter-level retry policy:
                         // four bounded attempts, manifest refresh, and
                         // cross-source rescue.  A second three-attempt loop
@@ -5881,6 +5957,7 @@ export class ImporterEngine {
        */
       maxAttempts?: number;
       signal?: AbortSignal;
+      requestTrace?: DownloadRequestTrace;
     }
   ): Promise<Uint8Array> {
     const parsedUrl = new URL(url);
@@ -5920,6 +5997,20 @@ export class ImporterEngine {
     let res: Response | null = null;
     let responseSignal: AbortSignal | undefined;
     let fetchError: any = null;
+    const requestTrace = options?.requestTrace;
+    const requestStartedAt = Date.now();
+    const emitTrace = (event: string, meta?: Record<string, unknown>) => {
+      requestTrace?.emit(event, meta);
+    };
+    const emitTraceFailure = (stage: string, error: unknown, bodyMeta?: Record<string, unknown>) => {
+      emitTrace('DOWNLOAD_REQUEST_FAILED', {
+        stage,
+        errorType: classifyDownloadTraceError(error),
+        abortReason: classifyDownloadTraceAbort(this.abortController.signal, options?.signal, responseSignal),
+        elapsedMs: Date.now() - requestStartedAt,
+        ...bodyMeta,
+      });
+    };
 
     let attempts = 0;
     const maxAttempts = Math.max(1, Math.min(3, options?.maxAttempts ?? 3));
@@ -5933,9 +6024,24 @@ export class ImporterEngine {
           AbortSignal.timeout(timeoutDuration),
         ]);
         responseSignal = requestSignal;
+        emitTrace('DOWNLOAD_REQUEST_STARTED', {
+          fetchAttempt: attempts,
+          timeoutMs: timeoutDuration,
+          requestStartedAtMs: requestStartedAt,
+        });
         res = await fetch(url, {
           headers: requestHeaders,
           signal: requestSignal,
+        });
+        emitTrace('DOWNLOAD_REQUEST_HEADERS', {
+          fetchAttempt: attempts,
+          status: res.status,
+          contentLengthBytes: (() => {
+            const raw = res.headers.get('content-length');
+            const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+            return Number.isFinite(parsed) ? parsed : null;
+          })(),
+          elapsedMs: Date.now() - requestStartedAt,
         });
         if (res.ok) {
           // Keep the signal alive through body consumption. A response that
@@ -5956,6 +6062,7 @@ export class ImporterEngine {
         break;
       } catch (err: any) {
         fetchError = err;
+        emitTraceFailure('FETCH_HEADERS', err);
         // A controlled recovery cancels the current operation epoch. It is
         // not a transient upstream failure and must not spend retry time or
         // retain permits while the engine is draining.
@@ -6039,7 +6146,9 @@ export class ImporterEngine {
         const retryAfter = res?.headers?.get('Retry-After');
         this.rateLimiter.handle429(parsedUrl.host, retryAfter);
       }
-      throw new ProviderDownloadError(status, url, source, `Failed to download image from ${url}: HTTP ${status}`);
+      const error = new ProviderDownloadError(status, url, source, `Failed to download image from ${url}: HTTP ${status}`);
+      emitTraceFailure('HTTP_RESPONSE', error);
+      throw error;
     }
 
     // Inspect declared Content-Length and enforce 20MB upper ceiling + reservation upgrade
@@ -6052,15 +6161,57 @@ export class ImporterEngine {
           throw new InvalidMediaError(url, `Image declared content-length (${Math.round(declaredBytes / 1024 / 1024)}MB) exceeds maximum safe limit of 20MB`);
         }
         if (options?.reservation && declaredBytes > options.reservation.reservedBytes) {
-          await options.reservation.upgrade(declaredBytes, responseSignal || options?.signal);
+          emitTrace('DOWNLOAD_REQUEST_RESERVATION_UPGRADE_STARTED', {
+            fromBytes: options.reservation.reservedBytes,
+            toBytes: declaredBytes,
+            elapsedMs: Date.now() - requestStartedAt,
+          });
+          try {
+            await options.reservation.upgrade(declaredBytes, responseSignal || options?.signal);
+            emitTrace('DOWNLOAD_REQUEST_RESERVATION_UPGRADE_COMPLETED', {
+              reservedBytes: options.reservation.reservedBytes,
+              elapsedMs: Date.now() - requestStartedAt,
+            });
+          } catch (error) {
+            emitTraceFailure('RESERVATION_UPGRADE', error);
+            throw error;
+          }
         }
       }
     }
 
-    const uint8 = await readImageBody(res, {
-      reservation: options?.reservation,
-      signal: (res as Response & { __noxBodySignal?: AbortSignal }).__noxBodySignal || responseSignal || options?.signal,
-    });
+    let bodyErrorTraced = false;
+    let uint8: Uint8Array;
+    try {
+      uint8 = await readImageBody(res, {
+        reservation: options?.reservation,
+        signal: (res as Response & { __noxBodySignal?: AbortSignal }).__noxBodySignal || responseSignal || options?.signal,
+        trace: requestTrace ? {
+          onFirstChunk: ({ bytes, elapsedMs }) => emitTrace('DOWNLOAD_REQUEST_FIRST_BODY_CHUNK', {
+            bytes,
+            bodyElapsedMs: elapsedMs,
+            elapsedMs: Date.now() - requestStartedAt,
+          }),
+          onComplete: ({ bytes, chunks, elapsedMs }) => emitTrace('DOWNLOAD_REQUEST_BODY_COMPLETED', {
+            bytes,
+            chunks,
+            bodyElapsedMs: elapsedMs,
+            elapsedMs: Date.now() - requestStartedAt,
+          }),
+          onReservationUpgrade: ({ phase, state, fromBytes, toBytes, elapsedMs }) => emitTrace(
+            `DOWNLOAD_REQUEST_BODY_RESERVATION_UPGRADE_${state}`,
+            { phase, fromBytes, toBytes, bodyElapsedMs: elapsedMs, elapsedMs: Date.now() - requestStartedAt },
+          ),
+          onError: ({ bytes, chunks, elapsedMs, waitingOn, error }) => {
+            bodyErrorTraced = true;
+            emitTraceFailure('BODY_READ', error, { bytes, chunks, bodyElapsedMs: elapsedMs, waitingOn });
+          },
+        } : undefined,
+      });
+    } catch (error) {
+      if (!bodyErrorTraced) emitTraceFailure('BODY_SETUP', error);
+      throw error;
+    }
 
     // Validate binary image integrity and check for fake HTML challenge pages returned with HTTP 200
     const bodySnippet = new TextDecoder('utf-8', { fatal: false }).decode(uint8.slice(0, 8192));
