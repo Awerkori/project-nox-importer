@@ -108,4 +108,46 @@ describe('header reservation upgrade cancellation', () => {
     controller.abort(new Error('job deadline'));
     await expect(pending).rejects.toThrow('job deadline');
   });
+
+  it('traces the bridge headers, reservation upgrade and body lifecycle', async () => {
+    const events: Array<{ event: string; meta?: Record<string, unknown> }> = [];
+    const reservation = {
+      reservedBytes: 2 * 1024 * 1024,
+      upgrade: vi.fn(async function (this: { reservedBytes: number }, bytes: number) {
+        this.reservedBytes = bytes;
+      }),
+    };
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response('blocked', { status: 403 }))
+      .mockResolvedValueOnce(new Response('body', {
+        status: 200,
+        headers: { 'content-length': String(3 * 1024 * 1024) },
+      })));
+
+    const body = await createEngine({ NOX_STORAGE_BRIDGE_TOKEN: 'test-token' }).fetchImageBytes(
+      'https://kuromangas.com/page.jpg',
+      'kuro',
+      {
+        maxAttempts: 1,
+        reservation: reservation as any,
+        requestTrace: {
+          jobId: 'job-1', source: 'kuro', chapterNumber: 1, pageIndex: 0, totalPages: 1, producerAttempt: 1,
+          emit: (event: string, meta?: Record<string, unknown>) => events.push({ event, meta }),
+        },
+      },
+    );
+
+    expect(body).toEqual(new TextEncoder().encode('body'));
+    expect(events.map(({ event }) => event)).toEqual([
+      'DOWNLOAD_REQUEST_STARTED',
+      'DOWNLOAD_REQUEST_HEADERS',
+      'DOWNLOAD_BRIDGE_REQUEST_STARTED',
+      'DOWNLOAD_BRIDGE_REQUEST_HEADERS',
+      'DOWNLOAD_BRIDGE_RESERVATION_UPGRADE_STARTED',
+      'DOWNLOAD_BRIDGE_RESERVATION_UPGRADE_COMPLETED',
+      'DOWNLOAD_BRIDGE_REQUEST_FIRST_BODY_CHUNK',
+      'DOWNLOAD_BRIDGE_REQUEST_BODY_COMPLETED',
+    ]);
+    expect(reservation.upgrade).toHaveBeenCalledWith(3 * 1024 * 1024, expect.any(AbortSignal));
+  });
 });

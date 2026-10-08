@@ -39,25 +39,51 @@ const downloadRequestTraceSource = process.env.NOX_DOWNLOAD_REQUEST_TRACE_SOURCE
 let tracedDownloadRequestJobId = null;
 const downloadRequestTraceLogger = new Logger('DownloadRequestTrace');
 // One bounded, opt-in diagnostic for the logical buffer-reservation lifecycle.
-// It observes one natural job only and records no URLs, headers beyond
-// Content-Length, or media payload. It does not participate in admission,
-// cancellation, retries, or resource accounting.
+// Each active page retains a small in-memory timeline, but nothing is logged
+// until a real saturation/long-hold condition occurs. This keeps the first
+// healthy job from consuming the only diagnostic sample, without participating
+// in admission, cancellation, retries, or resource accounting.
 const pageReservationTraceEnabled = process.env.NOX_PAGE_RESERVATION_TRACE === '1';
-let tracedPageReservationJobId = null;
 const pageReservationTraceLogger = new Logger('PageReservationTrace');
-function createPageReservationTrace(jobId, source, chapterNumber, pageIndex, totalPages) {
+const PAGE_RESERVATION_TRACE_GLOBAL_THRESHOLD_BYTES = 32 * 1024 * 1024;
+const PAGE_RESERVATION_TRACE_HOLD_THRESHOLD_MS = 30_000;
+const PAGE_RESERVATION_TRACE_MAX_EVENTS_PER_PAGE = 64;
+const activePageReservationTraceCandidates = new Set();
+let pageReservationSaturationCaptureId = null;
+function beginPageReservationSaturationCapture(trigger, reason, globalSnapshot) {
+    if (pageReservationSaturationCaptureId)
+        return;
+    pageReservationSaturationCaptureId = randomUUID();
+    const triggerSnapshot = trigger.getSnapshot();
+    const context = {
+        captureId: pageReservationSaturationCaptureId,
+        reason,
+        triggeredAt: new Date().toISOString(),
+        trigger: {
+            jobId: trigger.jobId,
+            source: trigger.source,
+            chapterNumber: trigger.chapterNumber,
+            pageIndex: trigger.pageIndex,
+            pageNumber: trigger.pageIndex + 1,
+            event: triggerSnapshot.lastEvent || 'UNKNOWN',
+            reservationState: triggerSnapshot.state,
+            reservationBytes: triggerSnapshot.reservedBytes,
+        },
+        globalSnapshot,
+    };
+    const active = [...activePageReservationTraceCandidates]
+        .filter((candidate) => !candidate.getSnapshot().released);
+    pageReservationTraceLogger.warn('PAGE_RESERVATION_SATURATION_CAPTURE_STARTED', {
+        ...context,
+        activeReservationCount: active.length,
+        globalThresholdBytes: PAGE_RESERVATION_TRACE_GLOBAL_THRESHOLD_BYTES,
+        holdThresholdMs: PAGE_RESERVATION_TRACE_HOLD_THRESHOLD_MS,
+    });
+    for (const candidate of active)
+        candidate.captureSaturation(context);
+}
+function createPageReservationTrace(jobId, source, chapterNumber, pageIndex, totalPages, getGlobalSnapshot) {
     if (!pageReservationTraceEnabled)
-        return undefined;
-    if (!tracedPageReservationJobId) {
-        tracedPageReservationJobId = jobId;
-        pageReservationTraceLogger.info('PAGE_RESERVATION_TRACE_JOB_SELECTED', {
-            jobId,
-            source,
-            chapterNumber,
-            totalPages,
-        });
-    }
-    if (tracedPageReservationJobId !== jobId)
         return undefined;
     const base = {
         jobId,
@@ -73,23 +99,29 @@ function createPageReservationTrace(jobId, source, chapterNumber, pageIndex, tot
     let reservationAcquiredAt = null;
     let reservedBytes = null;
     let state = 'PRODUCER_ASSIGNED';
+    let lastEvent = null;
     let released = false;
+    let captured = false;
+    let timelineTruncated = false;
+    const timeline = [];
+    let holdTimer = null;
+    let trace;
     const nextStateForEvent = (event) => {
         if (event === 'PAGE_RESERVATION_ACQUIRED' || event === 'PAGE_RESERVATION_REACQUIRED')
             return 'RESERVED';
         if (event === 'PAGE_GLOBAL_DOWNLOAD_PERMIT_WAIT_STARTED')
             return 'WAITING_GLOBAL_DOWNLOAD_PERMIT';
-        if (event === 'PAGE_GLOBAL_DOWNLOAD_PERMIT_ACQUIRED' || event === 'DOWNLOAD_REQUEST_STARTED')
+        if (event === 'PAGE_GLOBAL_DOWNLOAD_PERMIT_ACQUIRED' || event.endsWith('REQUEST_STARTED'))
             return 'FETCHING';
-        if (event === 'DOWNLOAD_REQUEST_HEADERS')
+        if (event.endsWith('REQUEST_HEADERS'))
             return 'HEADERS_RECEIVED';
         if (event.includes('RESERVATION_UPGRADE_STARTED'))
             return 'WAITING_RESERVATION_UPGRADE';
         if (event.includes('RESERVATION_UPGRADE_COMPLETED'))
             return 'AWAITING_BODY';
-        if (event === 'DOWNLOAD_REQUEST_FIRST_BODY_CHUNK')
+        if (event.endsWith('FIRST_BODY_CHUNK'))
             return 'READING_BODY';
-        if (event === 'DOWNLOAD_REQUEST_BODY_COMPLETED')
+        if (event.endsWith('BODY_COMPLETED'))
             return 'BODY_COMPLETED';
         if (event === 'PAGE_RESERVATION_COMMITTED')
             return 'COMMITTED';
@@ -111,7 +143,9 @@ function createPageReservationTrace(jobId, source, chapterNumber, pageIndex, tot
             released = true;
         const previousState = state;
         state = nextStateForEvent(event) || state;
-        pageReservationTraceLogger.info('PAGE_RESERVATION_TRACE', {
+        lastEvent = event;
+        const globalSnapshot = getGlobalSnapshot();
+        const traceEvent = {
             ...base,
             event,
             observedAt: new Date(now).toISOString(),
@@ -121,20 +155,79 @@ function createPageReservationTrace(jobId, source, chapterNumber, pageIndex, tot
             previousState,
             reservationState: state,
             reservationBytes: reservedBytes,
+            globalReservedBytes: globalSnapshot.reservedBytes,
+            globalCommittedBytes: globalSnapshot.committedBytes,
+            globalBufferedBytes: globalSnapshot.bufferedBytes,
+            globalBufferBudgetBytes: globalSnapshot.bufferBudgetBytes,
+            capacityState: globalSnapshot.capacityState,
+            capacityReason: globalSnapshot.capacityReason,
             ...meta,
-        });
+        };
+        if (timeline.length >= PAGE_RESERVATION_TRACE_MAX_EVENTS_PER_PAGE) {
+            // Preserve acquisition and the most recent state while keeping this
+            // diagnostic strictly bounded per active page.
+            timeline.splice(1, 1);
+            timelineTruncated = true;
+        }
+        timeline.push(traceEvent);
         previousEventAt = now;
+        if (captured) {
+            pageReservationTraceLogger.info('PAGE_RESERVATION_SATURATION_EVENT', traceEvent);
+        }
+        if (released) {
+            if (holdTimer)
+                clearTimeout(holdTimer);
+            activePageReservationTraceCandidates.delete(trace);
+            return;
+        }
+        if (globalSnapshot.reservedBytes >= PAGE_RESERVATION_TRACE_GLOBAL_THRESHOLD_BYTES) {
+            beginPageReservationSaturationCapture(trace, 'GLOBAL_RESERVED_THRESHOLD', globalSnapshot);
+        }
     };
-    return {
+    trace = {
         ...base,
         emit,
         getSnapshot: () => ({
             state,
+            lastEvent,
             reservedBytes,
             acquiredAt: reservationAcquiredAt === null ? null : new Date(reservationAcquiredAt).toISOString(),
             released,
         }),
+        captureSaturation: (context) => {
+            if (captured || released)
+                return;
+            captured = true;
+            if (holdTimer)
+                clearTimeout(holdTimer);
+            pageReservationTraceLogger.warn('PAGE_RESERVATION_SATURATION_SNAPSHOT', {
+                captureId: context.captureId,
+                captureReason: context.reason,
+                captureTriggeredAt: context.triggeredAt,
+                captureTrigger: context.trigger,
+                captureGlobalSnapshot: context.globalSnapshot,
+                ...base,
+                reservationState: state,
+                reservationBytes: reservedBytes,
+                acquiredAt: reservationAcquiredAt === null ? null : new Date(reservationAcquiredAt).toISOString(),
+                timelineTruncated,
+                timeline,
+            });
+        },
+        dispose: () => {
+            if (holdTimer)
+                clearTimeout(holdTimer);
+            activePageReservationTraceCandidates.delete(trace);
+        },
     };
+    activePageReservationTraceCandidates.add(trace);
+    holdTimer = setTimeout(() => {
+        if (!released) {
+            beginPageReservationSaturationCapture(trace, 'RESERVATION_HOLD_THRESHOLD', getGlobalSnapshot());
+        }
+    }, PAGE_RESERVATION_TRACE_HOLD_THRESHOLD_MS);
+    holdTimer.unref?.();
+    return trace;
 }
 function mergeDownloadRequestTraces(...traces) {
     const active = traces.filter((trace) => Boolean(trace));
@@ -4173,6 +4266,17 @@ export class ImporterEngine {
         // It lets a bounded job abort describe the exact lifecycle state that was
         // holding each logical reservation, without changing the abort path.
         const activePageReservationTraces = new Set();
+        const getPageReservationGlobalSnapshot = () => {
+            const capacity = this.autotuner.getLatestResult();
+            return {
+                reservedBytes: this.autotuner.getReservedBytes(),
+                committedBytes: this.autotuner.getCommittedBytes(),
+                bufferedBytes: this.autotuner.getBufferedBytes(),
+                bufferBudgetBytes: this.autotuner.getMaxBufferedBytes(),
+                capacityState: capacity.state,
+                capacityReason: capacity.reason,
+            };
+        };
         let successfulExecution = false;
         let lastRescuedError = null;
         let validPages = [];
@@ -4395,6 +4499,7 @@ export class ImporterEngine {
                         trace.emit('PAGE_RESERVATION_RELEASED', { reason, ...meta });
                     }
                     activePageReservationTraces.delete(trace);
+                    trace.dispose();
                 };
                 const notifyConsumer = () => {
                     if (pipelineError || this.stopSignal || isCancelled?.() || jobSignal?.aborted) {
@@ -4487,7 +4592,7 @@ export class ImporterEngine {
                                         chBufferedPagePermitWaitEvents++;
                                     bufferedSemaphoreAcquired = true;
                                     releaseBufferedPermit = admission.releasePagePermit;
-                                    reservationTrace = createPageReservationTrace(job.id, effectiveSource, chapterNumber, idx, expectedCount);
+                                    reservationTrace = createPageReservationTrace(job.id, effectiveSource, chapterNumber, idx, expectedCount, getPageReservationGlobalSnapshot);
                                     activeReservationTrace = reservationTrace;
                                     if (reservationTrace)
                                         activePageReservationTraces.add(reservationTrace);
@@ -4704,6 +4809,7 @@ export class ImporterEngine {
                                 stateAtEnd: activeReservationTrace.getSnapshot(),
                             });
                             activePageReservationTraces.delete(activeReservationTrace);
+                            activeReservationTrace.dispose();
                         }
                         if (!pipelineError)
                             pipelineError = err;
@@ -5525,6 +5631,7 @@ export class ImporterEngine {
         // If Cloudflare 403 or network error occurred and internal bridge is configured, fallback to bridge
         if ((fetchError || res?.status === 403) && this.config.NOX_STORAGE_BRIDGE_TOKEN && isKuro) {
             let bridgeSignal;
+            let bridgeFailureTraced = false;
             try {
                 const bridgeUrl = `${(this.config.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev').replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
                 bridgeSignal = AbortSignal.any([
@@ -5532,6 +5639,11 @@ export class ImporterEngine {
                     ...(options?.signal ? [options.signal] : []),
                     AbortSignal.timeout(timeoutDuration),
                 ]);
+                const bridgeRequestStartedAt = Date.now();
+                emitTrace('DOWNLOAD_BRIDGE_REQUEST_STARTED', {
+                    timeoutMs: timeoutDuration,
+                    requestStartedAtMs: bridgeRequestStartedAt,
+                });
                 const bridgeRes = await fetch(bridgeUrl, {
                     method: 'POST',
                     headers: {
@@ -5546,6 +5658,15 @@ export class ImporterEngine {
                     }),
                     signal: bridgeSignal,
                 });
+                emitTrace('DOWNLOAD_BRIDGE_REQUEST_HEADERS', {
+                    status: bridgeRes.status,
+                    contentLengthBytes: (() => {
+                        const raw = bridgeRes.headers.get('content-length');
+                        const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+                        return Number.isFinite(parsed) ? parsed : null;
+                    })(),
+                    elapsedMs: Date.now() - bridgeRequestStartedAt,
+                });
                 if (bridgeRes.ok) {
                     this.rateLimiter.recordSuccess(parsedUrl.host);
                     const bridgeLenStr = bridgeRes.headers.get('content-length');
@@ -5557,17 +5678,73 @@ export class ImporterEngine {
                                 throw new InvalidMediaError(url, `Bridge image declared content-length exceeds 20MB limit`);
                             }
                             if (options?.reservation && bridgeBytes > options.reservation.reservedBytes) {
-                                await options.reservation.upgrade(bridgeBytes, bridgeSignal);
+                                emitTrace('DOWNLOAD_BRIDGE_RESERVATION_UPGRADE_STARTED', {
+                                    fromBytes: options.reservation.reservedBytes,
+                                    toBytes: bridgeBytes,
+                                    elapsedMs: Date.now() - bridgeRequestStartedAt,
+                                });
+                                try {
+                                    await options.reservation.upgrade(bridgeBytes, bridgeSignal);
+                                    emitTrace('DOWNLOAD_BRIDGE_RESERVATION_UPGRADE_COMPLETED', {
+                                        reservedBytes: options.reservation.reservedBytes,
+                                        elapsedMs: Date.now() - bridgeRequestStartedAt,
+                                    });
+                                }
+                                catch (error) {
+                                    bridgeFailureTraced = true;
+                                    emitTrace('DOWNLOAD_BRIDGE_REQUEST_FAILED', {
+                                        stage: 'RESERVATION_UPGRADE',
+                                        errorType: classifyDownloadTraceError(error),
+                                        abortReason: classifyDownloadTraceAbort(this.abortController.signal, options?.signal, bridgeSignal),
+                                        elapsedMs: Date.now() - bridgeRequestStartedAt,
+                                    });
+                                    throw error;
+                                }
                             }
                         }
                     }
                     return await readImageBody(bridgeRes, {
                         reservation: options?.reservation,
                         signal: bridgeSignal,
+                        trace: requestTrace ? {
+                            onFirstChunk: ({ bytes, elapsedMs }) => emitTrace('DOWNLOAD_BRIDGE_REQUEST_FIRST_BODY_CHUNK', {
+                                bytes,
+                                bodyElapsedMs: elapsedMs,
+                                elapsedMs: Date.now() - bridgeRequestStartedAt,
+                            }),
+                            onComplete: ({ bytes, chunks, elapsedMs }) => emitTrace('DOWNLOAD_BRIDGE_REQUEST_BODY_COMPLETED', {
+                                bytes,
+                                chunks,
+                                bodyElapsedMs: elapsedMs,
+                                elapsedMs: Date.now() - bridgeRequestStartedAt,
+                            }),
+                            onReservationUpgrade: ({ phase, state, fromBytes, toBytes, elapsedMs }) => emitTrace(`DOWNLOAD_BRIDGE_BODY_RESERVATION_UPGRADE_${state}`, { phase, fromBytes, toBytes, bodyElapsedMs: elapsedMs, elapsedMs: Date.now() - bridgeRequestStartedAt }),
+                            onError: ({ bytes, chunks, elapsedMs, waitingOn, error }) => {
+                                bridgeFailureTraced = true;
+                                emitTrace('DOWNLOAD_BRIDGE_REQUEST_FAILED', {
+                                    stage: 'BODY_READ',
+                                    errorType: classifyDownloadTraceError(error),
+                                    abortReason: classifyDownloadTraceAbort(this.abortController.signal, options?.signal, bridgeSignal),
+                                    bytes,
+                                    chunks,
+                                    bodyElapsedMs: elapsedMs,
+                                    waitingOn,
+                                    elapsedMs: Date.now() - bridgeRequestStartedAt,
+                                });
+                            },
+                        } : undefined,
                     });
                 }
             }
             catch (bridgeErr) {
+                if (!bridgeFailureTraced) {
+                    emitTrace('DOWNLOAD_BRIDGE_REQUEST_FAILED', {
+                        stage: 'BRIDGE_REQUEST',
+                        errorType: classifyDownloadTraceError(bridgeErr),
+                        abortReason: classifyDownloadTraceAbort(this.abortController.signal, options?.signal, bridgeSignal),
+                        elapsedMs: Date.now() - requestStartedAt,
+                    });
+                }
                 if (bridgeSignal?.aborted || this.abortController.signal.aborted || options?.signal?.aborted) {
                     throw bridgeErr;
                 }
