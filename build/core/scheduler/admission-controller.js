@@ -339,51 +339,54 @@ export class AdmissionController {
      * Se false: obra permanece WAITING_ADMISSION.
      */
     async canAdmitNewWork(options = {}) {
-        const config = this.stateStore.getConfig();
-        // 1. SYSTEM_HEALTHY
-        const isStopActive = await this.protectiveSentinel.isProtectiveStopActive();
-        if (isStopActive) {
-            return {
-                allowed: false,
-                reason: 'SYSTEM_UNHEALTHY: PROTECTIVE_STOP is active',
-                metrics: {
-                    p0Waiting: 0,
-                    p1Claimable: 0,
-                    p1AvailableChapters: 0,
-                    p1WorksWaiting: 0,
-                    p2ActiveCohortSize: 0,
-                    p2UnfinishedCount: 0,
-                    systemHealthy: false,
-                },
-            };
-        }
-        // Admission pressure is advisory; claims are the work-conserving path.
-        // When a bounded pool already has claim waiters, running the P1 frontier
-        // probe would consume the other connection and make those claims wait
-        // behind a query that cannot itself publish work. Defer the probe until
-        // the pool drains; this preserves P1-before-P2 ordering without allowing
-        // maintenance/admission to starve the chapter data plane.
-        const poolWaiters = Number(this.pool?.waitingCount || 0);
-        const activeWorksCount = this.stateStore.getActiveWorks().length;
-        if (poolWaiters > 0 && !options.allowDuringClaimPressure && activeWorksCount > 0) {
-            return {
-                allowed: false,
-                reason: `YSQL_POOL_BUSY: ${poolWaiters} claim/query waiter(s)`,
-                metrics: {
-                    p0Waiting: 0,
-                    p1Claimable: 0,
-                    p1AvailableChapters: 0,
-                    p1WorksWaiting: 0,
-                    p2ActiveCohortSize: 0,
-                    p2UnfinishedCount: 0,
-                    systemHealthy: true,
-                },
-            };
-        }
-        // 2. NO_P0_WAITING (Real P0 releases: 100 <= priority < 1000; staff-forced >= 1000 belongs to chapter data plane)
-        // We must use a frontier/eligibility check so that works blocked by upstream gaps
-        // do not falsely register as "waiting" and starve P2 admission indefinitely.
-        const p0Res = await this.runQuery(`
+        const startedAt = performance.now();
+        const stages = {};
+        try {
+            const config = this.stateStore.getConfig();
+            // 1. SYSTEM_HEALTHY
+            const isStopActive = await this.timeAdmissionStage(stages, 'protectiveStopMs', () => this.protectiveSentinel.isProtectiveStopActive());
+            if (isStopActive) {
+                return {
+                    allowed: false,
+                    reason: 'SYSTEM_UNHEALTHY: PROTECTIVE_STOP is active',
+                    metrics: {
+                        p0Waiting: 0,
+                        p1Claimable: 0,
+                        p1AvailableChapters: 0,
+                        p1WorksWaiting: 0,
+                        p2ActiveCohortSize: 0,
+                        p2UnfinishedCount: 0,
+                        systemHealthy: false,
+                    },
+                };
+            }
+            // Admission pressure is advisory; claims are the work-conserving path.
+            // When a bounded pool already has claim waiters, running the P1 frontier
+            // probe would consume the other connection and make those claims wait
+            // behind a query that cannot itself publish work. Defer the probe until
+            // the pool drains; this preserves P1-before-P2 ordering without allowing
+            // maintenance/admission to starve the chapter data plane.
+            const poolWaiters = Number(this.pool?.waitingCount || 0);
+            const activeWorksCount = this.stateStore.getActiveWorks().length;
+            if (poolWaiters > 0 && !options.allowDuringClaimPressure && activeWorksCount > 0) {
+                return {
+                    allowed: false,
+                    reason: `YSQL_POOL_BUSY: ${poolWaiters} claim/query waiter(s)`,
+                    metrics: {
+                        p0Waiting: 0,
+                        p1Claimable: 0,
+                        p1AvailableChapters: 0,
+                        p1WorksWaiting: 0,
+                        p2ActiveCohortSize: 0,
+                        p2UnfinishedCount: 0,
+                        systemHealthy: true,
+                    },
+                };
+            }
+            // 2. NO_P0_WAITING (Real P0 releases: 100 <= priority < 1000; staff-forced >= 1000 belongs to chapter data plane)
+            // We must use a frontier/eligibility check so that works blocked by upstream gaps
+            // do not falsely register as "waiting" and starve P2 admission indefinitely.
+            const p0Res = await this.timeAdmissionStage(stages, 'p0FrontierProbeMs', () => this.runQuery(`
       SELECT q.id
       FROM importer_queue q
       JOIN importer_sources s ON s.id = q.source
@@ -431,113 +434,120 @@ export class AdmissionController {
             AND (canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key))
         )
       LIMIT 1
-    `);
-        const p0Waiting = p0Res.rows.length > 0 ? 1 : 0;
-        if (p0Waiting > 0 && activeWorksCount > 0) {
-            return {
-                allowed: false,
-                reason: `P0_WAITING: ${p0Waiting} P0 releases/jobs waiting`,
-                metrics: {
-                    p0Waiting,
-                    p1Claimable: 0,
-                    p1AvailableChapters: 0,
-                    p1WorksWaiting: 0,
-                    p2ActiveCohortSize: 0,
-                    p2UnfinishedCount: 0,
-                    systemHealthy: true,
-                },
-            };
-        }
-        // 3. Existing visible works are P1 regardless of the priority that was
-        // assigned when they were first discovered.  This is deliberately based
-        // on the canonical work visibility, not latest_chapter_published_at: that
-        // denormalized timestamp may legitimately be null for older works.
-        const p1 = await this.getP1BacklogSnapshot(options);
-        if (p1.available > 0 && activeWorksCount > 0) {
-            return {
-                allowed: false,
-                reason: 'P1_BACKLOG_WAITING: existing catalog work must advance before P2 admission',
-                metrics: {
-                    p0Waiting: 0,
-                    p1Claimable: p1.claimable,
-                    p1AvailableChapters: p1.available,
-                    p1WorksWaiting: p1.works,
-                    p2ActiveCohortSize: 0,
-                    p2UnfinishedCount: 0,
-                    systemHealthy: true,
-                },
-            };
-        }
-        // 4. P2_ACTIVE_COHORT_BELOW_LIMIT:
-        // Strictly restrict active P2 cohort to <= config.maxActiveNewWorks (default 4).
-        // Filter out stale P2 works that have been in FILLING for >= 30m without progress.
-        const activeWorks = this.stateStore.getActiveWorks();
-        const nowMs = Date.now();
-        const activeP2Works = activeWorks.filter((w) => {
-            if (w.lane !== 'P2' || w.state !== 'FILLING')
-                return false;
-            // If work has no queued or in-flight chapters, it has completed its initial batch and does not block new admissions
-            if (w.queuedChapters === 0 && (w.inFlightChapters || 0) === 0)
-                return false;
-            const admittedTime = new Date(w.admittedAt).getTime();
-            if (w.publishedChapters === 0 && (nowMs - admittedTime >= 30 * 60 * 1000)) {
-                return false; // Stale cohort work does not block new admissions
+    `));
+            const p0Waiting = p0Res.rows.length > 0 ? 1 : 0;
+            if (p0Waiting > 0 && activeWorksCount > 0) {
+                return {
+                    allowed: false,
+                    reason: `P0_WAITING: ${p0Waiting} P0 releases/jobs waiting`,
+                    metrics: {
+                        p0Waiting,
+                        p1Claimable: 0,
+                        p1AvailableChapters: 0,
+                        p1WorksWaiting: 0,
+                        p2ActiveCohortSize: 0,
+                        p2UnfinishedCount: 0,
+                        systemHealthy: true,
+                    },
+                };
             }
-            return true;
-        });
-        const maxP2Cohort = config.maxActiveNewWorks || 8;
-        if (activeP2Works.length >= maxP2Cohort) {
+            // 3. Existing visible works are P1 regardless of the priority that was
+            // assigned when they were first discovered.  This is deliberately based
+            // on the canonical work visibility, not latest_chapter_published_at: that
+            // denormalized timestamp may legitimately be null for older works.
+            const p1 = await this.timeAdmissionStage(stages, 'p1BacklogProbeMs', () => this.getP1BacklogSnapshot(options));
+            if (p1.available > 0 && activeWorksCount > 0) {
+                return {
+                    allowed: false,
+                    reason: 'P1_BACKLOG_WAITING: existing catalog work must advance before P2 admission',
+                    metrics: {
+                        p0Waiting: 0,
+                        p1Claimable: p1.claimable,
+                        p1AvailableChapters: p1.available,
+                        p1WorksWaiting: p1.works,
+                        p2ActiveCohortSize: 0,
+                        p2UnfinishedCount: 0,
+                        systemHealthy: true,
+                    },
+                };
+            }
+            // 4. P2_ACTIVE_COHORT_BELOW_LIMIT:
+            // Strictly restrict active P2 cohort to <= config.maxActiveNewWorks (default 4).
+            // Filter out stale P2 works that have been in FILLING for >= 30m without progress.
+            const activeWorks = this.stateStore.getActiveWorks();
+            const nowMs = Date.now();
+            const activeP2Works = activeWorks.filter((w) => {
+                if (w.lane !== 'P2' || w.state !== 'FILLING')
+                    return false;
+                // If work has no queued or in-flight chapters, it has completed its initial batch and does not block new admissions
+                if (w.queuedChapters === 0 && (w.inFlightChapters || 0) === 0)
+                    return false;
+                const admittedTime = new Date(w.admittedAt).getTime();
+                if (w.publishedChapters === 0 && (nowMs - admittedTime >= 30 * 60 * 1000)) {
+                    return false; // Stale cohort work does not block new admissions
+                }
+                return true;
+            });
+            const maxP2Cohort = config.maxActiveNewWorks || 8;
+            if (activeP2Works.length >= maxP2Cohort) {
+                return {
+                    allowed: false,
+                    reason: `P2_ACTIVE_COHORT_FULL: ${activeP2Works.length}/${maxP2Cohort} active works`,
+                    metrics: {
+                        p0Waiting: 0,
+                        p1Claimable: 0,
+                        p1AvailableChapters: 0,
+                        p1WorksWaiting: 0,
+                        p2ActiveCohortSize: activeP2Works.length,
+                        p2UnfinishedCount: activeP2Works.length,
+                        systemHealthy: true,
+                    },
+                };
+            }
+            // 5. WORKER_CAPACITY_CHECK:
+            // P0 >>> P1 > P2 > P3. P2 must use the effective chapter capacity, not
+            // a historical runner count: otherwise a 3-slot runtime keeps admitting
+            // new work and repeatedly scans the hot queue while all slots are busy.
+            // If there is spare capacity and activeP2Works < maxP2Cohort:
+            // allow P2/P3 new works to admit so P3 never dies of starvation from catalog backlog.
+            const inFlightRes = await this.timeAdmissionStage(stages, 'inFlightCountMs', () => this.runQuery(`SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`));
+            const importingCnt = parseInt(inFlightRes.rows[0]?.cnt || '0', 10);
+            const maxTotalWorkers = Math.max(1, this.chapterCapacityProvider());
+            if (importingCnt >= maxTotalWorkers) {
+                return {
+                    allowed: false,
+                    reason: `WORKERS_FULLY_UTILIZED: ${importingCnt}/${maxTotalWorkers} chapters in-flight`,
+                    metrics: {
+                        p0Waiting: 0,
+                        p1Claimable: 0,
+                        p1AvailableChapters: 0,
+                        p1WorksWaiting: 0,
+                        p2ActiveCohortSize: activeP2Works.length,
+                        p2UnfinishedCount: activeP2Works.length,
+                        systemHealthy: true,
+                    },
+                };
+            }
             return {
-                allowed: false,
-                reason: `P2_ACTIVE_COHORT_FULL: ${activeP2Works.length}/${maxP2Cohort} active works`,
+                allowed: true,
+                reason: 'CAN_ADMIT_NEW_WORK_ALLOWED',
                 metrics: {
                     p0Waiting: 0,
                     p1Claimable: 0,
                     p1AvailableChapters: 0,
                     p1WorksWaiting: 0,
                     p2ActiveCohortSize: activeP2Works.length,
-                    p2UnfinishedCount: activeP2Works.length,
+                    p2UnfinishedCount: 0,
                     systemHealthy: true,
                 },
             };
         }
-        // 5. WORKER_CAPACITY_CHECK:
-        // P0 >>> P1 > P2 > P3. P2 must use the effective chapter capacity, not
-        // a historical runner count: otherwise a 3-slot runtime keeps admitting
-        // new work and repeatedly scans the hot queue while all slots are busy.
-        // If there is spare capacity and activeP2Works < maxP2Cohort:
-        // allow P2/P3 new works to admit so P3 never dies of starvation from catalog backlog.
-        const inFlightRes = await this.runQuery(`SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`);
-        const importingCnt = parseInt(inFlightRes.rows[0]?.cnt || '0', 10);
-        const maxTotalWorkers = Math.max(1, this.chapterCapacityProvider());
-        if (importingCnt >= maxTotalWorkers) {
-            return {
-                allowed: false,
-                reason: `WORKERS_FULLY_UTILIZED: ${importingCnt}/${maxTotalWorkers} chapters in-flight`,
-                metrics: {
-                    p0Waiting: 0,
-                    p1Claimable: 0,
-                    p1AvailableChapters: 0,
-                    p1WorksWaiting: 0,
-                    p2ActiveCohortSize: activeP2Works.length,
-                    p2UnfinishedCount: activeP2Works.length,
-                    systemHealthy: true,
-                },
-            };
+        finally {
+            this.logSlowAdmissionStages('P2_ADMISSION_GATE_STAGE_TIMING', startedAt, stages, {
+                activeWorks: this.getActiveWorksCount(),
+                allowDuringClaimPressure: options.allowDuringClaimPressure === true,
+            });
         }
-        return {
-            allowed: true,
-            reason: 'CAN_ADMIT_NEW_WORK_ALLOWED',
-            metrics: {
-                p0Waiting: 0,
-                p1Claimable: 0,
-                p1AvailableChapters: 0,
-                p1WorksWaiting: 0,
-                p2ActiveCohortSize: activeP2Works.length,
-                p2UnfinishedCount: 0,
-                systemHealthy: true,
-            },
-        };
     }
     /**
      * A bounded health-aware P1 admission signal. This is an existence check,
@@ -2206,22 +2216,33 @@ export class AdmissionController {
                     ]);
                 };
                 const findOnDemandFrontier = async (candidateRows) => {
+                    const startedAt = performance.now();
+                    const stages = {};
+                    let gapConfirmationAttempts = 0;
+                    const finish = (result) => {
+                        this.logSlowAdmissionStages('FRONTIER_RESOLUTION_STAGE_TIMING', startedAt, stages, {
+                            lane,
+                            candidateCount: candidateRows.length,
+                            gapConfirmationAttempts,
+                        });
+                        return result;
+                    };
                     if (candidateRows.length === 0)
-                        return null;
+                        return finish(null);
                     this.logger.info(`[DEBUG_ADM_CANDIDATES] CacheSize: ${this.deadWorksCache.size} | Cands: ${JSON.stringify(candidateRows.map(c => ({ w: c.work_id, q: c.queued_count })))}`);
                     const candWorkIds = candidateRows.map((r) => r.work_id);
                     const pubMap = new Map();
-                    const pubRes = await this.runQuery(`SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
+                    const pubRes = await this.timeAdmissionStage(stages, 'publishedFrontierLookupMs', () => this.runQuery(`SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
            FROM chapters
            WHERE work_id = ANY($1::uuid[]) AND published_at IS NOT NULL
-           GROUP BY work_id`, [candWorkIds]);
+           GROUP BY work_id`, [candWorkIds]));
                     for (const pr of pubRes.rows)
                         pubMap.set(pr.work_id, parseFloat(pr.max_pub));
                     const gapsMap = new Map();
                     try {
-                        const gapsRes = await this.runQuery(`SELECT work_id::text, start_sort_key, end_sort_key
+                        const gapsRes = await this.timeAdmissionStage(stages, 'confirmedGapsLookupMs', () => this.runQuery(`SELECT work_id::text, start_sort_key, end_sort_key
              FROM importer_confirmed_gaps
-             WHERE work_id = ANY($1::uuid[])`, [candWorkIds]);
+             WHERE work_id = ANY($1::uuid[])`, [candWorkIds]));
                         for (const gr of gapsRes.rows) {
                             const arr = gapsMap.get(gr.work_id) || [];
                             arr.push({ start: parseFloat(gr.start_sort_key), end: parseFloat(gr.end_sort_key) });
@@ -2271,7 +2292,7 @@ export class AdmissionController {
                         return isCandidateFrontierValid(cand.work_id, minSort, maxPub);
                     });
                     if (match)
-                        return match;
+                        return finish(match);
                     // Only the bounded source window is considered for gap confirmation.
                     for (const cand of candidateRows) {
                         const maxPub = pubMap.get(cand.work_id) ?? -1;
@@ -2279,8 +2300,11 @@ export class AdmissionController {
                         const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
                         const gapEnd = minSort - 1;
                         if (gapStart > gapEnd) {
-                            return cand;
+                            return finish(cand);
                         }
+                        const confirmationStartedAt = performance.now();
+                        gapConfirmationAttempts++;
+                        let gapConfirmed = false;
                         try {
                             const conf = await confirmUpstreamGapInterval(this.pool, {
                                 workId: cand.work_id,
@@ -2289,16 +2313,20 @@ export class AdmissionController {
                                 primarySource: cand.source,
                                 reason: 'ON_DEMAND_ADMISSION_GAP_CONFIRM',
                             });
-                            if (conf.confirmed)
-                                return cand;
-                            else
+                            gapConfirmed = conf.confirmed;
+                            if (!gapConfirmed)
                                 this.deadWorksCache.set(cand.work_id, Date.now());
                         }
                         catch {
                             this.deadWorksCache.set(cand.work_id, Date.now());
                         }
+                        finally {
+                            stages.gapConfirmationMs = (stages.gapConfirmationMs || 0) + Math.round(performance.now() - confirmationStartedAt);
+                        }
+                        if (gapConfirmed)
+                            return finish(cand);
                     }
-                    return null;
+                    return finish(null);
                 };
                 let res = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}LoadQueuedMs`, () => loadOnDemandCandidates(false));
                 let match = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}ResolveQueuedFrontierMs`, () => findOnDemandFrontier(res.rows));
