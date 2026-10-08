@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { PGlite } from '@electric-sql/pglite';
 import {
   SchedulerLane,
   WorkSchedulerState,
@@ -231,6 +232,167 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(sql).toContain("staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')");
     expect(sql).toContain('pub.max_published + 1.5');
     expect(sql).toContain('importer_confirmed_gaps');
+  });
+
+  it('builds the P0 work list from canonical executable rows before its 32-work bound', async () => {
+    const db = new PGlite();
+    const previousNodeEnv = process.env.NODE_ENV;
+    const p0Query = vi.fn((sql: string, params?: any[]) => db.query(sql, params));
+    const blockedWorkIds = Array.from({ length: 24 }, (_, index) =>
+      `00000000-0000-0000-0000-${String(index + 1).padStart(12, '0')}`,
+    );
+    const nagatoroWorkId = '00000000-0000-0000-0000-000000000025';
+    const retryWorkId = '00000000-0000-0000-0000-000000000026';
+
+    try {
+      await db.exec(`
+        CREATE TABLE importer_queue (
+          task_type text NOT NULL,
+          status text NOT NULL,
+          payload jsonb NOT NULL,
+          attempts integer NOT NULL DEFAULT 0,
+          max_attempts integer,
+          priority integer NOT NULL,
+          chapter_sort_key numeric NOT NULL,
+          source text NOT NULL,
+          next_run_at timestamptz NOT NULL
+        );
+        CREATE TABLE importer_sources (
+          id text PRIMARY KEY,
+          enabled boolean NOT NULL,
+          status text NOT NULL,
+          cooldown_until timestamptz,
+          blocked_reason text,
+          blocked_details jsonb
+        );
+        CREATE TABLE chapters (work_id uuid NOT NULL, number numeric NOT NULL, published_at timestamptz);
+        CREATE TABLE importer_chapter_mappings (
+          work_id uuid NOT NULL,
+          chapter_sort_key numeric NOT NULL,
+          status text NOT NULL,
+          is_gap boolean NOT NULL DEFAULT false
+        );
+        CREATE TABLE importer_confirmed_gaps (
+          work_id uuid NOT NULL,
+          start_sort_key numeric NOT NULL,
+          end_sort_key numeric NOT NULL
+        );
+        INSERT INTO importer_sources (id, enabled, status) VALUES ('healthy-source', true, 'ACTIVE');
+      `);
+
+      // These rows are deliberately ordered before the valid releases. They
+      // model healthy sources such as Montetai/Nebulosa whose P0 row is behind
+      // an open canonical predecessor, so a post-LIMIT filter would starve
+      // the release that is ready now.
+      for (const workId of blockedWorkIds) {
+        await db.query(
+          `INSERT INTO importer_queue
+             (task_type, status, payload, attempts, max_attempts, priority, chapter_sort_key, source, next_run_at)
+           VALUES
+             ('IMPORT_CHAPTER', 'IMPORTING', $1::jsonb, 0, 7, 100, 1, 'healthy-source', NOW() - INTERVAL '1 day'),
+             ('IMPORT_CHAPTER', 'QUEUED', $1::jsonb, 0, 7, 100, 2, 'healthy-source', NOW() - INTERVAL '1 day')`,
+          [JSON.stringify({ workId })],
+        );
+      }
+
+      // Mirrors MangaFlix / Nagatoro #130: max published is 129, chapter 130
+      // is queued and due, and no predecessor is open.
+      await db.query(
+        `INSERT INTO chapters (work_id, number, published_at) VALUES ($1::uuid, 129, NOW())`,
+        [nagatoroWorkId],
+      );
+      await db.query(
+        `INSERT INTO importer_queue
+           (task_type, status, payload, attempts, max_attempts, priority, chapter_sort_key, source, next_run_at)
+         VALUES ('IMPORT_CHAPTER', 'QUEUED', $1::jsonb, 0, 7, 100, 130, 'healthy-source', NOW())`,
+        [JSON.stringify({ workId: nagatoroWorkId })],
+      );
+
+      // RETRY remains eligible when due and canonical; the pre-list must not
+      // accidentally narrow the existing QUEUED/RETRY behavior.
+      await db.query(
+        `INSERT INTO importer_queue
+           (task_type, status, payload, attempts, max_attempts, priority, chapter_sort_key, source, next_run_at)
+         VALUES ('IMPORT_CHAPTER', 'RETRY', $1::jsonb, 1, 7, 100, 1, 'healthy-source', NOW() - INTERVAL '1 minute')`,
+        [JSON.stringify({ workId: retryWorkId })],
+      );
+
+      process.env.NODE_ENV = 'production';
+      (scheduler as any).pool = { query: p0Query };
+
+      const candidateWorkIds = await (scheduler as any).getP0CandidateWorkIds();
+      expect(candidateWorkIds).toEqual(expect.arrayContaining([nagatoroWorkId, retryWorkId]));
+      expect(candidateWorkIds).toHaveLength(2);
+      expect(candidateWorkIds).not.toEqual(expect.arrayContaining(blockedWorkIds));
+
+      const sql = p0Query.mock.calls[0][0] as string;
+      const limitOffset = sql.indexOf('LIMIT 32');
+      expect(sql).toContain('MAX(c.number) AS max_published');
+      expect(sql).toContain('canonical_chapter.published_at IS NOT NULL');
+      expect(sql).toContain('predecessor.chapter_sort_key < q.chapter_sort_key');
+      expect(sql).toContain("staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')");
+      expect(sql).toContain('active_chapter.status = \'IMPORTING\'');
+      expect(sql).toContain("q.status = 'RETRY' AND q.next_run_at <= NOW()");
+      expect(sql.indexOf('predecessor.chapter_sort_key < q.chapter_sort_key')).toBeLessThan(limitOffset);
+      expect(sql.indexOf('active_chapter.status = \'IMPORTING\'')).toBeLessThan(limitOffset);
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+      await db.close();
+    }
+  });
+
+  it('keeps P0 round-robin fairness within the canonical executable work list', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const p0WorkIds = ['p0-executable-a', 'p0-executable-b'];
+    const p0Jobs = new Map([
+      ['p0-executable-a', {
+        id: 'job-p0-a', source: 'healthy-source', priority: 100, chapter_sort_key: 130,
+        payload: { workId: 'p0-executable-a', chapterNumber: 130 },
+      }],
+      ['p0-executable-b', {
+        id: 'job-p0-b', source: 'healthy-source', priority: 100, chapter_sort_key: 131,
+        payload: { workId: 'p0-executable-b', chapterNumber: 131 },
+      }],
+    ]);
+    const client = {
+      query: vi.fn((sql: string, params: any[]) => {
+        if (sql.includes('importer_staff_requests') || sql.includes('priority >= 1000')) return { rows: [] };
+        if (sql.includes("SELECT q.payload->>'workId' AS work_id")) {
+          return { rows: p0WorkIds.map((work_id) => ({ work_id })) };
+        }
+        if (sql.includes('UPDATE importer_queue q')) {
+          const job = p0Jobs.get(params?.[2]);
+          return { rows: job ? [job] : [] };
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+
+    try {
+      process.env.NODE_ENV = 'production';
+      (scheduler as any).pool = {
+        query: vi.fn(),
+        connect: vi.fn().mockResolvedValue(client),
+      };
+
+      const first = await scheduler.acquireNextChapterJob({
+        workerId: 'p0-fairness-1', allowedSources: ['healthy-source'],
+      });
+      scheduler.onJobFinished('p0-executable-a', 130);
+      const second = await scheduler.acquireNextChapterJob({
+        workerId: 'p0-fairness-2', allowedSources: ['healthy-source'],
+      });
+
+      expect(first?.id).toBe('job-p0-a');
+      expect(second?.id).toBe('job-p0-b');
+      const claimedWorkIds = client.query.mock.calls
+        .filter(([sql]: [string]) => sql.includes('UPDATE importer_queue q'))
+        .map(([, params]: [string, any[]]) => params[2]);
+      expect(claimedWorkIds).toEqual(p0WorkIds);
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
   });
 
   it('claims an executable catalog P1 before on-demand admission when the active set is empty', async () => {
