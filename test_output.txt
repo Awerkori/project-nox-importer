@@ -1,0 +1,79 @@
+npm notice run project-nox-importer@1.0.0 npx
+npm notice run 'vitest' run tests/engine.test.ts
+
+ RUN  v3.2.7 /home/awerkori/.Projects/project-nox-importer
+
+stdout | tests/engine.test.ts > ImporterEngine End-to-End Execution > runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish
+{"timestamp":"2026-10-07T17:44:03.695Z","level":"INFO","context":"Queue","message":"Enqueued job","meta":{"taskType":"DISCOVER_WORKS","source":"nexus","dedupeKey":"nexus:discover:995219","priority":10}}
+
+stdout | tests/engine.test.ts > ImporterEngine End-to-End Execution > runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish
+{"timestamp":"2026-10-07T17:44:03.697Z","level":"INFO","context":"Queue","message":"Acquired job with atomic lease lock","meta":{"jobId":"e8882e47-30cd-428c-a35a-9f19adee6ef1","taskType":"DISCOVER_WORKS","source":"nexus","attempts":1,"chapterSortKey":null}}
+
+stdout | tests/engine.test.ts > ImporterEngine End-to-End Execution > runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish
+{"timestamp":"2026-10-07T17:44:03.700Z","level":"INFO","context":"Engine","message":"Processing job","meta":{"jobId":"e8882e47-30cd-428c-a35a-9f19adee6ef1","taskType":"DISCOVER_WORKS","source":"nexus","chapterSortKey":null}}
+
+stdout | tests/engine.test.ts > ImporterEngine End-to-End Execution > runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish
+{"timestamp":"2026-10-07T17:44:03.701Z","level":"INFO","context":"Engine","message":"Running bootstrap discovery for source nexus","meta":{"source":"nexus","mode":"bootstrap"}}
+
+stdout | tests/engine.test.ts > ImporterEngine End-to-End Execution > runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish
+{"timestamp":"2026-10-07T17:44:03.701Z","level":"INFO","context":"Engine","message":"Discovered updated works","meta":{"source":"nexus","mode":"bootstrap","count":1,"nextCursor":"2026-09-08T10:00:00Z"}}
+
+stdout | tests/engine.test.ts > ImporterEngine End-to-End Execution > runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish
+{"timestamp":"2026-10-07T17:44:03.702Z","level":"INFO","context":"Queue","message":"Enqueued job","meta":{"taskType":"SYNC_WORK","source":"nexus","dedupeKey":"nexus:work:nx-pilot-work-1","priority":60}}
+
+stdout | tests/engine.test.ts > ImporterEngine End-to-End Execution > runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish
+{"timestamp":"2026-10-07T17:44:03.703Z","level":"INFO","context":"Engine","message":"[Catalog Backfill] Source nexus advanced to cursor: 2026-09-08T10:00:00Z"}
+
+stdout | tests/engine.test.ts > ImporterEngine End-to-End Execution > runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish
+{"timestamp":"2026-10-07T17:44:03.704Z","level":"INFO","context":"Queue","message":"Released job","meta":{"jobId":"e8882e47-30cd-428c-a35a-9f19adee6ef1","status":"COMPLETED","hasError":false}}
+
+stdout | tests/engine.test.ts > ImporterEngine End-to-End Execution > runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish
+Mock caught insert error: duplicate key value violates unique constraint "importer_queue_dedupe_key_key"
+
+stdout | tests/engine.test.ts > ImporterEngine End-to-End Execution > safely skips already completed chapters on subsequent sync runs without duplicate downloads
+Mock caught insert error: duplicate key value violates unique constraint "importer_queue_dedupe_key_key"
+
+ ❯ tests/engine.test.ts (3 tests | 3 failed) 1689ms
+   × ImporterEngine End-to-End Execution > runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish 33ms
+     → duplicate key value violates unique constraint "importer_queue_dedupe_key_key"
+   × ImporterEngine End-to-End Execution > safely skips already completed chapters on subsequent sync runs without duplicate downloads 4ms
+     → duplicate key value violates unique constraint "importer_queue_dedupe_key_key"
+   × ImporterEngine End-to-End Execution > repairs an already published chapter instead of treating publication as integrity proof 2ms
+     → Cannot read properties of undefined (reading 'payload')
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/engine.test.ts > ImporterEngine End-to-End Execution > runs full autonomous pipeline: discover -> sync work -> import chapter -> verify pages -> publish
+ FAIL  tests/engine.test.ts > ImporterEngine End-to-End Execution > safely skips already completed chapters on subsequent sync runs without duplicate downloads
+error: duplicate key value violates unique constraint "importer_queue_dedupe_key_key"
+ ❯ pe.Ue node_modules/@electric-sql/pg-protocol/src/parser.ts:442:11
+ ❯ pe.tt node_modules/@electric-sql/pg-protocol/src/parser.ts:220:16
+ ❯ pe.parse node_modules/@electric-sql/pg-protocol/src/parser.ts:104:21
+ ❯ N.qe node_modules/@electric-sql/pglite/src/pglite.ts:753:26
+ ❯ node_modules/@electric-sql/pglite/src/pglite.ts:706:14
+ ❯ null.<anonymous> wasm:/wasm/0267bb86:1:5922000
+ ❯ null.<anonymous> wasm:/wasm/0267bb86:1:2616044
+ ❯ null.<anonymous> wasm:/wasm/0267bb86:1:2648530
+ ❯ null.<anonymous> wasm:/wasm/0267bb86:1:2649134
+ ❯ null.<anonymous> wasm:/wasm/0267bb86:1:5569870
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  tests/engine.test.ts > ImporterEngine End-to-End Execution > repairs an already published chapter instead of treating publication as integrity proof
+TypeError: Cannot read properties of undefined (reading 'payload')
+ ❯ tests/engine.test.ts:516:116
+    514|   it('repairs an already published chapter instead of treating publica…
+    515|     const job: any = (await db.query("SELECT * FROM importer_queue WHE…
+    516|     const chapter: any = (await db.query('SELECT id,published_at FROM …
+       |                                                                                                                    ^
+    517|     await db.query('DELETE FROM pages WHERE chapter_id=$1 AND position…
+    518|     const uploadsBefore = storage.uploads.size;
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed (3)
+   Start at  14:44:01
+   Duration  2.67s (transform 569ms, setup 0ms, collect 741ms, tests 1.69s, environment 0ms, prepare 47ms)
+
