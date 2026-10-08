@@ -244,7 +244,7 @@ const DEFAULT_AUTOTUNER_CONFIG = {
     rssSoftLimitMb: parseInt(process.env.RSS_SOFT_LIMIT_MB || '330', 10),
     rssHardLimitMb: parseInt(process.env.RSS_HARD_LIMIT_MB || '380', 10),
     rssEmergencyLimitMb: parseInt(process.env.RSS_EMERGENCY_LIMIT_MB || '410', 10),
-    maxBufferedBytes: parseInt(process.env.MAX_BUFFERED_BYTES || String(64 * 1024 * 1024), 10),
+    maxBufferedBytes: parseInt(process.env.MAX_BUFFERED_BYTES || String(256 * 1024 * 1024), 10),
     adaptiveEnabled: true,
     scaleUpDwellTimeMs: 0,
     desiredFloorFreshPerMin: 5,
