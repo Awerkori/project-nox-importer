@@ -1,6 +1,6 @@
 /**
  * Work-Affinity Scheduler for Project Nox Importer.
- * 
+ *
  * Implements:
  * - P0: Absolute priority preemption for fresh new releases (priority >= 100).
  * - P1 Critical Gap: Prioritizes missing chapters unblocking STAGED barrier cascade (priority 90-95).
@@ -371,7 +371,7 @@ export class WorkAffinityScheduler {
       try {
         const r = await this.runQuery(this.pool, `
           WITH candidate_works AS MATERIALIZED (
-            SELECT 
+            SELECT
               q.payload->>'workId' AS work_id,
               MIN(q.chapter_sort_key) as min_chapter_sort_key,
               MIN(q.next_run_at) as min_next_run_at
@@ -389,8 +389,8 @@ export class WorkAffinityScheduler {
           )
           SELECT q.payload->>'workId' AS work_id
           FROM candidate_works cw
-          JOIN importer_queue q 
-            ON (q.payload->>'workId') = cw.work_id 
+          JOIN importer_queue q
+            ON (q.payload->>'workId') = cw.work_id
             AND q.chapter_sort_key = cw.min_chapter_sort_key
           LEFT JOIN LATERAL (
             SELECT MAX(c.number) AS max_published
@@ -616,7 +616,7 @@ export class WorkAffinityScheduler {
   private async hydrateHeartbeatFromDb(): Promise<void> {
     try {
       const res = await this.runQuery(this.pool, `
-        SELECT 
+        SELECT
           (SELECT MAX(published_at) FROM chapters WHERE published_at IS NOT NULL) as last_publication,
           (SELECT MAX(updated_at) FROM importer_queue WHERE status = 'COMPLETED') as last_completion,
           (SELECT MAX(locked_at) FROM importer_queue WHERE status = 'IMPORTING') as last_claim;
@@ -1021,9 +1021,9 @@ export class WorkAffinityScheduler {
     // -------------------------------------------------------------
     const tP1_0 = performance.now();
     const eligibleP1Works = p1Works.filter(
-      (w) => w.state === 'FILLING' && 
-             w.criticalGapSortKey === null && 
-             !this.isWorkStagedBlocked(w.workId) && 
+      (w) => w.state === 'FILLING' &&
+             w.criticalGapSortKey === null &&
+             !this.isWorkStagedBlocked(w.workId) &&
              !this.isWorkUnclaimable(w.workId) &&
              (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork
     );
@@ -1153,8 +1153,8 @@ export class WorkAffinityScheduler {
     // -------------------------------------------------------------
     const tP2_0 = performance.now();
     const eligibleP2Works = p2Works.filter(
-      (w) => !this.isWorkStagedBlocked(w.workId) && 
-             !this.isWorkUnclaimable(w.workId) && 
+      (w) => !this.isWorkStagedBlocked(w.workId) &&
+             !this.isWorkUnclaimable(w.workId) &&
              (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork
     );
 
@@ -1279,9 +1279,9 @@ export class WorkAffinityScheduler {
     // -------------------------------------------------------------
     const tFall0 = performance.now();
     const activeWorkIds = activeWorks
-      .filter((w) => w.state === 'FILLING' && 
-                     !this.isWorkStagedBlocked(w.workId) && 
-                     !this.isWorkUnclaimable(w.workId) && 
+      .filter((w) => w.state === 'FILLING' &&
+                     !this.isWorkStagedBlocked(w.workId) &&
+                     !this.isWorkUnclaimable(w.workId) &&
                      (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork)
       .map((w) => w.workId);
 
@@ -1461,13 +1461,17 @@ export class WorkAffinityScheduler {
   ): Promise<any | null> {
     const disallowedChapterKeys = opts.disallowedChapterKeys || Array.from(this.inFlightChapterKeys);
 
+    const allowedSourcesFilter = opts.allowedSources && opts.allowedSources.length > 0 ? `AND s.id = ANY($1::text[])` : ``;
+    const disallowedWorkIdsFilter = opts.disallowedWorkIds && opts.disallowedWorkIds.length > 0 ? `AND NOT ((q.payload->>'workId') = ANY($2::text[]))` : ``;
+    const disallowedChapterKeysFilter = disallowedChapterKeys.length > 0 ? `AND NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[]))` : ``;
+
     const query = `
       WITH eligible_sources AS MATERIALIZED (
         SELECT s.id
         FROM importer_sources s
         WHERE s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
-          AND ($1::text[] IS NULL OR s.id = ANY($1::text[]))
+          ${allowedSourcesFilter}
         ORDER BY s.id ASC
         LIMIT $7
       ),
@@ -1509,8 +1513,8 @@ export class WorkAffinityScheduler {
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
           ${CANONICAL_FRONTIER_CLAIM_FILTER}
-          AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
-          AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
+          ${disallowedWorkIdsFilter}
+          ${disallowedChapterKeysFilter}
           ${CANONICAL_ACTIVE_CLAIM_FILTER}
         ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
         FOR UPDATE OF q SKIP LOCKED
@@ -1655,8 +1659,8 @@ export class WorkAffinityScheduler {
     let staffWorkIds = this.cachedStaffWorkIds;
     if (now - this.lastStaffCheckTime > 3000 || !staffWorkIds) {
       const activeReqs = await this.runQuery(client, `
-        SELECT work_id::text, priority_boost, created_at 
-        FROM importer_staff_requests 
+        SELECT work_id::text, priority_boost, created_at
+        FROM importer_staff_requests
         WHERE status IN ('ACTIVE', 'QUEUED', 'IMPORTING', 'RETRYING')
         ORDER BY priority_boost DESC, created_at ASC
       `, [], opts.telemetry);
@@ -1664,6 +1668,11 @@ export class WorkAffinityScheduler {
       this.cachedStaffWorkIds = activeReqs.rows.map((r: any) => r.work_id);
       staffWorkIds = this.cachedStaffWorkIds;
     }
+
+const allowedSourcesFilter = opts.allowedSources && opts.allowedSources.length > 0 ? `AND q.source = ANY($1::text[])` : ``;
+    const disallowedWorkIdsFilter = opts.disallowedWorkIds && opts.disallowedWorkIds.length > 0 ? `AND NOT ((q.payload->>'workId') = ANY($2::text[]))` : ``;
+    const disallowedChapterKeysFilter = disallowedChapterKeys.length > 0 ? `AND NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[]))` : ``;
+    const staffWorkIdsFilter = staffWorkIds && staffWorkIds.length > 0 ? `OR (payload->>'workId') = ANY($6::text[])` : ``;
 
     const query = `
       WITH q_candidates AS (
@@ -1674,7 +1683,7 @@ export class WorkAffinityScheduler {
           AND attempts < COALESCE(max_attempts, 7)
           AND (
             priority >= 1000
-            OR (payload->>'workId') = ANY($6::text[])
+            ${staffWorkIdsFilter}
           )
       ),
       to_lock AS (
@@ -1688,22 +1697,22 @@ export class WorkAffinityScheduler {
           WHERE c.work_id = (q.payload->>'workId')::uuid
             AND c.published_at IS NOT NULL
         ) pub ON TRUE
-        LEFT JOIN importer_staff_requests sr 
+        LEFT JOIN importer_staff_requests sr
           ON sr.work_id = (q.payload->>'workId')::uuid
          AND sr.status IN ('ACTIVE', 'QUEUED', 'IMPORTING', 'RETRYING')
         WHERE s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
           ${CANONICAL_FRONTIER_CLAIM_FILTER}
-          AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
-          AND ($2::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($2::text[])))
-          AND ($3::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[])))
+          ${allowedSourcesFilter}
+          ${disallowedWorkIdsFilter}
+          ${disallowedChapterKeysFilter}
           ${CANONICAL_ACTIVE_CLAIM_FILTER}
         ORDER BY
           CASE WHEN sr.work_id IS NOT NULL THEN 0 ELSE 1 END,
           COALESCE(array_position($6::text[], q.payload->>'workId'), 2147483647),
-          q.priority DESC, 
-          q.chapter_sort_key ASC NULLS LAST, 
+          q.priority DESC,
+          q.chapter_sort_key ASC NULLS LAST,
           q.next_run_at ASC
         FOR UPDATE OF q_base SKIP LOCKED
         LIMIT 1
@@ -1798,9 +1807,19 @@ export class WorkAffinityScheduler {
       const orderClause = isSingleWork
         ? `ORDER BY q.chapter_sort_key ASC NULLS LAST`
         : `ORDER BY
-          q.priority DESC, 
-          q.chapter_sort_key ASC NULLS LAST, 
+          q.priority DESC,
+          q.chapter_sort_key ASC NULLS LAST,
           q.next_run_at ASC`;
+
+const minPriorityFilter = opts.minPriority != null ? `AND priority >= $2::int` : ``;
+      const maxPriorityFilter = opts.maxPriority != null ? `AND priority <= $10::int` : ``;
+      const workIdFilter = opts.workId ? `AND (payload->>'workId') = $3::text` : ``;
+      const sortKeyFilter = opts.sortKey != null ? `AND chapter_sort_key = $4::numeric` : ``;
+      const allowedWorkIdsFilter = opts.allowedWorkIds && opts.allowedWorkIds.length > 0 ? `AND (payload->>'workId') = ANY($7::text[])` : ``;
+
+      const allowedSourcesFilter = opts.allowedSources && opts.allowedSources.length > 0 ? `AND q.source = ANY($1::text[])` : ``;
+      const disallowedWorkIdsFilter = opts.disallowedWorkIds && opts.disallowedWorkIds.length > 0 ? `AND NOT ((q.payload->>'workId') = ANY($8::text[]))` : ``;
+      const disallowedChapterKeysFilter = disallowedChapterKeys.length > 0 ? `AND NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($9::text[]))` : ``;
 
       const query = `
       WITH q_candidates AS (
@@ -1809,11 +1828,11 @@ export class WorkAffinityScheduler {
         WHERE (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW()))
           AND task_type = 'IMPORT_CHAPTER'
           AND attempts < COALESCE(max_attempts, 7)
-          AND ($2::int IS NULL OR priority >= $2::int)
-          AND ($10::int IS NULL OR priority <= $10::int)
-          AND ($3::text IS NULL OR (payload->>'workId') = $3::text)
-          AND ($4::numeric IS NULL OR chapter_sort_key = $4::numeric)
-          AND ($7::text[] IS NULL OR (payload->>'workId') = ANY($7::text[]))
+          ${minPriorityFilter}
+          ${maxPriorityFilter}
+          ${workIdFilter}
+          ${sortKeyFilter}
+          ${allowedWorkIdsFilter}
       ),
       to_lock AS (
         SELECT q_base.id
@@ -1830,9 +1849,9 @@ export class WorkAffinityScheduler {
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
           ${CANONICAL_FRONTIER_CLAIM_FILTER}
-          AND ($1::text[] IS NULL OR q.source = ANY($1::text[]))
-          AND ($8::text[] IS NULL OR NOT ((q.payload->>'workId') = ANY($8::text[])))
-          AND ($9::text[] IS NULL OR NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($9::text[])))
+          ${allowedSourcesFilter}
+          ${disallowedWorkIdsFilter}
+          ${disallowedChapterKeysFilter}
           ${CANONICAL_ACTIVE_CLAIM_FILTER}
         ${orderClause}
         FOR UPDATE OF q_base SKIP LOCKED
@@ -1976,7 +1995,7 @@ export class WorkAffinityScheduler {
     // 2. Safety check: is there an un-published STAGED chapter behind this one?
     if (sortKey !== null) {
       const stagedCheck = await this.runQuery(this.pool, `
-        SELECT id, chapter_id, chapter_sort_key, source 
+        SELECT id, chapter_id, chapter_sort_key, source
         FROM importer_chapter_mappings
         WHERE work_id = $1::uuid
           AND status = 'STAGED'
@@ -2402,7 +2421,7 @@ export class WorkAffinityScheduler {
     let stagedWaitingForGap = 0;
 
     const qRes = await this.runQuery(this.pool, `
-      SELECT 
+      SELECT
         COUNT(CASE WHEN priority >= 100 THEN 1 END) as p0_cnt,
         COUNT(CASE WHEN priority >= 70 AND priority < 100 THEN 1 END) as p1_cnt,
         COUNT(CASE WHEN priority >= 30 AND priority < 70 THEN 1 END) as p2_cnt,
@@ -2464,8 +2483,8 @@ export class WorkAffinityScheduler {
     try {
       const res = await this.runQuery(this.pool, `
         WITH recent_works AS (
-          SELECT DISTINCT work_id 
-          FROM chapters 
+          SELECT DISTINCT work_id
+          FROM chapters
           WHERE published_at >= NOW() - INTERVAL '60 minutes'
         ),
         redundant AS (
