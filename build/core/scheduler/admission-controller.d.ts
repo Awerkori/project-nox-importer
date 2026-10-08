@@ -49,6 +49,14 @@ export declare class AdmissionController {
     private getP1SourceWindow;
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
+    /**
+     * Slow admission stages can be either a distributed SQL read or time spent
+     * waiting for the intentionally small YSQL pool.  Keep that distinction at
+     * the query boundary for the few frontier probes that determine whether an
+     * idle chapter slot can receive work.  This is diagnostic only: it executes
+     * the same SQL and parameters as runQuery and logs no row data.
+     */
+    private runTimedAdmissionQuery;
     private getCurrentInFlightChapterCount;
     private getActiveWorksCount;
     /**

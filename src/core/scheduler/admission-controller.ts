@@ -169,6 +169,51 @@ export class AdmissionController {
     throw new Error('Pool has neither query nor connect');
   }
 
+  /**
+   * Slow admission stages can be either a distributed SQL read or time spent
+   * waiting for the intentionally small YSQL pool.  Keep that distinction at
+   * the query boundary for the few frontier probes that determine whether an
+   * idle chapter slot can receive work.  This is diagnostic only: it executes
+   * the same SQL and parameters as runQuery and logs no row data.
+   */
+  private async runTimedAdmissionQuery(operation: string, text: string, params?: any[]): Promise<any> {
+    const startedAt = performance.now();
+    let poolWaitMs = 0;
+    let sqlExecMs = 0;
+    let client: any;
+    try {
+      if (typeof this.pool?.connect === 'function') {
+        const waitStartedAt = performance.now();
+        client = await this.pool.connect();
+        poolWaitMs = performance.now() - waitStartedAt;
+        const sqlStartedAt = performance.now();
+        try {
+          return await client.query(text, params);
+        } finally {
+          sqlExecMs = performance.now() - sqlStartedAt;
+        }
+      }
+
+      const sqlStartedAt = performance.now();
+      try {
+        return await this.runQuery(text, params);
+      } finally {
+        sqlExecMs = performance.now() - sqlStartedAt;
+      }
+    } finally {
+      if (typeof client?.release === 'function') client.release();
+      const totalMs = performance.now() - startedAt;
+      if (totalMs >= 500) {
+        this.logger.info('ADMISSION_QUERY_TIMING', {
+          operation,
+          poolWaitMs: Math.round(poolWaitMs * 10) / 10,
+          sqlExecMs: Math.round(sqlExecMs * 10) / 10,
+          totalMs: Math.round(totalMs * 10) / 10,
+        });
+      }
+    }
+  }
+
   private async getCurrentInFlightChapterCount(): Promise<number> {
     if (this.inFlightChapterCountProvider) {
       try {
@@ -451,7 +496,7 @@ export class AdmissionController {
     // 2. NO_P0_WAITING (Real P0 releases: 100 <= priority < 1000; staff-forced >= 1000 belongs to chapter data plane)
     // We must use a frontier/eligibility check so that works blocked by upstream gaps
     // do not falsely register as "waiting" and starve P2 admission indefinitely.
-    const p0Res = await this.timeAdmissionStage(stages, 'p0FrontierProbeMs', () => this.runQuery(`
+    const p0Res = await this.timeAdmissionStage(stages, 'p0FrontierProbeMs', () => this.runTimedAdmissionQuery('p0_frontier_probe', `
       SELECT q.id
       FROM importer_queue q
       JOIN importer_sources s ON s.id = q.source
@@ -692,7 +737,7 @@ export class AdmissionController {
       // Ready P1 uses the existing partial claim index. Only if no ready P1
       // exists do we check the paused window backlog; that slower path is
       // exceptional and avoids turning a normal admission probe into a scan.
-      const ready = await this.runQuery(`
+      const ready = await this.runTimedAdmissionQuery('p1_ready_frontier_probe', `
         SELECT q.status
         FROM importer_queue q
         JOIN importer_sources s ON s.id = q.source
@@ -732,7 +777,7 @@ export class AdmissionController {
         this.p1BacklogProbeAt = Date.now();
         return this.p1BacklogSnapshot;
       }
-      const paused = await this.runQuery(`
+      const paused = await this.runTimedAdmissionQuery('p1_paused_frontier_probe', `
         SELECT 1
         FROM importer_queue q
         JOIN importer_sources s ON s.id = q.source
@@ -2362,7 +2407,8 @@ export class AdmissionController {
         this.logger.info(`[DEBUG_ADM_CANDIDATES] CacheSize: ${this.deadWorksCache.size} | Cands: ${JSON.stringify(candidateRows.map(c => ({w:c.work_id, q:c.queued_count})))}`);
         const candWorkIds = candidateRows.map((r: any) => r.work_id);
         const pubMap = new Map<string, number>();
-        const pubRes = await this.timeAdmissionStage(stages, 'publishedFrontierLookupMs', () => this.runQuery(
+        const pubRes = await this.timeAdmissionStage(stages, 'publishedFrontierLookupMs', () => this.runTimedAdmissionQuery(
+          'candidate_published_frontier_lookup',
           `SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
            FROM chapters
            WHERE work_id = ANY($1::uuid[]) AND published_at IS NOT NULL
@@ -2373,7 +2419,8 @@ export class AdmissionController {
 
         const gapsMap = new Map<string, Array<{ start: number; end: number }>>();
         try {
-          const gapsRes = await this.timeAdmissionStage(stages, 'confirmedGapsLookupMs', () => this.runQuery(
+          const gapsRes = await this.timeAdmissionStage(stages, 'confirmedGapsLookupMs', () => this.runTimedAdmissionQuery(
+            'candidate_confirmed_gaps_lookup',
             `SELECT work_id::text, start_sort_key, end_sort_key
              FROM importer_confirmed_gaps
              WHERE work_id = ANY($1::uuid[])`,
