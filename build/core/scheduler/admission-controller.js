@@ -1091,68 +1091,100 @@ export class AdmissionController {
             .then(operation)
             .finally(release);
     }
+    /**
+     * Control-plane admission intentionally serializes its work on the small
+     * YSQL pool.  Keep stage timing local to the operation so a slow cycle can
+     * be attributed without changing that serialization or retaining state.
+     */
+    async timeAdmissionStage(stages, stage, operation) {
+        const startedAt = performance.now();
+        try {
+            return await operation();
+        }
+        finally {
+            stages[stage] = Math.round(performance.now() - startedAt);
+        }
+    }
+    logSlowAdmissionStages(event, startedAt, stages, context) {
+        const executionMs = Math.round(performance.now() - startedAt);
+        // The aggregate timing events remain the normal low-volume signal. Emit
+        // this diagnostic only for a materially slow operation, with durations
+        // only—never queue payloads or chapter data.
+        if (executionMs < 1_000)
+            return;
+        this.logger.info(event, { ...context, executionMs, stages });
+    }
     async executeAdmissionCycle() {
+        const startedAt = performance.now();
+        const stages = {};
         const now = Date.now();
-        for (const [wid, ts] of this.deadWorksCache.entries()) {
-            if (now - ts > 60 * 60 * 1000)
-                this.deadWorksCache.delete(wid);
+        try {
+            for (const [wid, ts] of this.deadWorksCache.entries()) {
+                if (now - ts > 60 * 60 * 1000)
+                    this.deadWorksCache.delete(wid);
+            }
+            const config = this.stateStore.getConfig();
+            if (!config.enabled && !config.shadowMode) {
+                return;
+            }
+            // Step 0: Check PROTECTIVE_STOP
+            if (await this.timeAdmissionStage(stages, 'protectiveStopMs', () => this.protectiveSentinel.isProtectiveStopActive())) {
+                this.logger.warn('PROTECTIVE_STOP active, skipping admission cycle');
+                return;
+            }
+            // Do not let control-plane scans consume the bounded pool while claims
+            // are active or queued.  A later scheduled/vacancy cycle will retry.
+            if (this.isPoolUnderClaimPressure() && !this.shouldRunPressureMaintenance()) {
+                // Claims are the work-conserving data plane, but a pool waiter must not
+                // permanently starve P2 discovery when the bounded P1 probe has no
+                // executable catalog frontier. This path performs exactly one bounded
+                // P1 probe followed by the bounded P2 source-window admission; it does
+                // not run reconciliation, recovery, GROUP BY maintenance, or paused
+                // backlog scans. A real P1 frontier still wins in canAdmitNewWork().
+                await this.timeAdmissionStage(stages, 'pressureP2ProbeMs', () => this.executeOnDemandAdmission('P2', undefined, true));
+                this.logger.debug('[ADMISSION_P2_PRESSURE_PROBE] bounded P2 admission attempted while claims are waiting');
+                return;
+            }
+            // If claim pressure remains continuous, one bounded reconciliation pass is
+            // necessary to retire stale active_works and replenish a legitimate
+            // frontier.  Do not run the broad recovery/scanning chain in this escape
+            // hatch; it is intentionally limited to the active-work snapshot and its
+            // bounded replenishment.
+            if (this.isPoolUnderClaimPressure()) {
+                this.logger.warn('[ADMISSION_PRESSURE_MAINTENANCE] sustained claim pressure; running bounded active-work reconciliation');
+                await this.timeAdmissionStage(stages, 'pressureMaintenanceMs', () => this.runPressureMaintenance());
+                return;
+            }
+            // Run before P1/P2 admission so legacy visible works cannot be bypassed
+            // by discovery during the first post-deploy cycle.
+            await this.timeAdmissionStage(stages, 'recoverOrphanedCancelledMs', () => this.recoverOrphanedCancelledChapterJobs());
+            if (this.isPoolUnderClaimPressure())
+                return;
+            await this.timeAdmissionStage(stages, 'recoverLegacyTransientMs', () => this.recoverLegacyTransientFailures());
+            if (this.isPoolUnderClaimPressure())
+                return;
+            await this.timeAdmissionStage(stages, 'recoverSourceTransientMs', () => this.recoverSourceRecoveredTransientFailures());
+            if (this.isPoolUnderClaimPressure())
+                return;
+            await this.timeAdmissionStage(stages, 'repairVisibleP2Ms', () => this.repairVisibleP2LifecycleBacklog());
+            if (this.isPoolUnderClaimPressure())
+                return;
+            // Step 1: Reconcile current active works (check caught-up, in-flight, queued)
+            await this.timeAdmissionStage(stages, 'reconcileActiveWorksMs', () => this.reconcileActiveWorks());
+            if (this.isPoolUnderClaimPressure())
+                return;
+            // Step 2: Replenish active sets if below capacity
+            await this.timeAdmissionStage(stages, 'replenishActiveSetsMs', () => this.replenishActiveSets());
+            if (this.isPoolUnderClaimPressure())
+                return;
+            // Step 3: Maintain sliding admission windows for all active works
+            await this.timeAdmissionStage(stages, 'maintainSlidingWindowsMs', () => this.maintainSlidingWindows());
         }
-        const config = this.stateStore.getConfig();
-        if (!config.enabled && !config.shadowMode) {
-            return;
+        finally {
+            this.logSlowAdmissionStages('ADMISSION_CYCLE_STAGE_TIMING', startedAt, stages, {
+                activeWorks: this.getActiveWorksCount(),
+            });
         }
-        // Step 0: Check PROTECTIVE_STOP
-        if (await this.protectiveSentinel.isProtectiveStopActive()) {
-            this.logger.warn('PROTECTIVE_STOP active, skipping admission cycle');
-            return;
-        }
-        // Do not let control-plane scans consume the bounded pool while claims
-        // are active or queued.  A later scheduled/vacancy cycle will retry.
-        if (this.isPoolUnderClaimPressure() && !this.shouldRunPressureMaintenance()) {
-            // Claims are the work-conserving data plane, but a pool waiter must not
-            // permanently starve P2 discovery when the bounded P1 probe has no
-            // executable catalog frontier. This path performs exactly one bounded
-            // P1 probe followed by the bounded P2 source-window admission; it does
-            // not run reconciliation, recovery, GROUP BY maintenance, or paused
-            // backlog scans. A real P1 frontier still wins in canAdmitNewWork().
-            await this.executeOnDemandAdmission('P2', undefined, true);
-            this.logger.debug('[ADMISSION_P2_PRESSURE_PROBE] bounded P2 admission attempted while claims are waiting');
-            return;
-        }
-        // If claim pressure remains continuous, one bounded reconciliation pass is
-        // necessary to retire stale active_works and replenish a legitimate
-        // frontier.  Do not run the broad recovery/scanning chain in this escape
-        // hatch; it is intentionally limited to the active-work snapshot and its
-        // bounded replenishment.
-        if (this.isPoolUnderClaimPressure()) {
-            this.logger.warn('[ADMISSION_PRESSURE_MAINTENANCE] sustained claim pressure; running bounded active-work reconciliation');
-            await this.runPressureMaintenance();
-            return;
-        }
-        // Run before P1/P2 admission so legacy visible works cannot be bypassed
-        // by discovery during the first post-deploy cycle.
-        await this.recoverOrphanedCancelledChapterJobs();
-        if (this.isPoolUnderClaimPressure())
-            return;
-        await this.recoverLegacyTransientFailures();
-        if (this.isPoolUnderClaimPressure())
-            return;
-        await this.recoverSourceRecoveredTransientFailures();
-        if (this.isPoolUnderClaimPressure())
-            return;
-        await this.repairVisibleP2LifecycleBacklog();
-        if (this.isPoolUnderClaimPressure())
-            return;
-        // Step 1: Reconcile current active works (check caught-up, in-flight, queued)
-        await this.reconcileActiveWorks();
-        if (this.isPoolUnderClaimPressure())
-            return;
-        // Step 2: Replenish active sets if below capacity
-        await this.replenishActiveSets();
-        if (this.isPoolUnderClaimPressure())
-            return;
-        // Step 3: Maintain sliding admission windows for all active works
-        await this.maintainSlidingWindows();
     }
     async runPressureMaintenance() {
         await this.reconcileActiveWorks();
@@ -2037,43 +2069,50 @@ export class AdmissionController {
         return flight;
     }
     async executeOnDemandAdmission(preferredLane, allowedSources, allowDuringClaimPressure = false) {
-        const config = this.stateStore.getConfig();
-        if (!config.enabled && !config.shadowMode)
-            return null;
-        if (await this.protectiveSentinel.isProtectiveStopActive())
-            return null;
-        const activeWorks = this.stateStore.getActiveWorks();
-        const activeIds = activeWorks.map((w) => w.workId);
-        const sourceCounts = new Map();
-        for (const w of activeWorks.filter((w) => w.state === 'FILLING' && (w.inFlightChapters || 0) > 0)) {
-            sourceCounts.set(w.primarySource, (sourceCounts.get(w.primarySource) || 0) + 1);
-        }
-        const saturatedSources = Array.from(sourceCounts.entries())
-            .filter(([src, cnt]) => cnt >= 4)
-            .map(([src]) => src);
-        const lanesToTry = preferredLane === 'P1'
-            ? ['P1', 'P2']
-            : (preferredLane ? [preferredLane] : ['P1', 'P2']);
-        for (const lane of lanesToTry) {
-            if (lane === 'P2') {
-                const gate = await this.canAdmitNewWork({ allowDuringClaimPressure });
-                if (!gate.allowed) {
-                    this.logger.debug(`[ADMISSION_GATE_HOLD] admitNextWorkOnDemand blocked for P2: ${gate.reason}`);
-                    continue;
-                }
+        const startedAt = performance.now();
+        const stages = {};
+        const attemptedLanes = [];
+        try {
+            const config = this.stateStore.getConfig();
+            if (!config.enabled && !config.shadowMode)
+                return null;
+            if (await this.timeAdmissionStage(stages, 'protectiveStopMs', () => this.protectiveSentinel.isProtectiveStopActive()))
+                return null;
+            const activeWorks = this.stateStore.getActiveWorks();
+            const activeIds = activeWorks.map((w) => w.workId);
+            const sourceCounts = new Map();
+            for (const w of activeWorks.filter((w) => w.state === 'FILLING' && (w.inFlightChapters || 0) > 0)) {
+                sourceCounts.set(w.primarySource, (sourceCounts.get(w.primarySource) || 0) + 1);
             }
-            const isP1 = lane === 'P1';
-            const p1SourceWindow = isP1 ? await this.getP1SourceWindow(allowedSources) : null;
-            if (isP1 && p1SourceWindow?.length === 0)
-                continue;
-            const maxPriority = isP1 ? 100 : 75;
-            const loadOnDemandCandidates = (includePaused) => {
-                // This path is called from failed claim attempts. Keep it bounded by
-                // source and ordered on the existing source/status/task/created_at
-                // index; sorting the entire source backlog by chapter number before
-                // LIMIT can otherwise consume a bounded YSQL client for 25 seconds.
-                // The JS frontier check below remains the canonical authority.
-                const query = `
+            const saturatedSources = Array.from(sourceCounts.entries())
+                .filter(([src, cnt]) => cnt >= 4)
+                .map(([src]) => src);
+            const lanesToTry = preferredLane === 'P1'
+                ? ['P1', 'P2']
+                : (preferredLane ? [preferredLane] : ['P1', 'P2']);
+            for (const lane of lanesToTry) {
+                attemptedLanes.push(lane);
+                if (lane === 'P2') {
+                    const gate = await this.timeAdmissionStage(stages, 'p2GateMs', () => this.canAdmitNewWork({ allowDuringClaimPressure }));
+                    if (!gate.allowed) {
+                        this.logger.debug(`[ADMISSION_GATE_HOLD] admitNextWorkOnDemand blocked for P2: ${gate.reason}`);
+                        continue;
+                    }
+                }
+                const isP1 = lane === 'P1';
+                const p1SourceWindow = isP1
+                    ? await this.timeAdmissionStage(stages, 'p1SourceWindowMs', () => this.getP1SourceWindow(allowedSources))
+                    : null;
+                if (isP1 && p1SourceWindow?.length === 0)
+                    continue;
+                const maxPriority = isP1 ? 100 : 75;
+                const loadOnDemandCandidates = (includePaused) => {
+                    // This path is called from failed claim attempts. Keep it bounded by
+                    // source and ordered on the existing source/status/task/created_at
+                    // index; sorting the entire source backlog by chapter number before
+                    // LIMIT can otherwise consume a bounded YSQL client for 25 seconds.
+                    // The JS frontier check below remains the canonical authority.
+                    const query = `
         WITH eligible_sources AS MATERIALIZED (
           SELECT s.id
           FROM importer_sources s
@@ -2156,158 +2195,158 @@ export class AdmissionController {
         ORDER BY q.source, q.min_sort_key ASC NULLS LAST
         LIMIT ${isP1 ? 64 : 10};
       `;
-                return this.runQuery(query, [
-                    allowedSources && allowedSources.length > 0 ? allowedSources : null,
-                    activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
-                    saturatedSources.length > 0 ? saturatedSources : null,
-                    JSON.stringify(this.getP1AdmissionCursors()),
-                    16,
-                    p1SourceWindow,
-                    Array.from(this.deadWorksCache.keys()).length > 0 ? Array.from(this.deadWorksCache.keys()) : ['00000000-0000-0000-0000-000000000000']
-                ]);
-            };
-            const findOnDemandFrontier = async (candidateRows) => {
-                if (candidateRows.length === 0)
-                    return null;
-                this.logger.info(`[DEBUG_ADM_CANDIDATES] CacheSize: ${this.deadWorksCache.size} | Cands: ${JSON.stringify(candidateRows.map(c => ({ w: c.work_id, q: c.queued_count })))}`);
-                const candWorkIds = candidateRows.map((r) => r.work_id);
-                const pubMap = new Map();
-                const pubRes = await this.runQuery(`SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
+                    return this.runQuery(query, [
+                        allowedSources && allowedSources.length > 0 ? allowedSources : null,
+                        activeIds.length > 0 ? activeIds : ['00000000-0000-0000-0000-000000000000'],
+                        saturatedSources.length > 0 ? saturatedSources : null,
+                        JSON.stringify(this.getP1AdmissionCursors()),
+                        16,
+                        p1SourceWindow,
+                        Array.from(this.deadWorksCache.keys()).length > 0 ? Array.from(this.deadWorksCache.keys()) : ['00000000-0000-0000-0000-000000000000']
+                    ]);
+                };
+                const findOnDemandFrontier = async (candidateRows) => {
+                    if (candidateRows.length === 0)
+                        return null;
+                    this.logger.info(`[DEBUG_ADM_CANDIDATES] CacheSize: ${this.deadWorksCache.size} | Cands: ${JSON.stringify(candidateRows.map(c => ({ w: c.work_id, q: c.queued_count })))}`);
+                    const candWorkIds = candidateRows.map((r) => r.work_id);
+                    const pubMap = new Map();
+                    const pubRes = await this.runQuery(`SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
            FROM chapters
            WHERE work_id = ANY($1::uuid[]) AND published_at IS NOT NULL
            GROUP BY work_id`, [candWorkIds]);
-                for (const pr of pubRes.rows)
-                    pubMap.set(pr.work_id, parseFloat(pr.max_pub));
-                const gapsMap = new Map();
-                try {
-                    const gapsRes = await this.runQuery(`SELECT work_id::text, start_sort_key, end_sort_key
+                    for (const pr of pubRes.rows)
+                        pubMap.set(pr.work_id, parseFloat(pr.max_pub));
+                    const gapsMap = new Map();
+                    try {
+                        const gapsRes = await this.runQuery(`SELECT work_id::text, start_sort_key, end_sort_key
              FROM importer_confirmed_gaps
              WHERE work_id = ANY($1::uuid[])`, [candWorkIds]);
-                    for (const gr of gapsRes.rows) {
-                        const arr = gapsMap.get(gr.work_id) || [];
-                        arr.push({ start: parseFloat(gr.start_sort_key), end: parseFloat(gr.end_sort_key) });
-                        gapsMap.set(gr.work_id, arr);
+                        for (const gr of gapsRes.rows) {
+                            const arr = gapsMap.get(gr.work_id) || [];
+                            arr.push({ start: parseFloat(gr.start_sort_key), end: parseFloat(gr.end_sort_key) });
+                            gapsMap.set(gr.work_id, arr);
+                        }
                     }
-                }
-                catch { }
-                // Sort candidates by source permit headroom and diversity. P1 has one
-                // circular candidate per source, so this preserves its cursor fairness.
-                const p1Sources = isP1
-                    ? Array.from(new Set(candidateRows.map((row) => String(row.source)))).sort()
-                    : [];
-                const nextP1SourceRank = (source) => {
-                    if (!isP1 || p1Sources.length === 0)
-                        return 0;
-                    if (!this.lastOnDemandP1Source)
-                        return p1Sources.indexOf(source);
-                    const firstAfterCursor = p1Sources.findIndex((candidate) => candidate > this.lastOnDemandP1Source);
-                    const start = firstAfterCursor >= 0 ? firstAfterCursor : 0;
-                    return (p1Sources.indexOf(source) - start + p1Sources.length) % p1Sources.length;
-                };
-                candidateRows.sort((a, b) => {
-                    const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
-                    const permitsB = this.sourcePermitProvider ? this.sourcePermitProvider(b.source) : 1;
-                    const activeA = sourceCounts.get(a.source) || 0;
-                    const activeB = sourceCounts.get(b.source) || 0;
-                    if ((permitsA > 0) !== (permitsB > 0))
-                        return permitsA > 0 ? -1 : 1;
-                    if (activeA !== activeB)
-                        return activeA - activeB;
-                    const sourceRankA = nextP1SourceRank(a.source);
-                    const sourceRankB = nextP1SourceRank(b.source);
-                    if (sourceRankA !== sourceRankB)
-                        return sourceRankA - sourceRankB;
-                    return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
-                });
-                const isCandidateFrontierValid = (workId, minSort, maxPub) => {
-                    if (minSort <= (maxPub === -1 ? 1.5 : maxPub + 1.5))
-                        return true;
-                    const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
-                    const gapEnd = minSort - 1;
-                    return (gapsMap.get(workId) || []).some((g) => g.start <= gapStart && g.end >= gapEnd);
-                };
-                let match = candidateRows.find((cand) => {
-                    const maxPub = pubMap.get(cand.work_id) ?? -1;
-                    const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
-                    return isCandidateFrontierValid(cand.work_id, minSort, maxPub);
-                });
-                if (match)
-                    return match;
-                // Only the bounded source window is considered for gap confirmation.
-                for (const cand of candidateRows) {
-                    const maxPub = pubMap.get(cand.work_id) ?? -1;
-                    const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
-                    const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
-                    const gapEnd = minSort - 1;
-                    if (gapStart > gapEnd) {
-                        return cand;
-                    }
-                    try {
-                        const conf = await confirmUpstreamGapInterval(this.pool, {
-                            workId: cand.work_id,
-                            startSortKey: gapStart,
-                            endSortKey: gapEnd,
-                            primarySource: cand.source,
-                            reason: 'ON_DEMAND_ADMISSION_GAP_CONFIRM',
-                        });
-                        if (conf.confirmed)
+                    catch { }
+                    // Sort candidates by source permit headroom and diversity. P1 has one
+                    // circular candidate per source, so this preserves its cursor fairness.
+                    const p1Sources = isP1
+                        ? Array.from(new Set(candidateRows.map((row) => String(row.source)))).sort()
+                        : [];
+                    const nextP1SourceRank = (source) => {
+                        if (!isP1 || p1Sources.length === 0)
+                            return 0;
+                        if (!this.lastOnDemandP1Source)
+                            return p1Sources.indexOf(source);
+                        const firstAfterCursor = p1Sources.findIndex((candidate) => candidate > this.lastOnDemandP1Source);
+                        const start = firstAfterCursor >= 0 ? firstAfterCursor : 0;
+                        return (p1Sources.indexOf(source) - start + p1Sources.length) % p1Sources.length;
+                    };
+                    candidateRows.sort((a, b) => {
+                        const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
+                        const permitsB = this.sourcePermitProvider ? this.sourcePermitProvider(b.source) : 1;
+                        const activeA = sourceCounts.get(a.source) || 0;
+                        const activeB = sourceCounts.get(b.source) || 0;
+                        if ((permitsA > 0) !== (permitsB > 0))
+                            return permitsA > 0 ? -1 : 1;
+                        if (activeA !== activeB)
+                            return activeA - activeB;
+                        const sourceRankA = nextP1SourceRank(a.source);
+                        const sourceRankB = nextP1SourceRank(b.source);
+                        if (sourceRankA !== sourceRankB)
+                            return sourceRankA - sourceRankB;
+                        return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
+                    });
+                    const isCandidateFrontierValid = (workId, minSort, maxPub) => {
+                        if (minSort <= (maxPub === -1 ? 1.5 : maxPub + 1.5))
+                            return true;
+                        const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+                        const gapEnd = minSort - 1;
+                        return (gapsMap.get(workId) || []).some((g) => g.start <= gapStart && g.end >= gapEnd);
+                    };
+                    let match = candidateRows.find((cand) => {
+                        const maxPub = pubMap.get(cand.work_id) ?? -1;
+                        const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
+                        return isCandidateFrontierValid(cand.work_id, minSort, maxPub);
+                    });
+                    if (match)
+                        return match;
+                    // Only the bounded source window is considered for gap confirmation.
+                    for (const cand of candidateRows) {
+                        const maxPub = pubMap.get(cand.work_id) ?? -1;
+                        const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
+                        const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
+                        const gapEnd = minSort - 1;
+                        if (gapStart > gapEnd) {
                             return cand;
-                        else
+                        }
+                        try {
+                            const conf = await confirmUpstreamGapInterval(this.pool, {
+                                workId: cand.work_id,
+                                startSortKey: gapStart,
+                                endSortKey: gapEnd,
+                                primarySource: cand.source,
+                                reason: 'ON_DEMAND_ADMISSION_GAP_CONFIRM',
+                            });
+                            if (conf.confirmed)
+                                return cand;
+                            else
+                                this.deadWorksCache.set(cand.work_id, Date.now());
+                        }
+                        catch {
                             this.deadWorksCache.set(cand.work_id, Date.now());
+                        }
                     }
-                    catch {
-                        this.deadWorksCache.set(cand.work_id, Date.now());
-                    }
-                }
-                return null;
-            };
-            let res = await loadOnDemandCandidates(false);
-            let match = await findOnDemandFrontier(res.rows);
-            // A non-empty QUEUED source window may contain only rows behind a gap.
-            // Retry the existing bounded paused-window path when no candidate is
-            // actually executable, rather than treating row presence as progress.
-            if (!match) {
-                const pausedRes = await loadOnDemandCandidates(true);
-                const pausedMatch = await findOnDemandFrontier(pausedRes.rows);
-                if (pausedMatch) {
-                    res = pausedRes;
-                    match = pausedMatch;
-                }
-            }
-            if (match) {
-                const cand = match;
-                const newWork = {
-                    workId: cand.work_id,
-                    workTitle: cand.title || 'Unknown Title',
-                    lane,
-                    state: 'FILLING',
-                    primarySource: cand.source,
-                    admittedAt: new Date().toISOString(),
-                    lastActivityAt: new Date().toISOString(),
-                    totalChapters: parseInt(cand.pending_jobs || '0', 10),
-                    publishedChapters: 0,
-                    queuedChapters: parseInt(cand.queued_count || '0', 10),
-                    inFlightChapters: 0,
-                    frontierSortKey: cand.min_sort_key ? parseFloat(cand.min_sort_key) : null,
-                    criticalGapSortKey: null,
-                    criticalGapUnblockCount: 0,
+                    return null;
                 };
-                if (isP1) {
-                    newWork.queuedChapters = await this.enforceP1FairWindow(newWork.workId, cand.source);
-                    // The P1 query is restricted to rotation_rank=1. This admission is
-                    // therefore real circular progress, not a frontier leap: persist
-                    // it so the same work cannot be immediately re-admitted after it
-                    // consumes its one chapter window.
-                    this.advanceP1AdmissionCursor(cand.source, cand.work_id);
-                    this.lastOnDemandP1Source = cand.source;
+                let res = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}LoadQueuedMs`, () => loadOnDemandCandidates(false));
+                let match = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}ResolveQueuedFrontierMs`, () => findOnDemandFrontier(res.rows));
+                // A non-empty QUEUED source window may contain only rows behind a gap.
+                // Retry the existing bounded paused-window path when no candidate is
+                // actually executable, rather than treating row presence as progress.
+                if (!match) {
+                    const pausedRes = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}LoadPausedMs`, () => loadOnDemandCandidates(true));
+                    const pausedMatch = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}ResolvePausedFrontierMs`, () => findOnDemandFrontier(pausedRes.rows));
+                    if (pausedMatch) {
+                        res = pausedRes;
+                        match = pausedMatch;
+                    }
                 }
-                this.stateStore.setActiveWork(newWork);
-                // P1 receives its one fair chapter through enforceP1FairWindow above.
-                // P2 keeps its existing sliding window semantics.
-                if (!isP1 && newWork.queuedChapters < config.slidingWindowMin) {
-                    const needed = config.slidingWindowSize - newWork.queuedChapters;
-                    const targetPriority = 50;
-                    const promoteRes = await this.runQuery(`WITH to_promote AS (
+                if (match) {
+                    const cand = match;
+                    const newWork = {
+                        workId: cand.work_id,
+                        workTitle: cand.title || 'Unknown Title',
+                        lane,
+                        state: 'FILLING',
+                        primarySource: cand.source,
+                        admittedAt: new Date().toISOString(),
+                        lastActivityAt: new Date().toISOString(),
+                        totalChapters: parseInt(cand.pending_jobs || '0', 10),
+                        publishedChapters: 0,
+                        queuedChapters: parseInt(cand.queued_count || '0', 10),
+                        inFlightChapters: 0,
+                        frontierSortKey: cand.min_sort_key ? parseFloat(cand.min_sort_key) : null,
+                        criticalGapSortKey: null,
+                        criticalGapUnblockCount: 0,
+                    };
+                    if (isP1) {
+                        newWork.queuedChapters = await this.timeAdmissionStage(stages, 'p1FairWindowMs', () => this.enforceP1FairWindow(newWork.workId, cand.source));
+                        // The P1 query is restricted to rotation_rank=1. This admission is
+                        // therefore real circular progress, not a frontier leap: persist
+                        // it so the same work cannot be immediately re-admitted after it
+                        // consumes its one chapter window.
+                        this.advanceP1AdmissionCursor(cand.source, cand.work_id);
+                        this.lastOnDemandP1Source = cand.source;
+                    }
+                    this.stateStore.setActiveWork(newWork);
+                    // P1 receives its one fair chapter through enforceP1FairWindow above.
+                    // P2 keeps its existing sliding window semantics.
+                    if (!isP1 && newWork.queuedChapters < config.slidingWindowMin) {
+                        const needed = config.slidingWindowSize - newWork.queuedChapters;
+                        const targetPriority = 50;
+                        const promoteRes = await this.timeAdmissionStage(stages, 'p2InitialWindowPromotionMs', () => this.runQuery(`WITH to_promote AS (
                SELECT id
                FROM importer_queue
                WHERE status = 'PAUSED_BY_STAFF'
@@ -2323,18 +2362,26 @@ export class AdmissionController {
                  updated_at = NOW()
              FROM to_promote
              WHERE q.id = to_promote.id
-             RETURNING q.id;`, [newWork.workId, needed, targetPriority]);
-                    newWork.queuedChapters += promoteRes.rows.length;
-                    this.stateStore.setActiveWork(newWork);
+             RETURNING q.id;`, [newWork.workId, needed, targetPriority]));
+                        newWork.queuedChapters += promoteRes.rows.length;
+                        this.stateStore.setActiveWork(newWork);
+                    }
+                    this.logger.info(`[ON_DEMAND_ADMISSION] Admitted work ${newWork.workTitle} into ${lane}`, {
+                        workId: newWork.workId,
+                        lane,
+                        source: newWork.primarySource,
+                    });
+                    return newWork;
                 }
-                this.logger.info(`[ON_DEMAND_ADMISSION] Admitted work ${newWork.workTitle} into ${lane}`, {
-                    workId: newWork.workId,
-                    lane,
-                    source: newWork.primarySource,
-                });
-                return newWork;
             }
+            return null;
         }
-        return null;
+        finally {
+            this.logSlowAdmissionStages('ON_DEMAND_ADMISSION_STAGE_TIMING', startedAt, stages, {
+                preferredLane: preferredLane || 'all',
+                attemptedLanes,
+                allowedSourceCount: allowedSources?.length || 0,
+            });
+        }
     }
 }

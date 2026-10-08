@@ -1130,66 +1130,106 @@ export class AdmissionController {
       .finally(release);
   }
 
+  /**
+   * Control-plane admission intentionally serializes its work on the small
+   * YSQL pool.  Keep stage timing local to the operation so a slow cycle can
+   * be attributed without changing that serialization or retaining state.
+   */
+  private async timeAdmissionStage<T>(
+    stages: Record<string, number>,
+    stage: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const startedAt = performance.now();
+    try {
+      return await operation();
+    } finally {
+      stages[stage] = Math.round(performance.now() - startedAt);
+    }
+  }
+
+  private logSlowAdmissionStages(
+    event: 'ADMISSION_CYCLE_STAGE_TIMING' | 'ON_DEMAND_ADMISSION_STAGE_TIMING',
+    startedAt: number,
+    stages: Record<string, number>,
+    context: Record<string, unknown>,
+  ): void {
+    const executionMs = Math.round(performance.now() - startedAt);
+    // The aggregate timing events remain the normal low-volume signal. Emit
+    // this diagnostic only for a materially slow operation, with durations
+    // only—never queue payloads or chapter data.
+    if (executionMs < 1_000) return;
+    this.logger.info(event, { ...context, executionMs, stages });
+  }
+
   private async executeAdmissionCycle(): Promise<void> {
+    const startedAt = performance.now();
+    const stages: Record<string, number> = {};
     const now = Date.now();
-    for (const [wid, ts] of this.deadWorksCache.entries()) { if (now - ts > 60 * 60 * 1000) this.deadWorksCache.delete(wid); }
-    const config = this.stateStore.getConfig();
-    if (!config.enabled && !config.shadowMode) {
-      return;
+    try {
+      for (const [wid, ts] of this.deadWorksCache.entries()) { if (now - ts > 60 * 60 * 1000) this.deadWorksCache.delete(wid); }
+      const config = this.stateStore.getConfig();
+      if (!config.enabled && !config.shadowMode) {
+        return;
+      }
+
+      // Step 0: Check PROTECTIVE_STOP
+      if (await this.timeAdmissionStage(stages, 'protectiveStopMs', () => this.protectiveSentinel.isProtectiveStopActive())) {
+        this.logger.warn('PROTECTIVE_STOP active, skipping admission cycle');
+        return;
+      }
+
+      // Do not let control-plane scans consume the bounded pool while claims
+      // are active or queued.  A later scheduled/vacancy cycle will retry.
+      if (this.isPoolUnderClaimPressure() && !this.shouldRunPressureMaintenance()) {
+        // Claims are the work-conserving data plane, but a pool waiter must not
+        // permanently starve P2 discovery when the bounded P1 probe has no
+        // executable catalog frontier. This path performs exactly one bounded
+        // P1 probe followed by the bounded P2 source-window admission; it does
+        // not run reconciliation, recovery, GROUP BY maintenance, or paused
+        // backlog scans. A real P1 frontier still wins in canAdmitNewWork().
+        await this.timeAdmissionStage(stages, 'pressureP2ProbeMs', () => this.executeOnDemandAdmission('P2', undefined, true));
+        this.logger.debug('[ADMISSION_P2_PRESSURE_PROBE] bounded P2 admission attempted while claims are waiting');
+        return;
+      }
+
+      // If claim pressure remains continuous, one bounded reconciliation pass is
+      // necessary to retire stale active_works and replenish a legitimate
+      // frontier.  Do not run the broad recovery/scanning chain in this escape
+      // hatch; it is intentionally limited to the active-work snapshot and its
+      // bounded replenishment.
+      if (this.isPoolUnderClaimPressure()) {
+        this.logger.warn('[ADMISSION_PRESSURE_MAINTENANCE] sustained claim pressure; running bounded active-work reconciliation');
+        await this.timeAdmissionStage(stages, 'pressureMaintenanceMs', () => this.runPressureMaintenance());
+        return;
+      }
+
+      // Run before P1/P2 admission so legacy visible works cannot be bypassed
+      // by discovery during the first post-deploy cycle.
+      await this.timeAdmissionStage(stages, 'recoverOrphanedCancelledMs', () => this.recoverOrphanedCancelledChapterJobs());
+      if (this.isPoolUnderClaimPressure()) return;
+      await this.timeAdmissionStage(stages, 'recoverLegacyTransientMs', () => this.recoverLegacyTransientFailures());
+      if (this.isPoolUnderClaimPressure()) return;
+      await this.timeAdmissionStage(stages, 'recoverSourceTransientMs', () => this.recoverSourceRecoveredTransientFailures());
+      if (this.isPoolUnderClaimPressure()) return;
+      await this.timeAdmissionStage(stages, 'repairVisibleP2Ms', () => this.repairVisibleP2LifecycleBacklog());
+      if (this.isPoolUnderClaimPressure()) return;
+
+      // Step 1: Reconcile current active works (check caught-up, in-flight, queued)
+      await this.timeAdmissionStage(stages, 'reconcileActiveWorksMs', () => this.reconcileActiveWorks());
+      if (this.isPoolUnderClaimPressure()) return;
+
+      // Step 2: Replenish active sets if below capacity
+      await this.timeAdmissionStage(stages, 'replenishActiveSetsMs', () => this.replenishActiveSets());
+      if (this.isPoolUnderClaimPressure()) return;
+
+      // Step 3: Maintain sliding admission windows for all active works
+      await this.timeAdmissionStage(stages, 'maintainSlidingWindowsMs', () => this.maintainSlidingWindows());
+    } finally {
+      this.logSlowAdmissionStages('ADMISSION_CYCLE_STAGE_TIMING', startedAt, stages, {
+        activeWorks: this.getActiveWorksCount(),
+      });
     }
-
-    // Step 0: Check PROTECTIVE_STOP
-    if (await this.protectiveSentinel.isProtectiveStopActive()) {
-      this.logger.warn('PROTECTIVE_STOP active, skipping admission cycle');
-      return;
-    }
-
-    // Do not let control-plane scans consume the bounded pool while claims
-    // are active or queued.  A later scheduled/vacancy cycle will retry.
-    if (this.isPoolUnderClaimPressure() && !this.shouldRunPressureMaintenance()) {
-      // Claims are the work-conserving data plane, but a pool waiter must not
-      // permanently starve P2 discovery when the bounded P1 probe has no
-      // executable catalog frontier. This path performs exactly one bounded
-      // P1 probe followed by the bounded P2 source-window admission; it does
-      // not run reconciliation, recovery, GROUP BY maintenance, or paused
-      // backlog scans. A real P1 frontier still wins in canAdmitNewWork().
-      await this.executeOnDemandAdmission('P2', undefined, true);
-      this.logger.debug('[ADMISSION_P2_PRESSURE_PROBE] bounded P2 admission attempted while claims are waiting');
-      return;
-    }
-
-    // If claim pressure remains continuous, one bounded reconciliation pass is
-    // necessary to retire stale active_works and replenish a legitimate
-    // frontier.  Do not run the broad recovery/scanning chain in this escape
-    // hatch; it is intentionally limited to the active-work snapshot and its
-    // bounded replenishment.
-    if (this.isPoolUnderClaimPressure()) {
-      this.logger.warn('[ADMISSION_PRESSURE_MAINTENANCE] sustained claim pressure; running bounded active-work reconciliation');
-      await this.runPressureMaintenance();
-      return;
-    }
-
-    // Run before P1/P2 admission so legacy visible works cannot be bypassed
-    // by discovery during the first post-deploy cycle.
-    await this.recoverOrphanedCancelledChapterJobs();
-    if (this.isPoolUnderClaimPressure()) return;
-    await this.recoverLegacyTransientFailures();
-    if (this.isPoolUnderClaimPressure()) return;
-    await this.recoverSourceRecoveredTransientFailures();
-    if (this.isPoolUnderClaimPressure()) return;
-    await this.repairVisibleP2LifecycleBacklog();
-    if (this.isPoolUnderClaimPressure()) return;
-
-    // Step 1: Reconcile current active works (check caught-up, in-flight, queued)
-    await this.reconcileActiveWorks();
-    if (this.isPoolUnderClaimPressure()) return;
-
-    // Step 2: Replenish active sets if below capacity
-    await this.replenishActiveSets();
-    if (this.isPoolUnderClaimPressure()) return;
-
-    // Step 3: Maintain sliding admission windows for all active works
-    await this.maintainSlidingWindows();
   }
 
   private async runPressureMaintenance(): Promise<void> {
@@ -2128,35 +2168,42 @@ export class AdmissionController {
     allowedSources?: string[],
     allowDuringClaimPressure = false,
   ): Promise<ActiveWork | null> {
-    const config = this.stateStore.getConfig();
-    if (!config.enabled && !config.shadowMode) return null;
-    if (await this.protectiveSentinel.isProtectiveStopActive()) return null;
+    const startedAt = performance.now();
+    const stages: Record<string, number> = {};
+    const attemptedLanes: string[] = [];
+    try {
+      const config = this.stateStore.getConfig();
+      if (!config.enabled && !config.shadowMode) return null;
+      if (await this.timeAdmissionStage(stages, 'protectiveStopMs', () => this.protectiveSentinel.isProtectiveStopActive())) return null;
 
-    const activeWorks = this.stateStore.getActiveWorks();
-    const activeIds = activeWorks.map((w) => w.workId);
+      const activeWorks = this.stateStore.getActiveWorks();
+      const activeIds = activeWorks.map((w) => w.workId);
 
-    const sourceCounts = new Map<string, number>();
-    for (const w of activeWorks.filter((w) => w.state === 'FILLING' && (w.inFlightChapters || 0) > 0)) {
-      sourceCounts.set(w.primarySource, (sourceCounts.get(w.primarySource) || 0) + 1);
-    }
-    const saturatedSources = Array.from(sourceCounts.entries())
-      .filter(([src, cnt]) => cnt >= 4)
-      .map(([src]) => src);
+      const sourceCounts = new Map<string, number>();
+      for (const w of activeWorks.filter((w) => w.state === 'FILLING' && (w.inFlightChapters || 0) > 0)) {
+        sourceCounts.set(w.primarySource, (sourceCounts.get(w.primarySource) || 0) + 1);
+      }
+      const saturatedSources = Array.from(sourceCounts.entries())
+        .filter(([src, cnt]) => cnt >= 4)
+        .map(([src]) => src);
 
-    const lanesToTry = preferredLane === 'P1'
-      ? (['P1', 'P2'] as const)
-      : (preferredLane ? [preferredLane] : (['P1', 'P2'] as const));
+      const lanesToTry = preferredLane === 'P1'
+        ? (['P1', 'P2'] as const)
+        : (preferredLane ? [preferredLane] : (['P1', 'P2'] as const));
 
-    for (const lane of lanesToTry) {
+      for (const lane of lanesToTry) {
+        attemptedLanes.push(lane);
       if (lane === 'P2') {
-        const gate = await this.canAdmitNewWork({ allowDuringClaimPressure });
+        const gate = await this.timeAdmissionStage(stages, 'p2GateMs', () => this.canAdmitNewWork({ allowDuringClaimPressure }));
         if (!gate.allowed) {
           this.logger.debug(`[ADMISSION_GATE_HOLD] admitNextWorkOnDemand blocked for P2: ${gate.reason}`);
           continue;
         }
       }
       const isP1 = lane === 'P1';
-      const p1SourceWindow = isP1 ? await this.getP1SourceWindow(allowedSources) : null;
+      const p1SourceWindow = isP1
+        ? await this.timeAdmissionStage(stages, 'p1SourceWindowMs', () => this.getP1SourceWindow(allowedSources))
+        : null;
       if (isP1 && p1SourceWindow?.length === 0) continue;
       const maxPriority = isP1 ? 100 : 75;
       const loadOnDemandCandidates = (includePaused: boolean) => {
@@ -2353,14 +2400,14 @@ export class AdmissionController {
         return null;
       };
 
-      let res = await loadOnDemandCandidates(false);
-      let match = await findOnDemandFrontier(res.rows);
+      let res = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}LoadQueuedMs`, () => loadOnDemandCandidates(false));
+      let match = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}ResolveQueuedFrontierMs`, () => findOnDemandFrontier(res.rows));
       // A non-empty QUEUED source window may contain only rows behind a gap.
       // Retry the existing bounded paused-window path when no candidate is
       // actually executable, rather than treating row presence as progress.
       if (!match) {
-        const pausedRes = await loadOnDemandCandidates(true);
-        const pausedMatch = await findOnDemandFrontier(pausedRes.rows);
+        const pausedRes = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}LoadPausedMs`, () => loadOnDemandCandidates(true));
+        const pausedMatch = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}ResolvePausedFrontierMs`, () => findOnDemandFrontier(pausedRes.rows));
         if (pausedMatch) {
           res = pausedRes;
           match = pausedMatch;
@@ -2387,7 +2434,7 @@ export class AdmissionController {
         };
 
         if (isP1) {
-          newWork.queuedChapters = await this.enforceP1FairWindow(newWork.workId, cand.source);
+          newWork.queuedChapters = await this.timeAdmissionStage(stages, 'p1FairWindowMs', () => this.enforceP1FairWindow(newWork.workId, cand.source));
           // The P1 query is restricted to rotation_rank=1. This admission is
           // therefore real circular progress, not a frontier leap: persist
           // it so the same work cannot be immediately re-admitted after it
@@ -2402,7 +2449,7 @@ export class AdmissionController {
         if (!isP1 && newWork.queuedChapters < config.slidingWindowMin) {
           const needed = config.slidingWindowSize - newWork.queuedChapters;
           const targetPriority = 50;
-          const promoteRes = await this.runQuery(
+          const promoteRes = await this.timeAdmissionStage(stages, 'p2InitialWindowPromotionMs', () => this.runQuery(
             `WITH to_promote AS (
                SELECT id
                FROM importer_queue
@@ -2421,7 +2468,7 @@ export class AdmissionController {
              WHERE q.id = to_promote.id
              RETURNING q.id;`,
             [newWork.workId, needed, targetPriority]
-          );
+          ));
           newWork.queuedChapters += promoteRes.rows.length;
           this.stateStore.setActiveWork(newWork);
         }
@@ -2434,7 +2481,14 @@ export class AdmissionController {
 
         return newWork;
       }
+      }
+      return null;
+    } finally {
+      this.logSlowAdmissionStages('ON_DEMAND_ADMISSION_STAGE_TIMING', startedAt, stages, {
+        preferredLane: preferredLane || 'all',
+        attemptedLanes,
+        allowedSourceCount: allowedSources?.length || 0,
+      });
     }
-    return null;
   }
 }
