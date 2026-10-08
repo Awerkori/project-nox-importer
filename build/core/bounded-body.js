@@ -1,3 +1,4 @@
+import { Logger } from './logger.js';
 import { InvalidMediaError } from './retry-policy.js';
 import { performance } from 'node:perf_hooks';
 /**
@@ -8,6 +9,7 @@ import { performance } from 'node:perf_hooks';
  */
 const bodyMemoryProbeEnabled = process.env.NOX_BODY_MEMORY_PROBE === '1';
 let bodyMemoryProbeConsumed = false;
+const bodyMemoryProbeLogger = new Logger('BodyMemoryProbe');
 function captureBodyMemorySnapshot() {
     const memory = process.memoryUsage();
     return {
@@ -38,7 +40,7 @@ function emitBodyMemoryProbe(probe) {
     const peakRssBytes = Math.max(...snapshots.map((snapshot) => snapshot.rssBytes));
     const peakExternalBytes = Math.max(...snapshots.map((snapshot) => snapshot.externalBytes));
     const peakArrayBuffersBytes = Math.max(...snapshots.map((snapshot) => snapshot.arrayBuffersBytes));
-    console.info('[BODY_MEMORY_PROBE]', JSON.stringify({
+    bodyMemoryProbeLogger.info('BODY_MEMORY_PROBE', {
         contentLengthBytes: probe.contentLengthBytes,
         chunkCount: probe.chunkCount,
         chunkBytes: probe.chunkBytes,
@@ -51,7 +53,7 @@ function emitBodyMemoryProbe(probe) {
         peakRssBytes,
         peakExternalBytes,
         peakArrayBuffersBytes,
-    }));
+    });
 }
 function abortError(signal) {
     const reason = signal.reason;
