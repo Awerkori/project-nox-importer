@@ -1,4 +1,5 @@
 import type { BufferReservation } from './concurrency.js';
+import { Logger } from './logger.js';
 import { InvalidMediaError } from './retry-policy.js';
 import { performance } from 'node:perf_hooks';
 
@@ -16,6 +17,7 @@ export interface ReadImageBodyOptions {
  */
 const bodyMemoryProbeEnabled = process.env.NOX_BODY_MEMORY_PROBE === '1';
 let bodyMemoryProbeConsumed = false;
+const bodyMemoryProbeLogger = new Logger('BodyMemoryProbe');
 
 type BodyMemorySnapshot = {
   rssBytes: number;
@@ -71,7 +73,7 @@ function emitBodyMemoryProbe(probe: BodyMemoryProbe): void {
   const peakExternalBytes = Math.max(...snapshots.map((snapshot) => snapshot.externalBytes));
   const peakArrayBuffersBytes = Math.max(...snapshots.map((snapshot) => snapshot.arrayBuffersBytes));
 
-  console.info('[BODY_MEMORY_PROBE]', JSON.stringify({
+  bodyMemoryProbeLogger.info('BODY_MEMORY_PROBE', {
     contentLengthBytes: probe.contentLengthBytes,
     chunkCount: probe.chunkCount,
     chunkBytes: probe.chunkBytes,
@@ -84,7 +86,7 @@ function emitBodyMemoryProbe(probe: BodyMemoryProbe): void {
     peakRssBytes,
     peakExternalBytes,
     peakArrayBuffersBytes,
-  }));
+  });
 }
 
 function abortError(signal: AbortSignal): Error {
