@@ -367,10 +367,13 @@ export class AdmissionController {
       systemHealthy: boolean;
     };
   }> {
+    const startedAt = performance.now();
+    const stages: Record<string, number> = {};
+    try {
     const config = this.stateStore.getConfig();
 
     // 1. SYSTEM_HEALTHY
-    const isStopActive = await this.protectiveSentinel.isProtectiveStopActive();
+    const isStopActive = await this.timeAdmissionStage(stages, 'protectiveStopMs', () => this.protectiveSentinel.isProtectiveStopActive());
     if (isStopActive) {
       return {
         allowed: false,
@@ -415,7 +418,7 @@ export class AdmissionController {
     // 2. NO_P0_WAITING (Real P0 releases: 100 <= priority < 1000; staff-forced >= 1000 belongs to chapter data plane)
     // We must use a frontier/eligibility check so that works blocked by upstream gaps
     // do not falsely register as "waiting" and starve P2 admission indefinitely.
-    const p0Res = await this.runQuery(`
+    const p0Res = await this.timeAdmissionStage(stages, 'p0FrontierProbeMs', () => this.runQuery(`
       SELECT q.id
       FROM importer_queue q
       JOIN importer_sources s ON s.id = q.source
@@ -463,7 +466,7 @@ export class AdmissionController {
             AND (canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key))
         )
       LIMIT 1
-    `);
+    `));
     const p0Waiting = p0Res.rows.length > 0 ? 1 : 0;
     if (p0Waiting > 0 && activeWorksCount > 0) {
       return {
@@ -485,7 +488,7 @@ export class AdmissionController {
     // assigned when they were first discovered.  This is deliberately based
     // on the canonical work visibility, not latest_chapter_published_at: that
     // denormalized timestamp may legitimately be null for older works.
-    const p1 = await this.getP1BacklogSnapshot(options);
+    const p1 = await this.timeAdmissionStage(stages, 'p1BacklogProbeMs', () => this.getP1BacklogSnapshot(options));
     if (p1.available > 0 && activeWorksCount > 0) {
       return {
         allowed: false,
@@ -541,9 +544,9 @@ export class AdmissionController {
     // new work and repeatedly scans the hot queue while all slots are busy.
     // If there is spare capacity and activeP2Works < maxP2Cohort:
     // allow P2/P3 new works to admit so P3 never dies of starvation from catalog backlog.
-    const inFlightRes = await this.runQuery(
+    const inFlightRes = await this.timeAdmissionStage(stages, 'inFlightCountMs', () => this.runQuery(
       `SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`
-    );
+    ));
     const importingCnt = parseInt(inFlightRes.rows[0]?.cnt || '0', 10);
     const maxTotalWorkers = Math.max(1, this.chapterCapacityProvider());
 
@@ -576,6 +579,12 @@ export class AdmissionController {
         systemHealthy: true,
       },
     };
+    } finally {
+      this.logSlowAdmissionStages('P2_ADMISSION_GATE_STAGE_TIMING', startedAt, stages, {
+        activeWorks: this.getActiveWorksCount(),
+        allowDuringClaimPressure: options.allowDuringClaimPressure === true,
+      });
+    }
   }
 
   /**
@@ -1149,7 +1158,7 @@ export class AdmissionController {
   }
 
   private logSlowAdmissionStages(
-    event: 'ADMISSION_CYCLE_STAGE_TIMING' | 'ON_DEMAND_ADMISSION_STAGE_TIMING',
+    event: 'ADMISSION_CYCLE_STAGE_TIMING' | 'ON_DEMAND_ADMISSION_STAGE_TIMING' | 'P2_ADMISSION_GATE_STAGE_TIMING' | 'FRONTIER_RESOLUTION_STAGE_TIMING',
     startedAt: number,
     stages: Record<string, number>,
     context: Record<string, unknown>,
@@ -2307,27 +2316,38 @@ export class AdmissionController {
       };
 
       const findOnDemandFrontier = async (candidateRows: any[]): Promise<any | null> => {
-        if (candidateRows.length === 0) return null;
+        const startedAt = performance.now();
+        const stages: Record<string, number> = {};
+        let gapConfirmationAttempts = 0;
+        const finish = (result: any | null): any | null => {
+          this.logSlowAdmissionStages('FRONTIER_RESOLUTION_STAGE_TIMING', startedAt, stages, {
+            lane,
+            candidateCount: candidateRows.length,
+            gapConfirmationAttempts,
+          });
+          return result;
+        };
+        if (candidateRows.length === 0) return finish(null);
         this.logger.info(`[DEBUG_ADM_CANDIDATES] CacheSize: ${this.deadWorksCache.size} | Cands: ${JSON.stringify(candidateRows.map(c => ({w:c.work_id, q:c.queued_count})))}`);
         const candWorkIds = candidateRows.map((r: any) => r.work_id);
         const pubMap = new Map<string, number>();
-        const pubRes = await this.runQuery(
+        const pubRes = await this.timeAdmissionStage(stages, 'publishedFrontierLookupMs', () => this.runQuery(
           `SELECT work_id::text, COALESCE(MAX(number), -1) as max_pub
            FROM chapters
            WHERE work_id = ANY($1::uuid[]) AND published_at IS NOT NULL
            GROUP BY work_id`,
           [candWorkIds]
-        );
+        ));
         for (const pr of pubRes.rows) pubMap.set(pr.work_id, parseFloat(pr.max_pub));
 
         const gapsMap = new Map<string, Array<{ start: number; end: number }>>();
         try {
-          const gapsRes = await this.runQuery(
+          const gapsRes = await this.timeAdmissionStage(stages, 'confirmedGapsLookupMs', () => this.runQuery(
             `SELECT work_id::text, start_sort_key, end_sort_key
              FROM importer_confirmed_gaps
              WHERE work_id = ANY($1::uuid[])`,
             [candWorkIds]
-          );
+          ));
           for (const gr of gapsRes.rows) {
             const arr = gapsMap.get(gr.work_id) || [];
             arr.push({ start: parseFloat(gr.start_sort_key), end: parseFloat(gr.end_sort_key) });
@@ -2373,7 +2393,7 @@ export class AdmissionController {
           const minSort = cand.min_sort_key ? parseFloat(cand.min_sort_key) : 0;
           return isCandidateFrontierValid(cand.work_id, minSort, maxPub);
         });
-        if (match) return match;
+        if (match) return finish(match);
 
         // Only the bounded source window is considered for gap confirmation.
         for (const cand of candidateRows) {
@@ -2383,8 +2403,11 @@ export class AdmissionController {
           const gapStart = maxPub >= 0 ? maxPub + 1 : 1;
           const gapEnd = minSort - 1;
           if (gapStart > gapEnd) {
-            return cand;
+            return finish(cand);
           }
+          const confirmationStartedAt = performance.now();
+          gapConfirmationAttempts++;
+          let gapConfirmed = false;
           try {
             const conf = await confirmUpstreamGapInterval(this.pool, {
               workId: cand.work_id,
@@ -2393,11 +2416,15 @@ export class AdmissionController {
               primarySource: cand.source,
               reason: 'ON_DEMAND_ADMISSION_GAP_CONFIRM',
             });
-            if (conf.confirmed) return cand;
-            else this.deadWorksCache.set(cand.work_id, Date.now());
+            gapConfirmed = conf.confirmed;
+            if (!gapConfirmed) this.deadWorksCache.set(cand.work_id, Date.now());
           } catch { this.deadWorksCache.set(cand.work_id, Date.now()); }
+          finally {
+            stages.gapConfirmationMs = (stages.gapConfirmationMs || 0) + Math.round(performance.now() - confirmationStartedAt);
+          }
+          if (gapConfirmed) return finish(cand);
         }
-        return null;
+        return finish(null);
       };
 
       let res = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}LoadQueuedMs`, () => loadOnDemandCandidates(false));
