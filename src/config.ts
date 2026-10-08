@@ -49,7 +49,7 @@ const ConfigSchema = z.object({
   // Three importer connections plus the site/Hyperdrive reaches that threshold;
   // two leave a real reader and operational headroom. Media/network latency
   // does not benefit from a larger direct pool.
-  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(10).default(2),
+  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(8),
   UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.coerce.number().int().default(4194304),
   // These are global pipeline ceilings, not per-chapter multipliers.  Keep
   // them aligned with the small production container so a chapter ramp cannot
