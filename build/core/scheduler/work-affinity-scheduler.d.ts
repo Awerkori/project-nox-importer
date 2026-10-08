@@ -117,6 +117,12 @@ export declare class WorkAffinityScheduler {
     private cachedP0WorkIds;
     private p0CandidateProbeFlight;
     private hasP0Candidate;
+    /**
+     * Exposes the exact P0 executable-frontier signal used by the claim path.
+     * Admission consumes this through Engine so an idle P2 gate does not repeat
+     * the same canonical probe against the bounded YSQL pool.
+     */
+    hasCanonicalP0Candidate(): Promise<boolean>;
     /** A bounded, short-lived P0 work list so concurrent releases take turns. */
     private getP0CandidateWorkIds;
     private hasStaffForcedCandidate;

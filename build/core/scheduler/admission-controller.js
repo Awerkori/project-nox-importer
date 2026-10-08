@@ -28,6 +28,12 @@ export class AdmissionController {
     loopTimer = null;
     sourcePermitProvider;
     chapterCapacityProvider = () => 1;
+    // The scheduler already owns the canonical P0 executable-frontier probe
+    // used by the claim path. Reuse that short-lived, single-flight result for
+    // the P2 admission gate instead of issuing a second, broader P0 scan on
+    // the same bounded YSQL pool. The durable SQL probe remains the fallback
+    // for isolated controller users that do not have a scheduler lifecycle.
+    p0CandidateProvider;
     // The exclusive runtime leader already records every durable chapter claim
     // in WorkAffinityScheduler before a worker receives it.  Reuse that
     // authoritative in-process count in the two admission capacity checks:
@@ -38,6 +44,9 @@ export class AdmissionController {
     inFlightChapterCountProvider;
     setChapterCapacityProvider(provider) {
         this.chapterCapacityProvider = provider;
+    }
+    setP0CandidateProvider(provider) {
+        this.p0CandidateProvider = provider;
     }
     setInFlightChapterCountProvider(provider) {
         this.inFlightChapterCountProvider = provider;
@@ -462,7 +471,11 @@ export class AdmissionController {
             // 2. NO_P0_WAITING (Real P0 releases: 100 <= priority < 1000; staff-forced >= 1000 belongs to chapter data plane)
             // We must use a frontier/eligibility check so that works blocked by upstream gaps
             // do not falsely register as "waiting" and starve P2 admission indefinitely.
-            const p0Res = await this.timeAdmissionStage(stages, 'p0FrontierProbeMs', () => this.runTimedAdmissionQuery('p0_frontier_probe', `
+            const p0Waiting = await this.timeAdmissionStage(stages, 'p0FrontierProbeMs', async () => {
+                if (this.p0CandidateProvider) {
+                    return (await this.p0CandidateProvider()) ? 1 : 0;
+                }
+                const p0Res = await this.runTimedAdmissionQuery('p0_frontier_probe', `
       SELECT q.id
       FROM importer_queue q
       JOIN importer_sources s ON s.id = q.source
@@ -510,8 +523,9 @@ export class AdmissionController {
             AND (canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key))
         )
       LIMIT 1
-    `));
-            const p0Waiting = p0Res.rows.length > 0 ? 1 : 0;
+      `);
+                return p0Res.rows.length > 0 ? 1 : 0;
+            });
             if (p0Waiting > 0 && activeWorksCount > 0) {
                 return {
                     allowed: false,

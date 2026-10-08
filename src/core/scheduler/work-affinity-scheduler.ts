@@ -349,6 +349,15 @@ export class WorkAffinityScheduler {
     return (await this.getP0CandidateWorkIds()).length > 0;
   }
 
+  /**
+   * Exposes the exact P0 executable-frontier signal used by the claim path.
+   * Admission consumes this through Engine so an idle P2 gate does not repeat
+   * the same canonical probe against the bounded YSQL pool.
+   */
+  public async hasCanonicalP0Candidate(): Promise<boolean> {
+    return this.hasP0Candidate();
+  }
+
   /** A bounded, short-lived P0 work list so concurrent releases take turns. */
   private async getP0CandidateWorkIds(): Promise<string[]> {
     if (process.env.NODE_ENV === 'test' || !this.pool?.query) {
