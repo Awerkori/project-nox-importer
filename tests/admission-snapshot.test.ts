@@ -151,6 +151,28 @@ describe('bounded admission snapshot', () => {
     }));
   });
 
+  it('emits stage attribution only for a materially slow admission operation', () => {
+    const controller = new AdmissionController({} as any, {} as any, { query: async () => ({ rows: [] }) });
+    const info = vi.fn();
+    (controller as any).logger = { info };
+
+    (controller as any).logSlowAdmissionStages(
+      'ON_DEMAND_ADMISSION_STAGE_TIMING',
+      performance.now() - 1_001,
+      { p1SourceWindowMs: 7, p1LoadQueuedMs: 986 },
+      { preferredLane: 'P1', attemptedLanes: ['P1'] },
+    );
+
+    expect(info).toHaveBeenCalledWith(
+      'ON_DEMAND_ADMISSION_STAGE_TIMING',
+      expect.objectContaining({
+        preferredLane: 'P1',
+        stages: { p1SourceWindowMs: 7, p1LoadQueuedMs: 986 },
+        executionMs: expect.any(Number),
+      }),
+    );
+  });
+
   it('does not admit P2 work beyond the effective chapter capacity', async () => {
     const state={getConfig:()=>({}),getActiveWorks:()=>[{workId:"mock",lane:"P1"}]} as any;
     const sentinel={isProtectiveStopActive:async()=>false} as any;

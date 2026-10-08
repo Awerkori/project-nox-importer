@@ -163,6 +163,13 @@ export declare class AdmissionController {
      */
     runAdmissionCycle(): Promise<void>;
     private enqueueAdmissionOperation;
+    /**
+     * Control-plane admission intentionally serializes its work on the small
+     * YSQL pool.  Keep stage timing local to the operation so a slow cycle can
+     * be attributed without changing that serialization or retaining state.
+     */
+    private timeAdmissionStage;
+    private logSlowAdmissionStages;
     private executeAdmissionCycle;
     private runPressureMaintenance;
     /**
