@@ -285,13 +285,13 @@ export class BufferReservation {
     get isReleased() {
         return this._released;
     }
-    async upgrade(newBytes, signal) {
+    async upgrade(newBytes, signal, options) {
         if (this._released || this._committed)
             return;
         if (newBytes <= this._reservedBytes)
             return;
         const additional = newBytes - this._reservedBytes;
-        await this.autotuner.upgradeReservation(additional, signal);
+        await this.autotuner.upgradeReservation(additional, signal, options);
         this._reservedBytes = newBytes;
     }
     commit(actualBytes) {
@@ -317,7 +317,7 @@ export class BufferReservation {
  * byte ceiling and streaming upgrades. If byte admission is aborted after a
  * page permit was acquired, both resources are returned immediately.
  */
-export async function acquirePageBufferAdmission(pageSemaphore, autotuner, requestedBytes, signal) {
+export async function acquirePageBufferAdmission(pageSemaphore, autotuner, requestedBytes, signal, options) {
     let releasePagePermit = null;
     let reservation;
     try {
@@ -326,7 +326,12 @@ export async function acquirePageBufferAdmission(pageSemaphore, autotuner, reque
         const pagePermitWaitMs = performance.now() - pagePermitStart;
         releasePagePermit = releasePermitOnce(pageSemaphore);
         const reservationStart = performance.now();
-        reservation = await autotuner.reserveBufferBudget(requestedBytes, signal);
+        reservation = await autotuner.reserveBufferBudget(requestedBytes, signal, {
+            intent: options?.completionHeadroomBytes && options.completionHeadroomBytes > 0
+                ? 'PAGE_INITIAL'
+                : 'GENERIC',
+            completionHeadroomBytes: options?.completionHeadroomBytes,
+        });
         const reservationWaitMs = performance.now() - reservationStart;
         return { reservation, releasePagePermit, pagePermitWaitMs, reservationWaitMs };
     }
@@ -608,9 +613,25 @@ export class AdaptiveAutotuner {
         }
         return true;
     }
-    async reserveBufferBudget(requestedBytes = 2 * 1024 * 1024, signal) {
+    canAdmitReservationWithIntent(requestedBytes, intent, completionHeadroomBytes) {
+        if (!this.canAdmitReservation(requestedBytes))
+            return false;
+        if (intent !== 'PAGE_INITIAL' || completionHeadroomBytes <= 0)
+            return true;
+        // Do not count this headroom separately. It is simply capacity that a
+        // speculative 2 MiB page admission is not allowed to consume, so one
+        // already-started body can later make a bounded, terminal reservation.
+        const totalCommitted = this.activeBufferedBytes + this.reservedBufferedBytes;
+        return totalCommitted + requestedBytes + completionHeadroomBytes <= this.config.maxBufferedBytes;
+    }
+    async reserveBufferBudget(requestedBytes = 2 * 1024 * 1024, signal, options) {
         signal?.throwIfAborted();
-        if (this.reservationWaiters.length === 0 && this.canAdmitReservation(requestedBytes)) {
+        const intent = options?.intent || 'GENERIC';
+        const completionHeadroomBytes = intent === 'PAGE_INITIAL'
+            ? Math.max(0, options?.completionHeadroomBytes || 0)
+            : 0;
+        if (this.reservationWaiters.length === 0
+            && this.canAdmitReservationWithIntent(requestedBytes, intent, completionHeadroomBytes)) {
             this.reservedBufferedBytes += requestedBytes;
             this.updateMaxCommittedObserved();
             return new BufferReservation(this, requestedBytes);
@@ -622,14 +643,16 @@ export class AdaptiveAutotuner {
                 requestedBytes,
                 t0,
                 signal,
-                resolve: (reservation) => {
+                intent,
+                completionHeadroomBytes,
+                resolve: () => {
                     cleanup();
                     const waitedMs = performance.now() - t0;
                     telemetryCollector.recordLimiterWait('memory_backpressure', waitedMs, this.config.maxBufferedBytes);
                     if (waitedMs > 1000) {
                         this.logger.info(`[Memory Backpressure] Admitted after ${Math.round(waitedMs)}ms wait (Active: ${Math.round(this.activeBufferedBytes / 1024 / 1024)}MB, Reserved: ${Math.round(this.reservedBufferedBytes / 1024 / 1024)}MB, RSS: ${diagnostics.getMemorySnapshot().rssMb}MB)`);
                     }
-                    resolve(reservation);
+                    resolve(new BufferReservation(this, requestedBytes));
                 },
                 reject: (err) => {
                     cleanup();
@@ -655,11 +678,13 @@ export class AdaptiveAutotuner {
             }, 200);
         });
     }
-    async upgradeReservation(additionalBytes, signal) {
+    async upgradeReservation(additionalBytes, signal, options) {
         if (additionalBytes <= 0)
             return;
         signal?.throwIfAborted();
-        if (this.reservationWaiters.length === 0 && this.canAdmitReservation(additionalBytes)) {
+        const intent = options?.intent || 'GENERIC';
+        if (this.reservationWaiters.length === 0
+            && this.canAdmitReservationWithIntent(additionalBytes, intent, 0)) {
             this.reservedBufferedBytes += additionalBytes;
             this.updateMaxCommittedObserved();
             return;
@@ -671,6 +696,8 @@ export class AdaptiveAutotuner {
                 requestedBytes: additionalBytes,
                 t0,
                 signal,
+                intent,
+                completionHeadroomBytes: 0,
                 resolve: () => {
                     cleanup();
                     resolve();
@@ -720,18 +747,39 @@ export class AdaptiveAutotuner {
     }
     drainReservationWaiters() {
         while (this.reservationWaiters.length > 0) {
-            const next = this.reservationWaiters[0];
-            if (this.canAdmitReservation(next.requestedBytes)) {
-                this.reservationWaiters.shift();
-                this.reservedBufferedBytes += next.requestedBytes;
-                this.updateMaxCommittedObserved();
-                const reservation = new BufferReservation(this, next.requestedBytes);
-                next.resolve(reservation);
-            }
-            else {
+            const nextIndex = this.getNextAdmissibleReservationWaiterIndex();
+            if (nextIndex < 0)
                 break;
-            }
+            const [next] = this.reservationWaiters.splice(nextIndex, 1);
+            this.reservedBufferedBytes += next.requestedBytes;
+            this.updateMaxCommittedObserved();
+            next.resolve();
         }
+    }
+    getNextAdmissibleReservationWaiterIndex() {
+        const first = this.reservationWaiters[0];
+        if (!first)
+            return -1;
+        if (this.canAdmitReservationWithIntent(first.requestedBytes, first.intent, first.completionHeadroomBytes)) {
+            return 0;
+        }
+        // A speculative page admission that cannot fit while retaining completion
+        // headroom must not trap an already-started body behind it. Only skip a
+        // contiguous prefix of PAGE_INITIAL waiters, and preserve FIFO within both
+        // initial admissions and completion promotions.
+        if (first.intent !== 'PAGE_INITIAL')
+            return -1;
+        let completionIndex = 1;
+        while (completionIndex < this.reservationWaiters.length
+            && this.reservationWaiters[completionIndex].intent === 'PAGE_INITIAL') {
+            completionIndex++;
+        }
+        const completion = this.reservationWaiters[completionIndex];
+        if (completion?.intent === 'COMPLETION'
+            && this.canAdmitReservationWithIntent(completion.requestedBytes, completion.intent, completion.completionHeadroomBytes)) {
+            return completionIndex;
+        }
+        return -1;
     }
     trackBufferedBytes(bytes) {
         if (bytes <= 0)

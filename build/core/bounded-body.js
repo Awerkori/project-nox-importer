@@ -1,6 +1,7 @@
 import { Logger } from './logger.js';
 import { InvalidMediaError } from './retry-policy.js';
 import { performance } from 'node:perf_hooks';
+export const MAX_IMAGE_BODY_BYTES = 20 * 1024 * 1024;
 function emitTrace(callback) {
     try {
         callback?.();
@@ -102,7 +103,7 @@ export async function readImageBody(response, optionsOrMaxBytes) {
     const options = typeof optionsOrMaxBytes === 'number'
         ? { maxBytes: optionsOrMaxBytes }
         : (optionsOrMaxBytes || {});
-    const maxBytes = options.maxBytes ?? 20 * 1024 * 1024;
+    const maxBytes = options.maxBytes ?? MAX_IMAGE_BODY_BYTES;
     const reservation = options.reservation;
     const signal = options.signal;
     const url = response.url || 'unknown';
@@ -120,12 +121,43 @@ export async function readImageBody(response, optionsOrMaxBytes) {
                 throw new InvalidMediaError(url, 'media', `Image declared content-length (${Math.round(declared / 1024 / 1024)}MB) exceeds maximum safe limit of ${Math.round(maxBytes / 1024 / 1024)}MB`);
             }
             if (reservation && declared > reservation.reservedBytes) {
-                await reservation.upgrade(declared, signal);
+                try {
+                    await reservation.upgrade(declared, signal, { intent: 'COMPLETION' });
+                }
+                catch (error) {
+                    await response.body?.cancel().catch(() => { });
+                    if (!reservation.isCommitted && !reservation.isReleased)
+                        reservation.release();
+                    throw error;
+                }
             }
         }
     }
     if (!response.body)
         throw new Error('Image response has no body');
+    // With no usable final length, incremental growth can let several readers
+    // fill the entire byte budget and then wait on one another forever. Promote
+    // one reader to a bounded completion reservation before its body advances.
+    // The autotuner accounts this in reservedBufferedBytes; it never borrows
+    // beyond maxBufferedBytes.
+    if (reservation && contentLengthBytes === null && maxBytes > reservation.reservedBytes) {
+        const fromBytes = reservation.reservedBytes;
+        emitTrace(() => options.trace?.onReservationUpgrade?.({
+            phase: 'COMPLETION', state: 'STARTED', fromBytes, toBytes: maxBytes, elapsedMs: 0,
+        }));
+        try {
+            await reservation.upgrade(maxBytes, signal, { intent: 'COMPLETION' });
+        }
+        catch (error) {
+            await response.body.cancel().catch(() => { });
+            if (!reservation.isCommitted && !reservation.isReleased)
+                reservation.release();
+            throw error;
+        }
+        emitTrace(() => options.trace?.onReservationUpgrade?.({
+            phase: 'COMPLETION', state: 'COMPLETED', fromBytes, toBytes: reservation.reservedBytes, elapsedMs: 0,
+        }));
+    }
     const reader = response.body.getReader();
     const chunks = [];
     let length = 0;
@@ -159,15 +191,18 @@ export async function readImageBody(response, optionsOrMaxBytes) {
             // This applies TCP backpressure upstream via the async pause.
             if (reservation && newLength > reservation.reservedBytes) {
                 const fromBytes = reservation.reservedBytes;
+                const completionPromotion = contentLengthBytes === null || newLength > contentLengthBytes;
+                const targetBytes = completionPromotion ? maxBytes : newLength;
+                const phase = completionPromotion ? 'COMPLETION' : 'STREAM';
                 waitingOnReservationUpgrade = true;
                 emitTrace(() => options.trace?.onReservationUpgrade?.({
-                    phase: 'STREAM', state: 'STARTED', fromBytes, toBytes: newLength,
+                    phase, state: 'STARTED', fromBytes, toBytes: targetBytes,
                     elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
                 }));
-                await reservation.upgrade(newLength, signal);
+                await reservation.upgrade(targetBytes, signal, completionPromotion ? { intent: 'COMPLETION' } : undefined);
                 waitingOnReservationUpgrade = false;
                 emitTrace(() => options.trace?.onReservationUpgrade?.({
-                    phase: 'STREAM', state: 'COMPLETED', fromBytes, toBytes: reservation.reservedBytes,
+                    phase, state: 'COMPLETED', fromBytes, toBytes: reservation.reservedBytes,
                     elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
                 }));
             }
