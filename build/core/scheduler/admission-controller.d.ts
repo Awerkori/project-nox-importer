@@ -22,7 +22,9 @@ export declare class AdmissionController {
     private loopTimer;
     private sourcePermitProvider?;
     private chapterCapacityProvider;
+    private inFlightChapterCountProvider?;
     setChapterCapacityProvider(provider: () => number): void;
+    setInFlightChapterCountProvider(provider: () => number): void;
     private admissionInFlight;
     private demandFlights;
     private deadWorksCache;
@@ -47,6 +49,7 @@ export declare class AdmissionController {
     private getP1SourceWindow;
     constructor(stateStore: SchedulerStateStore, protectiveSentinel: ProtectiveSentinel, pool?: any);
     private runQuery;
+    private getCurrentInFlightChapterCount;
     private getActiveWorksCount;
     /**
      * Admission is control-plane work.  Never start a broad reconciliation or

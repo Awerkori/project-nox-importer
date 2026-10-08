@@ -36,9 +36,21 @@ export class AdmissionController {
   private loopTimer: NodeJS.Timeout | null = null;
   private sourcePermitProvider?: (source: string) => number;
   private chapterCapacityProvider: () => number = () => 1;
+  // The exclusive runtime leader already records every durable chapter claim
+  // in WorkAffinityScheduler before a worker receives it.  Reuse that
+  // authoritative in-process count in the two admission capacity checks:
+  // repeatedly scanning the broad IMPORTING partial index here competes with
+  // claims on the intentionally small YSQL pool.  The database fallback is
+  // retained for isolated controller users and tests that do not have a
+  // scheduler lifecycle.
+  private inFlightChapterCountProvider?: () => number;
 
   public setChapterCapacityProvider(provider: () => number): void {
     this.chapterCapacityProvider = provider;
+  }
+
+  public setInFlightChapterCountProvider(provider: () => number): void {
+    this.inFlightChapterCountProvider = provider;
   }
   private admissionInFlight: Promise<void> | null = null;
   private demandFlights = new Map<string, Promise<ActiveWork | null>>();
@@ -155,6 +167,27 @@ export class AdmissionController {
       }
     }
     throw new Error('Pool has neither query nor connect');
+  }
+
+  private async getCurrentInFlightChapterCount(): Promise<number> {
+    if (this.inFlightChapterCountProvider) {
+      try {
+        const provided = Number(this.inFlightChapterCountProvider());
+        if (Number.isFinite(provided) && provided >= 0) {
+          return Math.floor(provided);
+        }
+        this.logger.warn('Ignoring invalid scheduler in-flight chapter count', { provided });
+      } catch (err: any) {
+        this.logger.warn('Failed to read scheduler in-flight chapter count; falling back to database', {
+          error: err?.message,
+        });
+      }
+    }
+
+    const result = await this.runQuery(
+      `SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`,
+    );
+    return parseInt(result.rows[0]?.cnt || '0', 10);
   }
 
   private getActiveWorksCount(): number {
@@ -544,10 +577,11 @@ export class AdmissionController {
     // new work and repeatedly scans the hot queue while all slots are busy.
     // If there is spare capacity and activeP2Works < maxP2Cohort:
     // allow P2/P3 new works to admit so P3 never dies of starvation from catalog backlog.
-    const inFlightRes = await this.timeAdmissionStage(stages, 'inFlightCountMs', () => this.runQuery(
-      `SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`
-    ));
-    const importingCnt = parseInt(inFlightRes.rows[0]?.cnt || '0', 10);
+    const importingCnt = await this.timeAdmissionStage(
+      stages,
+      'inFlightCountMs',
+      () => this.getCurrentInFlightChapterCount(),
+    );
     const maxTotalWorkers = Math.max(1, this.chapterCapacityProvider());
 
     if (importingCnt >= maxTotalWorkers) {
@@ -1577,10 +1611,7 @@ export class AdmissionController {
     // Measure current worker utilization for elastic scheduling (Section 7 & 8)
     let idleWorkers = 0;
     try {
-      const qAct = await this.runQuery(
-        `SELECT COUNT(*) as cnt FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'`
-      );
-      const importingCnt = parseInt(qAct.rows[0]?.cnt || '0', 10);
+      const importingCnt = await this.getCurrentInFlightChapterCount();
       idleWorkers = Math.max(0, this.chapterCapacityProvider() - importingCnt);
     } catch {}
 
