@@ -11,6 +11,15 @@ import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from 
 import { AutoHealWatchdog } from './auto-heal-watchdog.js';
 import { RateBucketTracker } from './rate-bucket-tracker.js';
 export { computeCanonicalChapterKey };
+type DownloadRequestTrace = {
+    jobId: string;
+    source: string;
+    chapterNumber: number;
+    pageIndex: number;
+    totalPages: number;
+    producerAttempt: number;
+    emit: (event: string, meta?: Record<string, unknown>) => void;
+};
 /**
  * The buffer budget is an operational limit, so it must be resolved where the
  * engine constructs the autotuner rather than being silently replaced by a
@@ -381,6 +390,7 @@ export declare class ImporterEngine {
          */
         maxAttempts?: number;
         signal?: AbortSignal;
+        requestTrace?: DownloadRequestTrace;
     }): Promise<Uint8Array>;
     tryRawMetadataCoverFallback(raw: Record<string, any>, botUserId: string, source: string, excludeUrl?: string | null): Promise<string | null>;
     trySiblingMappingCoverFallback(workId: string | undefined, excludeSource: string, slugOrTitle: string, botUserId: string): Promise<string | null>;

@@ -1,6 +1,14 @@
 import { Logger } from './logger.js';
 import { InvalidMediaError } from './retry-policy.js';
 import { performance } from 'node:perf_hooks';
+function emitTrace(callback) {
+    try {
+        callback?.();
+    }
+    catch {
+        // Observability must never affect the media pipeline.
+    }
+}
 /**
  * A one-shot, opt-in probe for the transient allocation made while stream
  * chunks are copied into their final Uint8Array. It is deliberately disabled
@@ -121,6 +129,9 @@ export async function readImageBody(response, optionsOrMaxBytes) {
     const reader = response.body.getReader();
     const chunks = [];
     let length = 0;
+    let firstChunkSeen = false;
+    const bodyStartedAt = performance.now();
+    let waitingOnReservationUpgrade = false;
     let bodyMemoryProbe = null;
     try {
         while (true) {
@@ -128,6 +139,13 @@ export async function readImageBody(response, optionsOrMaxBytes) {
             const { value, done } = await readChunk(reader, signal);
             if (done)
                 break;
+            if (!firstChunkSeen) {
+                firstChunkSeen = true;
+                emitTrace(() => options.trace?.onFirstChunk?.({
+                    bytes: value.byteLength,
+                    elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
+                }));
+            }
             const newLength = length + value.byteLength;
             if (newLength > maxBytes) {
                 await reader.cancel().catch(() => { });
@@ -140,7 +158,18 @@ export async function readImageBody(response, optionsOrMaxBytes) {
             // If accumulated length exceeds currently reserved budget, upgrade BEFORE accepting chunk!
             // This applies TCP backpressure upstream via the async pause.
             if (reservation && newLength > reservation.reservedBytes) {
+                const fromBytes = reservation.reservedBytes;
+                waitingOnReservationUpgrade = true;
+                emitTrace(() => options.trace?.onReservationUpgrade?.({
+                    phase: 'STREAM', state: 'STARTED', fromBytes, toBytes: newLength,
+                    elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
+                }));
                 await reservation.upgrade(newLength, signal);
+                waitingOnReservationUpgrade = false;
+                emitTrace(() => options.trace?.onReservationUpgrade?.({
+                    phase: 'STREAM', state: 'COMPLETED', fromBytes, toBytes: reservation.reservedBytes,
+                    elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
+                }));
             }
             length = newLength;
             chunks.push(value);
@@ -159,9 +188,21 @@ export async function readImageBody(response, optionsOrMaxBytes) {
             bodyMemoryProbe.concatDurationMs = Math.round((performance.now() - concatStartedAt) * 1000) / 1000;
             bodyMemoryProbe.afterCopy = captureBodyMemorySnapshot();
         }
+        emitTrace(() => options.trace?.onComplete?.({
+            bytes: length,
+            chunks: chunks.length,
+            elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
+        }));
         return result;
     }
     catch (error) {
+        emitTrace(() => options.trace?.onError?.({
+            bytes: length,
+            chunks: chunks.length,
+            elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
+            waitingOn: waitingOnReservationUpgrade ? 'RESERVATION_UPGRADE' : null,
+            error,
+        }));
         // Keep error recovery bounded too. The abort handler above already asked
         // the stream to cancel; a second cancel is best-effort only.
         void reader.cancel().catch(() => { });

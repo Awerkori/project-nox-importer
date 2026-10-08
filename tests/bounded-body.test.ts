@@ -13,6 +13,22 @@ describe('bounded image pipeline', () => {
     const body = new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1,2])); c.enqueue(new Uint8Array([3])); c.close(); } });
     expect(await readImageBody(new Response(body), 10)).toEqual(new Uint8Array([1,2,3]));
   });
+  it('reports first body chunk and completion counters without retaining media', async () => {
+    const events: Array<{ type: string; bytes: number; chunks?: number }> = [];
+    const body = new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1, 2])); c.enqueue(new Uint8Array([3])); c.close(); } });
+
+    await expect(readImageBody(new Response(body), {
+      trace: {
+        onFirstChunk: ({ bytes }) => events.push({ type: 'first', bytes }),
+        onComplete: ({ bytes, chunks }) => events.push({ type: 'complete', bytes, chunks }),
+      },
+    })).resolves.toEqual(new Uint8Array([1, 2, 3]));
+
+    expect(events).toEqual([
+      { type: 'first', bytes: 2 },
+      { type: 'complete', bytes: 3, chunks: 2 },
+    ]);
+  });
   it('cancels a response body that stalls after its headers', async () => {
     let cancelled = false;
     const body = new ReadableStream<Uint8Array>({
@@ -73,5 +89,27 @@ describe('bounded image pipeline', () => {
     setTimeout(() => abort.abort(new Error('job deadline')), 10);
     await expect(reading).rejects.toThrow('job deadline');
     expect(cancelled).toBe(true);
+  });
+  it('reports partial counters when an in-progress body is aborted', async () => {
+    let sentFirstChunk = false;
+    const failures: Array<{ bytes: number; chunks: number; error: unknown }> = [];
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sentFirstChunk) {
+          sentFirstChunk = true;
+          controller.enqueue(new Uint8Array([1, 2]));
+        }
+      },
+    });
+    const abort = new AbortController();
+    const reading = readImageBody(new Response(body), {
+      signal: abort.signal,
+      trace: { onError: (metrics) => failures.push(metrics) },
+    });
+    setTimeout(() => abort.abort(new Error('job deadline')), 10);
+
+    await expect(reading).rejects.toThrow('job deadline');
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ bytes: 2, chunks: 1 });
   });
 });
