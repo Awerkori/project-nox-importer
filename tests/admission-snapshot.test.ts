@@ -44,7 +44,7 @@ describe('bounded admission snapshot', () => {
     expect(source).toMatch(
       /queue_candidate_groups[\s\S]{0,1800}canonical_chapter\.published_at IS NOT NULL[\s\S]{0,300}canonical_chapter\.number = COALESCE/,
     );
-    const p1PressureStart = source.indexOf('const ready = await this.runQuery');
+    const p1PressureStart = source.indexOf("const ready = await this.runTimedAdmissionQuery('p1_ready_frontier_probe'");
     const p1PressureSql = source.slice(p1PressureStart, p1PressureStart + 9000);
     expect(p1PressureSql).toMatch(
       /JOIN works w ON w\.id = \(q\.payload->>'workId'\)::uuid[\s\S]{0,900}w\.published IS TRUE/,
@@ -216,6 +216,32 @@ describe('bounded admission snapshot', () => {
 
     await expect((controller as any).getCurrentInFlightChapterCount()).resolves.toBe(2);
     expect(query).toHaveBeenCalledWith(expect.stringContaining("status = 'IMPORTING'"), undefined);
+  });
+
+  it('separates pool acquisition from SQL execution for slow frontier probes', async () => {
+    const release = vi.fn();
+    const query = vi.fn(async () => ({ rows: [{ ok: true }] }));
+    const connect = vi.fn(async () => ({ query, release }));
+    const controller = new AdmissionController({} as any, {} as any, { connect });
+
+    await expect((controller as any).runTimedAdmissionQuery('test_frontier', 'SELECT 1', ['x']))
+      .resolves.toEqual({ rows: [{ ok: true }] });
+
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledWith('SELECT 1', ['x']);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the timed frontier query client when the query fails', async () => {
+    const release = vi.fn();
+    const query = vi.fn(async () => { throw new Error('query failed'); });
+    const controller = new AdmissionController({} as any, {} as any, {
+      connect: async () => ({ query, release }),
+    });
+
+    await expect((controller as any).runTimedAdmissionQuery('test_frontier', 'SELECT 1'))
+      .rejects.toThrow('query failed');
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   it('defers the advisory P1 pressure probe while claims are waiting for the bounded pool', async () => {
