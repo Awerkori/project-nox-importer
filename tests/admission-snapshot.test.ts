@@ -189,6 +189,35 @@ describe('bounded admission snapshot', () => {
     });
   });
 
+  it('uses the scheduler in-flight count for the P2 capacity gate without a broad queue count', async () => {
+    const state = { getConfig: () => ({}), getActiveWorks: () => [] } as any;
+    const sentinel = { isProtectiveStopActive: async () => false } as any;
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('priority >= 100')) return { rows: [] };
+      if (sql.includes("status = 'IMPORTING'")) {
+        throw new Error('database in-flight count must not run when scheduler count is available');
+      }
+      return { rows: [] };
+    });
+    const controller = new AdmissionController(state, sentinel, { query });
+    controller.setChapterCapacityProvider(() => 3);
+    controller.setInFlightChapterCountProvider(() => 3);
+
+    await expect(controller.canAdmitNewWork()).resolves.toMatchObject({
+      allowed: false,
+      reason: 'WORKERS_FULLY_UTILIZED: 3/3 chapters in-flight',
+    });
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("status = 'IMPORTING'"))).toBe(false);
+  });
+
+  it('falls back to the durable queue count when no scheduler count provider is configured', async () => {
+    const query = vi.fn(async () => ({ rows: [{ cnt: '2' }] }));
+    const controller = new AdmissionController({} as any, {} as any, { query });
+
+    await expect((controller as any).getCurrentInFlightChapterCount()).resolves.toBe(2);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("status = 'IMPORTING'"), undefined);
+  });
+
   it('defers the advisory P1 pressure probe while claims are waiting for the bounded pool', async () => {
     const state={getConfig:()=>({}),getActiveWorks:()=>[{workId:"mock",lane:"P1"}]} as any;
     const sentinel={isProtectiveStopActive:async()=>false} as any;

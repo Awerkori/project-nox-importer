@@ -23,6 +23,20 @@ describe('Early Deduplication & Multi-Provider Concurrency Isolation', () => {
     expect(inFlightKeys.has(`${workId}:${sortKey}`)).toBe(false);
   });
 
+  it('reports the total number of in-flight chapter jobs across works', () => {
+    const scheduler = new WorkAffinityScheduler();
+
+    scheduler.onJobStarted('work-a', 1);
+    scheduler.onJobStarted('work-a', 2);
+    scheduler.onJobStarted('work-b', 1);
+    expect(scheduler.getTotalInFlight()).toBe(3);
+
+    scheduler.onJobFinished('work-a', 1);
+    scheduler.onJobFinished('work-a', 2);
+    scheduler.onJobFinished('work-b', 1);
+    expect(scheduler.getTotalInFlight()).toBe(0);
+  });
+
   it('In-flight chapter key isolation prevents duplicate concurrent slots', () => {
     const scheduler = new WorkAffinityScheduler();
     const workId = 'test-work-multi-provider';
