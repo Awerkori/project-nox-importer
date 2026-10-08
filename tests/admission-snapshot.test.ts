@@ -210,6 +210,46 @@ describe('bounded admission snapshot', () => {
     expect(query.mock.calls.some(([sql]) => String(sql).includes("status = 'IMPORTING'"))).toBe(false);
   });
 
+  it('reuses the scheduler canonical P0 signal instead of issuing a second P0 frontier scan', async () => {
+    const state = { getConfig: () => ({}), getActiveWorks: () => [] } as any;
+    const sentinel = { isProtectiveStopActive: async () => false } as any;
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('priority >= 100')) {
+        throw new Error('duplicate P0 frontier scan must not run when scheduler signal is available');
+      }
+      return { rows: [] };
+    });
+    const controller = new AdmissionController(state, sentinel, { query });
+    controller.setP0CandidateProvider(async () => false);
+    controller.setInFlightChapterCountProvider(() => 0);
+
+    await expect(controller.canAdmitNewWork()).resolves.toMatchObject({
+      allowed: true,
+      reason: 'CAN_ADMIT_NEW_WORK_ALLOWED',
+    });
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('priority >= 100'))).toBe(false);
+  });
+
+  it('preserves P0 precedence when the scheduler reports a canonical executable candidate', async () => {
+    const state = {
+      getConfig: () => ({}),
+      getActiveWorks: () => [{ workId: 'p2-active', lane: 'P2', state: 'FILLING' }],
+    } as any;
+    const sentinel = { isProtectiveStopActive: async () => false } as any;
+    const query = vi.fn(async () => {
+      throw new Error('P1/P2 queries must not run while canonical P0 work is waiting');
+    });
+    const controller = new AdmissionController(state, sentinel, { query });
+    controller.setP0CandidateProvider(async () => true);
+
+    await expect(controller.canAdmitNewWork()).resolves.toMatchObject({
+      allowed: false,
+      reason: 'P0_WAITING: 1 P0 releases/jobs waiting',
+      metrics: { p0Waiting: 1 },
+    });
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('falls back to the durable queue count when no scheduler count provider is configured', async () => {
     const query = vi.fn(async () => ({ rows: [{ cnt: '2' }] }));
     const controller = new AdmissionController({} as any, {} as any, { query });

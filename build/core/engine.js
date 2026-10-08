@@ -623,6 +623,7 @@ export class ImporterEngine {
         this.scheduler.setChapterCapacityProvider(() => this.autotuner.getGlobalChapterSemaphore().capacity);
         this.admissionController.setChapterCapacityProvider(() => this.autotuner.getGlobalChapterSemaphore().capacity);
         this.admissionController.setInFlightChapterCountProvider(() => this.scheduler.getTotalInFlight());
+        this.admissionController.setP0CandidateProvider(() => this.scheduler.hasCanonicalP0Candidate());
         this.admissionController.setSourcePermitProvider((source) => {
             return this.autotuner.getSourceSemaphore(source).available;
         });
