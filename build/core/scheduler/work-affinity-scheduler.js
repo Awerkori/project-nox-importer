@@ -316,26 +316,41 @@ export class WorkAffinityScheduler {
         const flight = (async () => {
             try {
                 const r = await this.runQuery(this.pool, `
+          WITH candidate_works AS MATERIALIZED (
+            SELECT 
+              q.payload->>'workId' AS work_id,
+              MIN(q.chapter_sort_key) as min_chapter_sort_key,
+              MIN(q.next_run_at) as min_next_run_at
+            FROM importer_queue q
+            JOIN importer_sources s ON s.id = q.source
+            WHERE q.task_type = 'IMPORT_CHAPTER'
+              AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
+              AND q.attempts < COALESCE(q.max_attempts, 7)
+              AND q.priority >= 100 AND q.priority < 1000
+              AND s.enabled = true
+              AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+            GROUP BY q.payload->>'workId'
+            ORDER BY MIN(q.next_run_at) ASC, MIN(q.chapter_sort_key) ASC NULLS LAST
+            LIMIT 100
+          )
           SELECT q.payload->>'workId' AS work_id
-          FROM importer_queue q
-          JOIN importer_sources s ON s.id = q.source
+          FROM candidate_works cw
+          JOIN importer_queue q 
+            ON (q.payload->>'workId') = cw.work_id 
+            AND q.chapter_sort_key = cw.min_chapter_sort_key
           LEFT JOIN LATERAL (
             SELECT MAX(c.number) AS max_published
             FROM chapters c
             WHERE c.work_id = (q.payload->>'workId')::uuid
               AND c.published_at IS NOT NULL
           ) pub ON TRUE
-          WHERE (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
-            AND q.task_type = 'IMPORT_CHAPTER'
-            AND q.attempts < COALESCE(q.max_attempts, 7)
-            AND q.priority >= 100 AND q.priority < 1000
-            AND s.enabled = true
-            AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          WHERE q.task_type = 'IMPORT_CHAPTER'
+            AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
             ${CANONICAL_PUBLISHED_CLAIM_FILTER}
             ${CANONICAL_FRONTIER_CLAIM_FILTER}
             ${CANONICAL_ACTIVE_CLAIM_FILTER}
           GROUP BY q.payload->>'workId'
-          ORDER BY MIN(q.next_run_at) ASC, MIN(q.chapter_sort_key) ASC NULLS LAST
+          ORDER BY MIN(cw.min_next_run_at) ASC, MIN(cw.min_chapter_sort_key) ASC NULLS LAST
           LIMIT 32;
         `);
                 this.cachedP0WorkIds = r.rows.map((row) => row.work_id).filter(Boolean);

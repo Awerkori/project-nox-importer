@@ -754,24 +754,39 @@ export class AdmissionController {
       // exists do we check the paused window backlog; that slower path is
       // exceptional and avoids turning a normal admission probe into a scan.
       const ready = await this.runTimedAdmissionQuery('p1_ready_frontier_probe', `
+        WITH candidate_works AS MATERIALIZED (
+          SELECT 
+            q.payload->>'workId' AS work_id,
+            MIN(q.chapter_sort_key) as min_chapter_sort_key,
+            MIN(q.next_run_at) as min_next_run_at
+          FROM importer_queue q
+          JOIN importer_sources s ON s.id = q.source
+          WHERE q.task_type = 'IMPORT_CHAPTER'
+            AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
+            AND q.attempts < COALESCE(q.max_attempts, 7)
+            AND q.priority >= 75 AND q.priority < 100
+            AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+            AND s.enabled = true
+            AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          GROUP BY q.payload->>'workId'
+          ORDER BY MIN(q.next_run_at) ASC, MIN(q.chapter_sort_key) ASC NULLS LAST
+          LIMIT 100
+        )
         SELECT q.status
-        FROM importer_queue q
-        JOIN importer_sources s ON s.id = q.source
-        JOIN works w ON w.id = (q.payload->>'workId')::uuid
+        FROM candidate_works cw
+        JOIN importer_queue q 
+          ON (q.payload->>'workId') = cw.work_id 
+          AND q.chapter_sort_key = cw.min_chapter_sort_key
+        JOIN works w ON w.id = cw.work_id::uuid
         CROSS JOIN LATERAL (
           SELECT MAX(c.number) AS max_published
           FROM chapters c
-          WHERE c.work_id = (q.payload->>'workId')::uuid
+          WHERE c.work_id = cw.work_id::uuid
             AND c.published_at IS NOT NULL
         ) pub
         WHERE q.task_type = 'IMPORT_CHAPTER'
           AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
-          AND q.attempts < COALESCE(q.max_attempts, 7)
-          AND q.priority >= 75 AND q.priority < 100
-          AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
           AND w.published IS TRUE
-          AND s.enabled = true
-          AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${frontierEligibility}
         LIMIT 1
       `);
@@ -794,24 +809,39 @@ export class AdmissionController {
         return this.p1BacklogSnapshot;
       }
       const paused = await this.runTimedAdmissionQuery('p1_paused_frontier_probe', `
+        WITH candidate_works AS MATERIALIZED (
+          SELECT 
+            q.payload->>'workId' AS work_id,
+            MIN(q.chapter_sort_key) as min_chapter_sort_key,
+            MIN(q.next_run_at) as min_next_run_at
+          FROM importer_queue q
+          JOIN importer_sources s ON s.id = q.source
+          WHERE q.task_type = 'IMPORT_CHAPTER'
+            AND q.status = 'PAUSED_BY_STAFF'
+            AND q.attempts < COALESCE(q.max_attempts, 7)
+            AND q.priority >= 75 AND q.priority < 100
+            AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+            AND s.enabled = true
+            AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
+          GROUP BY q.payload->>'workId'
+          ORDER BY MIN(q.next_run_at) ASC, MIN(q.chapter_sort_key) ASC NULLS LAST
+          LIMIT 100
+        )
         SELECT 1
-        FROM importer_queue q
-        JOIN importer_sources s ON s.id = q.source
-        JOIN works w ON w.id = (q.payload->>'workId')::uuid
+        FROM candidate_works cw
+        JOIN importer_queue q 
+          ON (q.payload->>'workId') = cw.work_id 
+          AND q.chapter_sort_key = cw.min_chapter_sort_key
+        JOIN works w ON w.id = cw.work_id::uuid
         CROSS JOIN LATERAL (
           SELECT MAX(c.number) AS max_published
           FROM chapters c
-          WHERE c.work_id = (q.payload->>'workId')::uuid
+          WHERE c.work_id = cw.work_id::uuid
             AND c.published_at IS NOT NULL
         ) pub
         WHERE q.task_type = 'IMPORT_CHAPTER'
           AND q.status = 'PAUSED_BY_STAFF'
-          AND q.attempts < COALESCE(q.max_attempts, 7)
-          AND q.priority >= 75 AND q.priority < 100
-          AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
           AND w.published IS TRUE
-          AND s.enabled = true
-          AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${frontierEligibility}
         LIMIT 1
       `);

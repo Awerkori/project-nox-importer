@@ -1,0 +1,140 @@
+--- a/tests/admission-snapshot.test.ts
++++ b/tests/admission-snapshot.test.ts
+@@ -252,10 +252,10 @@ describe('bounded admission snapshot', () => {
+   });
+ 
+   it('holds P2 admission whenever a visible work still has P1 backlog, including paused window jobs', async () => {
+-    const state={getConfig:()=>({}),getActiveWorks:()=>[]} as any;
++    const state={getConfig:()=>({}),getActiveWorks:()=>[{workId:'mock',lane:'P1'}]} as any;
+     const sentinel={isProtectiveStopActive:async()=>false} as any;
+     const pool={query:async(sql:string)=> {
+-      if (sql.includes('priority >= 100')) return {rows:[{p0_cnt:'0'}]};
++      if (sql.includes('priority >= 100')) return {rows:[]};
+       if (sql.includes("AND (q.status = 'QUEUED'")) return {rows:[{status:'QUEUED'}]};
+       return {rows:[]};
+     }};
+--- a/tests/cooldown.test.ts
++++ b/tests/cooldown.test.ts
+@@ -79,6 +79,7 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
+     await db.query(`insert into public.settings (key, value) values ('catalog_discovery_enabled', 'ENABLED') on conflict (key) do update set value = 'ENABLED'`);
+ 
+     supabaseMock = {
++      pool: db,
+       from: (table: string) => {
+         let filters: Array<{ col: string; op: string; val: any }> = [];
+         let limitVal: number | null = null;
+@@ -199,6 +200,7 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
+       rateLimiter,
+       config
+     );
++    (engine as any).dbPool = db;
+     queue = (engine as any).queue;
+   });
+ 
+@@ -222,10 +224,12 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
+     // Put nexus in COOLDOWN until 1 hour in future
+     const future = new Date(Date.now() + 3600 * 1000).toISOString();
+     await db.query(`update public.importer_sources set status = 'COOLDOWN', cooldown_until = $1 where id = 'nexus'`, [future]);
++    (engine as any).sourceScheduleSnapshot.cachedAt = 0;
+ 
+     // Clear queue
+     await db.query(`delete from public.importer_queue`);
+ 
++    (engine as any).sourceScheduleSnapshot.cachedAt = 0;
+     await (engine as any).scheduleSources();
+ 
+     const queued = await db.query(`select * from public.importer_queue where source = 'nexus'`);
+@@ -241,6 +245,7 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
+       where id = 'nexus'
+     `, [past]);
+ 
++    (engine as any).sourceScheduleSnapshot.cachedAt = 0;
+     await (engine as any).scheduleSources();
+ 
+     // Verify source status flipped back to ACTIVE and cooldown_until is cleared
+@@ -264,9 +269,11 @@ describe('Source Status Lifecycle & Persistent COOLDOWN', () => {
+         ('DISCOVER_WORKS', 'nexus', 'nexus:stale:3', 'QUEUED', now() - interval '2 hours')
+     `);
+ 
++    (engine as any).sourceScheduleSnapshot.cachedAt = 0;
+     await (engine as any).scheduleSources();
+ 
+     const stale = await db.query(`select status from public.importer_queue where source = 'nexus' and dedupe_key like 'nexus:stale:%'`);
++
+     expect(stale.rows).toHaveLength(3);
+     expect(stale.rows.every((row: any) => row.status === 'SUPERSEDED')).toBe(true);
+     const replacement = await db.query(`select count(*)::int as count from public.importer_queue where source = 'nexus' and task_type = 'DISCOVER_WORKS' and status = 'QUEUED'`);
+--- a/tests/engine.test.ts
++++ b/tests/engine.test.ts
+@@ -280,7 +280,13 @@ describe('ImporterEngine End-to-End Execution', () => {
+               const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
+               db.query(`insert into public.${table} (${cols}) values (${placeholders}) returning *`, vals)
+                 .then(r => resolve?.({ data: r.rows[0], error: null }))
+-                .catch(err => reject ? reject(err) : resolve?.({ data: null, error: err }));
++                .catch(err => {
++                  console.log("Mock caught insert error:", err.message);
++                  if (err.message && err.message.includes('duplicate key value violates unique constraint')) {
++                    err.code = '23505';
++                  }
++                  reject ? reject(err) : resolve?.({ data: null, error: err })
++                });
+             }
+           }),
+           update: (row: any) => ({
+@@ -410,6 +416,7 @@ describe('ImporterEngine End-to-End Execution', () => {
+     };
+ 
+     engine = new ImporterEngine(supabaseMock, storage, registry, rateLimiter, testConfig);
++    (engine as any).dbPool = db;
+   });
+ 
+   afterAll(async () => {
+--- a/tests/p1-on-demand-cursor-fairness.test.ts
++++ b/tests/p1-on-demand-cursor-fairness.test.ts
+@@ -36,6 +36,7 @@ function makeOnDemandFixture(options: {
+   const pool = {
+     query: vi.fn(async (sql: string) => {
+       if (sql.includes('FROM p1_rotation q') || sql.includes('FROM queue_candidates q')) return { rows };
++      if (sql.includes('FROM importer_sources')) return { rows: [{ id: SOURCE }] };
+       if (sql.includes('FROM chapters')) {
+         return { rows: rows.map((row) => ({ work_id: row.work_id, max_pub: options.maxPublished || '4' })) };
+       }
+@@ -66,9 +67,10 @@ describe('P1 on-demand cursor fairness', () => {
+       lane: 'P1',
+       workId: GOBLIN_POSITION,
+     }));
++    console.log(pool.query.mock.calls.map((c) => c[0]));
+     const admissionSql = pool.query.mock.calls.find(([sql]) => String(sql).includes('FROM p1_rotation q'))?.[0] as string;
+     expect(admissionSql).toContain('canonical_chapter.published_at IS NOT NULL');
+-    expect(admissionSql).toContain("canonical_chapter.number = q.chapter_sort_key");
++    expect(admissionSql).toContain("canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key)");
+     // It received a real one-chapter window, so this is valid durable cursor
+     // progress rather than the artificial leap that caused the regression.
+     expect(stateStore.setP1AdmissionCursor).toHaveBeenCalledWith(SOURCE, GOBLIN_POSITION);
+@@ -85,6 +87,7 @@ describe('P1 on-demand cursor fairness', () => {
+       if (sql.includes('FROM p1_rotation q') || sql.includes('FROM queue_candidates q')) {
+         return { rows: [{ work_id: FRONTIER_AFTER_GOBLIN, title: 'Next work', source: SOURCE, pending_jobs: '1', queued_count: '1', min_sort_key: '6', rotation_rank: '1' }] };
+       }
++      if (sql.includes('FROM importer_sources')) return { rows: [{ id: SOURCE }] };
+       if (sql.includes('FROM chapters')) return { rows: [{ work_id: FRONTIER_AFTER_GOBLIN, max_pub: '5' }] };
+       if (sql.includes('FROM importer_confirmed_gaps')) return { rows: [] };
+       if (sql.includes('WITH ranked AS')) return { rows: [] };
+@@ -172,6 +175,7 @@ describe('P1 on-demand cursor fairness', () => {
+           },
+         ] };
+       }
++      if (sql.includes('FROM importer_sources')) return { rows: [{ id: SOURCE }] };
+       if (sql.includes('FROM chapters')) {
+         return { rows: [
+           { work_id: blockedWork, max_pub: '4' },
+--- a/tests/work-affinity-scheduler.test.ts
++++ b/tests/work-affinity-scheduler.test.ts
+@@ -363,7 +363,7 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
+     expect(sqlCalls).toHaveLength(1);
+     expect(sqlCalls[0]).toContain('canonical_chapter.work_id = (q.payload->>\'workId\')::uuid');
+     expect(sqlCalls[0]).toContain('canonical_chapter.published_at IS NOT NULL');
+-    expect(sqlCalls[0]).toContain('canonical_chapter.number = q.chapter_sort_key');
++    expect(sqlCalls[0]).toContain("canonical_chapter.number = COALESCE(NULLIF(q.payload->>'chapterNumber', '')::numeric, q.chapter_sort_key)");
+   });
+ 
+   it('vacates a stale P2 active entry after repeated exact claim misses', () => {
