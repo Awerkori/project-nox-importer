@@ -1322,7 +1322,8 @@ export class WorkAffinityScheduler {
         const disallowedWorkIdsFilter = opts.disallowedWorkIds && opts.disallowedWorkIds.length > 0 ? `AND NOT ((q.payload->>'workId') = ANY($2::text[]))` : ``;
         const disallowedChapterKeysFilter = disallowedChapterKeys.length > 0 ? `AND NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[]))` : ``;
         const query = `
-      WITH eligible_sources AS MATERIALIZED (
+      WITH dummy_params AS (SELECT $1::text[], $2::text[], $3::text[], $4::text, $5::int, $6::int, $7::int),
+      eligible_sources AS MATERIALIZED (
         SELECT s.id
         FROM importer_sources s
         WHERE s.enabled = true
@@ -1499,7 +1500,8 @@ export class WorkAffinityScheduler {
         const disallowedChapterKeysFilter = disallowedChapterKeys.length > 0 ? `AND NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($3::text[]))` : ``;
         const staffWorkIdsFilter = staffWorkIds && staffWorkIds.length > 0 ? `OR (payload->>'workId') = ANY($6::text[])` : ``;
         const query = `
-      WITH q_candidates AS (
+      WITH dummy_params AS (SELECT $1::text[], $2::text[], $3::text[], $4::text, $5::int, $6::text[]),
+      q_candidates AS (
         SELECT id, payload, source, chapter_sort_key, next_run_at, priority
         FROM importer_queue
         WHERE (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW()))
@@ -1623,7 +1625,8 @@ export class WorkAffinityScheduler {
             const disallowedWorkIdsFilter = opts.disallowedWorkIds && opts.disallowedWorkIds.length > 0 ? `AND NOT ((q.payload->>'workId') = ANY($8::text[]))` : ``;
             const disallowedChapterKeysFilter = disallowedChapterKeys.length > 0 ? `AND NOT (((q.payload->>'workId') || ':' || q.chapter_sort_key::text) = ANY($9::text[]))` : ``;
             const query = `
-      WITH q_candidates AS (
+      WITH dummy_params AS (SELECT $1::text[], $2::int, $3::text, $4::numeric, $5::text, $6::int, $7::text[], $8::text[], $9::text[], $10::int),
+      q_candidates AS (
         SELECT id, payload, source, chapter_sort_key, next_run_at, priority
         FROM importer_queue
         WHERE (status = 'QUEUED' OR (status = 'RETRY' AND next_run_at <= NOW()))
