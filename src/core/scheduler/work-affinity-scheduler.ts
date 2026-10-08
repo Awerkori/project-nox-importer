@@ -52,7 +52,7 @@ const CANONICAL_PUBLISHED_CLAIM_FILTER = `
 // the same ordering rule, but the direct claim paths must enforce it too:
 // catalog fallback and a racing worker can otherwise bypass admission and
 // claim chapters that publication can never accept yet.
-const CANONICAL_FRONTIER_CLAIM_FILTER = `
+export const CANONICAL_FRONTIER_CLAIM_FILTER = `
           AND NOT EXISTS (
             SELECT 1
             FROM importer_queue predecessor
@@ -1487,7 +1487,7 @@ export class WorkAffinityScheduler {
             AND q.task_type = 'IMPORT_CHAPTER'
             AND q.attempts < COALESCE(q.max_attempts, 7)
           -- Uses idx_importer_queue_fetch; canonical selection remains below.
-          ORDER BY q.created_at ASC NULLS LAST, q.id ASC
+          ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
           LIMIT $6
         ) candidate
       ),
