@@ -715,20 +715,23 @@ export class AdmissionController {
             q.payload->>'workId' AS work_id,
             MIN(q.chapter_sort_key) as min_chapter_sort_key,
             MIN(q.next_run_at) as min_next_run_at
-          FROM importer_queue q
+          FROM (
+            SELECT payload, chapter_sort_key, next_run_at, source
+            FROM importer_queue q
+            WHERE q.task_type = 'IMPORT_CHAPTER'
+              AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
+              AND q.attempts < COALESCE(q.max_attempts, 7)
+              AND q.priority >= 75 AND q.priority < 100
+              AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+            ORDER BY q.priority DESC, q.chapter_sort_key ASC
+            LIMIT 400
+          ) q
           JOIN importer_sources s ON s.id = q.source
           JOIN works w ON w.id = (q.payload->>'workId')::uuid
-          WHERE q.task_type = 'IMPORT_CHAPTER'
-            AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
-            AND w.published IS TRUE
-            AND q.attempts < COALESCE(q.max_attempts, 7)
-            AND q.priority >= 75 AND q.priority < 100
-            AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+          WHERE w.published IS TRUE
             AND s.enabled = true
             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           GROUP BY q.payload->>'workId'
-          ORDER BY MIN(q.next_run_at) ASC, MIN(q.chapter_sort_key) ASC NULLS LAST
-          LIMIT 100
         )
         SELECT q.status
         FROM candidate_works cw
@@ -772,20 +775,23 @@ export class AdmissionController {
             q.payload->>'workId' AS work_id,
             MIN(q.chapter_sort_key) as min_chapter_sort_key,
             MIN(q.next_run_at) as min_next_run_at
-          FROM importer_queue q
+          FROM (
+            SELECT payload, chapter_sort_key, next_run_at, source
+            FROM importer_queue q
+            WHERE q.task_type = 'IMPORT_CHAPTER'
+              AND q.status = 'PAUSED_BY_STAFF'
+              AND q.attempts < COALESCE(q.max_attempts, 7)
+              AND q.priority >= 75 AND q.priority < 100
+              AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+            ORDER BY q.priority DESC, q.chapter_sort_key ASC
+            LIMIT 400
+          ) q
           JOIN importer_sources s ON s.id = q.source
           JOIN works w ON w.id = (q.payload->>'workId')::uuid
-          WHERE q.task_type = 'IMPORT_CHAPTER'
-            AND q.status = 'PAUSED_BY_STAFF'
-            AND w.published IS TRUE
-            AND q.attempts < COALESCE(q.max_attempts, 7)
-            AND q.priority >= 75 AND q.priority < 100
-            AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+          WHERE w.published IS TRUE
             AND s.enabled = true
             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           GROUP BY q.payload->>'workId'
-          ORDER BY MIN(q.next_run_at) ASC, MIN(q.chapter_sort_key) ASC NULLS LAST
-          LIMIT 100
         )
         SELECT 1
         FROM candidate_works cw
