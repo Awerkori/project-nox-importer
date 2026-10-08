@@ -1,4 +1,5 @@
 import { Logger } from './logger.js';
+import { CANONICAL_FRONTIER_CLAIM_FILTER, CANONICAL_PUBLISHED_CLAIM_FILTER } from './scheduler/work-affinity-scheduler.js';
 import { diagnostics } from './diagnostics.js';
 // With eligible backlog, five concurrent chapters should yield observable
 // progress well before these bounds.  They intentionally sit above normal
@@ -251,8 +252,8 @@ export class AutoHealWatchdog {
               AND c.published_at IS NOT NULL
           ) pub ON TRUE
           WHERE w.published IS TRUE
-            \${CANONICAL_PUBLISHED_CLAIM_FILTER}
-            \${CANONICAL_FRONTIER_CLAIM_FILTER}
+            ${CANONICAL_PUBLISHED_CLAIM_FILTER}
+            ${CANONICAL_FRONTIER_CLAIM_FILTER}
         ) sub) as eligible_cnt,
         (SELECT count(*) FROM importer_queue WHERE status = 'IMPORTING') as importing_cnt,
         (SELECT count(*) FROM importer_queue WHERE status = 'RETRY') as retry_cnt
