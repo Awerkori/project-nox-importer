@@ -40,7 +40,7 @@ import { randomUUID } from 'node:crypto';
 
 export { computeCanonicalChapterKey };
 
-const DEFAULT_MAX_BUFFERED_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_BUFFERED_BYTES = 256 * 1024 * 1024;
 const INITIAL_PAGE_BUFFER_RESERVATION_BYTES = 2 * 1024 * 1024;
 const PAGE_COMPLETION_HEADROOM_BYTES = MAX_IMAGE_BODY_BYTES - INITIAL_PAGE_BUFFER_RESERVATION_BYTES;
 const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
