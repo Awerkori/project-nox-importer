@@ -4167,20 +4167,23 @@ export class ImporterEngine {
       nextCursor,
     });
 
-    for (const work of works) {
-      const dedupeKey = `${job.source}:work:${work.sourceWorkId}`;
-      await this.queue.enqueue(
-        'SYNC_WORK',
-        job.source,
-        dedupeKey,
-        {
-          sourceWorkId: work.sourceWorkId,
-          slug: work.slug,
-          title: work.title,
-        },
-        60
-      );
-    }
+    // Providers return catalog pages, not individual work events (MangaFlix
+    // returns 24 entries and Manhastro up to 100).  Serial enqueues hold the
+    // single maintenance lane for one database round trip per entry, even
+    // though queue insertion is already safely batched elsewhere in the
+    // reconciliation path.  Keep the exact same dedupe keys and priority;
+    // only collapse the independent insert requests into bounded chunks.
+    await this.queue.enqueueBatch(works.map((work) => ({
+      taskType: 'SYNC_WORK' as const,
+      source: job.source,
+      dedupeKey: `${job.source}:work:${work.sourceWorkId}`,
+      payload: {
+        sourceWorkId: work.sourceWorkId,
+        slug: work.slug,
+        title: work.title,
+      },
+      priority: 60,
+    })), { reviveDuplicates: true });
 
     if (mode === 'bootstrap') {
       if (!nextCursor || works.length === 0) {

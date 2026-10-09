@@ -43,7 +43,14 @@ export declare class ImporterQueue {
      */
     enqueue(taskType: TaskType, source: string, dedupeKey: string, payload?: Record<string, any>, priority?: number, chapterSortKey?: number | null): Promise<boolean>;
     /**
-     * Batch enqueue multiple tasks safely with deduplication
+     * Batch enqueue multiple tasks safely with deduplication.
+     *
+     * A plain `ON CONFLICT DO NOTHING` is sufficient for new work, but must not
+     * lose the single-item enqueue behavior that revives a failed/cancelled
+     * dedupe row when discovery sees the work again.  Callers that need that
+     * legacy behavior can opt in; only then do we query the bounded batch for
+     * exceptional states after the bulk insert and delegate revival to
+     * `enqueue`, preserving staff priority and fenced update semantics.
      */
     enqueueBatch(jobs: Array<{
         taskType: TaskType;
@@ -53,7 +60,9 @@ export declare class ImporterQueue {
         priority?: number;
         chapterSortKey?: number | null;
         status?: string;
-    }>): Promise<number>;
+    }>, options?: {
+        reviveDuplicates?: boolean;
+    }): Promise<number>;
     /**
      * Acquire the next job atomically using SKIP LOCKED stored procedure,
      * optionally filtered by source and/or task type for dedicated runner lanes.
