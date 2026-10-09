@@ -53,7 +53,7 @@ describe('bounded admission snapshot', () => {
       /loadP2Candidates\(false\)[\s\S]{0,180}loadP2Candidates\(true\)/,
     );
     expect(source).toMatch(
-      /loadOnDemandCandidates\(false\)[\s\S]{0,500}if \(!match\)[\s\S]{0,200}loadOnDemandCandidates\(true\)/,
+      /loadOnDemandCandidates\(false\)[\s\S]{0,800}if \(!match\)[\s\S]{0,300}loadOnDemandCandidates\(true\)/,
     );
     const onDemandStart = source.indexOf('const loadOnDemandCandidates =');
     const onDemandSql = source.slice(onDemandStart, onDemandStart + 10000);
@@ -90,6 +90,46 @@ describe('bounded admission snapshot', () => {
       expect(rows.find(r=>r.work_id===id)).toMatchObject({queued_cnt:1,importing_cnt:1,paused_cnt:1,min_queued:'3',min_sort_key:'3',pub_cnt:2,max_pub:'2',staged_cnt:1,min_staged:'4',unimported_cnt:2,source_status:'ACTIVE'});
       expect(rows.find(r=>r.work_id===empty)).toMatchObject({queued_cnt:0,pub_cnt:0,unimported_cnt:0});
     } finally { await db.close(); }
+  });
+
+  it('keeps a P2 chapter-one candidate out of admission when a non-gap predecessor blocks the direct claim', async () => {
+    const db = new PGlite();
+    try {
+      const blocked = '00000000-0000-0000-0000-000000000101';
+      const confirmedGap = '00000000-0000-0000-0000-000000000102';
+      const clear = '00000000-0000-0000-0000-000000000103';
+      await db.exec(`
+        CREATE TABLE chapters (work_id uuid, published_at timestamptz);
+        CREATE TABLE importer_chapter_mappings (work_id uuid, chapter_sort_key numeric, is_gap boolean, status text);
+        CREATE TABLE importer_confirmed_gaps (work_id uuid, start_sort_key numeric, end_sort_key numeric);
+      `);
+      await db.query(
+        `INSERT INTO importer_chapter_mappings (work_id, chapter_sort_key, is_gap, status)
+         VALUES ($1, 0, false, 'FAILED'), ($2, 0, false, 'FAILED')`,
+        [blocked, confirmedGap],
+      );
+      await db.query(
+        `INSERT INTO importer_confirmed_gaps (work_id, start_sort_key, end_sort_key)
+         VALUES ($1, 0, 0)`,
+        [confirmedGap],
+      );
+      const controller = new AdmissionController(
+        { getConfig: () => ({}) } as any,
+        {} as any,
+        { query: (sql: string, params?: any[]) => db.query(sql, params) },
+      );
+
+      const candidates = [
+        { work_id: blocked, min_sort_key: '1' },
+        { work_id: confirmedGap, min_sort_key: '1' },
+        { work_id: clear, min_sort_key: '1' },
+      ];
+      const admitted = await (controller as any).filterBlockedInitialP2Candidates(candidates);
+
+      expect(admitted.map((candidate: any) => candidate.work_id)).toEqual([confirmedGap, clear]);
+    } finally {
+      await db.close();
+    }
   });
 
   it('coalesces periodic, watchdog and vacate-triggered admission until the cycle completes', async () => {

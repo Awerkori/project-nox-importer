@@ -191,6 +191,21 @@ export declare class AdmissionController {
      */
     private reconcileActiveWorks;
     /**
+     * A P2 work starts at its first unpublished canonical frontier. The
+     * periodic and on-demand admission queries intentionally stay index-bounded
+     * and therefore only know the first queued sort key. Before admitting an
+     * initial (chapter 1) frontier, make the same predecessor check that the
+     * direct claim predicate makes. Otherwise a failed/non-gap chapter 0 can
+     * repeatedly occupy a P2 cohort slot even though the claim fence must
+     * reject chapter 1.
+     *
+     * This is deliberately a bounded post-filter: candidate queries retain
+     * their queue-index access path, then this lookup inspects at most the
+     * handful of selected P2 works. It does not turn a predecessor into a gap,
+     * skip a chapter, or weaken the claim-time canonical fence.
+     */
+    private filterBlockedInitialP2Candidates;
+    /**
      * Step 2: Replenishes active sets (P1 Backfill and P2 New Works) if slots are free.
      * Work-conserving: considers actual worker utilization and elastic capacity.
      */
