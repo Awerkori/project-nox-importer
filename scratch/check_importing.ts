@@ -1,7 +1,6 @@
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 dotenv.config();
-
 async function run() {
   const pool = new Pool({
     host: process.env.YUGABYTE_HOST,
@@ -11,11 +10,12 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-
-  const res = await pool.query("SELECT status, count(*) FROM importer_queue GROUP BY status");
+  const res = await pool.query(`
+    SELECT id, status, updated_at, created_at, source, chapter_number 
+    FROM importer_queue 
+    WHERE status = 'IMPORTING'
+  `);
   console.log(res.rows);
-  const active = await pool.query("SELECT status, count(*) FROM importer_chapter_mappings WHERE status = 'STAGED' GROUP BY status");
-  console.log("Staged:", active.rows);
   await pool.end();
 }
 run();
