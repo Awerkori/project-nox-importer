@@ -33,6 +33,23 @@ const PAGE_COMPLETION_HEADROOM_BYTES = MAX_IMAGE_BODY_BYTES - INITIAL_PAGE_BUFFE
 const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
 const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
+const MAX_CATALOG_MAINTENANCE_SOURCE_PROBES = 4;
+/**
+ * A catalog lane has one bounded claimant, so FIFO ordering across all source
+ * rows can let one large, old source monopolize it for hours. Rotate a small
+ * probe window instead. The caller still checks each source atomically and
+ * receives no lease until it is selected, preserving source eligibility and
+ * all existing rate limits.
+ */
+export function selectCatalogMaintenanceProbeSources(eligibleSources, cursor, maxProbes = MAX_CATALOG_MAINTENANCE_SOURCE_PROBES) {
+    const sources = [...new Set(eligibleSources)].sort();
+    if (sources.length === 0)
+        return { sources: [], nextCursor: 0 };
+    const start = ((Math.trunc(cursor) % sources.length) + sources.length) % sources.length;
+    const count = Math.max(1, Math.min(Math.trunc(maxProbes) || 1, sources.length));
+    const selected = Array.from({ length: count }, (_, offset) => sources[(start + offset) % sources.length]);
+    return { sources: selected, nextCursor: (start + count) % sources.length };
+}
 // A deliberately narrow diagnostic switch: it is inert unless both variables
 // are configured and observes only the first matching job in this process.
 // This keeps a one-case investigation from becoming a media-request log.
@@ -513,6 +530,10 @@ export class ImporterEngine {
     // Discovery and catalog sync are maintenance lanes. They must not each hold
     // a DB client beside chapter claims, publication and site traffic.
     catalogMaintenanceLane = new AsyncSemaphore(1, 'catalog_maintenance_lane');
+    catalogMaintenanceSourceCursor = {
+        DISCOVER_WORKS: 0,
+        SYNC_WORK: 0,
+    };
     activeSourcesCache = { sources: [], cachedAt: 0 };
     // Source configuration changes infrequently. Share one short-lived snapshot between
     // discovery and catalog backfill instead of making two full-table reads every minute.
@@ -2860,7 +2881,19 @@ export class ImporterEngine {
             const allowedSources = await this.getEligibleCatalogSources();
             if (allowedSources.length === 0)
                 return null;
-            return await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), allowedSources, taskType);
+            // Do not pass the entire source set to the direct FIFO queue. A large
+            // old catalog would otherwise win every claim until it is drained,
+            // starving equally healthy sources such as MangaFlix. Probe a rotating,
+            // bounded subset and keep a source in an array so the direct claimant
+            // revalidates ACTIVE status atomically before taking its lease.
+            const probe = selectCatalogMaintenanceProbeSources(allowedSources, this.catalogMaintenanceSourceCursor[taskType]);
+            this.catalogMaintenanceSourceCursor[taskType] = probe.nextCursor;
+            for (const source of probe.sources) {
+                const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), [source], taskType);
+                if (job)
+                    return job;
+            }
+            return null;
         }
         finally {
             this.chapterClaimGate.release();
@@ -3768,6 +3801,7 @@ export class ImporterEngine {
             .not('published_at', 'is', null);
         // Match each candidate chapter against published chapters
         const missingChapters = [];
+        const mappingsAlreadyPublished = [];
         for (const ch of chapters) {
             if (completedIds.has(ch.sourceChapterId)) {
                 continue;
@@ -3786,8 +3820,11 @@ export class ImporterEngine {
                 return true;
             });
             if (matchedPublished) {
-                // Chapter is ALREADY published: link mapping to canonical chapter, zero re-download!
-                await this.supabase.from('importer_chapter_mappings').upsert({
+                // Chapter is already public: preserve the zero-download link, but
+                // write it in a bounded batch. A large source work can otherwise hold
+                // the one catalog lane for minutes with one identical DB round-trip
+                // per already-published chapter.
+                mappingsAlreadyPublished.push({
                     source: job.source,
                     source_chapter_id: ch.sourceChapterId,
                     chapter_id: matchedPublished.id,
@@ -3797,10 +3834,25 @@ export class ImporterEngine {
                     is_page_provider: false,
                     status: 'COMPLETED',
                     last_error: null,
-                }, { onConflict: 'source,source_chapter_id' });
+                });
                 continue;
             }
             missingChapters.push(ch);
+        }
+        const EXISTING_MAPPING_BATCH_SIZE = 50;
+        for (let i = 0; i < mappingsAlreadyPublished.length; i += EXISTING_MAPPING_BATCH_SIZE) {
+            await this.supabase
+                .from('importer_chapter_mappings')
+                .upsert(mappingsAlreadyPublished.slice(i, i + EXISTING_MAPPING_BATCH_SIZE), {
+                onConflict: 'source,source_chapter_id',
+            });
+        }
+        if (mappingsAlreadyPublished.length > 0) {
+            this.logger.info('Linked already-published chapters in bounded batch', {
+                source: job.source,
+                workId: result.workId,
+                count: mappingsAlreadyPublished.length,
+            });
         }
         // For missing chapters, check if another source already has an active job in queue
         const { rows: activeJobsForWork } = await this.dbPool.query(`SELECT payload, source, status FROM importer_queue

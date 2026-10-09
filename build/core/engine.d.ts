@@ -11,6 +11,17 @@ import { WorkAffinityScheduler, SchedulerStateStore, AdmissionController } from 
 import { AutoHealWatchdog } from './auto-heal-watchdog.js';
 import { RateBucketTracker } from './rate-bucket-tracker.js';
 export { computeCanonicalChapterKey };
+/**
+ * A catalog lane has one bounded claimant, so FIFO ordering across all source
+ * rows can let one large, old source monopolize it for hours. Rotate a small
+ * probe window instead. The caller still checks each source atomically and
+ * receives no lease until it is selected, preserving source eligibility and
+ * all existing rate limits.
+ */
+export declare function selectCatalogMaintenanceProbeSources(eligibleSources: string[], cursor: number, maxProbes?: number): {
+    sources: string[];
+    nextCursor: number;
+};
 type DownloadRequestTrace = {
     jobId: string;
     source: string;
@@ -145,6 +156,7 @@ export declare class ImporterEngine {
     private chapterClaimPhaseReady;
     private chapterClaimStartupSlots;
     private catalogMaintenanceLane;
+    private catalogMaintenanceSourceCursor;
     private activeSourcesCache;
     private sourceScheduleSnapshot;
     private sourceScheduleSnapshotFlight;
