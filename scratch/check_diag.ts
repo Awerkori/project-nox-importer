@@ -2,7 +2,7 @@ import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-async function main() {
+async function run() {
   const pool = new Pool({
     host: process.env.YUGABYTE_HOST,
     port: parseInt(process.env.YUGABYTE_PORT || '5433'),
@@ -12,17 +12,8 @@ async function main() {
     ssl: { rejectUnauthorized: false }
   });
 
-  const res = await pool.query(`
-    SELECT payload->>'workId' as work_id, count(*) as c 
-    FROM importer_queue 
-    WHERE status IN ('QUEUED', 'PAUSED_BY_STAFF', 'RETRY') AND task_type = 'IMPORT_CHAPTER'
-    GROUP BY payload->>'workId'
-    ORDER BY count(*) DESC
-    LIMIT 10
-  `);
+  const res = await pool.query("SELECT created_at, data->'runtimeFingerprint'->>'gitSha' as sha FROM importer_diagnostic_telemetry ORDER BY created_at DESC LIMIT 5");
   console.log(res.rows);
-
   await pool.end();
 }
-
-main().catch(console.error).then(() => process.exit(0));
+run();

@@ -12,9 +12,12 @@ const pool = new Pool({
 });
 
 async function main() {
-  const query = process.argv[2] || "SELECT 1";
-  const res = await pool.query(query);
-  console.table(res.rows);
+  const workId = '72e5145a-151f-4b0c-92ed-b5de358f253f';
+
+  const q = await pool.query(`SELECT id, last_error FROM importer_queue WHERE payload->>'workId' = $1 AND task_type = 'IMPORT_CHAPTER' AND chapter_sort_key = 29 ORDER BY priority DESC`, [workId]);
+  console.log("Errors:");
+  console.table(q.rows);
+
   pool.end();
 }
 main().catch(console.error);

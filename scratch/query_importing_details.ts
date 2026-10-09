@@ -1,8 +1,8 @@
 import { Pool } from 'pg';
-import * as dotenv from 'dotenv';
+import dotenv from 'dotenv';
 dotenv.config();
 
-async function main() {
+async function run() {
   const pool = new Pool({
     host: process.env.YUGABYTE_HOST,
     port: parseInt(process.env.YUGABYTE_PORT || '5433'),
@@ -13,16 +13,12 @@ async function main() {
   });
 
   const res = await pool.query(`
-    SELECT payload->>'workId' as work_id, count(*) as c 
-    FROM importer_queue 
-    WHERE status IN ('QUEUED', 'PAUSED_BY_STAFF', 'RETRY') AND task_type = 'IMPORT_CHAPTER'
-    GROUP BY payload->>'workId'
-    ORDER BY count(*) DESC
-    LIMIT 10
+    SELECT id, source, task_type, locked_by, 
+           EXTRACT(EPOCH FROM (NOW() - locked_at)) as running_sec
+    FROM importer_queue
+    WHERE status = 'IMPORTING'
   `);
-  console.log(res.rows);
-
+  console.table(res.rows);
   await pool.end();
 }
-
-main().catch(console.error).then(() => process.exit(0));
+run();

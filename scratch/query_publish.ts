@@ -14,17 +14,17 @@ async function run() {
 
   try {
     const res = await pool.query(`
-      SELECT data->'avgTiming' as timings, created_at
+      SELECT data->'publicationMetrics'->'sqlExecutionMs'->>'avg' as pub_sql_avg,
+             data->'publicationMetrics'->'commitMs'->>'avg' as pub_commit_avg,
+             data->'publicationMetrics'->'totalMs'->>'avg' as pub_total_avg,
+             data->'latency'->'publishBatchMs'->>'avg' as pub_batch_ms
       FROM importer_diagnostic_telemetry 
-      WHERE data->>'avgTiming' IS NOT NULL
+      WHERE data->>'publicationMetrics' IS NOT NULL 
+         OR data->'latency'->'publishBatchMs' IS NOT NULL
       ORDER BY created_at DESC 
-      LIMIT 1
+      LIMIT 10
     `);
-    if (res.rows.length > 0) {
-        console.log(JSON.stringify(res.rows[0].timings, null, 2));
-    } else {
-        console.log("No timing data found.");
-    }
+    console.table(res.rows);
   } catch (err) {
     console.error(err.message);
   }

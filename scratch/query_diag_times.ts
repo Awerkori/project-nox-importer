@@ -14,17 +14,14 @@ async function run() {
 
   try {
     const res = await pool.query(`
-      SELECT data->'avgTiming' as timings, created_at
+      SELECT 
+        data->'jobProfile' as job_profile,
+        data->'telegramStorage' as tg_storage,
+        data->'imageDownload' as download
       FROM importer_diagnostic_telemetry 
-      WHERE data->>'avgTiming' IS NOT NULL
-      ORDER BY created_at DESC 
-      LIMIT 1
+      ORDER BY created_at DESC LIMIT 1
     `);
-    if (res.rows.length > 0) {
-        console.log(JSON.stringify(res.rows[0].timings, null, 2));
-    } else {
-        console.log("No timing data found.");
-    }
+    console.log(JSON.stringify(res.rows[0], null, 2));
   } catch (err) {
     console.error(err.message);
   }

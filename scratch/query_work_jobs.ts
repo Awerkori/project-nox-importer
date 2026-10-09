@@ -13,14 +13,14 @@ async function main() {
   });
 
   const res = await pool.query(`
-    SELECT payload->>'workId' as work_id, count(*) as c 
-    FROM importer_queue 
-    WHERE status IN ('QUEUED', 'PAUSED_BY_STAFF', 'RETRY') AND task_type = 'IMPORT_CHAPTER'
-    GROUP BY payload->>'workId'
-    ORDER BY count(*) DESC
+    SELECT id, chapter_sort_key, status, next_run_at
+    FROM importer_queue
+    WHERE payload->>'workId' = '1da06bc3-8515-46e7-ac6c-f2305886af3f'
+      AND task_type = 'IMPORT_CHAPTER'
+    ORDER BY chapter_sort_key ASC
     LIMIT 10
   `);
-  console.log(res.rows);
+  console.table(res.rows);
 
   await pool.end();
 }

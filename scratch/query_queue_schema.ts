@@ -12,8 +12,11 @@ const pool = new Pool({
 });
 
 async function main() {
-  const query = process.argv[2] || "SELECT 1";
-  const res = await pool.query(query);
+  const res = await pool.query(`
+    SELECT column_name, data_type 
+    FROM information_schema.columns 
+    WHERE table_name = 'importer_queue';
+  `);
   console.table(res.rows);
   pool.end();
 }

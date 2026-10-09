@@ -12,28 +12,13 @@ async function run() {
     ssl: { rejectUnauthorized: false }
   });
 
-  let lastTimestamp = "";
-  for (let i = 0; i < 20; i++) { // ~2 minutes
-    try {
-      const res = await pool.query("SELECT value FROM settings WHERE key = 'importer_heartbeat'");
-      if (res.rows[0]) {
-        const data = JSON.parse(res.rows[0].value);
-        if (data.timestamp !== lastTimestamp) {
-          lastTimestamp = data.timestamp;
-          const cap = data.capacity?.concurrency ?? data.capacity ?? 0;
-          const slots = data.pipelineCapacity?.slots?.busySlots ?? 0;
-          const rate1m = data.throughput?.rate1m ?? data.rate1m ?? 0;
-          const completed30m = data.completed30m ?? 0;
-          const eligible = data.eligibleJobs ?? 0;
-          const status = data.status;
-          
-          console.log(`[${data.timestamp}] Status: ${status} | Cap: ${cap} | Busy Slots: ${slots} | Eligible: ${eligible} | Completed 30m: ${completed30m} | Rate1m: ${rate1m}`);
-        }
-      }
-    } catch (err) {
-      console.error("Error fetching heartbeat:", err.message);
+  for (let i = 0; i < 30; i++) {
+    const hbRes = await pool.query("SELECT value FROM settings WHERE key = 'importer_heartbeat'");
+    if (hbRes.rows[0]) {
+      const hb = JSON.parse(hbRes.rows[0].value);
+      console.log(`[${new Date().toISOString()}] rate1m: ${hb.throughput?.rate1m} | Cap: ${hb.capacity?.concurrency} | LimitingFactor: ${hb.throughput?.limitingFactor} | ActiveWorks: ${hb.activeWorks}`);
     }
-    await new Promise(resolve => setTimeout(resolve, 6000));
+    await new Promise(resolve => setTimeout(resolve, 10000));
   }
   await pool.end();
 }
