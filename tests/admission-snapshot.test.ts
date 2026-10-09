@@ -87,8 +87,8 @@ describe('bounded admission snapshot', () => {
         .split('`, [activeWorks')[0]
         .replace('${SOURCE_EXECUTION_ELIGIBILITY_SQL}', SOURCE_EXECUTION_ELIGIBILITY_SQL);
       const {rows}=await db.query<any>(sql,[[id,empty],['s','s']]);
-      expect(rows.find(r=>r.work_id===id)).toMatchObject({queued_cnt:1,importing_cnt:1,paused_cnt:1,min_queued:'3',min_sort_key:'3',pub_cnt:2,max_pub:'2',staged_cnt:1,min_staged:'4',unimported_cnt:2,source_status:'ACTIVE'});
-      expect(rows.find(r=>r.work_id===empty)).toMatchObject({queued_cnt:0,pub_cnt:0,unimported_cnt:0});
+      expect(rows.find(r=>r.work_id===id)).toMatchObject({queued_cnt:1,claimable_cnt:1,importing_cnt:1,paused_cnt:1,min_queued:'3',min_sort_key:'3',pub_cnt:2,max_pub:'2',staged_cnt:1,min_staged:'4',unimported_cnt:2,source_status:'ACTIVE'});
+      expect(rows.find(r=>r.work_id===empty)).toMatchObject({queued_cnt:0,claimable_cnt:0,pub_cnt:0,unimported_cnt:0});
     } finally { await db.close(); }
   });
 
