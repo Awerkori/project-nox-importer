@@ -553,18 +553,6 @@ export class AutoHealWatchdog {
 
             let canActuallyPublish = isCandidatePub;
 
-            // Chapter barrier canonical alignment: if candidate is publishable and publicationBarrier is present
-            if (canActuallyPublish && this.publicationBarrier && row.work_id && row.frontier_sort_key !== undefined) {
-              try {
-                const check = await this.publicationBarrier.checkBarrier(row.work_id, parseFloat(row.frontier_sort_key));
-                if (!check.canPublish) {
-                  canActuallyPublish = false;
-                }
-              } catch (err: any) {
-                this.logger.warn('Error checking individual chapter publication barrier', { workId: row.work_id, error: err?.message });
-              }
-            }
-
             if (canActuallyPublish) {
               publishableStaged += 1; // Only frontier chapter is actionable
               waitingPredecessorStaged += Math.max(0, totalStaged - 1);
