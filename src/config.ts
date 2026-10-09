@@ -44,7 +44,7 @@ const ConfigSchema = z.object({
   ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(3),
   // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
-  BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
+  BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(16),
   // Aeon exposes only 13 YSQL connections in production and warns at 60%.
   // Three importer connections plus the site/Hyperdrive reaches that threshold;
   // two leave a real reader and operational headroom. Media/network latency
@@ -54,9 +54,9 @@ const ConfigSchema = z.object({
   // These are global pipeline ceilings, not per-chapter multipliers.  Keep
   // them aligned with the small production container so a chapter ramp cannot
   // create a hidden 24+ request/media burst behind five chapter slots.
-  TELEGRAM_MEDIA_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
-  DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
-  BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(12),
+  TELEGRAM_MEDIA_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(24),
+  DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(16),
+  BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(48),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   IMPORTER_DB_MODE: z.enum(['direct', 'gateway']).default('direct'),
   YUGABYTE_HOST: z.string().default('sa-east-1.b49305ea-8536-43e6-936e-b2fd77fc07b0.aws.yugabyte.cloud'),
