@@ -655,7 +655,7 @@ export class ImporterEngine {
     private config: Config
   ) {
     this.runtimeInstanceId = `${config.WORKER_ID}@${process.pid}-${randomUUID().slice(0, 8)}`;
-    this.config = { ...config, WORKER_ID: this.runtimeInstanceId };
+    this.config = { ...config, WORKER_ID: this.runtimeInstanceId, MAX_CONCURRENT_CHAPTERS: 12 };
     this.chapterClaimGate = new AsyncSemaphore(
       resolveChapterClaimConcurrency(this.config.MAX_CONCURRENT_CHAPTERS || 5, this.config.DIRECT_DB_POOL_MAX || 2),
       'chapter_claim_gate',
