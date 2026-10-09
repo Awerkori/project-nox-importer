@@ -1850,10 +1850,10 @@ export class WorkAffinityScheduler {
                         const alt = gapResult.alternativeSourceFound;
                         await this.runQuery(this.pool, `
               UPDATE importer_queue
-              SET priority = 95, next_run_at = NOW(), updated_at = NOW()
+              SET status = 'RETRY', priority = 95, next_run_at = NOW(), updated_at = NOW()
               WHERE (payload->>'workId') = $1
                 AND chapter_sort_key = $2
-                AND status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF');
+                AND status IN ('QUEUED', 'RETRY', 'PAUSED_BY_STAFF', 'FAILED');
             `, [workId, alt.chapterSortKey]);
                         this.logger.info(`Prioritized predecessor job ${alt.chapterSortKey} to priority 95 for work ${workId} on source ${alt.source}.`);
                         const activeWork = this.stateStore.getActiveWork(workId);
@@ -1881,6 +1881,7 @@ export class WorkAffinityScheduler {
                 await this.runQuery(this.pool, `
           UPDATE importer_queue
           SET status = 'RETRY',
+              priority = LEAST(priority, 80),
               attempts = GREATEST(0, attempts - 1),
               locked_by = NULL,
               locked_at = NULL,
