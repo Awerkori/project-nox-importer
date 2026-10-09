@@ -1764,34 +1764,42 @@ export class AdmissionController {
              AND s.id = ANY($6::text[])
          ),
          queued_retry AS (
-           SELECT q.*
-           FROM importer_queue q
-           JOIN eligible_sources s ON s.id = q.source
-           WHERE q.task_type = 'IMPORT_CHAPTER'
-             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
-             AND q.attempts < COALESCE(q.max_attempts, 7)
-             AND q.priority >= 75 AND q.priority < 100
-             AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
-             AND NOT ((q.payload->>'workId') = ANY($1::text[]))
-             AND q.payload->>'workId' IS NOT NULL
-             AND NOT ((q.payload->>'workId') = ANY($7::text[]))
-           ORDER BY q.priority DESC, q.chapter_sort_key ASC
-           LIMIT $5
+           SELECT candidate.*
+           FROM eligible_sources s
+           CROSS JOIN LATERAL (
+             SELECT q.*
+             FROM importer_queue q
+             WHERE q.source = s.id
+               AND q.task_type = 'IMPORT_CHAPTER'
+               AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
+               AND q.attempts < COALESCE(q.max_attempts, 7)
+               AND q.priority >= 75 AND q.priority < 100
+               AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+               AND NOT ((q.payload->>'workId') = ANY($1::text[]))
+               AND q.payload->>'workId' IS NOT NULL
+               AND NOT ((q.payload->>'workId') = ANY($7::text[]))
+             ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
+             LIMIT $5
+           ) candidate
          )
          ${includePaused ? `, paused AS (
-           SELECT q.*
-           FROM importer_queue q
-           JOIN eligible_sources s ON s.id = q.source
-           WHERE q.task_type = 'IMPORT_CHAPTER'
-             AND q.status = 'PAUSED_BY_STAFF'
-             AND q.attempts < COALESCE(q.max_attempts, 7)
-             AND q.priority >= 75 AND q.priority < 100
-             AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
-             AND NOT ((q.payload->>'workId') = ANY($1::text[]))
-             AND q.payload->>'workId' IS NOT NULL
-             AND NOT ((q.payload->>'workId') = ANY($7::text[]))
-           ORDER BY q.priority DESC, q.chapter_sort_key ASC
-           LIMIT $5
+           SELECT candidate.*
+           FROM eligible_sources s
+           CROSS JOIN LATERAL (
+             SELECT q.*
+             FROM importer_queue q
+             WHERE q.source = s.id
+               AND q.task_type = 'IMPORT_CHAPTER'
+               AND q.status = 'PAUSED_BY_STAFF'
+               AND q.attempts < COALESCE(q.max_attempts, 7)
+               AND q.priority >= 75 AND q.priority < 100
+               AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+               AND NOT ((q.payload->>'workId') = ANY($1::text[]))
+               AND q.payload->>'workId' IS NOT NULL
+               AND NOT ((q.payload->>'workId') = ANY($7::text[]))
+             ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
+             LIMIT $5
+           ) candidate
          )` : ''}
          , source_window AS MATERIALIZED (
            SELECT * FROM queued_retry
@@ -2372,34 +2380,42 @@ export class AdmissionController {
             AND ($3::text[] IS NULL OR NOT (s.id = ANY($3::text[])))
             AND ($5::text[] IS NULL OR s.id = ANY($5::text[]))
         ), queued_retry AS (
-          SELECT q.*
-          FROM importer_queue q
-          JOIN eligible_sources s ON s.id = q.source
-          WHERE q.task_type = 'IMPORT_CHAPTER'
-            AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
-            AND q.attempts < COALESCE(q.max_attempts,7)
-            AND q.priority >= ${isP1 ? 75 : 50} AND q.priority < ${maxPriority}
-            AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
-            AND NOT ((q.payload->>'workId') = ANY($2::text[]))
-            AND q.payload->>'workId' IS NOT NULL
-            AND NOT ((q.payload->>'workId') = ANY($6::text[]))
-          ORDER BY q.priority DESC, q.chapter_sort_key ASC
-          LIMIT 160
+          SELECT candidate.*
+          FROM eligible_sources s
+          CROSS JOIN LATERAL (
+            SELECT q.*
+            FROM importer_queue q
+            WHERE q.source = s.id
+              AND q.task_type = 'IMPORT_CHAPTER'
+              AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
+              AND q.attempts < COALESCE(q.max_attempts,7)
+              AND q.priority >= ${isP1 ? 75 : 50} AND q.priority < ${maxPriority}
+              AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+              AND NOT ((q.payload->>'workId') = ANY($2::text[]))
+              AND q.payload->>'workId' IS NOT NULL
+              AND NOT ((q.payload->>'workId') = ANY($6::text[]))
+            ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
+            LIMIT 160
+          ) candidate
         )
         ${includePaused ? `, paused AS (
-          SELECT q.*
-          FROM importer_queue q
-          JOIN eligible_sources s ON s.id = q.source
-          WHERE q.task_type = 'IMPORT_CHAPTER'
-            AND q.status = 'PAUSED_BY_STAFF'
-            AND q.attempts < COALESCE(q.max_attempts,7)
-            AND q.priority >= ${isP1 ? 75 : 50} AND q.priority < ${maxPriority}
-            AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
-            AND NOT ((q.payload->>'workId') = ANY($2::text[]))
-            AND q.payload->>'workId' IS NOT NULL
-            AND NOT ((q.payload->>'workId') = ANY($6::text[]))
-          ORDER BY q.priority DESC, q.chapter_sort_key ASC
-          LIMIT 160
+          SELECT candidate.*
+          FROM eligible_sources s
+          CROSS JOIN LATERAL (
+            SELECT q.*
+            FROM importer_queue q
+            WHERE q.source = s.id
+              AND q.task_type = 'IMPORT_CHAPTER'
+              AND q.status = 'PAUSED_BY_STAFF'
+              AND q.attempts < COALESCE(q.max_attempts,7)
+              AND q.priority >= ${isP1 ? 75 : 50} AND q.priority < ${maxPriority}
+              AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+              AND NOT ((q.payload->>'workId') = ANY($2::text[]))
+              AND q.payload->>'workId' IS NOT NULL
+              AND NOT ((q.payload->>'workId') = ANY($6::text[]))
+            ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
+            LIMIT 160
+          ) candidate
         )` : ''}
         , source_window AS MATERIALIZED (
           SELECT * FROM queued_retry
