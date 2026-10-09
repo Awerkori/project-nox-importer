@@ -2,7 +2,7 @@
  * Work-Affinity Scheduler for Project Nox Importer.
  *
  * Implements:
- * - P0: Absolute priority preemption for fresh new releases (priority >= 100).
+ * - P0: Absolute priority preemption for fresh new releases and critical gaps (priority >= 90).
  * - P1 Critical Gap: Prioritizes missing chapters unblocking STAGED barrier cascade (priority 90-95).
  * - P1 Backfill: Fair scheduling across ACTIVE_BACKFILL_WORKS (<= 10 works).
  * - P2 Active New Works: Fair scheduling with work affinity across ACTIVE_NEW_WORKS (<= 8 works).
@@ -332,7 +332,7 @@ export class WorkAffinityScheduler {
           WHERE q.task_type = 'IMPORT_CHAPTER'
             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
             AND q.attempts < COALESCE(q.max_attempts, 7)
-            AND q.priority >= 100 AND q.priority < 1000
+            AND q.priority >= 90 AND q.priority < 1000
           GROUP BY q.payload->>'workId'
           ORDER BY MIN(q.next_run_at) ASC, MIN(q.chapter_sort_key) ASC NULLS LAST
           LIMIT 100
@@ -773,7 +773,7 @@ export class WorkAffinityScheduler {
         }
         this.staffConsecutiveClaims = 0;
         // -------------------------------------------------------------
-        // LANE P0: Fresh New Releases (Priority >= 100)
+        // LANE P0: Fresh New Releases & Critical Gaps (Priority >= 90)
         // P0 wins normal selection, except for one bounded lower-priority
         // reservation after a sustained Staff/P0 burst. This prevents internal
         // starvation without changing capacity or source/global limits.
@@ -789,7 +789,7 @@ export class WorkAffinityScheduler {
                 workerId: options.workerId,
                 leaseMin,
                 allowedSources,
-                minPriority: 100,
+                minPriority: 90,
                 maxPriority: 999,
                 workId: targetP0WorkId,
                 disallowedWorkIds: fullWorkIds,
@@ -2199,8 +2199,8 @@ export class WorkAffinityScheduler {
         let stagedWaitingForGap = 0;
         const qRes = await this.runQuery(this.pool, `
       SELECT
-        COUNT(CASE WHEN priority >= 100 THEN 1 END) as p0_cnt,
-        COUNT(CASE WHEN priority >= 70 AND priority < 100 THEN 1 END) as p1_cnt,
+        COUNT(CASE WHEN priority >= 90 THEN 1 END) as p0_cnt,
+        COUNT(CASE WHEN priority >= 70 AND priority < 90 THEN 1 END) as p1_cnt,
         COUNT(CASE WHEN priority >= 30 AND priority < 70 THEN 1 END) as p2_cnt,
         COUNT(CASE WHEN priority < 30 OR task_type IN ('DISCOVER_WORKS', 'SYNC_WORK') THEN 1 END) as p3_cnt
       FROM importer_queue

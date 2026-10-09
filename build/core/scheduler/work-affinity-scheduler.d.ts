@@ -2,7 +2,7 @@
  * Work-Affinity Scheduler for Project Nox Importer.
  *
  * Implements:
- * - P0: Absolute priority preemption for fresh new releases (priority >= 100).
+ * - P0: Absolute priority preemption for fresh new releases and critical gaps (priority >= 90).
  * - P1 Critical Gap: Prioritizes missing chapters unblocking STAGED barrier cascade (priority 90-95).
  * - P1 Backfill: Fair scheduling across ACTIVE_BACKFILL_WORKS (<= 10 works).
  * - P2 Active New Works: Fair scheduling with work affinity across ACTIVE_NEW_WORKS (<= 8 works).
