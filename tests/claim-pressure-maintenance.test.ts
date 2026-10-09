@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ImporterEngine } from '../src/core/engine.js';
+import { ImporterEngine, selectCatalogMaintenanceProbeSources } from '../src/core/engine.js';
 import { shouldDeferHeavyStagedClassification } from '../src/core/auto-heal-watchdog.js';
 import { AsyncSemaphore } from '../src/core/concurrency.js';
 
@@ -65,5 +65,19 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(engine.chapterClaimPhaseReady).toBe(true);
     engine.chapterClaimGate = { active: 0, queued: 0, capacity: 5 };
     expect(engine.shouldDeferCatalogMaintenance()).toBe(false);
+  });
+
+  it('rotates bounded maintenance probes across eligible sources', () => {
+    const sources = ['zeta', 'mangaflix', 'alpha', 'mangaflix'];
+
+    const first = selectCatalogMaintenanceProbeSources(sources, 0, 2);
+    expect(first).toEqual({ sources: ['alpha', 'mangaflix'], nextCursor: 2 });
+
+    const second = selectCatalogMaintenanceProbeSources(sources, first.nextCursor, 2);
+    expect(second).toEqual({ sources: ['zeta', 'alpha'], nextCursor: 1 });
+  });
+
+  it('keeps the maintenance probe empty when no source is eligible', () => {
+    expect(selectCatalogMaintenanceProbeSources([], 4, 6)).toEqual({ sources: [], nextCursor: 0 });
   });
 });
