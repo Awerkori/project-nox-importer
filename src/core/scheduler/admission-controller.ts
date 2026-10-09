@@ -1393,7 +1393,7 @@ export class AdmissionController {
       // One bounded snapshot for the active cohort; no cache of editorial state.
       // Keep indexed work predicates inside each aggregate to avoid scanning the hot queue.
       const snapshot = await this.runQuery(`
-        SELECT w.work_id, q.*, p.*, m.*, s.status AS source_status, s.cooldown_until,
+        SELECT w.work_id, q.*, p.*, m.*, c.claimable_cnt, s.status AS source_status, s.cooldown_until,
                s.blocked_reason AS source_blocked_reason, s.blocked_details AS source_blocked_details
         FROM unnest($1::text[], $2::text[]) AS w(work_id, source)
         CROSS JOIN LATERAL (
