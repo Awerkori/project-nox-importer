@@ -265,7 +265,7 @@ export async function confirmUpstreamGapInterval(client, params) {
        WHERE (payload->>'workId') = $1
          AND chapter_sort_key >= $2::numeric
          AND chapter_sort_key <= $3::numeric
-         AND status IN ('QUEUED', 'RETRY', 'IMPORTING', 'FAILED', 'PAUSED_BY_STAFF')
+         AND status IN ('QUEUED', 'RETRY', 'IMPORTING', 'PAUSED_BY_STAFF')
          AND task_type = 'IMPORT_CHAPTER'
        ORDER BY chapter_sort_key ASC
        LIMIT 1;`, [workId, startSortKey, endSortKey]);
