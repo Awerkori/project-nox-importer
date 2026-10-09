@@ -332,10 +332,14 @@ export class AutoHealWatchdog {
     // 1. Publication, Completion, and Started Timestamps (Index-Optimized)
     const timeRes = await this.pool.query(`
       SELECT 
-        (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(locked_at))) FROM importer_queue WHERE status = 'IMPORTING' AND locked_at IS NOT NULL) as started_age,
+        -- Liveness/restart decisions below are for the chapter publication
+        -- pipeline.  Catalog maintenance can legitimately run for longer
+        -- than a chapter transfer, and must not look like a stalled chapter
+        -- import just because it also owns an IMPORTING queue lease.
+        (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(locked_at))) FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER' AND locked_at IS NOT NULL) as started_age,
         (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(updated_at))) FROM importer_queue WHERE status = 'COMPLETED' AND task_type = 'IMPORT_CHAPTER') as completed_age,
         (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(published_at))) FROM chapters WHERE published_at IS NOT NULL) as fresh_age,
-        (SELECT count(*) FROM importer_queue WHERE status = 'IMPORTING') as started_15m,
+        (SELECT count(*) FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER') as started_15m,
         (SELECT count(*) FROM importer_queue WHERE status = 'COMPLETED' AND task_type = 'IMPORT_CHAPTER' AND updated_at >= NOW() - INTERVAL '15 minutes') as completed_15m,
         (SELECT count(*) FROM chapters WHERE published_at >= NOW() - INTERVAL '15 minutes') as fresh_15m
     `);
@@ -387,8 +391,8 @@ export class AutoHealWatchdog {
             ${CANONICAL_FRONTIER_CLAIM_FILTER}
             ${CANONICAL_ACTIVE_CLAIM_FILTER}
         ) sub) as eligible_cnt,
-        (SELECT count(*) FROM importer_queue WHERE status = 'IMPORTING') as importing_cnt,
-        (SELECT count(*) FROM importer_queue WHERE status = 'RETRY') as retry_cnt
+        (SELECT count(*) FROM importer_queue WHERE status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER') as importing_cnt,
+        (SELECT count(*) FROM importer_queue WHERE status = 'RETRY' AND task_type = 'IMPORT_CHAPTER') as retry_cnt
     `);
     const qRow = qRes.rows[0] || {};
     const eligibleJobs = parseInt(qRow.eligible_cnt || '0', 10);

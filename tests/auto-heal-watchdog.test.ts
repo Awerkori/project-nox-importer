@@ -40,6 +40,37 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
     await expect(watchdog.collectTelemetry()).rejects.toThrow('temporary');
     expect(watchdog.telemetryFlight).toBeNull();
   });
+
+  it('scopes chapter liveness counters to IMPORT_CHAPTER jobs, not catalog maintenance leases', async () => {
+    const watchdog = new AutoHealWatchdog({
+      pool: mockPool,
+      scheduler: mockScheduler,
+      admissionController: mockAdmissionController,
+      protectiveSentinel: mockProtectiveSentinel,
+      onControlledRestart,
+    });
+    const queries: string[] = [];
+    mockPool.query.mockImplementation((sql: string) => {
+      queries.push(sql);
+      if (sql.includes('started_age')) {
+        return { rows: [{ started_age: null, completed_age: null, fresh_age: null, started_15m: '0', completed_15m: '0', fresh_15m: '0' }] };
+      }
+      if (sql.includes('eligible_cnt')) return { rows: [{ eligible_cnt: '0', importing_cnt: '0', retry_cnt: '0' }] };
+      if (sql.includes('staged_unique')) return { rows: [{ staged_unique: '0' }] };
+      if (sql.includes("key = 'active_works'")) return { rows: [{ value: JSON.stringify([]) }] };
+      if (sql.includes("key = 'importer_protective_stop'")) return { rows: [{ value: JSON.stringify({ active: false }) }] };
+      if (sql.includes("key = 'importer_auto_restarts'")) return { rows: [{ value: JSON.stringify([]) }] };
+      return { rows: [] };
+    });
+
+    await watchdog.collectTelemetry(true);
+
+    const timeQuery = queries.find((sql) => sql.includes('started_age'));
+    const queueQuery = queries.find((sql) => sql.includes('eligible_cnt'));
+    expect(timeQuery).toContain("status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'");
+    expect(queueQuery).toContain("status = 'IMPORTING' AND task_type = 'IMPORT_CHAPTER'");
+    expect(queueQuery).toContain("status = 'RETRY' AND task_type = 'IMPORT_CHAPTER'");
+  });
   let mockPool: any;
   let mockScheduler: any;
   let mockAdmissionController: any;
