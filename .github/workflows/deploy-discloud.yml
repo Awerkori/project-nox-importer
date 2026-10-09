@@ -1,0 +1,65 @@
+name: Deploy DIScloud
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discloud-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # A manually dispatched workflow can be selected from another branch in
+    # the UI. Production deploys must always use the reviewed main ref.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: discloud-production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Verify deployment credential is configured
+        env:
+          DISCLOUD_TOKEN: ${{ secrets.DISCLOUD_TOKEN }}
+        run: |
+          if [ -z "${DISCLOUD_TOKEN:-}" ]; then
+            echo 'DISCLOUD_TOKEN is not configured for the discloud-production environment.'
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build deployment artifact
+        run: npm run build
+
+      - name: Verify generated runtime artifact
+        run: |
+          test -f build/index.js
+          if [ -n "$(git status --porcelain build/ ':!build/BUILD_ID')" ]; then
+            echo 'Generated runtime files differ from their committed counterparts.'
+            git diff -- build/ ':!build/BUILD_ID'
+            exit 1
+          fi
+
+      - name: Commit reviewed runtime artifact to DIScloud
+        uses: discloud/deploy-action@fae7024653d941a19daa2b6f56d2ae208e008c54
+        with:
+          token: ${{ secrets.DISCLOUD_TOKEN }}
+          # Do not upload .env, source, tests, git metadata, or local caches.
+          # Runtime configuration remains in DIScloud's protected environment.
+          glob: |
+            build/**
+            discloud.config
+            package.json
+            package-lock.json
+            README.md

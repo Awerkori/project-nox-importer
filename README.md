@@ -98,6 +98,19 @@ APT=tools
 ### Passos para deploy:
 
 1. Crie o arquivo `.env` preenchido a partir do `.env.example`.
-2. Execute `npm run build` para gerar a pasta `dist/`.
-3. Compacte os arquivos para a DIScloud (incluindo `dist`, `package.json`, `package-lock.json`, `discloud.config` e `.env`).
+2. Execute `npm run build` para gerar a pasta `build/`.
+3. Compacte os arquivos de runtime para a DIScloud (incluindo `build`, `package.json`, `package-lock.json` e `discloud.config`). Configure segredos no ambiente protegido da plataforma; não inclua `.env` no pacote.
 4. Envie o zip através do painel ou bot da DIScloud.
+
+### Deploy manual seguro por GitHub Actions
+
+O workflow **Deploy DIScloud** só pode ser executado manualmente a partir da
+branch `main`. Ele recompila o projeto e envia exclusivamente os arquivos de
+runtime; não envia `.env`, código-fonte, testes nem caches.
+
+Antes da primeira execução, um administrador deve criar o GitHub Environment
+`discloud-production`, habilitar as proteções de aprovação apropriadas e
+configurar nele o secret `DISCLOUD_TOKEN`. O valor deve ser uma API key gerada
+no dashboard da DIScloud para uma conta com permissão de atualizar somente este
+aplicativo (preferencialmente uma conta técnica/moderadora dedicada). Não
+versione, imprima ou reutilize sessões de navegador para esse fim.
