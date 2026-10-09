@@ -34,6 +34,18 @@ const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
 const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
 const MAX_CATALOG_MAINTENANCE_SOURCE_PROBES = 4;
+const LEGACY_SAME_SOURCE_CLAIM_AMBIGUITY_REASON = 'Work already claimed by another ID from the same source';
+const LEGACY_SAME_SOURCE_CLAIM_RECOVERY_BATCH_SIZE = 4;
+const LEGACY_SAME_SOURCE_CLAIM_RECOVERY_PRIORITY = 65;
+/**
+ * This key is intentionally distinct from the normal source:work key. The
+ * original SYNC_WORK completed after recording the ambiguity, so its normal
+ * dedupe row cannot be revived by a later catalog scan. A recovery attempt is
+ * still exactly-once and remains subject to the normal identity matcher.
+ */
+export function legacySameSourceClaimRecoveryDedupeKey(source, sourceWorkId) {
+    return `${source}:legacy-same-source-claim-recovery:${sourceWorkId}`;
+}
 /**
  * A catalog lane has one bounded claimant, so FIFO ordering across all source
  * rows can let one large, old source monopolize it for hours. Rotate a small
@@ -1241,6 +1253,13 @@ export class ImporterEngine {
         for (const src of selected) {
             if (!src.enabled || src.catalog_discovery_enabled === false || src.catalog_discovery_enabled === 0 || src.status !== 'ACTIVE')
                 continue;
+            // A completed legacy SYNC_WORK row cannot be revived by a later catalog
+            // scan because its normal dedupe key remains occupied. Requeue only the
+            // narrow, now-retryable same-source-claim ambiguity before applying the
+            // ordinary backfill pressure check. The recovery key is distinct and
+            // bounded, while source rotation and the shared catalog lane preserve
+            // fairness and every existing upstream limit.
+            await this.scheduleLegacySameSourceClaimAmbiguityRecovery(src.id);
             const checkpoint = await this.checkpoints.getCheckpoint(src.id);
             // If completed pass, allow re-scan only after 12 hours
             if (checkpoint?.metadata?.catalog_completed) {
@@ -1277,6 +1296,64 @@ export class ImporterEngine {
                 mode: 'bootstrap',
                 cursor: currentCursor,
             }, 50);
+        }
+    }
+    /**
+     * Make the PR #382 identity fix reachable for legacy mappings whose original
+     * SYNC_WORK row already completed. This never mutates a mapping or chooses a
+     * canonical work: it only creates a bounded, idempotent normal sync attempt.
+     * Real title/slug/alias collisions remain AMBIGUOUS in DeduplicationService.
+     */
+    async scheduleLegacySameSourceClaimAmbiguityRecovery(source) {
+        try {
+            const pool = this.dbPool && typeof this.dbPool.query === 'function' ? this.dbPool : getYugabytePool();
+            const result = await pool.query(`SELECT wm.source_work_id, wm.source_slug, wm.source_title
+         FROM importer_work_mappings wm
+         WHERE wm.source = $1
+           AND wm.work_id IS NULL
+           AND wm.sync_status = 'AMBIGUOUS'
+           AND wm.metadata->>'ambiguity_reason' = $2
+           AND NOT EXISTS (
+             SELECT 1
+             FROM importer_queue q
+             WHERE q.dedupe_key = $3 || wm.source_work_id
+           )
+         ORDER BY wm.updated_at ASC, wm.source_work_id ASC
+         LIMIT $4`, [
+                source,
+                LEGACY_SAME_SOURCE_CLAIM_AMBIGUITY_REASON,
+                `${source}:legacy-same-source-claim-recovery:`,
+                LEGACY_SAME_SOURCE_CLAIM_RECOVERY_BATCH_SIZE,
+            ]);
+            if (!result.rows.length)
+                return;
+            await this.queue.enqueueBatch(result.rows.map((mapping) => ({
+                taskType: 'SYNC_WORK',
+                source,
+                dedupeKey: legacySameSourceClaimRecoveryDedupeKey(source, mapping.source_work_id),
+                payload: {
+                    sourceWorkId: mapping.source_work_id,
+                    slug: mapping.source_slug,
+                    title: mapping.source_title,
+                    legacySameSourceClaimRecovery: true,
+                },
+                // Ahead of ordinary re-syncs from this source, but below discovery's
+                // effective priority. Cross-source fairness remains in the rotating
+                // catalog probe rather than priority competition.
+                priority: LEGACY_SAME_SOURCE_CLAIM_RECOVERY_PRIORITY,
+            })));
+            this.logger.info('Queued bounded legacy same-source ambiguity recovery', {
+                source,
+                candidates: result.rows.length,
+            });
+        }
+        catch (err) {
+            // Recovery is additive. A transient read/queue failure must not block
+            // ordinary catalog backfill or change the persisted ambiguity state.
+            this.logger.warn('Unable to schedule legacy same-source ambiguity recovery', {
+                source,
+                error: err?.message,
+            });
         }
     }
     /**

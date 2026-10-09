@@ -12,6 +12,13 @@ import { AutoHealWatchdog } from './auto-heal-watchdog.js';
 import { RateBucketTracker } from './rate-bucket-tracker.js';
 export { computeCanonicalChapterKey };
 /**
+ * This key is intentionally distinct from the normal source:work key. The
+ * original SYNC_WORK completed after recording the ambiguity, so its normal
+ * dedupe row cannot be revived by a later catalog scan. A recovery attempt is
+ * still exactly-once and remains subject to the normal identity matcher.
+ */
+export declare function legacySameSourceClaimRecoveryDedupeKey(source: string, sourceWorkId: string): string;
+/**
  * A catalog lane has one bounded claimant, so FIFO ordering across all source
  * rows can let one large, old source monopolize it for hours. Rotate a small
  * probe window instead. The caller still checks each source atomically and
@@ -246,6 +253,13 @@ export declare class ImporterEngine {
      */
     private runCatalogBackfillLoop;
     private scheduleCatalogBackfill;
+    /**
+     * Make the PR #382 identity fix reachable for legacy mappings whose original
+     * SYNC_WORK row already completed. This never mutates a mapping or chooses a
+     * canonical work: it only creates a bounded, idempotent normal sync attempt.
+     * Real title/slug/alias collisions remain AMBIGUOUS in DeduplicationService.
+     */
+    private scheduleLegacySameSourceClaimAmbiguityRecovery;
     /**
      * Periodic publication sweep loop: 10s when active progress, backed off to 30s when no chapters are published
      */
