@@ -1,7 +1,6 @@
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 dotenv.config();
-
 async function run() {
   const pool = new Pool({
     host: process.env.YUGABYTE_HOST,
@@ -11,9 +10,8 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-
-  const res = await pool.query("SELECT created_at, data->'runtimeFingerprint'->>'gitSha' as sha FROM importer_diagnostic_telemetry ORDER BY created_at DESC LIMIT 5");
-  console.log(res.rows);
+  const res = await pool.query(`SELECT data->>'status' as status, data->>'noProgressReason' as reason, created_at, data->>'throughput' as tp, data->>'capacity' as cap FROM importer_diagnostic_telemetry ORDER BY created_at DESC LIMIT 1`);
+  console.log(res.rows[0]);
   await pool.end();
 }
 run();

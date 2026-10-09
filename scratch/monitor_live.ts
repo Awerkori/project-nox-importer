@@ -34,7 +34,7 @@ async function run() {
 
       if (res.rows[0]) {
         const row = res.rows[0];
-        console.log(`[${new Date().toISOString()}] SHA: ${row.sha?.substring(0,7)} | PoolWaitP50: ${row.pool_wait_p50}ms | PoolWaitAvg: ${row.pool_wait_avg}ms | Status: ${hb?.status} | rate1m: ${hb?.throughput?.rate1m ?? hb?.rate1m} | Cap: ${hb?.capacity?.concurrency ?? hb?.capacity} | 5xx: ${hb?.capacity?.consecutive5xx}`);
+        console.log(`[${new Date().toISOString()}] SHA: ${row.sha?.substring(0,7)} | ClaimAvg: ${row.claim_sql_avg}ms | PoolWaitP50: ${row.pool_wait_p50}ms | PoolWaitAvg: ${row.pool_wait_avg}ms | Status: ${hb?.status} | rate1m: ${hb?.throughput?.rate1m ?? hb?.rate1m} | Cap: ${hb?.capacity?.concurrency ?? hb?.capacity} | 5xx: ${hb?.capacity?.consecutive5xx}`);
       }
     } catch (err) {
       console.error(err.message);
