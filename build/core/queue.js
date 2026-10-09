@@ -113,9 +113,16 @@ export class ImporterQueue {
         return true;
     }
     /**
-     * Batch enqueue multiple tasks safely with deduplication
+     * Batch enqueue multiple tasks safely with deduplication.
+     *
+     * A plain `ON CONFLICT DO NOTHING` is sufficient for new work, but must not
+     * lose the single-item enqueue behavior that revives a failed/cancelled
+     * dedupe row when discovery sees the work again.  Callers that need that
+     * legacy behavior can opt in; only then do we query the bounded batch for
+     * exceptional states after the bulk insert and delegate revival to
+     * `enqueue`, preserving staff priority and fenced update semantics.
      */
-    async enqueueBatch(jobs) {
+    async enqueueBatch(jobs, options) {
         if (jobs.length === 0)
             return 0;
         const rows = jobs.map((j) => {
@@ -156,6 +163,25 @@ export class ImporterQueue {
             }
             else {
                 enqueuedCount += chunk.length;
+                if (options?.reviveDuplicates) {
+                    const { data: revivableRows, error: revivableError } = await this.supabase
+                        .from('importer_queue')
+                        .select('dedupe_key, source, status')
+                        .in('dedupe_key', chunk.map((job) => job.dedupe_key))
+                        .in('status', ['FAILED', 'CANCELLED', 'CANCELLED_BY_STAFF', 'RETRY']);
+                    if (revivableError) {
+                        throw revivableError;
+                    }
+                    const jobsByDedupeKey = new Map(chunk.map((job) => [job.dedupe_key, job]));
+                    for (const row of revivableRows || []) {
+                        const job = jobsByDedupeKey.get(row.dedupe_key);
+                        // A retry for the same source is still live work.  Match the
+                        // single-item conflict behavior and leave it untouched.
+                        if (!job || (row.status === 'RETRY' && row.source === job.source))
+                            continue;
+                        await this.enqueue(job.task_type, job.source, job.dedupe_key, job.payload, job.priority, job.chapter_sort_key);
+                    }
+                }
             }
         }
         this.logger.info(`Batch enqueued ${enqueuedCount}/${jobs.length} jobs`);
