@@ -69,6 +69,20 @@ export function selectCatalogMaintenanceProbeSources(
   return { sources: selected, nextCursor: (start + count) % sources.length };
 }
 
+/**
+ * Maintenance cursors describe a moving updates feed, while bootstrap cursors
+ * describe a stable catalog page or offset. Once a full pass has completed,
+ * never feed its maintenance cursor back into a new bootstrap: adapters can
+ * legitimately interpret an ISO timestamp as a large numeric page/offset.
+ */
+export function resolveCatalogBackfillCursor(checkpoint: {
+  cursor_value?: string | null;
+  metadata?: { catalog_completed?: boolean | null } | null;
+} | null | undefined): string | null {
+  if (checkpoint?.metadata?.catalog_completed) return null;
+  return checkpoint?.cursor_value || null;
+}
+
 type DownloadRequestTrace = {
   jobId: string;
   source: string;
@@ -1462,7 +1476,11 @@ export class ImporterEngine {
         }
       } catch {}
 
-      const currentCursor = checkpoint?.cursor_value || null;
+      // A completed source has a maintenance-feed cursor (often a timestamp).
+      // Starting a fresh bootstrap from it skips the beginning of the catalog
+      // for numeric page/offset adapters. Re-scan from the canonical origin;
+      // existing work/job dedupe prevents duplicate ingestion.
+      const currentCursor = resolveCatalogBackfillCursor(checkpoint);
       const dedupeKey = `${src.id}:backfill:${currentCursor || 'page1'}:${Math.floor(Date.now() / 60000)}`;
 
       await this.queue.enqueue(
