@@ -207,17 +207,18 @@ try {
     retry: lastHeartbeat.retry,
   } : null;
   stage = 'minute_rows';
-  const minuteRows = await query(`
-    WITH minutes AS (
-      SELECT generate_series($1::timestamptz, $2::timestamptz - interval '1 minute', interval '1 minute') AS minute
-    ), counts AS (
-      SELECT date_trunc('minute', c.published_at) AS minute, count(*)::int AS chapters
-      FROM chapters c JOIN works w ON w.id = c.work_id
-      WHERE c.published_at >= $1 AND c.published_at < $2 AND w.published IS TRUE
-      GROUP BY 1
-    )
-    SELECT m.minute, coalesce(c.chapters, 0)::int AS chapters FROM minutes m LEFT JOIN counts c USING (minute) ORDER BY m.minute
-  `, [start, end]);
+  // Buckets are relative to the requested window, rather than calendar minutes.
+  // This keeps historical windows with second-level boundaries internally
+  // consistent with their total, and avoids hiding events at e.g. 06:58:02
+  // behind a generated boundary at 06:58:46.
+  const minuteRows = Array.from({ length: minutes }, (_, index) => ({
+    minute: new Date(start.getTime() + index * 60_000),
+    chapters: 0,
+  }));
+  for (const chapter of publicCanonical) {
+    const index = Math.floor((new Date(chapter.published_at).getTime() - start.getTime()) / 60_000);
+    if (index >= 0 && index < minuteRows.length) minuteRows[index].chapters += 1;
+  }
 
   const workMap = new Map();
   for (const row of publicCanonical) {
