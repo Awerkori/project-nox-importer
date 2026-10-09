@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ImporterEngine } from '../src/core/engine.js';
+import { ImporterEngine, isCatalogMaintenancePoolPressured } from '../src/core/engine.js';
 import { shouldDeferHeavyStagedClassification } from '../src/core/auto-heal-watchdog.js';
 
 describe('claim pressure protects the bounded YSQL pool', () => {
@@ -21,22 +21,26 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     })).toBe(false);
   });
 
-  it('defers catalog maintenance whenever a chapter claim is in flight', () => {
+  it('defers catalog maintenance only for physical YSQL pool pressure', () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
     engine.chapterClaimPhaseReady = true;
     engine.chapterClaimGate = { active: 4, queued: 0, capacity: 5 };
-    expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
-    engine.chapterClaimGate = { active: 3, queued: 0, capacity: 5 };
-    expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
-    engine.chapterClaimGate = { active: 1, queued: 0, capacity: 5 };
-    expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
-    engine.chapterClaimGate = { active: 0, queued: 0, capacity: 5 };
+    engine.dbPool = { totalCount: 2, idleCount: 2, waitingCount: 0 };
     expect(engine.shouldDeferCatalogMaintenance()).toBe(false);
-    engine.chapterClaimGate = { active: 0, queued: 1, capacity: 5 };
+
+    engine.dbPool = { totalCount: 2, idleCount: 1, waitingCount: 0 };
+    expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
+    engine.dbPool = { totalCount: 2, idleCount: 2, waitingCount: 1 };
+    expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
+    engine.dbPool = { totalCount: 0, idleCount: 0, waitingCount: 0 };
+    expect(engine.shouldDeferCatalogMaintenance()).toBe(false);
+    engine.dbPool = undefined;
     expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
     engine.chapterClaimPhaseReady = false;
-    engine.chapterClaimGate = { active: 0, queued: 0, capacity: 5 };
     expect(engine.shouldDeferCatalogMaintenance()).toBe(true);
+
+    expect(isCatalogMaintenancePoolPressured({ totalCount: 1, idleCount: 0, waitingCount: 0 })).toBe(true);
+    expect(isCatalogMaintenancePoolPressured({ totalCount: 1, idleCount: 1, waitingCount: 0 })).toBe(false);
   });
 
   it('keeps maintenance deferred until every startup chapter slot has attempted a claim', () => {
@@ -55,6 +59,7 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     engine.markChapterClaimPhaseAttempt(4);
     expect(engine.chapterClaimPhaseReady).toBe(true);
     engine.chapterClaimGate = { active: 0, queued: 0, capacity: 5 };
+    engine.dbPool = { totalCount: 1, idleCount: 1, waitingCount: 0 };
     expect(engine.shouldDeferCatalogMaintenance()).toBe(false);
   });
 });
