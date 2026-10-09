@@ -1,7 +1,6 @@
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 dotenv.config();
-
 async function run() {
   const pool = new Pool({
     host: process.env.YUGABYTE_HOST,
@@ -11,8 +10,11 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
-  console.log(res.rows);
+  const res = await pool.query("SELECT value FROM settings WHERE key = 'importer_heartbeat'");
+  if (res.rows[0]) {
+    const data = JSON.parse(res.rows[0].value);
+    console.log("Timestamp:", data.timestamp, "PID:", data.pid, "WorkerId:", data.workerId);
+  }
   await pool.end();
 }
 run();

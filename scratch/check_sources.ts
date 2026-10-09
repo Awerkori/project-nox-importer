@@ -11,8 +11,16 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
-  console.log(res.rows);
+
+  try {
+    const res = await pool.query(`
+      SELECT id, enabled, status FROM importer_sources 
+      WHERE id IN ('manhastro', 'mangaflix', 'taimumangas', 'hentaihome');
+    `);
+    console.log(res.rows);
+  } catch (err) {
+    console.error(err.message);
+  }
   await pool.end();
 }
 run();

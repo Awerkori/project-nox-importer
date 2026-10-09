@@ -11,8 +11,15 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
+
+  const res = await pool.query(`
+    SELECT status, count(*) 
+    FROM importer_chapter_mappings 
+    WHERE work_id = '0003c726-f6c6-4e90-ad0a-2a04a0e4d771'
+    GROUP BY status
+  `);
   console.log(res.rows);
+
   await pool.end();
 }
 run();

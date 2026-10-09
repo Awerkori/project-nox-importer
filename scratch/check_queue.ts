@@ -11,8 +11,16 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
-  console.log(res.rows);
+
+  try {
+    const res = await pool.query(`
+      SELECT COUNT(*) as eligible FROM importer_queue
+      WHERE status = 'QUEUED' AND (next_run_at IS NULL OR next_run_at <= NOW());
+    `);
+    console.log("Eligible jobs:", res.rows[0]);
+  } catch (err) {
+    console.error(err.message);
+  }
   await pool.end();
 }
 run();

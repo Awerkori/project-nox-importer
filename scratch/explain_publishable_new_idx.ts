@@ -11,8 +11,10 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
-  console.log(res.rows);
+
+  const res = await pool.query(`EXPLAIN ANALYZE SELECT work_id, MIN(chapter_sort_key) FROM importer_chapter_mappings WHERE status IN ('STAGED', 'WAITING_FOR_GAP') GROUP BY work_id LIMIT 20`);
+  console.log(res.rows.map(r => r['QUERY PLAN']).join('\n'));
+
   await pool.end();
 }
 run();

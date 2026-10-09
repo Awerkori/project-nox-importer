@@ -26,7 +26,7 @@ export class SchedulerStateStore {
   // same source.  It is scheduler control-plane state, not editorial data.
   private p1AdmissionCursorsCache: Map<string, string> = new Map();
   private configCache: SchedulerConfig = {
-    enabled: false,
+    enabled: true,
     shadowMode: false,
     maxActiveNewWorks: 8,
     maxActiveBackfillWorks: 24,

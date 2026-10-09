@@ -11,8 +11,15 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
-  console.log(res.rows);
+
+  const hbRes = await pool.query("SELECT value FROM settings WHERE key = 'importer_heartbeat'");
+  let hb = null;
+  if (hbRes.rows[0]) hb = JSON.parse(hbRes.rows[0].value);
+
+  console.log("Cap:", hb?.capacity?.concurrency);
+  console.log("State:", hb?.capacity?.state);
+  console.log("Reason:", hb?.capacity?.reason);
+  
   await pool.end();
 }
 run();

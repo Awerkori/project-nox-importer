@@ -11,8 +11,17 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
-  console.log(res.rows);
+  try {
+    const res = await pool.query(`
+      SELECT id, payload->>'workId' as work_id, payload->>'chapterNumber' as number, source, status, updated_at
+      FROM importer_queue
+      WHERE status = 'IMPORTING'
+      ORDER BY updated_at ASC
+    `);
+    console.log(res.rows);
+  } catch (err) {
+    console.error(err);
+  }
   await pool.end();
 }
 run();

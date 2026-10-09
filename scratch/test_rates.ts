@@ -1,5 +1,7 @@
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
+import { TelemetryCollector } from '../src/core/telemetry-collector.js';
+import { RateBucketTracker } from '../src/core/rate-bucket-tracker.js';
 dotenv.config();
 
 async function run() {
@@ -11,8 +13,14 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
-  console.log(res.rows);
+
+  const tracker = new RateBucketTracker(pool, null as any);
+
+  console.log("Running getRecentRates()...");
+  const start = Date.now();
+  const rates = await tracker.getRecentRates();
+  console.log("Done in", Date.now() - start, "ms", rates);
+
   await pool.end();
 }
 run();

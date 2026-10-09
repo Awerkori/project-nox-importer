@@ -1,7 +1,6 @@
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 dotenv.config();
-
 async function run() {
   const pool = new Pool({
     host: process.env.YUGABYTE_HOST,
@@ -11,8 +10,17 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
-  console.log(res.rows);
+  try {
+    const res = await pool.query(`
+      SELECT q.id, q.payload, q.source, q.priority
+      FROM importer_queue q
+      WHERE q.status = 'QUEUED' AND q.priority >= 100 AND q.task_type = 'IMPORT_CHAPTER'
+      LIMIT 5
+    `);
+    console.log(JSON.stringify(res.rows, null, 2));
+  } catch (err) {
+    console.error(err.message);
+  }
   await pool.end();
 }
 run();

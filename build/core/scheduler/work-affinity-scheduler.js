@@ -351,7 +351,7 @@ export class WorkAffinityScheduler {
           WHERE q.task_type = 'IMPORT_CHAPTER'
             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
             ${CANONICAL_PUBLISHED_CLAIM_FILTER}
-            ${CANONICAL_FRONTIER_CLAIM_FILTER}
+            
             ${CANONICAL_ACTIVE_CLAIM_FILTER}
           GROUP BY q.payload->>'workId'
           ORDER BY MIN(cw.min_next_run_at) ASC, MIN(cw.min_chapter_sort_key) ASC NULLS LAST
@@ -1378,7 +1378,7 @@ export class WorkAffinityScheduler {
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
-          ${CANONICAL_FRONTIER_CLAIM_FILTER}
+          
           ${disallowedWorkIdsFilter}
           ${disallowedChapterKeysFilter}
           ${CANONICAL_ACTIVE_CLAIM_FILTER}
@@ -1538,7 +1538,7 @@ export class WorkAffinityScheduler {
         WHERE s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
-          ${CANONICAL_FRONTIER_CLAIM_FILTER}
+          
           ${allowedSourcesFilter}
           ${disallowedWorkIdsFilter}
           ${disallowedChapterKeysFilter}
@@ -1661,7 +1661,7 @@ export class WorkAffinityScheduler {
         WHERE s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
-          ${CANONICAL_FRONTIER_CLAIM_FILTER}
+          
           ${allowedSourcesFilter}
           ${disallowedWorkIdsFilter}
           ${disallowedChapterKeysFilter}
@@ -1880,11 +1880,12 @@ export class WorkAffinityScheduler {
                 this.logger.info(`Claimed job ${job.id} for work ${workId} ch ${sortKey} is ahead of STAGED chapter ${barrierKey}. Releasing back to QUEUED to preserve canonical barrier.`);
                 await this.runQuery(this.pool, `
           UPDATE importer_queue
-          SET status = 'QUEUED',
+          SET status = 'RETRY',
               attempts = GREATEST(0, attempts - 1),
               locked_by = NULL,
               locked_at = NULL,
               lease_expires_at = NULL,
+              next_run_at = NOW() + INTERVAL '5 minutes',
               updated_at = NOW()
           WHERE id = $1;
         `, [job.id]);
