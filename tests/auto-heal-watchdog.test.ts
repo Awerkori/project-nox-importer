@@ -1694,10 +1694,11 @@ describe('AutoHealWatchdog — Autonomous Recovery & Liveness Hardening (Casos A
 
     const metrics = await watchdog.collectTelemetry(true);
 
-    // Canonical chapter barrier blocked it => NOT ACTIONABLE!
-    expect(mockPublicationBarrier.checkBarrier).toHaveBeenCalledWith('work-w', 5);
-    expect(metrics.publishableStaged).toBe(0);
-    expect(metrics.stuckStaged).toBe(1);
+    // We intentionally removed individual chapter barrier checks from telemetry for performance.
+    // Telemetry relies on the SQL heuristic (is_frontier_publishable = 1).
+    expect(mockPublicationBarrier.checkBarrier).not.toHaveBeenCalled();
+    expect(metrics.publishableStaged).toBe(1);
+    expect(metrics.stuckStaged).toBe(0);
   });
 
   // =========================================================================
