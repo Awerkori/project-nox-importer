@@ -1491,11 +1491,17 @@ export class WorkAffinityScheduler {
           LIMIT $6
         ) candidate
       ),
-      to_lock AS (
-        SELECT q.id
+      to_lock_filtered AS (
+        SELECT q.id, q.payload, q.status, q.task_type, q.attempts, q.max_attempts, q.next_run_at, q.priority, q.chapter_sort_key, q.source
         FROM source_window windowed
         JOIN importer_queue q ON q.id = windowed.id
         JOIN works w ON w.id = (q.payload->>'workId')::uuid
+        WHERE w.published = true
+      ),
+      to_lock AS (
+        SELECT q_base.id
+        FROM to_lock_filtered q
+        JOIN importer_queue q_base ON q_base.id = q.id
         JOIN importer_sources s ON s.id = q.source
         LEFT JOIN LATERAL (
           SELECT MAX(c.number) AS max_published
@@ -1510,7 +1516,6 @@ export class WorkAffinityScheduler {
           AND q.task_type = 'IMPORT_CHAPTER'
           AND q.attempts < COALESCE(q.max_attempts, 7)
           AND s.enabled = true
-          AND w.published = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
           ${CANONICAL_FRONTIER_CLAIM_FILTER}
@@ -1518,21 +1523,21 @@ export class WorkAffinityScheduler {
           ${disallowedChapterKeysFilter}
           ${CANONICAL_ACTIVE_CLAIM_FILTER}
         ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
-        FOR UPDATE OF q SKIP LOCKED
+        FOR UPDATE OF q_base SKIP LOCKED
         LIMIT 1
       )
-      UPDATE importer_queue q
+      UPDATE importer_queue q_base
       SET status = 'IMPORTING',
           locked_by = $4,
           locked_at = NOW(),
           lease_expires_at = NOW() + ($5::text || ' minutes')::interval,
-          attempts = q.attempts + 1,
+          attempts = q_base.attempts + 1,
           updated_at = NOW()
       FROM to_lock
-      WHERE q.id = to_lock.id
-      RETURNING q.id, q.task_type, q.source, q.priority, q.payload, q.dedupe_key,
-                q.status, q.attempts, q.max_attempts, q.locked_by, q.locked_at,
-                q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
+      WHERE q_base.id = to_lock.id
+      RETURNING q_base.id, q_base.task_type, q_base.source, q_base.priority, q_base.payload, q_base.dedupe_key,
+                q_base.status, q_base.attempts, q_base.max_attempts, q_base.locked_by, q_base.locked_at,
+                q_base.lease_expires_at, q_base.next_run_at, q_base.last_error, q_base.chapter_sort_key;
     `;
 
     const res = await this.runQuery(client, query, [
