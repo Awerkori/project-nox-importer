@@ -2908,6 +2908,13 @@ export class ImporterEngine {
           }
 
           if (!candidateJob) {
+            // The scheduler has just completed its canonical scan without a
+            // claim.  In empty-scan backoff mode one slot may perform every
+            // subsequent probe, so waiting for every configured slot to get a
+            // turn can defer discovery/sync forever even though no chapter
+            // work was found.  A confirmed empty scan is sufficient evidence
+            // to hand the bounded claim turn to catalog maintenance.
+            this.markInitialChapterScanEmpty();
             emptyScanRevision = scanRevision;
             break;
           }
@@ -3289,6 +3296,16 @@ export class ImporterEngine {
       Math.min(this.config.MAX_CONCURRENT_CHAPTERS || 5, this.config.TESTED_CONCURRENCY_CEILING || 32),
     );
     this.chapterClaimPhaseReady = this.chapterClaimStartupSlots.size >= configuredSlots;
+  }
+
+  /**
+   * An empty canonical scheduler scan is stronger evidence than a startup
+   * slot-count heuristic: it means the currently executable chapter frontier
+   * was checked and yielded no job.  Let catalog maintenance replenish future
+   * demand instead of waiting for every idle slot to repeat that same scan.
+   */
+  private markInitialChapterScanEmpty(): void {
+    this.chapterClaimPhaseReady = true;
   }
 
   private async getEligibleCatalogSources(): Promise<string[]> {
