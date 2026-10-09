@@ -641,7 +641,6 @@ export class ExistingWorksReconciler {
       for (const ecm of existingChapterMappings) {
         if (
           ecm.status === 'FAILED' &&
-          ecm.is_gap &&
           (ecm.last_error?.includes('404') || ecm.last_error?.includes('sem fallback'))
         ) {
           permanentGapSortKeys.add(Number(ecm.chapter_sort_key));
