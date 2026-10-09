@@ -1686,6 +1686,77 @@ export class AdmissionController {
   }
 
   /**
+   * A P2 work starts at its first unpublished canonical frontier. The
+   * periodic and on-demand admission queries intentionally stay index-bounded
+   * and therefore only know the first queued sort key. Before admitting an
+   * initial (chapter 1) frontier, make the same predecessor check that the
+   * direct claim predicate makes. Otherwise a failed/non-gap chapter 0 can
+   * repeatedly occupy a P2 cohort slot even though the claim fence must
+   * reject chapter 1.
+   *
+   * This is deliberately a bounded post-filter: candidate queries retain
+   * their queue-index access path, then this lookup inspects at most the
+   * handful of selected P2 works. It does not turn a predecessor into a gap,
+   * skip a chapter, or weaken the claim-time canonical fence.
+   */
+  private async filterBlockedInitialP2Candidates(candidateRows: any[]): Promise<any[]> {
+    const firstSortByWork = new Map<string, number>();
+    for (const candidate of candidateRows) {
+      const workId = String(candidate?.work_id || '');
+      const minSort = Number(candidate?.min_sort_key);
+      if (!workId || !Number.isFinite(minSort) || minSort > 1.5) continue;
+      const existing = firstSortByWork.get(workId);
+      if (existing === undefined || minSort < existing) firstSortByWork.set(workId, minSort);
+    }
+    if (firstSortByWork.size === 0) return candidateRows;
+
+    try {
+      const frontiers = Array.from(firstSortByWork.entries());
+      const blocked = await this.runTimedAdmissionQuery(
+        'p2_initial_frontier_blocker_probe',
+        `WITH initial_frontiers AS MATERIALIZED (
+           SELECT candidate.work_id, candidate.min_sort_key
+           FROM unnest($1::uuid[], $2::numeric[]) AS candidate(work_id, min_sort_key)
+         )
+         SELECT candidate.work_id::text
+         FROM initial_frontiers candidate
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM chapters published_chapter
+           WHERE published_chapter.work_id = candidate.work_id
+             AND published_chapter.published_at IS NOT NULL
+         )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM importer_confirmed_gaps gap
+             WHERE gap.work_id = candidate.work_id
+               AND gap.start_sort_key <= 1
+               AND gap.end_sort_key >= candidate.min_sort_key - 1
+           )
+           AND EXISTS (
+             SELECT 1
+             FROM importer_chapter_mappings predecessor_mapping
+             WHERE predecessor_mapping.work_id = candidate.work_id
+               AND predecessor_mapping.chapter_sort_key < candidate.min_sort_key
+               AND predecessor_mapping.is_gap = false
+               AND predecessor_mapping.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
+           )`,
+        [frontiers.map(([workId]) => workId), frontiers.map(([, minSort]) => minSort)],
+      );
+      const blockedWorkIds = new Set(blocked.rows.map((row: any) => String(row.work_id)));
+      return candidateRows.filter((candidate) => !blockedWorkIds.has(String(candidate?.work_id || '')));
+    } catch (err: any) {
+      // The claim-time fence remains authoritative. If this optional,
+      // work-conserving admission probe cannot run, retain the old behavior
+      // rather than making a transient control-plane read halt all P2 work.
+      this.logger.warn('P2 initial frontier blocker probe failed; retaining candidates for claim-time validation', {
+        error: err?.message,
+      });
+      return candidateRows;
+    }
+  }
+
+  /**
    * Step 2: Replenishes active sets (P1 Backfill and P2 New Works) if slots are free.
    * Work-conserving: considers actual worker utilization and elastic capacity.
    */
@@ -2086,12 +2157,14 @@ export class AdmissionController {
         ]
       );
       let candidatesRes = await loadP2Candidates(false);
-      if (candidatesRes.rows.length < newWorkSlotsAvailable) {
+      let p2Candidates = await this.filterBlockedInitialP2Candidates(candidatesRes.rows);
+      if (p2Candidates.length < newWorkSlotsAvailable) {
         candidatesRes = await loadP2Candidates(true);
+        p2Candidates = await this.filterBlockedInitialP2Candidates(candidatesRes.rows);
       }
 
       // Sort P2 candidates by permit headroom and source diversity
-      candidatesRes.rows.sort((a: any, b: any) => {
+      p2Candidates.sort((a: any, b: any) => {
         const permitsA = this.sourcePermitProvider ? this.sourcePermitProvider(a.source) : 1;
         const permitsB = this.sourcePermitProvider ? this.sourcePermitProvider(b.source) : 1;
         const activeA = sourceCounts.get(a.source) || 0;
@@ -2107,12 +2180,12 @@ export class AdmissionController {
       });
 
       let admitted = 0;
-      for (const cand of candidatesRes.rows) {
+      for (const cand of p2Candidates) {
         if (admitted >= newWorkSlotsAvailable) break;
 
         const srcCount = sourceCounts.get(cand.source) || 0;
         const maxWorksPerSource = idleWorkers >= 2 ? 4 : 3;
-        const otherSourceCandidates = candidatesRes.rows.filter((r: any) => (sourceCounts.get(r.source) || 0) < maxWorksPerSource);
+        const otherSourceCandidates = p2Candidates.filter((r: any) => (sourceCounts.get(r.source) || 0) < maxWorksPerSource);
         if (srcCount >= maxWorksPerSource && otherSourceCandidates.length > 0) {
           continue;
         }
@@ -2606,13 +2679,19 @@ export class AdmissionController {
       };
 
       let res = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}LoadQueuedMs`, () => loadOnDemandCandidates(false));
-      let match = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}ResolveQueuedFrontierMs`, () => findOnDemandFrontier(res.rows));
+      let candidateRows = isP1
+        ? res.rows
+        : await this.timeAdmissionStage(stages, 'p2InitialFrontierBlockerProbeMs', () => this.filterBlockedInitialP2Candidates(res.rows));
+      let match = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}ResolveQueuedFrontierMs`, () => findOnDemandFrontier(candidateRows));
       // A non-empty QUEUED source window may contain only rows behind a gap.
       // Retry the existing bounded paused-window path when no candidate is
       // actually executable, rather than treating row presence as progress.
       if (!match) {
         const pausedRes = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}LoadPausedMs`, () => loadOnDemandCandidates(true));
-        const pausedMatch = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}ResolvePausedFrontierMs`, () => findOnDemandFrontier(pausedRes.rows));
+        const pausedCandidateRows = isP1
+          ? pausedRes.rows
+          : await this.timeAdmissionStage(stages, 'p2InitialPausedFrontierBlockerProbeMs', () => this.filterBlockedInitialP2Candidates(pausedRes.rows));
+        const pausedMatch = await this.timeAdmissionStage(stages, `${lane.toLowerCase()}ResolvePausedFrontierMs`, () => findOnDemandFrontier(pausedCandidateRows));
         if (pausedMatch) {
           res = pausedRes;
           match = pausedMatch;
