@@ -1932,7 +1932,10 @@ export class AdmissionController {
                 reason: 'ADMISSION_CANDIDATE_GAP_CONFIRM',
               });
               if (conf.confirmed) contiguous.push(cand);
-              else this.deadWorksCache.set(cand.work_id, Date.now());
+              else {
+                const tempBlock = conf.reason.includes('JOB_EXISTS_IN_QUEUE') || conf.reason.includes('ALTERNATIVE_SOURCE_HAS_CHAPTER');
+                this.deadWorksCache.set(cand.work_id, tempBlock ? Date.now() - 59 * 60 * 1000 : Date.now());
+              }
             } catch {}
           }
         }
@@ -2573,7 +2576,10 @@ export class AdmissionController {
               reason: 'ON_DEMAND_ADMISSION_GAP_CONFIRM',
             });
             gapConfirmed = conf.confirmed;
-            if (!gapConfirmed) this.deadWorksCache.set(cand.work_id, Date.now());
+            if (!gapConfirmed) {
+              const tempBlock = conf.reason.includes('JOB_EXISTS_IN_QUEUE') || conf.reason.includes('ALTERNATIVE_SOURCE_HAS_CHAPTER');
+              this.deadWorksCache.set(cand.work_id, tempBlock ? Date.now() - 59 * 60 * 1000 : Date.now());
+            }
           } catch { this.deadWorksCache.set(cand.work_id, Date.now()); }
           finally {
             stages.gapConfirmationMs = (stages.gapConfirmationMs || 0) + Math.round(performance.now() - confirmationStartedAt);
