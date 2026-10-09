@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import { ImporterEngine, selectCatalogMaintenanceProbeSources } from '../src/core/engine.js';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  ImporterEngine,
+  legacySameSourceClaimRecoveryDedupeKey,
+  selectCatalogMaintenanceProbeSources,
+} from '../src/core/engine.js';
 import { shouldDeferHeavyStagedClassification } from '../src/core/auto-heal-watchdog.js';
 import { AsyncSemaphore } from '../src/core/concurrency.js';
 
@@ -90,5 +94,41 @@ describe('claim pressure protects the bounded YSQL pool', () => {
 
   it('keeps the maintenance probe empty when no source is eligible', () => {
     expect(selectCatalogMaintenanceProbeSources([], 4, 6)).toEqual({ sources: [], nextCursor: 0 });
+  });
+
+  it('uses a distinct idempotency key for a legacy ambiguity recovery sync', () => {
+    expect(legacySameSourceClaimRecoveryDedupeKey('mangaflix', 'source-work-42'))
+      .toBe('mangaflix:legacy-same-source-claim-recovery:source-work-42');
+  });
+
+  it('queues only a bounded, separately deduplicated legacy ambiguity re-sync', async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [{ source_work_id: 'source-work-42', source_slug: 'legacy-work', source_title: 'Legacy Work' }],
+    });
+    const enqueueBatch = vi.fn().mockResolvedValue(1);
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    engine.dbPool = { query };
+    engine.queue = { enqueueBatch };
+    engine.logger = { info: vi.fn(), warn: vi.fn() };
+
+    await engine.scheduleLegacySameSourceClaimAmbiguityRecovery('mangaflix');
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("wm.sync_status = 'AMBIGUOUS'"),
+      ['mangaflix', 'Work already claimed by another ID from the same source',
+        'mangaflix:legacy-same-source-claim-recovery:', 4],
+    );
+    expect(enqueueBatch).toHaveBeenCalledWith([{
+      taskType: 'SYNC_WORK',
+      source: 'mangaflix',
+      dedupeKey: 'mangaflix:legacy-same-source-claim-recovery:source-work-42',
+      payload: {
+        sourceWorkId: 'source-work-42',
+        slug: 'legacy-work',
+        title: 'Legacy Work',
+        legacySameSourceClaimRecovery: true,
+      },
+      priority: 65,
+    }]);
   });
 });
