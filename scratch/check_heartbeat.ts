@@ -11,8 +11,13 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
-  console.log(res.rows);
+
+  const res = await pool.query("SELECT value FROM settings WHERE key = 'importer_heartbeat'");
+  console.log("Heartbeat:", res.rows[0]?.value);
+  
+  const tel = await pool.query("SELECT created_at, data->'runtimeFingerprint'->>'gitSha' as sha FROM importer_diagnostic_telemetry ORDER BY created_at DESC LIMIT 3");
+  console.log("Telemetry updates:", tel.rows);
+
   await pool.end();
 }
 run();

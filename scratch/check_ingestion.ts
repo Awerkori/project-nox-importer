@@ -11,8 +11,16 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
-  console.log(res.rows);
+  try {
+    const res = await pool.query(`
+      SELECT id, chapter_ingestion_enabled
+      FROM importer_sources
+      WHERE id IN ('nebulosascan', 'apenasumafa', 'montetai', 'geasscomics')
+    `);
+    console.log(JSON.stringify(res.rows, null, 2));
+  } catch (err) {
+    console.error(err.message);
+  }
   await pool.end();
 }
 run();

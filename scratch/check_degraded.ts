@@ -11,8 +11,10 @@ async function run() {
     database: process.env.YUGABYTE_DATABASE,
     ssl: { rejectUnauthorized: false }
   });
-  const res = await pool.query(`SELECT * FROM settings WHERE key LIKE 'work_affinity%'`);
-  console.log(res.rows);
+
+  const hbRes = await pool.query("SELECT value FROM settings WHERE key = 'importer_heartbeat'");
+  if (hbRes.rows[0]) console.log(JSON.stringify(JSON.parse(hbRes.rows[0].value), null, 2));
+
   await pool.end();
 }
 run();
