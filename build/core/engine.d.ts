@@ -45,6 +45,15 @@ export declare function resolveChapterClaimConcurrency(globalConcurrency: number
  */
 export declare function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency: number, effectiveChapterConcurrency: number, emptySchedulerScanMode?: boolean): number;
 /**
+ * Catalog maintenance is allowed only while the shared direct YSQL pool has
+ * a physical idle connection. Claim-gate occupancy alone is not a pressure
+ * signal: workers deliberately acquire it before their short source/status
+ * checks, so an empty chapter pipeline can keep every logical claim slot
+ * occupied while both database clients are idle. Treating that state as
+ * pressure starves DISCOVER_WORKS and SYNC_WORK indefinitely.
+ */
+export declare function isCatalogMaintenancePoolPressured(pool: unknown): boolean;
+/**
  * A null scheduler result means every priority lane and the bounded catalog
  * fallback were just checked without finding executable work. Repeating that
  * DB-heavy scan after the historical 50-150ms sleep crowds out real claims on
@@ -327,9 +336,9 @@ export declare class ImporterEngine {
      */
     private runCatalogSyncWorker;
     /**
-     * Maintenance lanes are best-effort.  Never let them occupy the only
-     * remaining YSQL/claim opportunity while chapter claims are queued or nearly
-     * saturating the bounded claim gate.
+     * Maintenance lanes are best-effort. Never compete with a physically busy
+     * YSQL pool, but do not confuse logical claim-gate occupancy with database
+     * pressure: that would permanently starve discovery while the pool is idle.
      */
     private shouldDeferCatalogMaintenance;
     private markChapterClaimPhaseAttempt;

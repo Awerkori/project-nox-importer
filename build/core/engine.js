@@ -337,6 +337,34 @@ export function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency, ef
     return Math.min(configured, effective);
 }
 /**
+ * Catalog maintenance is allowed only while the shared direct YSQL pool has
+ * a physical idle connection. Claim-gate occupancy alone is not a pressure
+ * signal: workers deliberately acquire it before their short source/status
+ * checks, so an empty chapter pipeline can keep every logical claim slot
+ * occupied while both database clients are idle. Treating that state as
+ * pressure starves DISCOVER_WORKS and SYNC_WORK indefinitely.
+ */
+export function isCatalogMaintenancePoolPressured(pool) {
+    const state = pool;
+    const waiting = Number(state?.waitingCount);
+    if (Number.isFinite(waiting) && waiting > 0)
+        return true;
+    const total = Number(state?.totalCount);
+    const idle = Number(state?.idleCount);
+    // A pg.Pool opens clients lazily. With no clients, maintenance is the first
+    // bounded user; with known clients, require all of them to be idle so it
+    // never takes a connection away from an active claim.
+    if (Number.isFinite(total)) {
+        if (total === 0)
+            return false;
+        if (total > 0 && Number.isFinite(idle))
+            return idle < total;
+    }
+    // Preserve the historical fail-closed behavior for non-pg/test adapters
+    // that do not expose pool occupancy.
+    return true;
+}
+/**
  * A null scheduler result means every priority lane and the bounded catalog
  * fallback were just checked without finding executable work. Repeating that
  * DB-heavy scan after the historical 50-150ms sleep crowds out real claims on
@@ -2869,15 +2897,14 @@ export class ImporterEngine {
         }
     }
     /**
-     * Maintenance lanes are best-effort.  Never let them occupy the only
-     * remaining YSQL/claim opportunity while chapter claims are queued or nearly
-     * saturating the bounded claim gate.
+     * Maintenance lanes are best-effort. Never compete with a physically busy
+     * YSQL pool, but do not confuse logical claim-gate occupancy with database
+     * pressure: that would permanently starve discovery while the pool is idle.
      */
     shouldDeferCatalogMaintenance() {
         if (!this.chapterClaimPhaseReady)
             return true;
-        return this.chapterClaimGate.queued > 0 ||
-            this.chapterClaimGate.active > 0;
+        return isCatalogMaintenancePoolPressured(this.dbPool);
     }
     markChapterClaimPhaseAttempt(slotIndex) {
         if (this.chapterClaimPhaseReady)
