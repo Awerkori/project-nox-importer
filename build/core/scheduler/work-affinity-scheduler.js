@@ -192,7 +192,7 @@ export class WorkAffinityScheduler {
     lastCatalogProbeAt = 0;
     catalogProbeMinIntervalMs = 1_000;
     catalogProbeSourceWindowSize = 8;
-    catalogProbeRowsPerSource = 64;
+    catalogProbeRowsPerSource = 256;
     publicationBarrier;
     sourcePermitProvider;
     chapterCapacityProvider = () => 1;
@@ -1338,12 +1338,10 @@ export class WorkAffinityScheduler {
         CROSS JOIN LATERAL (
           SELECT q.id
           FROM importer_queue q
-          JOIN works w ON w.id = (q.payload->>'workId')::uuid
           WHERE q.source = s.id
             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
             AND q.task_type = 'IMPORT_CHAPTER'
             AND q.attempts < COALESCE(q.max_attempts, 7)
-            AND w.published = true
           -- Uses idx_importer_queue_fetch; canonical selection remains below.
           ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
           LIMIT $6
@@ -1368,6 +1366,7 @@ export class WorkAffinityScheduler {
           AND q.task_type = 'IMPORT_CHAPTER'
           AND q.attempts < COALESCE(q.max_attempts, 7)
           AND s.enabled = true
+          AND w.published = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
           ${CANONICAL_FRONTIER_CLAIM_FILTER}
