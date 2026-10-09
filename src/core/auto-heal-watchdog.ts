@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 import { Logger } from './logger.js';
-import { CANONICAL_FRONTIER_CLAIM_FILTER, CANONICAL_PUBLISHED_CLAIM_FILTER, type WorkAffinityScheduler } from './scheduler/work-affinity-scheduler.js';
+import { CANONICAL_ACTIVE_CLAIM_FILTER, CANONICAL_FRONTIER_CLAIM_FILTER, CANONICAL_PUBLISHED_CLAIM_FILTER, type WorkAffinityScheduler } from './scheduler/work-affinity-scheduler.js';
 import { SOURCE_EXECUTION_ELIGIBILITY_SQL } from './source-eligibility.js';
 import type { AdmissionController } from './scheduler/admission-controller.js';
 import type { ProtectiveSentinel } from './protective-sentinel.js';
@@ -384,7 +384,8 @@ export class AutoHealWatchdog {
           ) pub ON TRUE
           WHERE 1=1
             ${CANONICAL_PUBLISHED_CLAIM_FILTER}
-            
+            ${CANONICAL_FRONTIER_CLAIM_FILTER}
+            ${CANONICAL_ACTIVE_CLAIM_FILTER}
         ) sub) as eligible_cnt,
         (SELECT count(*) FROM importer_queue WHERE status = 'IMPORTING') as importing_cnt,
         (SELECT count(*) FROM importer_queue WHERE status = 'RETRY') as retry_cnt

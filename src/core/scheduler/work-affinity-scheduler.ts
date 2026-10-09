@@ -405,7 +405,7 @@ export class WorkAffinityScheduler {
           WHERE q.task_type = 'IMPORT_CHAPTER'
             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
             ${CANONICAL_PUBLISHED_CLAIM_FILTER}
-            
+            ${CANONICAL_FRONTIER_CLAIM_FILTER}
             ${CANONICAL_ACTIVE_CLAIM_FILTER}
           GROUP BY q.payload->>'workId'
           ORDER BY MIN(cw.min_next_run_at) ASC, MIN(cw.min_chapter_sort_key) ASC NULLS LAST
@@ -1522,7 +1522,7 @@ export class WorkAffinityScheduler {
           AND s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
-          
+          ${CANONICAL_FRONTIER_CLAIM_FILTER}
           ${disallowedWorkIdsFilter}
           ${disallowedChapterKeysFilter}
           ${CANONICAL_ACTIVE_CLAIM_FILTER}
@@ -1714,7 +1714,7 @@ const allowedSourcesFilter = opts.allowedSources && opts.allowedSources.length >
         WHERE s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
-          
+          ${CANONICAL_FRONTIER_CLAIM_FILTER}
           ${allowedSourcesFilter}
           ${disallowedWorkIdsFilter}
           ${disallowedChapterKeysFilter}
@@ -1860,7 +1860,7 @@ const minPriorityFilter = opts.minPriority != null ? `AND priority >= $2::int` :
         WHERE s.enabled = true
           AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
           ${CANONICAL_PUBLISHED_CLAIM_FILTER}
-          
+          ${CANONICAL_FRONTIER_CLAIM_FILTER}
           ${allowedSourcesFilter}
           ${disallowedWorkIdsFilter}
           ${disallowedChapterKeysFilter}

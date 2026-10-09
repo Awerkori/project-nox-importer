@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { CANONICAL_FRONTIER_CLAIM_FILTER } from '../scheduler/work-affinity-scheduler.js';
 
 describe('Canonical Claim Filters', () => {
@@ -28,5 +29,13 @@ describe('Canonical Claim Filters', () => {
     // Assegurar que a checagem não é contornada por restrições de fonte
     expect(CANONICAL_FRONTIER_CLAIM_FILTER).not.toContain('s.status');
     expect(CANONICAL_FRONTIER_CLAIM_FILTER).not.toMatch(/importer_sources/);
+  });
+
+  it('wires the frontier guard into every direct claim path and the watchdog count', () => {
+    const schedulerSource = readFileSync(new URL('../scheduler/work-affinity-scheduler.ts', import.meta.url), 'utf8');
+    const watchdogSource = readFileSync(new URL('../auto-heal-watchdog.ts', import.meta.url), 'utf8');
+
+    expect(schedulerSource.match(/\$\{CANONICAL_FRONTIER_CLAIM_FILTER\}/g)).toHaveLength(4);
+    expect(watchdogSource.match(/\$\{CANONICAL_FRONTIER_CLAIM_FILTER\}/g)).toHaveLength(1);
   });
 });
