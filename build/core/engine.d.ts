@@ -22,6 +22,18 @@ export declare function selectCatalogMaintenanceProbeSources(eligibleSources: st
     sources: string[];
     nextCursor: number;
 };
+/**
+ * Maintenance cursors describe a moving updates feed, while bootstrap cursors
+ * describe a stable catalog page or offset. Once a full pass has completed,
+ * never feed its maintenance cursor back into a new bootstrap: adapters can
+ * legitimately interpret an ISO timestamp as a large numeric page/offset.
+ */
+export declare function resolveCatalogBackfillCursor(checkpoint: {
+    cursor_value?: string | null;
+    metadata?: {
+        catalog_completed?: boolean | null;
+    } | null;
+} | null | undefined): string | null;
 type DownloadRequestTrace = {
     jobId: string;
     source: string;
