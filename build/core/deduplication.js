@@ -114,7 +114,14 @@ export class DeduplicationEngine {
             throw mapErr;
         }
         if (existingMapping) {
-            if (existingMapping.sync_status === 'AMBIGUOUS') {
+            // Reconsider only the legacy ambiguity produced by a same-source
+            // claim. Earlier versions treated a coarse creator fallback (often a
+            // scan group) as an identity collision. The current matcher preserves
+            // real title/slug/alias collisions, while allowing those false
+            // positives to be resolved on their next normal sync.
+            const retryableSameSourceClaimAmbiguity = existingMapping.sync_status === 'AMBIGUOUS' &&
+                existingMapping.metadata?.ambiguity_reason === 'Work already claimed by another ID from the same source';
+            if (existingMapping.sync_status === 'AMBIGUOUS' && !retryableSameSourceClaimAmbiguity) {
                 return {
                     workId: existingMapping.work_id,
                     mappingId: existingMapping.id,
@@ -122,6 +129,12 @@ export class DeduplicationEngine {
                     slug: existingMapping.source_slug,
                     reason: 'Marked as AMBIGUOUS in mapping table pending editorial review',
                 };
+            }
+            if (retryableSameSourceClaimAmbiguity) {
+                this.logger.info('Reconsidering same-source claim ambiguity with identity-scoped matching', {
+                    source,
+                    sourceWorkId,
+                });
             }
             if (existingMapping.work_id) {
                 // Update last_synced_at
@@ -183,6 +196,12 @@ export class DeduplicationEngine {
                 candidateMap.set(w.id, w);
             }
         }
+        // The first three queries are identity lookups (title, slug, aliases, or
+        // an existing source mapping).  Keep that provenance separate from the
+        // optional creator fallback below: a scan group can be listed as the
+        // "author" of hundreds of unrelated works, so its result alone must not
+        // turn an otherwise-new source work into a same-source collision.
+        const identityCandidateWorkIds = new Set(candidateMap.keys());
         // Title/alias remains the cheap primary narrowing path. Only when it
         // yields no candidate do we use exact creator fields to surface a small
         // corroborative set for translated titles. This avoids catalog scans.
@@ -219,6 +238,7 @@ export class DeduplicationEngine {
             const claimedBySameSource = new Set((claims || [])
                 .filter((c) => c.source === source && c.source_work_id !== sourceWorkId && c.work_id)
                 .map((c) => c.work_id));
+            const hasIdentityCandidateClaimedBySameSource = matchedWorks.some((work) => identityCandidateWorkIds.has(work.id) && claimedBySameSource.has(work.id));
             let bestMatch = null;
             let highestScore = -1;
             let secondScore = -1;
@@ -301,7 +321,7 @@ export class DeduplicationEngine {
             let isAmbiguous = false;
             // High confidence threshold: >= 0.85
             if (!bestMatch || highestScore < 0.85) {
-                if (ambiguousMetadataCandidates.length > 0 || matchedWorks.some(w => claimedBySameSource.has(w.id)) || (highestScore >= 0.60 && highestScore < 0.85)) {
+                if (ambiguousMetadataCandidates.length > 0 || hasIdentityCandidateClaimedBySameSource || (highestScore >= 0.60 && highestScore < 0.85)) {
                     isAmbiguous = true;
                 }
             }

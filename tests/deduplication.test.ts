@@ -216,6 +216,98 @@ describe('DeduplicationEngine', () => {
     expect((map.rows[0] as any).sync_status).toBe('AMBIGUOUS');
   });
 
+  it('does not mistake a creator-only fallback result for a same-source identity collision', async () => {
+    // MangaFlix exposes chapter upload groups as the first chapter "owner".
+    // A group can own many unrelated series, so this fallback candidate is
+    // deliberately not an identity match for the incoming work.
+    const unrelated = await db.query(`
+      insert into public.works (title, slug, author, kind, status)
+      values ('Unrelated Atlas Series', 'unrelated-atlas-series', 'AtlasScan', 'MANGA', 'ONGOING')
+      returning id
+    `);
+    const unrelatedId = (unrelated.rows[0] as any).id;
+    await db.query(`
+      insert into public.importer_work_mappings
+        (source, source_work_id, work_id, source_slug, source_title, sync_status, metadata, last_synced_at)
+      values ('mangaflix', 'mf-unrelated-atlas', $1, 'unrelated-atlas-series', 'Unrelated Atlas Series', 'SYNCED', '{}'::jsonb, now())
+    `, [unrelatedId]);
+
+    const result = await engine.resolveWork({
+      source: 'mangaflix',
+      sourceWorkId: 'mf-soul-vibration',
+      title: 'Soul Vibration',
+      slug: 'soul-vibration',
+      author: 'AtlasScan',
+      kind: 'MANGA',
+    });
+
+    expect(result.status).toBe('NEW_WORK');
+    expect(result.workId).toBeTruthy();
+    expect(result.workId).not.toBe(unrelatedId);
+  });
+
+  it('reconsiders the legacy same-source-claim ambiguity with identity-scoped matching', async () => {
+    await db.query(`
+      insert into public.importer_work_mappings
+        (source, source_work_id, work_id, source_slug, source_title, sync_status, metadata, last_synced_at)
+      values (
+        'mangaflix',
+        'mf-legacy-creator-false-positive',
+        null,
+        'legacy-soul-vibration',
+        'Legacy Soul Vibration',
+        'AMBIGUOUS',
+        $1::jsonb,
+        now()
+      )
+    `, [JSON.stringify({ ambiguity_reason: 'Work already claimed by another ID from the same source' })]);
+
+    const result = await engine.resolveWork({
+      source: 'mangaflix',
+      sourceWorkId: 'mf-legacy-creator-false-positive',
+      title: 'Legacy Soul Vibration',
+      slug: 'legacy-soul-vibration',
+      author: 'AtlasScan',
+      kind: 'MANGA',
+    });
+
+    expect(result.status).toBe('NEW_WORK');
+    const mapping = await db.query(
+      'select sync_status, work_id from public.importer_work_mappings where source = $1 and source_work_id = $2',
+      ['mangaflix', 'mf-legacy-creator-false-positive'],
+    );
+    expect((mapping.rows[0] as any).sync_status).toBe('SYNCED');
+    expect((mapping.rows[0] as any).work_id).toBe(result.workId);
+  });
+
+  it('keeps a reconsidered legacy ambiguity blocked when title identity still conflicts', async () => {
+    await db.query(`
+      insert into public.importer_work_mappings
+        (source, source_work_id, work_id, source_slug, source_title, sync_status, metadata, last_synced_at)
+      values (
+        'nexus',
+        'nx-legacy-real-identity-conflict',
+        null,
+        'solo-hero-legend',
+        'Solo Hero Legend',
+        'AMBIGUOUS',
+        $1::jsonb,
+        now()
+      )
+    `, [JSON.stringify({ ambiguity_reason: 'Work already claimed by another ID from the same source' })]);
+
+    const result = await engine.resolveWork({
+      source: 'nexus',
+      sourceWorkId: 'nx-legacy-real-identity-conflict',
+      title: 'Solo Hero Legend',
+      slug: 'solo-hero-legend',
+      kind: 'MANHWA',
+    });
+
+    expect(result.status).toBe('AMBIGUOUS');
+    expect(result.workId).toBeNull();
+  });
+
   it('does not let fuzzy title similarity alone bind a source work that will publish chapters', async () => {
     await db.exec(`
       insert into public.importer_sources (id, name, base_url, enabled, rate_limit_per_second, sync_interval_minutes, config)
