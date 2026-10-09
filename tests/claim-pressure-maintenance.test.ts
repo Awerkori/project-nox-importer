@@ -67,6 +67,17 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(engine.shouldDeferCatalogMaintenance()).toBe(false);
   });
 
+  it('releases maintenance after a confirmed empty canonical scan', () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    engine.chapterClaimPhaseReady = false;
+    engine.chapterClaimStartupSlots = new Set([0]);
+
+    engine.markInitialChapterScanEmpty();
+
+    expect(engine.chapterClaimPhaseReady).toBe(true);
+    expect(engine.shouldDeferCatalogMaintenance()).toBe(false);
+  });
+
   it('rotates bounded maintenance probes across eligible sources', () => {
     const sources = ['zeta', 'mangaflix', 'alpha', 'mangaflix'];
 

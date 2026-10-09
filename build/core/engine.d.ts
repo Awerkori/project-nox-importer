@@ -365,6 +365,13 @@ export declare class ImporterEngine {
      */
     private shouldDeferCatalogMaintenance;
     private markChapterClaimPhaseAttempt;
+    /**
+     * An empty canonical scheduler scan is stronger evidence than a startup
+     * slot-count heuristic: it means the currently executable chapter frontier
+     * was checked and yielded no job.  Let catalog maintenance replenish future
+     * demand instead of waiting for every idle slot to repeat that same scan.
+     */
+    private markInitialChapterScanEmpty;
     private getEligibleCatalogSources;
     /**
      * Executes a job with an active lease heartbeat and a bounded soft deadline.
