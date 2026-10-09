@@ -358,10 +358,12 @@ export class AutoHealWatchdog {
               MIN(q.chapter_sort_key) as min_chapter_sort_key
             FROM importer_queue q
             JOIN importer_sources s ON q.source = s.id
+            JOIN works w ON w.id = (q.payload->>'workId')::uuid
             WHERE q.task_type = 'IMPORT_CHAPTER'
               AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
               AND q.priority >= 50
               AND s.enabled = true
+              AND w.published IS TRUE
               AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
             GROUP BY q.payload->>'workId'
             ORDER BY MIN(q.chapter_sort_key) ASC NULLS LAST
@@ -369,7 +371,6 @@ export class AutoHealWatchdog {
           )
           SELECT 1
           FROM candidate_works cw
-          JOIN works w ON w.id = cw.work_id::uuid
           JOIN importer_queue q
             ON (q.payload->>'workId') = cw.work_id
             AND q.chapter_sort_key = cw.min_chapter_sort_key
@@ -381,7 +382,7 @@ export class AutoHealWatchdog {
             WHERE c.work_id = (q.payload->>'workId')::uuid
               AND c.published_at IS NOT NULL
           ) pub ON TRUE
-          WHERE w.published IS TRUE
+          WHERE 1=1
             ${CANONICAL_PUBLISHED_CLAIM_FILTER}
             ${CANONICAL_FRONTIER_CLAIM_FILTER}
         ) sub) as eligible_cnt,
