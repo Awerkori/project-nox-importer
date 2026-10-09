@@ -14,14 +14,17 @@ async function run() {
 
   console.log("Waiting for new deploy to take effect...");
   let lastSha = '';
-  for (let i = 0; i < 60; i++) { // ~10 minutes
+  for (let i = 0; i < 300; i++) { // ~50 minutes
     try {
       const res = await pool.query(`
         SELECT data->'runtimeFingerprint'->>'gitSha' as sha,
                data->'schedulerAcquireBreakdown'->'claimLockSqlExecMs'->>'avg' as claim_sql_avg,
-               data->'schedulerAcquireBreakdown'->'totalMs'->>'avg' as total_acq_avg
+               data->'schedulerAcquireBreakdown'->'totalMs'->>'avg' as total_acq_avg,
+               data->'yugabyteDbPool'->>'waitP50Ms' as pool_wait_p50,
+               data->'yugabyteDbPool'->>'waitAvgMs' as pool_wait_avg
         FROM importer_diagnostic_telemetry 
         WHERE data->>'schedulerAcquireBreakdown' IS NOT NULL
+           OR data->>'yugabyteDbPool' IS NOT NULL
         ORDER BY created_at DESC 
         LIMIT 1
       `);
@@ -31,7 +34,7 @@ async function run() {
 
       if (res.rows[0]) {
         const row = res.rows[0];
-        console.log(`[${new Date().toISOString()}] SHA: ${row.sha.substring(0,7)} | claim_sql: ${row.claim_sql_avg}ms | total_acq: ${row.total_acq_avg}ms | Status: ${hb?.status} | rate1m: ${hb?.throughput?.rate1m ?? hb?.rate1m} | Cap: ${hb?.capacity?.concurrency ?? hb?.capacity}`);
+        console.log(`[${new Date().toISOString()}] SHA: ${row.sha?.substring(0,7)} | PoolWaitP50: ${row.pool_wait_p50}ms | PoolWaitAvg: ${row.pool_wait_avg}ms | Status: ${hb?.status} | rate1m: ${hb?.throughput?.rate1m ?? hb?.rate1m} | Cap: ${hb?.capacity?.concurrency ?? hb?.capacity} | 5xx: ${hb?.capacity?.consecutive5xx}`);
       }
     } catch (err) {
       console.error(err.message);

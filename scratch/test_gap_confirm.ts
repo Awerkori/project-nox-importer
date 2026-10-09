@@ -1,5 +1,7 @@
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
+import { confirmUpstreamGapInterval } from '../src/core/gap-validator.js';
+
 dotenv.config();
 
 const pool = new Pool({
@@ -12,9 +14,14 @@ const pool = new Pool({
 });
 
 async function main() {
-  const query = process.argv[2] || "SELECT 1";
-  const res = await pool.query(query);
-  console.table(res.rows);
+  const res = await confirmUpstreamGapInterval(pool, {
+    workId: '1da06bc3-ba83-44b8-907d-dc5923816caf',
+    startSortKey: 29,
+    endSortKey: 29,
+    primarySource: 'apenasumafa',
+    reason: 'TEST',
+  });
+  console.log(JSON.stringify(res, null, 2));
   pool.end();
 }
 main().catch(console.error);

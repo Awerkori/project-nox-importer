@@ -58,8 +58,8 @@ describe('bounded admission snapshot', () => {
     const onDemandStart = source.indexOf('const loadOnDemandCandidates =');
     const onDemandSql = source.slice(onDemandStart, onDemandStart + 10000);
     expect(onDemandSql).toMatch(/eligible_sources AS MATERIALIZED[\s\S]{0,700}CROSS JOIN LATERAL/);
-    expect(onDemandSql).toContain('s.id = ANY($6::text[])');
-    expect(onDemandSql).toMatch(/LIMIT \$5/);
+    expect(onDemandSql).toContain('s.id = ANY($5::text[])');
+
     expect(onDemandSql).toContain('ORDER BY q.source, q.min_sort_key ASC NULLS LAST');
     expect(onDemandSql).not.toMatch(/FROM importer_queue q[\s\S]{0,1200}GROUP BY q\.payload->>'workId', q\.source/);
     expect(source).toContain("predecessor.chapter_sort_key < q.chapter_sort_key");
@@ -429,7 +429,7 @@ describe('bounded admission snapshot', () => {
           return { rows: [{ id: 's' }] };
         }
         if (sql.includes('WITH eligible_sources AS MATERIALIZED')) {
-          const includesPaused = sql.includes("OR q.status = 'PAUSED_BY_STAFF'");
+          const includesPaused = sql.includes("paused AS (");
           if (includesPaused) {
             pausedWindowQueries++;
             return { rows: [{ work_id: pausedFrontierWork, title: 'Paused frontier', source: 's', pending_jobs: '1', queued_count: '0', min_sort_key: '2' }] };

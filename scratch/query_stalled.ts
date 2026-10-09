@@ -15,9 +15,8 @@ async function main() {
   const res = await pool.query(`
     SELECT payload->>'workId' as work_id, count(*) as c 
     FROM importer_queue 
-    WHERE status IN ('QUEUED', 'PAUSED_BY_STAFF', 'RETRY') AND task_type = 'IMPORT_CHAPTER'
+    WHERE status = 'QUEUED' AND task_type = 'IMPORT_CHAPTER'
     GROUP BY payload->>'workId'
-    ORDER BY count(*) DESC
     LIMIT 10
   `);
   console.log(res.rows);

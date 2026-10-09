@@ -12,9 +12,8 @@ const pool = new Pool({
 });
 
 async function main() {
-  const query = process.argv[2] || "SELECT 1";
-  const res = await pool.query(query);
-  console.table(res.rows);
+  const res = await pool.query("SELECT value FROM settings WHERE key = 'importer_heartbeat'");
+  console.log(JSON.stringify(JSON.parse(res.rows[0].value), null, 2));
   pool.end();
 }
 main().catch(console.error);
