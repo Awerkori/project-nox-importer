@@ -21,6 +21,12 @@ export interface CandidateWork {
     ageRating?: number;
     contentRating?: 'GENERAL' | 'ADULT_18';
     coverId?: string | null;
+    /**
+     * Cover registration can cost a source request and a storage upload. It is
+     * intentionally lazy so an ambiguous work or healthy canonical cover does
+     * not pay for media that will be discarded.
+     */
+    loadCoverId?: () => Promise<string | null>;
     aliases?: string[];
     genres?: string[];
     rawMetadata?: Record<string, any>;
@@ -44,6 +50,7 @@ export declare class DeduplicationEngine {
     private tagCatalogFlight;
     private readonly tagCatalogTtlMs;
     constructor(supabase: SupabaseClient);
+    private resolveCandidateCover;
     /**
      * Resolve or register a work conservatively.
      * Never blindly overwrite or perform destructive merges on fuzzy matches.
