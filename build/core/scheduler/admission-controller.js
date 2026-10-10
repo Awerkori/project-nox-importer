@@ -121,14 +121,14 @@ export class AdmissionController {
     setSourcePermitProvider(provider) {
         this.sourcePermitProvider = provider;
     }
-    async getP1SourceWindow(allowedSources) {
+    async getP1SourceWindow(allowedSources, windowSize = this.p1SourceWindowSize) {
         const result = await this.runQuery(`SELECT s.id
        FROM importer_sources s
        WHERE s.enabled = true
          AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
          AND ($1::text[] IS NULL OR s.id = ANY($1::text[]))
        ORDER BY CASE WHEN $2::text IS NULL OR s.id > $2::text THEN 0 ELSE 1 END, s.id ASC
-       LIMIT $3`, [allowedSources && allowedSources.length > 0 ? allowedSources : null, this.p1SourceWindowCursor, this.p1SourceWindowSize]);
+       LIMIT $3`, [allowedSources && allowedSources.length > 0 ? allowedSources : null, this.p1SourceWindowCursor, Math.max(1, windowSize)]);
         const sources = result.rows.map((row) => String(row.id)).filter(Boolean);
         if (sources.length > 0)
             this.p1SourceWindowCursor = sources[sources.length - 1];
@@ -1793,7 +1793,11 @@ export class AdmissionController {
         // 1. Replenish P1 Backfill Works
         if (backfillSlotsAvailable > 0) {
             const activeIds = activeWorks.map((w) => w.workId);
-            const p1SourceWindow = await this.getP1SourceWindow();
+            // Keep the total candidate budget fixed, but spread it across enough
+            // sources to fill the currently vacant P1 cohort.  A fixed two-source
+            // window left most chapter slots idle when those two frontiers were
+            // blocked while executable P1 heads existed on other healthy sources.
+            const p1SourceWindow = await this.getP1SourceWindow(undefined, Math.min(8, Math.max(this.p1SourceWindowSize, backfillSlotsAvailable)));
             // Reserve a small total candidate budget across the already-rotated
             // source window. The old multiplier was also used as the per-source
             // LATERAL limit, expanding one maintenance cycle into thousands of
