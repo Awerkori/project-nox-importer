@@ -55,6 +55,12 @@ const MIN_IDLE_CHAPTER_SLOTS_FOR_PARALLEL_CATALOG = 2;
 const LEGACY_RECOVERY_SYNC_TURN_INTERVAL = 4;
 const LEGACY_RECOVERY_PROBE_BACKOFF_MS = 60_000;
 const P1_FRONTIER_RECOVERY_SYNC_TURN_INTERVAL = 4;
+// The frontier-recovery predicate joins two queue populations. A miss is
+// useful evidence for the current source slice, but repeating it immediately
+// only saturates the two-client YSQL pool while ordinary P1 sync can still
+// replenish work. Keep the next bounded probe prompt without turning an
+// empty recovery subset into a hot polling loop.
+const P1_FRONTIER_RECOVERY_PROBE_BACKOFF_MS = 30_000;
 const LEGACY_SAME_SOURCE_CLAIM_AMBIGUITY_REASON = 'Work already claimed by another ID from the same source';
 const LEGACY_SAME_SOURCE_CLAIM_RECOVERY_BATCH_SIZE = 4;
 const LEGACY_SAME_SOURCE_CLAIM_RECOVERY_PRIORITY = 65;
@@ -742,6 +748,7 @@ export class ImporterEngine {
   // bounded preference, but every fourth P1 turn remains a regular catalog
   // sync so the recovery subset cannot starve unscanned existing works.
   private catalogP1FrontierRecoveryClaimsSinceRegularSync = 0;
+  private nextCatalogP1FrontierRecoveryProbeAt = 0;
   // P1 catalog sync probes scan every eligible source before P2 is admitted.
   // Each probe is bounded, but P2 is held until the complete P1 sweep is
   // empty. This keeps the hierarchy without turning one catalog selector
@@ -3529,6 +3536,7 @@ export class ImporterEngine {
             this.catalogP1SyncSourceCursor = p1Probe.nextCursor;
             const frontierRecoveryDue = taskType === 'SYNC_WORK'
               && this.queue.supportsDirectCatalogFrontierRecoveryFilter?.() === true
+              && Date.now() >= (this.nextCatalogP1FrontierRecoveryProbeAt || 0)
               && (Number.isFinite(this.catalogP1FrontierRecoveryClaimsSinceRegularSync)
                 ? this.catalogP1FrontierRecoveryClaimsSinceRegularSync
                 : 0) < P1_FRONTIER_RECOVERY_SYNC_TURN_INTERVAL - 1;
@@ -3552,10 +3560,14 @@ export class ImporterEngine {
                   P1_FRONTIER_RECOVERY_SYNC_TURN_INTERVAL - 1,
                   (this.catalogP1FrontierRecoveryClaimsSinceRegularSync || 0) + 1,
                 );
+                this.nextCatalogP1FrontierRecoveryProbeAt = 0;
                 this.catalogP1SyncSweepRemainingSources = new Set(sortedSources);
                 inFlightSources.add(frontierRecoveryJob.source);
                 return frontierRecoveryJob;
               }
+              // The regular P1 selector below remains immediate. Only the
+              // expensive recovery subset backs off after an empty scan.
+              this.nextCatalogP1FrontierRecoveryProbeAt = Date.now() + P1_FRONTIER_RECOVERY_PROBE_BACKOFF_MS;
             }
             const p1Job = await this.queue.acquireNextJob(
               Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
