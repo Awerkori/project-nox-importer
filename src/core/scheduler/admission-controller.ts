@@ -54,6 +54,18 @@ export function hasCapacityBeyondP1Reservation(
   return importing < capacity - reservation;
 }
 
+/**
+ * Preserve a bounded admission-query budget without letting one source's
+ * backlog consume every candidate row before source-level fairness runs.
+ * The caller has already selected a small, healthy source window; this only
+ * divides its existing row budget across that window.
+ */
+export function resolveFairSourceWindowQuota(totalBudget: number, sourceCount: number): number {
+  const budget = Number.isFinite(totalBudget) ? Math.max(1, Math.floor(totalBudget)) : 1;
+  const sources = Number.isFinite(sourceCount) ? Math.max(1, Math.floor(sourceCount)) : 1;
+  return Math.max(1, Math.ceil(budget / sources));
+}
+
 export class AdmissionController {
   private logger = new Logger('AdmissionController');
   private pool: any;
@@ -1861,6 +1873,15 @@ export class AdmissionController {
     if (backfillSlotsAvailable > 0) {
       const activeIds = activeWorks.map((w) => w.workId);
       const p1SourceWindow = await this.getP1SourceWindow();
+      // Keep the same total candidate budget as before, but reserve a bounded
+      // share for every source in the already-rotated P1 source window. A
+      // global ORDER BY/LIMIT here allowed one source's priority-80 backlog to
+      // erase all other healthy sources before rotation/frontier fairness ran.
+      const p1SourceWindowBudget = Math.max(64, backfillSlotsAvailable * 32) * 10;
+      const p1SourceWindowPerSourceLimit = resolveFairSourceWindowQuota(
+        p1SourceWindowBudget,
+        p1SourceWindow.length,
+      );
       // The normal path must only inspect executable work.  Including the
       // entire PAUSED_BY_STAFF backlog here turns every 4s admission cycle
       // into a full GROUP BY over hundreds of thousands of rows, competing
@@ -1912,11 +1933,20 @@ export class AdmissionController {
              LIMIT $5
            ) candidate
          )` : ''}
-         , source_window AS MATERIALIZED (
-           SELECT * FROM queued_retry
-           ${includePaused ? 'UNION ALL SELECT * FROM paused' : ''}
-           ORDER BY priority DESC, chapter_sort_key ASC
-           LIMIT $5
+         , source_window_ranked AS MATERIALIZED (
+           SELECT windowed.*,
+             ROW_NUMBER() OVER (
+               PARTITION BY windowed.source
+               ORDER BY windowed.priority DESC, windowed.chapter_sort_key ASC NULLS LAST, windowed.next_run_at ASC
+             ) AS source_window_rank
+           FROM (
+             SELECT * FROM queued_retry
+             ${includePaused ? 'UNION ALL SELECT * FROM paused' : ''}
+           ) windowed
+         ), source_window AS MATERIALIZED (
+           SELECT *
+           FROM source_window_ranked
+           WHERE source_window_rank <= ${p1SourceWindowPerSourceLimit}
          ),
          queue_candidate_groups AS MATERIALIZED (
            SELECT q.payload->>'workId' AS work_id, q.source, COUNT(*) AS pending_jobs,
@@ -1978,7 +2008,7 @@ export class AdmissionController {
           Math.max(50, backfillSlotsAvailable * 5),
           4,
           JSON.stringify(this.getP1AdmissionCursors()),
-          Math.max(64, backfillSlotsAvailable * 32) * 10,
+          p1SourceWindowBudget,
           p1SourceWindow,
           Array.from(this.deadWorksCache.keys()).length > 0 ? Array.from(this.deadWorksCache.keys()) : ['00000000-0000-0000-0000-000000000000']
         ]
@@ -2479,6 +2509,9 @@ export class AdmissionController {
         ? await this.timeAdmissionStage(stages, 'p1SourceWindowMs', () => this.getP1SourceWindow(allowedSources))
         : null;
       if (isP1 && p1SourceWindow?.length === 0) continue;
+      const onDemandSourceWindowPerSourceLimit = isP1
+        ? resolveFairSourceWindowQuota(160, p1SourceWindow?.length || 1)
+        : 160;
       const maxPriority = isP1 ? 100 : 75;
       const loadOnDemandCandidates = (includePaused: boolean) => {
         // The paused fallback is the only path that can seed a completely new
@@ -2539,11 +2572,24 @@ export class AdmissionController {
             LIMIT 160
           ) candidate
         )` : ''}
+        ${isP1 ? `, source_window_ranked AS MATERIALIZED (
+          SELECT windowed.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY windowed.source
+              ORDER BY windowed.priority DESC, windowed.chapter_sort_key ASC NULLS LAST, windowed.next_run_at ASC
+            ) AS source_window_rank
+          FROM (
+            SELECT * FROM queued_retry
+            ${includePaused ? 'UNION ALL SELECT * FROM paused' : ''}
+          ) windowed
+        )` : ''}
         , source_window AS MATERIALIZED (
-          SELECT * FROM queued_retry
+          ${isP1 ? `SELECT *
+          FROM source_window_ranked
+          WHERE source_window_rank <= ${onDemandSourceWindowPerSourceLimit}` : `SELECT * FROM queued_retry
           ${includePaused ? 'UNION ALL SELECT * FROM paused' : ''}
           ORDER BY priority DESC, chapter_sort_key ASC
-          LIMIT 160
+          LIMIT 160`}
         ), queue_candidates AS MATERIALIZED (
           SELECT q.payload->>'workId' AS work_id, q.source, COUNT(*) AS pending_jobs,
             COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) AS queued_count,
