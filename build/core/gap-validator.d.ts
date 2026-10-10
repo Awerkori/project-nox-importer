@@ -82,12 +82,12 @@ export interface ConfirmUpstreamGapIntervalResult {
     };
 }
 /**
- * Validates and confirms an upstream structural gap across an entire interval [startSortKey, endSortKey].
- * Enforces Section 1:
- * - Checks all known mappings across all mapped sources for the work
- * - Checks importer_queue
- * - If alternative source has the chapter, prioritizes importing it (does NOT declare gap)
- * - Only if NO source possesses the chapters, inserts into importer_confirmed_gaps
- *   and registers canonical gap mappings.
+ * Checks whether the local importer knows of an alternative for a proposed
+ * interval. This helper intentionally does *not* fetch or probe any upstream
+ * catalog. Therefore it cannot prove that a chapter is absent upstream and
+ * must never create a confirmed canonical gap from local database absence.
+ *
+ * Callers retain the useful alternative-source signal, but must leave the
+ * frontier blocked until a separate path supplies positive upstream evidence.
  */
 export declare function confirmUpstreamGapInterval(client: any, params: ConfirmUpstreamGapIntervalParams): Promise<ConfirmUpstreamGapIntervalResult>;
