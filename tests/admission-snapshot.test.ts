@@ -51,10 +51,25 @@ describe('bounded admission snapshot', () => {
       /queue_candidate_groups[\s\S]{0,1800}canonical_chapter\.published_at IS NOT NULL[\s\S]{0,300}canonical_chapter\.number = COALESCE/,
     );
     const p1PressureStart = source.indexOf("const ready = await this.runTimedAdmissionQuery('p1_ready_frontier_probe'");
-    const p1PressureSql = source.slice(p1PressureStart, p1PressureStart + 9000);
+    const p1PressureSql = source.slice(p1PressureStart, p1PressureStart + 16_000);
     expect(p1PressureSql).toMatch(
       /JOIN works w ON w\.id = \(q\.payload->>'workId'\)::uuid[\s\S]{0,900}w\.published IS TRUE/,
     );
+    // Canonical filtering must happen before choosing each work's minimum
+    // queue row. Otherwise a stale, already-published chapter hides a later
+    // executable P1 chapter and incorrectly opens the P2 admission gate.
+    const readyRowsStart = p1PressureSql.indexOf('WITH ready_rows AS MATERIALIZED');
+    const readyCanonical = p1PressureSql.indexOf('${frontierEligibility}', readyRowsStart);
+    const readyGroup = p1PressureSql.indexOf('GROUP BY work_id', readyRowsStart);
+    expect(readyRowsStart).toBeGreaterThanOrEqual(0);
+    expect(readyCanonical).toBeGreaterThan(readyRowsStart);
+    expect(readyGroup).toBeGreaterThan(readyCanonical);
+    const pausedRowsStart = p1PressureSql.indexOf('WITH paused_rows AS MATERIALIZED');
+    const pausedCanonical = p1PressureSql.indexOf('${frontierEligibility}', pausedRowsStart);
+    const pausedGroup = p1PressureSql.indexOf('GROUP BY work_id', pausedRowsStart);
+    expect(pausedRowsStart).toBeGreaterThan(readyGroup);
+    expect(pausedCanonical).toBeGreaterThan(pausedRowsStart);
+    expect(pausedGroup).toBeGreaterThan(pausedCanonical);
     expect(source).toMatch(
       /loadP2Candidates\(false\)[\s\S]{0,180}loadP2Candidates\(true\)/,
     );
@@ -330,6 +345,33 @@ describe('bounded admission snapshot', () => {
     await expect(controller.canAdmitNewWork()).resolves.toMatchObject({
       allowed: false,
       reason: 'P1_BACKLOG_WAITING: existing catalog work must advance before P2 admission',
+    });
+  });
+
+  it('keeps P2 closed when a later canonical P1 chapter follows a stale published queue row', async () => {
+    const state = {
+      getConfig: () => ({ maxInflightPerWork: 2 }),
+      getActiveWorks: () => [{ workId: 'p1-work', lane: 'P1', state: 'FILLING' }],
+    } as any;
+    const sentinel = { isProtectiveStopActive: async () => false } as any;
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('WITH ready_rows AS MATERIALIZED')) {
+        // The mocked row represents a canonical later chapter; the assertion
+        // verifies the SQL cannot group on an older published row first.
+        expect(sql.indexOf('canonical_chapter.published_at IS NOT NULL')).toBeLessThan(sql.indexOf('GROUP BY work_id'));
+        return { rows: [{ exists: 1 }] };
+      }
+      return { rows: [] };
+    });
+    const controller = new AdmissionController(state, sentinel, { query });
+    controller.setP0CandidateProvider(async () => false);
+    controller.setInFlightChapterCountProvider(() => 0);
+    controller.setChapterCapacityProvider(() => 12);
+
+    await expect(controller.canAdmitNewWork()).resolves.toMatchObject({
+      allowed: false,
+      reason: 'P1_BACKLOG_WAITING: existing catalog work must advance before P2 admission',
+      metrics: { p1Claimable: 1, p1AvailableChapters: 1, p1WorksWaiting: 1 },
     });
   });
 
