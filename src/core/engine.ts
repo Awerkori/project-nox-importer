@@ -1528,19 +1528,31 @@ export class ImporterEngine {
     try {
       const pool = this.dbPool && typeof this.dbPool.query === 'function' ? this.dbPool : getYugabytePool();
       const result = await pool.query(
-        `SELECT wm.source_work_id, wm.source_slug, wm.source_title
-         FROM importer_work_mappings wm
-         WHERE wm.source = $1
-           AND wm.work_id IS NULL
-           AND wm.sync_status = 'AMBIGUOUS'
-           AND wm.metadata->>'ambiguity_reason' = $2
-           AND NOT EXISTS (
-             SELECT 1
-             FROM importer_queue q
-             WHERE q.dedupe_key = $3 || wm.source_work_id
-           )
-         ORDER BY wm.updated_at ASC, wm.source_work_id ASC
-         LIMIT $4`,
+        `WITH outstanding AS MATERIALIZED (
+           SELECT count(*)::int AS count
+           FROM importer_queue q
+           WHERE q.source = $1
+             AND q.dedupe_key LIKE $3 || '%'
+             AND q.status IN ('QUEUED', 'RETRY', 'IMPORTING')
+         ), candidates AS MATERIALIZED (
+           SELECT wm.source_work_id, wm.source_slug, wm.source_title,
+                  row_number() OVER (ORDER BY wm.updated_at ASC, wm.source_work_id ASC) AS candidate_rank
+           FROM importer_work_mappings wm
+           WHERE wm.source = $1
+             AND wm.work_id IS NULL
+             AND wm.sync_status = 'AMBIGUOUS'
+             AND wm.metadata->>'ambiguity_reason' = $2
+             AND NOT EXISTS (
+               SELECT 1
+               FROM importer_queue q
+               WHERE q.dedupe_key = $3 || wm.source_work_id
+             )
+         )
+         SELECT c.source_work_id, c.source_slug, c.source_title
+         FROM candidates c
+         CROSS JOIN outstanding o
+         WHERE c.candidate_rank <= GREATEST(0, $4 - o.count)
+         ORDER BY c.candidate_rank`,
         [
           source,
           LEGACY_SAME_SOURCE_CLAIM_AMBIGUITY_REASON,

@@ -159,7 +159,7 @@ describe('claim pressure protects the bounded YSQL pool', () => {
       .toBe('mangaflix:legacy-same-source-claim-recovery:source-work-42');
   });
 
-  it('queues only a bounded, separately deduplicated legacy ambiguity re-sync', async () => {
+  it('caps outstanding, separately deduplicated legacy ambiguity re-syncs per source', async () => {
     const query = vi.fn().mockResolvedValue({
       rows: [{ source_work_id: 'source-work-42', source_slug: 'legacy-work', source_title: 'Legacy Work' }],
     });
@@ -176,6 +176,8 @@ describe('claim pressure protects the bounded YSQL pool', () => {
       ['mangaflix', 'Work already claimed by another ID from the same source',
         'mangaflix:legacy-same-source-claim-recovery:', 4],
     );
+    expect(query.mock.calls[0][0]).toContain("q.status IN ('QUEUED', 'RETRY', 'IMPORTING')");
+    expect(query.mock.calls[0][0]).toContain('c.candidate_rank <= GREATEST(0, $4 - o.count)');
     expect(enqueueBatch).toHaveBeenCalledWith([{
       taskType: 'SYNC_WORK',
       source: 'mangaflix',
