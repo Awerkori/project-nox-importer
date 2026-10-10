@@ -289,6 +289,11 @@ export class ImporterQueue {
        * published work. This is the catalog-side P1 selector.
        */
       onlyExistingPublishedWorkSync?: boolean;
+      /**
+       * Restrict a catalog P1 sync to a mapped work that already has due P1
+       * chapter work waiting at its canonical frontier.
+       */
+      onlyQueuedP1FrontierWorkSync?: boolean;
     },
   ): Promise<QueueJob | null> {
     const params: Record<string, any> = {
@@ -317,6 +322,9 @@ export class ImporterQueue {
     }
     if (options?.onlyExistingPublishedWorkSync && typeof (this.supabase as any)?.getPool === 'function') {
       params.p_only_existing_published_work_sync = true;
+    }
+    if (options?.onlyQueuedP1FrontierWorkSync && typeof (this.supabase as any)?.getPool === 'function') {
+      params.p_only_queued_p1_frontier_work_sync = true;
     }
 
     const { data, error } = await this.supabase.rpc('importer_acquire_job', params);
@@ -347,6 +355,11 @@ export class ImporterQueue {
    * would let unclassified P2 catalog work overtake P1.
    */
   supportsDirectCatalogPriorityFilters(): boolean {
+    return typeof (this.supabase as any)?.getPool === 'function';
+  }
+
+  /** The frontier-recovery selector is also direct-YSQL-only. */
+  supportsDirectCatalogFrontierRecoveryFilter(): boolean {
     return typeof (this.supabase as any)?.getPool === 'function';
   }
 

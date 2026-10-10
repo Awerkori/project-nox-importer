@@ -220,6 +220,9 @@ export class ImporterQueue {
         if (options?.onlyExistingPublishedWorkSync && typeof this.supabase?.getPool === 'function') {
             params.p_only_existing_published_work_sync = true;
         }
+        if (options?.onlyQueuedP1FrontierWorkSync && typeof this.supabase?.getPool === 'function') {
+            params.p_only_queued_p1_frontier_work_sync = true;
+        }
         const { data, error } = await this.supabase.rpc('importer_acquire_job', params);
         if (error) {
             this.logger.error('Error acquiring queue job', { error: error.message, source });
@@ -244,6 +247,10 @@ export class ImporterQueue {
      * would let unclassified P2 catalog work overtake P1.
      */
     supportsDirectCatalogPriorityFilters() {
+        return typeof this.supabase?.getPool === 'function';
+    }
+    /** The frontier-recovery selector is also direct-YSQL-only. */
+    supportsDirectCatalogFrontierRecoveryFilter() {
         return typeof this.supabase?.getPool === 'function';
     }
     /**

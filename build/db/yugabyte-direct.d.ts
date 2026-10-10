@@ -36,6 +36,8 @@ export declare function acquireJobsDirect(options: {
     onlyLegacySameSourceClaimRecovery?: boolean;
     /** Claim only SYNC_WORK rows mapped to an existing published work (P1). */
     onlyExistingPublishedWorkSync?: boolean;
+    /** Claim only P1 sync rows for works with due P1 chapter-frontier work. */
+    onlyQueuedP1FrontierWorkSync?: boolean;
     taskType?: string;
     batchSize?: number;
 }): Promise<GatewayJob[]>;
