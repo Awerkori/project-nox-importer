@@ -92,6 +92,32 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(second).toEqual({ sources: ['zeta', 'alpha'], nextCursor: 1 });
   });
 
+  it('claims from the whole rotating probe window atomically', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const acquireNextJob = vi.fn().mockResolvedValue({ id: 'mangaflix-recovery' });
+    engine.chapterClaimGate = new AsyncSemaphore(1, 'test_catalog_claim_gate');
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue([
+      'zeta', 'mangaflix', 'littletyrant', 'alpha',
+    ]);
+    engine.queue = { acquireNextJob };
+
+    const job = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+
+    expect(job).toEqual({ id: 'mangaflix-recovery' });
+    expect(acquireNextJob).toHaveBeenCalledTimes(1);
+    expect(acquireNextJob).toHaveBeenCalledWith(
+      5,
+      ['alpha', 'littletyrant', 'mangaflix', 'zeta'],
+      'SYNC_WORK',
+    );
+    expect(engine.catalogMaintenanceSourceCursor.SYNC_WORK).toBe(0);
+    expect(engine.chapterClaimGate.active).toBe(0);
+  });
+
   it('keeps the maintenance probe empty when no source is eligible', () => {
     expect(selectCatalogMaintenanceProbeSources([], 4, 6)).toEqual({ sources: [], nextCursor: 0 });
   });
