@@ -216,6 +216,35 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect((scheduler as any).highPriorityConsecutiveClaims).toBe(5);
   });
 
+  it('tries another known P0 before P1/P2 when the round-robin target races away', async () => {
+    const racedP0WorkId = 'p0-raced-work';
+    const readyP0WorkId = 'p0-ready-work';
+    const p0Job = {
+      id: 'p0-ready-job', source: 'mangaflix', priority: 100, chapter_sort_key: 202,
+      payload: { workId: readyP0WorkId, chapterNumber: 202, isFreshRelease: true },
+    };
+    mockStateStore.setActiveWork({
+      workId: 'p1-work', workTitle: 'P1 backfill', lane: 'P1', state: 'FILLING',
+      primarySource: 'mangaflix', admittedAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(),
+      totalChapters: 2, publishedChapters: 1, queuedChapters: 1, inFlightChapters: 0,
+      frontierSortKey: 2, criticalGapSortKey: null, criticalGapUnblockCount: 0,
+    });
+    vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([racedP0WorkId, readyP0WorkId]);
+    vi.spyOn(scheduler as any, 'claimSingleJob').mockImplementation(async (_pool: unknown, opts: any) => {
+      if (opts.workId === racedP0WorkId) return null;
+      if (opts.allowedWorkIds?.includes(readyP0WorkId) && opts.minPriority === 100) return p0Job;
+      throw new Error('lower-priority path reached while P0 remained eligible');
+    });
+
+    const acquired = await scheduler.acquireNextChapterJob({
+      workerId: 'worker-p0-race', allowedSources: ['mangaflix'],
+    });
+
+    expect(acquired?.id).toBe('p0-ready-job');
+    expect(acquired?.priority).toBe(100);
+  });
+
   it('keeps an eligible STAFF job ahead of P0, P1, and P2', async () => {
     const staffJob = {
       id: 'staff-job', source: 'mangaflix', priority: 1000, chapter_sort_key: 1,
