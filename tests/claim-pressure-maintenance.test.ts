@@ -139,6 +139,84 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(engine.chapterClaimGate.active).toBe(0);
   });
 
+  it('admits mapped published-work sync (P1) before ordinary catalog work and rotates its source winner', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const acquireNextJob = vi.fn().mockResolvedValue({ id: 'p1-sync', source: 'mangaflix' });
+    engine.chapterClaimGate = new AsyncSemaphore(1, 'test_catalog_p1_priority');
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogP1SyncSourceCursor = 0;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue([
+      'zeta', 'mangaflix', 'littletyrant', 'alpha',
+    ]);
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(true),
+    };
+
+    const job = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+
+    expect(job).toEqual({ id: 'p1-sync', source: 'mangaflix' });
+    expect(acquireNextJob).toHaveBeenCalledTimes(1);
+    expect(acquireNextJob).toHaveBeenCalledWith(
+      5,
+      ['alpha', 'littletyrant', 'mangaflix', 'zeta'],
+      'SYNC_WORK',
+      true,
+      { onlyExistingPublishedWorkSync: true },
+    );
+    expect(engine.catalogP1SyncSourceCursor).toBe(3);
+    expect(engine.catalogMaintenanceSourcesInFlight).toEqual(new Set(['mangaflix']));
+  });
+
+  it('permits ordinary catalog work only after an empty P1 selector scan', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const acquireNextJob = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'p2-sync', source: 'alpha' });
+    engine.chapterClaimGate = new AsyncSemaphore(1, 'test_catalog_p1_empty');
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogP1SyncSourceCursor = 0;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue(['alpha', 'beta']);
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(true),
+    };
+
+    const job = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+
+    expect(job).toEqual({ id: 'p2-sync', source: 'alpha' });
+    expect(acquireNextJob).toHaveBeenNthCalledWith(
+      1, 5, ['alpha', 'beta'], 'SYNC_WORK', true,
+      { onlyExistingPublishedWorkSync: true },
+    );
+    expect(acquireNextJob).toHaveBeenNthCalledWith(2, 5, ['alpha', 'beta'], 'SYNC_WORK', true);
+  });
+
+  it('holds SYNC_WORK admission when the P1 selector cannot be expressed', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const acquireNextJob = vi.fn();
+    engine.chapterClaimGate = new AsyncSemaphore(1, 'test_catalog_p1_no_fallback');
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue(['alpha']);
+    engine.logger = { warn: vi.fn() };
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(false),
+    };
+
+    await expect(engine.acquireCatalogMaintenanceJob('SYNC_WORK')).resolves.toBeNull();
+    expect(acquireNextJob).not.toHaveBeenCalled();
+  });
+
   it('reserves one bounded sync turn for queued legacy ambiguity recoveries', async () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
     const acquireNextJob = vi.fn().mockResolvedValue({

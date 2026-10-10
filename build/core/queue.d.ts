@@ -69,7 +69,18 @@ export declare class ImporterQueue {
      */
     acquireNextJob(leaseDurationMinutes?: number, source?: string | string[], taskType?: string, preferSourceOrder?: boolean, options?: {
         onlyLegacySameSourceClaimRecovery?: boolean;
+        /**
+         * Restrict a catalog SYNC_WORK claim to a mapping already attached to a
+         * published work. This is the catalog-side P1 selector.
+         */
+        onlyExistingPublishedWorkSync?: boolean;
     }): Promise<QueueJob | null>;
+    /**
+     * The catalog P1 selector is implemented by the direct YSQL client.  Do
+     * not silently degrade that selector through the gateway RPC: doing so
+     * would let unclassified P2 catalog work overtake P1.
+     */
+    supportsDirectCatalogPriorityFilters(): boolean;
     /**
      * Heartbeat renewal of an active lease
      */

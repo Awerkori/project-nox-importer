@@ -611,6 +611,10 @@ export class ImporterEngine {
         DISCOVER_WORKS: new Map(),
         SYNC_WORK: new Map(),
     };
+    // P1 catalog sync probes scan every eligible source before P2 is admitted.
+    // The cursor advances past the winner, so this priority guard retains
+    // source fairness rather than pinning the maintenance lane to one catalog.
+    catalogP1SyncSourceCursor = 0;
     // Start with one recovery probe after a deploy, then reserve at most one of
     // every four successful sync claims. The lane remains globally serial and
     // each source still has at most one catalog operation in flight.
@@ -3087,6 +3091,38 @@ export class ImporterEngine {
                     .filter((source) => !inFlightSources.has(source));
                 if (allowedSources.length === 0)
                     return null;
+                // Existing public works (P1) must replenish their chapter frontier
+                // before discovery or synchronization of unmapped/new works (P2).
+                // The ordinary catalog probe is intentionally source-first for broad
+                // fairness, so it cannot establish this cross-source priority by
+                // itself.  Restrict this first claim in YSQL, then rotate all healthy
+                // sources only within the P1 cohort.
+                if (taskType === 'SYNC_WORK') {
+                    const supportsPriorityFilters = this.queue.supportsDirectCatalogPriorityFilters?.();
+                    if (supportsPriorityFilters === false) {
+                        // A gateway fallback cannot express the P1 predicate. Holding this
+                        // maintenance turn is safer than silently admitting P2 first.
+                        this.logger.warn('Catalog P1 priority selector unavailable; holding SYNC_WORK admission');
+                        return null;
+                    }
+                    if (supportsPriorityFilters === true) {
+                        const sortedSources = [...new Set(allowedSources)].sort();
+                        const cursor = Number.isFinite(this.catalogP1SyncSourceCursor)
+                            ? this.catalogP1SyncSourceCursor
+                            : 0;
+                        const start = ((cursor % sortedSources.length) + sortedSources.length) % sortedSources.length;
+                        const orderedP1Sources = Array.from({ length: sortedSources.length }, (_, offset) => sortedSources[(start + offset) % sortedSources.length]);
+                        const p1Job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedP1Sources, taskType, true, { onlyExistingPublishedWorkSync: true });
+                        if (p1Job) {
+                            const winnerOffset = orderedP1Sources.indexOf(p1Job.source);
+                            if (winnerOffset >= 0) {
+                                this.catalogP1SyncSourceCursor = (start + winnerOffset + 1) % sortedSources.length;
+                            }
+                            inFlightSources.add(p1Job.source);
+                            return p1Job;
+                        }
+                    }
+                }
                 // The ordinary catalog path gives source order precedence over job
                 // priority. That is desirable for broad catalog fairness, but it meant
                 // an already-queued legacy identity recovery could wait indefinitely

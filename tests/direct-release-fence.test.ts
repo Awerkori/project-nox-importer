@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const failBatchDirect = vi.fn();
+const acquireJobsDirect = vi.fn();
 
 vi.mock('../src/db/yugabyte-direct.js', () => ({
   failBatchDirect,
   getYugabytePool: () => ({ query: vi.fn() }),
-  acquireJobsDirect: vi.fn(),
+  acquireJobsDirect,
   heartbeatDirect: vi.fn(),
   recoverStalledLeasesDirect: vi.fn(),
 }));
@@ -27,5 +28,24 @@ describe('direct release fencing', () => {
       expect.objectContaining({ jobId: 'job-1', workerId: 'old-worker', status: 'COMPLETED' }),
     ]);
     expect(result).toEqual({ data: false, error: null });
+  });
+
+  it('passes the catalog P1 filter only to the direct YSQL acquisition path', async () => {
+    acquireJobsDirect.mockResolvedValueOnce([]);
+    const client = new DirectSupabaseClient({ query: vi.fn() } as any);
+
+    await client.rpc('importer_acquire_job', {
+      p_worker_id: 'worker-1',
+      p_allowed_sources: ['alpha', 'mangaflix'],
+      p_task_type: 'SYNC_WORK',
+      p_only_existing_published_work_sync: true,
+    });
+
+    expect(acquireJobsDirect).toHaveBeenCalledWith(expect.objectContaining({
+      workerId: 'worker-1',
+      allowedSources: ['alpha', 'mangaflix'],
+      taskType: 'SYNC_WORK',
+      onlyExistingPublishedWorkSync: true,
+    }));
   });
 });

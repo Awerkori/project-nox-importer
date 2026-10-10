@@ -198,6 +198,7 @@ export declare class ImporterEngine {
     private catalogMaintenanceSourcesInFlight;
     private catalogMaintenanceSourceCursor;
     private catalogMaintenanceWindowCursors;
+    private catalogP1SyncSourceCursor;
     private catalogSyncClaimsSinceLegacyRecovery;
     private catalogLegacyRecoverySourceCursor;
     private nextLegacyRecoveryProbeAt;
