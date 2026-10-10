@@ -380,7 +380,7 @@ describe('bounded admission snapshot', () => {
     expect(queries).toBe(0);
   });
 
-  it('defers broad maintenance but probes bounded P2 admission while the pool is occupied', async () => {
+  it('defers broad maintenance but probes bounded P1-first admission while the pool is occupied', async () => {
     const state = { getConfig: () => ({ enabled: true, shadowMode: false }) } as any;
     const sentinel = { isProtectiveStopActive: async () => false } as any;
     const pool = {
@@ -390,11 +390,11 @@ describe('bounded admission snapshot', () => {
       query: async () => { throw new Error('broad maintenance query must be deferred'); },
     };
     const controller = new AdmissionController(state, sentinel, pool);
-    const p2Probe = vi.spyOn(controller as any, 'executeOnDemandAdmission').mockResolvedValue(null);
+    const p1Probe = vi.spyOn(controller as any, 'executeOnDemandAdmission').mockResolvedValue(null);
     const recovery = vi.spyOn(controller as any, 'recoverOrphanedCancelledChapterJobs');
     await controller.runAdmissionCycle();
     expect(recovery).not.toHaveBeenCalled();
-    expect(p2Probe).toHaveBeenCalledWith('P2', undefined, true);
+    expect(p1Probe).toHaveBeenCalledWith('P1', undefined, true);
   });
 
   it('runs one bounded reconciliation after sustained pool pressure', async () => {

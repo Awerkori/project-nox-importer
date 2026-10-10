@@ -1294,13 +1294,12 @@ export class AdmissionController {
             // are active or queued.  A later scheduled/vacancy cycle will retry.
             if (this.isPoolUnderClaimPressure() && !this.shouldRunPressureMaintenance()) {
                 // Claims are the work-conserving data plane, but a pool waiter must not
-                // permanently starve P2 discovery when the bounded P1 probe has no
-                // executable catalog frontier. This path performs exactly one bounded
-                // P1 probe followed by the bounded P2 source-window admission; it does
-                // not run reconciliation, recovery, GROUP BY maintenance, or paused
-                // backlog scans. A real P1 frontier still wins in canAdmitNewWork().
-                await this.timeAdmissionStage(stages, 'pressureP2ProbeMs', () => this.executeOnDemandAdmission('P2', undefined, true));
-                this.logger.debug('[ADMISSION_P2_PRESSURE_PROBE] bounded P2 admission attempted while claims are waiting');
+                // leave an executable P1 frontier idle.  The P1 on-demand path makes a
+                // bounded P1 probe first and only then considers P2 through its strict
+                // gate.  It does not run reconciliation, recovery, GROUP BY maintenance,
+                // or paused-backlog scans.
+                await this.timeAdmissionStage(stages, 'pressureP1ProbeMs', () => this.executeOnDemandAdmission('P1', undefined, true));
+                this.logger.debug('[ADMISSION_P1_PRESSURE_PROBE] bounded P1-first admission attempted while claims are waiting');
                 return;
             }
             // If claim pressure remains continuous, one bounded reconciliation pass is
