@@ -74,12 +74,16 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(sql.indexOf('canonical_chapter.published_at IS NOT NULL', sourceWindow)).toBeLessThan(sourceWindowLimit);
     expect(sql.indexOf('predecessor.chapter_sort_key < q.chapter_sort_key', sourceWindow)).toBeLessThan(sourceWindowLimit);
     expect(sql.indexOf("active_chapter.status = 'IMPORTING'", sourceWindow)).toBeLessThan(sourceWindowLimit);
-    const canonicalRows = sql.indexOf('canonical_rows AS MATERIALIZED');
-    const canonicalFilter = sql.indexOf('canonical_chapter.published_at IS NOT NULL', canonicalRows);
-    const frontierRows = sql.indexOf('frontier_rows AS MATERIALIZED', canonicalRows);
-    expect(canonicalFilter).toBeGreaterThan(canonicalRows);
-    expect(frontierRows).toBeGreaterThan(canonicalFilter);
-    expect(sql).toContain('SELECT DISTINCT ON (source, work_id) id');
+    // The source window already applies the duplicate fence. Repeating that
+    // correlated check before grouping the same ids was a pure extra YSQL
+    // read; the final locked CTE remains the race-safe authoritative check.
+    expect(sql).not.toContain('canonical_rows AS MATERIALIZED');
+    const frontierRows = sql.indexOf('frontier_rows AS MATERIALIZED');
+    const finalLock = sql.indexOf('to_lock AS (', frontierRows);
+    expect(frontierRows).toBeGreaterThan(sourceWindowLimit);
+    expect(finalLock).toBeGreaterThan(frontierRows);
+    expect(sql.slice(finalLock)).toContain('canonical_chapter.published_at IS NOT NULL');
+    expect(sql).toContain("SELECT DISTINCT ON (q.source, q.payload->>'workId') q.id");
   });
 
   let mockPool: any;
