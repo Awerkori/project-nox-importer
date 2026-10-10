@@ -127,6 +127,14 @@ export declare class WorkCostEstimator {
 }
 export type BufferReservationIntent = 'GENERIC' | 'PAGE_INITIAL' | 'COMPLETION';
 /**
+ * RSS is not returned to the OS promptly by V8.  Treating every byte over the
+ * soft watermark as an all-but-one-page gate therefore turns a temporary
+ * allocation spike into a permanent throughput collapse.  Below the hard
+ * watermark, reserve only half of the measured remaining headroom; the
+ * regular bounded-buffer budget remains the primary cap.
+ */
+export declare function resolveSoftRssReservationBudgetBytes(rssMb: number, softLimitMb: number, hardLimitMb: number, maxBufferedBytes: number): number;
+/**
  * PAGE_INITIAL reservations may preserve room for one in-flight body to be
  * promoted to its bounded completion size. COMPLETION is used only by an
  * already-started page body whose current reservation is insufficient to
