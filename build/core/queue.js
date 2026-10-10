@@ -217,6 +217,9 @@ export class ImporterQueue {
         if (options?.onlyLegacySameSourceClaimRecovery && typeof this.supabase?.getPool === 'function') {
             params.p_only_legacy_same_source_claim_recovery = true;
         }
+        if (options?.onlyExistingPublishedWorkSync && typeof this.supabase?.getPool === 'function') {
+            params.p_only_existing_published_work_sync = true;
+        }
         const { data, error } = await this.supabase.rpc('importer_acquire_job', params);
         if (error) {
             this.logger.error('Error acquiring queue job', { error: error.message, source });
@@ -234,6 +237,14 @@ export class ImporterQueue {
             chapterSortKey: job.chapter_sort_key,
         });
         return job;
+    }
+    /**
+     * The catalog P1 selector is implemented by the direct YSQL client.  Do
+     * not silently degrade that selector through the gateway RPC: doing so
+     * would let unclassified P2 catalog work overtake P1.
+     */
+    supportsDirectCatalogPriorityFilters() {
+        return typeof this.supabase?.getPool === 'function';
     }
     /**
      * Heartbeat renewal of an active lease

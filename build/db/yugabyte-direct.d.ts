@@ -34,6 +34,8 @@ export declare function acquireJobsDirect(options: {
     preferAllowedSourceOrder?: boolean;
     /** Claim only the bounded legacy same-source ambiguity recovery jobs. */
     onlyLegacySameSourceClaimRecovery?: boolean;
+    /** Claim only SYNC_WORK rows mapped to an existing published work (P1). */
+    onlyExistingPublishedWorkSync?: boolean;
     taskType?: string;
     batchSize?: number;
 }): Promise<GatewayJob[]>;

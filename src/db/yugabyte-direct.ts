@@ -317,6 +317,8 @@ export async function acquireJobsDirect(options: {
   preferAllowedSourceOrder?: boolean;
   /** Claim only the bounded legacy same-source ambiguity recovery jobs. */
   onlyLegacySameSourceClaimRecovery?: boolean;
+  /** Claim only SYNC_WORK rows mapped to an existing published work (P1). */
+  onlyExistingPublishedWorkSync?: boolean;
   taskType?: string;
   batchSize?: number;
 }): Promise<GatewayJob[]> {
@@ -327,6 +329,7 @@ export async function acquireJobsDirect(options: {
   const allowedSources = options.allowedSources && options.allowedSources.length > 0 ? options.allowedSources : null;
   const preferAllowedSourceOrder = options.preferAllowedSourceOrder === true && allowedSources !== null;
   const onlyLegacySameSourceClaimRecovery = options.onlyLegacySameSourceClaimRecovery === true;
+  const onlyExistingPublishedWorkSync = options.onlyExistingPublishedWorkSync === true;
   const taskType = options.taskType || null;
   const batchSize = Math.max(1, Math.min(50, options.batchSize || 10));
 
@@ -344,6 +347,22 @@ export async function acquireJobsDirect(options: {
         AND (
           NOT $8::boolean
           OR q.payload->>'legacySameSourceClaimRecovery' = 'true'
+        )
+        AND (
+          NOT $9::boolean
+          OR (
+            q.task_type = 'SYNC_WORK'
+            AND EXISTS (
+              SELECT 1
+              FROM importer_work_mappings wm
+              INNER JOIN works w ON w.id = wm.work_id AND w.published IS TRUE
+              WHERE wm.source = q.source
+                AND (
+                  wm.source_work_id = q.payload->>'sourceWorkId'
+                  OR wm.work_id::text = q.payload->>'workId'
+                )
+            )
+          )
         )
         AND (
           $2::text IS NULL
@@ -392,6 +411,7 @@ export async function acquireJobsDirect(options: {
     allowedSources,
     preferAllowedSourceOrder,
     onlyLegacySameSourceClaimRecovery,
+    onlyExistingPublishedWorkSync,
   ]);
   return res.rows.map((r: any) => ({
     ...r,
