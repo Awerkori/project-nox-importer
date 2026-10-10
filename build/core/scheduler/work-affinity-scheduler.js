@@ -186,6 +186,7 @@ export class WorkAffinityScheduler {
     catalogProbeSourceWindowSize = 2;
     catalogProbeRowsPerSource = 32;
     catalogP1SweepKey = '';
+    catalogP1SweepSources = new Set();
     catalogP1SweepRemainingSources = new Set();
     publicationBarrier;
     sourcePermitProvider;
@@ -1491,7 +1492,9 @@ export class WorkAffinityScheduler {
     async claimCatalogP1Job(client, opts) {
         const now = Date.now();
         if (!shouldStartCatalogProbe(now, this.lastCatalogProbeAt, this.catalogProbeInFlight, this.catalogProbeMinIntervalMs)) {
-            return { job: null, catalogExhausted: this.catalogP1SweepRemainingSources.size === 0 && this.catalogP1SweepKey !== '' };
+            // A skipped/throttled probe cannot prove the current P1 frontier is
+            // empty, even if the previous sweep completed without finding work.
+            return { job: null, catalogExhausted: false };
         }
         this.catalogProbeInFlight = true;
         this.lastCatalogProbeAt = now;
@@ -1512,7 +1515,26 @@ export class WorkAffinityScheduler {
             const uniqueSources = Array.from(new Set(candidateSources));
             const sweepKey = [...uniqueSources].sort().join('\u001f');
             if (sweepKey !== this.catalogP1SweepKey) {
+                // Source permits legitimately change while another source is
+                // downloading. Do not restart an empty P1 sweep just because one
+                // already-probed source temporarily drops out of the permit set:
+                // that kept the scheduler from ever reaching P2. Retain unfinished
+                // eligible sources and add only sources that have newly become
+                // eligible, so P2 still waits for every current P1 opportunity.
+                const nextSources = new Set(uniqueSources);
+                const retained = new Set(Array.from(this.catalogP1SweepRemainingSources).filter((source) => nextSources.has(source)));
+                for (const source of nextSources) {
+                    if (!this.catalogP1SweepSources.has(source))
+                        retained.add(source);
+                }
                 this.catalogP1SweepKey = sweepKey;
+                this.catalogP1SweepSources = nextSources;
+                this.catalogP1SweepRemainingSources = retained;
+            }
+            // A completed empty pass only proves that P1 was empty at that instant.
+            // Re-open the full eligible source set before the next P2 admission so
+            // newly arrived P1 work cannot slip through on a stale empty result.
+            if (this.catalogP1SweepRemainingSources.size === 0) {
                 this.catalogP1SweepRemainingSources = new Set(uniqueSources);
             }
             if (uniqueSources.length > 0) {
