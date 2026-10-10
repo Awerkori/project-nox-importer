@@ -378,6 +378,112 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     }));
   });
 
+  it('does not restart an empty P1 sweep when an already-probed source loses its permit', async () => {
+    const p2WorkId = 'p2-after-empty-p1-sweep';
+    const p2Job = {
+      id: 'p2-after-sweep-job', source: 'source-a', priority: 50, chapter_sort_key: 1,
+      payload: { workId: p2WorkId, chapterNumber: 1 },
+    };
+    mockStateStore.setActiveWork({
+      workId: p2WorkId,
+      workTitle: 'P2 after proven empty P1',
+      lane: 'P2', state: 'FILLING', primarySource: 'source-a',
+      admittedAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(),
+      totalChapters: 1, publishedChapters: 0, queuedChapters: 1, inFlightChapters: 0,
+      frontierSortKey: 1, criticalGapSortKey: null, criticalGapUnblockCount: 0,
+    });
+    vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([]);
+    vi.spyOn(scheduler as any, 'executeClaimCatalogQuery').mockResolvedValue(null);
+    vi.spyOn(scheduler as any, 'claimSingleJob').mockImplementation(async (_pool: unknown, opts: any) => {
+      if (opts.workId === p2WorkId) return p2Job;
+      throw new Error(`unexpected claim before an empty P1 sweep: ${opts.workId}`);
+    });
+
+    const first = await scheduler.acquireNextChapterJob({
+      workerId: 'catalog-sweep-permit-1', allowedSources: ['source-a', 'source-b', 'source-c', 'source-d'],
+    });
+    expect(first).toBeNull();
+
+    // source-d became unavailable after the first slice; source-a/b have
+    // already been checked, so only source-c remains to prove P1 empty.
+    (scheduler as any).lastCatalogProbeAt = 0;
+    const second = await scheduler.acquireNextChapterJob({
+      workerId: 'catalog-sweep-permit-2', allowedSources: ['source-a', 'source-b', 'source-c'],
+    });
+    expect(second?.id).toBe('p2-after-sweep-job');
+  });
+
+  it('rechecks a completed empty P1 sweep before admitting P2 again', async () => {
+    const p2WorkId = 'p2-rechecks-p1-frontier';
+    const p2Job = {
+      id: 'p2-rechecks-job', source: 'source-a', priority: 50, chapter_sort_key: 1,
+      payload: { workId: p2WorkId, chapterNumber: 1 },
+    };
+    const p1Job = {
+      id: 'newly-eligible-p1-job', source: 'source-b', priority: 75, chapter_sort_key: 1,
+      payload: { workId: 'existing-work', chapterNumber: 1 },
+    };
+    mockStateStore.setActiveWork({
+      workId: p2WorkId,
+      workTitle: 'P2 must not bypass a newly arrived P1 job',
+      lane: 'P2', state: 'FILLING', primarySource: 'source-a',
+      admittedAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(),
+      totalChapters: 1, publishedChapters: 0, queuedChapters: 1, inFlightChapters: 0,
+      frontierSortKey: 1, criticalGapSortKey: null, criticalGapUnblockCount: 0,
+    });
+    vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([]);
+    const catalogQuery = vi.spyOn(scheduler as any, 'executeClaimCatalogQuery')
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(p1Job);
+    vi.spyOn(scheduler as any, 'claimSingleJob').mockImplementation(async (_pool: unknown, opts: any) => {
+      if (opts.workId === p2WorkId) return p2Job;
+      throw new Error(`unexpected claim before fresh P1 scan: ${opts.workId}`);
+    });
+
+    const first = await scheduler.acquireNextChapterJob({
+      workerId: 'p2-fresh-sweep-1', allowedSources: ['source-a', 'source-b'],
+    });
+    expect(first?.id).toBe('p2-rechecks-job');
+
+    (scheduler as any).lastCatalogProbeAt = 0;
+    const second = await scheduler.acquireNextChapterJob({
+      workerId: 'p2-fresh-sweep-2', allowedSources: ['source-a', 'source-b'],
+    });
+
+    expect(second?.id).toBe('newly-eligible-p1-job');
+    expect(catalogQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not treat a throttled P1 probe as an exhausted frontier', async () => {
+    const p2WorkId = 'p2-waits-for-throttled-p1-probe';
+    mockStateStore.setActiveWork({
+      workId: p2WorkId,
+      workTitle: 'P2 waits for a fresh P1 probe',
+      lane: 'P2', state: 'FILLING', primarySource: 'source-a',
+      admittedAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(),
+      totalChapters: 1, publishedChapters: 0, queuedChapters: 1, inFlightChapters: 0,
+      frontierSortKey: 1, criticalGapSortKey: null, criticalGapUnblockCount: 0,
+    });
+    vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([]);
+    const catalogQuery = vi.spyOn(scheduler as any, 'executeClaimCatalogQuery');
+    const p2Claim = vi.spyOn(scheduler as any, 'claimSingleJob');
+    (scheduler as any).catalogP1SweepKey = ['source-a', 'source-b'].join('\u001f');
+    (scheduler as any).catalogP1SweepSources = new Set(['source-a', 'source-b']);
+    (scheduler as any).catalogP1SweepRemainingSources = new Set();
+    (scheduler as any).lastCatalogProbeAt = Date.now();
+
+    const acquired = await scheduler.acquireNextChapterJob({
+      workerId: 'p2-throttled-p1-probe', allowedSources: ['source-a', 'source-b'],
+    });
+
+    expect(acquired).toBeNull();
+    expect(catalogQuery).not.toHaveBeenCalled();
+    expect(p2Claim).not.toHaveBeenCalled();
+  });
+
   it('moves only retry-budget-exhausted queued/retry work out of the hot queue in a bounded statement', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [{ count: 2 }] });
     (scheduler as any).pool = { query };
@@ -650,6 +756,8 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(claim1.id).toBe('job-nano-1');
     expect(scheduler.getInFlightCount(workId)).toBe(1);
 
+    // Recheck P1 before another P2 admission (model the probe hand-off interval).
+    (scheduler as any).lastCatalogProbeAt = 0;
     // Slot 2 claims (within max inflight = 2)
     const claim2 = await scheduler.acquireNextChapterJob({ workerId: 'worker-2', allowedSources: ['kuro'] });
     expect(claim2.id).toBe('job-nano-2');
