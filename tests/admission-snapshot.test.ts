@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
 import { readFileSync } from 'node:fs';
-import { AdmissionController } from '../src/core/scheduler/admission-controller.js';
+import { AdmissionController, hasCapacityBeyondP1Reservation } from '../src/core/scheduler/admission-controller.js';
 import { SOURCE_EXECUTION_ELIGIBILITY_SQL } from '../src/core/source-eligibility.js';
 
 describe('bounded admission snapshot', () => {
@@ -295,6 +295,30 @@ describe('bounded admission snapshot', () => {
       metrics: { p0Waiting: 1 },
     });
     expect(query).not.toHaveBeenCalled();
+  });
+
+  it('opens P2 only into capacity a single P1 frontier cannot consume', async () => {
+    const state = {
+      getConfig: () => ({ maxInflightPerWork: 2 }),
+      getActiveWorks: () => [{ workId: 'p1-retry', lane: 'P1', state: 'FILLING' }],
+    } as any;
+    const sentinel = { isProtectiveStopActive: async () => false } as any;
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("w.published IS TRUE")) return { rows: [{ status: 'QUEUED' }] };
+      return { rows: [] };
+    });
+    const controller = new AdmissionController(state, sentinel, { query });
+    controller.setP0CandidateProvider(async () => false);
+    controller.setInFlightChapterCountProvider(() => 0);
+    controller.setChapterCapacityProvider(() => 12);
+
+    await expect(controller.canAdmitNewWork()).resolves.toMatchObject({
+      allowed: true,
+      reason: 'CAN_ADMIT_NEW_WORK_ALLOWED',
+    });
+    expect(hasCapacityBeyondP1Reservation(0, 12, 2)).toBe(true);
+    expect(hasCapacityBeyondP1Reservation(10, 12, 2)).toBe(false);
+    expect(hasCapacityBeyondP1Reservation(0, 1, 2)).toBe(false);
   });
 
   it('falls back to the durable queue count when no scheduler count provider is configured', async () => {

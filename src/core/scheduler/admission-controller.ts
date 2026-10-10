@@ -29,6 +29,31 @@ import { isSourceExecutionEligible, SOURCE_EXECUTION_ELIGIBILITY_SQL } from '../
 // healthy P1 works get their first opportunity on the same source.
 const P1_FAIR_WINDOW_CHAPTERS = 1;
 
+/**
+ * P1 keeps its canonical per-work execution reservation, but a single
+ * visible-work frontier must not leave every other execution slot empty.
+ * Priority remains enforced at claim time (P0 -> P1 -> P2); this only decides
+ * whether it is safe to open a P2 window that can use capacity P1 cannot
+ * currently consume.
+ */
+export function hasCapacityBeyondP1Reservation(
+  importingCount: number,
+  effectiveChapterCapacity: number,
+  maxInflightPerWork: number,
+): boolean {
+  const capacity = Number.isFinite(effectiveChapterCapacity)
+    ? Math.max(1, Math.floor(effectiveChapterCapacity))
+    : 1;
+  const importing = Number.isFinite(importingCount)
+    ? Math.max(0, Math.floor(importingCount))
+    : 0;
+  const reservation = Math.min(
+    capacity,
+    Number.isFinite(maxInflightPerWork) ? Math.max(1, Math.floor(maxInflightPerWork)) : 1,
+  );
+  return importing < capacity - reservation;
+}
+
 export class AdmissionController {
   private logger = new Logger('AdmissionController');
   private pool: any;
@@ -578,12 +603,34 @@ export class AdmissionController {
       };
     }
 
+    // The P1 gate needs the authoritative in-flight count before deciding
+    // whether a single visible frontier can legitimately hold all lower
+    // priority work. Do not issue a second broad queue count when Engine has
+    // already supplied the scheduler's in-process accounting.
+    const importingCnt = await this.timeAdmissionStage(
+      stages,
+      'inFlightCountMs',
+      () => this.getCurrentInFlightChapterCount(),
+    );
+    const maxTotalWorkers = Math.max(1, this.chapterCapacityProvider());
+
     // 3. Existing visible works are P1 regardless of the priority that was
     // assigned when they were first discovered.  This is deliberately based
     // on the canonical work visibility, not latest_chapter_published_at: that
     // denormalized timestamp may legitimately be null for older works.
     const p1 = await this.timeAdmissionStage(stages, 'p1BacklogProbeMs', () => this.getP1BacklogSnapshot(options));
-    if (p1.available > 0 && activeWorksCount > 0) {
+    // P1 remains ahead of P2 in every claim decision, and this keeps its
+    // normal per-work concurrency reservation available.  Treating one
+    // retrying P1 frontier as an absolute admission freeze, however, left
+    // every other global slot empty even though the work itself can consume
+    // at most maxInflightPerWork slots.  Only hold P2 once the capacity beyond
+    // that canonical reservation is already occupied.
+    const maxInflightPerWork = Math.max(1, Number(config.maxInflightPerWork || 2));
+    if (
+      p1.available > 0 &&
+      activeWorksCount > 0 &&
+      !hasCapacityBeyondP1Reservation(importingCnt, maxTotalWorkers, maxInflightPerWork)
+    ) {
       return {
         allowed: false,
         reason: 'P1_BACKLOG_WAITING: existing catalog work must advance before P2 admission',
@@ -638,13 +685,6 @@ export class AdmissionController {
     // new work and repeatedly scans the hot queue while all slots are busy.
     // If there is spare capacity and activeP2Works < maxP2Cohort:
     // allow P2/P3 new works to admit so P3 never dies of starvation from catalog backlog.
-    const importingCnt = await this.timeAdmissionStage(
-      stages,
-      'inFlightCountMs',
-      () => this.getCurrentInFlightChapterCount(),
-    );
-    const maxTotalWorkers = Math.max(1, this.chapterCapacityProvider());
-
     if (importingCnt >= maxTotalWorkers) {
       return {
         allowed: false,
