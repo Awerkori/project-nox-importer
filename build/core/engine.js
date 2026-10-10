@@ -612,9 +612,13 @@ export class ImporterEngine {
         SYNC_WORK: new Map(),
     };
     // P1 catalog sync probes scan every eligible source before P2 is admitted.
-    // The cursor advances past the winner, so this priority guard retains
-    // source fairness rather than pinning the maintenance lane to one catalog.
+    // Each probe is bounded, but P2 is held until the complete P1 sweep is
+    // empty. This keeps the hierarchy without turning one catalog selector
+    // into a full-source YSQL scan.
     catalogP1SyncSourceCursor = 0;
+    catalogP1SyncSweepKey = '';
+    catalogP1SyncSweepSources = new Set();
+    catalogP1SyncSweepRemainingSources = new Set();
     // Start with one recovery probe after a deploy, then reserve at most one of
     // every four successful sync claims. The lane remains globally serial and
     // each source still has at most one catalog operation in flight.
@@ -3065,10 +3069,9 @@ export class ImporterEngine {
         }
     }
     /**
-     * Catalog maintenance waits for one fair turn in the bounded claim phase.
-     * It acquires no job lease until that turn arrives and releases the permit
-     * before network or job execution, so one maintenance lane cannot reduce
-     * configured chapter execution concurrency or create a claim stampede.
+     * Catalog maintenance selection is serialized independently from chapter
+     * claims. The maintenance lane owns no chapter execution permit and cannot
+     * hold the single empty-scan chapter claim turn behind a slow YSQL query.
      */
     async acquireCatalogMaintenanceJob(taskType) {
         // The chapter claim gate is deliberately wider than one. Keep the
@@ -3080,117 +3083,153 @@ export class ImporterEngine {
             new Set();
         await claimMutex.acquire();
         try {
-            await this.chapterClaimGate.acquire();
-            try {
-                if (this.stopSignal || this.shouldDeferCatalogMaintenance())
-                    return null;
-                // A source may still have another catalog task queued, but never run
-                // two catalog operations for it concurrently. Its adapter-level host
-                // limiter remains authoritative for all network requests.
-                const allowedSources = (await this.getEligibleCatalogSources())
-                    .filter((source) => !inFlightSources.has(source));
-                if (allowedSources.length === 0)
-                    return null;
-                // Existing public works (P1) must replenish their chapter frontier
-                // before discovery or synchronization of unmapped/new works (P2).
-                // The ordinary catalog probe is intentionally source-first for broad
-                // fairness, so it cannot establish this cross-source priority by
-                // itself.  Restrict this first claim in YSQL, then rotate all healthy
-                // sources only within the P1 cohort.
-                if (taskType === 'SYNC_WORK') {
-                    const supportsPriorityFilters = this.queue.supportsDirectCatalogPriorityFilters?.();
-                    if (supportsPriorityFilters === false) {
-                        // A gateway fallback cannot express the P1 predicate. Holding this
-                        // maintenance turn is safer than silently admitting P2 first.
-                        this.logger.warn('Catalog P1 priority selector unavailable; holding SYNC_WORK admission');
-                        return null;
+            // Catalog selection is already serialized by catalogMaintenanceClaimMutex
+            // and catalogMaintenanceLane. It must not take the chapter claim gate:
+            // a slow catalog scan previously held the empty-scan single permit and
+            // delayed newly eligible STAFF/P0/P1 chapter claims behind P2-capable
+            // maintenance work.
+            if (this.stopSignal || this.shouldDeferCatalogMaintenance())
+                return null;
+            // A source may still have another catalog task queued, but never run
+            // two catalog operations for it concurrently. Its adapter-level host
+            // limiter remains authoritative for all network requests.
+            const allowedSources = (await this.getEligibleCatalogSources())
+                .filter((source) => !inFlightSources.has(source));
+            if (allowedSources.length === 0)
+                return null;
+            // Existing public works (P1) must replenish their chapter frontier
+            // before discovery or synchronization of unmapped/new works (P2).
+            // The ordinary catalog probe is intentionally source-first for broad
+            // fairness, so it cannot establish this cross-source priority by
+            // itself. Restrict this first claim in YSQL, then rotate all healthy
+            // sources only within the P1 cohort.
+            // Both SYNC_WORK and DISCOVER_WORKS can introduce P2 work. The same P1
+            // proof therefore guards both lanes; otherwise the dedicated discovery
+            // worker could bypass an unfinished P1 sync sweep.
+            const supportsPriorityFilters = this.queue.supportsDirectCatalogPriorityFilters?.();
+            if (supportsPriorityFilters !== true) {
+                // A fallback that cannot express the P1 predicate must fail closed.
+                // Admitting P2 would violate the durable STAFF -> P0 -> P1 -> P2
+                // hierarchy even if the ordinary source-order query happened to find
+                // no P1 row first.
+                this.logger.warn('Catalog P1 priority selector unavailable; holding catalog maintenance admission');
+                return null;
+            }
+            {
+                const sortedSources = [...new Set(allowedSources)].sort();
+                const sweepKey = sortedSources.join('\u001f');
+                const previousSources = this.catalogP1SyncSweepSources instanceof Set
+                    ? this.catalogP1SyncSweepSources
+                    : new Set();
+                const previousRemaining = this.catalogP1SyncSweepRemainingSources instanceof Set
+                    ? this.catalogP1SyncSweepRemainingSources
+                    : new Set();
+                if (sweepKey !== this.catalogP1SyncSweepKey) {
+                    // Permit changes are normal while a source syncs. Preserve
+                    // unprobed sources and add only genuinely new ones; restarting
+                    // the entire P1 sweep on every change could starve P2 forever.
+                    const nextSources = new Set(sortedSources);
+                    const retained = new Set(Array.from(previousRemaining).filter((source) => nextSources.has(source)));
+                    for (const source of nextSources) {
+                        if (!previousSources.has(source))
+                            retained.add(source);
                     }
-                    if (supportsPriorityFilters === true) {
-                        const sortedSources = [...new Set(allowedSources)].sort();
-                        const cursor = Number.isFinite(this.catalogP1SyncSourceCursor)
-                            ? this.catalogP1SyncSourceCursor
-                            : 0;
-                        const start = ((cursor % sortedSources.length) + sortedSources.length) % sortedSources.length;
-                        const orderedP1Sources = Array.from({ length: sortedSources.length }, (_, offset) => sortedSources[(start + offset) % sortedSources.length]);
-                        const p1Job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedP1Sources, taskType, true, { onlyExistingPublishedWorkSync: true });
-                        if (p1Job) {
-                            const winnerOffset = orderedP1Sources.indexOf(p1Job.source);
-                            if (winnerOffset >= 0) {
-                                this.catalogP1SyncSourceCursor = (start + winnerOffset + 1) % sortedSources.length;
-                            }
-                            inFlightSources.add(p1Job.source);
-                            return p1Job;
-                        }
-                    }
+                    this.catalogP1SyncSweepKey = sweepKey;
+                    this.catalogP1SyncSweepSources = nextSources;
+                    this.catalogP1SyncSweepRemainingSources = retained;
                 }
-                // The ordinary catalog path gives source order precedence over job
-                // priority. That is desirable for broad catalog fairness, but it meant
-                // an already-queued legacy identity recovery could wait indefinitely
-                // behind ordinary SYNC_WORK rows from earlier sources in each window.
-                // Give recoveries one bounded, serial turn after three normal syncs.
-                // The direct claim is restricted to the dedicated recovery payload, so
-                // it cannot consume unrelated catalog work or relax identity matching.
-                const now = Date.now();
-                const syncClaimsSinceLegacyRecovery = Number.isFinite(this.catalogSyncClaimsSinceLegacyRecovery)
-                    ? this.catalogSyncClaimsSinceLegacyRecovery
+                if (this.catalogP1SyncSweepRemainingSources.size === 0) {
+                    // An empty sweep proves P1 was empty only at that instant. A
+                    // subsequent P2 turn must be preceded by a fresh P1 sweep.
+                    this.catalogP1SyncSweepRemainingSources = new Set(sortedSources);
+                }
+                const cursor = Number.isFinite(this.catalogP1SyncSourceCursor)
+                    ? this.catalogP1SyncSourceCursor
                     : 0;
-                const recoveryDue = taskType === 'SYNC_WORK'
-                    && syncClaimsSinceLegacyRecovery >= LEGACY_RECOVERY_SYNC_TURN_INTERVAL - 1
-                    && now >= this.nextLegacyRecoveryProbeAt;
-                if (recoveryDue) {
-                    const sortedSources = [...new Set(allowedSources)].sort();
-                    const start = ((this.catalogLegacyRecoverySourceCursor % sortedSources.length) + sortedSources.length) % sortedSources.length;
-                    const orderedRecoverySources = Array.from({ length: sortedSources.length }, (_, offset) => sortedSources[(start + offset) % sortedSources.length]);
-                    const recoveryJob = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedRecoverySources, taskType, true, { onlyLegacySameSourceClaimRecovery: true });
-                    if (recoveryJob) {
-                        const winnerOffset = orderedRecoverySources.indexOf(recoveryJob.source);
-                        if (winnerOffset >= 0) {
-                            this.catalogLegacyRecoverySourceCursor = (start + winnerOffset + 1) % sortedSources.length;
-                        }
-                        this.catalogSyncClaimsSinceLegacyRecovery = 0;
-                        inFlightSources.add(recoveryJob.source);
-                        return recoveryJob;
+                const p1Probe = selectCatalogMaintenanceProbeSources(sortedSources, cursor, MAX_CATALOG_MAINTENANCE_SOURCE_PROBES);
+                this.catalogP1SyncSourceCursor = p1Probe.nextCursor;
+                const p1Job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), p1Probe.sources, 'SYNC_WORK', true, { onlyExistingPublishedWorkSync: true });
+                if (p1Job) {
+                    const winnerIndex = sortedSources.indexOf(p1Job.source);
+                    if (winnerIndex >= 0) {
+                        this.catalogP1SyncSourceCursor = (winnerIndex + 1) % sortedSources.length;
                     }
-                    // An empty recovery scan is not a reason to keep scanning every
-                    // maintenance turn. Resume ordinary sync immediately and retry this
-                    // bounded check later.
-                    this.nextLegacyRecoveryProbeAt = now + LEGACY_RECOVERY_PROBE_BACKOFF_MS;
+                    this.catalogP1SyncSweepRemainingSources = new Set(sortedSources);
+                    inFlightSources.add(p1Job.source);
+                    return p1Job;
                 }
-                // Do not pass the entire source set to the direct FIFO queue. A large
-                // old catalog would otherwise win every claim until it is drained,
-                // starving equally healthy sources such as MangaFlix. Probe a rotating,
-                // bounded subset instead. Claim across that whole window atomically:
-                // probing sources one by one made the first perpetually-backlogged
-                // source in a window hide every later source indefinitely.
-                const probe = selectCatalogMaintenanceProbeSources(allowedSources, this.catalogMaintenanceSourceCursor[taskType]);
-                this.catalogMaintenanceSourceCursor[taskType] = probe.nextCursor;
-                const windowCursors = this.catalogMaintenanceWindowCursors ||= {
-                    DISCOVER_WORKS: new Map(),
-                    SYNC_WORK: new Map(),
-                };
-                const windowKey = probe.sources.join('\u001f');
-                const windowCursor = windowCursors[taskType].get(windowKey) || 0;
-                const normalizedWindowCursor = ((windowCursor % probe.sources.length) + probe.sources.length) % probe.sources.length;
-                const orderedSources = Array.from({ length: probe.sources.length }, (_, offset) => probe.sources[(normalizedWindowCursor + offset) % probe.sources.length]);
-                const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedSources, taskType, true);
-                // Keep the global sweep at the next four-source window. Only the
-                // local ordering rotates after a winner, so fairness inside a window
-                // cannot turn a 32-source sweep into a much slower one-source cycle.
-                if (job) {
-                    const winnerOffset = orderedSources.indexOf(job.source);
+                for (const source of p1Probe.sources)
+                    this.catalogP1SyncSweepRemainingSources.delete(source);
+                // A later source may have eligible P1 work. Do not let ordinary
+                // SYNC_WORK (P2) bypass it merely because this bounded slice is
+                // empty; the next maintenance turn continues the same sweep.
+                if (this.catalogP1SyncSweepRemainingSources.size > 0)
+                    return null;
+            }
+            // The ordinary catalog path gives source order precedence over job
+            // priority. That is desirable for broad catalog fairness, but it meant
+            // an already-queued legacy identity recovery could wait indefinitely
+            // behind ordinary SYNC_WORK rows from earlier sources in each window.
+            // Give recoveries one bounded, serial turn after three normal syncs.
+            // The direct claim is restricted to the dedicated recovery payload, so
+            // it cannot consume unrelated catalog work or relax identity matching.
+            const now = Date.now();
+            const syncClaimsSinceLegacyRecovery = Number.isFinite(this.catalogSyncClaimsSinceLegacyRecovery)
+                ? this.catalogSyncClaimsSinceLegacyRecovery
+                : 0;
+            const recoveryDue = taskType === 'SYNC_WORK'
+                && syncClaimsSinceLegacyRecovery >= LEGACY_RECOVERY_SYNC_TURN_INTERVAL - 1
+                && now >= this.nextLegacyRecoveryProbeAt;
+            if (recoveryDue) {
+                const sortedSources = [...new Set(allowedSources)].sort();
+                const start = ((this.catalogLegacyRecoverySourceCursor % sortedSources.length) + sortedSources.length) % sortedSources.length;
+                const orderedRecoverySources = Array.from({ length: sortedSources.length }, (_, offset) => sortedSources[(start + offset) % sortedSources.length]);
+                const recoveryJob = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedRecoverySources, taskType, true, { onlyLegacySameSourceClaimRecovery: true });
+                if (recoveryJob) {
+                    const winnerOffset = orderedRecoverySources.indexOf(recoveryJob.source);
                     if (winnerOffset >= 0) {
-                        windowCursors[taskType].set(windowKey, (normalizedWindowCursor + winnerOffset + 1) % probe.sources.length);
+                        this.catalogLegacyRecoverySourceCursor = (start + winnerOffset + 1) % sortedSources.length;
                     }
-                    if (taskType === 'SYNC_WORK') {
-                        this.catalogSyncClaimsSinceLegacyRecovery = Math.min(LEGACY_RECOVERY_SYNC_TURN_INTERVAL - 1, syncClaimsSinceLegacyRecovery + 1);
-                    }
-                    inFlightSources.add(job.source);
+                    this.catalogSyncClaimsSinceLegacyRecovery = 0;
+                    inFlightSources.add(recoveryJob.source);
+                    return recoveryJob;
                 }
-                return job;
+                // An empty recovery scan is not a reason to keep scanning every
+                // maintenance turn. Resume ordinary sync immediately and retry this
+                // bounded check later.
+                this.nextLegacyRecoveryProbeAt = now + LEGACY_RECOVERY_PROBE_BACKOFF_MS;
             }
-            finally {
-                this.chapterClaimGate.release();
+            // Do not pass the entire source set to the direct FIFO queue. A large
+            // old catalog would otherwise win every claim until it is drained,
+            // starving equally healthy sources such as MangaFlix. Probe a rotating,
+            // bounded subset instead. Claim across that whole window atomically:
+            // probing sources one by one made the first perpetually-backlogged
+            // source in a window hide every later source indefinitely.
+            const probe = selectCatalogMaintenanceProbeSources(allowedSources, this.catalogMaintenanceSourceCursor[taskType]);
+            this.catalogMaintenanceSourceCursor[taskType] = probe.nextCursor;
+            const windowCursors = this.catalogMaintenanceWindowCursors ||= {
+                DISCOVER_WORKS: new Map(),
+                SYNC_WORK: new Map(),
+            };
+            const windowKey = probe.sources.join('\u001f');
+            const windowCursor = windowCursors[taskType].get(windowKey) || 0;
+            const normalizedWindowCursor = ((windowCursor % probe.sources.length) + probe.sources.length) % probe.sources.length;
+            const orderedSources = Array.from({ length: probe.sources.length }, (_, offset) => probe.sources[(normalizedWindowCursor + offset) % probe.sources.length]);
+            const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedSources, taskType, true);
+            // Keep the global sweep at the next four-source window. Only the
+            // local ordering rotates after a winner, so fairness inside a window
+            // cannot turn a 32-source sweep into a much slower one-source cycle.
+            if (job) {
+                const winnerOffset = orderedSources.indexOf(job.source);
+                if (winnerOffset >= 0) {
+                    windowCursors[taskType].set(windowKey, (normalizedWindowCursor + winnerOffset + 1) % probe.sources.length);
+                }
+                if (taskType === 'SYNC_WORK') {
+                    this.catalogSyncClaimsSinceLegacyRecovery = Math.min(LEGACY_RECOVERY_SYNC_TURN_INTERVAL - 1, syncClaimsSinceLegacyRecovery + 1);
+                }
+                inFlightSources.add(job.source);
             }
+            return job;
         }
         finally {
             claimMutex.release();

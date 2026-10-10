@@ -738,9 +738,13 @@ export class ImporterEngine {
     SYNC_WORK: new Map(),
   };
   // P1 catalog sync probes scan every eligible source before P2 is admitted.
-  // The cursor advances past the winner, so this priority guard retains
-  // source fairness rather than pinning the maintenance lane to one catalog.
+  // Each probe is bounded, but P2 is held until the complete P1 sweep is
+  // empty. This keeps the hierarchy without turning one catalog selector
+  // into a full-source YSQL scan.
   private catalogP1SyncSourceCursor = 0;
+  private catalogP1SyncSweepKey = '';
+  private catalogP1SyncSweepSources = new Set<string>();
+  private catalogP1SyncSweepRemainingSources = new Set<string>();
   // Start with one recovery probe after a deploy, then reserve at most one of
   // every four successful sync claims. The lane remains globally serial and
   // each source still has at most one catalog operation in flight.
@@ -3433,10 +3437,9 @@ export class ImporterEngine {
   }
 
   /**
-   * Catalog maintenance waits for one fair turn in the bounded claim phase.
-   * It acquires no job lease until that turn arrives and releases the permit
-   * before network or job execution, so one maintenance lane cannot reduce
-   * configured chapter execution concurrency or create a claim stampede.
+   * Catalog maintenance selection is serialized independently from chapter
+   * claims. The maintenance lane owns no chapter execution permit and cannot
+   * hold the single empty-scan chapter claim turn behind a slow YSQL query.
    */
   private async acquireCatalogMaintenanceJob(
     taskType: Extract<TaskType, 'DISCOVER_WORKS' | 'SYNC_WORK'>,
@@ -3450,57 +3453,97 @@ export class ImporterEngine {
       new Set<string>();
     await claimMutex.acquire();
     try {
-      await this.chapterClaimGate.acquire();
-      try {
-        if (this.stopSignal || this.shouldDeferCatalogMaintenance()) return null;
-        // A source may still have another catalog task queued, but never run
-        // two catalog operations for it concurrently. Its adapter-level host
-        // limiter remains authoritative for all network requests.
-        const allowedSources = (await this.getEligibleCatalogSources())
-          .filter((source) => !inFlightSources.has(source));
-        if (allowedSources.length === 0) return null;
+      // Catalog selection is already serialized by catalogMaintenanceClaimMutex
+      // and catalogMaintenanceLane. It must not take the chapter claim gate:
+      // a slow catalog scan previously held the empty-scan single permit and
+      // delayed newly eligible STAFF/P0/P1 chapter claims behind P2-capable
+      // maintenance work.
+      if (this.stopSignal || this.shouldDeferCatalogMaintenance()) return null;
+      // A source may still have another catalog task queued, but never run
+      // two catalog operations for it concurrently. Its adapter-level host
+      // limiter remains authoritative for all network requests.
+      const allowedSources = (await this.getEligibleCatalogSources())
+        .filter((source) => !inFlightSources.has(source));
+      if (allowedSources.length === 0) return null;
 
-        // Existing public works (P1) must replenish their chapter frontier
-        // before discovery or synchronization of unmapped/new works (P2).
-        // The ordinary catalog probe is intentionally source-first for broad
-        // fairness, so it cannot establish this cross-source priority by
-        // itself.  Restrict this first claim in YSQL, then rotate all healthy
-        // sources only within the P1 cohort.
-        if (taskType === 'SYNC_WORK') {
-          const supportsPriorityFilters = this.queue.supportsDirectCatalogPriorityFilters?.();
-          if (supportsPriorityFilters === false) {
-            // A gateway fallback cannot express the P1 predicate. Holding this
-            // maintenance turn is safer than silently admitting P2 first.
-            this.logger.warn('Catalog P1 priority selector unavailable; holding SYNC_WORK admission');
-            return null;
-          }
-          if (supportsPriorityFilters === true) {
+      // Existing public works (P1) must replenish their chapter frontier
+      // before discovery or synchronization of unmapped/new works (P2).
+      // The ordinary catalog probe is intentionally source-first for broad
+      // fairness, so it cannot establish this cross-source priority by
+      // itself. Restrict this first claim in YSQL, then rotate all healthy
+      // sources only within the P1 cohort.
+      // Both SYNC_WORK and DISCOVER_WORKS can introduce P2 work. The same P1
+      // proof therefore guards both lanes; otherwise the dedicated discovery
+      // worker could bypass an unfinished P1 sync sweep.
+      const supportsPriorityFilters = this.queue.supportsDirectCatalogPriorityFilters?.();
+      if (supportsPriorityFilters !== true) {
+        // A fallback that cannot express the P1 predicate must fail closed.
+        // Admitting P2 would violate the durable STAFF -> P0 -> P1 -> P2
+        // hierarchy even if the ordinary source-order query happened to find
+        // no P1 row first.
+        this.logger.warn('Catalog P1 priority selector unavailable; holding catalog maintenance admission');
+        return null;
+      }
+      {
             const sortedSources = [...new Set(allowedSources)].sort();
+            const sweepKey = sortedSources.join('\u001f');
+            const previousSources = this.catalogP1SyncSweepSources instanceof Set
+              ? this.catalogP1SyncSweepSources
+              : new Set<string>();
+            const previousRemaining = this.catalogP1SyncSweepRemainingSources instanceof Set
+              ? this.catalogP1SyncSweepRemainingSources
+              : new Set<string>();
+            if (sweepKey !== this.catalogP1SyncSweepKey) {
+              // Permit changes are normal while a source syncs. Preserve
+              // unprobed sources and add only genuinely new ones; restarting
+              // the entire P1 sweep on every change could starve P2 forever.
+              const nextSources = new Set(sortedSources);
+              const retained = new Set(
+                Array.from(previousRemaining).filter((source) => nextSources.has(source)),
+              );
+              for (const source of nextSources) {
+                if (!previousSources.has(source)) retained.add(source);
+              }
+              this.catalogP1SyncSweepKey = sweepKey;
+              this.catalogP1SyncSweepSources = nextSources;
+              this.catalogP1SyncSweepRemainingSources = retained;
+            }
+            if (this.catalogP1SyncSweepRemainingSources.size === 0) {
+              // An empty sweep proves P1 was empty only at that instant. A
+              // subsequent P2 turn must be preceded by a fresh P1 sweep.
+              this.catalogP1SyncSweepRemainingSources = new Set(sortedSources);
+            }
             const cursor = Number.isFinite(this.catalogP1SyncSourceCursor)
               ? this.catalogP1SyncSourceCursor
               : 0;
-            const start = ((cursor % sortedSources.length) + sortedSources.length) % sortedSources.length;
-            const orderedP1Sources = Array.from(
-              { length: sortedSources.length },
-              (_, offset) => sortedSources[(start + offset) % sortedSources.length],
+            const p1Probe = selectCatalogMaintenanceProbeSources(
+              sortedSources,
+              cursor,
+              MAX_CATALOG_MAINTENANCE_SOURCE_PROBES,
             );
+            this.catalogP1SyncSourceCursor = p1Probe.nextCursor;
             const p1Job = await this.queue.acquireNextJob(
               Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
-              orderedP1Sources,
-              taskType,
+              p1Probe.sources,
+              'SYNC_WORK',
               true,
               { onlyExistingPublishedWorkSync: true },
             );
             if (p1Job) {
-              const winnerOffset = orderedP1Sources.indexOf(p1Job.source);
-              if (winnerOffset >= 0) {
-                this.catalogP1SyncSourceCursor = (start + winnerOffset + 1) % sortedSources.length;
+              const winnerIndex = sortedSources.indexOf(p1Job.source);
+              if (winnerIndex >= 0) {
+                this.catalogP1SyncSourceCursor = (winnerIndex + 1) % sortedSources.length;
               }
+              this.catalogP1SyncSweepRemainingSources = new Set(sortedSources);
               inFlightSources.add(p1Job.source);
               return p1Job;
             }
-          }
-        }
+            for (const source of p1Probe.sources) this.catalogP1SyncSweepRemainingSources.delete(source);
+            // A later source may have eligible P1 work. Do not let ordinary
+            // SYNC_WORK (P2) bypass it merely because this bounded slice is
+            // empty; the next maintenance turn continues the same sweep.
+            if (this.catalogP1SyncSweepRemainingSources.size > 0) return null;
+      }
 
         // The ordinary catalog path gives source order precedence over job
         // priority. That is desirable for broad catalog fairness, but it meant
@@ -3594,9 +3637,6 @@ export class ImporterEngine {
           inFlightSources.add(job.source);
         }
         return job;
-      } finally {
-        this.chapterClaimGate.release();
-      }
     } finally {
       claimMutex.release();
     }
