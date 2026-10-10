@@ -119,7 +119,7 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(engine.chapterClaimGate.active).toBe(0);
   });
 
-  it('resumes the catalog rotation after the winning source, not the window boundary', async () => {
+  it('rotates winners inside a probe window without slowing the global window sweep', async () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
     const acquireNextJob = vi.fn().mockResolvedValue({ id: 'mangaflix-recovery', source: 'mangaflix' });
     engine.chapterClaimGate = new AsyncSemaphore(1, 'test_catalog_source_order');
@@ -144,9 +144,22 @@ describe('claim pressure protects the bounded YSQL pool', () => {
       'SYNC_WORK',
       true,
     );
-    // MangaFlix won its probe, so the next claim starts at the
-    // following source rather than returning to the same four-source group.
-    expect(engine.catalogMaintenanceSourceCursor.SYNC_WORK).toBe(17);
+    // MangaFlix won its probe, so its next visit starts at the following
+    // source; the global cursor still advances by the whole four-source
+    // window instead of degrading to a one-source cycle.
+    expect(engine.catalogMaintenanceSourceCursor.SYNC_WORK).toBe(0);
+    expect(engine.catalogMaintenanceWindowCursors.SYNC_WORK.get('mangaflix\u001fmangalivreto\u001fmangaonlinetv\u001fmegahentai')).toBe(1);
+
+    engine.catalogMaintenanceSourceCursor.SYNC_WORK = 16;
+    await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+
+    expect(acquireNextJob).toHaveBeenLastCalledWith(
+      5,
+      ['mangalivreto', 'mangaonlinetv', 'megahentai', 'mangaflix'],
+      'SYNC_WORK',
+      true,
+    );
+    expect(engine.catalogMaintenanceSourceCursor.SYNC_WORK).toBe(0);
     expect(engine.chapterClaimGate.active).toBe(0);
   });
 
