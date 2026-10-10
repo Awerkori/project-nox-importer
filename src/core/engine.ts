@@ -3340,23 +3340,20 @@ export class ImporterEngine {
       // Do not pass the entire source set to the direct FIFO queue. A large
       // old catalog would otherwise win every claim until it is drained,
       // starving equally healthy sources such as MangaFlix. Probe a rotating,
-      // bounded subset and keep a source in an array so the direct claimant
-      // revalidates ACTIVE status atomically before taking its lease.
+      // bounded subset instead. Claim across that whole window atomically:
+      // probing sources one by one made the first perpetually-backlogged
+      // source in a window hide every later source indefinitely.
       const probe = selectCatalogMaintenanceProbeSources(
         allowedSources,
         this.catalogMaintenanceSourceCursor[taskType],
       );
       this.catalogMaintenanceSourceCursor[taskType] = probe.nextCursor;
 
-      for (const source of probe.sources) {
-        const job = await this.queue.acquireNextJob(
-          Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
-          [source],
-          taskType,
-        );
-        if (job) return job;
-      }
-      return null;
+      return await this.queue.acquireNextJob(
+        Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
+        probe.sources,
+        taskType,
+      );
     } finally {
       this.chapterClaimGate.release();
     }
