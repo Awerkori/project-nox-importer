@@ -34,6 +34,8 @@ const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
 const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
 const MAX_CATALOG_MAINTENANCE_SOURCE_PROBES = 4;
+const PARALLEL_CATALOG_MAINTENANCE_CAPACITY = 2;
+const MIN_IDLE_CHAPTER_SLOTS_FOR_PARALLEL_CATALOG = 2;
 // A recovery turn is serial and source-rotated. Reserving one in four SYNC
 // claims keeps long-lived, retryable identity recoveries moving without
 // allowing a large source's ordinary catalog backlog to monopolize the lane.
@@ -66,6 +68,23 @@ export function selectCatalogMaintenanceProbeSources(eligibleSources, cursor, ma
     const count = Math.max(1, Math.min(Math.trunc(maxProbes) || 1, sources.length));
     const selected = Array.from({ length: count }, (_, offset) => sources[(start + offset) % sources.length]);
     return { sources: selected, nextCursor: (start + count) % sources.length };
+}
+/**
+ * A second catalog operation is useful only when the chapter data plane and
+ * its very small YSQL pool already have real headroom.  This deliberately
+ * fails closed: a missing pool measurement, a waiting DB client, or any site
+ * pressure leaves catalog work globally serial.
+ */
+export function resolveCatalogMaintenanceCapacity(input) {
+    const canRunSecondCatalogOperation = input.catalogActive >= 1 &&
+        input.chapterAvailable >= MIN_IDLE_CHAPTER_SLOTS_FOR_PARALLEL_CATALOG &&
+        input.chapterWaiters === 0 &&
+        input.dbWaitingClients === 0 &&
+        input.dbIdleConnections >= 1 &&
+        input.siteHealth === 'GREEN' &&
+        input.pressureScore === 0 &&
+        !input.emergencyPaused;
+    return canRunSecondCatalogOperation ? PARALLEL_CATALOG_MAINTENANCE_CAPACITY : 1;
 }
 /**
  * Maintenance cursors describe a moving updates feed, while bootstrap cursors
@@ -555,9 +574,15 @@ export class ImporterEngine {
     // work, allowing a heavy maintenance scan to re-enter too early.
     chapterClaimPhaseReady = false;
     chapterClaimStartupSlots = new Set();
-    // Discovery and catalog sync are maintenance lanes. They must not each hold
-    // a DB client beside chapter claims, publication and site traffic.
+    // Discovery and catalog sync are maintenance lanes. They begin serial and
+    // may admit one different-source peer only while chapter and YSQL headroom
+    // are both observed. This is intentionally not a static concurrency raise.
     catalogMaintenanceLane = new AsyncSemaphore(1, 'catalog_maintenance_lane');
+    // Claiming and reserving a catalog source is atomic across the two workers.
+    // It prevents a discovery and sync operation for the same source from
+    // overlapping when the elastic second catalog permit is available.
+    catalogMaintenanceClaimMutex = new AsyncSemaphore(1, 'catalog_maintenance_claim_mutex');
+    catalogMaintenanceSourcesInFlight = new Set();
     catalogMaintenanceSourceCursor = {
         DISCOVER_WORKS: 0,
         SYNC_WORK: 0,
@@ -2923,11 +2948,13 @@ export class ImporterEngine {
                 }
                 // Shared with SYNC_WORK. Acquire before claiming so a job never holds a
                 // lease while merely waiting behind another maintenance operation.
+                this.refreshCatalogMaintenanceCapacity();
                 await this.catalogMaintenanceLane.acquire();
+                let job = null;
                 try {
                     if (this.stopSignal)
                         continue;
-                    const job = await this.acquireCatalogMaintenanceJob('DISCOVER_WORKS');
+                    job = await this.acquireCatalogMaintenanceJob('DISCOVER_WORKS');
                     if (!job) {
                         idle = true;
                     }
@@ -2937,6 +2964,8 @@ export class ImporterEngine {
                     }
                 }
                 finally {
+                    if (job)
+                        this.releaseCatalogMaintenanceSource(job.source);
                     this.catalogMaintenanceLane.release();
                 }
                 await this.sleep(idle ? 5_000 : 100);
@@ -2973,11 +3002,13 @@ export class ImporterEngine {
                     await this.sleep(5_000);
                     continue;
                 }
+                this.refreshCatalogMaintenanceCapacity();
                 await this.catalogMaintenanceLane.acquire();
+                let job = null;
                 try {
                     if (this.stopSignal)
                         continue;
-                    const job = await this.acquireCatalogMaintenanceJob('SYNC_WORK');
+                    job = await this.acquireCatalogMaintenanceJob('SYNC_WORK');
                     if (!job) {
                         idle = true;
                     }
@@ -2987,6 +3018,8 @@ export class ImporterEngine {
                     }
                 }
                 finally {
+                    if (job)
+                        this.releaseCatalogMaintenanceSource(job.source);
                     this.catalogMaintenanceLane.release();
                 }
                 await this.sleep(idle ? 5_000 : 100);
@@ -3004,79 +3037,118 @@ export class ImporterEngine {
      * configured chapter execution concurrency or create a claim stampede.
      */
     async acquireCatalogMaintenanceJob(taskType) {
-        await this.chapterClaimGate.acquire();
+        // The chapter claim gate is deliberately wider than one. Keep the
+        // source selection itself serial so a second catalog permit cannot claim
+        // a discovery and sync job for the same source before either executes.
+        const claimMutex = this.catalogMaintenanceClaimMutex ||=
+            new AsyncSemaphore(1, 'catalog_maintenance_claim_mutex');
+        const inFlightSources = this.catalogMaintenanceSourcesInFlight ||=
+            new Set();
+        await claimMutex.acquire();
         try {
-            if (this.stopSignal || this.shouldDeferCatalogMaintenance())
-                return null;
-            const allowedSources = await this.getEligibleCatalogSources();
-            if (allowedSources.length === 0)
-                return null;
-            // The ordinary catalog path gives source order precedence over job
-            // priority. That is desirable for broad catalog fairness, but it meant
-            // an already-queued legacy identity recovery could wait indefinitely
-            // behind ordinary SYNC_WORK rows from earlier sources in each window.
-            // Give recoveries one bounded, serial turn after three normal syncs.
-            // The direct claim is restricted to the dedicated recovery payload, so
-            // it cannot consume unrelated catalog work or relax identity matching.
-            const now = Date.now();
-            const syncClaimsSinceLegacyRecovery = Number.isFinite(this.catalogSyncClaimsSinceLegacyRecovery)
-                ? this.catalogSyncClaimsSinceLegacyRecovery
-                : 0;
-            const recoveryDue = taskType === 'SYNC_WORK'
-                && syncClaimsSinceLegacyRecovery >= LEGACY_RECOVERY_SYNC_TURN_INTERVAL - 1
-                && now >= this.nextLegacyRecoveryProbeAt;
-            if (recoveryDue) {
-                const sortedSources = [...new Set(allowedSources)].sort();
-                const start = ((this.catalogLegacyRecoverySourceCursor % sortedSources.length) + sortedSources.length) % sortedSources.length;
-                const orderedRecoverySources = Array.from({ length: sortedSources.length }, (_, offset) => sortedSources[(start + offset) % sortedSources.length]);
-                const recoveryJob = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedRecoverySources, taskType, true, { onlyLegacySameSourceClaimRecovery: true });
-                if (recoveryJob) {
-                    const winnerOffset = orderedRecoverySources.indexOf(recoveryJob.source);
-                    if (winnerOffset >= 0) {
-                        this.catalogLegacyRecoverySourceCursor = (start + winnerOffset + 1) % sortedSources.length;
+            await this.chapterClaimGate.acquire();
+            try {
+                if (this.stopSignal || this.shouldDeferCatalogMaintenance())
+                    return null;
+                // A source may still have another catalog task queued, but never run
+                // two catalog operations for it concurrently. Its adapter-level host
+                // limiter remains authoritative for all network requests.
+                const allowedSources = (await this.getEligibleCatalogSources())
+                    .filter((source) => !inFlightSources.has(source));
+                if (allowedSources.length === 0)
+                    return null;
+                // The ordinary catalog path gives source order precedence over job
+                // priority. That is desirable for broad catalog fairness, but it meant
+                // an already-queued legacy identity recovery could wait indefinitely
+                // behind ordinary SYNC_WORK rows from earlier sources in each window.
+                // Give recoveries one bounded, serial turn after three normal syncs.
+                // The direct claim is restricted to the dedicated recovery payload, so
+                // it cannot consume unrelated catalog work or relax identity matching.
+                const now = Date.now();
+                const syncClaimsSinceLegacyRecovery = Number.isFinite(this.catalogSyncClaimsSinceLegacyRecovery)
+                    ? this.catalogSyncClaimsSinceLegacyRecovery
+                    : 0;
+                const recoveryDue = taskType === 'SYNC_WORK'
+                    && syncClaimsSinceLegacyRecovery >= LEGACY_RECOVERY_SYNC_TURN_INTERVAL - 1
+                    && now >= this.nextLegacyRecoveryProbeAt;
+                if (recoveryDue) {
+                    const sortedSources = [...new Set(allowedSources)].sort();
+                    const start = ((this.catalogLegacyRecoverySourceCursor % sortedSources.length) + sortedSources.length) % sortedSources.length;
+                    const orderedRecoverySources = Array.from({ length: sortedSources.length }, (_, offset) => sortedSources[(start + offset) % sortedSources.length]);
+                    const recoveryJob = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedRecoverySources, taskType, true, { onlyLegacySameSourceClaimRecovery: true });
+                    if (recoveryJob) {
+                        const winnerOffset = orderedRecoverySources.indexOf(recoveryJob.source);
+                        if (winnerOffset >= 0) {
+                            this.catalogLegacyRecoverySourceCursor = (start + winnerOffset + 1) % sortedSources.length;
+                        }
+                        this.catalogSyncClaimsSinceLegacyRecovery = 0;
+                        inFlightSources.add(recoveryJob.source);
+                        return recoveryJob;
                     }
-                    this.catalogSyncClaimsSinceLegacyRecovery = 0;
-                    return recoveryJob;
+                    // An empty recovery scan is not a reason to keep scanning every
+                    // maintenance turn. Resume ordinary sync immediately and retry this
+                    // bounded check later.
+                    this.nextLegacyRecoveryProbeAt = now + LEGACY_RECOVERY_PROBE_BACKOFF_MS;
                 }
-                // An empty recovery scan is not a reason to keep scanning every
-                // maintenance turn. Resume ordinary sync immediately and retry this
-                // bounded check later.
-                this.nextLegacyRecoveryProbeAt = now + LEGACY_RECOVERY_PROBE_BACKOFF_MS;
+                // Do not pass the entire source set to the direct FIFO queue. A large
+                // old catalog would otherwise win every claim until it is drained,
+                // starving equally healthy sources such as MangaFlix. Probe a rotating,
+                // bounded subset instead. Claim across that whole window atomically:
+                // probing sources one by one made the first perpetually-backlogged
+                // source in a window hide every later source indefinitely.
+                const probe = selectCatalogMaintenanceProbeSources(allowedSources, this.catalogMaintenanceSourceCursor[taskType]);
+                this.catalogMaintenanceSourceCursor[taskType] = probe.nextCursor;
+                const windowCursors = this.catalogMaintenanceWindowCursors ||= {
+                    DISCOVER_WORKS: new Map(),
+                    SYNC_WORK: new Map(),
+                };
+                const windowKey = probe.sources.join('\u001f');
+                const windowCursor = windowCursors[taskType].get(windowKey) || 0;
+                const normalizedWindowCursor = ((windowCursor % probe.sources.length) + probe.sources.length) % probe.sources.length;
+                const orderedSources = Array.from({ length: probe.sources.length }, (_, offset) => probe.sources[(normalizedWindowCursor + offset) % probe.sources.length]);
+                const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedSources, taskType, true);
+                // Keep the global sweep at the next four-source window. Only the
+                // local ordering rotates after a winner, so fairness inside a window
+                // cannot turn a 32-source sweep into a much slower one-source cycle.
+                if (job) {
+                    const winnerOffset = orderedSources.indexOf(job.source);
+                    if (winnerOffset >= 0) {
+                        windowCursors[taskType].set(windowKey, (normalizedWindowCursor + winnerOffset + 1) % probe.sources.length);
+                    }
+                    if (taskType === 'SYNC_WORK') {
+                        this.catalogSyncClaimsSinceLegacyRecovery = Math.min(LEGACY_RECOVERY_SYNC_TURN_INTERVAL - 1, syncClaimsSinceLegacyRecovery + 1);
+                    }
+                    inFlightSources.add(job.source);
+                }
+                return job;
             }
-            // Do not pass the entire source set to the direct FIFO queue. A large
-            // old catalog would otherwise win every claim until it is drained,
-            // starving equally healthy sources such as MangaFlix. Probe a rotating,
-            // bounded subset instead. Claim across that whole window atomically:
-            // probing sources one by one made the first perpetually-backlogged
-            // source in a window hide every later source indefinitely.
-            const probe = selectCatalogMaintenanceProbeSources(allowedSources, this.catalogMaintenanceSourceCursor[taskType]);
-            this.catalogMaintenanceSourceCursor[taskType] = probe.nextCursor;
-            const windowCursors = this.catalogMaintenanceWindowCursors ||= {
-                DISCOVER_WORKS: new Map(),
-                SYNC_WORK: new Map(),
-            };
-            const windowKey = probe.sources.join('\u001f');
-            const windowCursor = windowCursors[taskType].get(windowKey) || 0;
-            const normalizedWindowCursor = ((windowCursor % probe.sources.length) + probe.sources.length) % probe.sources.length;
-            const orderedSources = Array.from({ length: probe.sources.length }, (_, offset) => probe.sources[(normalizedWindowCursor + offset) % probe.sources.length]);
-            const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedSources, taskType, true);
-            // Keep the global sweep at the next four-source window. Only the
-            // local ordering rotates after a winner, so fairness inside a window
-            // cannot turn a 32-source sweep into a much slower one-source cycle.
-            if (job) {
-                const winnerOffset = orderedSources.indexOf(job.source);
-                if (winnerOffset >= 0) {
-                    windowCursors[taskType].set(windowKey, (normalizedWindowCursor + winnerOffset + 1) % probe.sources.length);
-                }
-                if (taskType === 'SYNC_WORK') {
-                    this.catalogSyncClaimsSinceLegacyRecovery = Math.min(LEGACY_RECOVERY_SYNC_TURN_INTERVAL - 1, syncClaimsSinceLegacyRecovery + 1);
-                }
+            finally {
+                this.chapterClaimGate.release();
             }
-            return job;
         }
         finally {
-            this.chapterClaimGate.release();
+            claimMutex.release();
         }
+    }
+    releaseCatalogMaintenanceSource(source) {
+        const inFlightSources = this.catalogMaintenanceSourcesInFlight ||=
+            new Set();
+        inFlightSources.delete(source);
+    }
+    refreshCatalogMaintenanceCapacity() {
+        const chapterSemaphore = this.autotuner.getGlobalChapterSemaphore();
+        const pressure = this.protectiveSentinel.getPressureSnapshot();
+        const pool = this.dbPool;
+        this.catalogMaintenanceLane.setCapacity(resolveCatalogMaintenanceCapacity({
+            catalogActive: this.catalogMaintenanceLane.active,
+            chapterAvailable: chapterSemaphore.available,
+            chapterWaiters: chapterSemaphore.queued,
+            dbWaitingClients: Math.max(0, Number(pool?.waitingCount || 0)),
+            dbIdleConnections: Math.max(0, Number(pool?.idleCount || 0)),
+            siteHealth: pressure.siteHealth,
+            pressureScore: pressure.pressureScore,
+            emergencyPaused: this.protectiveSentinel.isEmergencyPaused(),
+        }));
     }
     /**
      * Wait until every initial chapter slot has attempted a claim. Afterwards

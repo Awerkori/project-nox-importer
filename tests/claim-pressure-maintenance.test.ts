@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   ImporterEngine,
   legacySameSourceClaimRecoveryDedupeKey,
+  resolveCatalogMaintenanceCapacity,
   selectCatalogMaintenanceProbeSources,
 } from '../src/core/engine.js';
 import { shouldDeferHeavyStagedClassification } from '../src/core/auto-heal-watchdog.js';
@@ -92,6 +93,25 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(second).toEqual({ sources: ['zeta', 'alpha'], nextCursor: 1 });
   });
 
+  it('opens a second catalog permit only with observed chapter, YSQL, and site headroom', () => {
+    const safe = {
+      catalogActive: 1,
+      chapterAvailable: 4,
+      chapterWaiters: 0,
+      dbWaitingClients: 0,
+      dbIdleConnections: 1,
+      siteHealth: 'GREEN',
+      pressureScore: 0,
+      emergencyPaused: false,
+    };
+    expect(resolveCatalogMaintenanceCapacity(safe)).toBe(2);
+    expect(resolveCatalogMaintenanceCapacity({ ...safe, dbIdleConnections: 0 })).toBe(1);
+    expect(resolveCatalogMaintenanceCapacity({ ...safe, dbWaitingClients: 1 })).toBe(1);
+    expect(resolveCatalogMaintenanceCapacity({ ...safe, chapterWaiters: 1 })).toBe(1);
+    expect(resolveCatalogMaintenanceCapacity({ ...safe, siteHealth: 'YELLOW' })).toBe(1);
+    expect(resolveCatalogMaintenanceCapacity({ ...safe, emergencyPaused: true })).toBe(1);
+  });
+
   it('claims from the whole rotating probe window atomically', async () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
     const acquireNextJob = vi.fn().mockResolvedValue({ id: 'mangaflix-recovery' });
@@ -170,7 +190,7 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     ]);
     engine.queue = { acquireNextJob };
 
-    await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+    const firstJob = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
 
     expect(acquireNextJob).toHaveBeenCalledWith(
       5,
@@ -183,6 +203,7 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     // window instead of degrading to a one-source cycle.
     expect(engine.catalogMaintenanceSourceCursor.SYNC_WORK).toBe(0);
     expect(engine.catalogMaintenanceWindowCursors.SYNC_WORK.get('mangaflix\u001fmangalivreto\u001fmangaonlinetv\u001fmegahentai')).toBe(1);
+    engine.releaseCatalogMaintenanceSource(firstJob.source);
 
     engine.catalogMaintenanceSourceCursor.SYNC_WORK = 16;
     await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
@@ -195,6 +216,26 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     );
     expect(engine.catalogMaintenanceSourceCursor.SYNC_WORK).toBe(0);
     expect(engine.chapterClaimGate.active).toBe(0);
+  });
+
+  it('does not claim a second catalog operation for a source already executing one', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const acquireNextJob = vi.fn().mockResolvedValue({ id: 'beta-job', source: 'beta' });
+    engine.chapterClaimGate = new AsyncSemaphore(1, 'test_catalog_distinct_sources_gate');
+    engine.catalogMaintenanceClaimMutex = new AsyncSemaphore(1, 'test_catalog_distinct_sources_mutex');
+    engine.catalogMaintenanceSourcesInFlight = new Set(['alpha']);
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue(['alpha', 'beta']);
+    engine.queue = { acquireNextJob };
+
+    const job = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+
+    expect(job).toEqual({ id: 'beta-job', source: 'beta' });
+    expect(acquireNextJob).toHaveBeenCalledWith(5, ['beta'], 'SYNC_WORK', true);
+    expect(engine.catalogMaintenanceSourcesInFlight).toEqual(new Set(['alpha', 'beta']));
   });
 
   it('keeps the maintenance probe empty when no source is eligible', () => {
