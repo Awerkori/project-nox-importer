@@ -34,6 +34,11 @@ const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
 const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
 const MAX_CATALOG_MAINTENANCE_SOURCE_PROBES = 4;
+// A recovery turn is serial and source-rotated. Reserving one in four SYNC
+// claims keeps long-lived, retryable identity recoveries moving without
+// allowing a large source's ordinary catalog backlog to monopolize the lane.
+const LEGACY_RECOVERY_SYNC_TURN_INTERVAL = 4;
+const LEGACY_RECOVERY_PROBE_BACKOFF_MS = 60_000;
 const LEGACY_SAME_SOURCE_CLAIM_AMBIGUITY_REASON = 'Work already claimed by another ID from the same source';
 const LEGACY_SAME_SOURCE_CLAIM_RECOVERY_BATCH_SIZE = 4;
 const LEGACY_SAME_SOURCE_CLAIM_RECOVERY_PRIORITY = 65;
@@ -565,6 +570,12 @@ export class ImporterEngine {
         DISCOVER_WORKS: new Map(),
         SYNC_WORK: new Map(),
     };
+    // Start with one recovery probe after a deploy, then reserve at most one of
+    // every four successful sync claims. The lane remains globally serial and
+    // each source still has at most one catalog operation in flight.
+    catalogSyncClaimsSinceLegacyRecovery = LEGACY_RECOVERY_SYNC_TURN_INTERVAL - 1;
+    catalogLegacyRecoverySourceCursor = 0;
+    nextLegacyRecoveryProbeAt = 0;
     activeSourcesCache = { sources: [], cachedAt: 0 };
     // Source configuration changes infrequently. Share one short-lived snapshot between
     // discovery and catalog backfill instead of making two full-table reads every minute.
@@ -3000,6 +3011,38 @@ export class ImporterEngine {
             const allowedSources = await this.getEligibleCatalogSources();
             if (allowedSources.length === 0)
                 return null;
+            // The ordinary catalog path gives source order precedence over job
+            // priority. That is desirable for broad catalog fairness, but it meant
+            // an already-queued legacy identity recovery could wait indefinitely
+            // behind ordinary SYNC_WORK rows from earlier sources in each window.
+            // Give recoveries one bounded, serial turn after three normal syncs.
+            // The direct claim is restricted to the dedicated recovery payload, so
+            // it cannot consume unrelated catalog work or relax identity matching.
+            const now = Date.now();
+            const syncClaimsSinceLegacyRecovery = Number.isFinite(this.catalogSyncClaimsSinceLegacyRecovery)
+                ? this.catalogSyncClaimsSinceLegacyRecovery
+                : 0;
+            const recoveryDue = taskType === 'SYNC_WORK'
+                && syncClaimsSinceLegacyRecovery >= LEGACY_RECOVERY_SYNC_TURN_INTERVAL - 1
+                && now >= this.nextLegacyRecoveryProbeAt;
+            if (recoveryDue) {
+                const sortedSources = [...new Set(allowedSources)].sort();
+                const start = ((this.catalogLegacyRecoverySourceCursor % sortedSources.length) + sortedSources.length) % sortedSources.length;
+                const orderedRecoverySources = Array.from({ length: sortedSources.length }, (_, offset) => sortedSources[(start + offset) % sortedSources.length]);
+                const recoveryJob = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedRecoverySources, taskType, true, { onlyLegacySameSourceClaimRecovery: true });
+                if (recoveryJob) {
+                    const winnerOffset = orderedRecoverySources.indexOf(recoveryJob.source);
+                    if (winnerOffset >= 0) {
+                        this.catalogLegacyRecoverySourceCursor = (start + winnerOffset + 1) % sortedSources.length;
+                    }
+                    this.catalogSyncClaimsSinceLegacyRecovery = 0;
+                    return recoveryJob;
+                }
+                // An empty recovery scan is not a reason to keep scanning every
+                // maintenance turn. Resume ordinary sync immediately and retry this
+                // bounded check later.
+                this.nextLegacyRecoveryProbeAt = now + LEGACY_RECOVERY_PROBE_BACKOFF_MS;
+            }
             // Do not pass the entire source set to the direct FIFO queue. A large
             // old catalog would otherwise win every claim until it is drained,
             // starving equally healthy sources such as MangaFlix. Probe a rotating,
@@ -3024,6 +3067,9 @@ export class ImporterEngine {
                 const winnerOffset = orderedSources.indexOf(job.source);
                 if (winnerOffset >= 0) {
                     windowCursors[taskType].set(windowKey, (normalizedWindowCursor + winnerOffset + 1) % probe.sources.length);
+                }
+                if (taskType === 'SYNC_WORK') {
+                    this.catalogSyncClaimsSinceLegacyRecovery = Math.min(LEGACY_RECOVERY_SYNC_TURN_INTERVAL - 1, syncClaimsSinceLegacyRecovery + 1);
                 }
             }
             return job;

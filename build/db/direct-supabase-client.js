@@ -216,6 +216,7 @@ export class DirectSupabaseClient {
                     source: typeof args.p_source === 'string' ? args.p_source : undefined,
                     allowedSources: args.p_allowed_sources || (Array.isArray(args.p_source) ? args.p_source : undefined),
                     preferAllowedSourceOrder: args.p_prefer_source_order === true,
+                    onlyLegacySameSourceClaimRecovery: args.p_only_legacy_same_source_claim_recovery === true,
                     taskType: args.p_task_type,
                     batchSize: args.p_batch_size || 1,
                     leaseDurationMinutes: leaseMinutes,

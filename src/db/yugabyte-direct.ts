@@ -315,6 +315,8 @@ export async function acquireJobsDirect(options: {
    * head from a neighbouring source cannot win every visit to the window.
    */
   preferAllowedSourceOrder?: boolean;
+  /** Claim only the bounded legacy same-source ambiguity recovery jobs. */
+  onlyLegacySameSourceClaimRecovery?: boolean;
   taskType?: string;
   batchSize?: number;
 }): Promise<GatewayJob[]> {
@@ -324,6 +326,7 @@ export async function acquireJobsDirect(options: {
   const source = options.source || null;
   const allowedSources = options.allowedSources && options.allowedSources.length > 0 ? options.allowedSources : null;
   const preferAllowedSourceOrder = options.preferAllowedSourceOrder === true && allowedSources !== null;
+  const onlyLegacySameSourceClaimRecovery = options.onlyLegacySameSourceClaimRecovery === true;
   const taskType = options.taskType || null;
   const batchSize = Math.max(1, Math.min(50, options.batchSize || 10));
 
@@ -338,6 +341,10 @@ export async function acquireJobsDirect(options: {
         AND q.attempts < COALESCE(q.max_attempts, 7)
         AND ($1::text IS NULL OR q.source = $1::text)
         AND ($6::text[] IS NULL OR q.source = ANY($6::text[]))
+        AND (
+          NOT $8::boolean
+          OR q.payload->>'legacySameSourceClaimRecovery' = 'true'
+        )
         AND (
           $2::text IS NULL
           OR ($2::text = 'DISCOVERY' AND q.task_type IN ('DISCOVER_WORKS', 'SYNC_WORK'))
@@ -384,6 +391,7 @@ export async function acquireJobsDirect(options: {
     leaseMin,
     allowedSources,
     preferAllowedSourceOrder,
+    onlyLegacySameSourceClaimRecovery,
   ]);
   return res.rows.map((r: any) => ({
     ...r,
