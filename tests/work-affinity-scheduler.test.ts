@@ -290,7 +290,10 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     });
     vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
     vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([]);
-    vi.spyOn(scheduler as any, 'claimCatalogP1Job').mockResolvedValue(catalogP1Job);
+    vi.spyOn(scheduler as any, 'claimCatalogP1Job').mockResolvedValue({
+      job: catalogP1Job,
+      catalogExhausted: false,
+    });
     vi.spyOn(scheduler as any, 'claimSingleJob').mockImplementation(async () => {
       throw new Error('P2 claim attempted before eligible catalog P1');
     });
@@ -318,7 +321,10 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     });
     vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
     vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([]);
-    vi.spyOn(scheduler as any, 'claimCatalogP1Job').mockResolvedValue(null);
+    vi.spyOn(scheduler as any, 'claimCatalogP1Job').mockResolvedValue({
+      job: null,
+      catalogExhausted: true,
+    });
     vi.spyOn(scheduler as any, 'claimSingleJob').mockImplementation(async (_pool: unknown, opts: any) => {
       if (opts.workId === p2WorkId) return p2Job;
       throw new Error(`unexpected higher-priority claim: ${opts.workId}`);
@@ -329,6 +335,47 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     });
 
     expect(acquired?.id).toBe('p2-job');
+  });
+
+  it('holds P2 until a rotating catalog sweep reaches a later P1 source', async () => {
+    const p2WorkId = 'p2-waiting-for-catalog-sweep';
+    const catalogP1Job = {
+      id: 'catalog-p1-later-source', source: 'source-c', priority: 75, chapter_sort_key: 1,
+      payload: { workId: 'catalog-p1-later-work', chapterNumber: 1 },
+    };
+    mockStateStore.setActiveWork({
+      workId: p2WorkId,
+      workTitle: 'P2 must wait',
+      lane: 'P2', state: 'FILLING', primarySource: 'source-a',
+      admittedAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(),
+      totalChapters: 1, publishedChapters: 0, queuedChapters: 1, inFlightChapters: 0,
+      frontierSortKey: 1, criticalGapSortKey: null, criticalGapUnblockCount: 0,
+    });
+    vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([]);
+    const catalogQuery = vi.spyOn(scheduler as any, 'executeClaimCatalogQuery').mockImplementation(
+      async (_client: unknown, opts: any) => opts.allowedSources.includes('source-c') ? catalogP1Job : null,
+    );
+    vi.spyOn(scheduler as any, 'claimSingleJob').mockImplementation(async () => {
+      throw new Error('P2 must not run before every catalog P1 source is checked');
+    });
+
+    const first = await scheduler.acquireNextChapterJob({
+      workerId: 'catalog-sweep-1', allowedSources: ['source-a', 'source-b', 'source-c'],
+    });
+    expect(first).toBeNull();
+    expect(catalogQuery).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      allowedSources: ['source-a', 'source-b'],
+    }));
+
+    (scheduler as any).lastCatalogProbeAt = 0;
+    const second = await scheduler.acquireNextChapterJob({
+      workerId: 'catalog-sweep-2', allowedSources: ['source-a', 'source-b', 'source-c'],
+    });
+    expect(second?.id).toBe('catalog-p1-later-source');
+    expect(catalogQuery).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      allowedSources: ['source-c', 'source-a'],
+    }));
   });
 
   it('moves only retry-budget-exhausted queued/retry work out of the hot queue in a bounded statement', async () => {
@@ -760,7 +807,10 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
     vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([]);
     vi.spyOn(scheduler as any, 'claimSingleJob').mockResolvedValue(null);
-    vi.spyOn(scheduler as any, 'claimCatalogP1Job').mockResolvedValue(null);
+    vi.spyOn(scheduler as any, 'claimCatalogP1Job').mockResolvedValue({
+      job: null,
+      catalogExhausted: true,
+    });
 
     for (let attempt = 0; attempt < 3; attempt++) {
       await scheduler.acquireNextChapterJob({ workerId: 'critical-miss', allowedSources: ['mangaflix'] });

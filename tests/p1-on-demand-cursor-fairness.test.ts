@@ -55,6 +55,34 @@ function makeOnDemandFixture(options: {
 }
 
 describe('P1 on-demand cursor fairness', () => {
+  it('bounds each P1 admission probe to a rotating two-source window', async () => {
+    const sourceRows = [{ id: 'alpha' }, { id: 'beta' }];
+    const stateStore = {
+      getConfig: () => ({ enabled: true, shadowMode: false, maxActiveNewWorks: 8 }),
+      getActiveWorks: () => [],
+      getP1AdmissionCursors: () => ({}),
+    };
+    const pool = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.trim().startsWith('SELECT s.id')) return { rows: sourceRows };
+        return { rows: [] };
+      }),
+    };
+    const controller = new AdmissionController(stateStore as any, {
+      isProtectiveStopActive: vi.fn().mockResolvedValue(false),
+    } as any, pool);
+
+    await expect(controller.admitNextWorkOnDemand('P1', ['alpha', 'beta', 'gamma'])).resolves.toBeNull();
+
+    const sourceWindowCall = pool.query.mock.calls.find(([sql]) => String(sql).trim().startsWith('SELECT s.id'));
+    expect(sourceWindowCall?.[1]).toEqual([['alpha', 'beta', 'gamma'], null, 2]);
+    const p1CandidateCalls = pool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM p1_rotation q'));
+    expect(p1CandidateCalls).toHaveLength(2); // queued, then bounded paused fallback
+    for (const [, params] of p1CandidateCalls) {
+      expect(params[4]).toEqual(['alpha', 'beta']);
+    }
+  });
+
   it('admits the next circular P1 opportunity instead of a later frontier work', async () => {
     const { stateStore, pool, sentinel } = makeOnDemandFixture();
     const controller = new AdmissionController(stateStore as any, sentinel as any, pool);

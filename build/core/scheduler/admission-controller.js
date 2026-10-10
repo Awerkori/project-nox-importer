@@ -82,13 +82,12 @@ export class AdmissionController {
     // the authority for work order; it merely avoids choosing the first source
     // alphabetically on every spare-capacity pass.
     lastOnDemandP1Source = null;
-    // Admission queries use a per-source indexed window.  Sampling every
-    // healthy source in one cycle turns a five-slot controller into dozens of
-    // distributed reads, which can starve the claims the controller exists to
-    // feed.  Rotate a small source subset instead; this is scheduling fairness,
-    // not a resource limit or health classification.
+    // Admission queries use a per-source indexed window. Sampling ten healthy
+    // sources at once was enough to exhaust the two-connection YSQL pool before
+    // any chapter claim could proceed. Rotate a small subset instead; this is
+    // scheduling fairness, not a resource limit or health classification.
     p1SourceWindowCursor = null;
-    p1SourceWindowSize = 10;
+    p1SourceWindowSize = 2;
     // A previous scheduler generation could vacate a visible P2 work after its
     // first window, leaving the rest of its queue at priority 50. Repair that
     // legacy state in small work-scoped batches; never scan or rewrite the P2
@@ -1795,11 +1794,11 @@ export class AdmissionController {
         if (backfillSlotsAvailable > 0) {
             const activeIds = activeWorks.map((w) => w.workId);
             const p1SourceWindow = await this.getP1SourceWindow();
-            // Keep the same total candidate budget as before, but reserve a bounded
-            // share for every source in the already-rotated P1 source window. A
-            // global ORDER BY/LIMIT here allowed one source's priority-80 backlog to
-            // erase all other healthy sources before rotation/frontier fairness ran.
-            const p1SourceWindowBudget = Math.max(64, backfillSlotsAvailable * 32) * 10;
+            // Reserve a small total candidate budget across the already-rotated
+            // source window. The old multiplier was also used as the per-source
+            // LATERAL limit, expanding one maintenance cycle into thousands of
+            // distributed queue rows on a two-connection pool.
+            const p1SourceWindowBudget = Math.max(64, backfillSlotsAvailable * 32);
             const p1SourceWindowPerSourceLimit = resolveFairSourceWindowQuota(p1SourceWindowBudget, p1SourceWindow.length);
             // The normal path must only inspect executable work.  Including the
             // entire PAUSED_BY_STAFF backlog here turns every 4s admission cycle
