@@ -2,12 +2,12 @@
  * Work-Affinity Scheduler for Project Nox Importer.
  *
  * Implements:
- * - P0: Absolute priority preemption for fresh new releases and critical gaps (priority >= 90).
- * - P1 Critical Gap: Prioritizes missing chapters unblocking STAGED barrier cascade (priority 90-95).
+ * - P0: Absolute priority preemption for fresh releases (priority >= 100).
+ * - P1 Critical Gap: Prioritizes missing chapters unblocking STAGED barrier cascade (priority 90-99).
  * - P1 Backfill: Fair scheduling across ACTIVE_BACKFILL_WORKS (<= 10 works).
  * - P2 Active New Works: Fair scheduling with work affinity across ACTIVE_NEW_WORKS (<= 8 works).
  * - Max in-flight per work: MAX_INFLIGHT_PER_WORK = 2 (ensures >= 9 concurrent works across 18 workers).
- * - Anti-starvation: P1 and P2 make steady progress even under sustained P0 traffic.
+ * - Fairness is constrained within a lane; it never bypasses the hierarchy.
  * - Work-conserving fallback: No worker sits idle if any eligible job exists.
  * - Explainable scheduler: Detailed telemetry on why each job was selected.
  * - Shadow mode & live cutover toggle.
@@ -26,7 +26,7 @@ export declare function isActiveChapterClaimConflict(error: any): boolean;
  * normal source, DB, media and global chapter permits, so this cannot
  * manufacture capacity.
  */
-export declare function shouldReserveP0AfterStaffBurst(consecutiveStaffClaims: number, antiStarvationRatio: number, hasP0Candidate: boolean): boolean;
+export declare function shouldReserveP0AfterStaffBurst(_consecutiveStaffClaims: number, _antiStarvationRatio: number, _hasP0Candidate: boolean): boolean;
 /**
  * When no tracked active work exists, the first catalog fallback already
  * probes the full published catalog.  A second identical probe in the same
@@ -50,14 +50,6 @@ export declare function selectRotatingSourceWindow(sources: string[], cursor: nu
     sources: string[];
     nextCursor: number;
 };
-/**
- * Staff and P0 are order-only lanes, but an endless stream of either must not
- * make already-admitted P1/P2 work mathematically impossible to finish.  One
- * normal-lane claim after a bounded high-priority burst preserves the normal
- * resource budget and gives lower lanes forward progress without weakening
- * their usual priority when the burst has not happened.
- */
-export declare function shouldReserveLowerPriorityAfterHighBurst(consecutiveHighPriorityClaims: number, antiStarvationRatio: number): boolean;
 export interface AcquiredSchedulerJob {
     job: any;
     lane: SchedulerLane;

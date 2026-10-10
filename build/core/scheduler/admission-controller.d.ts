@@ -14,14 +14,6 @@ import { ProtectiveSentinel } from '../protective-sentinel.js';
 import { SchedulerStateStore } from './state-store.js';
 import { ActiveWork } from './types.js';
 /**
- * P1 keeps its canonical per-work execution reservation, but a single
- * visible-work frontier must not leave every other execution slot empty.
- * Priority remains enforced at claim time (P0 -> P1 -> P2); this only decides
- * whether it is safe to open a P2 window that can use capacity P1 cannot
- * currently consume.
- */
-export declare function hasCapacityBeyondP1Reservation(importingCount: number, effectiveChapterCapacity: number, maxInflightPerWork: number): boolean;
-/**
  * Preserve a bounded admission-query budget without letting one source's
  * backlog consume every candidate row before source-level fairness runs.
  * The caller has already selected a small, healthy source window; this only
