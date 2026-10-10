@@ -1480,35 +1480,49 @@ export class WorkAffinityScheduler {
         SELECT candidate.id
         FROM eligible_sources s
         CROSS JOIN LATERAL (
+          -- A source can retain hundreds of P1 rows for the same work.
+          -- Only its earliest still-unpublished row can become canonical:
+          -- any later row remains behind that predecessor. Reducing to one
+          -- such frontier per work before the heavier gap checks keeps the
+          -- P1 proof complete while avoiding the repeated distributed scan of
+          -- every historical row from the same work on each idle claim.
+          WITH source_rows AS MATERIALIZED (
+            SELECT q.*
+            FROM importer_queue q
+            JOIN works w ON w.id = (q.payload->>'workId')::uuid
+            WHERE q.source = s.id
+              AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
+              AND q.task_type = 'IMPORT_CHAPTER'
+              AND q.attempts < COALESCE(q.max_attempts, 7)
+              -- This is the catalog P1 path. Keeping P0/STAFF rows out of its
+              -- bounded window both preserves the hierarchy and prevents them
+              -- from crowding out P1 frontiers before their own claim lanes run.
+              AND q.priority >= 75 AND q.priority < 100
+              AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+              AND w.published = true
+              ${CANONICAL_PUBLISHED_CLAIM_FILTER}
+              ${disallowedWorkIdsFilter}
+              ${disallowedChapterKeysFilter}
+              ${CANONICAL_ACTIVE_CLAIM_FILTER}
+          ), source_work_frontiers AS MATERIALIZED (
+            SELECT DISTINCT ON (q.payload->>'workId') q.*
+            FROM source_rows q
+            ORDER BY q.payload->>'workId', q.chapter_sort_key ASC NULLS LAST, q.id ASC
+          )
           SELECT q.id
-          FROM importer_queue q
-          JOIN works w ON w.id = (q.payload->>'workId')::uuid
+          FROM source_work_frontiers q
           LEFT JOIN LATERAL (
             SELECT MAX(c.number) AS max_published
             FROM chapters c
             WHERE c.work_id = (q.payload->>'workId')::uuid
               AND c.published_at IS NOT NULL
           ) pub ON TRUE
-          WHERE q.source = s.id
-            AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
-            AND q.task_type = 'IMPORT_CHAPTER'
-            AND q.attempts < COALESCE(q.max_attempts, 7)
-            -- This is the catalog P1 path. Keeping P0/STAFF rows out of its
-            -- bounded window both preserves the hierarchy and prevents them
-            -- from crowding out P1 frontiers before their own claim lanes run.
-            AND q.priority >= 75 AND q.priority < 100
-            AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
-            -- A raw queue head can be a canonical duplicate, behind a gap, or
-            -- already executing. Apply every frontier fence before the
-            -- per-source cap: otherwise 256 stale rows can hide a valid P1
-            -- chapter farther down the same source queue indefinitely.
-            AND w.published = true
-            ${CANONICAL_PUBLISHED_CLAIM_FILTER}
+          WHERE TRUE -- A raw queue head can be a canonical duplicate, behind a
+                -- gap, or already executing. Apply the remaining frontier
+                -- fence before the per-source cap so blocked works never hide
+                -- another executable P1 work in the same source.
             ${CANONICAL_FRONTIER_CLAIM_FILTER}
-            ${disallowedWorkIdsFilter}
-            ${disallowedChapterKeysFilter}
-            ${CANONICAL_ACTIVE_CLAIM_FILTER}
-          -- The bounded window now contains only executable P1 frontiers.
+          -- The bounded window now contains only executable P1 work frontiers.
           ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
           LIMIT $6
         ) candidate
