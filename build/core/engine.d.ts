@@ -177,6 +177,9 @@ export declare class ImporterEngine {
     private catalogMaintenanceLane;
     private catalogMaintenanceSourceCursor;
     private catalogMaintenanceWindowCursors;
+    private catalogSyncClaimsSinceLegacyRecovery;
+    private catalogLegacyRecoverySourceCursor;
+    private nextLegacyRecoveryProbeAt;
     private activeSourcesCache;
     private sourceScheduleSnapshot;
     private sourceScheduleSnapshotFlight;

@@ -191,7 +191,7 @@ export class ImporterQueue {
      * Acquire the next job atomically using SKIP LOCKED stored procedure,
      * optionally filtered by source and/or task type for dedicated runner lanes.
      */
-    async acquireNextJob(leaseDurationMinutes = 5, source, taskType, preferSourceOrder = false) {
+    async acquireNextJob(leaseDurationMinutes = 5, source, taskType, preferSourceOrder = false, options) {
         const params = {
             p_worker_id: this.workerId,
             p_lease_duration: `${leaseDurationMinutes} minutes`,
@@ -210,6 +210,12 @@ export class ImporterQueue {
         // changing its production contract.
         if (preferSourceOrder && Array.isArray(source) && typeof this.supabase?.getPool === 'function') {
             params.p_prefer_source_order = true;
+        }
+        // This selector is implemented only by the direct importer path. Gateway
+        // deployments retain their public RPC contract and fall back to ordinary
+        // queue ordering rather than sending an unsupported parameter.
+        if (options?.onlyLegacySameSourceClaimRecovery && typeof this.supabase?.getPool === 'function') {
+            params.p_only_legacy_same_source_claim_recovery = true;
         }
         const { data, error } = await this.supabase.rpc('importer_acquire_job', params);
         if (error) {

@@ -119,6 +119,40 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(engine.chapterClaimGate.active).toBe(0);
   });
 
+  it('reserves one bounded sync turn for queued legacy ambiguity recoveries', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const acquireNextJob = vi.fn().mockResolvedValue({
+      id: 'mangaflix-recovery',
+      source: 'mangaflix',
+    });
+    engine.chapterClaimGate = new AsyncSemaphore(1, 'test_catalog_recovery_turn');
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
+    engine.catalogSyncClaimsSinceLegacyRecovery = 3;
+    engine.catalogLegacyRecoverySourceCursor = 0;
+    engine.nextLegacyRecoveryProbeAt = 0;
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue([
+      'zeta', 'mangaflix', 'littletyrant', 'alpha',
+    ]);
+    engine.queue = { acquireNextJob };
+
+    const job = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+
+    expect(job).toEqual({ id: 'mangaflix-recovery', source: 'mangaflix' });
+    expect(acquireNextJob).toHaveBeenCalledWith(
+      5,
+      ['alpha', 'littletyrant', 'mangaflix', 'zeta'],
+      'SYNC_WORK',
+      true,
+      { onlyLegacySameSourceClaimRecovery: true },
+    );
+    expect(engine.catalogSyncClaimsSinceLegacyRecovery).toBe(0);
+    expect(engine.catalogLegacyRecoverySourceCursor).toBe(3);
+    expect(engine.chapterClaimGate.active).toBe(0);
+  });
+
   it('rotates winners inside a probe window without slowing the global window sweep', async () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
     const acquireNextJob = vi.fn().mockResolvedValue({ id: 'mangaflix-recovery', source: 'mangaflix' });

@@ -32,6 +32,8 @@ export declare function acquireJobsDirect(options: {
      * head from a neighbouring source cannot win every visit to the window.
      */
     preferAllowedSourceOrder?: boolean;
+    /** Claim only the bounded legacy same-source ambiguity recovery jobs. */
+    onlyLegacySameSourceClaimRecovery?: boolean;
     taskType?: string;
     batchSize?: number;
 }): Promise<GatewayJob[]>;
