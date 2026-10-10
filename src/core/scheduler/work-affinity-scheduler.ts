@@ -2,12 +2,12 @@
  * Work-Affinity Scheduler for Project Nox Importer.
  *
  * Implements:
- * - P0: Absolute priority preemption for fresh new releases and critical gaps (priority >= 90).
- * - P1 Critical Gap: Prioritizes missing chapters unblocking STAGED barrier cascade (priority 90-95).
+ * - P0: Absolute priority preemption for fresh releases (priority >= 100).
+ * - P1 Critical Gap: Prioritizes missing chapters unblocking STAGED barrier cascade (priority 90-99).
  * - P1 Backfill: Fair scheduling across ACTIVE_BACKFILL_WORKS (<= 10 works).
  * - P2 Active New Works: Fair scheduling with work affinity across ACTIVE_NEW_WORKS (<= 8 works).
  * - Max in-flight per work: MAX_INFLIGHT_PER_WORK = 2 (ensures >= 9 concurrent works across 18 workers).
- * - Anti-starvation: P1 and P2 make steady progress even under sustained P0 traffic.
+ * - Fairness is constrained within a lane; it never bypasses the hierarchy.
  * - Work-conserving fallback: No worker sits idle if any eligible job exists.
  * - Explainable scheduler: Detailed telemetry on why each job was selected.
  * - Shadow mode & live cutover toggle.
@@ -131,13 +131,13 @@ export function isActiveChapterClaimConflict(error: any): boolean {
  * manufacture capacity.
  */
 export function shouldReserveP0AfterStaffBurst(
-  consecutiveStaffClaims: number,
-  antiStarvationRatio: number,
-  hasP0Candidate: boolean,
+  _consecutiveStaffClaims: number,
+  _antiStarvationRatio: number,
+  _hasP0Candidate: boolean,
 ): boolean {
-  // Compatibility helper for old telemetry/tests. The live scheduler does not
-  // invoke it while Staff has claimable work.
-  return hasP0Candidate && antiStarvationRatio > 0 && consecutiveStaffClaims >= antiStarvationRatio;
+  // Compatibility helper for old telemetry/tests. Reserving P0 while STAFF
+  // remains executable would violate the product hierarchy.
+  return false;
 }
 
 /**
@@ -183,20 +183,6 @@ export function selectRotatingSourceWindow(
   return { sources: selected, nextCursor: (start + take) % unique.length };
 }
 
-/**
- * Staff and P0 are order-only lanes, but an endless stream of either must not
- * make already-admitted P1/P2 work mathematically impossible to finish.  One
- * normal-lane claim after a bounded high-priority burst preserves the normal
- * resource budget and gives lower lanes forward progress without weakening
- * their usual priority when the burst has not happened.
- */
-export function shouldReserveLowerPriorityAfterHighBurst(
-  consecutiveHighPriorityClaims: number,
-  antiStarvationRatio: number,
-): boolean {
-  return antiStarvationRatio > 0 && consecutiveHighPriorityClaims >= antiStarvationRatio;
-}
-
 export interface AcquiredSchedulerJob {
   job: any;
   lane: SchedulerLane;
@@ -215,9 +201,8 @@ export class WorkAffinityScheduler {
   // Counts actual successful STAFF_FORCED claims. It is deliberately local to
   // ordering: it never changes semaphores, pool size, or worker capacity.
   private staffConsecutiveClaims = 0;
-  // Combined STAFF/P0 streak.  Unlike staffConsecutiveClaims (which reserves
-  // a fresh release inside a Staff burst), this reserves one admitted normal
-  // lane opportunity after a sustained high-priority burst.
+  // Combined STAFF/P0 streak remains diagnostic only.  It must never change
+  // the strict STAFF -> P0 -> P1 -> P2 claim order.
   private highPriorityConsecutiveClaims = 0;
   private rrIndexP0 = 0;
   private rrIndexP1 = 0;
@@ -386,7 +371,7 @@ export class WorkAffinityScheduler {
           WHERE q.task_type = 'IMPORT_CHAPTER'
             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
             AND q.attempts < COALESCE(q.max_attempts, 7)
-            AND q.priority >= 90 AND q.priority < 1000
+            AND q.priority >= 100 AND q.priority < 1000
           GROUP BY q.payload->>'workId'
           ORDER BY MIN(q.next_run_at) ASC, MIN(q.chapter_sort_key) ASC NULLS LAST
           LIMIT 100
@@ -822,13 +807,8 @@ export class WorkAffinityScheduler {
     // -------------------------------------------------------------
     const fullWorkIds = this.getFullInFlightWorkIds(config.maxInflightPerWork);
     // Staff is absolute while it has claimable work. Once it is exhausted (or
-    // temporarily unclaimable), P0 retains bounded lower-lane fairness.
+    // temporarily unclaimable), continue in the fixed P0 -> P1 -> P2 order.
     const hasStaffCandidate = await this.hasStaffForcedCandidate();
-    let reserveLowerPriority = !hasStaffCandidate && shouldReserveLowerPriorityAfterHighBurst(
-      this.highPriorityConsecutiveClaims,
-      config.antiStarvationRatio,
-    );
-    let reserveP0 = false;
     let staffForcedJob: any | null = null;
     if (hasStaffCandidate) {
       const tStaff0 = performance.now();
@@ -845,27 +825,17 @@ export class WorkAffinityScheduler {
     if (staffForcedJob) {
       return this.completeStaffClaim(staffForcedJob, t0, telemetry);
     }
-    // The presence probe may race another runner. Do not let an old Staff
-    // streak manufacture a P0 reservation while Staff is claimable; once the
-    // Staff CTE proved empty, normal P0/P1 anti-starvation may resume.
-    if (hasStaffCandidate) {
-      reserveLowerPriority = shouldReserveLowerPriorityAfterHighBurst(
-        this.highPriorityConsecutiveClaims,
-        config.antiStarvationRatio,
-      );
-    }
     this.staffConsecutiveClaims = 0;
 
     // -------------------------------------------------------------
-    // LANE P0: Fresh New Releases & Critical Gaps (Priority >= 90)
-    // P0 wins normal selection, except for one bounded lower-priority
-    // reservation after a sustained Staff/P0 burst. This prevents internal
-    // starvation without changing capacity or source/global limits.
+    // LANE P0: Fresh New Releases (Priority >= 100)
+    // P0 is selected whenever it has an eligible frontier.  Fairness is
+    // within each priority lane; it never grants P1/P2 a bypass over P0.
     // -------------------------------------------------------------
     const tP0_0 = performance.now();
     let p0Job = null;
-    const p0WorkIds = !reserveLowerPriority ? await this.getP0CandidateWorkIds() : [];
-    if (!reserveLowerPriority && p0WorkIds.length > 0) {
+    const p0WorkIds = await this.getP0CandidateWorkIds();
+    if (p0WorkIds.length > 0) {
       this.genericClaimAttempts++;
       const startIdx = this.rrIndexP0 % p0WorkIds.length;
       const targetP0WorkId = p0WorkIds[startIdx];
@@ -873,7 +843,7 @@ export class WorkAffinityScheduler {
         workerId: options.workerId,
         leaseMin,
         allowedSources,
-        minPriority: 90,
+        minPriority: 100,
         maxPriority: 999,
         workId: targetP0WorkId,
         disallowedWorkIds: fullWorkIds,
@@ -882,8 +852,7 @@ export class WorkAffinityScheduler {
 
       this.rrIndexP0 = (startIdx + 1) % p0WorkIds.length;
       if (p0Job) {
-        // A P0 claim consumes the bounded reservation and begins a fresh
-        // Staff burst. It has used the exact same normal claim path/limits.
+        // It uses the same normal claim path and resource limits as all lanes.
         this.staffConsecutiveClaims = 0;
         this.highPriorityConsecutiveClaims++;
         this.genericClaimSuccesses++;
@@ -926,25 +895,8 @@ export class WorkAffinityScheduler {
     }
     telemetry.p0ProbeMs = Math.round((performance.now() - tP0_0) * 10) / 10;
 
-    // The P0 that triggered a reservation may have raced another worker or
-    // become source-blocked. Do not waste a healthy slot: Staff resumes only
-    // after that bounded P0 opportunity was actually attempted.
-    if (!reserveLowerPriority && reserveP0) {
-      const tStaff0 = performance.now();
-      staffForcedJob = await this.claimStaffForcedJob(this.pool, {
-        workerId: options.workerId,
-        leaseMin,
-        allowedSources,
-        disallowedWorkIds: fullWorkIds,
-        telemetry,
-      });
-      telemetry.staffCheckMs += Math.round((performance.now() - tStaff0) * 10) / 10;
-      if (staffForcedJob) return this.completeStaffClaim(staffForcedJob, t0, telemetry);
-      this.staffConsecutiveClaims = 0;
-    }
-
     // -------------------------------------------------------------
-    // LANE P1: Critical Gap (Priority >= 90, unblocks STAGED barrier)
+    // LANE P1: Critical Gap (Priority 90-99, unblocks STAGED barrier)
     // -------------------------------------------------------------
     const activeWorks = this.stateStore.getActiveWorks();
     const p1Works = activeWorks.filter((w) => w.lane === 'P1');
@@ -1150,10 +1102,69 @@ export class WorkAffinityScheduler {
     }
     telemetry.p1WorkTimeMs = Math.round((performance.now() - tP1_0) * 10) / 10;
 
+    // A published-but-not-yet-active work is still P1. Probe the bounded
+    // catalog P1 frontier before considering active P2 work; otherwise an
+    // untracked eligible P1 row could be bypassed solely because it has not
+    // yet been hydrated into the in-memory active set.
+    const activeWorkIds = activeWorks
+      .filter((w) => w.state === 'FILLING' &&
+                     !this.isWorkStagedBlocked(w.workId) &&
+                     !this.isWorkUnclaimable(w.workId) &&
+                     (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork)
+      .map((w) => w.workId);
+    const disallowedCatalogWorkIds = Array.from(new Set([
+      ...fullWorkIds,
+      ...Array.from(this.stagedBlockedWorks.keys()).filter((wId) => this.isWorkStagedBlocked(wId)),
+      ...Array.from(this.unclaimableWorksCooldown.keys()).filter((wId) => this.isWorkUnclaimable(wId)),
+    ]));
+    let catalogAllowedSources = allowedSources;
+    if (this.sourcePermitProvider && catalogAllowedSources && catalogAllowedSources.length > 0) {
+      const permitted = catalogAllowedSources.filter((s) => this.sourcePermitProvider!(s) > 0);
+      if (permitted.length > 0) catalogAllowedSources = permitted;
+    }
+    const claimCatalogP1 = async (): Promise<any | null> => {
+      const tCat0 = performance.now();
+      this.genericClaimAttempts++;
+      const job = await this.claimCatalogP1Job(this.pool, {
+        workerId: options.workerId,
+        leaseMin,
+        allowedSources: catalogAllowedSources,
+        disallowedWorkIds: disallowedCatalogWorkIds,
+        telemetry,
+      });
+      telemetry.catalogFallbackMs = Math.round((performance.now() - tCat0) * 10) / 10;
+      return job;
+    };
+    const finishCatalogP1 = (catalogP1Job: any): any => {
+      this.highPriorityConsecutiveClaims = 0;
+      this.genericClaimSuccesses++;
+      const waitTimeMs = performance.now() - t0;
+      telemetry.totalAcquireMs = Math.round(waitTimeMs * 10) / 10;
+      catalogP1Job._acquireTelemetry = telemetry;
+      const workId = catalogP1Job.payload?.workId || '';
+      this.onJobStarted(workId, catalogP1Job.chapter_sort_key);
+      this.p1Count1h++;
+      this.logDecision({
+        jobId: catalogP1Job.id,
+        workId,
+        workTitle: catalogP1Job.payload?.chapterTitle || 'Catalog P1 Backfill',
+        chapterNumber: catalogP1Job.payload?.chapterNumber ?? 0,
+        chapterSortKey: catalogP1Job.chapter_sort_key ?? 0,
+        lane: SchedulerLane.P1_BACKFILL,
+        reason: 'CATALOG_P1_BACKFILL_CLAIM',
+        workState: 'FILLING',
+        source: catalogP1Job.source,
+        waitTimeMs: Math.round(waitTimeMs * 10) / 10,
+        decisionTime: new Date().toISOString(),
+      });
+      return catalogP1Job;
+    };
+    const catalogP1Job = await claimCatalogP1();
+    if (catalogP1Job) return finishCatalogP1(catalogP1Job);
+
     // -------------------------------------------------------------
     // LANE P2: Active New Works (Fair Round-Robin + Batch Candidate Filter)
-    // Evaluated after active P1 works, but BEFORE generic untracked catalog backfills,
-    // guaranteeing newly admitted works are not starved by massive backlog.
+    // Evaluated only after every bounded P1 claim path above.
     // -------------------------------------------------------------
     const tP2_0 = performance.now();
     const eligibleP2Works = p2Works.filter(
@@ -1282,73 +1293,6 @@ export class WorkAffinityScheduler {
     // Try active works fallback first BEFORE scanning the full catalog
     // -------------------------------------------------------------
     const tFall0 = performance.now();
-    const activeWorkIds = activeWorks
-      .filter((w) => w.state === 'FILLING' &&
-                     !this.isWorkStagedBlocked(w.workId) &&
-                     !this.isWorkUnclaimable(w.workId) &&
-                     (this.inFlightByWork.get(w.workId) || 0) < config.maxInflightPerWork)
-      .map((w) => w.workId);
-
-    // When the persisted active set is empty, do not run the expensive
-    // on-demand admission GROUP BY before trying a bounded catalog claim. A
-    // published P1 row can be claimed directly and will rehydrate the active
-    // set; otherwise every idle slot repeats the large admission scan before
-    // reaching the same catalog fallback.
-    const disallowedCatalogWorkIds = Array.from(new Set([
-      ...fullWorkIds,
-      ...Array.from(this.stagedBlockedWorks.keys()).filter((wId) => this.isWorkStagedBlocked(wId)),
-      ...Array.from(this.unclaimableWorksCooldown.keys()).filter((wId) => this.isWorkUnclaimable(wId)),
-    ]));
-    let catalogAllowedSources = allowedSources;
-    if (this.sourcePermitProvider && catalogAllowedSources && catalogAllowedSources.length > 0) {
-      const permitted = catalogAllowedSources.filter((s) => this.sourcePermitProvider!(s) > 0);
-      if (permitted.length > 0) catalogAllowedSources = permitted;
-    }
-    const claimCatalogP1 = async (): Promise<any | null> => {
-      const tCat0 = performance.now();
-      this.genericClaimAttempts++;
-      const job = await this.claimCatalogP1Job(this.pool, {
-        workerId: options.workerId,
-        leaseMin,
-        allowedSources: catalogAllowedSources,
-        disallowedWorkIds: disallowedCatalogWorkIds,
-        telemetry,
-      });
-      telemetry.catalogFallbackMs = Math.round((performance.now() - tCat0) * 10) / 10;
-      return job;
-    };
-    const finishCatalogP1 = (catalogP1Job: any): any => {
-      this.highPriorityConsecutiveClaims = 0;
-      this.genericClaimSuccesses++;
-      const waitTimeMs = performance.now() - t0;
-      telemetry.totalAcquireMs = Math.round(waitTimeMs * 10) / 10;
-      catalogP1Job._acquireTelemetry = telemetry;
-      const workId = catalogP1Job.payload?.workId || '';
-      this.onJobStarted(workId, catalogP1Job.chapter_sort_key);
-      this.p1Count1h++;
-      this.logDecision({
-        jobId: catalogP1Job.id,
-        workId,
-        workTitle: catalogP1Job.payload?.chapterTitle || 'Catalog P1 Backfill',
-        chapterNumber: catalogP1Job.payload?.chapterNumber ?? 0,
-        chapterSortKey: catalogP1Job.chapter_sort_key ?? 0,
-        lane: SchedulerLane.P1_BACKFILL,
-        reason: 'CATALOG_P1_BACKFILL_CLAIM',
-        workState: 'FILLING',
-        source: catalogP1Job.source,
-        waitTimeMs: Math.round(waitTimeMs * 10) / 10,
-        decisionTime: new Date().toISOString(),
-      });
-      return catalogP1Job;
-    };
-
-    let catalogP1AlreadyChecked = false;
-    if (activeWorkIds.length === 0) {
-      catalogP1AlreadyChecked = true;
-      const directCatalogJob = await claimCatalogP1();
-      if (directCatalogJob) return finishCatalogP1(directCatalogJob);
-    }
-
     let fallbackJob = null;
     if (activeWorkIds.length > 0) {
       telemetry.worksTested += activeWorkIds.length;
@@ -1419,28 +1363,6 @@ export class WorkAffinityScheduler {
       };
       this.logDecision(decision); if (waitTimeMs > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
       return fallbackJob;
-    }
-
-    // -------------------------------------------------------------
-    // LANE P1: Catalog Backfill Dynamic Claim (Last Resort)
-    // When currently tracked active P1 and P2 works cannot supply a job,
-    // claim from ANY published catalog work
-    // -------------------------------------------------------------
-    const catalogP1Job = shouldRunCatalogFallbackAgain(activeWorkIds.length === 0, catalogP1AlreadyChecked)
-      ? await claimCatalogP1()
-      : null;
-
-    if (catalogP1Job) {
-      return finishCatalogP1(catalogP1Job);
-    }
-
-    // A reservation only defers the high lanes for one real normal-lane
-    // opportunity.  If no lower-priority work is claimable (for example all
-    // sources are cooling down), retry the regular priority order once rather
-    // than idling a healthy slot or recursively reserving forever.
-    if (reserveLowerPriority) {
-      this.highPriorityConsecutiveClaims = 0;
-      return this.executeIntelligentClaim(options, t0);
     }
 
     this.emptyClaimAttempts++; if (performance.now() - t0 > 1000) this.logger.info(`[SCHEDULER_TELEMETRY] NULL_RETURN ${JSON.stringify(telemetry)}`);

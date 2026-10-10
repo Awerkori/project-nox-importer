@@ -24,7 +24,6 @@ import { SchedulerStateStore } from '../src/core/scheduler/state-store.js';
 import { AdmissionController } from '../src/core/scheduler/admission-controller.js';
 import { WorkAffinityScheduler } from '../src/core/scheduler/work-affinity-scheduler.js';
 import {
-  shouldReserveLowerPriorityAfterHighBurst,
   shouldRunCatalogFallbackAgain,
   shouldStartCatalogProbe,
   selectRotatingSourceWindow,
@@ -147,11 +146,12 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(scheduler.getInFlightCount('solo-leveling-id')).toBe(1);
   });
 
-  it('gives an admitted P1 one bounded claim opportunity after a sustained P0/Staff burst', async () => {
-    const workId = 'p1-progress-work';
+  it('keeps an eligible P0 ahead of P1 after a sustained high-priority streak', async () => {
+    const p1WorkId = 'p1-progress-work';
+    const p0WorkId = 'p0-release-work';
     mockStateStore.setActiveWork({
-      workId,
-      workTitle: 'P1 progress must survive fresh-release bursts',
+      workId: p1WorkId,
+      workTitle: 'P1 backfill',
       lane: 'P1',
       state: 'FILLING',
       primarySource: 'mangaflix',
@@ -167,38 +167,109 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     });
     (scheduler as any).highPriorityConsecutiveClaims = 4;
 
-    const p1Job = {
-      id: 'p1-progress-job', source: 'mangaflix', priority: 75, chapter_sort_key: 6,
-      payload: { workId, chapterNumber: 6 },
+    const p0Job = {
+      id: 'p0-release-job', source: 'mangaflix', priority: 100, chapter_sort_key: 201,
+      payload: { workId: p0WorkId, chapterNumber: 201, isFreshRelease: true },
     };
-    const mockClient = {
-      query: vi.fn().mockImplementation((_sql: string, params: any[]) => {
-        // A priority-100 query would mean P0 was allowed to starve this P1.
-        if (params?.[1] === 100) throw new Error('P0 must be deferred for one P1 opportunity');
-        if (params?.[2] === workId) return { rows: [p1Job] };
-        return { rows: [] };
-      }),
-      release: vi.fn(),
-    };
-    (scheduler as any).pool = { connect: vi.fn().mockResolvedValue(mockClient) };
-
-    const acquired = await scheduler.acquireNextChapterJob({
-      workerId: 'worker-fairness', allowedSources: ['mangaflix'],
+    vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([p0WorkId]);
+    vi.spyOn(scheduler as any, 'claimSingleJob').mockImplementation(async (_pool: unknown, opts: any) => {
+      if (opts.workId === p0WorkId) return p0Job;
+      throw new Error(`lower-priority path reached before P0: ${opts.workId}`);
     });
 
-    expect(acquired?.id).toBe('p1-progress-job');
-    expect((scheduler as any).highPriorityConsecutiveClaims).toBe(0);
-    const claimSql = mockClient.query.mock.calls
-      .map(([sql]: [string]) => sql)
-      .find((sql: string) => sql.includes('UPDATE importer_queue'));
-    expect(claimSql).toMatch(/FOR UPDATE OF (q|q_base) SKIP LOCKED/);
-    expect(claimSql).not.toContain('FOR UPDATE SKIP LOCKED');
+    const acquired = await scheduler.acquireNextChapterJob({
+      workerId: 'worker-strict-p0', allowedSources: ['mangaflix'],
+    });
+
+    expect(acquired?.id).toBe('p0-release-job');
+    expect((scheduler as any).highPriorityConsecutiveClaims).toBe(5);
   });
 
-  it('only reserves lower-priority work after the configured high-priority burst', () => {
-    expect(shouldReserveLowerPriorityAfterHighBurst(3, 4)).toBe(false);
-    expect(shouldReserveLowerPriorityAfterHighBurst(4, 4)).toBe(true);
-    expect(shouldReserveLowerPriorityAfterHighBurst(100, 0)).toBe(false);
+  it('keeps an eligible STAFF job ahead of P0, P1, and P2', async () => {
+    const staffJob = {
+      id: 'staff-job', source: 'mangaflix', priority: 1000, chapter_sort_key: 1,
+      payload: { workId: 'staff-work', chapterNumber: 1, staffForced: true },
+    };
+    vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(true);
+    vi.spyOn(scheduler as any, 'claimStaffForcedJob').mockResolvedValue(staffJob);
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockImplementation(async () => {
+      throw new Error('P0 must not be probed before an eligible STAFF claim');
+    });
+    vi.spyOn(scheduler as any, 'claimSingleJob').mockImplementation(async () => {
+      throw new Error('P1/P2 must not be reached before an eligible STAFF claim');
+    });
+
+    const acquired = await scheduler.acquireNextChapterJob({
+      workerId: 'worker-staff', allowedSources: ['mangaflix'],
+    });
+
+    expect(acquired?.id).toBe('staff-job');
+  });
+
+  it('claims an untracked eligible P1 catalog frontier before an active P2 work', async () => {
+    const p2WorkId = 'p2-new-work';
+    const catalogP1Job = {
+      id: 'catalog-p1-job', source: 'mangaflix', priority: 75, chapter_sort_key: 2,
+      payload: { workId: 'catalog-p1-work', chapterNumber: 2 },
+    };
+    mockStateStore.setActiveWork({
+      workId: p2WorkId,
+      workTitle: 'P2 new work',
+      lane: 'P2',
+      state: 'FILLING',
+      primarySource: 'mangaflix',
+      admittedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+      totalChapters: 8,
+      publishedChapters: 0,
+      queuedChapters: 1,
+      inFlightChapters: 0,
+      frontierSortKey: 1,
+      criticalGapSortKey: null,
+      criticalGapUnblockCount: 0,
+    });
+    vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([]);
+    vi.spyOn(scheduler as any, 'claimCatalogP1Job').mockResolvedValue(catalogP1Job);
+    vi.spyOn(scheduler as any, 'claimSingleJob').mockImplementation(async () => {
+      throw new Error('P2 claim attempted before eligible catalog P1');
+    });
+
+    const acquired = await scheduler.acquireNextChapterJob({
+      workerId: 'worker-strict-p1', allowedSources: ['mangaflix'],
+    });
+
+    expect(acquired?.id).toBe('catalog-p1-job');
+  });
+
+  it('allows P2 only after STAFF, P0, and every P1 claim path is empty', async () => {
+    const p2WorkId = 'p2-only-work';
+    const p2Job = {
+      id: 'p2-job', source: 'mangaflix', priority: 50, chapter_sort_key: 1,
+      payload: { workId: p2WorkId, chapterNumber: 1 },
+    };
+    mockStateStore.setActiveWork({
+      workId: p2WorkId,
+      workTitle: 'P2 only work',
+      lane: 'P2', state: 'FILLING', primarySource: 'mangaflix',
+      admittedAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(),
+      totalChapters: 1, publishedChapters: 0, queuedChapters: 1, inFlightChapters: 0,
+      frontierSortKey: 1, criticalGapSortKey: null, criticalGapUnblockCount: 0,
+    });
+    vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([]);
+    vi.spyOn(scheduler as any, 'claimCatalogP1Job').mockResolvedValue(null);
+    vi.spyOn(scheduler as any, 'claimSingleJob').mockImplementation(async (_pool: unknown, opts: any) => {
+      if (opts.workId === p2WorkId) return p2Job;
+      throw new Error(`unexpected higher-priority claim: ${opts.workId}`);
+    });
+
+    const acquired = await scheduler.acquireNextChapterJob({
+      workerId: 'worker-p2', allowedSources: ['mangaflix'],
+    });
+
+    expect(acquired?.id).toBe('p2-job');
   });
 
   it('moves only retry-budget-exhausted queued/retry work out of the hot queue in a bounded statement', async () => {

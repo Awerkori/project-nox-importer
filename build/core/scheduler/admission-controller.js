@@ -20,23 +20,6 @@ import { isSourceExecutionEligible, SOURCE_EXECUTION_ELIGIBILITY_SQL } from '../
 // healthy P1 works get their first opportunity on the same source.
 const P1_FAIR_WINDOW_CHAPTERS = 1;
 /**
- * P1 keeps its canonical per-work execution reservation, but a single
- * visible-work frontier must not leave every other execution slot empty.
- * Priority remains enforced at claim time (P0 -> P1 -> P2); this only decides
- * whether it is safe to open a P2 window that can use capacity P1 cannot
- * currently consume.
- */
-export function hasCapacityBeyondP1Reservation(importingCount, effectiveChapterCapacity, maxInflightPerWork) {
-    const capacity = Number.isFinite(effectiveChapterCapacity)
-        ? Math.max(1, Math.floor(effectiveChapterCapacity))
-        : 1;
-    const importing = Number.isFinite(importingCount)
-        ? Math.max(0, Math.floor(importingCount))
-        : 0;
-    const reservation = Math.min(capacity, Number.isFinite(maxInflightPerWork) ? Math.max(1, Math.floor(maxInflightPerWork)) : 1);
-    return importing < capacity - reservation;
-}
-/**
  * Preserve a bounded admission-query budget without letting one source's
  * backlog consume every candidate row before source-level fairness runs.
  * The caller has already selected a small, healthy source window; this only
@@ -580,16 +563,11 @@ export class AdmissionController {
             // on the canonical work visibility, not latest_chapter_published_at: that
             // denormalized timestamp may legitimately be null for older works.
             const p1 = await this.timeAdmissionStage(stages, 'p1BacklogProbeMs', () => this.getP1BacklogSnapshot(options));
-            // P1 remains ahead of P2 in every claim decision, and this keeps its
-            // normal per-work concurrency reservation available.  Treating one
-            // retrying P1 frontier as an absolute admission freeze, however, left
-            // every other global slot empty even though the work itself can consume
-            // at most maxInflightPerWork slots.  Only hold P2 once the capacity beyond
-            // that canonical reservation is already occupied.
-            const maxInflightPerWork = Math.max(1, Number(config.maxInflightPerWork || 2));
-            if (p1.available > 0 &&
-                activeWorksCount > 0 &&
-                !hasCapacityBeyondP1Reservation(importingCnt, maxTotalWorkers, maxInflightPerWork)) {
+            // P2 admission is forbidden while any executable P1 frontier exists.
+            // Capacity beyond a single work's per-work limit is not a reason to
+            // invert the product priority hierarchy: the P1 admission/claim paths
+            // must find another eligible P1 work or release the blocked candidate.
+            if (p1.available > 0) {
                 return {
                     allowed: false,
                     reason: 'P1_BACKLOG_WAITING: existing catalog work must advance before P2 admission',

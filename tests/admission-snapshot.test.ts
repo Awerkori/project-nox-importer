@@ -3,7 +3,6 @@ import { PGlite } from '@electric-sql/pglite';
 import { readFileSync } from 'node:fs';
 import {
   AdmissionController,
-  hasCapacityBeyondP1Reservation,
   resolveFairSourceWindowQuota,
 } from '../src/core/scheduler/admission-controller.js';
 import { SOURCE_EXECUTION_ELIGIBILITY_SQL } from '../src/core/source-eligibility.js';
@@ -313,7 +312,7 @@ describe('bounded admission snapshot', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
-  it('opens P2 only into capacity a single P1 frontier cannot consume', async () => {
+  it('holds P2 admission whenever an executable P1 frontier exists, even with spare capacity', async () => {
     const state = {
       getConfig: () => ({ maxInflightPerWork: 2 }),
       getActiveWorks: () => [{ workId: 'p1-retry', lane: 'P1', state: 'FILLING' }],
@@ -329,12 +328,9 @@ describe('bounded admission snapshot', () => {
     controller.setChapterCapacityProvider(() => 12);
 
     await expect(controller.canAdmitNewWork()).resolves.toMatchObject({
-      allowed: true,
-      reason: 'CAN_ADMIT_NEW_WORK_ALLOWED',
+      allowed: false,
+      reason: 'P1_BACKLOG_WAITING: existing catalog work must advance before P2 admission',
     });
-    expect(hasCapacityBeyondP1Reservation(0, 12, 2)).toBe(true);
-    expect(hasCapacityBeyondP1Reservation(10, 12, 2)).toBe(false);
-    expect(hasCapacityBeyondP1Reservation(0, 1, 2)).toBe(false);
   });
 
   it('falls back to the durable queue count when no scheduler count provider is configured', async () => {
