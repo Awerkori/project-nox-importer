@@ -309,6 +309,12 @@ export async function acquireJobsDirect(options: {
   leaseDurationMinutes?: number;
   source?: string;
   allowedSources?: string[];
+  /**
+   * Catalog maintenance supplies a short, already-rotated source window.
+   * Preserve that source order for this one bounded claim so an older queue
+   * head from a neighbouring source cannot win every visit to the window.
+   */
+  preferAllowedSourceOrder?: boolean;
   taskType?: string;
   batchSize?: number;
 }): Promise<GatewayJob[]> {
@@ -317,6 +323,7 @@ export async function acquireJobsDirect(options: {
   const leaseMin = Math.max(1, Math.min(60, options.leaseDurationMinutes || 5));
   const source = options.source || null;
   const allowedSources = options.allowedSources && options.allowedSources.length > 0 ? options.allowedSources : null;
+  const preferAllowedSourceOrder = options.preferAllowedSourceOrder === true && allowedSources !== null;
   const taskType = options.taskType || null;
   const batchSize = Math.max(1, Math.min(50, options.batchSize || 10));
 
@@ -341,6 +348,10 @@ export async function acquireJobsDirect(options: {
           OR q.source IN (SELECT s.id FROM importer_sources s WHERE s.enabled = true AND s.status = 'ACTIVE')
         )
       ORDER BY 
+        CASE
+          WHEN $7::boolean THEN COALESCE(array_position($6::text[], q.source), 2147483647)
+          ELSE 0
+        END ASC,
         CASE 
           WHEN (q.payload->>'staffForced')::boolean = true OR q.priority >= 1000 THEN 0 
           ELSE 1 
@@ -365,7 +376,15 @@ export async function acquireJobsDirect(options: {
               q.lease_expires_at, q.next_run_at, q.last_error, q.chapter_sort_key;
   `;
 
-  const res = await p.query(query, [source, taskType, batchSize, workerId, leaseMin, allowedSources]);
+  const res = await p.query(query, [
+    source,
+    taskType,
+    batchSize,
+    workerId,
+    leaseMin,
+    allowedSources,
+    preferAllowedSourceOrder,
+  ]);
   return res.rows.map((r: any) => ({
     ...r,
     payload: typeof r.payload === 'string' ? JSON.parse(r.payload) : (r.payload || {}),

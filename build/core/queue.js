@@ -191,7 +191,7 @@ export class ImporterQueue {
      * Acquire the next job atomically using SKIP LOCKED stored procedure,
      * optionally filtered by source and/or task type for dedicated runner lanes.
      */
-    async acquireNextJob(leaseDurationMinutes = 5, source, taskType) {
+    async acquireNextJob(leaseDurationMinutes = 5, source, taskType, preferSourceOrder = false) {
         const params = {
             p_worker_id: this.workerId,
             p_lease_duration: `${leaseDurationMinutes} minutes`,
@@ -204,6 +204,12 @@ export class ImporterQueue {
         }
         if (taskType) {
             params.p_task_type = taskType;
+        }
+        // Only DirectSupabaseClient implements this optional ordering hint. The
+        // gateway RPC has a fixed public signature, so omit it there rather than
+        // changing its production contract.
+        if (preferSourceOrder && Array.isArray(source) && typeof this.supabase?.getPool === 'function') {
+            params.p_prefer_source_order = true;
         }
         const { data, error } = await this.supabase.rpc('importer_acquire_job', params);
         if (error) {

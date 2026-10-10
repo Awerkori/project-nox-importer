@@ -26,6 +26,12 @@ export declare function acquireJobsDirect(options: {
     leaseDurationMinutes?: number;
     source?: string;
     allowedSources?: string[];
+    /**
+     * Catalog maintenance supplies a short, already-rotated source window.
+     * Preserve that source order for this one bounded claim so an older queue
+     * head from a neighbouring source cannot win every visit to the window.
+     */
+    preferAllowedSourceOrder?: boolean;
     taskType?: string;
     batchSize?: number;
 }): Promise<GatewayJob[]>;
