@@ -396,7 +396,7 @@ describe('Atomic Buffer Reservation & Streaming Backpressure', () => {
     res.release();
   });
 
-  it('safe backpressure: high RSS stops reservation admission until memory recovers (no blind bypass)', async () => {
+  it('safe backpressure: hard RSS stops reservation admission until memory recovers', async () => {
     const autotuner = new AdaptiveAutotuner({
       maxBufferedBytes: 64 * 1024 * 1024,
       rssSoftLimitMb: 330,
@@ -406,7 +406,7 @@ describe('Atomic Buffer Reservation & Streaming Backpressure', () => {
     autotuner.trackBufferedBytes(1 * 1024 * 1024);
 
     vi.spyOn(diagnostics, 'getMemorySnapshot').mockReturnValue({
-      rssMb: 345,
+      rssMb: 381,
       heapUsedMb: 150,
       heapTotalMb: 200,
       externalMb: 10,
