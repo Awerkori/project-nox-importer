@@ -1420,17 +1420,37 @@ export class WorkAffinityScheduler {
             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
             AND q.task_type = 'IMPORT_CHAPTER'
             AND q.attempts < COALESCE(q.max_attempts, 7)
-          -- Uses idx_importer_queue_fetch; canonical selection remains below.
+            -- This is the catalog P1 path. Keeping P0/STAFF rows out of its
+            -- bounded window both preserves the hierarchy and prevents them
+            -- from crowding out P1 frontiers before their own claim lanes run.
+            AND q.priority >= 75 AND q.priority < 100
+            AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+          -- Uses idx_importer_queue_p1_claim_source; canonical selection
+          -- remains below after the bounded per-source read.
           ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
           LIMIT $6
         ) candidate
       ),
-      to_lock_filtered AS (
-        SELECT q.id, q.payload, q.status, q.task_type, q.attempts, q.max_attempts, q.next_run_at, q.priority, q.chapter_sort_key, q.source
+      -- Drop already-published alternatives before reducing the bounded
+      -- source window to one frontier per work. Grouping raw rows first can
+      -- select an obsolete chapter and hide a later executable P1 frontier.
+      canonical_rows AS MATERIALIZED (
+        SELECT q.id, q.payload->>'workId' AS work_id, q.source, q.chapter_sort_key
         FROM source_window windowed
         JOIN importer_queue q ON q.id = windowed.id
         JOIN works w ON w.id = (q.payload->>'workId')::uuid
         WHERE w.published = true
+          ${CANONICAL_PUBLISHED_CLAIM_FILTER}
+      ),
+      frontier_rows AS MATERIALIZED (
+        SELECT DISTINCT ON (source, work_id) id
+        FROM canonical_rows
+        ORDER BY source, work_id, chapter_sort_key ASC NULLS LAST, id ASC
+      ),
+      to_lock_filtered AS (
+        SELECT q.id, q.payload, q.status, q.task_type, q.attempts, q.max_attempts, q.next_run_at, q.priority, q.chapter_sort_key, q.source
+        FROM frontier_rows frontier
+        JOIN importer_queue q ON q.id = frontier.id
       ),
       to_lock AS (
         SELECT q_base.id

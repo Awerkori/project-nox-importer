@@ -52,6 +52,33 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     });
   });
 
+  it('keeps the catalog fallback P1-only and chooses frontiers after canonical filtering', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const client = { query };
+    const state = {
+      getConfig: () => ({ maxInflightPerWork: 2 }),
+      getActiveWork: () => undefined,
+      setActiveWork: vi.fn(),
+    } as any;
+    const localScheduler = new WorkAffinityScheduler(state, {} as any, {} as any);
+
+    await expect((localScheduler as any).executeClaimCatalogQuery(client, {
+      workerId: 'catalog-test', leaseMin: 5, allowedSources: ['healthy-source'],
+    })).resolves.toBeNull();
+
+    const sql = String(query.mock.calls[0][0]);
+    const sourceWindow = sql.indexOf('source_window AS MATERIALIZED');
+    const sourceWindowLimit = sql.indexOf('LIMIT $6', sourceWindow);
+    expect(sql.indexOf('q.priority >= 75 AND q.priority < 100', sourceWindow)).toBeLessThan(sourceWindowLimit);
+    expect(sql.indexOf("COALESCE(q.payload->>'staffForced', 'false') <> 'true'", sourceWindow)).toBeLessThan(sourceWindowLimit);
+    const canonicalRows = sql.indexOf('canonical_rows AS MATERIALIZED');
+    const canonicalFilter = sql.indexOf('canonical_chapter.published_at IS NOT NULL', canonicalRows);
+    const frontierRows = sql.indexOf('frontier_rows AS MATERIALIZED', canonicalRows);
+    expect(canonicalFilter).toBeGreaterThan(canonicalRows);
+    expect(frontierRows).toBeGreaterThan(canonicalFilter);
+    expect(sql).toContain('SELECT DISTINCT ON (source, work_id) id');
+  });
+
   let mockPool: any;
   let mockStateStore: any;
   let mockAdmissionController: any;
