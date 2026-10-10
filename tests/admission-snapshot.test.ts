@@ -708,6 +708,7 @@ describe('bounded admission snapshot', () => {
           priority integer, chapter_sort_key numeric, next_run_at timestamptz,
           updated_at timestamptz
         );
+        CREATE TABLE chapters (work_id uuid, number numeric, published_at timestamptz);
         INSERT INTO importer_queue VALUES
           (1, 'IMPORT_CHAPTER', 'source-a', 'QUEUED', '{"workId":"${id}"}', 75, 1, now(), now()),
           (2, 'IMPORT_CHAPTER', 'source-a', 'QUEUED', '{"workId":"${id}"}', 75, 2, now(), now()),
@@ -741,6 +742,7 @@ describe('bounded admission snapshot', () => {
           priority integer, chapter_sort_key numeric, next_run_at timestamptz,
           updated_at timestamptz
         );
+        CREATE TABLE chapters (work_id uuid, number numeric, published_at timestamptz);
         INSERT INTO importer_queue VALUES
           (1, 'IMPORT_CHAPTER', 'blocked-source', 'QUEUED', '{"workId":"${id}"}', 75, 1, now(), now()),
           (2, 'IMPORT_CHAPTER', 'healthy-source', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 75, 2, now(), now());
@@ -756,6 +758,37 @@ describe('bounded admission snapshot', () => {
       expect(rows).toEqual([
         { source: 'blocked-source', status: 'PAUSED_BY_STAFF', chapter_sort_key: '1' },
         { source: 'healthy-source', status: 'QUEUED', chapter_sort_key: '2' },
+      ]);
+    } finally { await db.close(); }
+  });
+
+  it('does not let a canonically published queue row consume the P1 fair window', async () => {
+    const db = new PGlite();
+    try {
+      const id = '00000000-0000-0000-0000-000000000017';
+      await db.exec(`
+        CREATE TABLE importer_queue (
+          id integer PRIMARY KEY, task_type text, source text, status text, payload jsonb,
+          priority integer, chapter_sort_key numeric, next_run_at timestamptz,
+          updated_at timestamptz
+        );
+        CREATE TABLE chapters (work_id uuid, number numeric, published_at timestamptz);
+        INSERT INTO chapters VALUES ('${id}', 6, now());
+        INSERT INTO importer_queue VALUES
+          (1, 'IMPORT_CHAPTER', 'source-a', 'QUEUED', '{"workId":"${id}"}', 75, 6, now(), now()),
+          (2, 'IMPORT_CHAPTER', 'source-a', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 75, 7, now(), now());
+      `);
+      const controller = new AdmissionController({} as any, {} as any, {
+        query: (sql: string, params?: any[]) => db.query(sql, params),
+      });
+
+      await expect((controller as any).enforceP1FairWindow(id)).resolves.toBe(1);
+      const { rows } = await db.query<any>(
+        `SELECT status, chapter_sort_key FROM importer_queue ORDER BY chapter_sort_key`,
+      );
+      expect(rows).toEqual([
+        { status: 'PAUSED_BY_STAFF', chapter_sort_key: '6' },
+        { status: 'QUEUED', chapter_sort_key: '7' },
       ]);
     } finally { await db.close(); }
   });
@@ -804,6 +837,7 @@ describe('bounded admission snapshot', () => {
           priority integer, chapter_sort_key numeric, next_run_at timestamptz,
           updated_at timestamptz
         );
+        CREATE TABLE chapters (work_id uuid, number numeric, published_at timestamptz);
         INSERT INTO importer_queue VALUES
           (1, 'IMPORT_CHAPTER', 'source-a', 'PAUSED_BY_STAFF', '{"workId":"${id}"}', 75, 34, now(), now()),
           (2, 'IMPORT_CHAPTER', 'source-a', 'QUEUED', '{"workId":"${id}"}', 75, 36, now(), now());
