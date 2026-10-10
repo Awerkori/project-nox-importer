@@ -1413,6 +1413,13 @@ export class WorkAffinityScheduler {
         CROSS JOIN LATERAL (
           SELECT q.id
           FROM importer_queue q
+          JOIN works w ON w.id = (q.payload->>'workId')::uuid
+          LEFT JOIN LATERAL (
+            SELECT MAX(c.number) AS max_published
+            FROM chapters c
+            WHERE c.work_id = (q.payload->>'workId')::uuid
+              AND c.published_at IS NOT NULL
+          ) pub ON TRUE
           WHERE q.source = s.id
             AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
             AND q.task_type = 'IMPORT_CHAPTER'
@@ -1422,8 +1429,17 @@ export class WorkAffinityScheduler {
             -- from crowding out P1 frontiers before their own claim lanes run.
             AND q.priority >= 75 AND q.priority < 100
             AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
-          -- Uses idx_importer_queue_p1_claim_source; canonical selection
-          -- remains below after the bounded per-source read.
+            -- A raw queue head can be a canonical duplicate, behind a gap, or
+            -- already executing. Apply every frontier fence before the
+            -- per-source cap: otherwise 256 stale rows can hide a valid P1
+            -- chapter farther down the same source queue indefinitely.
+            AND w.published = true
+            ${CANONICAL_PUBLISHED_CLAIM_FILTER}
+            ${CANONICAL_FRONTIER_CLAIM_FILTER}
+            ${disallowedWorkIdsFilter}
+            ${disallowedChapterKeysFilter}
+            ${CANONICAL_ACTIVE_CLAIM_FILTER}
+          -- The bounded window now contains only executable P1 frontiers.
           ORDER BY q.priority DESC, q.chapter_sort_key ASC NULLS LAST, q.next_run_at ASC
           LIMIT $6
         ) candidate

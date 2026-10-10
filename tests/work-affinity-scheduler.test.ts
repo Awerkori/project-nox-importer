@@ -52,7 +52,7 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     });
   });
 
-  it('keeps the catalog fallback P1-only and chooses frontiers after canonical filtering', async () => {
+  it('keeps the catalog fallback P1-only and filters blocked rows before its bounded source window', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [] });
     const client = { query };
     const state = {
@@ -71,6 +71,9 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     const sourceWindowLimit = sql.indexOf('LIMIT $6', sourceWindow);
     expect(sql.indexOf('q.priority >= 75 AND q.priority < 100', sourceWindow)).toBeLessThan(sourceWindowLimit);
     expect(sql.indexOf("COALESCE(q.payload->>'staffForced', 'false') <> 'true'", sourceWindow)).toBeLessThan(sourceWindowLimit);
+    expect(sql.indexOf('canonical_chapter.published_at IS NOT NULL', sourceWindow)).toBeLessThan(sourceWindowLimit);
+    expect(sql.indexOf('predecessor.chapter_sort_key < q.chapter_sort_key', sourceWindow)).toBeLessThan(sourceWindowLimit);
+    expect(sql.indexOf("active_chapter.status = 'IMPORTING'", sourceWindow)).toBeLessThan(sourceWindowLimit);
     const canonicalRows = sql.indexOf('canonical_rows AS MATERIALIZED');
     const canonicalFilter = sql.indexOf('canonical_chapter.published_at IS NOT NULL', canonicalRows);
     const frontierRows = sql.indexOf('frontier_rows AS MATERIALIZED', canonicalRows);
