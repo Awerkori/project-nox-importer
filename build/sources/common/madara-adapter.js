@@ -165,9 +165,7 @@ export class MadaraAdapter {
             nextCursor: hasNextPage ? String(page + 1) : null,
         };
     }
-    async fetchWorkDetails(sourceWorkId) {
-        const workUrl = `${this.baseUrl}/${this.mangaSubString}/${sourceWorkId}/`;
-        const html = await this.fetchHtml(workUrl);
+    parseWorkDetails(sourceWorkId, html) {
         // Title
         const titleMatch = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
             html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
@@ -245,9 +243,7 @@ export class MadaraAdapter {
             alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
         };
     }
-    async fetchChapters(sourceWorkId) {
-        const workUrl = `${this.baseUrl}/${this.mangaSubString}/${sourceWorkId}/`;
-        let html = await this.fetchHtml(workUrl);
+    async extractChaptersFromHtml(sourceWorkId, workUrl, html) {
         // 1. First extract chapters from standard wp-manga-chapter list items
         const wpMangaChapterRegex = /<li[^>]*class="[^"]*wp-manga-chapter[^"]*"[\s\S]*?<a[^>]+href="([^"]+)"/gi;
         let chapterMatches = Array.from(html.matchAll(wpMangaChapterRegex)).map((m) => m[1]);
@@ -322,6 +318,27 @@ export class MadaraAdapter {
         }
         chapters.sort((a, b) => a.number - b.number);
         return chapters;
+    }
+    async fetchWorkDetails(sourceWorkId) {
+        const workUrl = `${this.baseUrl}/${this.mangaSubString}/${sourceWorkId}/`;
+        return this.parseWorkDetails(sourceWorkId, await this.fetchHtml(workUrl));
+    }
+    /**
+     * Madara puts the work metadata and the initial chapter list in the same
+     * HTML document. A sync previously fetched that document once per value,
+     * serializing two identical source reads through the catalog lane.
+     */
+    async fetchWorkSnapshot(sourceWorkId) {
+        const workUrl = `${this.baseUrl}/${this.mangaSubString}/${sourceWorkId}/`;
+        const html = await this.fetchHtml(workUrl);
+        return {
+            details: this.parseWorkDetails(sourceWorkId, html),
+            chapters: await this.extractChaptersFromHtml(sourceWorkId, workUrl, html),
+        };
+    }
+    async fetchChapters(sourceWorkId) {
+        const workUrl = `${this.baseUrl}/${this.mangaSubString}/${sourceWorkId}/`;
+        return this.extractChaptersFromHtml(sourceWorkId, workUrl, await this.fetchHtml(workUrl));
     }
     async fetchChapterPages(sourceChapterId, _chapterNumber) {
         const chapterUrl = sourceChapterId.startsWith('http')

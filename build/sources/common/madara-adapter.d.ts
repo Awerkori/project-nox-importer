@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 export interface MadaraOptions {
@@ -35,7 +35,15 @@ export declare class MadaraAdapter implements SourceAdapter {
         works: SourceWorkSummary[];
         nextCursor: string | null;
     }>;
+    private parseWorkDetails;
+    private extractChaptersFromHtml;
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
+    /**
+     * Madara puts the work metadata and the initial chapter list in the same
+     * HTML document. A sync previously fetched that document once per value,
+     * serializing two identical source reads through the catalog lane.
+     */
+    fetchWorkSnapshot(sourceWorkId: string): Promise<SourceWorkSnapshot>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;

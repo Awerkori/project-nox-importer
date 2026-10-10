@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { slugify, decodeHtmlEntities, stripHtml, extractChapterNumber } from './html-utils.js';
@@ -198,10 +198,7 @@ export class MadaraAdapter implements SourceAdapter {
     };
   }
 
-  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
-    const workUrl = `${this.baseUrl}/${this.mangaSubString}/${sourceWorkId}/`;
-    const html = await this.fetchHtml(workUrl);
-
+  private parseWorkDetails(sourceWorkId: string, html: string): SourceWorkDetails {
     // Title
     const titleMatch = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
                        html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
@@ -288,10 +285,11 @@ export class MadaraAdapter implements SourceAdapter {
     };
   }
 
-  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
-    const workUrl = `${this.baseUrl}/${this.mangaSubString}/${sourceWorkId}/`;
-    let html = await this.fetchHtml(workUrl);
-
+  private async extractChaptersFromHtml(
+    sourceWorkId: string,
+    workUrl: string,
+    html: string,
+  ): Promise<SourceChapterSummary[]> {
     // 1. First extract chapters from standard wp-manga-chapter list items
     const wpMangaChapterRegex = /<li[^>]*class="[^"]*wp-manga-chapter[^"]*"[\s\S]*?<a[^>]+href="([^"]+)"/gi;
     let chapterMatches = Array.from(html.matchAll(wpMangaChapterRegex)).map((m) => m[1]);
@@ -373,6 +371,30 @@ export class MadaraAdapter implements SourceAdapter {
 
     chapters.sort((a, b) => a.number - b.number);
     return chapters;
+  }
+
+  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+    const workUrl = `${this.baseUrl}/${this.mangaSubString}/${sourceWorkId}/`;
+    return this.parseWorkDetails(sourceWorkId, await this.fetchHtml(workUrl));
+  }
+
+  /**
+   * Madara puts the work metadata and the initial chapter list in the same
+   * HTML document. A sync previously fetched that document once per value,
+   * serializing two identical source reads through the catalog lane.
+   */
+  async fetchWorkSnapshot(sourceWorkId: string): Promise<SourceWorkSnapshot> {
+    const workUrl = `${this.baseUrl}/${this.mangaSubString}/${sourceWorkId}/`;
+    const html = await this.fetchHtml(workUrl);
+    return {
+      details: this.parseWorkDetails(sourceWorkId, html),
+      chapters: await this.extractChaptersFromHtml(sourceWorkId, workUrl, html),
+    };
+  }
+
+  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
+    const workUrl = `${this.baseUrl}/${this.mangaSubString}/${sourceWorkId}/`;
+    return this.extractChaptersFromHtml(sourceWorkId, workUrl, await this.fetchHtml(workUrl));
   }
 
   async fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]> {
