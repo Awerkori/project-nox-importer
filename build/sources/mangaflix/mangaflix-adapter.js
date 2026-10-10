@@ -125,12 +125,15 @@ export class MangaFlixAdapter {
             };
         }
     }
-    async fetchWorkDetails(sourceWorkId) {
+    async fetchWorkPayload(sourceWorkId) {
         const url = `${this.apiUrl}/mangas/${sourceWorkId}`;
         const response = await this.request(url);
         const data = response.data;
         if (!data)
             throw new Error(`Manga not found on MangaFlix: ${sourceWorkId}`);
+        return data;
+    }
+    toWorkDetails(data) {
         let kind = 'UNKNOWN';
         const ct = (data.content_type || '').toLowerCase();
         if (ct.includes('manhwa'))
@@ -153,10 +156,8 @@ export class MangaFlixAdapter {
             raw: data,
         };
     }
-    async fetchChapters(sourceWorkId) {
-        const url = `${this.apiUrl}/mangas/${sourceWorkId}`;
-        const response = await this.request(url);
-        const rawChapters = response.data?.chapters || [];
+    toChapterSummaries(data) {
+        const rawChapters = data.chapters || [];
         const chapters = rawChapters.map((ch) => {
             const num = parseFloat(ch.number) || 0;
             return {
@@ -169,6 +170,19 @@ export class MangaFlixAdapter {
         });
         // Sort ascending by chapter number
         return chapters.sort((a, b) => a.number - b.number);
+    }
+    async fetchWorkSnapshot(sourceWorkId) {
+        const data = await this.fetchWorkPayload(sourceWorkId);
+        return {
+            details: this.toWorkDetails(data),
+            chapters: this.toChapterSummaries(data),
+        };
+    }
+    async fetchWorkDetails(sourceWorkId) {
+        return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+    }
+    async fetchChapters(sourceWorkId) {
+        return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
     }
     async fetchChapterPages(sourceChapterId, _chapterNumber) {
         const url = `${this.apiUrl}/chapters/${sourceChapterId}?selected_language=pt-br`;

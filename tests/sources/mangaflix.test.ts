@@ -81,6 +81,29 @@ describe('MangaFlixAdapter', () => {
     expect(chapters[1].pageCount).toBe(18);
   });
 
+  it('reuses the authoritative work payload for a combined sync snapshot', async () => {
+    const mockTransport = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({
+        data: {
+          _id: 'mf-work-1',
+          name: 'Solo Necromancer',
+          content_type: 'manhwa',
+          chapters: [{ _id: 'mf-ch-1', number: '1', number_of_complete_pages: 15 }],
+        },
+      }),
+    });
+    const adapter = new MangaFlixAdapter(new HostRateLimiter(10.0), mockTransport as any);
+
+    const snapshot = await adapter.fetchWorkSnapshot('mf-work-1');
+
+    expect(snapshot.details.title).toBe('Solo Necromancer');
+    expect(snapshot.chapters).toEqual([expect.objectContaining({ sourceChapterId: 'mf-ch-1', number: 1, pageCount: 15 })]);
+    expect(mockTransport).toHaveBeenCalledTimes(1);
+  });
+
   it('correctly fetches chapter page URLs sorted by order', async () => {
     const mockTransport = vi.fn().mockResolvedValue({
       ok: true,

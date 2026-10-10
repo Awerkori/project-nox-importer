@@ -4379,7 +4379,14 @@ export class ImporterEngine {
     const adapter = this.registry.get(job.source);
     if (!adapter) throw new Error(`Source adapter not registered: ${job.source}`);
 
-    const details = await callProvider(() => adapter.fetchWorkDetails(sourceWorkId));
+    // MangaFlix returns metadata and chapters from the same authoritative
+    // work endpoint. Use an adapter-provided snapshot when available so a
+    // sync does not make a second identical request before it can enqueue
+    // canonical candidates. Other adapters retain their independent reads.
+    const workSnapshot = adapter.fetchWorkSnapshot
+      ? await callProvider(() => adapter.fetchWorkSnapshot!(sourceWorkId))
+      : null;
+    const details = workSnapshot?.details ?? await callProvider(() => adapter.fetchWorkDetails(sourceWorkId));
     let botUserId: string | null = null;
     const getBotUserId = async () => botUserId ??= await this.resolveBotUserId();
     let coverMediaId: string | null = null;
@@ -4468,7 +4475,7 @@ export class ImporterEngine {
       return;
     }
 
-    const discoveredChapters = await adapter.fetchChapters(sourceWorkId);
+    const discoveredChapters = workSnapshot?.chapters ?? await callProvider(() => adapter.fetchChapters(sourceWorkId));
     // An adapter that can prove URL ownership must never enqueue a chapter
     // outside its current source work.  This is deliberately before mappings
     // and queue writes: a bad upstream/sidebar link becomes no work at all.

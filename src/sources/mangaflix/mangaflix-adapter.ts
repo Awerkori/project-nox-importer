@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 
@@ -10,6 +10,25 @@ function slugify(text: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
 }
+
+type MangaFlixWorkPayload = {
+  _id: string;
+  name: string;
+  description?: string;
+  poster?: { default_url?: string };
+  genres?: Array<{ name: string }>;
+  content_type?: string;
+  chapters?: Array<{
+    _id: string;
+    name?: string;
+    number: string;
+    created_at?: string;
+    iso_date?: string;
+    number_of_complete_pages?: number;
+    number_of_pages?: number;
+    owners?: Array<{ name: string }>;
+  }>;
+};
 
 export class MangaFlixAdapter implements SourceAdapter {
   readonly id = 'mangaflix';
@@ -169,26 +188,16 @@ export class MangaFlixAdapter implements SourceAdapter {
     }
   }
 
-  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+  private async fetchWorkPayload(sourceWorkId: string): Promise<MangaFlixWorkPayload> {
     const url = `${this.apiUrl}/mangas/${sourceWorkId}`;
-    const response = await this.request<{
-      data: {
-        _id: string;
-        name: string;
-        description?: string;
-        poster?: { default_url?: string };
-        genres?: Array<{ name: string }>;
-        content_type?: string;
-        chapters?: Array<{
-          _id: string;
-          number: string;
-          owners?: Array<{ name: string }>;
-        }>;
-      };
-    }>(url);
+    const response = await this.request<{ data: MangaFlixWorkPayload }>(url);
 
     const data = response.data;
     if (!data) throw new Error(`Manga not found on MangaFlix: ${sourceWorkId}`);
+    return data;
+  }
+
+  private toWorkDetails(data: MangaFlixWorkPayload): SourceWorkDetails {
 
     let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
     const ct = (data.content_type || '').toLowerCase();
@@ -212,23 +221,8 @@ export class MangaFlixAdapter implements SourceAdapter {
     };
   }
 
-  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
-    const url = `${this.apiUrl}/mangas/${sourceWorkId}`;
-    const response = await this.request<{
-      data: {
-        chapters?: Array<{
-          _id: string;
-          name?: string;
-          number: string;
-          created_at?: string;
-          iso_date?: string;
-          number_of_complete_pages?: number;
-          number_of_pages?: number;
-        }>;
-      };
-    }>(url);
-
-    const rawChapters = response.data?.chapters || [];
+  private toChapterSummaries(data: MangaFlixWorkPayload): SourceChapterSummary[] {
+    const rawChapters = data.chapters || [];
 
     const chapters: SourceChapterSummary[] = rawChapters.map((ch) => {
       const num = parseFloat(ch.number) || 0;
@@ -243,6 +237,22 @@ export class MangaFlixAdapter implements SourceAdapter {
 
     // Sort ascending by chapter number
     return chapters.sort((a, b) => a.number - b.number);
+  }
+
+  async fetchWorkSnapshot(sourceWorkId: string): Promise<SourceWorkSnapshot> {
+    const data = await this.fetchWorkPayload(sourceWorkId);
+    return {
+      details: this.toWorkDetails(data),
+      chapters: this.toChapterSummaries(data),
+    };
+  }
+
+  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+    return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+  }
+
+  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
+    return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
   }
 
   async fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]> {

@@ -31,6 +31,16 @@ export interface SourceChapterSummary {
   pageCount?: number | null;
 }
 
+/**
+ * A source may expose the work metadata and its chapter list in one response.
+ * Adapters opt in only when both values came from the same authoritative
+ * payload; callers otherwise keep using the independent methods below.
+ */
+export interface SourceWorkSnapshot {
+  details: SourceWorkDetails;
+  chapters: SourceChapterSummary[];
+}
+
 export interface SourceAdapter {
   readonly id: string;
   readonly name: string;
@@ -63,6 +73,12 @@ export interface SourceAdapter {
    * Fetch chapters list for a work
    */
   fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
+
+  /**
+   * Optional combined work read. This avoids issuing two identical upstream
+   * requests when a provider's work-detail response already contains chapters.
+   */
+  fetchWorkSnapshot?(sourceWorkId: string): Promise<SourceWorkSnapshot>;
 
   /**
    * Fetch image page URLs for a specific chapter
