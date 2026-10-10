@@ -1394,21 +1394,18 @@ export class WorkAffinityScheduler {
           LIMIT $6
         ) candidate
       ),
-      -- Drop already-published alternatives before reducing the bounded
-      -- source window to one frontier per work. Grouping raw rows first can
-      -- select an obsolete chapter and hide a later executable P1 frontier.
-      canonical_rows AS MATERIALIZED (
-        SELECT q.id, q.payload->>'workId' AS work_id, q.source, q.chapter_sort_key
+      -- source_window contains ids selected from source_rows above, which
+      -- already proves published-work identity and excludes canonical
+      -- duplicates.  Do not repeat that correlated chapter lookup here: on
+      -- YSQL it turned every empty P1 probe into a second distributed read
+      -- of the same bounded candidates.  The final locked CTE below still
+      -- rechecks every canonical fence, so a concurrent publication or
+      -- claim cannot slip through between selection and UPDATE.
+      frontier_rows AS MATERIALIZED (
+        SELECT DISTINCT ON (q.source, q.payload->>'workId') q.id
         FROM source_window windowed
         JOIN importer_queue q ON q.id = windowed.id
-        JOIN works w ON w.id = (q.payload->>'workId')::uuid
-        WHERE w.published = true
-          ${CANONICAL_PUBLISHED_CLAIM_FILTER}
-      ),
-      frontier_rows AS MATERIALIZED (
-        SELECT DISTINCT ON (source, work_id) id
-        FROM canonical_rows
-        ORDER BY source, work_id, chapter_sort_key ASC NULLS LAST, id ASC
+        ORDER BY q.source, q.payload->>'workId', q.chapter_sort_key ASC NULLS LAST, q.id ASC
       ),
       to_lock_filtered AS (
         SELECT q.id, q.payload, q.status, q.task_type, q.attempts, q.max_attempts, q.next_run_at, q.priority, q.chapter_sort_key, q.source
