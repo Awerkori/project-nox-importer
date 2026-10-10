@@ -89,7 +89,10 @@ export declare function resolveChapterClaimConcurrency(globalConcurrency: number
  * only one can ultimately take the reduced execution permit.  Keep the
  * DB-backed claim phase no wider than the current effective capacity.
  */
-export declare function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency: number, effectiveChapterConcurrency: number, emptySchedulerScanMode?: boolean): number;
+export declare function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency: number, effectiveChapterConcurrency: number, emptySchedulerScanMode?: boolean, dbPressure?: {
+    poolMax?: number;
+    waitingClients?: number;
+}): number;
 /**
  * A null scheduler result means every priority lane and the bounded catalog
  * fallback were just checked without finding executable work. Repeating that
@@ -375,6 +378,14 @@ export declare class ImporterEngine {
      * General fallback worker runner running multiple concurrent slots
      */
     private runGeneralWorker;
+    /**
+     * The nominal gate remains execution-width while YSQL is healthy. Once its
+     * own bounded pool reports queued clients, constrain new claim/admission
+     * scans to that pool until the queue drains. This preserves the productive
+     * wide path without allowing an empty-scan/admission herd to monopolize the
+     * two production connections.
+     */
+    private refreshChapterClaimGateCapacity;
     private runGeneralSlot;
     /**
      * Dedicated discovery worker loop to guarantee catalog scanning is NEVER starved by chapter backlog.

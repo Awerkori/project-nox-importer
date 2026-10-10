@@ -384,7 +384,7 @@ export function resolveChapterClaimConcurrency(globalConcurrency, dbPoolMax) {
  * only one can ultimately take the reduced execution permit.  Keep the
  * DB-backed claim phase no wider than the current effective capacity.
  */
-export function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency, effectiveChapterConcurrency, emptySchedulerScanMode = false) {
+export function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency, effectiveChapterConcurrency, emptySchedulerScanMode = false, dbPressure) {
     const configured = Number.isFinite(configuredClaimConcurrency)
         ? Math.max(1, Math.floor(configuredClaimConcurrency))
         : 1;
@@ -398,7 +398,23 @@ export function resolveEffectiveClaimGateCapacity(configuredClaimConcurrency, ef
     // immediately restores the normal, work-conserving claim width below.
     if (emptySchedulerScanMode)
         return 1;
-    return Math.min(configured, effective);
+    const normalCapacity = Math.min(configured, effective);
+    // Do not permanently make this a pool-sized gate: when the database is
+    // healthy, claims are short and keeping all bounded execution slots
+    // claimable prevents unused workers.  A positive pool queue is different
+    // evidence: another claim/control-plane operation is already waiting for a
+    // client, so admitting every slot turns one slow scan into a stampede. Let
+    // existing holders drain and cap new entrants at the actual pool size until
+    // that pressure clears.
+    const waitingClients = Number.isFinite(dbPressure?.waitingClients)
+        ? Math.max(0, Math.floor(dbPressure.waitingClients))
+        : 0;
+    if (waitingClients === 0)
+        return normalCapacity;
+    const poolMax = Number.isFinite(dbPressure?.poolMax)
+        ? Math.max(1, Math.floor(dbPressure.poolMax))
+        : 1;
+    return Math.min(normalCapacity, poolMax);
 }
 /**
  * A null scheduler result means every priority lane and the bounded catalog
@@ -2588,6 +2604,20 @@ export class ImporterEngine {
         const slots = Array.from({ length: slotsCount }, (_, i) => this.runGeneralSlot(i));
         await Promise.all(slots);
     }
+    /**
+     * The nominal gate remains execution-width while YSQL is healthy. Once its
+     * own bounded pool reports queued clients, constrain new claim/admission
+     * scans to that pool until the queue drains. This preserves the productive
+     * wide path without allowing an empty-scan/admission herd to monopolize the
+     * two production connections.
+     */
+    refreshChapterClaimGateCapacity(effectiveChapterConcurrency, emptySchedulerScanMode = false) {
+        const pool = this.dbPool;
+        this.chapterClaimGate.setCapacity(resolveEffectiveClaimGateCapacity(this.config.MAX_CONCURRENT_CHAPTERS || 5, effectiveChapterConcurrency, emptySchedulerScanMode, {
+            poolMax: this.config.DIRECT_DB_POOL_MAX || 2,
+            waitingClients: Math.max(0, Number(pool?.waitingCount || 0)),
+        }));
+    }
     async runGeneralSlot(slotIndex) {
         telemetryCollector.registerSlot(slotIndex);
         // 1. Initial runner startup stagger (30-80ms per slot index) to prevent all runners opening simultaneously
@@ -2660,7 +2690,7 @@ export class ImporterEngine {
                     continue;
                 }
                 telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
-                this.chapterClaimGate.setCapacity(resolveEffectiveClaimGateCapacity(this.config.MAX_CONCURRENT_CHAPTERS || 5, globalSem.capacity, this.emptySchedulerScanMode));
+                this.refreshChapterClaimGateCapacity(globalSem.capacity, this.emptySchedulerScanMode);
                 if (!this.chapterClaimGate.tryAcquire()) {
                     telemetryCollector.setSlotState(slotIndex, 'IDLE');
                     await this.sleep(50 + Math.floor(Math.random() * 50));
@@ -2732,7 +2762,7 @@ export class ImporterEngine {
                     this.emptySchedulerScanRevision++;
                     this.emptySchedulerScanMode = false;
                     this.nextEmptySchedulerProbeAt = 0;
-                    this.chapterClaimGate.setCapacity(resolveEffectiveClaimGateCapacity(this.config.MAX_CONCURRENT_CHAPTERS || 5, globalSem.capacity));
+                    this.refreshChapterClaimGateCapacity(globalSem.capacity);
                     // D. Short In-Memory Reservation Mutex (< 0.05ms, ZERO DB I/O, ZERO Network, ZERO Await)
                     telemetryCollector.setSlotState(slotIndex, 'WAITING_MUTEX');
                     reservation = await this.chapterClaimMutex.runExclusive(async () => {

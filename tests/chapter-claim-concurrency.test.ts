@@ -25,6 +25,28 @@ describe('chapter claim concurrency', () => {
     expect(resolveEffectiveClaimGateCapacity(5, 0)).toBe(1);
   });
 
+  it('narrows only while the bounded database pool has queued claim work', () => {
+    expect(resolveEffectiveClaimGateCapacity(12, 12, false, {
+      poolMax: 2,
+      waitingClients: 1,
+    })).toBe(2);
+    expect(resolveEffectiveClaimGateCapacity(12, 3, false, {
+      poolMax: 2,
+      waitingClients: 7,
+    })).toBe(2);
+    expect(resolveEffectiveClaimGateCapacity(12, 12, false, {
+      poolMax: 2,
+      waitingClients: 0,
+    })).toBe(12);
+  });
+
+  it('keeps the empty-scan single probe stricter than database pressure', () => {
+    expect(resolveEffectiveClaimGateCapacity(12, 12, true, {
+      poolMax: 2,
+      waitingClients: 4,
+    })).toBe(1);
+  });
+
   it('coalesces only exhausted scheduler scans and restores normal claim width for work', () => {
     expect(resolveEffectiveClaimGateCapacity(5, 5, true)).toBe(1);
     expect(resolveEffectiveClaimGateCapacity(5, 3, true)).toBe(1);
