@@ -298,27 +298,47 @@ export class AdmissionController {
         // later row (correctly), but admission believes the work already owns its
         // one chapter and repeatedly forms an unclaimable cohort.  Rank both
         // non-terminal window states together, preserving only the lowest
-        // candidate from the healthy source that admitted this work as QUEUED.
+        // unpublished candidate from the healthy source that admitted this work
+        // as QUEUED. A stale queue row may describe a chapter another source has
+        // already published; it must not consume the sole P1 window.
         // A lower row from another source may be blocked, stale, or merely an
         // alternate mapping; reopening it instead would strand the valid source
         // frontier while falsely keeping this work active. RETRY is deliberately not rewritten:
         // it retains its retry/backoff semantics and the claim fence still keeps
         // a later retry behind the promoted predecessor.
-        const normalized = await this.runQuery(`WITH ranked AS MATERIALIZED (
+        const normalized = await this.runQuery(`WITH candidates AS MATERIALIZED (
+         SELECT q.id,
+                q.status AS prior_status,
+                q.source,
+                q.chapter_sort_key,
+                NOT EXISTS (
+                  SELECT 1
+                  FROM chapters canonical_chapter
+                  WHERE canonical_chapter.work_id = (q.payload->>'workId')::uuid
+                    AND canonical_chapter.published_at IS NOT NULL
+                    AND canonical_chapter.number = COALESCE(
+                      NULLIF(q.payload->>'chapterNumber', '')::numeric,
+                      q.chapter_sort_key
+                    )
+                ) AS canonical_eligible
+         FROM importer_queue q
+         WHERE q.task_type = 'IMPORT_CHAPTER'
+           AND (q.payload->>'workId') = $1
+           AND q.status IN ('QUEUED', 'PAUSED_BY_STAFF')
+           AND q.priority >= 75 AND q.priority < 100
+           AND COALESCE(q.payload->>'staffForced', 'false') <> 'true'
+       ), ranked AS MATERIALIZED (
          SELECT id,
-                status AS prior_status,
-                CASE WHEN ($3::text IS NULL OR source = $3::text)
-                           AND ROW_NUMBER() OVER (
+                prior_status,
+                CASE WHEN canonical_eligible
+                           AND ($3::text IS NULL OR source = $3::text)
+                           AND SUM(CASE WHEN canonical_eligible THEN 1 ELSE 0 END) OVER (
                              PARTITION BY CASE WHEN $3::text IS NULL THEN '' ELSE source END
                              ORDER BY chapter_sort_key ASC NULLS LAST, id ASC
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                            ) <= $2
                      THEN 'QUEUED' ELSE 'PAUSED_BY_STAFF' END AS target_status
-         FROM importer_queue
-         WHERE task_type = 'IMPORT_CHAPTER'
-           AND (payload->>'workId') = $1
-           AND status IN ('QUEUED', 'PAUSED_BY_STAFF')
-           AND priority >= 75 AND priority < 100
-           AND COALESCE(payload->>'staffForced', 'false') <> 'true'
+         FROM candidates
        ), normalized AS (
          UPDATE importer_queue q
          SET status = r.target_status,
