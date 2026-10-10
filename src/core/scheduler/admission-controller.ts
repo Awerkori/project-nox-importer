@@ -1953,7 +1953,13 @@ export class AdmissionController {
                  )
              )
            GROUP BY q.payload->>'workId', q.source
-           HAVING COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) > 0
+           -- source_window contains only due QUEUED/RETRY rows on the
+           -- normal pass and adds PAUSED_BY_STAFF only on the explicit
+           -- fallback. Requiring a ready row here made that fallback empty
+           -- for every paused-only P1 work, so a completed fair window could
+           -- never be re-admitted. The following fair-window normalization
+           -- reopens exactly one canonical row for the selected work.
+           HAVING COUNT(*) > 0
          ),
          queue_candidates AS MATERIALIZED (
            -- Rotate work selection independently from chapter number. Keep the
