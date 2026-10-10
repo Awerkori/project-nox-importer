@@ -47,6 +47,23 @@ describe('Publication Stall Detector & Lifecycle Transitions', () => {
     expect(evaluation.nextState).toBe('CAUTION');
   });
 
+  it('coalesces concurrent barrier cache misses into one settings read', async () => {
+    let resolveRead: ((value: any) => void) | undefined;
+    const maybeSingle = vi.fn(() => new Promise(resolve => { resolveRead = resolve; }));
+    const mockDb = {
+      from: vi.fn(() => ({
+        select: vi.fn(() => ({ eq: vi.fn(() => ({ maybeSingle })) })),
+        upsert: vi.fn(),
+      })),
+    };
+    const barrier = new PublicationSafetyBarrier(mockDb as any);
+
+    const reads = [barrier.getState(true), barrier.getState(true), barrier.getState(true)];
+    expect(maybeSingle).toHaveBeenCalledTimes(1);
+    resolveRead?.({ data: { value: 'OPEN' }, error: null });
+    await expect(Promise.all(reads)).resolves.toEqual(['OPEN', 'OPEN', 'OPEN']);
+  });
+
   it('2. Confirms that CLOSED barrier holds 0 worker slots and allows 0 new historical claims', async () => {
     const mockDb = createMockSupabase('CLOSED');
     const barrier = new PublicationSafetyBarrier(mockDb as any);

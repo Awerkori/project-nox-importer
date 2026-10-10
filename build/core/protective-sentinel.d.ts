@@ -78,6 +78,7 @@ export declare class ProtectiveSentinel {
     private cachedInfo;
     private lastFetchMs;
     private cacheTtlMs;
+    private protectiveStopFetchInFlight;
     private isRunning;
     private stopSignal;
     private homeSamples;

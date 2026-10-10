@@ -31,6 +31,10 @@ export class ProtectiveSentinel {
     cachedInfo = { active: false };
     lastFetchMs = 0;
     cacheTtlMs = 3000; // 3 second cache
+    // Coalesce concurrent cache misses from chapter slots.  The read remains
+    // bounded by the existing TTL and forceFresh callers still bypass cached
+    // data; they simply share an already-started fresher read.
+    protectiveStopFetchInFlight = null;
     isRunning = false;
     stopSignal = false;
     // Rolling latency windows for p50/p95 with 75s expiration window (max 20 samples)
@@ -162,14 +166,40 @@ export class ProtectiveSentinel {
         if (!forceFresh && now - this.lastFetchMs < this.cacheTtlMs) {
             return this.cachedInfo;
         }
-        try {
+        if (this.protectiveStopFetchInFlight)
+            return this.protectiveStopFetchInFlight;
+        const refresh = async () => {
             try {
-                const pool = this.getPool();
-                if (pool && typeof pool.query === 'function') {
-                    const res = await pool.query("SELECT value FROM settings WHERE key = 'importer_protective_stop'");
-                    if (res.rows.length > 0 && res.rows[0].value) {
-                        const raw = res.rows[0].value;
-                        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                try {
+                    const pool = this.getPool();
+                    if (pool && typeof pool.query === 'function') {
+                        const res = await pool.query("SELECT value FROM settings WHERE key = 'importer_protective_stop'");
+                        if (res.rows.length > 0 && res.rows[0].value) {
+                            const raw = res.rows[0].value;
+                            const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                            this.cachedInfo = {
+                                active: Boolean(parsed.active),
+                                reason: parsed.reason || null,
+                                classification: parsed.classification || null,
+                                details: parsed.details || null,
+                                triggered_at: parsed.triggered_at || null,
+                                resumed_at: parsed.resumed_at || null,
+                                resumed_by: parsed.resumed_by || null,
+                            };
+                            this.lastFetchMs = now;
+                            return this.cachedInfo;
+                        }
+                    }
+                }
+                catch { }
+                const { data, error } = await this.supabase
+                    .from('settings')
+                    .select('value')
+                    .eq('key', 'importer_protective_stop')
+                    .maybeSingle();
+                if (!error && data?.value) {
+                    try {
+                        const parsed = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
                         this.cachedInfo = {
                             active: Boolean(parsed.active),
                             reason: parsed.reason || null,
@@ -179,43 +209,30 @@ export class ProtectiveSentinel {
                             resumed_at: parsed.resumed_at || null,
                             resumed_by: parsed.resumed_by || null,
                         };
-                        this.lastFetchMs = now;
-                        return this.cachedInfo;
+                    }
+                    catch {
+                        this.cachedInfo = { active: false };
                     }
                 }
-            }
-            catch { }
-            const { data, error } = await this.supabase
-                .from('settings')
-                .select('value')
-                .eq('key', 'importer_protective_stop')
-                .maybeSingle();
-            if (!error && data?.value) {
-                try {
-                    const parsed = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
-                    this.cachedInfo = {
-                        active: Boolean(parsed.active),
-                        reason: parsed.reason || null,
-                        classification: parsed.classification || null,
-                        details: parsed.details || null,
-                        triggered_at: parsed.triggered_at || null,
-                        resumed_at: parsed.resumed_at || null,
-                        resumed_by: parsed.resumed_by || null,
-                    };
-                }
-                catch {
+                else {
                     this.cachedInfo = { active: false };
                 }
+                this.lastFetchMs = now;
             }
-            else {
-                this.cachedInfo = { active: false };
+            catch (err) {
+                this.logger.warn('Failed to fetch importer_protective_stop setting', { error: err?.message });
             }
-            this.lastFetchMs = now;
+            return this.cachedInfo;
+        };
+        const request = refresh();
+        this.protectiveStopFetchInFlight = request;
+        try {
+            return await request;
         }
-        catch (err) {
-            this.logger.warn('Failed to fetch importer_protective_stop setting', { error: err?.message });
+        finally {
+            if (this.protectiveStopFetchInFlight === request)
+                this.protectiveStopFetchInFlight = null;
         }
-        return this.cachedInfo;
     }
     /**
      * On startup, auto-clears any legacy automatic protective stop if active.

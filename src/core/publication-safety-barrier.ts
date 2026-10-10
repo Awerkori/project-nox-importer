@@ -31,6 +31,10 @@ export class PublicationSafetyBarrier {
   private cachedState: BarrierState;
   private lastFetchMs = 0;
   private cacheTtlMs = 5000; // 5 second cache
+  // Several chapter slots can reach the cache boundary together.  Keep one
+  // refresh in flight so the safety check remains fresh without stampeding
+  // the small production YSQL pool with equivalent settings reads.
+  private stateFetchInFlight: Promise<BarrierState> | null = null;
 
   constructor(private supabase: SupabaseClient) {
     this.cachedState = 'OPEN';
@@ -45,39 +49,53 @@ export class PublicationSafetyBarrier {
       return this.cachedState;
     }
 
-    try {
-      const { data, error } = await this.supabase
-        .from('settings')
-        .select('value')
-        .eq('key', 'publication_safety_barrier')
-        .maybeSingle();
+    // A forced read may bypass a completed cache entry, but a request already
+    // in flight is at least as fresh and must be shared.  This does not alter
+    // the barrier state, TTL, or the fail-safe behaviour on read errors.
+    if (this.stateFetchInFlight) return this.stateFetchInFlight;
 
-      if (!error && data?.value) {
-        const val = String(data.value).toUpperCase() as BarrierState;
-        if (['OPEN', 'CAUTION', 'CLOSED', 'RECOVERING'].includes(val)) {
-          this.cachedState = val;
-        } else {
+    const refresh = async (): Promise<BarrierState> => {
+      try {
+        const { data, error } = await this.supabase
+          .from('settings')
+          .select('value')
+          .eq('key', 'publication_safety_barrier')
+          .maybeSingle();
+
+        if (!error && data?.value) {
+          const val = String(data.value).toUpperCase() as BarrierState;
+          if (['OPEN', 'CAUTION', 'CLOSED', 'RECOVERING'].includes(val)) {
+            this.cachedState = val;
+          } else {
+            this.cachedState = 'OPEN';
+          }
+        } else if (!data) {
+          await this.supabase.from('settings').upsert({
+            key: 'publication_safety_barrier',
+            value: 'OPEN',
+          });
           this.cachedState = 'OPEN';
         }
-      } else if (!data) {
-        await this.supabase.from('settings').upsert({
-          key: 'publication_safety_barrier',
-          value: 'OPEN',
+        this.lastFetchMs = now;
+      } catch (err: any) {
+        this.logger.warn('Failed to read publication_safety_barrier setting, retaining current cached state', {
+          error: err?.message,
+          currentState: this.cachedState,
         });
-        this.cachedState = 'OPEN';
+        if (!this.cachedState) {
+          this.cachedState = 'OPEN';
+        }
       }
-      this.lastFetchMs = now;
-    } catch (err: any) {
-      this.logger.warn('Failed to read publication_safety_barrier setting, retaining current cached state', {
-        error: err?.message,
-        currentState: this.cachedState,
-      });
-      if (!this.cachedState) {
-        this.cachedState = 'OPEN';
-      }
-    }
+      return this.cachedState;
+    };
 
-    return this.cachedState;
+    const request = refresh();
+    this.stateFetchInFlight = request;
+    try {
+      return await request;
+    } finally {
+      if (this.stateFetchInFlight === request) this.stateFetchInFlight = null;
+    }
   }
 
   /**
