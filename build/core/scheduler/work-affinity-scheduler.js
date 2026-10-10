@@ -235,14 +235,13 @@ export class WorkAffinityScheduler {
             return;
         const active = this.stateStore.getActiveWork(workId);
         const staleP2 = active?.lane === 'P2' && active.state === 'FILLING';
-        // A persisted P1 can retain an old inFlight counter after a worker dies
-        // or a retry is terminally completed. A critical P1 can also retain a
-        // raw QUEUED row whose canonical chapter was published by another source.
-        // The exact critical claim already applies the canonical/source/frontier
-        // fence, so three misses with no local in-flight work safely rotate only
-        // that stale active entry; the durable rows remain untouched.
-        const staleP1 = active?.lane === 'P1' && active.state === 'FILLING' && ((active.queuedChapters === 0 && (active.inFlightChapters || 0) > 0) ||
-            (active.criticalGapSortKey !== null && (active.inFlightChapters || 0) === 0));
+        // Active P1 state is advisory: a raw QUEUED row may already be
+        // canonically published by another source, even outside a critical gap.
+        // This method is reached only after an exact P1 claim applied the source,
+        // canonical and predecessor fences. With no local work in flight, three
+        // bounded misses safely rotate any stale P1 entry; durable queue rows are
+        // left untouched and can be rediscovered if they later become eligible.
+        const staleP1 = active?.lane === 'P1' && active.state === 'FILLING';
         if (!staleP2 && !staleP1)
             return;
         // claimSingleJob already applied the canonical/source/frontier filters;

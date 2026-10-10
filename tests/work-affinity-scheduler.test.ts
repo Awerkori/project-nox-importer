@@ -679,6 +679,33 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(mockStateStore.getActiveWork(workId)).toBeUndefined();
   });
 
+  it('vacates a stale normal P1 entry after exact misses even when state reports queued work', () => {
+    const workId = 'stale-normal-p1-work';
+    mockStateStore.setActiveWork({
+      workId,
+      workTitle: 'Stale normal P1',
+      lane: 'P1',
+      state: 'FILLING',
+      primarySource: 'source',
+      admittedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+      totalChapters: 1,
+      publishedChapters: 1,
+      queuedChapters: 1,
+      inFlightChapters: 0,
+      frontierSortKey: 1,
+      criticalGapSortKey: null,
+      criticalGapUnblockCount: 0,
+    });
+
+    (scheduler as any).noteStaleActiveWorkClaimMiss(workId);
+    (scheduler as any).noteStaleActiveWorkClaimMiss(workId);
+    expect(mockStateStore.getActiveWork(workId)).toBeDefined();
+    (scheduler as any).noteStaleActiveWorkClaimMiss(workId);
+    expect(mockStateStore.getActiveWork(workId)).toBeUndefined();
+    expect(mockStateStore.removeActiveWork).toHaveBeenCalledWith(workId);
+  });
+
   it('rotates a stale critical P1 entry after repeated exact claim misses', async () => {
     const workId = 'stale-critical-p1-work';
     mockStateStore.setActiveWork({
