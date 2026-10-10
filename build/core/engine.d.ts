@@ -176,6 +176,7 @@ export declare class ImporterEngine {
     private chapterClaimStartupSlots;
     private catalogMaintenanceLane;
     private catalogMaintenanceSourceCursor;
+    private catalogMaintenanceWindowCursors;
     private activeSourcesCache;
     private sourceScheduleSnapshot;
     private sourceScheduleSnapshotFlight;

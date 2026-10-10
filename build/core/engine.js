@@ -557,6 +557,14 @@ export class ImporterEngine {
         DISCOVER_WORKS: 0,
         SYNC_WORK: 0,
     };
+    // The global cursor moves by a whole probe window so every healthy source
+    // is revisited within a bounded number of maintenance claims. Each window
+    // separately remembers its last winner, preventing an older neighbouring
+    // source from taking every visit to that same window.
+    catalogMaintenanceWindowCursors = {
+        DISCOVER_WORKS: new Map(),
+        SYNC_WORK: new Map(),
+    };
     activeSourcesCache = { sources: [], cachedAt: 0 };
     // Source configuration changes infrequently. Share one short-lived snapshot between
     // discovery and catalog backfill instead of making two full-table reads every minute.
@@ -2999,19 +3007,23 @@ export class ImporterEngine {
             // probing sources one by one made the first perpetually-backlogged
             // source in a window hide every later source indefinitely.
             const probe = selectCatalogMaintenanceProbeSources(allowedSources, this.catalogMaintenanceSourceCursor[taskType]);
-            const probeStart = this.catalogMaintenanceSourceCursor[taskType];
             this.catalogMaintenanceSourceCursor[taskType] = probe.nextCursor;
-            const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), probe.sources, taskType, true);
-            // The source order above is a fair rotation, not merely a bounded
-            // filter. Resume immediately after the winner so a permanently old
-            // queue head from another member of the same four-source window cannot
-            // repeatedly outrank MangaFlix (or any other neighbour) by timestamp.
+            const windowCursors = this.catalogMaintenanceWindowCursors ||= {
+                DISCOVER_WORKS: new Map(),
+                SYNC_WORK: new Map(),
+            };
+            const windowKey = probe.sources.join('\u001f');
+            const windowCursor = windowCursors[taskType].get(windowKey) || 0;
+            const normalizedWindowCursor = ((windowCursor % probe.sources.length) + probe.sources.length) % probe.sources.length;
+            const orderedSources = Array.from({ length: probe.sources.length }, (_, offset) => probe.sources[(normalizedWindowCursor + offset) % probe.sources.length]);
+            const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), orderedSources, taskType, true);
+            // Keep the global sweep at the next four-source window. Only the
+            // local ordering rotates after a winner, so fairness inside a window
+            // cannot turn a 32-source sweep into a much slower one-source cycle.
             if (job) {
-                const winnerOffset = probe.sources.indexOf(job.source);
-                const sourceCount = new Set(allowedSources).size;
-                if (winnerOffset >= 0 && sourceCount > 0) {
-                    const normalizedStart = ((probeStart % sourceCount) + sourceCount) % sourceCount;
-                    this.catalogMaintenanceSourceCursor[taskType] = (normalizedStart + winnerOffset + 1) % sourceCount;
+                const winnerOffset = orderedSources.indexOf(job.source);
+                if (winnerOffset >= 0) {
+                    windowCursors[taskType].set(windowKey, (normalizedWindowCursor + winnerOffset + 1) % probe.sources.length);
                 }
             }
             return job;
