@@ -30,6 +30,22 @@ export declare function selectCatalogMaintenanceProbeSources(eligibleSources: st
     nextCursor: number;
 };
 /**
+ * A second catalog operation is useful only when the chapter data plane and
+ * its very small YSQL pool already have real headroom.  This deliberately
+ * fails closed: a missing pool measurement, a waiting DB client, or any site
+ * pressure leaves catalog work globally serial.
+ */
+export declare function resolveCatalogMaintenanceCapacity(input: {
+    catalogActive: number;
+    chapterAvailable: number;
+    chapterWaiters: number;
+    dbWaitingClients: number;
+    dbIdleConnections: number;
+    siteHealth: string;
+    pressureScore: number;
+    emergencyPaused: boolean;
+}): number;
+/**
  * Maintenance cursors describe a moving updates feed, while bootstrap cursors
  * describe a stable catalog page or offset. Once a full pass has completed,
  * never feed its maintenance cursor back into a new bootstrap: adapters can
@@ -175,6 +191,8 @@ export declare class ImporterEngine {
     private chapterClaimPhaseReady;
     private chapterClaimStartupSlots;
     private catalogMaintenanceLane;
+    private catalogMaintenanceClaimMutex;
+    private catalogMaintenanceSourcesInFlight;
     private catalogMaintenanceSourceCursor;
     private catalogMaintenanceWindowCursors;
     private catalogSyncClaimsSinceLegacyRecovery;
@@ -375,6 +393,8 @@ export declare class ImporterEngine {
      * configured chapter execution concurrency or create a claim stampede.
      */
     private acquireCatalogMaintenanceJob;
+    private releaseCatalogMaintenanceSource;
+    private refreshCatalogMaintenanceCapacity;
     /**
      * Wait until every initial chapter slot has attempted a claim. Afterwards
      * the catalog lane obtains a fair claim-gate turn before its bounded DB
