@@ -2325,6 +2325,9 @@ export class AdmissionController {
                     }
                 }
                 const isP1 = lane === 'P1';
+                const candidateOrder = isP1
+                    ? 'q.source, q.min_sort_key ASC NULLS LAST'
+                    : 'q.source_rank ASC, q.source ASC, q.min_sort_key ASC NULLS LAST';
                 const p1SourceWindow = isP1
                     ? await this.timeAdmissionStage(stages, 'p1SourceWindowMs', () => this.getP1SourceWindow(allowedSources))
                     : null;
@@ -2332,6 +2335,12 @@ export class AdmissionController {
                     continue;
                 const maxPriority = isP1 ? 100 : 75;
                 const loadOnDemandCandidates = (includePaused) => {
+                    // The paused fallback is the only path that can seed a completely new
+                    // P2 work: it has no QUEUED chapter until admission promotes its
+                    // sliding window below. Requiring a queued row after adding paused
+                    // rows makes that frontier invisible and leaves every idle chapter
+                    // slot without a candidate.
+                    const queuedRowsPredicate = `COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) > 0`;
                     // This path is called from failed claim attempts. Keep it bounded by
                     // source and ordered on the existing source/status/task/created_at
                     // index; sorting the entire source backlog by chapter number before
@@ -2405,7 +2414,7 @@ export class AdmissionController {
               )
           )
           GROUP BY q.payload->>'workId', q.source
-          HAVING COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) > 0
+          HAVING ${includePaused ? 'COUNT(*) > 0' : queuedRowsPredicate}
         ), p1_rotation AS MATERIALIZED (
           SELECT ranked.*
           FROM (
@@ -2432,17 +2441,28 @@ export class AdmissionController {
           -- candidate window used by the periodic P1 admission path.
           WHERE rotation_rank <= 4 OR frontier_rank <= 4
         )
+        ${isP1 ? '' : `, p2_source_window AS MATERIALIZED (
+          SELECT ranked.*
+          FROM (
+            SELECT q.*,
+              ROW_NUMBER() OVER (
+                PARTITION BY q.source
+                ORDER BY q.min_sort_key ASC NULLS LAST, q.work_id
+              ) AS source_rank
+            FROM queue_candidates q
+          ) ranked
+        )`}
         SELECT q.work_id,
                w.title,
                q.source,
                q.pending_jobs,
                q.queued_count,
                q.min_sort_key,
-               ${isP1 ? 'q.rotation_rank, q.frontier_rank' : 'NULL::int AS rotation_rank, NULL::int AS frontier_rank'}
-        FROM ${isP1 ? 'p1_rotation' : 'queue_candidates'} q
+               ${isP1 ? 'q.rotation_rank, q.frontier_rank' : 'q.source_rank, NULL::int AS rotation_rank, NULL::int AS frontier_rank'}
+        FROM ${isP1 ? 'p1_rotation' : 'p2_source_window'} q
         JOIN works w ON w.id = q.work_id::uuid
         WHERE ${isP1 ? 'w.published = true' : 'w.published IS FALSE'}
-        ORDER BY q.source, q.min_sort_key ASC NULLS LAST
+        ORDER BY ${candidateOrder}
         LIMIT ${isP1 ? 64 : 10};
       `;
                     return this.runQuery(query, [
@@ -2516,6 +2536,12 @@ export class AdmissionController {
                         const sourceRankB = nextP1SourceRank(b.source);
                         if (sourceRankA !== sourceRankB)
                             return sourceRankA - sourceRankB;
+                        if (!isP1) {
+                            const p2SourceRankA = parseInt(a.source_rank || '1', 10);
+                            const p2SourceRankB = parseInt(b.source_rank || '1', 10);
+                            if (p2SourceRankA !== p2SourceRankB)
+                                return p2SourceRankA - p2SourceRankB;
+                        }
                         return parseInt(b.queued_count || '0', 10) - parseInt(a.queued_count || '0', 10);
                     });
                     const isCandidateFrontierValid = (workId, minSort, maxPub) => {

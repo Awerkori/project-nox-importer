@@ -59,8 +59,15 @@ describe('bounded admission snapshot', () => {
     const onDemandSql = source.slice(onDemandStart, onDemandStart + 10000);
     expect(onDemandSql).toMatch(/eligible_sources AS MATERIALIZED[\s\S]{0,700}CROSS JOIN LATERAL/);
     expect(onDemandSql).toContain('s.id = ANY($5::text[])');
+    // The paused fallback must be able to admit an entirely-paused P2 work;
+    // admission then promotes its normal bounded sliding window. Requiring a
+    // pre-existing QUEUED row here deadlocks newly discovered works.
+    expect(onDemandSql).toContain("const queuedRowsPredicate = `COUNT(*) FILTER (WHERE q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW())) > 0`;");
+    expect(onDemandSql).toContain("HAVING ${includePaused ? 'COUNT(*) > 0' : queuedRowsPredicate}");
 
-    expect(onDemandSql).toContain('ORDER BY q.source, q.min_sort_key ASC NULLS LAST');
+    expect(source).toContain("const candidateOrder = isP1");
+    expect(source).toContain("'q.source_rank ASC, q.source ASC, q.min_sort_key ASC NULLS LAST'");
+    expect(onDemandSql).toContain("p2_source_window AS MATERIALIZED");
     expect(onDemandSql).not.toMatch(/FROM importer_queue q[\s\S]{0,1200}GROUP BY q\.payload->>'workId', q\.source/);
     expect(source).toContain("predecessor.chapter_sort_key < q.chapter_sort_key");
     expect(source).toContain('predecessor_canonical.published_at IS NOT NULL');
@@ -496,6 +503,75 @@ describe('bounded admission snapshot', () => {
     expect(result).toMatchObject({ workId: pausedFrontierWork, lane: 'P1', primarySource: 's' });
     expect(admitted).toHaveLength(1);
     expect(admitted[0]).toMatchObject({ workId: pausedFrontierWork, queuedChapters: 1 });
+  });
+
+  it('admits a paused-only P2 frontier and promotes only its bounded initial window', async () => {
+    const admitted: any[] = [];
+    const pausedP2Work = '00000000-0000-0000-0000-000000000043';
+    const state = {
+      getConfig: () => ({ enabled: true, shadowMode: false, maxActiveNewWorks: 4, slidingWindowMin: 4, slidingWindowSize: 8 }),
+      getActiveWorks: () => [],
+      setActiveWork: (work: any) => admitted.push(work),
+    } as any;
+    const sentinel = { isProtectiveStopActive: async () => false } as any;
+    const pool = {
+      query: async (sql: string) => {
+        if (sql.includes('priority >= 100')) return { rows: [] };
+        if (sql.includes("status = 'IMPORTING'")) return { rows: [{ cnt: '0' }] };
+        if (sql.includes('WITH eligible_sources AS MATERIALIZED')) {
+          if (sql.includes('paused AS (')) {
+            return { rows: [{ work_id: pausedP2Work, title: 'Paused P2 frontier', source: 's', pending_jobs: '8', queued_count: '0', min_sort_key: '1' }] };
+          }
+          return { rows: [] };
+        }
+        if (sql.includes('SELECT work_id::text, COALESCE(MAX(number), -1)')) return { rows: [] };
+        if (sql.includes('FROM importer_confirmed_gaps')) return { rows: [] };
+        if (sql.includes('WITH to_promote AS')) return { rows: [{ id: 'one' }, { id: 'two' }, { id: 'three' }, { id: 'four' }] };
+        return { rows: [] };
+      },
+    };
+    const controller = new AdmissionController(state, sentinel, pool as any);
+    controller.setChapterCapacityProvider(() => 2);
+
+    const result = await (controller as any).executeOnDemandAdmission('P2', ['s']);
+
+    expect(result).toMatchObject({ workId: pausedP2Work, lane: 'P2', primarySource: 's' });
+    expect(admitted.at(-1)).toMatchObject({ workId: pausedP2Work, queuedChapters: 4 });
+  });
+
+  it('keeps the first P2 source round ahead of a larger backlog from a later source', async () => {
+    const admitted: any[] = [];
+    const firstSourceWork = '00000000-0000-0000-0000-000000000044';
+    const laterSourceWork = '00000000-0000-0000-0000-000000000045';
+    const state = {
+      getConfig: () => ({ enabled: true, shadowMode: false, maxActiveNewWorks: 4, slidingWindowMin: 4, slidingWindowSize: 8 }),
+      getActiveWorks: () => [],
+      setActiveWork: (work: any) => admitted.push(work),
+    } as any;
+    const sentinel = { isProtectiveStopActive: async () => false } as any;
+    const pool = {
+      query: async (sql: string) => {
+        if (sql.includes('priority >= 100')) return { rows: [] };
+        if (sql.includes("status = 'IMPORTING'")) return { rows: [{ cnt: '0' }] };
+        if (sql.includes('WITH eligible_sources AS MATERIALIZED')) {
+          return { rows: [
+            { work_id: firstSourceWork, title: 'First source', source: 'source-a', pending_jobs: '1', queued_count: '0', min_sort_key: '1', source_rank: '1' },
+            { work_id: laterSourceWork, title: 'Later source', source: 'source-b', pending_jobs: '20', queued_count: '20', min_sort_key: '1', source_rank: '2' },
+          ] };
+        }
+        if (sql.includes('SELECT work_id::text, COALESCE(MAX(number), -1)')) return { rows: [] };
+        if (sql.includes('FROM importer_confirmed_gaps')) return { rows: [] };
+        if (sql.includes('WITH to_promote AS')) return { rows: [{ id: 'one' }, { id: 'two' }, { id: 'three' }, { id: 'four' }] };
+        return { rows: [] };
+      },
+    };
+    const controller = new AdmissionController(state, sentinel, pool as any);
+    controller.setChapterCapacityProvider(() => 2);
+
+    const result = await (controller as any).executeOnDemandAdmission('P2', ['source-a', 'source-b']);
+
+    expect(result).toMatchObject({ workId: firstSourceWork, primarySource: 'source-a' });
+    expect(admitted.at(-1)).toMatchObject({ workId: firstSourceWork });
   });
 
   it('keeps paused/retry backlog active and persists the P2-to-P1 transition after first publication', async () => {
