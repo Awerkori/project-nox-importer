@@ -280,7 +280,8 @@ export class ImporterQueue {
   async acquireNextJob(
     leaseDurationMinutes: number = 5,
     source?: string | string[],
-    taskType?: string
+    taskType?: string,
+    preferSourceOrder: boolean = false,
   ): Promise<QueueJob | null> {
     const params: Record<string, any> = {
       p_worker_id: this.workerId,
@@ -293,6 +294,12 @@ export class ImporterQueue {
     }
     if (taskType) {
       params.p_task_type = taskType;
+    }
+    // Only DirectSupabaseClient implements this optional ordering hint. The
+    // gateway RPC has a fixed public signature, so omit it there rather than
+    // changing its production contract.
+    if (preferSourceOrder && Array.isArray(source) && typeof (this.supabase as any)?.getPool === 'function') {
+      params.p_prefer_source_order = true;
     }
 
     const { data, error } = await this.supabase.rpc('importer_acquire_job', params);

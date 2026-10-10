@@ -2987,8 +2987,22 @@ export class ImporterEngine {
             // probing sources one by one made the first perpetually-backlogged
             // source in a window hide every later source indefinitely.
             const probe = selectCatalogMaintenanceProbeSources(allowedSources, this.catalogMaintenanceSourceCursor[taskType]);
+            const probeStart = this.catalogMaintenanceSourceCursor[taskType];
             this.catalogMaintenanceSourceCursor[taskType] = probe.nextCursor;
-            return await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), probe.sources, taskType);
+            const job = await this.queue.acquireNextJob(Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60), probe.sources, taskType, true);
+            // The source order above is a fair rotation, not merely a bounded
+            // filter. Resume immediately after the winner so a permanently old
+            // queue head from another member of the same four-source window cannot
+            // repeatedly outrank MangaFlix (or any other neighbour) by timestamp.
+            if (job) {
+                const winnerOffset = probe.sources.indexOf(job.source);
+                const sourceCount = new Set(allowedSources).size;
+                if (winnerOffset >= 0 && sourceCount > 0) {
+                    const normalizedStart = ((probeStart % sourceCount) + sourceCount) % sourceCount;
+                    this.catalogMaintenanceSourceCursor[taskType] = (normalizedStart + winnerOffset + 1) % sourceCount;
+                }
+            }
+            return job;
         }
         finally {
             this.chapterClaimGate.release();

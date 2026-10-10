@@ -113,8 +113,40 @@ describe('claim pressure protects the bounded YSQL pool', () => {
       5,
       ['alpha', 'littletyrant', 'mangaflix', 'zeta'],
       'SYNC_WORK',
+      true,
     );
     expect(engine.catalogMaintenanceSourceCursor.SYNC_WORK).toBe(0);
+    expect(engine.chapterClaimGate.active).toBe(0);
+  });
+
+  it('resumes the catalog rotation after the winning source, not the window boundary', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const acquireNextJob = vi.fn().mockResolvedValue({ id: 'mangaflix-recovery', source: 'mangaflix' });
+    engine.chapterClaimGate = new AsyncSemaphore(1, 'test_catalog_source_order');
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 16, SYNC_WORK: 16 };
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue([
+      'apenasumafa', 'apecomics', 'brasilhentai', 'cafecomyaoi',
+      'euphoriascan', 'fleurblanche', 'hanamiheaven', 'hentaifusion',
+      'hentaihome', 'hentaiseason', 'hentaitokyo', 'hipercool',
+      'kamisamaexplorer', 'kuro', 'ler999', 'littletyrant',
+      'mangaonlinetv', 'mangalivreto', 'mangaflix', 'megahentai',
+    ]);
+    engine.queue = { acquireNextJob };
+
+    await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+
+    expect(acquireNextJob).toHaveBeenCalledWith(
+      5,
+      ['mangaflix', 'mangalivreto', 'mangaonlinetv', 'megahentai'],
+      'SYNC_WORK',
+      true,
+    );
+    // MangaFlix won its probe, so the next claim starts at the
+    // following source rather than returning to the same four-source group.
+    expect(engine.catalogMaintenanceSourceCursor.SYNC_WORK).toBe(17);
     expect(engine.chapterClaimGate.active).toBe(0);
   });
 
