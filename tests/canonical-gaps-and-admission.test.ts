@@ -2,7 +2,7 @@
  * Project Nox — Canonical Upstream Gaps & Elastic Admission Test Suite
  * 
  * Verifies all 5 mandatory behavioral contracts:
- * - TEST A: Work with ch 1 -> gap [2..6] proven absent across all sources -> confirmed gap registered -> ch 7 publishes canonically -> ch 8 cascades
+ * - TEST A: Local absence of ch 2..6 is not proof of an upstream gap; ch 7 remains blocked
  * - TEST B: Work with ch 1 -> ch 2 exists in alternative source -> NO confirmed gap registered -> prioritizes ch 2 with priority 95 -> ch 7 remains STAGED
  * - TEST C: Blocked work vacates active set immediately -> AdmissionController admits healthy work -> claims throughput does not drop to 0
  * - TEST D: Scheduler avoids saturated source (0 permits) and prioritizes source with available permit headroom
@@ -81,10 +81,10 @@ describe('Project Nox — Canonical Gaps & Elastic Admission (Tests A-E)', () =>
   });
 
   // =========================================================================
-  // TEST A: Structural gap [2..6] absent from all sources -> confirmed gap
-  // -> ch 7 publishes canonically -> ch 8 cascades
+  // TEST A: Local absence [2..6] without upstream evidence must not create a
+  // canonical gap or release a later staged chapter.
   // =========================================================================
-  it('TEST A: confirmed structural gap releases STAGED chapter 7 and cascades chapter 8', async () => {
+  it('TEST A: unverified local absence keeps the staged frontier blocked', async () => {
     const workId = 'work-test-a-1111-2222';
     const publishedChapters = new Set<number>([1]);
     const confirmedGaps: Array<{ start: number; end: number }> = [];
@@ -146,7 +146,7 @@ describe('Project Nox — Canonical Gaps & Elastic Admission (Tests A-E)', () =>
       query: mockClient.query,
     };
 
-    // 1. Confirm gap interval [2..6]
+    // 1. Local checks alone cannot confirm gap interval [2..6].
     const gapResult = await confirmUpstreamGapInterval(mockPool, {
       workId,
       startSortKey: 2,
@@ -155,10 +155,9 @@ describe('Project Nox — Canonical Gaps & Elastic Admission (Tests A-E)', () =>
       reason: 'UPSTREAM_MISSING_PREDECESSORS',
     });
 
-    expect(gapResult.confirmed).toBe(true);
-    expect(confirmedGaps.length).toBe(1);
-    expect(confirmedGaps[0].start).toBe(2);
-    expect(confirmedGaps[0].end).toBe(6);
+    expect(gapResult.confirmed).toBe(false);
+    expect(gapResult.reason).toContain('UPSTREAM_ABSENCE_UNVERIFIED');
+    expect(confirmedGaps).toHaveLength(0);
 
     // 2. Publication barrier unblocks chapter 7 and cascades chapter 8
     const mockBarrier = {
@@ -189,11 +188,11 @@ describe('Project Nox — Canonical Gaps & Elastic Admission (Tests A-E)', () =>
     };
 
     const validation = await scheduler.validateClaimedJobPostMutex(jobCh9);
-    expect(mockBarrier.tryPublish).toHaveBeenCalledWith(workId, 7, 'ch-7-id');
-    // Chapters 7 and 8 published -> ch 9 is now completely valid without block!
-    expect(validation.valid).toBe(true);
-    expect(publishedChapters.has(7)).toBe(true);
-    expect(publishedChapters.has(8)).toBe(true);
+    expect(mockBarrier.tryPublish).not.toHaveBeenCalled();
+    expect(validation.valid).toBe(false);
+    expect(validation.reason).toBe('BLOCKED_BY_STAGED');
+    expect(publishedChapters.has(7)).toBe(false);
+    expect(publishedChapters.has(8)).toBe(false);
   });
 
   // =========================================================================

@@ -243,13 +243,13 @@ export async function markPermanentGapSafely(client, params) {
     }
 }
 /**
- * Validates and confirms an upstream structural gap across an entire interval [startSortKey, endSortKey].
- * Enforces Section 1:
- * - Checks all known mappings across all mapped sources for the work
- * - Checks importer_queue
- * - If alternative source has the chapter, prioritizes importing it (does NOT declare gap)
- * - Only if NO source possesses the chapters, inserts into importer_confirmed_gaps
- *   and registers canonical gap mappings.
+ * Checks whether the local importer knows of an alternative for a proposed
+ * interval. This helper intentionally does *not* fetch or probe any upstream
+ * catalog. Therefore it cannot prove that a chapter is absent upstream and
+ * must never create a confirmed canonical gap from local database absence.
+ *
+ * Callers retain the useful alternative-source signal, but must leave the
+ * frontier blocked until a separate path supplies positive upstream evidence.
  */
 export async function confirmUpstreamGapInterval(client, params) {
     const { workId, startSortKey, endSortKey, primarySource, reason = 'STRUCTURAL_UPSTREAM_GAP' } = params;
@@ -371,66 +371,9 @@ export async function confirmUpstreamGapInterval(client, params) {
             sourcesChecked,
         };
     }
-    // 4. Positive verification: all sources and queue verified; predecessor is demonstrably missing upstream
-    try {
-        // Record in importer_confirmed_gaps
-        await client.query(`INSERT INTO importer_confirmed_gaps (
-        work_id, start_chapter_number, end_chapter_number,
-        start_sort_key, end_sort_key, verified_at, sources_checked, reason
-      ) VALUES (
-        $1::uuid, $2::numeric, $3::numeric,
-        $2::numeric, $3::numeric, NOW(), $4::text[], $5
-      );`, [workId, startSortKey, endSortKey, sourcesChecked, `CONFIRMED_UPSTREAM_GAP: ${reason}`]);
-        // Query work_mapping_id for importer_chapter_mappings foreign key
-        let workMappingId = null;
-        try {
-            const wmRes = await client.query(`SELECT id FROM importer_work_mappings WHERE work_id = $1::uuid AND source = $2 LIMIT 1`, [workId, primarySource]);
-            if (wmRes?.rows && wmRes.rows.length > 0) {
-                workMappingId = wmRes.rows[0].id;
-            }
-            else {
-                const anyWm = await client.query(`SELECT id FROM importer_work_mappings WHERE work_id = $1::uuid LIMIT 1`, [workId]);
-                if (anyWm?.rows && anyWm.rows.length > 0) {
-                    workMappingId = anyWm.rows[0].id;
-                }
-            }
-        }
-        catch { }
-        // Register placeholder rows in importer_chapter_mappings for integer keys in this range (up to 100 items)
-        if (workMappingId) {
-            const stepCount = Math.min(100, Math.floor(endSortKey - startSortKey) + 1);
-            for (let k = 0; k < stepCount; k++) {
-                const key = Math.round((startSortKey + k) * 1000) / 1000;
-                if (key > endSortKey)
-                    break;
-                await client.query(`INSERT INTO importer_chapter_mappings (
-            source, source_chapter_id, work_id, work_mapping_id, chapter_number, chapter_sort_key,
-            status, is_gap, is_page_provider, page_count, last_error, updated_at
-          ) VALUES (
-            $1, $2, $3::uuid, $4::uuid, $5::numeric, $5::numeric,
-            'COMPLETED', true, false, 0, $6, NOW()
-          ) ON CONFLICT (source, source_chapter_id) DO UPDATE
-          SET is_gap = true, status = 'COMPLETED', last_error = EXCLUDED.last_error, updated_at = NOW();`, [
-                    primarySource,
-                    `gap:${workId}:${key}`,
-                    workId,
-                    workMappingId,
-                    key,
-                    `CONFIRMED_UPSTREAM_GAP: ${reason} (checked: ${sourcesChecked.join(', ')})`,
-                ]);
-            }
-        }
-        return {
-            confirmed: true,
-            reason: `CONFIRMED_UPSTREAM_GAP: Verified absent across all sources [${sourcesChecked.join(', ')}]`,
-            sourcesChecked,
-        };
-    }
-    catch (dbErr) {
-        return {
-            confirmed: false,
-            reason: `DB_INSERT_FAILED: ${dbErr?.message}`,
-            sourcesChecked,
-        };
-    }
+    return {
+        confirmed: false,
+        reason: `UPSTREAM_ABSENCE_UNVERIFIED: no upstream catalog or repeated 404 evidence for interval [${startSortKey}..${endSortKey}]`,
+        sourcesChecked,
+    };
 }

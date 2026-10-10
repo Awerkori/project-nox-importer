@@ -7,7 +7,7 @@ import {
 } from '../src/core/gap-validator.js';
 
 describe('Project Nox — Gap Safety & Permanent Absence Invariant Tests', () => {
-  it('reconciles only stale IMPORTING mappings before confirming a structural gap', async () => {
+  it('reconciles only stale IMPORTING mappings but refuses to infer an upstream gap from local absence', async () => {
     const queries: string[] = [];
     const client = {
       query: vi.fn().mockImplementation(async (sql: string) => {
@@ -24,7 +24,8 @@ describe('Project Nox — Gap Safety & Permanent Absence Invariant Tests', () =>
       primarySource: 'source-a',
     });
 
-    expect(result.confirmed).toBe(true);
+    expect(result.confirmed).toBe(false);
+    expect(result.reason).toContain('UPSTREAM_ABSENCE_UNVERIFIED');
     const cleanup = queries.find((sql) => sql.includes('STALE_IMPORTING_MAPPING_RECONCILED'));
     expect(cleanup).toBeDefined();
     expect(cleanup).toContain("m.status = 'IMPORTING'");
