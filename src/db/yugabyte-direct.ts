@@ -319,6 +319,8 @@ export async function acquireJobsDirect(options: {
   onlyLegacySameSourceClaimRecovery?: boolean;
   /** Claim only SYNC_WORK rows mapped to an existing published work (P1). */
   onlyExistingPublishedWorkSync?: boolean;
+  /** Claim only P1 sync rows for works with due P1 chapter-frontier work. */
+  onlyQueuedP1FrontierWorkSync?: boolean;
   taskType?: string;
   batchSize?: number;
 }): Promise<GatewayJob[]> {
@@ -330,6 +332,7 @@ export async function acquireJobsDirect(options: {
   const preferAllowedSourceOrder = options.preferAllowedSourceOrder === true && allowedSources !== null;
   const onlyLegacySameSourceClaimRecovery = options.onlyLegacySameSourceClaimRecovery === true;
   const onlyExistingPublishedWorkSync = options.onlyExistingPublishedWorkSync === true;
+  const onlyQueuedP1FrontierWorkSync = options.onlyQueuedP1FrontierWorkSync === true;
   const taskType = options.taskType || null;
   const batchSize = Math.max(1, Math.min(50, options.batchSize || 10));
 
@@ -383,6 +386,29 @@ export async function acquireJobsDirect(options: {
           )
         )
         AND (
+          -- A bounded P1-within-P1 selector: it never makes a new work P1.
+          NOT $10::boolean
+          OR (
+            q.task_type = 'SYNC_WORK'
+            AND EXISTS (
+              SELECT 1
+              FROM importer_work_mappings frontier_mapping
+              WHERE frontier_mapping.source = q.source
+                AND frontier_mapping.source_work_id = q.payload->>'sourceWorkId'
+                AND EXISTS (
+                  SELECT 1
+                  FROM importer_queue frontier
+                  WHERE frontier.task_type = 'IMPORT_CHAPTER'
+                    AND frontier.payload->>'workId' = frontier_mapping.work_id::text
+                    AND (frontier.status = 'QUEUED' OR (frontier.status = 'RETRY' AND frontier.next_run_at <= NOW()))
+                    AND frontier.attempts < COALESCE(frontier.max_attempts, 7)
+                    AND frontier.priority >= 75
+                    AND frontier.priority < 100
+                )
+            )
+          )
+        )
+        AND (
           $2::text IS NULL
           OR ($2::text = 'DISCOVERY' AND q.task_type IN ('DISCOVER_WORKS', 'SYNC_WORK'))
           OR q.task_type = $2::text
@@ -430,6 +456,7 @@ export async function acquireJobsDirect(options: {
     preferAllowedSourceOrder,
     onlyLegacySameSourceClaimRecovery,
     onlyExistingPublishedWorkSync,
+    onlyQueuedP1FrontierWorkSync,
   ]);
   return res.rows.map((r: any) => ({
     ...r,

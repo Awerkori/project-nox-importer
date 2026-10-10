@@ -255,6 +255,7 @@ export class DirectSupabaseClient implements SqlClient {
           preferAllowedSourceOrder: args.p_prefer_source_order === true,
           onlyLegacySameSourceClaimRecovery: args.p_only_legacy_same_source_claim_recovery === true,
           onlyExistingPublishedWorkSync: args.p_only_existing_published_work_sync === true,
+          onlyQueuedP1FrontierWorkSync: args.p_only_queued_p1_frontier_work_sync === true,
           taskType: args.p_task_type,
           batchSize: args.p_batch_size || 1,
           leaseDurationMinutes: leaseMinutes,

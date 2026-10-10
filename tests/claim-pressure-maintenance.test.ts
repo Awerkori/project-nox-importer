@@ -175,6 +175,58 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(engine.catalogMaintenanceSourcesInFlight).toEqual(new Set(['mangaflix']));
   });
 
+  it('prefers a due P1 frontier sync within P1 before a routine catalog sync', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const acquireNextJob = vi.fn().mockResolvedValue({ id: 'frontier-sync', source: 'mangaflix' });
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogP1SyncSourceCursor = 0;
+    engine.catalogP1FrontierRecoveryClaimsSinceRegularSync = 0;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue(['alpha', 'mangaflix']);
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(true),
+      supportsDirectCatalogFrontierRecoveryFilter: vi.fn().mockReturnValue(true),
+    };
+
+    const job = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+
+    expect(job).toEqual({ id: 'frontier-sync', source: 'mangaflix' });
+    expect(acquireNextJob).toHaveBeenCalledWith(
+      5, ['alpha', 'mangaflix'], 'SYNC_WORK', true,
+      { onlyExistingPublishedWorkSync: true, onlyQueuedP1FrontierWorkSync: true },
+    );
+    expect(engine.catalogP1FrontierRecoveryClaimsSinceRegularSync).toBe(1);
+  });
+
+  it('runs a regular P1 catalog sync after three frontier recovery turns', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const acquireNextJob = vi.fn().mockResolvedValue({ id: 'regular-p1-sync', source: 'alpha' });
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogP1SyncSourceCursor = 0;
+    engine.catalogP1FrontierRecoveryClaimsSinceRegularSync = 3;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue(['alpha', 'mangaflix']);
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(true),
+      supportsDirectCatalogFrontierRecoveryFilter: vi.fn().mockReturnValue(true),
+    };
+
+    await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+
+    expect(acquireNextJob).toHaveBeenCalledTimes(1);
+    expect(acquireNextJob).toHaveBeenCalledWith(
+      5, ['alpha', 'mangaflix'], 'SYNC_WORK', true,
+      { onlyExistingPublishedWorkSync: true },
+    );
+    expect(engine.catalogP1FrontierRecoveryClaimsSinceRegularSync).toBe(0);
+  });
+
   it('permits ordinary catalog work only after an empty P1 selector scan', async () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
     const acquireNextJob = vi.fn()

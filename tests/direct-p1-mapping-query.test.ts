@@ -18,4 +18,16 @@ describe('direct P1 catalog mapping selector', () => {
       /wm\.source = q\.source\s+AND\s+\(\s*wm\.source_work_id = q\.payload->>'sourceWorkId'\s+OR\s+wm\.work_id::text = q\.payload->>'workId'/,
     );
   });
+
+  it('can narrow a P1 sync to a work with due P1 chapter-frontier work', () => {
+    const selector = source.slice(
+      source.indexOf('const query = `', source.indexOf('export async function acquireJobsDirect')),
+      source.indexOf('const res = await p.query', source.indexOf('export async function acquireJobsDirect')),
+    );
+
+    expect(selector).toContain('NOT $10::boolean');
+    expect(selector).toContain("frontier_mapping.source_work_id = q.payload->>'sourceWorkId'");
+    expect(selector).toContain('frontier.priority >= 75');
+    expect(selector).toContain('frontier.priority < 100');
+  });
 });

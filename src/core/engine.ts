@@ -54,6 +54,7 @@ const MIN_IDLE_CHAPTER_SLOTS_FOR_PARALLEL_CATALOG = 2;
 // allowing a large source's ordinary catalog backlog to monopolize the lane.
 const LEGACY_RECOVERY_SYNC_TURN_INTERVAL = 4;
 const LEGACY_RECOVERY_PROBE_BACKOFF_MS = 60_000;
+const P1_FRONTIER_RECOVERY_SYNC_TURN_INTERVAL = 4;
 const LEGACY_SAME_SOURCE_CLAIM_AMBIGUITY_REASON = 'Work already claimed by another ID from the same source';
 const LEGACY_SAME_SOURCE_CLAIM_RECOVERY_BATCH_SIZE = 4;
 const LEGACY_SAME_SOURCE_CLAIM_RECOVERY_PRIORITY = 65;
@@ -737,6 +738,10 @@ export class ImporterEngine {
     DISCOVER_WORKS: new Map(),
     SYNC_WORK: new Map(),
   };
+  // Existing P1 syncs that can recover a known P1 chapter frontier get a
+  // bounded preference, but every fourth P1 turn remains a regular catalog
+  // sync so the recovery subset cannot starve unscanned existing works.
+  private catalogP1FrontierRecoveryClaimsSinceRegularSync = 0;
   // P1 catalog sync probes scan every eligible source before P2 is admitted.
   // Each probe is bounded, but P2 is held until the complete P1 sweep is
   // empty. This keeps the hierarchy without turning one catalog selector
@@ -3522,6 +3527,36 @@ export class ImporterEngine {
               MAX_CATALOG_MAINTENANCE_SOURCE_PROBES,
             );
             this.catalogP1SyncSourceCursor = p1Probe.nextCursor;
+            const frontierRecoveryDue = taskType === 'SYNC_WORK'
+              && this.queue.supportsDirectCatalogFrontierRecoveryFilter?.() === true
+              && (Number.isFinite(this.catalogP1FrontierRecoveryClaimsSinceRegularSync)
+                ? this.catalogP1FrontierRecoveryClaimsSinceRegularSync
+                : 0) < P1_FRONTIER_RECOVERY_SYNC_TURN_INTERVAL - 1;
+            if (frontierRecoveryDue) {
+              const frontierRecoveryJob = await this.queue.acquireNextJob(
+                Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
+                p1Probe.sources,
+                'SYNC_WORK',
+                true,
+                {
+                  onlyExistingPublishedWorkSync: true,
+                  onlyQueuedP1FrontierWorkSync: true,
+                },
+              );
+              if (frontierRecoveryJob) {
+                const winnerIndex = sortedSources.indexOf(frontierRecoveryJob.source);
+                if (winnerIndex >= 0) {
+                  this.catalogP1SyncSourceCursor = (winnerIndex + 1) % sortedSources.length;
+                }
+                this.catalogP1FrontierRecoveryClaimsSinceRegularSync = Math.min(
+                  P1_FRONTIER_RECOVERY_SYNC_TURN_INTERVAL - 1,
+                  (this.catalogP1FrontierRecoveryClaimsSinceRegularSync || 0) + 1,
+                );
+                this.catalogP1SyncSweepRemainingSources = new Set(sortedSources);
+                inFlightSources.add(frontierRecoveryJob.source);
+                return frontierRecoveryJob;
+              }
+            }
             const p1Job = await this.queue.acquireNextJob(
               Math.ceil(this.config.QUEUE_LEASE_DURATION_SECONDS / 60),
               p1Probe.sources,
@@ -3534,6 +3569,7 @@ export class ImporterEngine {
               if (winnerIndex >= 0) {
                 this.catalogP1SyncSourceCursor = (winnerIndex + 1) % sortedSources.length;
               }
+              this.catalogP1FrontierRecoveryClaimsSinceRegularSync = 0;
               this.catalogP1SyncSweepRemainingSources = new Set(sortedSources);
               inFlightSources.add(p1Job.source);
               return p1Job;

@@ -74,6 +74,11 @@ export declare class ImporterQueue {
          * published work. This is the catalog-side P1 selector.
          */
         onlyExistingPublishedWorkSync?: boolean;
+        /**
+         * Restrict a catalog P1 sync to a mapped work that already has due P1
+         * chapter work waiting at its canonical frontier.
+         */
+        onlyQueuedP1FrontierWorkSync?: boolean;
     }): Promise<QueueJob | null>;
     /**
      * The catalog P1 selector is implemented by the direct YSQL client.  Do
@@ -81,6 +86,8 @@ export declare class ImporterQueue {
      * would let unclassified P2 catalog work overtake P1.
      */
     supportsDirectCatalogPriorityFilters(): boolean;
+    /** The frontier-recovery selector is also direct-YSQL-only. */
+    supportsDirectCatalogFrontierRecoveryFilter(): boolean;
     /**
      * Heartbeat renewal of an active lease
      */
