@@ -43,7 +43,9 @@ describe('Memory Pressure State Machine Transition Flow', () => {
 
     // 2. STATE: SOFT LIMIT REACHED (RSS = 335MB >= 330MB)
     // Add active buffer so progress exception does not bypass soft limit
-    autotuner.trackBufferedBytes(1 * 1024 * 1024);
+    // Occupy the bounded soft-RSS headroom. A tiny retained allocation must
+    // not turn into a permanent one-page gate after V8 keeps RSS mapped.
+    autotuner.trackBufferedBytes(24 * 1024 * 1024);
     vi.spyOn(diagnostics, 'getMemorySnapshot').mockReturnValue({
       rssMb: 335,
       heapUsedMb: 150,
@@ -95,7 +97,7 @@ describe('Memory Pressure State Machine Transition Flow', () => {
     expect(evalRes.reason).toContain('Emergency RSS');
 
     // 5. STATE: RECOVERING (RSS drops back to 220MB, buffers released)
-    autotuner.releaseActiveBufferedBytes(1 * 1024 * 1024);
+    autotuner.releaseActiveBufferedBytes(24 * 1024 * 1024);
     vi.spyOn(diagnostics, 'getMemorySnapshot').mockReturnValue({
       rssMb: 220,
       heapUsedMb: 90,
@@ -125,5 +127,29 @@ describe('Memory Pressure State Machine Transition Flow', () => {
     evalRes = autotuner.evaluateCycle();
     expect(evalRes.action).toBe('SCALED_UP');
     expect(evalRes.concurrency).toBe(2);
+  });
+
+  it('does not ratchet capacity down on retained RSS while the bounded buffer window is empty', () => {
+    const autotuner = new AdaptiveAutotuner({
+      initialConcurrency: 5,
+      minConcurrency: 1,
+      maxConcurrency: 8,
+      rssSoftLimitMb: 330,
+      rssHardLimitMb: 380,
+      rssEmergencyLimitMb: 410,
+      requiredStableCycles: 2,
+    });
+    vi.spyOn(diagnostics, 'getMemorySnapshot').mockReturnValue({
+      rssMb: 335,
+      heapUsedMb: 90,
+      heapTotalMb: 160,
+      externalMb: 8,
+      arrayBuffersMb: 4,
+    });
+
+    expect(autotuner.canAdmitReservation(2 * 1024 * 1024)).toBe(true);
+    const result = autotuner.evaluateCycle();
+    expect(result.concurrency).toBe(5);
+    expect(result.action).not.toBe('SCALED_DOWN');
   });
 });

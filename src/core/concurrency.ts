@@ -379,6 +379,26 @@ export class WorkCostEstimator {
 
 export type BufferReservationIntent = 'GENERIC' | 'PAGE_INITIAL' | 'COMPLETION';
 
+const MEBIBYTE = 1024 * 1024;
+
+/**
+ * RSS is not returned to the OS promptly by V8.  Treating every byte over the
+ * soft watermark as an all-but-one-page gate therefore turns a temporary
+ * allocation spike into a permanent throughput collapse.  Below the hard
+ * watermark, reserve only half of the measured remaining headroom; the
+ * regular bounded-buffer budget remains the primary cap.
+ */
+export function resolveSoftRssReservationBudgetBytes(
+  rssMb: number,
+  softLimitMb: number,
+  hardLimitMb: number,
+  maxBufferedBytes: number,
+): number {
+  if (!Number.isFinite(rssMb) || rssMb < softLimitMb) return maxBufferedBytes;
+  const headroomBytes = Math.max(0, hardLimitMb - rssMb) * MEBIBYTE;
+  return Math.max(0, Math.min(maxBufferedBytes, Math.floor(headroomBytes / 2)));
+}
+
 /**
  * PAGE_INITIAL reservations may preserve room for one in-flight body to be
  * promoted to its bounded completion size. COMPLETION is used only by an
@@ -798,11 +818,25 @@ export class AdaptiveAutotuner {
       return false;
     }
 
-    if (mem.rssMb >= this.config.rssSoftLimitMb) {
+    if (mem.rssMb >= this.config.rssHardLimitMb) {
       if (totalCommitted === 0) {
         return true; // Forward progress exception
       }
       return false;
+    }
+
+    if (mem.rssMb >= this.config.rssSoftLimitMb) {
+      const budget = resolveSoftRssReservationBudgetBytes(
+        mem.rssMb,
+        this.config.rssSoftLimitMb,
+        this.config.rssHardLimitMb,
+        this.config.maxBufferedBytes,
+      );
+      // Keep one bounded page able to finish even when the computed window is
+      // smaller than a normal reservation.  At the hard limit the branch
+      // above retains the stricter one-at-a-time recovery behavior.
+      const effectiveBudget = Math.max(budget, requestedBytes);
+      return totalCommitted + requestedBytes <= effectiveBudget;
     }
 
     return true;
@@ -1389,7 +1423,20 @@ export class AdaptiveAutotuner {
     // Local process checks
     const hasEmergencyRss = mem.rssMb >= this.config.rssEmergencyLimitMb;
     const hasHardRss = mem.rssMb >= this.config.rssHardLimitMb;
-    const hasSoftRss = mem.rssMb >= this.config.rssSoftLimitMb || mem.rssMb >= this.config.maxRssMb;
+    const totalCommitted = this.activeBufferedBytes + this.reservedBufferedBytes;
+    const softReservationBudget = resolveSoftRssReservationBudgetBytes(
+      mem.rssMb,
+      this.config.rssSoftLimitMb,
+      this.config.rssHardLimitMb,
+      this.config.maxBufferedBytes,
+    );
+    // A high, but stable, RSS is common after image processing because V8
+    // keeps arenas mapped. It is pressure only after the bounded live-buffer
+    // window is actually occupied; otherwise repeated AIMD downscaling can
+    // never lower RSS and self-throttles the importer to one worker.
+    const hasSoftRss = (mem.rssMb >= this.config.rssSoftLimitMb || mem.rssMb >= this.config.maxRssMb)
+      && totalCommitted > 0
+      && totalCommitted >= softReservationBudget;
     const hasHeapStress = mem.heapUsedMb >= this.config.maxHeapMb;
 
     // Calibrated Event Loop Lag Tiers for 0.50 vCPU AMD EPYC (Section 18)
@@ -1634,8 +1681,7 @@ export class AdaptiveAutotuner {
     }
 
     // 2. Hardware / Resource constraints check
-    const totalCommitted = this.activeBufferedBytes + this.reservedBufferedBytes;
-    const isMemoryConstrained = mem.rssMb >= (this.config.rssSoftLimitMb - 20) || totalCommitted > (this.config.maxBufferedBytes * 0.7);
+    const isMemoryConstrained = hasHardRss || hasSoftRss || totalCommitted > (this.config.maxBufferedBytes * 0.7);
     const isLagConstrained = lagMs >= 300;
 
     // If throughput < 5 cap/min and system is constrained by hardware/signals, report THROUGHPUT_CONSTRAINED
