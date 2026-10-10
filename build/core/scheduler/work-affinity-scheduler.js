@@ -811,9 +811,60 @@ export class WorkAffinityScheduler {
                 return p0Job;
             }
             else {
-                // The selected work may have raced another runner or lost its source
-                // permit. Let the next slot refresh the tiny candidate set instead of
-                // repeatedly favoring it over other P0 works.
+                // A candidate may have raced another runner or lost its source permit.
+                // Do not let that single miss hand the current slot to P1/P2 while a
+                // different executable P0 work is already known. The batch claim uses
+                // the same canonical fences and keeps fairness inside P0.
+                const remainingP0WorkIds = p0WorkIds.filter((workId) => workId !== targetP0WorkId);
+                if (remainingP0WorkIds.length > 0) {
+                    p0Job = await this.claimSingleJob(this.pool, {
+                        workerId: options.workerId,
+                        leaseMin,
+                        allowedSources,
+                        minPriority: 100,
+                        maxPriority: 999,
+                        allowedWorkIds: remainingP0WorkIds,
+                        disallowedWorkIds: fullWorkIds,
+                        telemetry,
+                    });
+                    if (p0Job) {
+                        this.staffConsecutiveClaims = 0;
+                        this.highPriorityConsecutiveClaims++;
+                        this.genericClaimSuccesses++;
+                        const matchedWorkId = p0Job.payload?.workId;
+                        const matchedIdx = p0WorkIds.indexOf(matchedWorkId);
+                        if (matchedIdx >= 0)
+                            this.rrIndexP0 = (matchedIdx + 1) % p0WorkIds.length;
+                        const waitTimeMs = performance.now() - t0;
+                        telemetry.p0ProbeMs = Math.round((performance.now() - tP0_0) * 10) / 10;
+                        telemetry.totalAcquireMs = Math.round(waitTimeMs * 10) / 10;
+                        p0Job._acquireTelemetry = telemetry;
+                        this.p0Count1h++;
+                        this.p0WaitTimes.push(waitTimeMs);
+                        if (this.p0WaitTimes.length > 100)
+                            this.p0WaitTimes.shift();
+                        this.onJobStarted(matchedWorkId || '', p0Job.chapter_sort_key);
+                        this.lastClaimTime = Date.now();
+                        this.logDecision({
+                            jobId: p0Job.id,
+                            workId: matchedWorkId || '',
+                            workTitle: p0Job.payload?.chapterTitle || 'P0 Release',
+                            chapterNumber: p0Job.payload?.chapterNumber ?? 0,
+                            chapterSortKey: p0Job.chapter_sort_key ?? 0,
+                            lane: SchedulerLane.P0_FRESH_RELEASE,
+                            reason: 'FRESH_RELEASE_BATCH',
+                            workState: 'UPDATING',
+                            source: p0Job.source,
+                            waitTimeMs: Math.round(waitTimeMs * 10) / 10,
+                            decisionTime: new Date().toISOString(),
+                        });
+                        if (waitTimeMs > 1000)
+                            this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
+                        return p0Job;
+                    }
+                }
+                // The candidate list is now known stale. Refresh it before another
+                // P0 probe rather than repeatedly favoring the raced work.
                 this.hasP0InQueue = false;
                 this.cachedP0WorkIds = [];
                 this.lastP0ProbeAt = 0;
