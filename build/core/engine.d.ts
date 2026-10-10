@@ -199,6 +199,9 @@ export declare class ImporterEngine {
     private catalogMaintenanceSourceCursor;
     private catalogMaintenanceWindowCursors;
     private catalogP1SyncSourceCursor;
+    private catalogP1SyncSweepKey;
+    private catalogP1SyncSweepSources;
+    private catalogP1SyncSweepRemainingSources;
     private catalogSyncClaimsSinceLegacyRecovery;
     private catalogLegacyRecoverySourceCursor;
     private nextLegacyRecoveryProbeAt;
@@ -399,10 +402,9 @@ export declare class ImporterEngine {
      */
     private runCatalogSyncWorker;
     /**
-     * Catalog maintenance waits for one fair turn in the bounded claim phase.
-     * It acquires no job lease until that turn arrives and releases the permit
-     * before network or job execution, so one maintenance lane cannot reduce
-     * configured chapter execution concurrency or create a claim stampede.
+     * Catalog maintenance selection is serialized independently from chapter
+     * claims. The maintenance lane owns no chapter execution permit and cannot
+     * hold the single empty-scan chapter claim turn behind a slow YSQL query.
      */
     private acquireCatalogMaintenanceJob;
     private releaseCatalogMaintenanceSource;

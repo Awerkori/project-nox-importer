@@ -112,9 +112,9 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(resolveCatalogMaintenanceCapacity({ ...safe, emergencyPaused: true })).toBe(1);
   });
 
-  it('claims from the whole rotating probe window atomically', async () => {
+  it('claims P1 from the whole bounded probe window atomically', async () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
-    const acquireNextJob = vi.fn().mockResolvedValue({ id: 'mangaflix-recovery' });
+    const acquireNextJob = vi.fn().mockResolvedValue({ id: 'mangaflix-recovery', source: 'mangaflix' });
     engine.chapterClaimGate = new AsyncSemaphore(1, 'test_catalog_claim_gate');
     engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
     engine.stopSignal = false;
@@ -123,17 +123,21 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     engine.getEligibleCatalogSources = vi.fn().mockResolvedValue([
       'zeta', 'mangaflix', 'littletyrant', 'alpha',
     ]);
-    engine.queue = { acquireNextJob };
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(true),
+    };
 
     const job = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
 
-    expect(job).toEqual({ id: 'mangaflix-recovery' });
+    expect(job).toEqual({ id: 'mangaflix-recovery', source: 'mangaflix' });
     expect(acquireNextJob).toHaveBeenCalledTimes(1);
     expect(acquireNextJob).toHaveBeenCalledWith(
       5,
       ['alpha', 'littletyrant', 'mangaflix', 'zeta'],
       'SYNC_WORK',
       true,
+      { onlyExistingPublishedWorkSync: true },
     );
     expect(engine.catalogMaintenanceSourceCursor.SYNC_WORK).toBe(0);
     expect(engine.chapterClaimGate.active).toBe(0);
@@ -198,6 +202,67 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(acquireNextJob).toHaveBeenNthCalledWith(2, 5, ['alpha', 'beta'], 'SYNC_WORK', true);
   });
 
+  it('holds P2 until every bounded P1 catalog source slice is empty', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const acquireNextJob = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'later-p1-sync', source: 'gamma' });
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogP1SyncSourceCursor = 0;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue([
+      'alpha', 'beta', 'gamma', 'delta', 'epsilon',
+    ]);
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(true),
+    };
+
+    const first = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+    expect(first).toBeNull();
+    expect(acquireNextJob).toHaveBeenCalledTimes(1);
+    expect(acquireNextJob).toHaveBeenLastCalledWith(
+      5, ['alpha', 'beta', 'delta', 'epsilon'], 'SYNC_WORK', true,
+      { onlyExistingPublishedWorkSync: true },
+    );
+
+    const second = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+    expect(second).toEqual({ id: 'later-p1-sync', source: 'gamma' });
+    expect(acquireNextJob).toHaveBeenCalledTimes(2);
+    expect(acquireNextJob).toHaveBeenLastCalledWith(
+      5, ['gamma', 'alpha', 'beta', 'delta'], 'SYNC_WORK', true,
+      { onlyExistingPublishedWorkSync: true },
+    );
+  });
+
+  it('does not let catalog maintenance occupy the chapter claim gate', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const chapterGate = new AsyncSemaphore(1, 'test_chapter_claim_gate');
+    expect(chapterGate.tryAcquire()).toBe(true);
+    const acquireNextJob = vi.fn().mockResolvedValue({ id: 'catalog-job', source: 'alpha' });
+    engine.chapterClaimGate = chapterGate;
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue(['alpha']);
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(true),
+    };
+
+    await expect(engine.acquireCatalogMaintenanceJob('DISCOVER_WORKS')).resolves.toEqual({
+      id: 'catalog-job', source: 'alpha',
+    });
+    expect(chapterGate.active).toBe(1);
+    expect(acquireNextJob).toHaveBeenCalledWith(
+      5, ['alpha'], 'SYNC_WORK', true, { onlyExistingPublishedWorkSync: true },
+    );
+    chapterGate.release();
+  });
+
   it('holds SYNC_WORK admission when the P1 selector cannot be expressed', async () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
     const acquireNextJob = vi.fn();
@@ -214,15 +279,15 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     };
 
     await expect(engine.acquireCatalogMaintenanceJob('SYNC_WORK')).resolves.toBeNull();
+    await expect(engine.acquireCatalogMaintenanceJob('DISCOVER_WORKS')).resolves.toBeNull();
     expect(acquireNextJob).not.toHaveBeenCalled();
   });
 
   it('reserves one bounded sync turn for queued legacy ambiguity recoveries', async () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
-    const acquireNextJob = vi.fn().mockResolvedValue({
-      id: 'mangaflix-recovery',
-      source: 'mangaflix',
-    });
+    const acquireNextJob = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'mangaflix-recovery', source: 'mangaflix' });
     engine.chapterClaimGate = new AsyncSemaphore(1, 'test_catalog_recovery_turn');
     engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
     engine.stopSignal = false;
@@ -234,12 +299,24 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     engine.getEligibleCatalogSources = vi.fn().mockResolvedValue([
       'zeta', 'mangaflix', 'littletyrant', 'alpha',
     ]);
-    engine.queue = { acquireNextJob };
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(true),
+    };
 
     const job = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
 
     expect(job).toEqual({ id: 'mangaflix-recovery', source: 'mangaflix' });
-    expect(acquireNextJob).toHaveBeenCalledWith(
+    expect(acquireNextJob).toHaveBeenNthCalledWith(
+      1,
+      5,
+      ['alpha', 'littletyrant', 'mangaflix', 'zeta'],
+      'SYNC_WORK',
+      true,
+      { onlyExistingPublishedWorkSync: true },
+    );
+    expect(acquireNextJob).toHaveBeenNthCalledWith(
+      2,
       5,
       ['alpha', 'littletyrant', 'mangaflix', 'zeta'],
       'SYNC_WORK',
@@ -251,13 +328,16 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(engine.chapterClaimGate.active).toBe(0);
   });
 
-  it('rotates winners inside a probe window without slowing the global window sweep', async () => {
+  it('rotates P1 source probes after a winning source', async () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
-    const acquireNextJob = vi.fn().mockResolvedValue({ id: 'mangaflix-recovery', source: 'mangaflix' });
+    const acquireNextJob = vi.fn()
+      .mockResolvedValueOnce({ id: 'mangaflix-p1', source: 'mangaflix' })
+      .mockResolvedValueOnce({ id: 'megahentai-p1', source: 'megahentai' });
     engine.chapterClaimGate = new AsyncSemaphore(1, 'test_catalog_source_order');
     engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
     engine.stopSignal = false;
     engine.chapterClaimPhaseReady = true;
+    engine.catalogP1SyncSourceCursor = 16;
     engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 16, SYNC_WORK: 16 };
     engine.getEligibleCatalogSources = vi.fn().mockResolvedValue([
       'apenasumafa', 'apecomics', 'brasilhentai', 'cafecomyaoi',
@@ -266,7 +346,10 @@ describe('claim pressure protects the bounded YSQL pool', () => {
       'kamisamaexplorer', 'kuro', 'ler999', 'littletyrant',
       'mangaonlinetv', 'mangalivreto', 'mangaflix', 'megahentai',
     ]);
-    engine.queue = { acquireNextJob };
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(true),
+    };
 
     const firstJob = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
 
@@ -275,24 +358,25 @@ describe('claim pressure protects the bounded YSQL pool', () => {
       ['mangaflix', 'mangalivreto', 'mangaonlinetv', 'megahentai'],
       'SYNC_WORK',
       true,
+      { onlyExistingPublishedWorkSync: true },
     );
-    // MangaFlix won its probe, so its next visit starts at the following
-    // source; the global cursor still advances by the whole four-source
-    // window instead of degrading to a one-source cycle.
-    expect(engine.catalogMaintenanceSourceCursor.SYNC_WORK).toBe(0);
-    expect(engine.catalogMaintenanceWindowCursors.SYNC_WORK.get('mangaflix\u001fmangalivreto\u001fmangaonlinetv\u001fmegahentai')).toBe(1);
+    // MangaFlix won, so the P1 sweep resumes at the following source.
+    expect(engine.catalogP1SyncSourceCursor).toBe(17);
     engine.releaseCatalogMaintenanceSource(firstJob.source);
 
-    engine.catalogMaintenanceSourceCursor.SYNC_WORK = 16;
-    await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+    const secondJob = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
 
+    expect(secondJob).toEqual({ id: 'megahentai-p1', source: 'megahentai' });
     expect(acquireNextJob).toHaveBeenLastCalledWith(
       5,
-      ['mangalivreto', 'mangaonlinetv', 'megahentai', 'mangaflix'],
+      // MangaFlix is still executing and is deliberately excluded. The
+      // cursor resumes with the next available source instead of restarting
+      // the P1 sweep at the first source.
+      ['mangalivreto', 'mangaonlinetv', 'megahentai', 'apecomics'],
       'SYNC_WORK',
       true,
+      { onlyExistingPublishedWorkSync: true },
     );
-    expect(engine.catalogMaintenanceSourceCursor.SYNC_WORK).toBe(0);
     expect(engine.chapterClaimGate.active).toBe(0);
   });
 
@@ -307,12 +391,17 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     engine.chapterClaimPhaseReady = true;
     engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
     engine.getEligibleCatalogSources = vi.fn().mockResolvedValue(['alpha', 'beta']);
-    engine.queue = { acquireNextJob };
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(true),
+    };
 
     const job = await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
 
     expect(job).toEqual({ id: 'beta-job', source: 'beta' });
-    expect(acquireNextJob).toHaveBeenCalledWith(5, ['beta'], 'SYNC_WORK', true);
+    expect(acquireNextJob).toHaveBeenCalledWith(
+      5, ['beta'], 'SYNC_WORK', true, { onlyExistingPublishedWorkSync: true },
+    );
     expect(engine.catalogMaintenanceSourcesInFlight).toEqual(new Set(['alpha', 'beta']));
   });
 
