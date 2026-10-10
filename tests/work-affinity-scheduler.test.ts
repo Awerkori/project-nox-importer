@@ -652,6 +652,38 @@ describe('Project Nox — Work-Affinity Scheduler Tests A-H', () => {
     expect(mockStateStore.getActiveWork(workId)).toBeUndefined();
   });
 
+  it('rotates a stale critical P1 entry after repeated exact claim misses', async () => {
+    const workId = 'stale-critical-p1-work';
+    mockStateStore.setActiveWork({
+      workId,
+      workTitle: 'Stale critical P1',
+      lane: 'P1',
+      state: 'FILLING',
+      primarySource: 'mangaflix',
+      admittedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+      totalChapters: 1,
+      publishedChapters: 49,
+      queuedChapters: 1,
+      inFlightChapters: 0,
+      frontierSortKey: 50,
+      criticalGapSortKey: 50,
+      criticalGapUnblockCount: 1,
+    });
+    mockAdmissionController.admitNextWorkOnDemand = vi.fn().mockResolvedValue(null);
+    vi.spyOn(scheduler as any, 'hasStaffForcedCandidate').mockResolvedValue(false);
+    vi.spyOn(scheduler as any, 'getP0CandidateWorkIds').mockResolvedValue([]);
+    vi.spyOn(scheduler as any, 'claimSingleJob').mockResolvedValue(null);
+    vi.spyOn(scheduler as any, 'claimCatalogP1Job').mockResolvedValue(null);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await scheduler.acquireNextChapterJob({ workerId: 'critical-miss', allowedSources: ['mangaflix'] });
+    }
+
+    expect(mockStateStore.getActiveWork(workId)).toBeUndefined();
+    expect(mockStateStore.removeActiveWork).toHaveBeenCalledWith(workId);
+  });
+
   // =========================================================================
   // TEST C: Fairness & Max Inflight per Work (MAX_INFLIGHT_PER_WORK = 2)
   // =========================================================================

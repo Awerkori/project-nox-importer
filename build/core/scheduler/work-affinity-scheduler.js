@@ -209,7 +209,7 @@ export class WorkAffinityScheduler {
     unclaimableWorksCooldown = new Map();
     // A work can remain in the persisted active set after its last queued row
     // was canonically satisfied by another source. Keep a small miss counter so
-    // repeated, exact claim misses evict only stale P2 state instead of making
+    // repeated, exact claim misses evict stale cohort state instead of making
     // every slot retry the same work forever.
     staleActiveWorkClaimMisses = new Map();
     markWorkUnclaimable(workId, ttlMs = 15000) {
@@ -236,12 +236,13 @@ export class WorkAffinityScheduler {
         const active = this.stateStore.getActiveWork(workId);
         const staleP2 = active?.lane === 'P2' && active.state === 'FILLING';
         // A persisted P1 can retain an old inFlight counter after a worker dies
-        // or a retry is terminally completed. Only evict that narrower shape:
-        // no queued frontier, no local in-flight job, and repeated exact misses.
-        const staleP1 = active?.lane === 'P1' &&
-            active.state === 'FILLING' &&
-            active.queuedChapters === 0 &&
-            (active.inFlightChapters || 0) > 0;
+        // or a retry is terminally completed. A critical P1 can also retain a
+        // raw QUEUED row whose canonical chapter was published by another source.
+        // The exact critical claim already applies the canonical/source/frontier
+        // fence, so three misses with no local in-flight work safely rotate only
+        // that stale active entry; the durable rows remain untouched.
+        const staleP1 = active?.lane === 'P1' && active.state === 'FILLING' && ((active.queuedChapters === 0 && (active.inFlightChapters || 0) > 0) ||
+            (active.criticalGapSortKey !== null && (active.inFlightChapters || 0) === 0));
         if (!staleP2 && !staleP1)
             return;
         // claimSingleJob already applied the canonical/source/frontier filters;
@@ -884,6 +885,11 @@ export class WorkAffinityScheduler {
                     this.logger.info(`[SCHEDULER_TELEMETRY] ${JSON.stringify(telemetry)}`);
                 return gapJob;
             }
+            // A critical frontier can be stale when an alternate source already
+            // published the canonical chapter.  Record the exact fenced miss so it
+            // cannot monopolize P1 forever; noteStaleActiveWorkClaimMiss rotates
+            // only after three misses and never mutates queue rows.
+            this.noteStaleActiveWorkClaimMiss(cw.workId);
         }
         telemetry.criticalWorkTimeMs = Math.round((performance.now() - tCrit0) * 10) / 10;
         // -------------------------------------------------------------
