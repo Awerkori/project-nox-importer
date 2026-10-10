@@ -26,6 +26,7 @@ export declare class PublicationSafetyBarrier {
     private cachedState;
     private lastFetchMs;
     private cacheTtlMs;
+    private stateFetchInFlight;
     constructor(supabase: SupabaseClient);
     /**
      * Returns current safety barrier state from database with short caching.

@@ -70,6 +70,23 @@ describe('ProtectiveSentinel Always-On Adaptive Capacity Tests', () => {
     expect(SITE_PROBE_HEADERS['Accept-Language']).toContain('pt-BR');
   }, 30000);
 
+  it('coalesces concurrent protective-stop cache misses into one direct settings read', async () => {
+    let resolveRead: ((value: any) => void) | undefined;
+    const pool = {
+      query: vi.fn(() => new Promise(resolve => { resolveRead = resolve; })),
+    };
+    const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, undefined, pool);
+
+    const reads = [
+      sentinel.getProtectiveStopInfo(true),
+      sentinel.getProtectiveStopInfo(true),
+      sentinel.getProtectiveStopInfo(true),
+    ];
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    resolveRead?.({ rows: [{ value: { active: false } }] });
+    await expect(Promise.all(reads)).resolves.toEqual([{ active: false, reason: null, classification: null, details: null, triggered_at: null, resumed_at: null, resumed_by: null }, { active: false, reason: null, classification: null, details: null, triggered_at: null, resumed_at: null, resumed_by: null }, { active: false, reason: null, classification: null, details: null, triggered_at: null, resumed_at: null, resumed_by: null }]);
+  }, 30000);
+
   it('Requirement 1 & 2: Automatic 5xx errors NEVER trigger global protective stop', async () => {
     const sentinel = new ProtectiveSentinel(mockSupabase as any, undefined, 'https://test-site.workers.dev');
 

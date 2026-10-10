@@ -5,6 +5,10 @@ export class PublicationSafetyBarrier {
     cachedState;
     lastFetchMs = 0;
     cacheTtlMs = 5000; // 5 second cache
+    // Several chapter slots can reach the cache boundary together.  Keep one
+    // refresh in flight so the safety check remains fresh without stampeding
+    // the small production YSQL pool with equivalent settings reads.
+    stateFetchInFlight = null;
     constructor(supabase) {
         this.supabase = supabase;
         this.cachedState = 'OPEN';
@@ -17,40 +21,56 @@ export class PublicationSafetyBarrier {
         if (!forceFresh && now - this.lastFetchMs < this.cacheTtlMs) {
             return this.cachedState;
         }
-        try {
-            const { data, error } = await this.supabase
-                .from('settings')
-                .select('value')
-                .eq('key', 'publication_safety_barrier')
-                .maybeSingle();
-            if (!error && data?.value) {
-                const val = String(data.value).toUpperCase();
-                if (['OPEN', 'CAUTION', 'CLOSED', 'RECOVERING'].includes(val)) {
-                    this.cachedState = val;
+        // A forced read may bypass a completed cache entry, but a request already
+        // in flight is at least as fresh and must be shared.  This does not alter
+        // the barrier state, TTL, or the fail-safe behaviour on read errors.
+        if (this.stateFetchInFlight)
+            return this.stateFetchInFlight;
+        const refresh = async () => {
+            try {
+                const { data, error } = await this.supabase
+                    .from('settings')
+                    .select('value')
+                    .eq('key', 'publication_safety_barrier')
+                    .maybeSingle();
+                if (!error && data?.value) {
+                    const val = String(data.value).toUpperCase();
+                    if (['OPEN', 'CAUTION', 'CLOSED', 'RECOVERING'].includes(val)) {
+                        this.cachedState = val;
+                    }
+                    else {
+                        this.cachedState = 'OPEN';
+                    }
                 }
-                else {
+                else if (!data) {
+                    await this.supabase.from('settings').upsert({
+                        key: 'publication_safety_barrier',
+                        value: 'OPEN',
+                    });
+                    this.cachedState = 'OPEN';
+                }
+                this.lastFetchMs = now;
+            }
+            catch (err) {
+                this.logger.warn('Failed to read publication_safety_barrier setting, retaining current cached state', {
+                    error: err?.message,
+                    currentState: this.cachedState,
+                });
+                if (!this.cachedState) {
                     this.cachedState = 'OPEN';
                 }
             }
-            else if (!data) {
-                await this.supabase.from('settings').upsert({
-                    key: 'publication_safety_barrier',
-                    value: 'OPEN',
-                });
-                this.cachedState = 'OPEN';
-            }
-            this.lastFetchMs = now;
+            return this.cachedState;
+        };
+        const request = refresh();
+        this.stateFetchInFlight = request;
+        try {
+            return await request;
         }
-        catch (err) {
-            this.logger.warn('Failed to read publication_safety_barrier setting, retaining current cached state', {
-                error: err?.message,
-                currentState: this.cachedState,
-            });
-            if (!this.cachedState) {
-                this.cachedState = 'OPEN';
-            }
+        finally {
+            if (this.stateFetchInFlight === request)
+                this.stateFetchInFlight = null;
         }
-        return this.cachedState;
     }
     /**
      * Sets safety barrier state in public.settings.
