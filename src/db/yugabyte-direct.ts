@@ -352,15 +352,33 @@ export async function acquireJobsDirect(options: {
           NOT $9::boolean
           OR (
             q.task_type = 'SYNC_WORK'
-            AND EXISTS (
-              SELECT 1
-              FROM importer_work_mappings wm
-              INNER JOIN works w ON w.id = wm.work_id AND w.published IS TRUE
-              WHERE wm.source = q.source
-                AND (
-                  wm.source_work_id = q.payload->>'sourceWorkId'
-                  OR wm.work_id::text = q.payload->>'workId'
-                )
+            AND (
+              -- Keep the common source-work-id path separate from the
+              -- legacy work-id fallback.  The former can use the unique
+              -- (source, source_work_id) index; combining them with OR made
+              -- YSQL scan every mapping for a source on each bounded P1
+              -- catalog probe.
+              EXISTS (
+                SELECT 1
+                FROM importer_work_mappings wm_by_source_work_id
+                INNER JOIN works w_by_source_work_id
+                  ON w_by_source_work_id.id = wm_by_source_work_id.work_id
+                 AND w_by_source_work_id.published IS TRUE
+                WHERE wm_by_source_work_id.source = q.source
+                  AND wm_by_source_work_id.source_work_id = q.payload->>'sourceWorkId'
+              )
+              OR EXISTS (
+                -- Older recovery rows can lack sourceWorkId. Retain the
+                -- work-id path so they remain eligible, without penalizing
+                -- the normal indexed selector above.
+                SELECT 1
+                FROM importer_work_mappings wm_by_work_id
+                INNER JOIN works w_by_work_id
+                  ON w_by_work_id.id = wm_by_work_id.work_id
+                 AND w_by_work_id.published IS TRUE
+                WHERE wm_by_work_id.source = q.source
+                  AND wm_by_work_id.work_id::text = q.payload->>'workId'
+              )
             )
           )
         )
