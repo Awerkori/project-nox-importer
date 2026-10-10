@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
 import { readFileSync } from 'node:fs';
-import { AdmissionController, hasCapacityBeyondP1Reservation } from '../src/core/scheduler/admission-controller.js';
+import {
+  AdmissionController,
+  hasCapacityBeyondP1Reservation,
+  resolveFairSourceWindowQuota,
+} from '../src/core/scheduler/admission-controller.js';
 import { SOURCE_EXECUTION_ELIGIBILITY_SQL } from '../src/core/source-eligibility.js';
 
 describe('bounded admission snapshot', () => {
@@ -32,6 +36,9 @@ describe('bounded admission snapshot', () => {
     // expect(periodicAdmissionSql).toMatch(/FROM eligible_sources s[\s\S]{0,700}CROSS JOIN LATERAL/);
     expect(periodicAdmissionSql).toContain('s.id = ANY($6::text[])');
     expect(periodicAdmissionSql).toMatch(/LIMIT \$5/);
+    expect(periodicAdmissionSql).toContain('source_window_ranked AS MATERIALIZED');
+    expect(periodicAdmissionSql).toContain('PARTITION BY windowed.source');
+    expect(periodicAdmissionSql).toContain('WHERE source_window_rank <= ${p1SourceWindowPerSourceLimit}');
     expect(periodicAdmissionSql).toContain('ORDER BY admission_rank, source');
     expect(periodicAdmissionSql).toContain('canonical_chapter.published_at IS NOT NULL');
     expect(periodicAdmissionSql).toMatch(/GROUP BY q\.payload->>'workId', q\.source/);
@@ -59,6 +66,8 @@ describe('bounded admission snapshot', () => {
     const onDemandSql = source.slice(onDemandStart, onDemandStart + 10000);
     expect(onDemandSql).toMatch(/eligible_sources AS MATERIALIZED[\s\S]{0,700}CROSS JOIN LATERAL/);
     expect(onDemandSql).toContain('s.id = ANY($5::text[])');
+    expect(onDemandSql).toContain('source_window_ranked AS MATERIALIZED');
+    expect(onDemandSql).toContain('WHERE source_window_rank <= ${onDemandSourceWindowPerSourceLimit}');
     // The paused fallback must be able to admit an entirely-paused P2 work;
     // admission then promotes its normal bounded sliding window. Requiring a
     // pre-existing QUEUED row here deadlocks newly discovered works.
@@ -72,6 +81,13 @@ describe('bounded admission snapshot', () => {
     expect(source).toContain("predecessor.chapter_sort_key < q.chapter_sort_key");
     expect(source).toContain('predecessor_canonical.published_at IS NOT NULL');
     expect(source).toContain("staged_frontier.status IN ('STAGED', 'WAITING_FOR_GAP')");
+  });
+
+  it('keeps the existing candidate budget while reserving a share for each selected source', () => {
+    expect(resolveFairSourceWindowQuota(640, 10)).toBe(64);
+    expect(resolveFairSourceWindowQuota(160, 10)).toBe(16);
+    expect(resolveFairSourceWindowQuota(5, 8)).toBe(1);
+    expect(resolveFairSourceWindowQuota(0, 0)).toBe(1);
   });
 
   it('preserves per-work counts, attempt limits and frontiers with one SQL roundtrip', async () => {

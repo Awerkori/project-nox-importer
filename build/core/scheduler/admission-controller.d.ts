@@ -21,6 +21,13 @@ import { ActiveWork } from './types.js';
  * currently consume.
  */
 export declare function hasCapacityBeyondP1Reservation(importingCount: number, effectiveChapterCapacity: number, maxInflightPerWork: number): boolean;
+/**
+ * Preserve a bounded admission-query budget without letting one source's
+ * backlog consume every candidate row before source-level fairness runs.
+ * The caller has already selected a small, healthy source window; this only
+ * divides its existing row budget across that window.
+ */
+export declare function resolveFairSourceWindowQuota(totalBudget: number, sourceCount: number): number;
 export declare class AdmissionController {
     private stateStore;
     private protectiveSentinel;
