@@ -729,11 +729,14 @@ export class AdmissionController {
             // exists do we check the paused window backlog; that slower path is
             // exceptional and avoids turning a normal admission probe into a scan.
             const ready = await this.runTimedAdmissionQuery('p1_ready_frontier_probe', `
-        WITH candidate_works AS MATERIALIZED (
-          SELECT 
+        -- Filter canonical eligibility before choosing a work frontier. A
+        -- stale queue row for an already-published chapter must not hide a
+        -- later executable P1 chapter in the same work.
+        WITH ready_rows AS MATERIALIZED (
+          SELECT
             q.payload->>'workId' AS work_id,
-            MIN(q.chapter_sort_key) as min_chapter_sort_key,
-            MIN(q.next_run_at) as min_next_run_at
+            q.chapter_sort_key,
+            q.next_run_at
           FROM (
             SELECT payload, chapter_sort_key, next_run_at, source
             FROM importer_queue q
@@ -747,27 +750,26 @@ export class AdmissionController {
           ) q
           JOIN importer_sources s ON s.id = q.source
           JOIN works w ON w.id = (q.payload->>'workId')::uuid
+          CROSS JOIN LATERAL (
+            SELECT MAX(c.number) AS max_published
+            FROM chapters c
+            WHERE c.work_id = (q.payload->>'workId')::uuid
+              AND c.published_at IS NOT NULL
+          ) pub
           WHERE w.published IS TRUE
             AND s.enabled = true
             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
-          GROUP BY q.payload->>'workId'
-        )
-        SELECT q.status
-        FROM candidate_works cw
-        JOIN importer_queue q 
-          ON (q.payload->>'workId') = cw.work_id 
-          AND q.chapter_sort_key = cw.min_chapter_sort_key
-        JOIN works w ON w.id = cw.work_id::uuid
-        CROSS JOIN LATERAL (
-          SELECT MAX(c.number) AS max_published
-          FROM chapters c
-          WHERE c.work_id = cw.work_id::uuid
-            AND c.published_at IS NOT NULL
-        ) pub
-        WHERE q.task_type = 'IMPORT_CHAPTER'
-          AND (q.status = 'QUEUED' OR (q.status = 'RETRY' AND q.next_run_at <= NOW()))
-          AND w.published IS TRUE
           ${frontierEligibility}
+        ), candidate_works AS MATERIALIZED (
+          SELECT
+            work_id,
+            MIN(chapter_sort_key) AS min_chapter_sort_key,
+            MIN(next_run_at) AS min_next_run_at
+          FROM ready_rows
+          GROUP BY work_id
+        )
+        SELECT 1
+        FROM candidate_works
         LIMIT 1
       `);
             const candidate = ready.rows[0];
@@ -789,11 +791,13 @@ export class AdmissionController {
                 return this.p1BacklogSnapshot;
             }
             const paused = await this.runTimedAdmissionQuery('p1_paused_frontier_probe', `
-        WITH candidate_works AS MATERIALIZED (
-          SELECT 
+        -- Keep the paused fallback semantically identical to the ready
+        -- probe: choose the minimum only among canonical P1 candidates.
+        WITH paused_rows AS MATERIALIZED (
+          SELECT
             q.payload->>'workId' AS work_id,
-            MIN(q.chapter_sort_key) as min_chapter_sort_key,
-            MIN(q.next_run_at) as min_next_run_at
+            q.chapter_sort_key,
+            q.next_run_at
           FROM (
             SELECT payload, chapter_sort_key, next_run_at, source
             FROM importer_queue q
@@ -807,27 +811,26 @@ export class AdmissionController {
           ) q
           JOIN importer_sources s ON s.id = q.source
           JOIN works w ON w.id = (q.payload->>'workId')::uuid
+          CROSS JOIN LATERAL (
+            SELECT MAX(c.number) AS max_published
+            FROM chapters c
+            WHERE c.work_id = (q.payload->>'workId')::uuid
+              AND c.published_at IS NOT NULL
+          ) pub
           WHERE w.published IS TRUE
             AND s.enabled = true
             AND ${SOURCE_EXECUTION_ELIGIBILITY_SQL}
-          GROUP BY q.payload->>'workId'
+          ${frontierEligibility}
+        ), candidate_works AS MATERIALIZED (
+          SELECT
+            work_id,
+            MIN(chapter_sort_key) AS min_chapter_sort_key,
+            MIN(next_run_at) AS min_next_run_at
+          FROM paused_rows
+          GROUP BY work_id
         )
         SELECT 1
-        FROM candidate_works cw
-        JOIN importer_queue q 
-          ON (q.payload->>'workId') = cw.work_id 
-          AND q.chapter_sort_key = cw.min_chapter_sort_key
-        JOIN works w ON w.id = cw.work_id::uuid
-        CROSS JOIN LATERAL (
-          SELECT MAX(c.number) AS max_published
-          FROM chapters c
-          WHERE c.work_id = cw.work_id::uuid
-            AND c.published_at IS NOT NULL
-        ) pub
-        WHERE q.task_type = 'IMPORT_CHAPTER'
-          AND q.status = 'PAUSED_BY_STAFF'
-          AND w.published IS TRUE
-          ${frontierEligibility}
+        FROM candidate_works
         LIMIT 1
       `);
             this.p1BacklogSnapshot = {
