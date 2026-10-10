@@ -79,6 +79,15 @@ export class DeduplicationEngine {
     constructor(supabase) {
         this.supabase = supabase;
     }
+    async resolveCandidateCover(candidate) {
+        if (candidate.coverId)
+            return candidate.coverId;
+        if (!candidate.loadCoverId)
+            return null;
+        const coverId = await candidate.loadCoverId();
+        candidate.coverId = coverId;
+        return coverId;
+    }
     /**
      * Resolve or register a work conservatively.
      * Never blindly overwrite or perform destructive merges on fuzzy matches.
@@ -409,7 +418,9 @@ export class DeduplicationEngine {
                 };
             }
         }
-        // 3. No match exists anywhere -> Genuinely new candidate.
+        // 3. No match exists anywhere -> Genuinely new candidate. Only this path
+        // needs a source cover before the canonical work is created.
+        await this.resolveCandidateCover(candidate);
         // Acquire transactional advisory lock to prevent race condition between concurrent workers.
         let uniqueSlug = cleanSlug;
         let suffix = 1;
@@ -695,8 +706,10 @@ export class DeduplicationEngine {
             prov.age_rating = { source, updated_at: now };
         }
         // Cover Precedence:
-        // MANUAL/ADMIN > HEALTHY CANONICAL > NEW VALID SOURCE > FALLBACK
-        if (candidate.coverId) {
+        // MANUAL/ADMIN > HEALTHY CANONICAL > NEW VALID SOURCE > FALLBACK.
+        // A healthy canonical cover is always preserved, so defer the source
+        // download/upload until it is actually needed by a new or unhealthy work.
+        if (candidate.coverId || candidate.loadCoverId) {
             if (prov.cover?.source === 'manual') {
                 this.logger.debug('Preserving manual cover for work', { workId });
             }
@@ -721,26 +734,33 @@ export class DeduplicationEngine {
                     });
                 }
                 else {
-                    // Existing cover is broken, corrupted or missing - repair with valid candidate cover
-                    updates.cover_id = candidate.coverId;
-                    prov.cover = { source, updated_at: now };
-                    this.logger.info('Replacing broken/unhealthy cover with valid candidate cover', {
-                        workId,
-                        oldCoverId: work.cover_id,
-                        newCoverId: candidate.coverId,
-                        source,
-                    });
+                    // Existing cover is broken, corrupted or missing - repair only if
+                    // a valid source cover can be obtained.
+                    const coverId = await this.resolveCandidateCover(candidate);
+                    if (coverId) {
+                        updates.cover_id = coverId;
+                        prov.cover = { source, updated_at: now };
+                        this.logger.info('Replacing broken/unhealthy cover with valid candidate cover', {
+                            workId,
+                            oldCoverId: work.cover_id,
+                            newCoverId: coverId,
+                            source,
+                        });
+                    }
                 }
             }
             else {
                 // Work has null cover: adopt valid candidate cover
-                updates.cover_id = candidate.coverId;
-                prov.cover = { source, updated_at: now };
-                this.logger.info('Adopting valid cover for work with null cover', {
-                    workId,
-                    coverId: candidate.coverId,
-                    source,
-                });
+                const coverId = await this.resolveCandidateCover(candidate);
+                if (coverId) {
+                    updates.cover_id = coverId;
+                    prov.cover = { source, updated_at: now };
+                    this.logger.info('Adopting valid cover for work with null cover', {
+                        workId,
+                        coverId,
+                        source,
+                    });
+                }
             }
         }
         // Commit updates if any field changed

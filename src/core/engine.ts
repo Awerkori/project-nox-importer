@@ -4383,32 +4383,40 @@ export class ImporterEngine {
     let botUserId: string | null = null;
     const getBotUserId = async () => botUserId ??= await this.resolveBotUserId();
     let coverMediaId: string | null = null;
-    if (!metadataOnly && details.coverUrl) {
-      try {
-        coverMediaId = await this.downloadAndRegisterImage(details.coverUrl, await getBotUserId(), 'editorial', job.source);
-      } catch (coverErr: any) {
-        this.logger.warn('Failed to import cover image from primary coverUrl, attempting fallback', {
-          error: coverErr?.message,
-          coverUrl: details.coverUrl,
-          source: job.source,
-        });
+    let coverLoadAttempted = false;
+    const loadCoverId = async (): Promise<string | null> => {
+      if (metadataOnly || coverLoadAttempted) return coverMediaId;
+      coverLoadAttempted = true;
+
+      if (details.coverUrl) {
+        try {
+          coverMediaId = await this.downloadAndRegisterImage(details.coverUrl, await getBotUserId(), 'editorial', job.source);
+        } catch (coverErr: any) {
+          this.logger.warn('Failed to import cover image from primary coverUrl, attempting fallback', {
+            error: coverErr?.message,
+            coverUrl: details.coverUrl,
+            source: job.source,
+          });
+        }
       }
-    }
 
-    // Fallback 1: Raw metadata cover alternatives
-    if (!metadataOnly && !coverMediaId && details.raw) {
-      coverMediaId = await this.tryRawMetadataCoverFallback(details.raw, await getBotUserId(), job.source, details.coverUrl);
-    }
+      // Fallback 1: Raw metadata cover alternatives
+      if (!coverMediaId && details.raw) {
+        coverMediaId = await this.tryRawMetadataCoverFallback(details.raw, await getBotUserId(), job.source, details.coverUrl);
+      }
 
-    // Fallback 2: Sibling mappings from other mapped sources
-    if (!metadataOnly && !coverMediaId && (job.payload?.workId || details.sourceWorkId)) {
-      coverMediaId = await this.trySiblingMappingCoverFallback(
-        job.payload?.workId,
-        job.source,
-        details.slug || details.title,
-        await getBotUserId()
-      );
-    }
+      // Fallback 2: Sibling mappings from other mapped sources
+      if (!coverMediaId && (job.payload?.workId || details.sourceWorkId)) {
+        coverMediaId = await this.trySiblingMappingCoverFallback(
+          job.payload?.workId,
+          job.source,
+          details.slug || details.title,
+          await getBotUserId()
+        );
+      }
+
+      return coverMediaId;
+    };
 
     const candidate: CandidateWork = {
       source: job.source,
@@ -4422,7 +4430,8 @@ export class ImporterEngine {
       status: details.status,
       year: details.year,
       ageRating: details.ageRating,
-      coverId: coverMediaId,
+      coverId: null,
+      loadCoverId: metadataOnly ? undefined : loadCoverId,
       aliases: details.alternativeTitles,
       genres: details.genres,
       contentRating: ADULT_SOURCES.has(job.source)
