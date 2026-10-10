@@ -227,6 +227,38 @@ describe('claim pressure protects the bounded YSQL pool', () => {
     expect(engine.catalogP1FrontierRecoveryClaimsSinceRegularSync).toBe(0);
   });
 
+  it('backs off an empty frontier-recovery probe without delaying regular P1 sync', async () => {
+    const engine = Object.create(ImporterEngine.prototype) as any;
+    const acquireNextJob = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'regular-a', source: 'alpha' })
+      .mockResolvedValueOnce({ id: 'regular-b', source: 'mangaflix' });
+    engine.config = { QUEUE_LEASE_DURATION_SECONDS: 300 };
+    engine.stopSignal = false;
+    engine.chapterClaimPhaseReady = true;
+    engine.catalogP1SyncSourceCursor = 0;
+    engine.catalogP1FrontierRecoveryClaimsSinceRegularSync = 0;
+    engine.nextCatalogP1FrontierRecoveryProbeAt = 0;
+    engine.catalogMaintenanceSourceCursor = { DISCOVER_WORKS: 0, SYNC_WORK: 0 };
+    engine.getEligibleCatalogSources = vi.fn().mockResolvedValue(['alpha', 'mangaflix']);
+    engine.queue = {
+      acquireNextJob,
+      supportsDirectCatalogPriorityFilters: vi.fn().mockReturnValue(true),
+      supportsDirectCatalogFrontierRecoveryFilter: vi.fn().mockReturnValue(true),
+    };
+
+    await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+    engine.releaseCatalogMaintenanceSource('alpha');
+    await engine.acquireCatalogMaintenanceJob('SYNC_WORK');
+
+    expect(engine.nextCatalogP1FrontierRecoveryProbeAt).toBeGreaterThan(Date.now());
+    expect(acquireNextJob).toHaveBeenCalledTimes(3);
+    expect(acquireNextJob.mock.calls.slice(1)).toEqual([
+      [5, ['alpha', 'mangaflix'], 'SYNC_WORK', true, { onlyExistingPublishedWorkSync: true }],
+      [5, ['mangaflix', 'alpha'], 'SYNC_WORK', true, { onlyExistingPublishedWorkSync: true }],
+    ]);
+  });
+
   it('permits ordinary catalog work only after an empty P1 selector scan', async () => {
     const engine = Object.create(ImporterEngine.prototype) as any;
     const acquireNextJob = vi.fn()
