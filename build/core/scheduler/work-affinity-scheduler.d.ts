@@ -75,6 +75,8 @@ export declare class WorkAffinityScheduler {
     private readonly catalogProbeMinIntervalMs;
     private readonly catalogProbeSourceWindowSize;
     private readonly catalogProbeRowsPerSource;
+    private catalogP1SweepKey;
+    private catalogP1SweepRemainingSources;
     private publicationBarrier?;
     private sourcePermitProvider?;
     private chapterCapacityProvider;

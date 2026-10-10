@@ -189,6 +189,13 @@ export interface AcquiredSchedulerJob {
   decision: SchedulerDecision;
 }
 
+interface CatalogP1ProbeResult {
+  job: any | null;
+  // P2 may proceed only after every currently eligible source has returned
+  // an empty executable P1 frontier in the current sweep.
+  catalogExhausted: boolean;
+}
+
 export class WorkAffinityScheduler {
   private logger = new Logger('WorkAffinityScheduler');
   private pool: any;
@@ -216,8 +223,13 @@ export class WorkAffinityScheduler {
   private catalogProbeInFlight = false;
   private lastCatalogProbeAt = 0;
   private readonly catalogProbeMinIntervalMs = 1_000;
-  private readonly catalogProbeSourceWindowSize = 8;
-  private readonly catalogProbeRowsPerSource = 256;
+  // This is deliberately small: the frontier predicate includes canonical
+  // joins, so a larger per-claim fan-out was timing out on the bounded YSQL
+  // pool. A complete empty sweep is still required before P2 can run.
+  private readonly catalogProbeSourceWindowSize = 2;
+  private readonly catalogProbeRowsPerSource = 32;
+  private catalogP1SweepKey = '';
+  private catalogP1SweepRemainingSources = new Set<string>();
 
   private publicationBarrier?: any;
   private sourcePermitProvider?: (source: string) => number;
@@ -1175,10 +1187,10 @@ export class WorkAffinityScheduler {
       const permitted = catalogAllowedSources.filter((s) => this.sourcePermitProvider!(s) > 0);
       if (permitted.length > 0) catalogAllowedSources = permitted;
     }
-    const claimCatalogP1 = async (): Promise<any | null> => {
+    const claimCatalogP1 = async (): Promise<CatalogP1ProbeResult> => {
       const tCat0 = performance.now();
       this.genericClaimAttempts++;
-      const job = await this.claimCatalogP1Job(this.pool, {
+      const result = await this.claimCatalogP1Job(this.pool, {
         workerId: options.workerId,
         leaseMin,
         allowedSources: catalogAllowedSources,
@@ -1186,7 +1198,7 @@ export class WorkAffinityScheduler {
         telemetry,
       });
       telemetry.catalogFallbackMs = Math.round((performance.now() - tCat0) * 10) / 10;
-      return job;
+      return result;
     };
     const finishCatalogP1 = (catalogP1Job: any): any => {
       this.highPriorityConsecutiveClaims = 0;
@@ -1212,8 +1224,16 @@ export class WorkAffinityScheduler {
       });
       return catalogP1Job;
     };
-    const catalogP1Job = await claimCatalogP1();
-    if (catalogP1Job) return finishCatalogP1(catalogP1Job);
+    const catalogP1Probe = await claimCatalogP1();
+    if (catalogP1Probe.job) return finishCatalogP1(catalogP1Probe.job);
+    // A bounded catalog probe is not evidence that P1 is empty outside its
+    // current source slice. Hold this slot until the rotating sweep has
+    // checked every eligible source; otherwise P2 could leapfrog P1 merely
+    // because the P1 source was scheduled for the next probe.
+    if (!catalogP1Probe.catalogExhausted) {
+      this.emptyClaimAttempts++;
+      return null;
+    }
 
     // -------------------------------------------------------------
     // LANE P2: Active New Works (Fair Round-Robin + Batch Candidate Filter)
@@ -1614,10 +1634,10 @@ export class WorkAffinityScheduler {
       disallowedWorkIds?: string[] | null;
       telemetry?: AcquireTelemetry;
     }
-  ): Promise<any | null> {
+  ): Promise<CatalogP1ProbeResult> {
     const now = Date.now();
     if (!shouldStartCatalogProbe(now, this.lastCatalogProbeAt, this.catalogProbeInFlight, this.catalogProbeMinIntervalMs)) {
-      return null;
+      return { job: null, catalogExhausted: this.catalogP1SweepRemainingSources.size === 0 && this.catalogP1SweepKey !== '' };
     }
     this.catalogProbeInFlight = true;
     this.lastCatalogProbeAt = now;
@@ -1631,21 +1651,45 @@ export class WorkAffinityScheduler {
         if (permitted.length > 0) candidateSources = permitted;
       }
 
-      if (candidateSources && candidateSources.length > 0) {
+      if (!candidateSources || candidateSources.length === 0) {
+        // Engine normally supplies its exact permit-eligible source set. An
+        // unbounded caller cannot prove that a limited probe exhausted P1, so
+        // fail closed instead of allowing P2 to bypass an unknown source.
+        return { job: null, catalogExhausted: false };
+      }
+
+      const uniqueSources = Array.from(new Set(candidateSources));
+      const sweepKey = [...uniqueSources].sort().join('\u001f');
+      if (sweepKey !== this.catalogP1SweepKey) {
+        this.catalogP1SweepKey = sweepKey;
+        this.catalogP1SweepRemainingSources = new Set(uniqueSources);
+      }
+
+      if (uniqueSources.length > 0) {
         const window = selectRotatingSourceWindow(
-          candidateSources,
+          uniqueSources,
           this.rrCatalogSourceIndex,
           this.catalogProbeSourceWindowSize,
         );
         this.rrCatalogSourceIndex = window.nextCursor;
-        candidateSources = window.sources;
+        const job = await this.executeClaimCatalogQuery(client, {
+          ...opts,
+          allowedSources: window.sources,
+          disallowedChapterKeys,
+        });
+        if (job) {
+          // A successful P1 claim invalidates a previous empty sweep: another
+          // P1 frontier may be ready immediately after this one.
+          this.catalogP1SweepRemainingSources = new Set(uniqueSources);
+          return { job, catalogExhausted: false };
+        }
+        for (const source of window.sources) this.catalogP1SweepRemainingSources.delete(source);
+        return {
+          job: null,
+          catalogExhausted: this.catalogP1SweepRemainingSources.size === 0,
+        };
       }
-
-      return await this.executeClaimCatalogQuery(client, {
-        ...opts,
-        allowedSources: candidateSources,
-        disallowedChapterKeys,
-      });
+      return { job: null, catalogExhausted: false };
     } finally {
       this.catalogProbeInFlight = false;
     }
