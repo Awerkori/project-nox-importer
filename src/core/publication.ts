@@ -40,11 +40,55 @@ export interface PublishResult {
  * applied; otherwise an old blocked prefix can starve later publishable work.
  */
 export const PUBLISHABLE_STAGED_WORKS_QUERY = `
-  SELECT m.work_id
-  FROM importer_chapter_mappings m
-  WHERE m.status = 'STAGED' AND m.work_id IS NOT NULL
-  GROUP BY m.work_id
-  ORDER BY MIN(m.chapter_sort_key) ASC
+  WITH staged_frontiers AS MATERIALIZED (
+    -- Select one durable staged frontier per work before applying the global
+    -- bound.  Selecting an arbitrary prefix of STAGED rows first lets old
+    -- blocked works consume every sweep turn and hides later work that the
+    -- same publication barrier could safely release now.
+    SELECT m.work_id, MIN(m.chapter_sort_key) AS frontier_sort_key
+    FROM importer_chapter_mappings m
+    WHERE m.status IN ('STAGED', 'WAITING_FOR_GAP')
+      AND m.work_id IS NOT NULL
+    GROUP BY m.work_id
+  ), frontier_state AS MATERIALIZED (
+    SELECT f.work_id,
+           f.frontier_sort_key,
+           MAX(c.number) AS max_published
+    FROM staged_frontiers f
+    LEFT JOIN chapters c
+      ON c.work_id = f.work_id
+     AND c.published_at IS NOT NULL
+    GROUP BY f.work_id, f.frontier_sort_key
+  )
+  SELECT f.work_id
+  FROM frontier_state f
+  WHERE
+    -- Normal monotonic advance: publication barrier permits the immediate
+    -- next canonical chapter (including decimal chapter keys).
+    (f.max_published IS NOT NULL AND f.frontier_sort_key <= f.max_published + 1.05)
+    -- A confirmed canonical gap permits the next staged frontier, exactly as
+    -- the barrier RPC does.  Local absence is never treated as a gap.
+    OR EXISTS (
+      SELECT 1
+      FROM importer_confirmed_gaps g
+      WHERE g.work_id = f.work_id
+        AND g.start_sort_key <= COALESCE(f.max_published + 1, 1)
+        AND g.end_sort_key >= f.frontier_sort_key - 1
+    )
+    -- Initial chapter safety: do not jump over a known non-gap predecessor.
+    OR (
+      f.max_published IS NULL
+      AND f.frontier_sort_key <= 1.5
+      AND NOT EXISTS (
+        SELECT 1
+        FROM importer_chapter_mappings predecessor
+        WHERE predecessor.work_id = f.work_id
+          AND predecessor.chapter_sort_key < f.frontier_sort_key
+          AND predecessor.is_gap IS NOT TRUE
+          AND predecessor.status NOT IN ('STAGED', 'WAITING_FOR_GAP')
+      )
+    )
+  ORDER BY f.frontier_sort_key ASC, f.work_id ASC
   LIMIT 40;
 `;
 

@@ -41,6 +41,10 @@ describe('bounded admission snapshot', () => {
     expect(periodicAdmissionSql).toContain('ORDER BY admission_rank, source');
     expect(periodicAdmissionSql).toContain('canonical_chapter.published_at IS NOT NULL');
     expect(periodicAdmissionSql).toMatch(/GROUP BY q\.payload->>'workId', q\.source/);
+    // The explicit paused fallback must be able to return a paused-only P1
+    // work. source_window already limits statuses, so a ready-only HAVING
+    // predicate would silently make the fallback an empty set.
+    expect(periodicAdmissionSql).toMatch(/HAVING COUNT\(\*\) > 0/);
     expect(source).toMatch(/WHERE rotation_rank <= \$3 OR frontier_rank <= \$3/);
     expect(source).toMatch(
       /loadP1Candidates\(false\)[\s\S]{0,500}contiguousCandidates\.length < backfillSlotsAvailable[\s\S]{0,300}loadP1Candidates\(true\)/,
