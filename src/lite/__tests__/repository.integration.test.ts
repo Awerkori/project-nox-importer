@@ -60,13 +60,17 @@ async function createSchema(db: PGlite): Promise<void> {
       media_id uuid NOT NULL REFERENCES media(id), width integer, height integer,
       UNIQUE(chapter_id, position)
     );
-    CREATE TABLE importer_sources (id text PRIMARY KEY);
+    CREATE TABLE importer_sources (
+      id text PRIMARY KEY, enabled boolean NOT NULL DEFAULT true,
+      status text NOT NULL DEFAULT 'ACTIVE', sync_interval_minutes integer NOT NULL DEFAULT 30,
+      cooldown_until timestamptz NULL
+    );
     CREATE TABLE importer_staff_requests (work_id uuid NOT NULL REFERENCES works(id), status text NOT NULL);
     CREATE TABLE importer_publication_events (
       chapter_id uuid PRIMARY KEY, transition_at timestamptz NOT NULL, recorded_at timestamptz NOT NULL,
       bucket_minute timestamptz NOT NULL, is_fresh_release boolean NOT NULL
     );
-    INSERT INTO importer_sources VALUES ('source-a'), ('source-b');
+    INSERT INTO importer_sources (id) VALUES ('source-a'), ('source-b');
     INSERT INTO works(id,title,slug) VALUES
       ('${ids.staff}','Staff','staff'), ('${ids.p0}','P0','p0'),
       ('${ids.p1a}','P1 A','p1-a'), ('${ids.p1b}','P1 B','p1-b'),
@@ -319,6 +323,44 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toMatchObject({ health: 'HEALTHY', cooldown_until: null, consecutive_failures: 0, last_error: null });
   });
 
+  it('uses the real source administration contract before discovery or catalog networking', async () => {
+    await db.query(`UPDATE importer_sources
+      SET enabled=false,status='PAUSED',sync_interval_minutes=7,cooldown_until=now()+interval '11 minutes'
+      WHERE id='source-a'`);
+    const policy = await repo.sourcePolicy('source-a');
+    expect(policy).toMatchObject({ enabled: false, status: 'PAUSED', runnable: false, syncIntervalMs: 7 * 60_000 });
+    expect(policy?.cooldownUntil?.getTime()).toBeGreaterThan(Date.now());
+
+    const adapter = {
+      id: 'source-a',
+      fetchUpdatedWorks: vi.fn(async () => ({ works: [], nextCursor: null })),
+      fetchWorkSnapshot: vi.fn(async () => { throw new Error('must not fetch a paused source'); }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    await repo.enqueue({ taskType: 'DISCOVER', workKey: 'source:source-a', priority: 'P2', idempotencyKey: 'paused-discover', payload: { source: 'source-a' } });
+    const discovery = await repo.claim('discovery-worker', 30);
+    await (runtime as any).handle(discovery, 'discovery-worker');
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:paused-work', priority: 'P2', idempotencyKey: 'paused-catalog', payload: { source: 'source-a', sourceWorkId: 'paused-work' } });
+    const catalog = await repo.claim('catalog-worker', 30);
+    await (runtime as any).handle(catalog, 'catalog-worker');
+
+    expect(adapter.fetchUpdatedWorks).not.toHaveBeenCalled();
+    expect(adapter.fetchWorkSnapshot).not.toHaveBeenCalled();
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`, [discovery!.id])).rows[0])
+      .toMatchObject({ state: 'RETRY_WAIT', reason: 'SOURCE_NOT_READY:PAUSED' });
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`, [catalog!.id])).rows[0])
+      .toMatchObject({ state: 'RETRY_WAIT', reason: 'SOURCE_NOT_READY:PAUSED' });
+
+    await (runtime as any).seedDiscovery();
+    expect((await db.query(`SELECT idempotency_key FROM importer_lite_tasks WHERE idempotency_key LIKE 'lite:discover:%' ORDER BY idempotency_key`)).rows)
+      .toEqual([{ idempotency_key: 'lite:discover:source-b' }]);
+  });
+
   it('reopens only source-blocked work after fresh catalog evidence, never an unknown upload outcome', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:1', priority: 'P1', idempotencyKey: 'source-blocked' });
     const sourceBlocked = await repo.claim('worker-a', 30);
@@ -397,6 +439,34 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT state,checkpoint->>'selectedSource' AS source FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
       .toMatchObject({ state: 'DONE', source: 'source-b' });
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(1);
+  });
+
+  it('skips an administratively disabled preferred source and immediately uses its confirmed alternative', async () => {
+    const key = 'pt-br|default|chapter|admin-fallback|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,source_rank,confirmed)
+      VALUES ($1,$2,'source-a','disabled-a','pt-BR','default',10,true),
+             ($1,$2,'source-b','enabled-b','pt-BR','default',20,true)`, [ids.p1a, key]);
+    await db.query(`UPDATE importer_sources SET enabled=false,status='DISABLED' WHERE id='source-a'`);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key,
+      priority: 'P1', idempotencyKey: 'admin-source-fallback',
+      payload: { displayNumber: '7', chapterTitle: 'Seven', language: 'pt-BR', edition: 'default', orderKey: '7' } });
+    const task = await repo.claim('worker-a', 120);
+    const sourceA = { id: 'source-a', fetchChapterPages: vi.fn(async () => ['https://source-a.test/forbidden.png']) };
+    const sourceB = { id: 'source-b', fetchChapterPages: vi.fn(async () => ['https://source-b.test/page.png']) };
+    const registry = { get: (id: string) => id === 'source-a' ? sourceA : id === 'source-b' ? sourceB : undefined } as unknown as SourceRegistry;
+    const storage: StorageProvider = { upload: vi.fn(async () => 'telegram-file-b'), healthCheck: async () => true, getProviderKey: () => 'telegram' };
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })));
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 1);
+      await executor.importChapter(task!, 'worker-a');
+    } finally { vi.stubGlobal('fetch', originalFetch); }
+    expect(sourceA.fetchChapterPages).not.toHaveBeenCalled();
+    expect(sourceB.fetchChapterPages).toHaveBeenCalledOnce();
+    expect((await db.query(`SELECT state,checkpoint->>'selectedSource' AS source FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
+      .toMatchObject({ state: 'DONE', source: 'source-b' });
   });
 
   it('requires adapter ownership proof before using a fallback route that can verify it', async () => {

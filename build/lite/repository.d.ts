@@ -15,6 +15,14 @@ export interface EnqueueLiteTask {
     /** Reserved for the one-resource P0 observation lane, never normal work. */
     monitoring?: boolean;
 }
+export interface LiteSourcePolicy {
+    enabled: boolean;
+    status: string;
+    health: string;
+    cooldownUntil: Date | null;
+    syncIntervalMs: number;
+    runnable: boolean;
+}
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export declare class LiteRepository {
     private readonly db;
@@ -39,6 +47,13 @@ export declare class LiteRepository {
      * selected by normal claims, so unchanged watches cannot starve P1/P2.
      */
     claimMonitor(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    /**
+     * Source administration and transient Lite health remain durable authority.
+     * This indexed one-source read happens before source networking, never in a
+     * normal task claim, and prevents a paused/cooling provider from consuming
+     * a catalog or discovery slot.
+     */
+    sourcePolicy(source: string): Promise<LiteSourcePolicy | null>;
     checkpoint(task: LiteTask, workerId: string, patch: Record<string, unknown>): Promise<boolean>;
     finish(task: LiteTask, workerId: string, outcome: {
         state: Extract<LiteTaskState, 'DONE' | 'RETRY_WAIT' | 'BLOCKED'>;

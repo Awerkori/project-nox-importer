@@ -107,6 +107,39 @@ export class LiteRepository {
         const result = await this.db.query('SELECT * FROM public.importer_lite_claim_monitor_task($1,$2::interval)', [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
         return result.rows[0] ? asTask(result.rows[0]) : null;
     }
+    /**
+     * Source administration and transient Lite health remain durable authority.
+     * This indexed one-source read happens before source networking, never in a
+     * normal task claim, and prevents a paused/cooling provider from consuming
+     * a catalog or discovery slot.
+     */
+    async sourcePolicy(source) {
+        const result = await this.db.query(`SELECT s.enabled,s.status,s.sync_interval_minutes,
+        s.cooldown_until AS source_cooldown,h.health,h.cooldown_until AS health_cooldown
+      FROM importer_sources s
+      LEFT JOIN importer_lite_source_health h ON h.source=s.id
+      WHERE s.id=$1`, [source]);
+        const row = result.rows[0];
+        if (!row)
+            return null;
+        const sourceCooldown = row.source_cooldown ? new Date(row.source_cooldown) : null;
+        const healthCooldown = row.health_cooldown ? new Date(row.health_cooldown) : null;
+        const cooldownUntil = [sourceCooldown, healthCooldown]
+            .filter((value) => Boolean(value && Number.isFinite(value.getTime())))
+            .sort((a, b) => b.getTime() - a.getTime())[0] || null;
+        const status = String(row.status || 'ACTIVE').toUpperCase();
+        const health = String(row.health || 'HEALTHY').toUpperCase();
+        const administrativelyActive = row.enabled === true && ['ACTIVE', 'DEGRADED', 'RECOVERING'].includes(status);
+        const healthAllowed = !['BROKEN', 'DISABLED'].includes(health);
+        const runnable = administrativelyActive && healthAllowed && (!cooldownUntil || cooldownUntil <= new Date());
+        const minutes = Number(row.sync_interval_minutes);
+        return {
+            enabled: row.enabled === true,
+            status, health, cooldownUntil,
+            syncIntervalMs: Math.max(5, Math.min(24 * 60, Number.isFinite(minutes) ? minutes : 30)) * 60_000,
+            runnable,
+        };
+    }
     async checkpoint(task, workerId, patch) {
         const result = await this.db.query(`UPDATE importer_lite_tasks SET checkpoint=checkpoint || $3::jsonb, updated_at=now()
        WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`, [task.id, workerId, JSON.stringify(patch)]);

@@ -75,11 +75,11 @@ export class ImporterLiteRuntime {
     stop() { this.stopped = true; for (const timer of this.timers)
         clearInterval(timer); this.timers = []; }
     async seedDiscovery() {
-        const sources = await this.pool.query(`SELECT id FROM importer_sources
-      WHERE enabled=true AND COALESCE(catalog_discovery_enabled,true)=true ORDER BY id`);
-        for (const { id } of sources.rows) {
+        const sources = await this.pool.query(`SELECT id,sync_interval_minutes FROM importer_sources
+      WHERE enabled=true AND COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') ORDER BY id`);
+        for (const { id, sync_interval_minutes } of sources.rows) {
             await this.queue.enqueue({ taskType: 'DISCOVER', workKey: `source:${id}`, priority: 'P2',
-                idempotencyKey: `lite:discover:${id}`, payload: { source: id }, checkpoint: { cursor: null } });
+                idempotencyKey: `lite:discover:${id}`, payload: { source: id, syncIntervalMinutes: sync_interval_minutes }, checkpoint: { cursor: null } });
         }
     }
     async upsertChapterSources(rows) {
@@ -225,6 +225,13 @@ export class ImporterLiteRuntime {
         const adapter = this.registry.get(source);
         if (!adapter)
             return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'SOURCE_ADAPTER_UNAVAILABLE' });
+        const policy = await this.queue.sourcePolicy(source);
+        if (!policy?.runnable) {
+            const nextRunAt = policy?.cooldownUntil && policy.cooldownUntil > new Date()
+                ? policy.cooldownUntil : new Date(Date.now() + (policy?.syncIntervalMs || 60 * 60_000));
+            await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: `SOURCE_NOT_READY:${policy?.status || 'MISSING'}`, nextRunAt });
+            return;
+        }
         try {
             const page = await adapter.fetchUpdatedWorks(String(task.checkpoint.cursor || '') || null, { mode: 'maintenance' });
             await this.queue.recordSourceSuccess(source);
@@ -233,7 +240,7 @@ export class ImporterLiteRuntime {
                     idempotencyKey: `lite:catalog:${source}:${work.sourceWorkId}`, payload: { source, sourceWorkId: work.sourceWorkId } });
             }
             // The durable task itself holds the cursor; no new cursor rows or sweep.
-            await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', priority: 'P2', nextRunAt: new Date(Date.now() + (page.nextCursor ? 1_000 : 10 * 60_000)),
+            await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', priority: 'P2', nextRunAt: new Date(Date.now() + (page.nextCursor ? 1_000 : policy.syncIntervalMs)),
                 checkpoint: { cursor: page.nextCursor } });
         }
         catch (error) {
@@ -247,6 +254,17 @@ export class ImporterLiteRuntime {
         const adapter = this.registry.get(source);
         if (!adapter || !sourceWorkId)
             return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CATALOG_INPUT_INVALID' });
+        const policy = await this.queue.sourcePolicy(source);
+        if (!policy?.runnable) {
+            const nextRunAt = policy?.cooldownUntil && policy.cooldownUntil > new Date()
+                ? policy.cooldownUntil : new Date(Date.now() + (policy?.syncIntervalMs || 60 * 60_000));
+            await this.queue.finish(task, workerId, {
+                state: task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
+                reason: `SOURCE_NOT_READY:${policy?.status || 'MISSING'}`, nextRunAt,
+                priority: task.monitoring ? 'P2' : undefined, monitoring: task.monitoring || undefined,
+            });
+            return;
+        }
         let fetchedSnapshot = false;
         try {
             const snapshot = adapter.fetchWorkSnapshot ? await adapter.fetchWorkSnapshot(sourceWorkId) : {
