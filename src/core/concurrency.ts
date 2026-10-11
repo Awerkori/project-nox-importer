@@ -206,11 +206,11 @@ export const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig> 
   tankouhentai: { maxChapters: 2, maxPagesPerChapter: 4 },
   cafecomyaoi: { maxChapters: 2, maxPagesPerChapter: 4 },
   kuro: { maxChapters: 1, maxPagesPerChapter: 2 },
-  // Production ramp 2026-10-11: exact-source media completed without 429 or
-  // cooldown, but the prior one-chapter fence serialized every healthy Hanami
-  // import. Keep the adapter's own 2→4 req/s host limiter and page fence; two
-  // chapters is the first measured, reversible expansion.
-  hanamiheaven: { maxChapters: 2, maxPagesPerChapter: 2 },
+  // Production ramp 2026-10-11: the 1→2 step sustained healthy media work
+  // with no 429, cooldown or failure streak. Keep the adapter's own 2→4
+  // req/s host limiter and page fence; three chapters remains below the four
+  // global Lite slots and is individually reversible.
+  hanamiheaven: { maxChapters: 3, maxPagesPerChapter: 2 },
   hotcabaretscan: { maxChapters: 4, maxPagesPerChapter: 6 },
   amuy: { maxChapters: 1, maxPagesPerChapter: 2 },
   arthurscan: { maxChapters: 1, maxPagesPerChapter: 2 },
