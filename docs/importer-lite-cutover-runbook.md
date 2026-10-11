@@ -38,23 +38,23 @@ horarios, operador e resultados de cada gate.
    8--10 capitulos/minuto requer duas janelas de dez minutos em infraestrutura
    autorizada; ela nao e' demonstrada por esta preparacao local.
 
-## Gate 1 — Reader em producao, antes do produtor Lite
+## Gate 1 — fase aditiva Reader e backfill
 
-1. Implantar o Reader compativel sem ativar Lite.
-2. Aplicar **somente** a migration Reader fase 1:
+1. Com o Reader e produtor v1 atuais ainda ativos, aplicar **somente** a
+   migration Reader fase 1:
    `20261011090000_add_reader_canonical_chapter_identity.sql`.
-3. Executar o backfill limitado ate' nao restarem linhas nulas; verificar
+   Ela e' aditiva e preserva a leitura/escrita legada durante o backfill.
+   Nao implantar ainda o Reader novo: ele seleciona as novas colunas e o
+   banco atual ainda nao as possui.
+2. Executar o backfill limitado ate' nao restarem linhas nulas; verificar
    duplicatas por `(work_id, canonical_chapter_key)`, rotas UUID antigas, APIs,
    ordenacao de `12.1`, `12.10`, especiais e edicoes. Corrigir dados antes de
    continuar.
-4. Aplicar a fase 2:
-   `20261011091000_enable_reader_canonical_chapter_identity.sql`. Ela aborta
-   se o backfill ou a unicidade nao estiverem prontos e remove apenas a
-   restricao numerica incompatível depois dessas provas.
-5. Confirmar que o Reader ainda serve capitulos legados e que cache continua
-   indexado pelo UUID do capitulo, nao pelo numero exibido.
+3. Implantar o Reader compativel sem ativar Lite somente depois de as colunas
+   da fase 1 existirem. Confirmar que ele serve capitulos legados e que cache
+   continua indexado pelo UUID do capitulo, nao pelo numero exibido.
 
-## Gate 2 — fencing e migration Lite
+## Gate 2 — fencing, fase 2 Reader e migration Lite
 
 1. Pausar novas admissoes do produtor v1 e deixá-lo drenar uploads e
    publicacoes que ja' possuem lease. Nao interromper uploads em andamento.
@@ -64,12 +64,16 @@ horarios, operador e resultados de cada gate.
 3. Confirmar que nao existe container/processo legado apto a reiniciar pelo
    auto-deploy. Desabilitar temporariamente esse produtor na configuracao da
    mesma aplicacao DIScloud; nao criar uma segunda aplicacao.
-4. Aplicar a migration aditiva Lite
+4. Aplicar a fase 2 Reader:
+   `20261011091000_enable_reader_canonical_chapter_identity.sql`. Ela aborta
+   se o backfill ou a unicidade nao estiverem prontos e remove apenas a
+   restricao numerica incompatível depois dessas provas.
+5. Aplicar a migration aditiva Lite
    `20261010090000_importer_lite_v2.sql`. Antes de producao, ela deve ter sido
    aplicada e verificada pelo `npm run validate:lite:staging` em staging.
    Registrar a contagem de linhas legadas antes/depois: a migration Lite nao
    pode altera-las.
-5. Verificar que `canonical_chapter_key`, `display_number`, `chapter_order_key`,
+6. Verificar que `canonical_chapter_key`, `display_number`, `chapter_order_key`,
    `chapter_kind`, `edition` e `language` existem; que `number` aceita nulo;
    que o indice `chapters_work_canonical_chapter_key_uq` existe; e que
    `chapters_work_id_number_key` nao existe. Caso contrario Lite deve falhar
