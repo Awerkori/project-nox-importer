@@ -27,7 +27,6 @@ export declare class LiteExecutor {
     private legacyMappedChapter;
     private mapCanonicalChapter;
     private createOrLoadChapter;
-    private hasPersistedUpload;
     importChapter(task: LiteTask, workerId: string): Promise<void>;
     publish(task: LiteTask, workerId: string): Promise<void>;
 }

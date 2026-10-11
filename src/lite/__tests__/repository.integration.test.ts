@@ -674,6 +674,27 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual({ storage_ready: true, sha256: 'atomic-page-sha' });
   });
 
+  it('loads durable page receipts once for a chapter without including another task', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'chapter:receipt-snapshot', priority: 'P1', idempotencyKey: 'receipt-snapshot' });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      chapterKey: 'chapter:receipt-snapshot-other', priority: 'P1', idempotencyKey: 'receipt-snapshot-other' });
+    const tasks = await db.query<{ id: string; idempotency_key: string }>(`SELECT id,idempotency_key FROM importer_lite_tasks
+      WHERE idempotency_key IN ('receipt-snapshot','receipt-snapshot-other')`);
+    const mine = tasks.rows.find((row) => row.idempotency_key === 'receipt-snapshot')!;
+    const other = tasks.rows.find((row) => row.idempotency_key === 'receipt-snapshot-other')!;
+    const reserved = await repo.reserveUpload(mine.id, 1, 'snapshot-page-sha');
+    await repo.recordUploadReceipt({
+      taskId: mine.id, pagePosition: 1, mediaId: reserved.mediaId, sha256: 'snapshot-page-sha',
+      bytes: 4096, mime: 'image/png', width: 64, height: 64, providerKey: 'telegram-file',
+      botReference: 'bot-a', shardId: 'shard-a', channelId: 'channel-a', messageId: 43, createdBy: ids.staff,
+    });
+    await repo.reserveUpload(other.id, 1, 'other-snapshot-page-sha');
+    const snapshot = await repo.uploadReceipts(mine.id);
+    expect(snapshot).toHaveLength(1);
+    expect(snapshot.get(1)).toMatchObject({ mediaId: reserved.mediaId, state: 'PERSISTED', sha256: 'snapshot-page-sha', storageReady: true });
+  });
+
   it('reuses an already validated media hash without creating a Telegram intent', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'chapter:hash-reuse', priority: 'P1', idempotencyKey: 'hash-reuse' });

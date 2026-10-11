@@ -221,13 +221,6 @@ export class LiteExecutor {
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; } finally { client.release(); }
   }
 
-  private async hasPersistedUpload(taskId: string): Promise<boolean> {
-    const result = await this.db.query<{ persisted: boolean }>(
-      `SELECT EXISTS(SELECT 1 FROM importer_lite_uploads WHERE task_id=$1::uuid AND state='PERSISTED') AS persisted`, [taskId],
-    );
-    return result.rows[0]?.persisted === true;
-  }
-
   async importChapter(task: LiteTask, workerId: string): Promise<void> {
     const legacy = await this.legacyMappedChapter(task);
     if (legacy?.publishedAt) {
@@ -237,6 +230,11 @@ export class LiteExecutor {
       });
       return;
     }
+    // One durable snapshot serves both source pinning and every page.  Fresh
+    // chapters have no receipts, so this replaces N position probes with one
+    // indexed read without allowing a cache to become authority.
+    const uploadReceipts = await this.queue.uploadReceipts(task.id);
+    const hasPersistedUpload = [...uploadReceipts.values()].some((receipt) => receipt.state === 'PERSISTED');
     const routeSet = await this.routes(task);
     const selection = selectableChapterSources(routeSet, { language: String(task.payload.language || 'und'), edition: String(task.payload.edition || 'default') });
     if (!selection.routes.length) {
@@ -247,7 +245,6 @@ export class LiteExecutor {
       });
       return;
     }
-    const hasPersistedUpload = await this.hasPersistedUpload(task.id);
     const pinnedSource = typeof task.checkpoint.selectedSource === 'string' ? task.checkpoint.selectedSource : null;
     const routes = hasPersistedUpload
       ? selection.routes.filter((route) => route.source === pinnedSource)
@@ -292,14 +289,9 @@ export class LiteExecutor {
         const chapterId = await this.createOrLoadChapter(task);
         const mediaIds = await mapBounded(urls, this.perChapterPageConcurrency, async (url, index) => {
           const position = index + 1;
-          const already = await this.db.query<{ media_id: string; state: string; storage_ready: boolean | null; bytes: number | null; mime: string | null; media_sha256: string | null; sha256: string }>(
-            `SELECT u.media_id,u.state,u.sha256,m.storage_ready,m.bytes,m.mime,m.sha256 AS media_sha256
-             FROM importer_lite_uploads u LEFT JOIN media m ON m.id=u.media_id
-             WHERE u.task_id=$1::uuid AND u.page_position=$2`, [task.id, position],
-          );
-          const receipt = already.rows[0];
-          if (receipt?.state === 'PERSISTED' && receipt.storage_ready === true && Number(receipt.bytes) > 0 &&
-              String(receipt.mime || '').startsWith('image/') && receipt.media_sha256 === receipt.sha256) return receipt.media_id;
+          const receipt = uploadReceipts.get(position);
+          if (receipt?.state === 'PERSISTED' && receipt.storageReady === true && Number(receipt.bytes) > 0 &&
+              String(receipt.mime || '').startsWith('image/') && receipt.mediaSha256 === receipt.sha256) return receipt.mediaId;
           if (receipt?.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
           const host = hostFor(url);
           if (host) await this.sourceRateLimiter.acquire(host);
@@ -369,7 +361,7 @@ export class LiteExecutor {
           await this.queue.recordSourceFailure(route.source, error);
           // Never blend a partially persisted chapter with an alternative
           // source. The task will retry the pinned route after its cooldown.
-          if (await this.hasPersistedUpload(task.id)) break;
+          if ([...(await this.queue.uploadReceipts(task.id)).values()].some((receipt) => receipt.state === 'PERSISTED')) break;
           continue;
         }
         break;

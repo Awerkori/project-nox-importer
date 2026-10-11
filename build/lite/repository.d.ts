@@ -122,6 +122,22 @@ export declare class LiteRepository {
         health: string;
         count: number;
     }>>;
+    /**
+     * Load a chapter's durable page receipts once before its bounded page fanout.
+     * A fresh chapter normally has no rows, so probing one position at a time
+     * needlessly turns every page into an extra YSQL round trip.  The task lease
+     * fences concurrent writers; the receipt remains authoritative after a
+     * restart and reserveUpload still rechecks the uncommon repair/race path.
+     */
+    uploadReceipts(taskId: string): Promise<Map<number, {
+        mediaId: string;
+        state: string;
+        sha256: string;
+        storageReady: boolean | null;
+        bytes: number | null;
+        mime: string | null;
+        mediaSha256: string | null;
+    }>>;
     /** Stable ID is reserved before the non-transactional Telegram call. */
     reserveUpload(taskId: string, pagePosition: number, sha256: string): Promise<{
         mediaId: string;

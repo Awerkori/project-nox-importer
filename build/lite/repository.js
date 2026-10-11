@@ -416,6 +416,26 @@ export class LiteRepository {
       FROM importer_lite_source_health GROUP BY health ORDER BY health`);
         return result.rows.map((row) => ({ health: String(row.health), count: Number(row.count) }));
     }
+    /**
+     * Load a chapter's durable page receipts once before its bounded page fanout.
+     * A fresh chapter normally has no rows, so probing one position at a time
+     * needlessly turns every page into an extra YSQL round trip.  The task lease
+     * fences concurrent writers; the receipt remains authoritative after a
+     * restart and reserveUpload still rechecks the uncommon repair/race path.
+     */
+    async uploadReceipts(taskId) {
+        const result = await this.db.query(`SELECT u.page_position,u.media_id,u.state,u.sha256,
+        m.storage_ready,m.bytes,m.mime,m.sha256 AS media_sha256
+      FROM importer_lite_uploads u LEFT JOIN media m ON m.id=u.media_id
+      WHERE u.task_id=$1::uuid`, [taskId]);
+        return new Map(result.rows.map((row) => [Number(row.page_position), {
+                mediaId: String(row.media_id), state: String(row.state), sha256: String(row.sha256),
+                storageReady: row.storage_ready === null || row.storage_ready === undefined ? null : row.storage_ready === true,
+                bytes: row.bytes === null || row.bytes === undefined ? null : Number(row.bytes),
+                mime: row.mime === null || row.mime === undefined ? null : String(row.mime),
+                mediaSha256: row.media_sha256 === null || row.media_sha256 === undefined ? null : String(row.media_sha256),
+            }]));
+    }
     /** Stable ID is reserved before the non-transactional Telegram call. */
     async reserveUpload(taskId, pagePosition, sha256) {
         // The normal new-page path used to make three sequential round trips:
