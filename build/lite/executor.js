@@ -132,6 +132,35 @@ export class LiteExecutor {
             };
         });
     }
+    /**
+     * Existing legacy mappings are exact source identities, unlike a numeric
+     * display value. Reuse them during migration so Lite never overwrites a
+     * published editorial chapter merely because its own mapping table is new.
+     */
+    async legacyMappedChapter(task, db = this.db) {
+        if (!task.workId || !task.chapterKey)
+            return null;
+        const result = await db.query(`SELECT m.chapter_id,c.published_at
+      FROM importer_lite_chapter_sources s
+      JOIN importer_chapter_mappings m ON m.source=s.source AND m.source_chapter_id=s.source_chapter_id
+      JOIN chapters c ON c.id=m.chapter_id
+      WHERE s.work_id=$1::uuid AND s.canonical_chapter_key=$2 AND s.confirmed=true
+        AND m.chapter_id IS NOT NULL AND c.work_id=$1::uuid
+      ORDER BY s.source_rank,s.created_at LIMIT 1`, [task.workId, task.chapterKey]);
+        const row = result.rows[0];
+        if (!row?.chapter_id)
+            return null;
+        return { chapterId: row.chapter_id, publishedAt: row.published_at ? new Date(row.published_at) : null };
+    }
+    async mapCanonicalChapter(client, task, chapterId) {
+        const display = String(task.payload.displayNumber || '0');
+        const mapped = await client.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key,edition,language)
+       VALUES($1::uuid,$2,$3::uuid,$4,$5,$6,$7)
+       ON CONFLICT(work_id,canonical_chapter_key) DO UPDATE SET chapter_id=importer_lite_chapters.chapter_id
+       RETURNING chapter_id`, [task.workId, task.chapterKey, chapterId, display, String(task.payload.orderKey || display),
+            String(task.payload.edition || 'default'), String(task.payload.language || 'und')]);
+        return mapped.rows[0].chapter_id;
+    }
     async createOrLoadChapter(task) {
         const existing = await this.db.query('SELECT chapter_id FROM importer_lite_chapters WHERE work_id=$1::uuid AND canonical_chapter_key=$2', [task.workId, task.chapterKey]);
         if (existing.rows[0])
@@ -144,6 +173,12 @@ export class LiteExecutor {
         const client = await this.db.connect();
         try {
             await client.query('BEGIN');
+            const legacy = await this.legacyMappedChapter(task, client);
+            if (legacy) {
+                const mapped = await this.mapCanonicalChapter(client, task, legacy.chapterId);
+                await client.query('COMMIT');
+                return mapped;
+            }
             const title = String(task.payload.chapterTitle || '').slice(0, 200);
             const inserted = await client.query(`INSERT INTO chapters(id,work_id,number,title,origin) VALUES($1::uuid,$2::uuid,$3,$4,'IMPORTER')
         ON CONFLICT DO NOTHING RETURNING id`, [chapterId, task.workId, numeric, title]);
@@ -158,13 +193,9 @@ export class LiteExecutor {
                     throw new Error('CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION');
                 durableChapterId = same.rows[0].id;
             }
-            const mapped = await client.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key,edition,language)
-         VALUES($1::uuid,$2,$3::uuid,$4,$5,$6,$7)
-         ON CONFLICT(work_id,canonical_chapter_key) DO UPDATE SET chapter_id=importer_lite_chapters.chapter_id
-         RETURNING chapter_id`, [task.workId, task.chapterKey, durableChapterId, display, String(task.payload.orderKey || display),
-                String(task.payload.edition || 'default'), String(task.payload.language || 'und')]);
+            const mapped = await this.mapCanonicalChapter(client, task, durableChapterId);
             await client.query('COMMIT');
-            return mapped.rows[0].chapter_id;
+            return mapped;
         }
         catch (error) {
             await client.query('ROLLBACK').catch(() => { });
@@ -179,6 +210,14 @@ export class LiteExecutor {
         return result.rows[0]?.persisted === true;
     }
     async importChapter(task, workerId) {
+        const legacy = await this.legacyMappedChapter(task);
+        if (legacy?.publishedAt) {
+            const chapterId = await this.createOrLoadChapter(task);
+            await this.queue.finish(task, workerId, {
+                state: 'DONE', checkpoint: { chapterId, publishedAt: legacy.publishedAt.toISOString(), legacyPublishedReuse: true },
+            });
+            return;
+        }
         const routeSet = await this.routes(task);
         const selection = selectableChapterSources(routeSet, { language: String(task.payload.language || 'und'), edition: String(task.payload.edition || 'default') });
         if (!selection.routes.length) {

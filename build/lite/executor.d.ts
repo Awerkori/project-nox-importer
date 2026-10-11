@@ -19,6 +19,13 @@ export declare class LiteExecutor {
     constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter);
     private sourceSlot;
     private routes;
+    /**
+     * Existing legacy mappings are exact source identities, unlike a numeric
+     * display value. Reuse them during migration so Lite never overwrites a
+     * published editorial chapter merely because its own mapping table is new.
+     */
+    private legacyMappedChapter;
+    private mapCanonicalChapter;
     private createOrLoadChapter;
     private hasPersistedUpload;
     importChapter(task: LiteTask, workerId: string): Promise<void>;

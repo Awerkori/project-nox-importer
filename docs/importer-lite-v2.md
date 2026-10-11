@@ -69,6 +69,10 @@ Invariants:
 - Canonical chapter IDs are deterministic from canonical work+chapter identity.
   A stale/recovered-worker overlap therefore cannot create two physical Reader
   chapter rows before the unique Lite chapter mapping is observed.
+- During migration, an exact legacy `source + source_chapter_id` mapping is
+  adopted into the Lite identity map. If that chapter is already published,
+  the Lite task is settled with its existing `published_at` and never downloads
+  media or replaces Reader pages.
 - An upload with an explicit Telegram rejection remains retryable using the
   same reserved media ID. A timeout, lost response, or a Telegram success
   followed by failed receipt persistence becomes `UNKNOWN` and blocks that

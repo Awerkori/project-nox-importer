@@ -35,6 +35,8 @@ integration suite verifies:
 - atomic Reader-visible publication only after cover and page media validation;
 - duplicate/recovered canonical chapter creation converges to one deterministic
   Reader chapter ID and one Lite identity mapping;
+- an exactly mapped legacy chapter that is already published is adopted without
+  downloading, replacing its pages or scheduling another publication;
 - healthy source fallback before storage, and safe source/manifest pinning
   after partial storage, including concurrent in-flight page drainage and
   adapter ownership proof before an alternative source route is used;

@@ -23,6 +23,7 @@ const ids = {
   chapter: '00000000-0000-4000-8000-000000000006',
   cover: '00000000-0000-4000-8000-000000000007',
   page: '00000000-0000-4000-8000-000000000008',
+  legacy: '00000000-0000-4000-8000-000000000010',
 };
 
 /** PGlite exposes the small pg surface used by LiteRepository. */
@@ -66,6 +67,10 @@ async function createSchema(db: PGlite): Promise<void> {
       cooldown_until timestamptz NULL
     );
     CREATE TABLE importer_staff_requests (work_id uuid NOT NULL REFERENCES works(id), status text NOT NULL);
+    CREATE TABLE importer_chapter_mappings (
+      source text NOT NULL, source_chapter_id text NOT NULL, chapter_id uuid NULL REFERENCES chapters(id),
+      PRIMARY KEY(source,source_chapter_id)
+    );
     CREATE TABLE settings (key text PRIMARY KEY, value text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE importer_publication_events (
       chapter_id uuid PRIMARY KEY, transition_at timestamptz NOT NULL, recorded_at timestamptz NOT NULL,
@@ -350,6 +355,29 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(first).toBe(second);
     expect((await db.query(`SELECT count(*)::int AS count FROM chapters WHERE work_id=$1 AND title='Race Safe'`, [ids.p1a])).rows[0].count).toBe(1);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapters WHERE work_id=$1 AND canonical_chapter_key=$2`, [ids.p1a, task.chapterKey])).rows[0].count).toBe(1);
+  });
+
+  it('reuses an exactly mapped legacy published chapter without rewriting its pages', async () => {
+    const key = 'pt-br|default|chapter|legacy-published|-';
+    await db.query(`INSERT INTO chapters(id,work_id,number,title,published_at) VALUES($1,$2,11,'Legacy published',now())`, [ids.legacy, ids.p1a]);
+    await db.query(`INSERT INTO importer_chapter_mappings(source,source_chapter_id,chapter_id) VALUES('source-a','legacy-source-chapter',$1)`, [ids.legacy]);
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
+      VALUES($1,$2,'source-a','legacy-source-chapter','pt-BR','default',true)`, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key, priority: 'P1', idempotencyKey: 'legacy-published',
+      payload: { displayNumber: '11', chapterTitle: 'Legacy published', language: 'pt-BR', edition: 'default', orderKey: '11' } });
+    const task = await repo.claim('worker-a', 120);
+    const adapter = { id: 'source-a', fetchChapterPages: vi.fn(async () => { throw new Error('published chapter must not download'); }) };
+    const storage: StorageProvider = { upload: vi.fn(async () => 'must-not-upload'), healthCheck: async () => true, getProviderKey: () => 'telegram' };
+    const executor = new LiteExecutor(poolFor(db) as Pool, repo, { get: () => adapter } as unknown as SourceRegistry, storage,
+      '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(1, 'test-downloads'));
+    await executor.importChapter(task!, 'worker-a');
+    expect(adapter.fetchChapterPages).not.toHaveBeenCalled();
+    expect(storage.upload).not.toHaveBeenCalled();
+    expect((await db.query(`SELECT state,checkpoint->>'publishedAt' AS published_at,checkpoint->>'legacyPublishedReuse' AS reused
+      FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
+      .toMatchObject({ state: 'DONE', reused: 'true' });
+    expect((await db.query(`SELECT chapter_id FROM importer_lite_chapters WHERE work_id=$1 AND canonical_chapter_key=$2`, [ids.p1a, key])).rows[0].chapter_id).toBe(ids.legacy);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks WHERE task_type='PUBLISH' AND work_id=$1 AND chapter_key=$2`, [ids.p1a, key])).rows[0].count).toBe(0);
   });
 
   it('does not enqueue publication when the import lease expires after page storage', async () => {
