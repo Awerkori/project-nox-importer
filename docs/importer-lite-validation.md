@@ -89,6 +89,12 @@ This is an integration and regression gate, not an external capacity result:
 PGlite does not model Yugabyte latency, real source limits, Telegram capacity,
 DIScloud RSS, or public-site contention.
 
+Latest isolated regression run: **43/43 Lite integration scenarios passed**
+(run in bounded blocks against PGlite), along with **10/10** Lite identity,
+metadata, priority, source-selection, direct-Telegram and runtime-leadership
+unit scenarios. `npm run build` also passed. This is intentionally distinct
+from the external homologation gate below.
+
 ## Full-suite result in this workspace
 
 The complete repository suite was run after the Lite tests. It reported 102
