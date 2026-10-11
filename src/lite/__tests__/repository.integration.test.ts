@@ -682,6 +682,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(reserved).toEqual({ mediaId: ids.page, state: 'PERSISTED' });
   });
 
+  it('repairs a legacy exhausted publication with repeated valid page media exactly once', async () => {
+    const key = 'pt-br|default|chapter|duplicate-pages|-';
+    await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key,edition,language)
+      VALUES($1,$2,$3,'1','n|000000000001','default','pt-BR')`, [ids.publish, key, ids.chapter]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.publish, workKey: `work:${ids.publish}`,
+      chapterKey: key, priority: 'P1', idempotencyKey: 'duplicate-pages-import' });
+    const imported = await repo.claim('importer', 60);
+    await repo.finish(imported!, 'importer', { state: 'DONE', checkpoint: { chapterId: ids.chapter, mediaIds: [ids.page, ids.page] } });
+    expect((await repo.reconcile(10)).publishable).toBe(1);
+    await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED',attempts=max_attempts,reason='MAX_ATTEMPTS_EXHAUSTED'
+      WHERE idempotency_key='lite:publish:' || $1 || ':' || $2`, [ids.publish, key]);
+
+    expect((await repo.reconcile(10)).publishRepairs).toBe(1);
+    const publish = await repo.claim('publisher', 60);
+    expect(publish).toMatchObject({ taskType: 'PUBLISH', reason: 'PUBLISH_INTEGRITY_REPAIRED' });
+    expect(await repo.publish({ task: publish!, workerId: 'publisher', chapterId: ids.chapter,
+      workId: ids.publish, mediaIds: [ids.page, ids.page], fresh: false })).toBe(true);
+    expect((await db.query(`SELECT count(*)::int AS count FROM pages WHERE chapter_id=$1`, [ids.chapter])).rows[0].count).toBe(2);
+    expect((await repo.reconcile(10)).publishRepairs).toBe(0);
+  });
+
   it('does not retry a repeatedly crashed lease beyond its durable attempt limit', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:crash', priority: 'P1', idempotencyKey: 'crash-exhausted', maxAttempts: 1 });
     const claimed = await repo.claim('worker-a', 30);

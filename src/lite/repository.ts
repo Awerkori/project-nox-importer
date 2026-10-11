@@ -324,7 +324,7 @@ export class LiteRepository {
   }
 
   /** One bounded recovery turn; it cannot consume the claim path or scan works. */
-  async reconcile(limit = 50): Promise<{ leases: number; retries: number; exhausted: number; uploads: number; publishable: number }> {
+  async reconcile(limit = 50): Promise<{ leases: number; retries: number; exhausted: number; uploads: number; publishable: number; publishRepairs: number }> {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
@@ -396,14 +396,46 @@ export class LiteRepository {
             JSON.stringify({ importTaskId: row.id }), JSON.stringify({})],
         );
       }
-      for (const key of new Set([...leases.rows, ...retries.rows, ...uploads.rows, ...ready.rows].map((row) => row.work_key))) {
+      // Before Lite accepted repeated page media IDs, a chapter with visually
+      // identical pages could have every reference persisted but fail the old
+      // unique-media integrity count.  Re-open that exact exhausted publish
+      // once after verifying presentation and every *positional* media
+      // reference. This is bounded and fenced in the checkpoint so another
+      // genuine publish error never becomes a retry loop.
+      const repairedPublishes = await client.query<Row>(
+        `WITH picked AS (
+          SELECT p.id,p.work_key
+          FROM importer_lite_tasks p
+          JOIN importer_lite_tasks i ON i.id=(p.payload->>'importTaskId')::uuid
+          JOIN works w ON w.id=i.work_id
+          LEFT JOIN media cover ON cover.id=w.cover_id
+          WHERE p.task_type='PUBLISH' AND p.state='BLOCKED' AND p.reason='MAX_ATTEMPTS_EXHAUSTED'
+            AND NOT p.checkpoint ? 'publishIntegrityRepairV1'
+            AND i.task_type='IMPORT_CHAPTER' AND i.state='DONE'
+            AND i.checkpoint ? 'mediaIds' AND NOT i.checkpoint ? 'publishedAt'
+            AND w.title IS NOT NULL AND w.slug IS NOT NULL
+            AND cover.storage_ready=true AND cover.bytes>=1500
+            AND COALESCE(jsonb_array_length(i.checkpoint->'mediaIds'),0)>0
+            AND (SELECT count(*) FROM jsonb_array_elements_text(i.checkpoint->'mediaIds') AS expected(media_id)
+                 JOIN media page ON page.id=expected.media_id::uuid
+                 WHERE page.storage_ready=true AND page.bytes>0 AND page.mime LIKE 'image/%')
+                = jsonb_array_length(i.checkpoint->'mediaIds')
+          ORDER BY p.updated_at LIMIT $1 FOR UPDATE OF p SKIP LOCKED
+        ) UPDATE importer_lite_tasks p
+          SET state='READY',attempts=0,lease_owner=NULL,lease_until=NULL,next_run_at=now(),
+              reason='PUBLISH_INTEGRITY_REPAIRED',
+              checkpoint=p.checkpoint || '{"publishIntegrityRepairV1":true}'::jsonb,updated_at=now()
+          FROM picked WHERE p.id=picked.id RETURNING picked.work_key`, [limit],
+      );
+      for (const key of new Set([...leases.rows, ...retries.rows, ...uploads.rows, ...ready.rows, ...repairedPublishes.rows].map((row) => row.work_key))) {
         await this.refreshReadyWork(client, key);
       }
       await client.query('COMMIT');
       const leaseRetries = leases.rows.filter((row) => row.state === 'RETRY_WAIT').length;
       const readyRetries = retries.rows.filter((row) => row.state === 'READY').length;
       const exhausted = [...leases.rows, ...retries.rows].filter((row) => row.state === 'BLOCKED').length;
-      return { leases: leaseRetries, retries: readyRetries, exhausted, uploads: uploads.rowCount || 0, publishable: ready.rowCount || 0 };
+      return { leases: leaseRetries, retries: readyRetries, exhausted, uploads: uploads.rowCount || 0,
+        publishable: ready.rowCount || 0, publishRepairs: repairedPublishes.rowCount || 0 };
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
       throw error;
@@ -568,7 +600,12 @@ export class LiteRepository {
         throw new Error('WORK_PRESENTATION_INCOMPLETE');
       }
       const integrity = await client.query<{ count: string }>(
-        `SELECT count(*) FROM media WHERE id=ANY($1::uuid[]) AND storage_ready=true AND bytes>0 AND mime LIKE 'image/%'`, [input.mediaIds],
+        // Page position, not byte identity, is the Reader contract. A source
+        // can legitimately repeat a panel, so validate every requested array
+        // position instead of counting only distinct media rows.
+        `SELECT count(*) FROM unnest($1::uuid[]) AS expected(media_id)
+         JOIN media ON media.id=expected.media_id
+         WHERE media.storage_ready=true AND media.bytes>0 AND media.mime LIKE 'image/%'`, [input.mediaIds],
       );
       if (Number(integrity.rows[0]?.count) !== input.mediaIds.length || input.mediaIds.length === 0) {
         throw new Error('PUBLISH_MEDIA_INCOMPLETE');
