@@ -50,6 +50,13 @@ export declare class LiteRepository {
      */
     claimMonitor(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /**
+     * Discovery is a low-cost producer, never a reason to monopolize P2.  This
+     * bounded startup repair only defers due DISCOVER rows; catalog and chapter
+     * tasks are untouched.  Each ready-work projection is refreshed in the
+     * same short transaction so a stale projection cannot create empty claims.
+     */
+    staggerReadyDiscoveries(spacingMs: number, limit?: number): Promise<number>;
+    /**
      * Source administration and transient Lite health remain durable authority.
      * This indexed one-source read happens before source networking, never in a
      * normal task claim, and prevents a paused/cooling provider from consuming

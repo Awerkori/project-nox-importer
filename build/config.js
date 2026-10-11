@@ -57,6 +57,10 @@ const ConfigSchema = z.object({
     TELEGRAM_MEDIA_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(24),
     DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(16),
     BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(48),
+    // Upstream adapter calls are network work, not a reason to monopolize a
+    // chapter slot. The timeout is deliberately independent from the durable
+    // task lease and results in capped retry/cooldown handling.
+    SOURCE_OPERATION_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(120_000).default(30_000),
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
     IMPORTER_DB_MODE: z.enum(['direct', 'gateway']).default('direct'),
     // This branch is the approved Lite cutover artifact.  An explicit `legacy`
