@@ -22,16 +22,19 @@ horarios, operador e resultados de cada gate.
 1. Fixar os SHAs do Reader `feat/reader-canonical-chapter-identity` e do
    Importer `feat/importer-lite-v2`; executar seus builds e suites relevantes
    a partir desses SHAs.
-2. Criar e verificar um backup restauravel do banco de producao. Registrar a
+2. Rotacionar qualquer credencial de DIScloud que tenha aparecido em script ou
+   log historico e confirmar que os jobs operacionais a recebem apenas pelo
+   ambiente protegido. Nunca registrar o valor na evidencia de cutover.
+3. Criar e verificar um backup restauravel do banco de producao. Registrar a
    contagem de obras, capitulos, paginas, midias, mapeamentos de fonte e
    solicitacoes STAFF.
-3. Restaurar uma copia sanitizada/descartavel com os papeis YSQL reais.
+4. Restaurar uma copia sanitizada/descartavel com os papeis YSQL reais.
    Executar os verificadores guardados em modo preflight e, so' nela, as fases
    Reader 1, backfill, Reader 2 e migration Lite. Validar rollback logico
    (parar Lite, sem restaurar/apagar dados) nessa copia.
-4. Com um bot e canal privados de validacao autorizados, testar recibo Telegram
+5. Com um bot e canal privados de validacao autorizados, testar recibo Telegram
    e Reader de ponta a ponta. Nao use midia, bots ou canais servidos pelo site.
-5. Coletar baseline do site e limites reais de YSQL/Telegram. A meta de
+6. Coletar baseline do site e limites reais de YSQL/Telegram. A meta de
    8--10 capitulos/minuto requer duas janelas de dez minutos em infraestrutura
    autorizada; ela nao e' demonstrada por esta preparacao local.
 
@@ -74,7 +77,11 @@ horarios, operador e resultados de cada gate.
 
 ## Gate 3 — artefato DIScloud e primeira publicacao controlada
 
-1. Publicar **um** artefato do SHA Lite aprovado na mesma aplicacao. Configurar
+1. Publicar **um** artefato do SHA Lite aprovado na mesma aplicacao. O workflow
+   atual `Deploy DIScloud` e' somente `workflow_dispatch` e aceita exclusivamente
+   `main`: depois do merge, disparar manualmente o run na `main` e registrar o
+   SHA do workflow, `build/BUILD_ID` e o hash do artefato. Um push por si so'
+   nao implanta a aplicacao. Configurar
    `IMPORTER_RUNTIME_MODE=lite`, `IMPORTER_DB_MODE=direct` e
    `STORAGE_PROVIDER=direct_telegram`; conferir `IMPORTER_USER_ID`, TLS YSQL e
    variaveis de Telegram sem imprimir seus valores. Definir
