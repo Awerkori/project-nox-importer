@@ -74,6 +74,7 @@ export declare class ImporterLiteRuntime {
      */
     private runMonitorTurn;
     /** A small protective gate, deliberately not another scheduler. */
+    private probeSiteHealth;
     private probeSharedResources;
     /** A small diagnostic snapshot; it deliberately skips contention and scans. */
     private emitOperationalSnapshot;

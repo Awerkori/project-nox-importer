@@ -410,24 +410,44 @@ export class ImporterLiteRuntime {
   }
 
   /** A small protective gate, deliberately not another scheduler. */
-  private async probeSharedResources(): Promise<void> {
+  private async probeSiteHealth(): Promise<{ healthy: boolean; latencyMs: number | null; status: number | null }> {
     const started = Date.now();
     try {
       const response = await fetch(`${this.config.NOX_MANGA_URL.replace(/\/$/, '')}/api/health`, { signal: AbortSignal.timeout(3_000) });
       await response.body?.cancel().catch(() => {});
-      const elapsed = Date.now() - started;
-      if (!response.ok || elapsed > 1_500) {
-        this.sitePausedUntil = Date.now() + 30_000;
-        this.lastSiteProbe = { state: 'PAUSED', checkedAt: new Date().toISOString(), latencyMs: elapsed };
-        this.logger.warn('Pausing new Lite claims to protect shared site resources', { status: response.status, elapsed });
-      } else {
-        this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: elapsed };
-      }
+      const latencyMs = Date.now() - started;
+      return { healthy: response.ok && latencyMs <= 1_500, latencyMs, status: response.status };
     } catch {
-      // A probe outage should reduce pressure, not cause retries or a restart.
-      this.sitePausedUntil = Date.now() + 30_000;
-      this.lastSiteProbe = { state: 'PAUSED', checkedAt: new Date().toISOString(), latencyMs: null };
+      return { healthy: false, latencyMs: null, status: null };
     }
+  }
+
+  private async probeSharedResources(): Promise<void> {
+    const first = await this.probeSiteHealth();
+    if (first.healthy) {
+      this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: first.latencyMs };
+      return;
+    }
+    // A one-off DIScloud egress failure previously halted every worker for
+    // thirty seconds even while Reader was healthy.  Confirm once, only on a
+    // failed probe; a real outage still pauses claims, while a transient does
+    // not masquerade as a site incident or collapse productive slots.
+    const confirmation = await this.probeSiteHealth();
+    if (confirmation.healthy) {
+      this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: confirmation.latencyMs };
+      this.logger.warn('Transient site-health probe recovered before pausing Lite claims', {
+        firstStatus: first.status, firstLatencyMs: first.latencyMs, confirmationLatencyMs: confirmation.latencyMs,
+      });
+      return;
+    }
+    // A confirmed outage reduces pressure without retrying tasks or restarting
+    // the process.  The next scheduled probe can release this small gate.
+    this.sitePausedUntil = Date.now() + 30_000;
+    this.lastSiteProbe = { state: 'PAUSED', checkedAt: new Date().toISOString(), latencyMs: confirmation.latencyMs ?? first.latencyMs };
+    this.logger.warn('Pausing new Lite claims to protect shared site resources', {
+      firstStatus: first.status, firstLatencyMs: first.latencyMs,
+      confirmationStatus: confirmation.status, confirmationLatencyMs: confirmation.latencyMs,
+    });
   }
 
   /** A small diagnostic snapshot; it deliberately skips contention and scans. */
