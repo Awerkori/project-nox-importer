@@ -56,6 +56,8 @@ const ConfigSchema = z.object({
     BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(48),
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
     IMPORTER_DB_MODE: z.enum(['direct', 'gateway']).default('direct'),
+    // Lite is deliberately opt-in until an approved, fenced production cutover.
+    IMPORTER_RUNTIME_MODE: z.enum(['legacy', 'lite']).default('legacy'),
     YUGABYTE_HOST: z.string().default('sa-east-1.b49305ea-8536-43e6-936e-b2fd77fc07b0.aws.yugabyte.cloud'),
     YUGABYTE_PORT: z.coerce.number().default(5433),
     YUGABYTE_USER: z.string().default('admin'),

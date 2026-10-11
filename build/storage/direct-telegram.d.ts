@@ -76,6 +76,8 @@ export declare class DirectTelegramStorageProvider implements StorageProvider {
     private releaseGlobalSlot;
     private selectOptimalBot;
     private selectOptimalShard;
+    /** Reserve actual bot and channel capacity before sending any bytes. */
+    private reserveDestination;
     private executeTelegramUpload;
     private waitForDrain;
     upload(bytes: Uint8Array, mime: string, id: string, chapterId?: string, signal?: AbortSignal): Promise<string>;

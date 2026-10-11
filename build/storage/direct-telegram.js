@@ -53,7 +53,9 @@ export class DirectTelegramStorageProvider {
     botRoundRobinIndex = 0;
     shardRoundRobinIndex = 0;
     // Bounded queue backpressure
-    maxGlobalConcurrent = 32;
+    // Runtime-wide, never a per-chapter multiplier. The Lite executor also has
+    // its own bounded page workers; this is the final shared Telegram fence.
+    maxGlobalConcurrent = Math.max(1, Math.min(32, Number(process.env.TELEGRAM_MEDIA_CONCURRENCY || 24)));
     currentGlobalActive = 0;
     waitingQueue = [];
     constructor(checkpointPath, rateLimitBytesPerSec) {
@@ -288,8 +290,9 @@ export class DirectTelegramStorageProvider {
         if (candidates.length === 0) {
             candidates = this.bots;
         }
-        const healthy = candidates.filter(b => b.cooldownUntil <= now);
-        const available = healthy.length > 0 ? healthy : candidates;
+        const available = candidates.filter(b => b.cooldownUntil <= now && b.activeUploads < b.maxConcurrent);
+        if (available.length === 0)
+            return null;
         let bestBot = available[0];
         let bestScore = Infinity;
         for (let i = 0; i < available.length; i++) {
@@ -311,8 +314,9 @@ export class DirectTelegramStorageProvider {
         if (candidates.length === 0) {
             candidates = this.shards;
         }
-        const healthy = candidates.filter(s => s.cooldownUntil <= now);
-        const available = healthy.length > 0 ? healthy : candidates;
+        const available = candidates.filter(s => s.cooldownUntil <= now && s.activeUploads < s.maxConcurrent);
+        if (available.length === 0)
+            return null;
         let bestShard = available[0];
         let bestScore = Infinity;
         for (let i = 0; i < available.length; i++) {
@@ -326,6 +330,25 @@ export class DirectTelegramStorageProvider {
         }
         this.shardRoundRobinIndex = (this.shardRoundRobinIndex + 1) % 10000;
         return bestShard;
+    }
+    /** Reserve actual bot and channel capacity before sending any bytes. */
+    async reserveDestination(excludeShards, signal) {
+        while (true) {
+            signal?.throwIfAborted();
+            const bot = this.selectOptimalBot();
+            const shard = this.selectOptimalShard(excludeShards);
+            if (bot && shard) {
+                bot.activeUploads++;
+                shard.activeUploads++;
+                return { bot, shard };
+            }
+            const now = Date.now();
+            const cooldowns = [...this.bots, ...this.shards]
+                .map((target) => target.cooldownUntil)
+                .filter((until) => until > now);
+            const nextCooldown = cooldowns.length ? Math.min(...cooldowns) - now : 25;
+            await abortableDelay(Math.max(25, Math.min(nextCooldown, 30_000)), signal);
+        }
     }
     executeTelegramUpload(token, channelId, bytes, id, signal) {
         return new Promise((resolve, reject) => {
@@ -428,20 +451,10 @@ export class DirectTelegramStorageProvider {
         await this.acquireGlobalSlot(signal);
         const maxAttempts = 3;
         let lastError;
-        const excludedBots = new Set();
         const excludedShards = new Set();
         try {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                const bot = this.selectOptimalBot(excludedBots);
-                const shard = this.selectOptimalShard(excludedShards);
-                const now = Date.now();
-                if (bot.cooldownUntil > now && this.bots.every(b => b.cooldownUntil > now)) {
-                    const waitMs = Math.min(...this.bots.map(b => b.cooldownUntil)) - now;
-                    this.logger.warn(`All bots in cooldown. Sleeping ${Math.ceil(waitMs / 1000)}s...`);
-                    await abortableDelay(Math.min(waitMs, 30_000), signal);
-                }
-                bot.activeUploads++;
-                shard.activeUploads++;
+                const { bot, shard } = await this.reserveDestination(excludedShards, signal);
                 const startTime = Date.now();
                 try {
                     const result = await this.executeTelegramUpload(bot.token, shard.channelId, bytes, id, signal);
@@ -504,12 +517,15 @@ export class DirectTelegramStorageProvider {
                         // AIMD Multiplicative Decrease
                         bot.maxConcurrent = Math.max(1, Math.floor(bot.maxConcurrent * 0.5));
                         bot.consecutiveSuccesses = 0;
-                        this.logger.warn(`[FLOOD_WAIT 429] Bot ${bot.ref} throttled for ${retryAfter}s! Failover to alternative bot for attempt ${attempt + 1}/${maxAttempts}...`);
-                        excludedBots.add(bot.ref);
+                        // Do not transfer this same upload to another bot to evade a
+                        // server-provided limit. The executor stores the exact cooldown
+                        // and retries the durable task only after it is legal to do so.
+                        err.retryAfter = retryAfter;
+                        this.logger.warn(`[FLOOD_WAIT 429] Bot ${bot.ref} throttled for ${retryAfter}s; upload deferred.`);
+                        throw err;
                     }
                     else {
                         this.logger.warn(`[UPLOAD_RETRY] Bot ${bot.ref} / Shard ${shard.name} error (${err.message}). Retrying attempt ${attempt + 1}/${maxAttempts}...`);
-                        excludedBots.add(bot.ref);
                         excludedShards.add(shard.shardId);
                     }
                     if (attempt < maxAttempts) {
