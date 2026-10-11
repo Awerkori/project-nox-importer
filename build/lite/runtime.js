@@ -312,12 +312,13 @@ export class ImporterLiteRuntime {
             await this.queue.finish(task, workerId, monitored ? {
                 state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
                 nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, newReleaseCount)),
+                workId: resolved.workId,
                 checkpoint: {
                     workId: resolved.workId, lastCheckedAt: new Date().toISOString(),
                     lastNewReleaseCount: newReleaseCount,
                     emptyChecks: newReleaseCount ? 0 : Number(task.checkpoint.emptyChecks || 0) + 1,
                 },
-            } : { state: 'DONE', checkpoint: { workId: resolved.workId } });
+            } : { state: 'DONE', workId: resolved.workId, checkpoint: { workId: resolved.workId } });
             await this.queue.recordSourceSuccess(source);
         }
         catch (error) {

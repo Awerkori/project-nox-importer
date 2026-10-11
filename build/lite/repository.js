@@ -121,13 +121,14 @@ export class LiteRepository {
               base_priority=COALESCE($7::smallint,base_priority),
               priority=CASE WHEN EXISTS (
                 SELECT 1 FROM importer_staff_requests s
-                WHERE s.work_id=importer_lite_tasks.work_id
+                WHERE s.work_id=COALESCE($9::uuid,importer_lite_tasks.work_id)
                   AND s.status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')
               ) THEN 0 ELSE COALESCE($7::smallint,base_priority) END,
               checkpoint=checkpoint || $6::jsonb,
               monitoring=COALESCE($8::boolean,monitoring),
+              work_id=COALESCE($9::uuid,work_id),
               lease_owner=NULL, lease_until=NULL, updated_at=now()
-         WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2`, [task.id, workerId, outcome.state, outcome.reason || null, outcome.nextRunAt || null, JSON.stringify(outcome.checkpoint || {}), outcome.priority === undefined ? null : LITE_PRIORITY_RANK[outcome.priority], outcome.monitoring === undefined ? null : outcome.monitoring]);
+         WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2`, [task.id, workerId, outcome.state, outcome.reason || null, outcome.nextRunAt || null, JSON.stringify(outcome.checkpoint || {}), outcome.priority === undefined ? null : LITE_PRIORITY_RANK[outcome.priority], outcome.monitoring === undefined ? null : outcome.monitoring, outcome.workId || null]);
             await this.refreshReadyWork(client, task.workKey);
             await client.query('COMMIT');
             return result.rowCount === 1;

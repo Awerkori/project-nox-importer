@@ -560,6 +560,18 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT state,priority,base_priority,monitoring,checkpoint->>'lastNewReleaseCount' AS releases
       FROM importer_lite_tasks WHERE idempotency_key='p0-lane-watch'`)).rows[0])
       .toEqual({ state: 'RETRY_WAIT', priority: 3, base_priority: 3, monitoring: true, releases: '1' });
+    // Discovery created this catalog task before there was a canonical work.
+    // Catalog must attach that identity so a later panel action can wake it.
+    expect((await db.query(`SELECT work_id FROM importer_lite_tasks WHERE idempotency_key='p0-lane-watch'`)).rows[0].work_id).toBe(ids.p1a);
+    await db.query(`INSERT INTO importer_staff_requests(work_id,status) VALUES($1,'ACTIVE')`, [ids.p1a]);
+    expect((await db.query(`SELECT state,priority,monitoring FROM importer_lite_tasks WHERE idempotency_key='p0-lane-watch'`)).rows[0])
+      .toEqual({ state: 'READY', priority: 0, monitoring: false });
+    expect((await db.query(`SELECT priority FROM importer_lite_ready_works WHERE work_key='source:source-a:monitored-work'`)).rows[0])
+      .toEqual({ priority: 0 });
+    // The newly materialised chapter is also STAFF, so either work may win
+    // fair selection; the essential property is that the awakened monitor no
+    // longer hides behind a null work id or delays the panel request.
+    expect(await repo.claim('staff-panel-worker', 120)).toMatchObject({ priority: 'STAFF' });
   });
 
   it('keeps a newly revealed historical chapter as P1 while P0 monitors a newer release', async () => {

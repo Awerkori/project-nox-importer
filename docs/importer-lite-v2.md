@@ -25,6 +25,10 @@ Invariants:
 - A duplicate panel click is harmless: all active request rows for a work form
   one STAFF overlay over idempotent task rows. Releasing one request does not
   demote the work while another active request remains.
+- A catalog task discovered before identity resolution attaches its canonical
+  `work_id` when it completes that catalog pass. This lets a later panel STAFF
+  request wake the durable monitor immediately; source discovery identity is
+  retained as the task key and is never replaced by a guessed title match.
 - A recurring P0 catalog pass compares the durable source-manifest order
   frontier: chapters beyond it are P0 releases, while a newly revealed older
   manifest entry becomes a P1 repair. This is evidence from the source

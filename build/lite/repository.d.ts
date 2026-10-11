@@ -47,6 +47,8 @@ export declare class LiteRepository {
         checkpoint?: Record<string, unknown>;
         priority?: Exclude<LitePriority, 'STAFF'>;
         monitoring?: boolean;
+        /** Catalog attaches the resolved canonical work without changing source identity. */
+        workId?: string;
     }): Promise<boolean>;
     /**
      * Catalog evidence is the only event that reopens a source-blocked chapter.
