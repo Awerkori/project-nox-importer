@@ -37,6 +37,11 @@ horarios, operador e resultados de cada gate.
 6. Coletar baseline do site e limites reais de YSQL/Telegram. A meta de
    8--10 capitulos/minuto requer duas janelas de dez minutos em infraestrutura
    autorizada; ela nao e' demonstrada por esta preparacao local.
+7. No painel DIScloud, verificar a integracao GitHub nativa da mesma aplicacao
+   e registrar repositorio, branch e estado de Auto Deploy. Ela deve estar
+   ausente ou desativada durante o merge/cutover: o workflow GitHub versionado
+   e' manual e esta' sujeito ao gate de SHA abaixo. Nao assumir que a ausencia
+   de `push` no workflow elimina um Auto Deploy configurado fora do repositorio.
 
 ## Gate 1 — fase aditiva Reader e backfill
 
