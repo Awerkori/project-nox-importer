@@ -9,6 +9,9 @@ only a controlled benchmark can establish sustained production capacity.
 | Admission probes competed with claims | PR #250 deferred probes behind claim pressure | Claim reads only `importer_lite_ready_works`; discovery/catalog run outside claim | `importer_lite_claim_task` has no source/catalog join | ready age; DB pool wait |
 | Blocked work/frontier hid useful work | PR #300, #350, #380 | only `READY` work projection is claimable; one work gets one turn | source-selector large-backlog test; claim SQL | ready count and oldest-ready age |
 | P2/P1 contention and priority inversions | PRs #390, #400, #401, #411–#419 | one numeric ordering STAFF(0), P0(1), P1(2), P2(3); staff trigger promotes durable tasks | claim query ordering and staff trigger | ready count by priority |
+| P0 candidate race could hand a slot to a lower lane or repeatedly favor one stale candidate | PR #409 (`retain P0 after raced claim`) | ready-work row is atomically claimed; a monitor never enters the normal projection; only durable, executable chapter tasks receive P0 | integration: 1,300 monitors plus P1/P2; monitor-to-P0 materialization | P0 ready age, monitor next-run time, empty monitor probes |
+| P0/STAFF presence probes could add YSQL work while no eligible task existed | PR #168 cached empty STAFF claims; PR #334 cached P0 admission probe; PR #339/#362 optimized P0 scans | one indexed monitor claim, one permit, shared 15s empty backoff; normal claims read only the ready-work projection | integration: monitor lane is invisible to normal claims | pool wait, monitor limiter active/queued, next monitor |
+| New STAFF request could conflict with lower-priority work already in flight | historical scheduler treated priority and capacity in overlapping paths; PR #400 established strict claim order | STAFF preempts only new READY claims. RUNNING tasks retain lease/finalization; finish re-evaluates active panel rows so cancellation restores base priority | integration: P0/P1/P2 finish while duplicate STAFF overlay arrives/cancels | running leases, stored-unpublished age, STAFF ready age |
 | Unverified numeric gap stalled publication | PR #395 | no inferred predecessors in claim/publish; dependencies must be materialized/explicit | chapter identity tests | blocked reasons by code |
 | Catalog maintenance consumed data-plane capacity | PR #398, #412 | catalog tasks are normal bounded tasks, not a side scheduler; execution is network outside transactions | runtime has one worker pool | catalog task latency; DB wait |
 | A large manifest caused per-chapter YSQL work | cataloguing hundreds of chapters multiplies round trips and pool holds | source mappings and queue rows are batched; ready projection refreshes once per work | integration: 1,300-chapter batch | catalog DB time; pool wait |
@@ -37,6 +40,13 @@ only a controlled benchmark can establish sustained production capacity.
 4. Source preference was coupled to scheduling in legacy recovery paths. Lite
    chooses task priority first, then selects a confirmed healthy source route;
    cooldown never grants exclusivity to a preferred source.
+5. Empty P0 monitoring used to be easy to mistake for executable high-priority
+   work. Lite stores a monitor as a durable, indexed observation with its own
+   one-slot budget. Its sole output is a real P0 chapter task, so quiet tracked
+   works cannot suppress P1/P2 claims.
+6. Strict STAFF admission must not become a finalization barrier. Lite has no
+   priority check after a task is RUNNING; durable media and publication
+   complete under their existing lease, then future admission observes STAFF.
 
 ## Known boundaries
 

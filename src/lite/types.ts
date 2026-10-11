@@ -32,6 +32,11 @@ export interface LiteTask {
   leaseOwner: string | null;
   leaseUntil: Date | null;
   reason: string | null;
+  /**
+   * A bounded, query-only P0 watch. It is deliberately excluded from the
+   * executable-work projection: observing an unchanged work is not P0 work.
+   */
+  monitoring: boolean;
   payload: Record<string, unknown>;
   checkpoint: Record<string, unknown>;
 }

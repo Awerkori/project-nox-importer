@@ -12,6 +12,7 @@ const asTask = (row: Row): LiteTask => ({
   state: row.state, idempotencyKey: row.idempotency_key, nextRunAt: new Date(row.next_run_at),
   attempts: row.attempts, maxAttempts: row.max_attempts, leaseOwner: row.lease_owner,
   leaseUntil: row.lease_until ? new Date(row.lease_until) : null, reason: row.reason,
+  monitoring: Boolean(row.monitoring),
   payload: row.payload || {}, checkpoint: row.checkpoint || {},
 });
 
@@ -26,6 +27,8 @@ export interface EnqueueLiteTask {
   maxAttempts?: number;
   payload?: Record<string, unknown>;
   checkpoint?: Record<string, unknown>;
+  /** Reserved for the one-resource P0 observation lane, never normal work. */
+  monitoring?: boolean;
 }
 
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
@@ -49,12 +52,12 @@ export class LiteRepository {
       const priority = staff.rowCount ? 0 : LITE_PRIORITY_RANK[input.priority];
       const result = await client.query<Row>(
         `INSERT INTO importer_lite_tasks
-          (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint)
-         VALUES ($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb)
+          (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
+         VALUES ($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12)
          ON CONFLICT (idempotency_key) DO NOTHING RETURNING *`,
         [input.taskType, input.workId || null, input.workKey, input.chapterKey || null, priority,
           LITE_PRIORITY_RANK[input.priority], input.idempotencyKey, input.nextRunAt || new Date(),
-          input.maxAttempts || 8, JSON.stringify(input.payload || {}), JSON.stringify(input.checkpoint || {})],
+          input.maxAttempts || 8, JSON.stringify(input.payload || {}), JSON.stringify(input.checkpoint || {}), Boolean(input.monitoring)],
       );
       await this.refreshReadyWork(client, input.workKey);
       await client.query('COMMIT');
@@ -70,8 +73,8 @@ export class LiteRepository {
    * work in one short transaction, then refresh each affected ready-work row
    * once.  It intentionally does no network work and never claims anything.
    */
-  async enqueueMany(inputs: EnqueueLiteTask[]): Promise<{ inserted: number }> {
-    if (inputs.length === 0) return { inserted: 0 };
+  async enqueueMany(inputs: EnqueueLiteTask[]): Promise<{ inserted: number; insertedKeys: Set<string> }> {
+    if (inputs.length === 0) return { inserted: 0, insertedKeys: new Set() };
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
@@ -81,30 +84,32 @@ export class LiteRepository {
           AND status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')`, [workIds]) : { rows: [] as Row[] };
       const staffWorkIds = new Set(staff.rows.map((row) => String(row.work_id)));
       let inserted = 0;
+      const insertedKeys = new Set<string>();
       // Keep far below PostgreSQL's parameter limit even if a source returns
       // an unusually large manifest.
       for (let offset = 0; offset < inputs.length; offset += 500) {
         const batch = inputs.slice(offset, offset + 500);
         const values: unknown[] = [];
         const rows = batch.map((input, index) => {
-          const start = index * 11;
+          const start = index * 12;
           values.push(
             input.taskType, input.workId || null, input.workKey, input.chapterKey || null,
             staffWorkIds.has(String(input.workId)) ? 0 : LITE_PRIORITY_RANK[input.priority], LITE_PRIORITY_RANK[input.priority],
             input.idempotencyKey, input.nextRunAt || new Date(), input.maxAttempts || 8,
-            JSON.stringify(input.payload || {}), JSON.stringify(input.checkpoint || {}),
+            JSON.stringify(input.payload || {}), JSON.stringify(input.checkpoint || {}), Boolean(input.monitoring),
           );
-          return `($${start + 1},$${start + 2}::uuid,$${start + 3},$${start + 4},$${start + 5},$${start + 6},$${start + 7},$${start + 8},$${start + 9},$${start + 10}::jsonb,$${start + 11}::jsonb)`;
+          return `($${start + 1},$${start + 2}::uuid,$${start + 3},$${start + 4},$${start + 5},$${start + 6},$${start + 7},$${start + 8},$${start + 9},$${start + 10}::jsonb,$${start + 11}::jsonb,$${start + 12})`;
         });
         const result = await client.query<Row>(`INSERT INTO importer_lite_tasks
-          (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint)
+          (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
           VALUES ${rows.join(',')}
-          ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`, values);
+          ON CONFLICT (idempotency_key) DO NOTHING RETURNING idempotency_key`, values);
         inserted += result.rowCount || 0;
+        for (const row of result.rows) insertedKeys.add(String(row.idempotency_key));
       }
       for (const workKey of new Set(inputs.map((input) => input.workKey))) await this.refreshReadyWork(client, workKey);
       await client.query('COMMIT');
-      return { inserted };
+      return { inserted, insertedKeys };
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
       throw error;
@@ -114,6 +119,18 @@ export class LiteRepository {
   async claim(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
     const result = await this.db.query<Row>(
       'SELECT * FROM public.importer_lite_claim_task($1,$2::interval)',
+      [workerId, `${Math.max(30, leaseSeconds)} seconds`],
+    );
+    return result.rows[0] ? asTask(result.rows[0]) : null;
+  }
+
+  /**
+   * P0 observation has one durable, explicitly bounded lane.  It is never
+   * selected by normal claims, so unchanged watches cannot starve P1/P2.
+   */
+  async claimMonitor(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
+    const result = await this.db.query<Row>(
+      'SELECT * FROM public.importer_lite_claim_monitor_task($1,$2::interval)',
       [workerId, `${Math.max(30, leaseSeconds)} seconds`],
     );
     return result.rows[0] ? asTask(result.rows[0]) : null;
@@ -134,6 +151,7 @@ export class LiteRepository {
     nextRunAt?: Date;
     checkpoint?: Record<string, unknown>;
     priority?: Exclude<LitePriority, 'STAFF'>;
+    monitoring?: boolean;
   }): Promise<boolean> {
     const client = await this.db.connect();
     try {
@@ -142,10 +160,16 @@ export class LiteRepository {
         `UPDATE importer_lite_tasks
           SET state=$3, reason=$4, next_run_at=COALESCE($5::timestamptz,next_run_at),
               base_priority=COALESCE($7::smallint,base_priority),
-              priority=CASE WHEN priority=0 THEN 0 ELSE COALESCE($7::smallint,priority) END,
-              checkpoint=checkpoint || $6::jsonb, lease_owner=NULL, lease_until=NULL, updated_at=now()
+              priority=CASE WHEN EXISTS (
+                SELECT 1 FROM importer_staff_requests s
+                WHERE s.work_id=importer_lite_tasks.work_id
+                  AND s.status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')
+              ) THEN 0 ELSE COALESCE($7::smallint,base_priority) END,
+              checkpoint=checkpoint || $6::jsonb,
+              monitoring=COALESCE($8::boolean,monitoring),
+              lease_owner=NULL, lease_until=NULL, updated_at=now()
          WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2`,
-        [task.id, workerId, outcome.state, outcome.reason || null, outcome.nextRunAt || null, JSON.stringify(outcome.checkpoint || {}), outcome.priority === undefined ? null : LITE_PRIORITY_RANK[outcome.priority]],
+        [task.id, workerId, outcome.state, outcome.reason || null, outcome.nextRunAt || null, JSON.stringify(outcome.checkpoint || {}), outcome.priority === undefined ? null : LITE_PRIORITY_RANK[outcome.priority], outcome.monitoring === undefined ? null : outcome.monitoring],
       );
       await this.refreshReadyWork(client, task.workKey);
       await client.query('COMMIT');
@@ -287,12 +311,12 @@ export class LiteRepository {
     } finally { client.release(); }
   }
 
-  async operationalSnapshot(): Promise<Array<{ priority: LitePriority; state: LiteTaskState; count: number; oldestReadyAt: Date | null }>> {
-    const result = await this.db.query<Row>(`SELECT priority,state,count(*)::int AS count,
-      min(created_at) FILTER (WHERE state='READY') AS oldest_ready_at
-      FROM importer_lite_tasks GROUP BY priority,state ORDER BY priority,state`);
+  async operationalSnapshot(): Promise<Array<{ priority: LitePriority; state: LiteTaskState; monitoring: boolean; count: number; oldestReadyAt: Date | null }>> {
+    const result = await this.db.query<Row>(`SELECT priority,state,monitoring,count(*)::int AS count,
+      min(created_at) FILTER (WHERE state='READY' AND monitoring=false) AS oldest_ready_at
+      FROM importer_lite_tasks GROUP BY priority,state,monitoring ORDER BY priority,state,monitoring`);
     return result.rows.map((row) => ({ priority: priorityName(row.priority), state: row.state,
-      count: Number(row.count), oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null }));
+      monitoring: Boolean(row.monitoring), count: Number(row.count), oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null }));
   }
 
   /** Small, indexed progress probe used for a human-operable Lite heartbeat. */
@@ -300,11 +324,14 @@ export class LiteRepository {
     publishedLastMinute: number;
     oldestReadyAt: Date | null;
     oldestStoredUnpublishedAt: Date | null;
+    nextMonitorAt: Date | null;
   }> {
     const result = await this.db.query<Row>(`SELECT
       (SELECT count(*)::int FROM importer_publication_events
         WHERE transition_at >= now() - interval '1 minute') AS published_last_minute,
-      (SELECT min(created_at) FROM importer_lite_tasks WHERE state='READY') AS oldest_ready_at,
+      (SELECT min(created_at) FROM importer_lite_tasks WHERE state='READY' AND monitoring=false) AS oldest_ready_at,
+      (SELECT min(next_run_at) FROM importer_lite_tasks
+        WHERE state IN ('READY','RETRY_WAIT') AND task_type='CATALOG' AND monitoring=true) AS next_monitor_at,
       (SELECT min(updated_at) FROM importer_lite_tasks
         WHERE state='DONE' AND task_type='IMPORT_CHAPTER'
           AND checkpoint ? 'mediaIds' AND NOT checkpoint ? 'publishedAt') AS oldest_stored_unpublished_at`);
@@ -313,6 +340,7 @@ export class LiteRepository {
       publishedLastMinute: Number(row.published_last_minute || 0),
       oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null,
       oldestStoredUnpublishedAt: row.oldest_stored_unpublished_at ? new Date(row.oldest_stored_unpublished_at) : null,
+      nextMonitorAt: row.next_monitor_at ? new Date(row.next_monitor_at) : null,
     };
   }
 

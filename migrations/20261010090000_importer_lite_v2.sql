@@ -22,10 +22,15 @@ CREATE TABLE IF NOT EXISTS public.importer_lite_tasks (
   reason text NULL,
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb,
+  -- A monitoring row is a durable source observation, not a chapter claim.
+  -- It is processed by the one-slot monitor lane and excluded from ready work.
+  monitoring boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CHECK ((state = 'RUNNING') = (lease_owner IS NOT NULL AND lease_until IS NOT NULL))
 );
+ALTER TABLE public.importer_lite_tasks
+  ADD COLUMN IF NOT EXISTS monitoring boolean NOT NULL DEFAULT false;
 
 -- This is the explicit executable-work projection. Claims read this tiny table
 -- first, then one task for the chosen work; blocked/retry rows never hide it.
@@ -40,6 +45,9 @@ CREATE TABLE IF NOT EXISTS public.importer_lite_ready_works (
 CREATE INDEX IF NOT EXISTS importer_lite_tasks_ready_work_idx
   ON public.importer_lite_tasks (work_key, priority, next_run_at, created_at)
   WHERE state = 'READY';
+CREATE INDEX IF NOT EXISTS importer_lite_tasks_monitor_ready_idx
+  ON public.importer_lite_tasks (next_run_at, created_at)
+  WHERE state='READY' AND task_type='CATALOG' AND monitoring=true;
 CREATE INDEX IF NOT EXISTS importer_lite_tasks_recovery_idx
   ON public.importer_lite_tasks (state, lease_until, next_run_at)
   WHERE state IN ('RUNNING', 'RETRY_WAIT');
@@ -151,7 +159,7 @@ DECLARE v_priority smallint; v_next timestamptz;
 BEGIN
   SELECT priority, next_run_at INTO v_priority, v_next
   FROM public.importer_lite_tasks
-  WHERE work_key = p_work_key AND state='READY'
+  WHERE work_key = p_work_key AND state='READY' AND monitoring=false
   ORDER BY priority, next_run_at, created_at
   LIMIT 1;
   IF NOT FOUND THEN
@@ -170,9 +178,20 @@ DECLARE v_work_id uuid; v_active boolean; v_key text;
 BEGIN
   v_work_id := COALESCE(NEW.work_id, OLD.work_id);
   IF v_work_id IS NULL THEN RETURN COALESCE(NEW,OLD); END IF;
-  v_active := TG_OP <> 'DELETE' AND NEW.status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE');
+  -- The panel can be clicked twice. Treat requests as an idempotent overlay:
+  -- priority remains STAFF while *any* active request for the work exists.
+  SELECT EXISTS(
+    SELECT 1 FROM public.importer_staff_requests
+    WHERE work_id=v_work_id AND status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')
+  ) INTO v_active;
   UPDATE public.importer_lite_tasks
-  SET priority=CASE WHEN v_active THEN 0 ELSE base_priority END, updated_at=now()
+  SET priority=CASE WHEN v_active THEN 0 ELSE base_priority END,
+      -- A recurring monitor becomes an ordinary immediate STAFF catalog task;
+      -- this is the only safe acceleration because it has no partial media.
+      state=CASE WHEN v_active AND monitoring THEN 'READY' ELSE state END,
+      monitoring=CASE WHEN v_active AND monitoring THEN false ELSE monitoring END,
+      next_run_at=CASE WHEN v_active AND monitoring THEN now() ELSE next_run_at END,
+      updated_at=now()
   WHERE work_id=v_work_id AND state IN ('READY','RETRY_WAIT','BLOCKED');
   FOR v_key IN SELECT DISTINCT work_key FROM public.importer_lite_tasks WHERE work_id=v_work_id LOOP
     PERFORM public.importer_lite_refresh_ready_work(v_key);
@@ -199,7 +218,7 @@ BEGIN
   LIMIT 1 FOR UPDATE SKIP LOCKED;
   IF NOT FOUND THEN RETURN; END IF;
   SELECT id INTO v_task_id FROM public.importer_lite_tasks
-  WHERE work_key=v_work_key AND state='READY' AND next_run_at<=now()
+  WHERE work_key=v_work_key AND state='READY' AND monitoring=false AND next_run_at<=now()
   ORDER BY priority,next_run_at,created_at LIMIT 1 FOR UPDATE SKIP LOCKED;
   IF NOT FOUND THEN
     PERFORM public.importer_lite_refresh_ready_work(v_work_key);
@@ -214,6 +233,26 @@ BEGIN
 END;
 $$;
 
+-- The only monitor claim path. It consults the narrow partial index, claims a
+-- single due observation, and deliberately does not touch ready-work rows.
+CREATE OR REPLACE FUNCTION public.importer_lite_claim_monitor_task(p_worker_id text, p_lease interval DEFAULT interval '10 minutes')
+RETURNS SETOF public.importer_lite_tasks LANGUAGE plpgsql SECURITY DEFINER SET search_path=public AS $$
+DECLARE v_task_id uuid;
+BEGIN
+  SELECT id INTO v_task_id
+  FROM public.importer_lite_tasks
+  WHERE state='READY' AND task_type='CATALOG' AND monitoring=true
+    AND priority BETWEEN 1 AND 3 AND next_run_at<=now()
+  ORDER BY next_run_at,created_at
+  LIMIT 1 FOR UPDATE SKIP LOCKED;
+  IF NOT FOUND THEN RETURN; END IF;
+  RETURN QUERY UPDATE public.importer_lite_tasks
+  SET state='RUNNING',lease_owner=p_worker_id,lease_until=now()+p_lease,
+      attempts=attempts+1,updated_at=now()
+  WHERE id=v_task_id RETURNING *;
+END;
+$$;
+
 REVOKE ALL ON public.importer_lite_tasks, public.importer_lite_ready_works,
   public.importer_lite_chapter_sources, public.importer_lite_source_health,
   public.importer_lite_chapters, public.importer_lite_uploads FROM PUBLIC, anon, authenticated;
@@ -222,6 +261,8 @@ GRANT ALL ON public.importer_lite_tasks, public.importer_lite_ready_works,
   public.importer_lite_chapters, public.importer_lite_uploads TO service_role;
 REVOKE ALL ON FUNCTION public.importer_lite_claim_task(text,interval) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.importer_lite_claim_task(text,interval) TO service_role;
+REVOKE ALL ON FUNCTION public.importer_lite_claim_monitor_task(text,interval) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.importer_lite_claim_monitor_task(text,interval) TO service_role;
 REVOKE ALL ON FUNCTION public.importer_lite_refresh_ready_work(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.importer_lite_refresh_ready_work(text) TO service_role;
 REVOKE ALL ON FUNCTION public.importer_lite_staff_priority_sync() FROM PUBLIC;

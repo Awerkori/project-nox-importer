@@ -28,8 +28,12 @@ export class ImporterLiteRuntime {
     downloads;
     bufferedPages;
     claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
+    // Observation is intentionally a one-slot lane. It may create P0 chapter
+    // work, but an empty observation must never compete with chapter workers.
+    monitorGate = new AsyncSemaphore(1, 'lite_p0_monitor');
     sitePausedUntil = 0;
     idleClaimUntil = 0;
+    idleMonitorUntil = 0;
     lastSiteProbe = {
         state: 'UNKNOWN', checkedAt: new Date(0).toISOString(), latencyMs: null,
     };
@@ -57,6 +61,9 @@ export class ImporterLiteRuntime {
         const timer = setInterval(() => void this.queue.reconcile(50).catch(() => { }), 30_000);
         timer.unref();
         this.timers.push(timer);
+        const monitorTimer = setInterval(() => void this.runMonitorTurn().catch(() => { }), 1_000);
+        monitorTimer.unref();
+        this.timers.push(monitorTimer);
         const healthTimer = setInterval(() => void this.probeSharedResources(), 30_000);
         healthTimer.unref();
         this.timers.push(healthTimer);
@@ -128,6 +135,28 @@ export class ImporterLiteRuntime {
             return task;
         });
     }
+    /**
+     * Claim at most one due P0 observation. A failed/empty probe backs off for
+     * fifteen seconds, so thousands of watched works do not turn into empty DB
+     * claims. This is a resource budget, not a second priority scheduler.
+     */
+    async runMonitorTurn() {
+        if (this.stopped || Date.now() < this.sitePausedUntil || this.pool.waitingCount > 0)
+            return;
+        if (!this.monitorGate.tryAcquire())
+            return;
+        try {
+            if (Date.now() < this.idleMonitorUntil)
+                return;
+            const task = await this.queue.claimMonitor(`${this.config.WORKER_ID}:lite-monitor`, this.config.QUEUE_LEASE_DURATION_SECONDS);
+            this.idleMonitorUntil = task ? 0 : Date.now() + 15_000;
+            if (task)
+                await this.handle(task, `${this.config.WORKER_ID}:lite-monitor`);
+        }
+        finally {
+            this.monitorGate.release();
+        }
+    }
     /** A small protective gate, deliberately not another scheduler. */
     async probeSharedResources() {
         const started = Date.now();
@@ -170,6 +199,7 @@ export class ImporterLiteRuntime {
             publishedLastMinute: progress.publishedLastMinute,
             oldestReadyAt: progress.oldestReadyAt?.toISOString() || null,
             oldestStoredUnpublishedAt: progress.oldestStoredUnpublishedAt?.toISOString() || null,
+            nextP0MonitorAt: progress.nextMonitorAt?.toISOString() || null,
             tasks, blocked, sourceHealth, slots: telemetryCollector.getSlotProductivitySnapshot(),
             memoryMiB: {
                 rss: Math.round(memory.rss / 1024 / 1024), heapUsed: Math.round(memory.heapUsed / 1024 / 1024),
@@ -237,10 +267,11 @@ export class ImporterLiteRuntime {
             }
             const language = String(snapshot.details.language || snapshot.details.raw?.language || 'pt-BR');
             const edition = String(snapshot.details.edition || snapshot.details.raw?.edition || 'default');
+            // A recurring monitor is intentionally separate from P0 *execution*.
             // P0 only accelerates releases beyond the durable manifest frontier.
             // A source can reveal historical chapters later; those are P1 repairs,
             // not P0, without inferring that every numeric gap is a missing chapter.
-            const p0Monitoring = task.priority === 'P0' || task.priority === 'STAFF';
+            const p0Monitoring = task.monitoring || task.priority === 'P0' || task.priority === 'STAFF';
             const knownFrontier = p0Monitoring
                 ? await this.pool.query(`SELECT max(order_key) AS order_key
           FROM importer_lite_chapter_sources WHERE work_id=$1::uuid AND order_key LIKE 'n|%'`, [resolved.workId])
@@ -267,23 +298,48 @@ export class ImporterLiteRuntime {
                     payload: { displayNumber, chapterTitle: chapter.title || '', orderKey, language, edition } });
             }
             await this.upsertChapterSources(sourceRows);
-            await this.queue.enqueueMany(chapterTasks);
+            const materialized = await this.queue.enqueueMany(chapterTasks);
+            const newReleaseCount = chapterTasks.filter((candidate) => candidate.priority === 'P0' && materialized.insertedKeys.has(candidate.idempotencyKey)).length;
             // A newly confirmed mapping (or repaired presentation metadata) is
             // evidence worth re-evaluating. This indexed, per-work wake-up replaces
             // the legacy global blocked-task sweeps.
             await this.queue.wakeCatalogBlocked(resolved.workId, `work:${resolved.workId}`);
-            // Ongoing works retain one cheap, persistent P0 check; completed works
-            // stay catalogued and are revisited only through discovery/repair.
-            const ongoing = snapshot.details.status === 'ONGOING';
-            await this.queue.finish(task, workerId, ongoing ? { state: 'RETRY_WAIT', priority: 'P0', nextRunAt: new Date(Date.now() + 15 * 60_000), checkpoint: { workId: resolved.workId } } : { state: 'DONE', checkpoint: { workId: resolved.workId } });
+            // Ongoing/hiatus works retain one cheap persistent monitor. The monitor
+            // remains base P2 and outside normal claims; only its newly inserted
+            // chapters are P0. Completed works remain available to discovery/repair.
+            const status = String(snapshot.details.status || 'UNKNOWN').toUpperCase();
+            const monitored = status === 'ONGOING' || status === 'HIATUS';
+            await this.queue.finish(task, workerId, monitored ? {
+                state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
+                nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, newReleaseCount)),
+                checkpoint: {
+                    workId: resolved.workId, lastCheckedAt: new Date().toISOString(),
+                    lastNewReleaseCount: newReleaseCount,
+                    emptyChecks: newReleaseCount ? 0 : Number(task.checkpoint.emptyChecks || 0) + 1,
+                },
+            } : { state: 'DONE', checkpoint: { workId: resolved.workId } });
             await this.queue.recordSourceSuccess(source);
         }
         catch (error) {
             if (!fetchedSnapshot)
                 await this.queue.recordSourceFailure(source, error);
+            const monitorRetry = task.monitoring;
+            const retryDelay = monitorRetry
+                ? Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(task.attempts, 8))
+                : 60_000;
             await this.queue.finish(task, workerId, { state: task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
-                reason: String(error?.message || 'CATALOG_FAILED').slice(0, 500), nextRunAt: new Date(Date.now() + 60_000) });
+                reason: String(error?.message || 'CATALOG_FAILED').slice(0, 500), nextRunAt: new Date(Date.now() + retryDelay),
+                priority: monitorRetry ? 'P2' : undefined, monitoring: monitorRetry || undefined });
         }
+    }
+    /** Release bursts get a quick recheck; quiet works exponentially back off. */
+    monitorIntervalMs(task, status, newReleaseCount) {
+        if (status === 'HIATUS')
+            return 6 * 60 * 60_000;
+        if (newReleaseCount > 0)
+            return 5 * 60_000;
+        const emptyChecks = Math.max(0, Number(task.checkpoint.emptyChecks || 0));
+        return Math.min(6 * 60 * 60_000, 15 * 60_000 * 2 ** Math.min(emptyChecks, 5));
     }
     /** Invalid/blocked covers remain absent; they never overwrite a known cover. */
     async loadCover(adapter, url) {

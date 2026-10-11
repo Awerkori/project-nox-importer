@@ -12,6 +12,8 @@ export interface EnqueueLiteTask {
     maxAttempts?: number;
     payload?: Record<string, unknown>;
     checkpoint?: Record<string, unknown>;
+    /** Reserved for the one-resource P0 observation lane, never normal work. */
+    monitoring?: boolean;
 }
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export declare class LiteRepository {
@@ -29,8 +31,14 @@ export declare class LiteRepository {
      */
     enqueueMany(inputs: EnqueueLiteTask[]): Promise<{
         inserted: number;
+        insertedKeys: Set<string>;
     }>;
     claim(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    /**
+     * P0 observation has one durable, explicitly bounded lane.  It is never
+     * selected by normal claims, so unchanged watches cannot starve P1/P2.
+     */
+    claimMonitor(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     checkpoint(task: LiteTask, workerId: string, patch: Record<string, unknown>): Promise<boolean>;
     finish(task: LiteTask, workerId: string, outcome: {
         state: Extract<LiteTaskState, 'DONE' | 'RETRY_WAIT' | 'BLOCKED'>;
@@ -38,6 +46,7 @@ export declare class LiteRepository {
         nextRunAt?: Date;
         checkpoint?: Record<string, unknown>;
         priority?: Exclude<LitePriority, 'STAFF'>;
+        monitoring?: boolean;
     }): Promise<boolean>;
     /**
      * Catalog evidence is the only event that reopens a source-blocked chapter.
@@ -65,6 +74,7 @@ export declare class LiteRepository {
     operationalSnapshot(): Promise<Array<{
         priority: LitePriority;
         state: LiteTaskState;
+        monitoring: boolean;
         count: number;
         oldestReadyAt: Date | null;
     }>>;
@@ -73,6 +83,7 @@ export declare class LiteRepository {
         publishedLastMinute: number;
         oldestReadyAt: Date | null;
         oldestStoredUnpublishedAt: Date | null;
+        nextMonitorAt: Date | null;
     }>;
     blockedReasonSnapshot(limit?: number): Promise<Array<{
         reason: string;

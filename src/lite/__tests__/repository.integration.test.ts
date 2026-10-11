@@ -113,6 +113,57 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(third?.idempotencyKey).toBe('p1');
   });
 
+  it('treats duplicate panel requests as one STAFF overlay and never blocks already-running finalization', async () => {
+    // These simulate a P0 download, a P1 upload and a P2 publication already
+    // beyond admission. A subsequent STAFF request may preempt claims only;
+    // it must not create a priority lock around their durable finalization.
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p0, workKey: `work:${ids.p0}`, chapterKey: 'p0-running', priority: 'P0', idempotencyKey: 'p0-running' });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'p1-running', priority: 'P1', idempotencyKey: 'p1-running' });
+    await repo.enqueue({ taskType: 'PUBLISH', workId: ids.p1b, workKey: `work:${ids.p1b}`, chapterKey: 'p2-running', priority: 'P2', idempotencyKey: 'p2-running' });
+    const running = [
+      await repo.claim('p0-worker', 120), await repo.claim('p1-worker', 120), await repo.claim('p2-worker', 120),
+    ];
+    expect(running.map((task) => task?.idempotencyKey).sort()).toEqual(['p0-running', 'p1-running', 'p2-running']);
+
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.staff, workKey: `work:${ids.staff}`, priority: 'P1', idempotencyKey: 'staff-overlay' });
+    // A double-click creates two panel rows in this minimal fixture. It must
+    // still produce one durable task and retain STAFF until both are released.
+    await db.query(`INSERT INTO importer_staff_requests(work_id,status) VALUES($1,'QUEUED'),($1,'ACTIVE')`, [ids.staff]);
+    await Promise.all([
+      repo.finish(running[0]!, 'p0-worker', { state: 'DONE' }),
+      repo.finish(running[1]!, 'p1-worker', { state: 'DONE' }),
+      repo.finish(running[2]!, 'p2-worker', { state: 'DONE' }),
+    ]);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks WHERE idempotency_key='staff-overlay'`)).rows[0].count).toBe(1);
+    const staff = await repo.claim('staff-worker', 120);
+    expect(staff).toMatchObject({ idempotencyKey: 'staff-overlay', priority: 'STAFF' });
+
+    await db.query(`UPDATE importer_staff_requests SET status='CANCELLED' WHERE work_id=$1 AND status='QUEUED'`, [ids.staff]);
+    // One active row remains, so finishing a running STAFF task must retain it.
+    await repo.finish(staff!, 'staff-worker', { state: 'RETRY_WAIT' });
+    expect((await db.query(`SELECT priority FROM importer_lite_tasks WHERE id=$1`, [staff!.id])).rows[0].priority).toBe(0);
+    await db.query(`UPDATE importer_staff_requests SET status='CANCELLED' WHERE work_id=$1`, [ids.staff]);
+    expect((await db.query(`SELECT priority,base_priority FROM importer_lite_tasks WHERE id=$1`, [staff!.id])).rows[0])
+      .toEqual({ priority: 2, base_priority: 2 });
+  });
+
+  it('reserves recurring P0 monitoring for one lightweight lane while normal P1/P2 work advances', async () => {
+    await repo.enqueueMany(Array.from({ length: 1300 }, (_, index) => ({
+      taskType: 'CATALOG' as const, workKey: `source:source-a:watch:${index}`, priority: 'P2' as const,
+      idempotencyKey: `watch:${index}`, nextRunAt: new Date(), monitoring: true,
+      payload: { source: 'source-a', sourceWorkId: `watch-${index}` },
+    })));
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'p1-healthy', priority: 'P1', idempotencyKey: 'p1-healthy' });
+    await repo.enqueue({ taskType: 'DISCOVER', workKey: 'source:source-b:page:1', priority: 'P2', idempotencyKey: 'p2-healthy' });
+
+    // A normal worker does not scan or consume any monitor rows.
+    expect((await repo.claim('chapter-worker', 120))?.idempotencyKey).toBe('p1-healthy');
+    const monitor = await repo.claimMonitor('p0-monitor', 120);
+    expect(monitor).toMatchObject({ taskType: 'CATALOG', monitoring: true, priority: 'P2' });
+    expect((await repo.claim('discovery-worker', 120))?.idempotencyKey).toBe('p2-healthy');
+  });
+
   it('fences concurrent workers so one durable task has only one claim', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:1', priority: 'P1', idempotencyKey: 'single-claim' });
     const claims = await Promise.all([repo.claim('worker-a', 120), repo.claim('worker-b', 120)]);
@@ -437,6 +488,38 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(created.rows[0]).toEqual({ priority: 1, base_priority: 1 });
   });
 
+  it('turns only a genuinely new monitor observation into P0 and returns the watch to its bounded lane', async () => {
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,order_key,confirmed)
+      VALUES($1,'pt-br|default|chapter|10|-','source-a','known-10','pt-BR','default','n|000000000010|000000000000||||-',true)`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:monitored-work', priority: 'P2', monitoring: true,
+      idempotencyKey: 'p0-lane-watch', payload: { source: 'source-a', sourceWorkId: 'monitored-work' } });
+    // This is the historical P0 regression: no normal chapter slot is spent
+    // merely checking an unchanged/new-release watch.
+    expect(await repo.claim('normal-worker', 120)).toBeNull();
+    const watch = await repo.claimMonitor('p0-monitor', 120);
+    expect(watch).toMatchObject({ idempotencyKey: 'p0-lane-watch', monitoring: true, priority: 'P2' });
+    const adapter = {
+      id: 'source-a',
+      fetchWorkSnapshot: async () => ({
+        details: { sourceWorkId: 'monitored-work', title: 'P1 A', slug: 'p1-a', status: 'ONGOING' as const, language: 'pt-BR' },
+        chapters: [{ sourceChapterId: 'release-11', number: 11, displayNumber: '11', title: 'Eleven' }],
+      }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
+    await (runtime as any).catalog(watch, 'p0-monitor');
+    expect((await db.query(`SELECT priority,base_priority FROM importer_lite_tasks
+      WHERE idempotency_key='lite:chapter:' || $1 || ':pt-br|default|chapter|11|-'`, [ids.p1a])).rows[0])
+      .toEqual({ priority: 1, base_priority: 1 });
+    expect((await db.query(`SELECT state,priority,base_priority,monitoring,checkpoint->>'lastNewReleaseCount' AS releases
+      FROM importer_lite_tasks WHERE idempotency_key='p0-lane-watch'`)).rows[0])
+      .toEqual({ state: 'RETRY_WAIT', priority: 3, base_priority: 3, monitoring: true, releases: '1' });
+  });
+
   it('keeps a newly revealed historical chapter as P1 while P0 monitors a newer release', async () => {
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,order_key,confirmed)
       VALUES($1,'pt-br|default|chapter|100|-','source-a','known-100','pt-BR','default','n|000000000100|000000000000||||-',true)`, [ids.p1a]);
@@ -563,6 +646,21 @@ describe('LiteRepository against the additive Lite migration', () => {
     const claim = vi.spyOn((runtime as any).queue, 'claim');
     await Promise.all(Array.from({ length: 12 }, (_, index) => (runtime as any).claimNext(`idle-${index}`)));
     expect(claim).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares an empty P0 monitor probe and leaves the normal pool untouched', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    const monitorClaim = vi.spyOn((runtime as any).queue, 'claimMonitor');
+    const normalClaim = vi.spyOn((runtime as any).queue, 'claim');
+    await Promise.all(Array.from({ length: 20 }, () => (runtime as any).runMonitorTurn()));
+    await (runtime as any).runMonitorTurn();
+    expect(monitorClaim).toHaveBeenCalledTimes(1);
+    expect(normalClaim).not.toHaveBeenCalled();
   });
 
   it('keeps retained page buffers globally bounded while uploads are slow', async () => {

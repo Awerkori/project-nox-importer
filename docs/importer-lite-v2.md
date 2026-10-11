@@ -16,11 +16,29 @@ Invariants:
   work fairly inside the highest priority that actually has eligible work.
 - Priority is `STAFF > P0 > P1 > P2`; the panel’s existing staff request table
   promotes or restores Lite task rows through a database trigger.
+- Priority governs **admission only**. A task that was already claimed keeps
+  its lease and can finish its download, Telegram receipt, media persistence or
+  atomic publication after a STAFF request arrives. There is no global
+  priority lock in any finalization transaction. On each finish the durable
+  panel overlay is read again, so cancelling the final STAFF request restores
+  the base priority instead of leaving an invisible STAFF flag behind.
+- A duplicate panel click is harmless: all active request rows for a work form
+  one STAFF overlay over idempotent task rows. Releasing one request does not
+  demote the work while another active request remains.
 - A recurring P0 catalog pass compares the durable source-manifest order
   frontier: chapters beyond it are P0 releases, while a newly revealed older
   manifest entry becomes a P1 repair. This is evidence from the source
   manifest, never a guessed numerical gap; existing P1 tasks keep their
   priority through their idempotency key.
+- A recurring P0 **check is not P0 execution**. Ongoing and hiatus works keep
+  one durable `monitoring=true` catalog row that is excluded from the
+  executable-work projection. A single monitor lane claims at most one due
+  check, shares an empty-probe backoff, and never consumes a chapter worker.
+  It rechecks a new release after five minutes, exponentially backs off quiet
+  works from fifteen minutes to six hours, uses six hours for hiatus, and
+  exponentially backs off source failures. Only a newly inserted chapter
+  beyond the verified frontier becomes a normal P0 task. Monitoring rows have
+  a partial index and are reported separately from executable READY work.
 - A catalog manifest is persisted in bounded batches (500 rows per SQL write),
   with one short queue transaction and one ready-work refresh per work. A
   large work therefore does not turn into a per-chapter YSQL transaction loop.
