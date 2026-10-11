@@ -113,3 +113,6 @@ lease must name one Lite boot identity only; logs must show no legacy engine
 start and one active Lite leader. Check the process list/health endpoint and
 the lease before admitting benchmark work. Roll back by stopping Lite and
 restoring the legacy producer; do not restore the database or delete Lite rows.
+
+The ordered operational gates, evidence to retain and non-destructive rollback
+conditions are in [the dedicated cutover runbook](importer-lite-cutover-runbook.md).

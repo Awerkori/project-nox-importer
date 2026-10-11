@@ -5,6 +5,7 @@ import type { Pool } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AsyncSemaphore } from '../../core/concurrency.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
+import { ImporterEngine } from '../../core/engine.js';
 import { LiteExecutor } from '../executor.js';
 import { ImporterLiteRuntime } from '../runtime.js';
 import { LiteRepository } from '../repository.js';
@@ -549,6 +550,48 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (first as any).releaseRuntimeLeadership();
     expect(await (second as any).tryAcquireRuntimeLeadership()).toBe(true);
     await (second as any).releaseRuntimeLeadership();
+  });
+
+  it('fences a legacy runtime and Lite during cutover without stranding an in-flight durable task', async () => {
+    // This is deliberately cross-runtime rather than a second Lite instance:
+    // a rolling DIScloud deployment must never leave both v1 and Lite able to
+    // admit claims. The shared settings row is the fence, while a task that
+    // was leased before the handoff may still settle its durable result.
+    const legacy = new ImporterEngine(
+      { getPool: () => poolFor(db) } as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {
+        WORKER_ID: 'legacy-cutover', MAX_CONCURRENT_CHAPTERS: 1,
+        TESTED_CONCURRENCY_CEILING: 1, ADAPTIVE_INITIAL_CONCURRENCY: 1,
+        DIRECT_DB_POOL_MAX: 1, TELEGRAM_MEDIA_CONCURRENCY: 1,
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1,
+        QUEUE_LEASE_DURATION_SECONDS: 30, QUEUE_HEARTBEAT_INTERVAL_SECONDS: 10,
+        NOX_MANGA_URL: 'https://example.test',
+      } as any,
+    );
+    const lite = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { WORKER_ID: 'lite-cutover', IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009',
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
+        QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+
+    expect(await (legacy as any).tryAcquireRuntimeLeadership()).toBe(true);
+    expect(await (lite as any).tryAcquireRuntimeLeadership()).toBe(false);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'cross-runtime-inflight', priority: 'P1', idempotencyKey: 'cross-runtime-inflight' });
+    expect(await (lite as any).claimNext('lite-standby')).toBeNull();
+    const inFlight = await repo.claim('legacy-inflight', 30);
+    expect(inFlight?.leaseOwner).toBe('legacy-inflight');
+    expect(await repo.finish(inFlight!, 'legacy-inflight', { state: 'DONE' })).toBe(true);
+
+    await (legacy as any).releaseRuntimeLeadership();
+    expect(await (lite as any).tryAcquireRuntimeLeadership()).toBe(true);
+    await (lite as any).releaseRuntimeLeadership();
   });
 
   it('turns a durable unknown Telegram outcome into a visible per-task block without touching other work', async () => {
