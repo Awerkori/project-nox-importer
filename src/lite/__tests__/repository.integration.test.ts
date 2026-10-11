@@ -320,7 +320,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.reconcile(10)).publishable).toBe(0);
   });
 
-  it('falls back within the same claim when the preferred source fails before media storage', async () => {
+  it('falls back within the same P0 claim when the preferred source fails before media storage', async () => {
     await db.query(`
       INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,source_rank,confirmed)
       VALUES ($1,'number:1|language:pt-BR|edition:default|kind:normal','source-a','a-1','pt-BR','default',10,true),
@@ -328,7 +328,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     `, [ids.p1a]);
     await repo.enqueue({
       taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
-      chapterKey: 'number:1|language:pt-BR|edition:default|kind:normal', priority: 'P1', idempotencyKey: 'fallback',
+      chapterKey: 'number:1|language:pt-BR|edition:default|kind:normal', priority: 'P0', idempotencyKey: 'fallback',
       payload: { displayNumber: '1', chapterTitle: 'One', language: 'pt-BR', edition: 'default', orderKey: '1' },
     });
     const task = await repo.claim('worker-a', 120);
