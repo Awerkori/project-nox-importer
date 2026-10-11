@@ -634,7 +634,13 @@ export class DirectTelegramStorageProvider implements StorageProvider {
           if (is429) {
             bot.rateLimits429++;
             bot.floodWaitSeconds += retryAfter;
-            bot.cooldownUntil = Date.now() + (retryAfter + 2) * 1000;
+            const cooldownUntil = Date.now() + (retryAfter + 2) * 1000;
+            bot.cooldownUntil = cooldownUntil;
+            // Telegram returned this limit for a send to this chat. Cooling
+            // the destination too keeps subsequent, unrelated work from
+            // concentrating on a channel that may be the constrained side.
+            shard.rateLimits429++;
+            shard.cooldownUntil = cooldownUntil;
             // AIMD Multiplicative Decrease
             bot.maxConcurrent = Math.max(1, Math.floor(bot.maxConcurrent * 0.5));
             bot.consecutiveSuccesses = 0;

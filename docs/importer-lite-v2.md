@@ -60,6 +60,10 @@ Invariants:
   page for recovery instead of blindly uploading it again. The reconciler
   also surfaces an `UNKNOWN` (or a stale intent) left by a restart as an
   explicit task block; it never silently replays it.
+- A Telegram 429 cools both the selected bot and selected destination shard.
+  The provider returns that same request to the durable executor rather than
+  switching bots to evade the server-provided wait; the next independent
+  upload also avoids the cooling channel.
 - Fallback is allowed before media persists. Once a page receipt exists, the
   task is pinned to its selected source and page-manifest hash; an alternative
   cannot silently mix another edition into a partial chapter.
