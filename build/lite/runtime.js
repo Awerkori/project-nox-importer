@@ -99,6 +99,7 @@ export class ImporterLiteRuntime {
         metricsTimer.unref();
         this.timers.push(metricsTimer);
         await this.probeSharedResources();
+        await this.emitOperationalSnapshot();
     }
     async assertReaderCanonicalIdentitySchema() {
         const required = ['canonical_chapter_key', 'display_number', 'chapter_order_key', 'chapter_kind', 'edition', 'language'];
@@ -353,7 +354,11 @@ export class ImporterLiteRuntime {
             active: (storageMetrics.bots || []).reduce((sum, bot) => sum + Number(bot.active || 0), 0),
             rateLimits429: (storageMetrics.bots || []).reduce((sum, bot) => sum + Number(bot.rateLimits429 || 0), 0),
         } : null;
-        this.logger.info('Lite operational progress', {
+        const snapshot = {
+            runtime: 'lite',
+            runtimeInstanceId: this.runtimeInstanceId,
+            leader: this.isRuntimeLeader,
+            chapterWorkers: Math.max(1, Math.min(this.config.LITE_CHAPTER_WORKERS ?? 1, this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING)),
             publishedLastMinute: progress.publishedLastMinute,
             oldestReadyAt: progress.oldestReadyAt?.toISOString() || null,
             oldestStoredUnpublishedAt: progress.oldestStoredUnpublishedAt?.toISOString() || null,
@@ -365,7 +370,13 @@ export class ImporterLiteRuntime {
             },
             ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
             telegram, site: this.lastSiteProbe,
-        });
+        };
+        this.logger.info('Lite operational progress', snapshot);
+        // A compact durable marker makes a native deploy auditable even when its
+        // dashboard only exposes a rolling log window. It is diagnostic state,
+        // never an authority for leadership or task eligibility.
+        await this.pool.query(`INSERT INTO settings(key,value) VALUES('importer_heartbeat',$1)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [JSON.stringify({ ...snapshot, observedAt: new Date().toISOString() })]);
     }
     async handle(task, workerId) {
         if (task.taskType === 'DISCOVER')
