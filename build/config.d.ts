@@ -23,6 +23,7 @@ declare const ConfigSchema: z.ZodObject<{
     TELEGRAM_MEDIA_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     DOWNLOAD_INFLIGHT_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     BUFFERED_PAGE_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
+    SOURCE_OPERATION_TIMEOUT_MS: z.ZodDefault<z.ZodNumber>;
     LOG_LEVEL: z.ZodDefault<z.ZodEnum<["debug", "info", "warn", "error"]>>;
     IMPORTER_DB_MODE: z.ZodDefault<z.ZodEnum<["direct", "gateway"]>>;
     IMPORTER_RUNTIME_MODE: z.ZodDefault<z.ZodEnum<["legacy", "lite"]>>;
@@ -52,6 +53,7 @@ declare const ConfigSchema: z.ZodObject<{
     TELEGRAM_MEDIA_CONCURRENCY: number;
     DOWNLOAD_INFLIGHT_CONCURRENCY: number;
     BUFFERED_PAGE_CONCURRENCY: number;
+    SOURCE_OPERATION_TIMEOUT_MS: number;
     LOG_LEVEL: "debug" | "info" | "warn" | "error";
     IMPORTER_DB_MODE: "direct" | "gateway";
     IMPORTER_RUNTIME_MODE: "legacy" | "lite";
@@ -90,6 +92,7 @@ declare const ConfigSchema: z.ZodObject<{
     TELEGRAM_MEDIA_CONCURRENCY?: number | undefined;
     DOWNLOAD_INFLIGHT_CONCURRENCY?: number | undefined;
     BUFFERED_PAGE_CONCURRENCY?: number | undefined;
+    SOURCE_OPERATION_TIMEOUT_MS?: number | undefined;
     LOG_LEVEL?: "debug" | "info" | "warn" | "error" | undefined;
     IMPORTER_DB_MODE?: "direct" | "gateway" | undefined;
     IMPORTER_RUNTIME_MODE?: "legacy" | "lite" | undefined;

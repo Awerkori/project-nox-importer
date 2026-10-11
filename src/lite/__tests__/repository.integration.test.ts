@@ -121,6 +121,15 @@ describe('LiteRepository against the additive Lite migration', () => {
     }
   });
 
+  it('staggering due discovery leaves catalog work eligible instead of creating a P2 sweep', async () => {
+    await repo.enqueue({ taskType: 'DISCOVER', workKey: 'source:source-a', priority: 'P2', idempotencyKey: 'stagger-a' });
+    await repo.enqueue({ taskType: 'DISCOVER', workKey: 'source:source-b', priority: 'P2', idempotencyKey: 'stagger-b' });
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:catalog-now', priority: 'P2', idempotencyKey: 'catalog-now' });
+    expect(await repo.staggerReadyDiscoveries(60_000)).toBe(2);
+    const claimed = await repo.claim('stagger-worker', 600);
+    expect(claimed?.taskType).toBe('CATALOG');
+  });
+
   it('reapplies the additive migration without changing pre-existing Reader data', async () => {
     // This is deliberately a second application in a disposable database:
     // the deployment procedure must be safe to resume after an interrupted
@@ -663,6 +672,23 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT health,cooldown_until,consecutive_failures,last_error FROM importer_lite_source_health WHERE source='source-a'`)).rows[0])
       .toMatchObject({ health: 'HEALTHY', cooldown_until: null, consecutive_failures: 0, last_error: null });
   });
+
+  it('bounds a hanging discovery call and returns its worker to durable retry', async () => {
+    const adapter = { id: 'source-a', fetchUpdatedWorks: vi.fn(() => new Promise<never>(() => {})) };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, SOURCE_OPERATION_TIMEOUT_MS: 5_000 } as any,
+    );
+    await repo.enqueue({ taskType: 'DISCOVER', workKey: 'source:source-a', priority: 'P2', idempotencyKey: 'hanging-discovery', payload: { source: 'source-a' } });
+    const task = await repo.claim('hanging-discovery-worker', 30);
+    const started = Date.now();
+    await (runtime as any).handle(task, 'hanging-discovery-worker');
+    expect(Date.now() - started).toBeLessThan(7_000);
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
+      .toMatchObject({ state: 'RETRY_WAIT', reason: 'DISCOVERY_SOURCE_TIMEOUT' });
+  }, 10_000);
 
   it('uses the real source administration contract before discovery or catalog networking', async () => {
     await db.query(`UPDATE importer_sources
