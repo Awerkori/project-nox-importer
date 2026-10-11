@@ -150,7 +150,7 @@ describe('LiteRepository against the additive Lite migration', () => {
         VALUES($1::uuid,$2,$3,$4::uuid,'WAITING_ADMISSION')`, [id, source, sourceWorkId, workId]);
     }
 
-    expect(await repo.refillHistoricalP1Catalog(4, 4)).toBe(4);
+    expect(await repo.refillHistoricalP1Catalog(8, 4)).toBe(4);
     const admitted = await db.query(`SELECT priority,base_priority,task_type,payload->>'source' AS source,
       payload->>'historicalP1Backfill' AS historical
       FROM importer_lite_tasks ORDER BY idempotency_key`);
@@ -162,6 +162,10 @@ describe('LiteRepository against the additive Lite migration', () => {
     }, {});
     expect(Math.max(...Object.values(perSource))).toBeLessThanOrEqual(2);
 
+    // A low reserve must not append another batch every recovery turn while
+    // the first historical catalog batch is still waiting behind imports.
+    expect(await repo.refillHistoricalP1Catalog(8, 4)).toBe(0);
+
     // Existing executable P1 work is the reserve.  Backfill must not fill a
     // second hidden queue while that reserve is already healthy.
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
@@ -172,7 +176,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       chapterKey: 'ready-reserve-3', priority: 'P1', idempotencyKey: 'ready-reserve-3' });
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
       chapterKey: 'ready-reserve-4', priority: 'P1', idempotencyKey: 'ready-reserve-4' });
-    expect(await repo.refillHistoricalP1Catalog(4, 4)).toBe(0);
+    expect(await repo.refillHistoricalP1Catalog(8, 4)).toBe(0);
   });
 
   it('admits ready publication before another same-priority chapter download', async () => {
@@ -1494,14 +1498,14 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).executor.sourceSlot('hanamiheaven').capacity).toBe(3);
   });
 
-  it('lets the fourth existing worker use the measured healthy MangaFlix route', () => {
+  it('lets a fifth producer fill MangaFlix page-wave gaps without widening the global page fence', () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
         BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
-    expect((runtime as any).executor.sourceSlot('mangaflix').capacity).toBe(4);
+    expect((runtime as any).executor.sourceSlot('mangaflix').capacity).toBe(5);
   });
 
   it('keeps six bounded page fetches per active chapter under the global fence', () => {

@@ -205,11 +205,27 @@ export class LiteRepository {
         await client.query('COMMIT');
         return 0;
       }
+      // The refill batch itself is durable work.  Count it separately from
+      // imports: otherwise a steadily draining import reserve can trigger a
+      // fresh 16-row catalog batch every recovery turn and grow a hidden P1
+      // producer queue.  Existing work is never discarded; this merely caps
+      // new pending historical checks at one small batch.
+      const pendingBackfill = await client.query<{ count: string }>(`SELECT count(*)::int AS count FROM (
+        SELECT 1 FROM importer_lite_tasks
+        WHERE state='READY' AND priority=2 AND task_type='CATALOG'
+          AND payload ? 'historicalP1Backfill'
+        LIMIT $1
+      ) AS bounded_backfill`, [maximum]);
+      const pending = Number(pendingBackfill.rows[0]?.count || 0);
+      if (pending >= maximum) {
+        await client.query('COMMIT');
+        return 0;
+      }
       // The floor is an early-warning gate, not the desired total task
       // count.  Once it is crossed, queue one small catalog batch now so the
       // next P1 source check is already waiting behind the remaining imports
       // instead of creating an avoidable empty interval at zero.
-      const limit = maximum;
+      const limit = maximum - pending;
       const candidates = await client.query<Row>(`WITH bounded AS (
           SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id
           FROM importer_work_mappings m

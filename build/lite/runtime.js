@@ -89,9 +89,9 @@ export class ImporterLiteRuntime {
         this.queue = new LiteRepository(pool);
         this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
         this.bufferedPages = new AsyncSemaphore(config.BUFFERED_PAGE_CONCURRENCY, 'lite_global_page_buffers');
-        // Four healthy MangaFlix workers fill the measured 24-page fence at six
-        // pages each. The 32/8 production ramp regressed, so retain this bounded
-        // distribution until a distinct bottleneck is demonstrated.
+        // Five independent MangaFlix chapter waves can fill the measured 24-page
+        // fence while each remains capped at six pages. The regressed 32/8 ramp
+        // widened the global fence itself; this controlled ramp does not.
         this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter);
         this.dedupe = new DeduplicationEngine(catalogClient);
     }
@@ -468,6 +468,7 @@ export class ImporterLiteRuntime {
             // Do not run four diagnostic scans while the small direct pool is busy.
             // Keep a tiny durable liveness marker instead: an old full snapshot must
             // never be mistaken for a stopped runtime during productive traffic.
+            const pipelineTelemetry = telemetryCollector.getSnapshotReport();
             const deferred = {
                 runtime: 'lite',
                 runtimeInstanceId: this.runtimeInstanceId,
@@ -475,6 +476,16 @@ export class ImporterLiteRuntime {
                 chapterWorkers: Math.max(1, Math.min(this.config.LITE_CHAPTER_WORKERS ?? 1, this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING)),
                 snapshotDeferred: 'POOL_BUSY',
                 ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+                // In-memory stage telemetry is safe to sample while the two YSQL
+                // connections are busy.  Without it, the exact periods that need
+                // diagnosis lose download/upload evidence to the protective snapshot
+                // deferral.
+                pipeline: {
+                    downloads: pipelineTelemetry.imageDownload,
+                    telegram: pipelineTelemetry.telegramStorage,
+                    pageDownloadLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_downloads,
+                    pageBufferLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_buffers,
+                },
                 sourceRate: this.sourceRateLimiter.getSummary(),
                 observedAt: new Date().toISOString(),
             };
