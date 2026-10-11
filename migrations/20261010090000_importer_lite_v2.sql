@@ -37,6 +37,10 @@ ALTER TABLE public.importer_lite_tasks
 CREATE TABLE IF NOT EXISTS public.importer_lite_ready_works (
   work_key text PRIMARY KEY,
   priority smallint NOT NULL CHECK (priority BETWEEN 0 AND 3),
+  -- Finalization is part of the selected work's durable state, not a second
+  -- priority hierarchy: PUBLISH must drain before another same-priority
+  -- download can grow the stored-but-unpublished backlog.
+  operation_rank smallint NOT NULL DEFAULT 1,
   next_run_at timestamptz NOT NULL,
   last_claimed_at timestamptz NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
@@ -62,7 +66,7 @@ CREATE INDEX IF NOT EXISTS importer_lite_tasks_publish_recovery_idx
   WHERE state = 'DONE' AND task_type = 'IMPORT_CHAPTER'
     AND checkpoint ? 'mediaIds' AND NOT checkpoint ? 'publishedAt';
 CREATE INDEX IF NOT EXISTS importer_lite_ready_works_claim_idx
-  ON public.importer_lite_ready_works (priority, next_run_at, last_claimed_at);
+  ON public.importer_lite_ready_works (priority, operation_rank, next_run_at, last_claimed_at);
 
 -- Confirmed chapter alternatives; it separates source health from task priority.
 CREATE TABLE IF NOT EXISTS public.importer_lite_chapter_sources (
@@ -155,19 +159,23 @@ CREATE INDEX IF NOT EXISTS importer_lite_uploads_recovery_idx
 -- promote/demote Lite tasks; no restart or periodic global scan is required.
 CREATE OR REPLACE FUNCTION public.importer_lite_refresh_ready_work(p_work_key text)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=public AS $$
-DECLARE v_priority smallint; v_next timestamptz;
+DECLARE v_priority smallint; v_next timestamptz; v_operation_rank smallint;
 BEGIN
-  SELECT priority, next_run_at INTO v_priority, v_next
+  SELECT priority, next_run_at,
+    CASE task_type WHEN 'PUBLISH' THEN 0 WHEN 'IMPORT_CHAPTER' THEN 1 WHEN 'CATALOG' THEN 2 ELSE 3 END
+    INTO v_priority, v_next, v_operation_rank
   FROM public.importer_lite_tasks
   WHERE work_key = p_work_key AND state='READY' AND monitoring=false
-  ORDER BY priority, next_run_at, created_at
+  ORDER BY priority,
+    CASE task_type WHEN 'PUBLISH' THEN 0 WHEN 'IMPORT_CHAPTER' THEN 1 WHEN 'CATALOG' THEN 2 ELSE 3 END,
+    next_run_at, created_at
   LIMIT 1;
   IF NOT FOUND THEN
     DELETE FROM public.importer_lite_ready_works WHERE work_key=p_work_key;
   ELSE
-    INSERT INTO public.importer_lite_ready_works(work_key,priority,next_run_at,updated_at)
-    VALUES (p_work_key,v_priority,v_next,now())
-    ON CONFLICT(work_key) DO UPDATE SET priority=excluded.priority,next_run_at=excluded.next_run_at,updated_at=now();
+    INSERT INTO public.importer_lite_ready_works(work_key,priority,operation_rank,next_run_at,updated_at)
+    VALUES (p_work_key,v_priority,v_operation_rank,v_next,now())
+    ON CONFLICT(work_key) DO UPDATE SET priority=excluded.priority,operation_rank=excluded.operation_rank,next_run_at=excluded.next_run_at,updated_at=now();
   END IF;
 END;
 $$;
@@ -214,12 +222,14 @@ BEGIN
   SELECT work_key INTO v_work_key
   FROM public.importer_lite_ready_works
   WHERE next_run_at <= now()
-  ORDER BY priority, last_claimed_at NULLS FIRST, next_run_at, work_key
+  ORDER BY priority, operation_rank, last_claimed_at NULLS FIRST, next_run_at, work_key
   LIMIT 1 FOR UPDATE SKIP LOCKED;
   IF NOT FOUND THEN RETURN; END IF;
   SELECT id INTO v_task_id FROM public.importer_lite_tasks
   WHERE work_key=v_work_key AND state='READY' AND monitoring=false AND next_run_at<=now()
-  ORDER BY priority,next_run_at,created_at LIMIT 1 FOR UPDATE SKIP LOCKED;
+  ORDER BY priority,
+    CASE task_type WHEN 'PUBLISH' THEN 0 WHEN 'IMPORT_CHAPTER' THEN 1 WHEN 'CATALOG' THEN 2 ELSE 3 END,
+    next_run_at,created_at LIMIT 1 FOR UPDATE SKIP LOCKED;
   IF NOT FOUND THEN
     PERFORM public.importer_lite_refresh_ready_work(v_work_key);
     RETURN;
