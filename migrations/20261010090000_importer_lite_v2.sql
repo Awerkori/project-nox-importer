@@ -258,15 +258,31 @@ $$;
 
 REVOKE ALL ON public.importer_lite_tasks, public.importer_lite_ready_works,
   public.importer_lite_chapter_sources, public.importer_lite_source_health,
-  public.importer_lite_chapters, public.importer_lite_uploads FROM PUBLIC, anon, authenticated;
-GRANT ALL ON public.importer_lite_tasks, public.importer_lite_ready_works,
-  public.importer_lite_chapter_sources, public.importer_lite_source_health,
-  public.importer_lite_chapters, public.importer_lite_uploads TO service_role;
+  public.importer_lite_chapters, public.importer_lite_uploads FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.importer_lite_claim_task(text,interval) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.importer_lite_claim_task(text,interval) TO service_role;
 REVOKE ALL ON FUNCTION public.importer_lite_claim_monitor_task(text,interval) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.importer_lite_claim_monitor_task(text,interval) TO service_role;
 REVOKE ALL ON FUNCTION public.importer_lite_refresh_ready_work(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.importer_lite_refresh_ready_work(text) TO service_role;
 REVOKE ALL ON FUNCTION public.importer_lite_staff_priority_sync() FROM PUBLIC;
+
+-- Direct YSQL deployments run the Importer with the database role configured
+-- by DIScloud and do not necessarily provision Supabase's `service_role`.
+-- Keep the tables private in every deployment, and grant the optional role
+-- only when it actually exists; a missing compatibility role must not abort an
+-- otherwise additive queue migration.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'REVOKE ALL ON public.importer_lite_tasks, public.importer_lite_ready_works, public.importer_lite_chapter_sources, public.importer_lite_source_health, public.importer_lite_chapters, public.importer_lite_uploads FROM anon';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'REVOKE ALL ON public.importer_lite_tasks, public.importer_lite_ready_works, public.importer_lite_chapter_sources, public.importer_lite_source_health, public.importer_lite_chapters, public.importer_lite_uploads FROM authenticated';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    EXECUTE 'GRANT ALL ON public.importer_lite_tasks, public.importer_lite_ready_works, public.importer_lite_chapter_sources, public.importer_lite_source_health, public.importer_lite_chapters, public.importer_lite_uploads TO service_role';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.importer_lite_claim_task(text,interval) TO service_role';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.importer_lite_claim_monitor_task(text,interval) TO service_role';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.importer_lite_refresh_ready_work(text) TO service_role';
+  END IF;
+END;
+$$;
 COMMIT;

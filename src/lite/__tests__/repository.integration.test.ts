@@ -38,9 +38,10 @@ function poolFor(db: PGlite): Pick<Pool, 'query' | 'connect'> {
   } as unknown as Pick<Pool, 'query' | 'connect'>;
 }
 
-async function createSchema(db: PGlite): Promise<void> {
+async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {}): Promise<void> {
+  const optionalRoles = options.optionalRoles ?? true;
   await db.exec(`
-    CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role;
+    ${optionalRoles ? 'CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role;' : ''}
     CREATE TABLE works (
       id uuid PRIMARY KEY, title text, slug text, cover_id uuid,
       published boolean NOT NULL DEFAULT false, latest_chapter_published_at timestamptz,
@@ -93,7 +94,7 @@ async function createSchema(db: PGlite): Promise<void> {
       ('${ids.page}','image/jpeg',800,1200,3000,'page-sha',true,'ACTIVE');
     UPDATE works SET cover_id='${ids.cover}' WHERE id='${ids.publish}';
   `);
-  await db.exec(readerMigration);
+  if (optionalRoles) await db.exec(readerMigration);
   await db.exec(migration);
 }
 
@@ -108,6 +109,17 @@ describe('LiteRepository against the additive Lite migration', () => {
   }, 20_000);
 
   afterEach(async () => { await db.close(); });
+
+  it('applies the additive Lite schema without optional Supabase roles', async () => {
+    const directYsql = new PGlite();
+    try {
+      await createSchema(directYsql, { optionalRoles: false });
+      expect((await directYsql.query(`SELECT to_regclass('public.importer_lite_tasks') AS tasks`)).rows[0].tasks)
+        .toBe('importer_lite_tasks');
+    } finally {
+      await directYsql.close();
+    }
+  });
 
   it('reapplies the additive migration without changing pre-existing Reader data', async () => {
     // This is deliberately a second application in a disposable database:

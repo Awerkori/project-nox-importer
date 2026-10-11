@@ -82,8 +82,11 @@ function assertSameCounts(before, after) {
 try {
   const server = (await rows("SELECT current_database() AS database,current_user AS role,current_setting('transaction_read_only') AS read_only,version() AS version"))[0];
   if (server.database !== database) throw new Error('Connected database does not match LITE_VALIDATION_DATABASE');
+  // Direct YSQL is intentionally supported without Supabase compatibility
+  // roles.  The migration keeps objects private and grants those roles only
+  // when they already exist; record their presence for the audit instead of
+  // making a production-compatible target fail validation.
   const roles = await rows("SELECT rolname FROM pg_roles WHERE rolname IN ('anon','authenticated','service_role') ORDER BY rolname");
-  if (roles.length !== 3) throw new Error('Validation target lacks anon/authenticated/service_role required by the additive migration');
   const before = await snapshot();
 
   if (apply) {
@@ -104,7 +107,7 @@ try {
   console.log(JSON.stringify({
     target, applied: apply, database: server.database, role: server.role,
     readOnlySession: server.read_only, version: String(server.version).split(' ').slice(0, 2).join(' '),
-    migrationSha256, legacyCounts: before,
+    migrationSha256, optionalRoles: roles.map((row) => row.rolname), legacyCounts: before,
     liteTables: tables.map((row) => row.relname), liteIndexes: indexes.map((row) => row.indexname),
     liteFunctions: functions.map((row) => row.proname), staffTrigger: Boolean(trigger.length),
   }, null, 2));
