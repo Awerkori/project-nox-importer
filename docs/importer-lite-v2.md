@@ -18,8 +18,10 @@ Invariants:
   `settings.importer_runtime_leader` lease during rollout. A standby runtime
   performs no discovery, reconciliation or new claim; renewal loss gates new
   claims. Per-task leases fence stale owners from `finish` and the
-  Reader-visible publish transaction, while already-valid in-flight work is
-  still allowed to make its bounded durable finalization.
+  Reader-visible publish transaction. A lost lease after media storage cannot
+  enqueue `PUBLISH`, and a lost lease during publication rolls back its pages
+  and `published_at`; already-valid in-flight work is still allowed to make
+  its bounded durable finalization.
 - Priority is `STAFF > P0 > P1 > P2`; the panel’s existing staff request table
   promotes or restores Lite task rows through a database trigger.
 - Priority governs **admission only**. A task that was already claimed keeps
@@ -83,7 +85,8 @@ Invariants:
   proof is an integrity block for that route, not a reason to publish from a
   merely similar work.
 - Download request slots and retained page buffers have separate global
-  semaphores. Neither is multiplied by the number of chapter workers.
+  semaphores, including the minimal executor default. Neither is multiplied by
+  the number of chapter workers or allowed to share a capacity-one permit.
 - Direct image and cover downloads also acquire the existing per-host rate
   limiter; an executor-local per-source chapter semaphore stops one slow
   provider from claiming the entire worker pool.

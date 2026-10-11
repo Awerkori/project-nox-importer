@@ -80,7 +80,10 @@ export class LiteExecutor {
     private readonly importerUserId: string,
     private readonly downloads: AsyncSemaphore,
     private readonly perChapterPageConcurrency = 4,
-    private readonly bufferedPages: AsyncSemaphore = downloads,
+    // Keep buffer ownership independent even for a minimal/test executor.
+    // Reusing `downloads` here would self-deadlock at capacity one because a
+    // page holds a buffer permit while it acquires a request permit.
+    private readonly bufferedPages: AsyncSemaphore = new AsyncSemaphore(downloads.capacity, 'lite_default_page_buffers'),
     private readonly sourceRateLimiter: HostRateLimiter = new HostRateLimiter(2),
   ) {}
 
@@ -280,8 +283,12 @@ export class LiteExecutor {
             }
           });
         });
-        await this.queue.checkpoint(task, workerId, { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source, mediaStoredAt: new Date().toISOString() });
-        await this.queue.finish(task, workerId, { state: 'DONE', checkpoint: { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source } });
+        if (!await this.queue.checkpoint(task, workerId, {
+          chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source, mediaStoredAt: new Date().toISOString(),
+        })) throw new Error('LEASE_LOST_AFTER_MEDIA_STORAGE');
+        if (!await this.queue.finish(task, workerId, {
+          state: 'DONE', checkpoint: { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source },
+        })) throw new Error('LEASE_LOST_AFTER_MEDIA_STORAGE');
         await this.queue.recordSourceSuccess(route.source);
         await this.queue.enqueue({ taskType: 'PUBLISH', workId: task.workId, workKey: task.workKey, chapterKey: task.chapterKey,
           priority: task.basePriority === 'STAFF' ? 'P0' : task.basePriority,

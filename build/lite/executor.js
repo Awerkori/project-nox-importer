@@ -77,7 +77,11 @@ export class LiteExecutor {
     // Held from byte download through receipt persistence. This is distinct
     // from request concurrency: it bounds real image buffers across every
     // chapter worker while Telegram is slow or cooling down.
-    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = downloads, sourceRateLimiter = new HostRateLimiter(2)) {
+    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4,
+    // Keep buffer ownership independent even for a minimal/test executor.
+    // Reusing `downloads` here would self-deadlock at capacity one because a
+    // page holds a buffer permit while it acquires a request permit.
+    bufferedPages = new AsyncSemaphore(downloads.capacity, 'lite_default_page_buffers'), sourceRateLimiter = new HostRateLimiter(2)) {
         this.db = db;
         this.queue = queue;
         this.registry = registry;
@@ -299,8 +303,14 @@ export class LiteExecutor {
                         }
                     });
                 });
-                await this.queue.checkpoint(task, workerId, { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source, mediaStoredAt: new Date().toISOString() });
-                await this.queue.finish(task, workerId, { state: 'DONE', checkpoint: { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source } });
+                if (!await this.queue.checkpoint(task, workerId, {
+                    chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source, mediaStoredAt: new Date().toISOString(),
+                }))
+                    throw new Error('LEASE_LOST_AFTER_MEDIA_STORAGE');
+                if (!await this.queue.finish(task, workerId, {
+                    state: 'DONE', checkpoint: { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source },
+                }))
+                    throw new Error('LEASE_LOST_AFTER_MEDIA_STORAGE');
                 await this.queue.recordSourceSuccess(route.source);
                 await this.queue.enqueue({ taskType: 'PUBLISH', workId: task.workId, workKey: task.workKey, chapterKey: task.chapterKey,
                     priority: task.basePriority === 'STAFF' ? 'P0' : task.basePriority,

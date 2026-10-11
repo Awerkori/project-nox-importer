@@ -352,6 +352,66 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapters WHERE work_id=$1 AND canonical_chapter_key=$2`, [ids.p1a, task.chapterKey])).rows[0].count).toBe(1);
   });
 
+  it('does not enqueue publication when the import lease expires after page storage', async () => {
+    const key = 'pt-br|default|chapter|lease-after-media|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
+      VALUES ($1,$2,'source-a','lease-after-media','pt-BR','default',true)`, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key, priority: 'P1', idempotencyKey: 'lease-after-media',
+      payload: { displayNumber: '10', chapterTitle: 'Lease after media', language: 'pt-BR', edition: 'default', orderKey: '10' } });
+    const task = await repo.claim('worker-a', 120);
+    const registry = { get: () => ({ id: 'source-a', fetchChapterPages: async () => ['https://source-a.test/page.png'] }) } as unknown as SourceRegistry;
+    const storage: StorageProvider = { upload: async () => 'telegram-file', healthCheck: async () => true, getProviderKey: () => 'telegram' };
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const originalCheckpoint = repo.checkpoint.bind(repo);
+    let checkpoints = 0;
+    (repo as any).checkpoint = async (...args: any[]) => {
+      checkpoints++;
+      if (checkpoints === 2) {
+        await db.query(`UPDATE importer_lite_tasks SET lease_until=now()-interval '1 second' WHERE id=$1`, [task!.id]);
+        return false;
+      }
+      return originalCheckpoint(...args);
+    };
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })));
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(1, 'test-downloads'), 1);
+      await executor.importChapter(task!, 'worker-a');
+    } finally {
+      (repo as any).checkpoint = originalCheckpoint;
+      vi.stubGlobal('fetch', originalFetch);
+    }
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('RUNNING');
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks WHERE task_type='PUBLISH' AND work_id=$1 AND chapter_key=$2`, [ids.p1a, key])).rows[0].count).toBe(0);
+    expect((await repo.reconcile(10)).leases).toBe(1);
+  });
+
+  it('rolls back Reader writes if publication loses its fence before task settlement', async () => {
+    await repo.enqueue({ taskType: 'PUBLISH', workId: ids.publish, workKey: `work:${ids.publish}`, chapterKey: 'chapter:lost-during-publish', priority: 'P1', idempotencyKey: 'lost-during-publish' });
+    const task = await repo.claim('publisher', 120);
+    const basePool = poolFor(db) as Pool;
+    const fencedPool = {
+      query: basePool.query.bind(basePool),
+      connect: async () => {
+        const client = await basePool.connect();
+        return {
+          ...client,
+          query: async (text: string, values?: unknown[]) => {
+            if (text.includes("UPDATE importer_lite_tasks SET state='DONE'")) return { rows: [], rowCount: 0 } as any;
+            return client.query(text, values);
+          },
+        };
+      },
+    } as unknown as Pool;
+    const fencedRepository = new LiteRepository(fencedPool);
+    await expect(fencedRepository.publish({ task: task!, workerId: 'publisher', chapterId: ids.chapter,
+      workId: ids.publish, mediaIds: [ids.page], fresh: true })).rejects.toThrow('LEASE_LOST_DURING_PUBLISH');
+    expect((await db.query(`SELECT published_at FROM chapters WHERE id=$1`, [ids.chapter])).rows[0].published_at).toBeNull();
+    expect((await db.query(`SELECT count(*)::int AS count FROM pages WHERE chapter_id=$1`, [ids.chapter])).rows[0].count).toBe(0);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_publication_events WHERE chapter_id=$1`, [ids.chapter])).rows[0].count).toBe(0);
+  });
+
   it('uses the shared runtime lease to gate a Lite contender without gating in-flight finalization', async () => {
     const makeRuntime = (workerId: string) => new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,

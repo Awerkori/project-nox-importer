@@ -551,7 +551,12 @@ export class LiteRepository {
       const done = await client.query(`UPDATE importer_lite_tasks SET state='DONE',lease_owner=NULL,lease_until=NULL,
         checkpoint=checkpoint || jsonb_build_object('publishedAt',COALESCE($3::text,checkpoint->>'publishedAt')),updated_at=now()
         WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`, [input.task.id,input.workerId,publishedAt]);
-      if (done.rowCount === 1) await this.refreshReadyWork(client, input.task.workKey);
+      // The task lock prevents a reclaimer from claiming this row during the
+      // transaction, but wall-clock lease expiry must still roll back every
+      // Reader-visible write. A stale owner is never allowed to commit pages
+      // or published_at and leave the durable task unsettled.
+      if (done.rowCount !== 1) throw new Error('LEASE_LOST_DURING_PUBLISH');
+      await this.refreshReadyWork(client, input.task.workKey);
       await client.query('COMMIT');
       return done.rowCount === 1;
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; } finally { client.release(); }

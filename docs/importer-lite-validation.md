@@ -21,7 +21,8 @@ integration suite verifies:
 - shared legacy/Lite runtime leadership fencing: a second Lite contender
   remains in standby, while a task already leased by the leader can finish;
   an expired owner cannot settle a task or replace Reader pages/publish a
-  chapter after a successor can recover it;
+  chapter after a successor can recover it, and expiry after media storage
+  cannot materialize an orphan `PUBLISH` task;
 - a ready work remains claimable behind 1,300 blocked task rows and peers of
   the same priority rotate fairly by work, including a 1,300-chapter ready
   work that cannot monopolize other P1 works; a 1,300-chapter catalog batch is
@@ -71,7 +72,9 @@ integration suite verifies:
   adult classification and specific source tags) to the existing conservative
   deduplication/tag writer after synopsis sanitization;
 - slow uploads with concurrent page discovery, proving that the global retained
-  page-buffer limit is applied rather than multiplied by chapter workers.
+  page-buffer limit is applied rather than multiplied by chapter workers, and
+  a capacity-one executor uses distinct request/buffer permits without
+  self-deadlocking.
 - the additive migration is re-applied in the same ephemeral database,
   confirming that it preserves pre-existing Reader rows and Lite tables rather
   than requiring a destructive reset.
