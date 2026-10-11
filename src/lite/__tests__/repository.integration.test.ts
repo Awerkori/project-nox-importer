@@ -417,7 +417,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
       { WORKER_ID: workerId, IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
-        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
     const first = makeRuntime('lite-a');
     const second = makeRuntime('lite-b');
@@ -427,8 +427,11 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await (second as any).claimNext('standby-worker')).toBeNull();
     // A task already leased by the leader may still complete: runtime
     // leadership is an admission fence, never a global finalization lock.
-    const inFlight = await repo.claim('leader-worker', 30);
-    expect(await repo.finish(inFlight!, 'leader-worker', { state: 'DONE' })).toBe(true);
+    const leaderWorker = `${(first as any).runtimeInstanceId}:lite:1`;
+    expect(leaderWorker).not.toContain((second as any).runtimeInstanceId);
+    const inFlight = await (first as any).claimNext(leaderWorker);
+    expect(inFlight?.leaseOwner).toBe(leaderWorker);
+    expect(await repo.finish(inFlight!, leaderWorker, { state: 'DONE' })).toBe(true);
     await (first as any).releaseRuntimeLeadership();
     expect(await (second as any).tryAcquireRuntimeLeadership()).toBe(true);
     await (second as any).releaseRuntimeLeadership();

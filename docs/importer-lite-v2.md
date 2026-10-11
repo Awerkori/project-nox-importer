@@ -17,11 +17,15 @@ Invariants:
 - Lite and the legacy importer share the existing durable
   `settings.importer_runtime_leader` lease during rollout. A standby runtime
   performs no discovery, reconciliation or new claim; renewal loss gates new
-  claims. Per-task leases fence stale owners from `finish` and the
+  claims. A newer process cannot take a non-expired lease merely because it
+  booted later; it waits for the owner to stop or the durable expiry. Per-task
+  leases fence stale owners from `finish` and the
   Reader-visible publish transaction. A lost lease after media storage cannot
   enqueue `PUBLISH`, and a lost lease during publication rolls back its pages
   and `published_at`; already-valid in-flight work is still allowed to make
-  its bounded durable finalization.
+  its bounded durable finalization. Every task lease owner includes a unique
+  boot identity, so a stopped predecessor cannot update a successor's task
+  merely because both deployments share `WORKER_ID`.
 - Priority is `STAFF > P0 > P1 > P2`; the panel’s existing staff request table
   promotes or restores Lite task rows through a database trigger.
 - Priority governs **admission only**. A task that was already claimed keeps

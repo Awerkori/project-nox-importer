@@ -71,8 +71,11 @@ export class ImporterLiteRuntime {
         await this.seedDiscovery();
         const workers = Math.max(1, Math.min(this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING));
         telemetryCollector.configureChapterSlots(workers, () => workers);
+        // Queue lease owners include the per-boot leader identity. A process that
+        // lost leadership can never checkpoint or finish a lease reclaimed by a
+        // successor which happens to use the same configured WORKER_ID.
         for (let i = 0; i < workers; i++)
-            void this.worker(`${this.config.WORKER_ID}:lite:${i + 1}`, i);
+            void this.worker(`${this.runtimeInstanceId}:lite:${i + 1}`, i);
         const timer = setInterval(() => {
             if (this.isRuntimeLeader)
                 void this.queue.reconcile(50).catch(() => { });
@@ -112,7 +115,6 @@ export class ImporterLiteRuntime {
            'started_at',$4::timestamptz,'expires_at',now()+($3::int * interval '1 second'))::text
          WHERE (leader.value::jsonb->>'owner')=$2::text
             OR COALESCE((leader.value::jsonb->>'expires_at')::timestamptz,'epoch'::timestamptz)<=now()
-            OR COALESCE((leader.value::jsonb->>'started_at')::timestamptz,'epoch'::timestamptz)<$4::timestamptz
          RETURNING value`, [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS, this.runtimeBootedAt.toISOString()]);
             const acquired = result.rows.length > 0;
             if (acquired && !this.isRuntimeLeader) {
@@ -268,10 +270,10 @@ export class ImporterLiteRuntime {
         try {
             if (Date.now() < this.idleMonitorUntil)
                 return;
-            const task = await this.queue.claimMonitor(`${this.config.WORKER_ID}:lite-monitor`, this.config.QUEUE_LEASE_DURATION_SECONDS);
+            const task = await this.queue.claimMonitor(`${this.runtimeInstanceId}:lite-monitor`, this.config.QUEUE_LEASE_DURATION_SECONDS);
             this.idleMonitorUntil = task ? 0 : Date.now() + 15_000;
             if (task)
-                await this.handle(task, `${this.config.WORKER_ID}:lite-monitor`);
+                await this.handle(task, `${this.runtimeInstanceId}:lite-monitor`);
         }
         finally {
             this.monitorGate.release();
