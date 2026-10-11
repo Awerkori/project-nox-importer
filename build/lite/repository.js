@@ -161,7 +161,13 @@ export class LiteRepository {
             .sort((a, b) => b.getTime() - a.getTime())[0] || null;
         const status = String(row.status || 'ACTIVE').toUpperCase();
         const health = String(row.health || 'HEALTHY').toUpperCase();
-        const administrativelyActive = row.enabled === true && ['ACTIVE', 'DEGRADED', 'RECOVERING'].includes(status);
+        // COOLDOWN is temporary only when it has a durable deadline.  Once that
+        // deadline passes it must resume; otherwise a source can remain invisible
+        // to P2 forever after a restart.  A cooldown without a deadline, and
+        // PAUSED/DISABLED, remain explicit operator actions.
+        const expiredAdministrativeCooldown = status === 'COOLDOWN' && Boolean(sourceCooldown && sourceCooldown <= new Date());
+        const administrativelyActive = row.enabled === true &&
+            (['ACTIVE', 'DEGRADED', 'RECOVERING'].includes(status) || expiredAdministrativeCooldown);
         const healthAllowed = !['BROKEN', 'DISABLED'].includes(health);
         const runnable = administrativelyActive && healthAllowed && (!cooldownUntil || cooldownUntil <= new Date());
         const minutes = Number(row.sync_interval_minutes);

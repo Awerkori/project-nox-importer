@@ -170,6 +170,14 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(third?.idempotencyKey).toBe('p1');
   });
 
+  it('admits P2 immediately when every higher-priority task is not due', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'later', priority: 'P1', idempotencyKey: 'p1-not-due', nextRunAt: new Date(Date.now() + 60_000) });
+    await repo.enqueue({ taskType: 'DISCOVER', workKey: 'source:source-a:eligible', priority: 'P2', idempotencyKey: 'p2-eligible' });
+
+    expect((await repo.claim('p2-worker', 120))?.idempotencyKey).toBe('p2-eligible');
+  });
+
   it('treats duplicate panel requests as one STAFF overlay and never blocks already-running finalization', async () => {
     // These simulate a P0 download, a P1 upload and a P2 publication already
     // beyond admission. A subsequent STAFF request may preempt claims only;
@@ -738,6 +746,30 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).seedDiscovery();
     expect((await db.query(`SELECT idempotency_key FROM importer_lite_tasks WHERE idempotency_key LIKE 'lite:discover:%' ORDER BY idempotency_key`)).rows)
       .toEqual([]);
+  });
+
+  it('releases an expired administrative cooldown for P2 without overriding a live cooldown', async () => {
+    await db.query(`UPDATE importer_sources
+      SET enabled=true,status='COOLDOWN',cooldown_until=now()-interval '1 second'
+      WHERE id='source-a'`);
+    expect(await repo.sourcePolicy('source-a')).toMatchObject({ status: 'COOLDOWN', runnable: true });
+
+    await db.query(`UPDATE importer_sources SET cooldown_until=now()+interval '1 minute' WHERE id='source-a'`);
+    expect(await repo.sourcePolicy('source-a')).toMatchObject({ status: 'COOLDOWN', runnable: false });
+
+    await db.query(`UPDATE importer_sources SET cooldown_until=now()-interval '1 second' WHERE id='source-a'`);
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    await (runtime as any).seedDiscovery();
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks WHERE idempotency_key='lite:discover:source-a'`)).rows[0].count)
+      .toBe(1);
+
+    await db.query(`UPDATE importer_sources SET cooldown_until=NULL WHERE id='source-a'`);
+    expect(await repo.sourcePolicy('source-a')).toMatchObject({ status: 'COOLDOWN', runnable: false });
   });
 
   it('reopens only source-blocked work after fresh catalog evidence, never an unknown upload outcome', async () => {

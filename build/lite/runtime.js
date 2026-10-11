@@ -256,7 +256,10 @@ export class ImporterLiteRuntime {
     }
     async seedDiscovery() {
         const sources = await this.pool.query(`SELECT id,sync_interval_minutes FROM importer_sources
-      WHERE enabled=true AND COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+      WHERE enabled=true AND (
+        COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
+        (status='COOLDOWN' AND cooldown_until IS NOT NULL AND cooldown_until<=now())
+      )
         AND COALESCE((to_jsonb(importer_sources)->>'catalog_discovery_enabled')::boolean,true)
       ORDER BY id`);
         const firstRun = Date.now();
