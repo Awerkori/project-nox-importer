@@ -108,9 +108,13 @@ describe('LiteRepository against the additive Lite migration', () => {
     // This is deliberately a second application in a disposable database:
     // the deployment procedure must be safe to resume after an interrupted
     // staging run, but this suite never touches a production database.
+    await db.query(`INSERT INTO importer_chapter_mappings(source,source_chapter_id,chapter_id)
+      VALUES('source-a','legacy-reader-chapter',$1)`, [ids.chapter]);
     await db.exec(migration);
     expect((await db.query(`SELECT title,cover_id FROM works WHERE id=$1`, [ids.publish])).rows[0])
       .toEqual({ title: 'Publish', cover_id: ids.cover });
+    expect((await db.query(`SELECT chapter_id FROM importer_chapter_mappings
+      WHERE source='source-a' AND source_chapter_id='legacy-reader-chapter'`)).rows[0].chapter_id).toBe(ids.chapter);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks`)).rows[0].count).toBe(0);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapter_sources`)).rows[0].count).toBe(0);
   });
@@ -355,6 +359,31 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(first).toBe(second);
     expect((await db.query(`SELECT count(*)::int AS count FROM chapters WHERE work_id=$1 AND title='Race Safe'`, [ids.p1a])).rows[0].count).toBe(1);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapters WHERE work_id=$1 AND canonical_chapter_key=$2`, [ids.p1a, task.chapterKey])).rows[0].count).toBe(1);
+  });
+
+  it('blocks a Reader numeric collision instead of merging distinct canonical chapters', async () => {
+    // Some deployed Reader schemas still constrain a work to one numeric
+    // chapter number.  `12.1` and `12.10` are distinct source identities but
+    // parse to the same numeric value, so Lite must surface the schema gap
+    // rather than point both identities at one Reader row.
+    await db.exec(`CREATE UNIQUE INDEX chapters_work_number_reader_compat_idx ON chapters(work_id,number)`);
+    const base = {
+      id: '00000000-0000-4000-8000-000000000098', taskType: 'IMPORT_CHAPTER', workId: ids.p1a,
+      workKey: `work:${ids.p1a}`, priority: 'P1', basePriority: 'P1', state: 'RUNNING',
+      idempotencyKey: 'numeric-collision', nextRunAt: new Date(), attempts: 1, maxAttempts: 8,
+      leaseOwner: 'worker-a', leaseUntil: new Date(Date.now() + 60_000), reason: null, monitoring: false,
+      payload: { displayNumber: '12.1', chapterTitle: 'Same rendered title', language: 'pt-BR', edition: 'default', orderKey: '12.1' }, checkpoint: {},
+    } as any;
+    const executor = new LiteExecutor(poolFor(db) as Pool, repo, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(1, 'test-downloads'));
+    await (executor as any).createOrLoadChapter({ ...base, chapterKey: 'pt-br|default|chapter|12.1|-' });
+    await expect((executor as any).createOrLoadChapter({
+      ...base, id: '00000000-0000-4000-8000-000000000097', chapterKey: 'pt-br|default|chapter|12.10|-',
+      payload: { ...base.payload, displayNumber: '12.10', orderKey: '12.10' },
+    })).rejects.toThrow('CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION');
+    expect((await db.query(`SELECT count(*)::int AS count FROM chapters WHERE work_id=$1 AND title='Same rendered title'`, [ids.p1a])).rows[0].count).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapters WHERE work_id=$1`, [ids.p1a])).rows[0].count).toBe(1);
   });
 
   it('reuses an exactly mapped legacy published chapter without rewriting its pages', async () => {
@@ -814,6 +843,57 @@ describe('LiteRepository against the additive Lite migration', () => {
       await executor.importChapter(retry!, 'worker-b');
       expect((await db.query(`SELECT state FROM importer_lite_uploads WHERE task_id=$1`, [first!.id])).rows[0].state).toBe('PERSISTED');
       expect(storage.upload).toHaveBeenCalledTimes(2);
+    } finally { vi.stubGlobal('fetch', originalFetch); }
+  });
+
+  it('resumes a partially stored chapter after restart without re-uploading its durable pages', async () => {
+    const key = 'pt-br|default|chapter|restart-partial|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
+      VALUES ($1,$2,'source-a','restart-partial','pt-BR','default',true)`, [ids.publish, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.publish, workKey: `work:${ids.publish}`, chapterKey: key, priority: 'P1', idempotencyKey: 'restart-partial',
+      payload: { displayNumber: '5.5', chapterTitle: 'Restart partial', language: 'pt-BR', edition: 'default', orderKey: '5.5' } });
+    const adapter = { id: 'source-a', fetchChapterPages: async () => ['https://source-a.test/one.png', 'https://source-a.test/two.png'] };
+    const storage: StorageProvider = { upload: vi.fn(async () => 'telegram-file'), healthCheck: async () => true, getProviderKey: () => 'telegram' };
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const secondPng = Uint8Array.from(png);
+    secondPng[secondPng.length - 13] ^= 1; // distinct valid payload/hash
+    let resumed = false;
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => new Response(url.includes('two') ? secondPng : png, {
+      status: url.includes('two') && !resumed ? 502 : 200,
+    })));
+    try {
+      const first = await repo.claim('before-restart', 120);
+      const beforeRestart = new LiteExecutor(poolFor(db) as Pool, repo, { get: () => adapter } as unknown as SourceRegistry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(1, 'before-restart-downloads'), 1);
+      await beforeRestart.importChapter(first!, 'before-restart');
+      expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [first!.id])).rows[0].state).toBe('RETRY_WAIT');
+      expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [first!.id])).rows[0].count).toBe(1);
+      expect(storage.upload).toHaveBeenCalledTimes(1);
+
+      // A new repository/executor models a process restart. The source's
+      // temporary cooldown has elapsed; durable receipts, not in-memory
+      // state, decide what it can reuse.
+      await db.query(`UPDATE importer_lite_source_health SET cooldown_until=now()-interval '1 second' WHERE source='source-a'`);
+      await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second' WHERE id=$1`, [first!.id]);
+      await repo.reconcile(10);
+      resumed = true;
+      const restartedRepo = new LiteRepository(poolFor(db));
+      const retry = await restartedRepo.claim('after-restart', 120);
+      const afterRestart = new LiteExecutor(poolFor(db) as Pool, restartedRepo, { get: () => adapter } as unknown as SourceRegistry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(1, 'after-restart-downloads'), 1);
+      await afterRestart.importChapter(retry!, 'after-restart');
+      expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [first!.id])).rows[0].count).toBe(2);
+      expect(storage.upload).toHaveBeenCalledTimes(2);
+
+      const publish = await restartedRepo.claim('after-restart-publish', 120);
+      expect(publish?.taskType).toBe('PUBLISH');
+      await afterRestart.publish(publish!, 'after-restart-publish');
+      const visible = await db.query(`SELECT c.published_at,count(p.media_id)::int AS pages
+        FROM chapters c JOIN pages p ON p.chapter_id=c.id WHERE c.work_id=$1 AND c.title='Restart partial' GROUP BY c.published_at`, [ids.publish]);
+      expect(visible.rows).toHaveLength(1);
+      expect(visible.rows[0]).toMatchObject({ pages: 2 });
+      expect(visible.rows[0].published_at).toBeTruthy();
     } finally { vi.stubGlobal('fetch', originalFetch); }
   });
 

@@ -189,10 +189,19 @@ export class LiteExecutor {
       if (!durableChapterId) {
         // The legacy Reader may still have a numeric uniqueness constraint.
         // Reuse only a clearly identical existing chapter; never silently map
-        // a special/edition to a different chapter sharing its number.
+        // a special/edition to a different chapter sharing its number.  In
+        // particular, a Reader numeric column can collapse 12.1 and 12.10.
+        // The Lite mapping is the durable authority for that distinction, so
+        // a row already mapped under another canonical identity is a schema
+        // incompatibility to surface, never an excuse to merge chapters.
         const same = await client.query<{ id: string }>(`SELECT id FROM chapters
           WHERE work_id=$1::uuid AND number=$2 AND lower(title)=lower($3) LIMIT 1 FOR UPDATE`, [task.workId, numeric, title]);
         if (!same.rows[0]) throw new Error('CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION');
+        const mappedIdentity = await client.query<{ canonical_chapter_key: string }>(`SELECT canonical_chapter_key
+          FROM importer_lite_chapters WHERE chapter_id=$1::uuid LIMIT 1 FOR UPDATE`, [same.rows[0].id]);
+        if (mappedIdentity.rows[0] && mappedIdentity.rows[0].canonical_chapter_key !== task.chapterKey) {
+          throw new Error('CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION');
+        }
         durableChapterId = same.rows[0].id;
       }
       const mapped = await this.mapCanonicalChapter(client, task, durableChapterId);

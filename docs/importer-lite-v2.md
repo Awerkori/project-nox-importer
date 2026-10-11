@@ -69,6 +69,12 @@ Invariants:
 - Canonical chapter IDs are deterministic from canonical work+chapter identity.
   A stale/recovered-worker overlap therefore cannot create two physical Reader
   chapter rows before the unique Lite chapter mapping is observed.
+- If a legacy Reader uniqueness rule collapses two distinct canonical
+  identities onto the same numeric display value (for example `12.1` and
+  `12.10`), Lite records neither a false mapping nor a duplicate: it blocks
+  the affected task as `CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION`.
+  This makes the Reader contract a pre-cutover validation item instead of
+  silently corrupting the chapter identity.
 - During migration, an exact legacy `source + source_chapter_id` mapping is
   adopted into the Lite identity map. If that chapter is already published,
   the Lite task is settled with its existing `published_at` and never downloads
@@ -144,6 +150,11 @@ The source manifest, not a numerical gap, is the authority on what chapters
 exist. Lite persists a textual canonical identity with display number, order
 key, edition, language and special-kind information; `12.1`, `12.10`, an
 extra numbered `12`, and another edition are never conflated by the importer.
+Where the legacy Reader itself still enforces a conflicting numeric identity,
+the importer blocks the later identity with an explicit migration reason; it
+does not claim that the Lite mapping alone can make the old Reader render two
+incompatible rows. The cutover gate must prove that the deployed Reader can
+represent every permitted canonical identity.
 The Reader contract currently permits independent publication of a complete,
 valid canonical chapter, so Lite does **not** manufacture predecessor tasks or
 hold a valid chapter behind a missing number. If the Reader later requires an

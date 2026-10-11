@@ -34,9 +34,14 @@ integration suite verifies:
   publication so recovery does not recreate completed work;
 - atomic Reader-visible publication only after cover and page media validation;
 - duplicate/recovered canonical chapter creation converges to one deterministic
-  Reader chapter ID and one Lite identity mapping;
+  Reader chapter ID and one Lite identity mapping; if a legacy Reader numeric
+  uniqueness rule would collapse distinct canonical identities such as `12.1`
+  and `12.10`, the second task is visibly blocked rather than silently merged;
 - an exactly mapped legacy chapter that is already published is adopted without
   downloading, replacing its pages or scheduling another publication;
+- a process restart after partial page storage reuses its durable receipt,
+  uploads only the missing page and then publishes a complete Reader-visible
+  chapter;
 - healthy source fallback before storage, and safe source/manifest pinning
   after partial storage, including concurrent in-flight page drainage and
   adapter ownership proof before an alternative source route is used;
@@ -82,18 +87,20 @@ integration suite verifies:
   a capacity-one executor uses distinct request/buffer permits without
   self-deadlocking.
 - the additive migration is re-applied in the same ephemeral database,
-  confirming that it preserves pre-existing Reader rows and Lite tables rather
-  than requiring a destructive reset.
+  confirming that it preserves pre-existing Reader rows, legacy source-chapter
+  mappings and Lite tables rather than requiring a destructive reset.
 
 This is an integration and regression gate, not an external capacity result:
 PGlite does not model Yugabyte latency, real source limits, Telegram capacity,
 DIScloud RSS, or public-site contention.
 
-Latest isolated regression run: **43/43 Lite integration scenarios passed**
-(run in bounded blocks against PGlite), along with **10/10** Lite identity,
-metadata, priority, source-selection, direct-Telegram and runtime-leadership
-unit scenarios. `npm run build` also passed. This is intentionally distinct
-from the external homologation gate below.
+Latest isolated regression run: **45/45 Lite integration scenarios passed**
+(run in bounded blocks against PGlite), along with **17/17** Lite identity,
+metadata, priority, source-selection, direct-Telegram, runtime-leadership and
+preferred-source adapter scenarios. A separate catalog integrity gate passed
+**33/33** tests for tags (including adult taxonomy), deduplication and
+field-level metadata precedence. `npm run build` also passed. This is
+intentionally distinct from the external homologation gate below.
 
 ## Full-suite result in this workspace
 

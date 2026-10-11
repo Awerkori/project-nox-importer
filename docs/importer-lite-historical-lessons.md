@@ -14,6 +14,7 @@ only a controlled benchmark can establish sustained production capacity.
 | A prolonged source outage could turn a P0 watch into an abandoned record | P0 recovery history and recurring source unavailability | one monitor row has capped recurrence backoff and resets after success; it does not consume normal claims | integration: max-attempt monitor stays recoverable while P1 claims | monitor reason, next-run, P1 ready age |
 | New STAFF request could conflict with lower-priority work already in flight | historical scheduler treated priority and capacity in overlapping paths; PR #400 established strict claim order | STAFF preempts only new READY claims. RUNNING tasks retain lease/finalization; finish re-evaluates active panel rows so cancellation restores base priority | integration: P0/P1/P2 finish while duplicate STAFF overlay arrives/cancels | running leases, stored-unpublished age, STAFF ready age |
 | Unverified numeric gap stalled publication | PR #395 | no inferred predecessors in claim/publish; dependencies must be materialized/explicit | chapter identity tests | blocked reasons by code |
+| Numeric Reader identity could collapse distinct source chapters | numeric display storage cannot distinguish all textual source identities | canonical identity remains textual; an incompatible legacy numeric uniqueness rule blocks the later chapter rather than merging it | integration: `12.1` versus `12.10` collision | `CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION` |
 | Catalog maintenance consumed data-plane capacity | PR #398, #412 | catalog tasks are normal bounded tasks, not a side scheduler; execution is network outside transactions | runtime has one worker pool | catalog task latency; DB wait |
 | A large manifest caused per-chapter YSQL work | cataloguing hundreds of chapters multiplies round trips and pool holds | source mappings and queue rows are batched; ready projection refreshes once per work | integration: 1,300-chapter batch | catalog DB time; pool wait |
 | Empty claims and YSQL pressure | PR #399, #413, #414, #418 | indexed ready-work projection, short claim transaction, no correlated canonical lookup | migration indexes and function | claim latency; empty claims |
@@ -53,10 +54,12 @@ only a controlled benchmark can establish sustained production capacity.
 
 The current Reader table still represents its visible chapter number as a
 numeric column. Lite stores a textual canonical chapter identity and display
-number in `importer_lite_chapters` to prevent importer-side collapse. Before
-cutover, the Reader’s rendering and uniqueness contract must be verified for
-two legitimate chapters that share a numeric display value (for example an
-extra and a regular edition). Telegram has no transaction shared with YSQL:
+number in `importer_lite_chapters` to prevent importer-side collapse. If an
+installed Reader uniqueness rule nevertheless collides, Lite blocks the later
+task as `CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION` rather than
+merging two identities. Before cutover, the Reader’s rendering and uniqueness
+contract must be verified for two legitimate chapters that share a numeric
+display value (for example an extra and a regular edition). Telegram has no transaction shared with YSQL:
 when Telegram succeeds but its receipt cannot be durably written, Lite blocks
 that page as `UPLOAD_OUTCOME_UNKNOWN` instead of risk a duplicate upload. A
 recovery connector can be added only after a reliable channel-message lookup
