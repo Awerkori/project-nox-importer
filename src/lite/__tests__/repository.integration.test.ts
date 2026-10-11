@@ -1470,6 +1470,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).executor.perChapterPageConcurrency).toBe(6);
   });
 
+  it('reports an anonymous bounded source-rate summary for production diagnosis', () => {
+    const limiter = new HostRateLimiter(5);
+    limiter.setHostRate('one.test', 5);
+    limiter.setHostRate('two.test', 8);
+    const summary = limiter.getSummary();
+    expect(summary).toEqual({
+      activeHosts: 2, blockedHosts: 0, minRatePerSecond: 5, maxRatePerSecond: 8, averageRatePerSecond: 6.5,
+    });
+    expect(JSON.stringify(summary)).not.toContain('one.test');
+  });
+
   it('shares an empty P0 monitor probe and leaves the normal pool untouched', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,

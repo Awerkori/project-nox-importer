@@ -105,6 +105,23 @@ export class HostRateLimiter {
     getHostRate(host) {
         return this.getBucket(host).ratePerSecond;
     }
+    /** Compact, host-anonymous diagnostic state for the Lite heartbeat. */
+    getSummary(activeWithinMs = 5 * 60_000) {
+        const now = Date.now();
+        const active = [...this.buckets.values()].filter((bucket) => now - bucket.lastUsedAt <= activeWithinMs);
+        if (!active.length)
+            return {
+                activeHosts: 0, blockedHosts: 0, minRatePerSecond: null, maxRatePerSecond: null, averageRatePerSecond: null,
+            };
+        const rates = active.map((bucket) => bucket.ratePerSecond);
+        return {
+            activeHosts: active.length,
+            blockedHosts: active.filter((bucket) => bucket.blockedUntil > now).length,
+            minRatePerSecond: Math.round(Math.min(...rates) * 10) / 10,
+            maxRatePerSecond: Math.round(Math.max(...rates) * 10) / 10,
+            averageRatePerSecond: Math.round((rates.reduce((sum, rate) => sum + rate, 0) / rates.length) * 10) / 10,
+        };
+    }
     /**
      * Acquire a token for host with jitter and sleep if necessary
      */
