@@ -38,6 +38,9 @@ describe('runtime leadership lease', () => {
     expect(params[1]).toMatch(/^discloud-importer-1@/);
     expect(params[3]).toMatch(/T/);
     expect((engine as any).config.WORKER_ID).toBe(params[1]);
+    // A rolling deploy waits for the prior live owner to release/expire. A
+    // newer boot timestamp is not an authority to create a second producer.
+    expect(sql).not.toContain("OR COALESCE((leader.value::jsonb->>'started_at')");
   });
 
   it('does not claim work when another live runtime owns the lease', async () => {

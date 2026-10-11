@@ -7,6 +7,8 @@ import type { GatewayJob, PublishBatchParams } from '../core/gateway-client.js';
 export declare function getSqlFingerprint(queryArg: unknown): string;
 export declare function getYugabytePool(): pg.Pool;
 export declare function closeYugabytePool(): Promise<void>;
+/** Test-only injection for disposable SQL contract tests. */
+export declare function setYugabytePoolForTest(testPool: pg.Pool | null): void;
 export declare function testConnection(): Promise<{
     connected: boolean;
     database: string;
@@ -94,4 +96,17 @@ export interface PublishBatchDirectResult {
     dbDurationMs: number;
     metrics: PublishBatchDirectMetrics;
 }
+/**
+ * The v1 publisher only receives a JavaScript number, so it cannot recover a
+ * textual scale that was already lost (for example 12.10 vs 12.1).  During a
+ * rollback after the Reader canonical-identity cutover it must therefore use
+ * the stable source chapter id as its identity, rather than recreating the
+ * removed `(work_id, number)` collision.  Lite itself supplies the richer
+ * source-independent identity and never uses this compatibility path.
+ */
+export declare function legacyRollbackChapterIdentity(source: string, sourceChapterId: string, number: number): {
+    canonicalKey: string;
+    displayNumber: string;
+    orderKey: string;
+};
 export declare function publishBatchDirect(payload: PublishBatchParams): Promise<PublishBatchDirectResult>;

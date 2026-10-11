@@ -14,6 +14,7 @@ declare const ConfigSchema: z.ZodObject<{
     QUEUE_LEASE_DURATION_SECONDS: z.ZodDefault<z.ZodNumber>;
     QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.ZodDefault<z.ZodNumber>;
     MAX_CONCURRENT_CHAPTERS: z.ZodDefault<z.ZodNumber>;
+    LITE_CHAPTER_WORKERS: z.ZodDefault<z.ZodNumber>;
     ADAPTIVE_INITIAL_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     TESTED_CONCURRENCY_CEILING: z.ZodDefault<z.ZodNumber>;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
@@ -24,6 +25,7 @@ declare const ConfigSchema: z.ZodObject<{
     BUFFERED_PAGE_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     LOG_LEVEL: z.ZodDefault<z.ZodEnum<["debug", "info", "warn", "error"]>>;
     IMPORTER_DB_MODE: z.ZodDefault<z.ZodEnum<["direct", "gateway"]>>;
+    IMPORTER_RUNTIME_MODE: z.ZodDefault<z.ZodEnum<["legacy", "lite"]>>;
     YUGABYTE_HOST: z.ZodDefault<z.ZodString>;
     YUGABYTE_PORT: z.ZodDefault<z.ZodNumber>;
     YUGABYTE_USER: z.ZodDefault<z.ZodString>;
@@ -41,6 +43,7 @@ declare const ConfigSchema: z.ZodObject<{
     QUEUE_LEASE_DURATION_SECONDS: number;
     QUEUE_HEARTBEAT_INTERVAL_SECONDS: number;
     MAX_CONCURRENT_CHAPTERS: number;
+    LITE_CHAPTER_WORKERS: number;
     ADAPTIVE_INITIAL_CONCURRENCY: number;
     TESTED_CONCURRENCY_CEILING: number;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: number;
@@ -51,6 +54,7 @@ declare const ConfigSchema: z.ZodObject<{
     BUFFERED_PAGE_CONCURRENCY: number;
     LOG_LEVEL: "debug" | "info" | "warn" | "error";
     IMPORTER_DB_MODE: "direct" | "gateway";
+    IMPORTER_RUNTIME_MODE: "legacy" | "lite";
     YUGABYTE_HOST: string;
     YUGABYTE_PORT: number;
     YUGABYTE_USER: string;
@@ -77,6 +81,7 @@ declare const ConfigSchema: z.ZodObject<{
     QUEUE_LEASE_DURATION_SECONDS?: number | undefined;
     QUEUE_HEARTBEAT_INTERVAL_SECONDS?: number | undefined;
     MAX_CONCURRENT_CHAPTERS?: number | undefined;
+    LITE_CHAPTER_WORKERS?: number | undefined;
     ADAPTIVE_INITIAL_CONCURRENCY?: number | undefined;
     TESTED_CONCURRENCY_CEILING?: number | undefined;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY?: number | undefined;
@@ -87,6 +92,7 @@ declare const ConfigSchema: z.ZodObject<{
     BUFFERED_PAGE_CONCURRENCY?: number | undefined;
     LOG_LEVEL?: "debug" | "info" | "warn" | "error" | undefined;
     IMPORTER_DB_MODE?: "direct" | "gateway" | undefined;
+    IMPORTER_RUNTIME_MODE?: "legacy" | "lite" | undefined;
     YUGABYTE_HOST?: string | undefined;
     YUGABYTE_PORT?: number | undefined;
     YUGABYTE_USER?: string | undefined;

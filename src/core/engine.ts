@@ -1087,7 +1087,6 @@ export class ImporterEngine {
          SET value = json_build_object('owner', $2::text, 'started_at', $4::timestamptz, 'expires_at', NOW() + ($3::int * INTERVAL '1 second'))::text
          WHERE (leader.value::jsonb->>'owner') = $2::text
             OR COALESCE((leader.value::jsonb->>'expires_at')::timestamptz, 'epoch'::timestamptz) <= NOW()
-            OR COALESCE((leader.value::jsonb->>'started_at')::timestamptz, 'epoch'::timestamptz) < $4::timestamptz
          RETURNING value`,
         [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS, this.runtimeBootedAt.toISOString()],
       );

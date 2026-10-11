@@ -18,6 +18,9 @@ export interface SourceWorkDetails {
   status?: 'ONGOING' | 'COMPLETED' | 'HIATUS' | 'CANCELLED' | 'UNKNOWN';
   year?: number;
   ageRating?: number;
+  /** BCP-47 when the adapter can prove it; Lite keeps editions separate. */
+  language?: string;
+  edition?: string;
   genres?: string[];
   alternativeTitles?: string[];
   raw?: Record<string, any>;
@@ -25,6 +28,8 @@ export interface SourceWorkDetails {
 
 export interface SourceChapterSummary {
   sourceChapterId: string;
+  /** Provider text preserved for Lite identity; `number` remains legacy display/sort compatibility. */
+  displayNumber?: string;
   number: number;
   title?: string;
   createdAt?: string;

@@ -41,6 +41,9 @@ const ConfigSchema = z.object({
   QUEUE_LEASE_DURATION_SECONDS: z.coerce.number().int().min(30).default(600),
   QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
   MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(128).default(10),
+  // Lite does not inherit the legacy chapter-worker setting at cutover.  A
+  // measured staging ramp must explicitly raise this safe admission cap.
+  LITE_CHAPTER_WORKERS: z.coerce.number().int().min(1).max(32).default(1),
   ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(3),
   // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
@@ -59,6 +62,11 @@ const ConfigSchema = z.object({
   BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(48),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   IMPORTER_DB_MODE: z.enum(['direct', 'gateway']).default('direct'),
+  // This branch is the approved Lite cutover artifact.  An explicit `legacy`
+  // setting remains available only for the documented rollback procedure; a
+  // fresh deployment must never silently revive the v1 scheduler because an
+  // environment variable was omitted by the native DIScloud Git integration.
+  IMPORTER_RUNTIME_MODE: z.enum(['legacy', 'lite']).default('lite'),
   YUGABYTE_HOST: z.string().default('sa-east-1.b49305ea-8536-43e6-936e-b2fd77fc07b0.aws.yugabyte.cloud'),
   YUGABYTE_PORT: z.coerce.number().default(5433),
   YUGABYTE_USER: z.string().default('admin'),

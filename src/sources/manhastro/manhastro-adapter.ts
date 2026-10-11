@@ -235,6 +235,7 @@ export class ManhastroAdapter implements SourceAdapter {
       synopsis: item.descricao_brasil?.trim() || item.descricao?.trim() || '',
       kind,
       status,
+      language: 'pt-BR',
       genres: item.generos || [],
       raw: item,
     };
@@ -255,8 +256,10 @@ export class ManhastroAdapter implements SourceAdapter {
 
     const chapters: SourceChapterSummary[] = rawChapters.map((ch) => {
       const num = extractChapterNumber(ch.capitulo_nome);
+      const displayNumber = ch.capitulo_nome?.match(/(\d+(?:\.\d+)?)/)?.[1] || String(num);
       return {
         sourceChapterId: String(ch.capitulo_id),
+        displayNumber,
         number: num,
         title: ch.capitulo_nome?.trim() || `Capítulo ${num}`,
         createdAt: ch.capitulo_data || new Date().toISOString(),

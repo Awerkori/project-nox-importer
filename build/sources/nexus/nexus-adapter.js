@@ -158,6 +158,7 @@ export class NexusAdapter {
         const rows = await this.request(url);
         return (rows || []).map((ch) => ({
             sourceChapterId: ch.id,
+            displayNumber: String(ch.number ?? ''),
             number: typeof ch.number === 'number' ? ch.number : parseFloat(ch.number || '0'),
             title: ch.title || undefined,
             createdAt: ch.created_at,

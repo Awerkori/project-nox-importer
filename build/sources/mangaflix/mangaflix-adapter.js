@@ -152,6 +152,7 @@ export class MangaFlixAdapter {
             author,
             kind,
             status: 'ONGOING',
+            language: 'pt-BR',
             genres: data.genres?.map((g) => g.name) || [],
             raw: data,
         };
@@ -162,6 +163,7 @@ export class MangaFlixAdapter {
             const num = parseFloat(ch.number) || 0;
             return {
                 sourceChapterId: ch._id,
+                displayNumber: ch.number,
                 number: num,
                 title: ch.name?.trim() || `Capítulo ${ch.number}`,
                 createdAt: ch.iso_date || ch.created_at || new Date().toISOString(),

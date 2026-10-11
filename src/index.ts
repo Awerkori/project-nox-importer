@@ -24,6 +24,7 @@ import { ImporterEngine } from './core/engine.js';
 import { HealthMonitor } from './core/health.js';
 import { diagnostics } from './core/diagnostics.js';
 import { telemetryCollector } from './core/telemetry-collector.js';
+import { ImporterLiteRuntime } from './lite/runtime.js';
 
 async function main() {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -79,7 +80,7 @@ async function main() {
   // 2. Initialize Storage Provider
   let storage: StorageProvider;
   if (config.STORAGE_PROVIDER === 'direct_telegram' || config.STORAGE_PROVIDER === 'telegram') {
-    storage = new DirectTelegramStorageProvider();
+    storage = new DirectTelegramStorageProvider(undefined, config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC);
   } else if (config.STORAGE_PROVIDER === 'worker') {
     if (!config.NOX_STORAGE_BRIDGE_TOKEN) {
       rootLogger.warn('Bridge token not provided, falling back to mock storage for safety');
@@ -101,8 +102,20 @@ async function main() {
   const rateLimiter = new HostRateLimiter(defaultHostRate);
   const registry = new SourceRegistry(rateLimiter, config.NOX_STORAGE_BRIDGE_TOKEN, config.NOX_MANGA_URL);
 
-  // 5. Initialize Importer Engine
-  const engine = new ImporterEngine(supabase, storage, registry, rateLimiter, config);
+  // 5. Lite is the default in the approved cutover artifact. Both runtimes
+  // share a durable leadership lease, so a rolling deploy cannot publish from
+  // both schedulers concurrently.
+  if (config.IMPORTER_RUNTIME_MODE === 'lite' && config.IMPORTER_DB_MODE !== 'direct') {
+    throw new Error('Importer Lite requires IMPORTER_DB_MODE=direct');
+  }
+  rootLogger.info('IMPORTER RUNTIME MODE', {
+    mode: config.IMPORTER_RUNTIME_MODE,
+    liteChapterWorkers: config.LITE_CHAPTER_WORKERS,
+    directDb: config.IMPORTER_DB_MODE === 'direct',
+  });
+  const engine = config.IMPORTER_RUNTIME_MODE === 'lite'
+    ? new ImporterLiteRuntime((supabase as DirectSupabaseClient).getPool(), supabase, registry, storage, config, rateLimiter)
+    : new ImporterEngine(supabase, storage, registry, rateLimiter, config);
 
   // 6. Graceful Shutdown & Forensics Handlers
   diagnostics.initProcessHandlers(async (signal: string) => {
