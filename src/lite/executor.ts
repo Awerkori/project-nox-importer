@@ -67,6 +67,15 @@ function canonicalChapterId(workId: string, chapterKey: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+/**
+ * Buffer ownership is intentionally distinct even for minimal/test executor
+ * construction. Reusing `downloads` would self-deadlock at capacity one,
+ * because a page holds a buffer permit while it acquires a request permit.
+ */
+function defaultBufferedPages(downloads: AsyncSemaphore): AsyncSemaphore {
+  return new AsyncSemaphore(downloads.capacity, 'lite_default_page_buffers');
+}
+
 export class LiteExecutor {
   private readonly sourceSlots = new Map<string, AsyncSemaphore>();
   // Held from byte download through receipt persistence. This is distinct
@@ -80,10 +89,7 @@ export class LiteExecutor {
     private readonly importerUserId: string,
     private readonly downloads: AsyncSemaphore,
     private readonly perChapterPageConcurrency = 4,
-    // Keep buffer ownership independent even for a minimal/test executor.
-    // Reusing `downloads` here would self-deadlock at capacity one because a
-    // page holds a buffer permit while it acquires a request permit.
-    private readonly bufferedPages: AsyncSemaphore = new AsyncSemaphore(downloads.capacity, 'lite_default_page_buffers'),
+    private readonly bufferedPages: AsyncSemaphore = defaultBufferedPages(downloads),
     private readonly sourceRateLimiter: HostRateLimiter = new HostRateLimiter(2),
   ) {}
 

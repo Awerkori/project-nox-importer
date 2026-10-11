@@ -63,6 +63,14 @@ function canonicalChapterId(workId, chapterKey) {
     const variant = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
+/**
+ * Buffer ownership is intentionally distinct even for minimal/test executor
+ * construction. Reusing `downloads` would self-deadlock at capacity one,
+ * because a page holds a buffer permit while it acquires a request permit.
+ */
+function defaultBufferedPages(downloads) {
+    return new AsyncSemaphore(downloads.capacity, 'lite_default_page_buffers');
+}
 export class LiteExecutor {
     db;
     queue;
@@ -77,11 +85,7 @@ export class LiteExecutor {
     // Held from byte download through receipt persistence. This is distinct
     // from request concurrency: it bounds real image buffers across every
     // chapter worker while Telegram is slow or cooling down.
-    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4,
-    // Keep buffer ownership independent even for a minimal/test executor.
-    // Reusing `downloads` here would self-deadlock at capacity one because a
-    // page holds a buffer permit while it acquires a request permit.
-    bufferedPages = new AsyncSemaphore(downloads.capacity, 'lite_default_page_buffers'), sourceRateLimiter = new HostRateLimiter(2)) {
+    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = defaultBufferedPages(downloads), sourceRateLimiter = new HostRateLimiter(2)) {
         this.db = db;
         this.queue = queue;
         this.registry = registry;
