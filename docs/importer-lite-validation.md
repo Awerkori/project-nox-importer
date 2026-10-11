@@ -14,6 +14,9 @@ actual SQL functions and the existing atomic Reader page function. The current
 integration suite verifies:
 
 - panel-triggered STAFF promotion followed by strict `STAFF > P0 > P1 > P2`;
+- STAFF is an admission overlay rather than a finalization lock: P0/P1/P2
+  tasks already running complete safely while duplicated panel requests are
+  collapsed logically, and cancellation restores the durable base priority;
 - concurrent claim fencing: exactly one worker can lease a durable task;
 - a ready work remains claimable behind 1,300 blocked task rows and peers of
   the same priority rotate fairly by work, including a 1,300-chapter ready
@@ -37,7 +40,10 @@ integration suite verifies:
   blocked task, rather than cycling forever through recovery;
 - P0 monitoring materialises newly observed chapters as P0 without rebucketing
   initial P1 fill work, while a source manifest entry at or before the durable
-  frontier is materialised as a P1 repair;
+  frontier is materialised as a P1 repair. 1,300 monitor rows are invisible to
+  normal P1/P2 claims; monitor probes have their own one-slot empty backoff,
+  bounded intervals, interrupted-lease recovery, and panel wake-up after the
+  catalog task attaches its canonical work ID;
 - a fully isolated path from `DISCOVER` through `CATALOG`, source route,
   Telegram receipt, `PUBLISH`, `published_at` and the Reader page manifest.
 - the Telegram receipt journal persists provider file ID, bot, shard, channel
