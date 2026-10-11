@@ -22,6 +22,14 @@ export declare class LiteRepository {
         inserted: boolean;
         task: LiteTask | null;
     }>;
+    /**
+     * Cataloguing can reveal hundreds of chapters at once.  Insert their durable
+     * work in one short transaction, then refresh each affected ready-work row
+     * once.  It intentionally does no network work and never claims anything.
+     */
+    enqueueMany(inputs: EnqueueLiteTask[]): Promise<{
+        inserted: number;
+    }>;
     claim(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     checkpoint(task: LiteTask, workerId: string, patch: Record<string, unknown>): Promise<boolean>;
     finish(task: LiteTask, workerId: string, outcome: {

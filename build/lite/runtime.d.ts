@@ -27,6 +27,7 @@ export declare class ImporterLiteRuntime {
     start(): Promise<void>;
     stop(): void;
     private seedDiscovery;
+    private upsertChapterSources;
     private worker;
     /** One empty claim probe per idle interval, shared by every worker. */
     private claimNext;

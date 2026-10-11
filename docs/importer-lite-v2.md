@@ -21,6 +21,9 @@ Invariants:
   manifest entry becomes a P1 repair. This is evidence from the source
   manifest, never a guessed numerical gap; existing P1 tasks keep their
   priority through their idempotency key.
+- A catalog manifest is persisted in bounded batches (500 rows per SQL write),
+  with one short queue transaction and one ready-work refresh per work. A
+  large work therefore does not turn into a per-chapter YSQL transaction loop.
 - Source rank is independent of task priority. MangaFlix is rank 10 and
   Manhastro (the configured technical source corresponding to the requested
   Manhua source) rank 20; either loses to a confirmed healthy alternative only

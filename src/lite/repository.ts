@@ -65,6 +65,52 @@ export class LiteRepository {
     } finally { client.release(); }
   }
 
+  /**
+   * Cataloguing can reveal hundreds of chapters at once.  Insert their durable
+   * work in one short transaction, then refresh each affected ready-work row
+   * once.  It intentionally does no network work and never claims anything.
+   */
+  async enqueueMany(inputs: EnqueueLiteTask[]): Promise<{ inserted: number }> {
+    if (inputs.length === 0) return { inserted: 0 };
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const workIds = [...new Set(inputs.map((input) => input.workId).filter((id): id is string => Boolean(id)))];
+      const staff = workIds.length ? await client.query<Row>(`SELECT DISTINCT work_id::text AS work_id
+        FROM importer_staff_requests WHERE work_id=ANY($1::uuid[])
+          AND status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')`, [workIds]) : { rows: [] as Row[] };
+      const staffWorkIds = new Set(staff.rows.map((row) => String(row.work_id)));
+      let inserted = 0;
+      // Keep far below PostgreSQL's parameter limit even if a source returns
+      // an unusually large manifest.
+      for (let offset = 0; offset < inputs.length; offset += 500) {
+        const batch = inputs.slice(offset, offset + 500);
+        const values: unknown[] = [];
+        const rows = batch.map((input, index) => {
+          const start = index * 11;
+          values.push(
+            input.taskType, input.workId || null, input.workKey, input.chapterKey || null,
+            staffWorkIds.has(String(input.workId)) ? 0 : LITE_PRIORITY_RANK[input.priority], LITE_PRIORITY_RANK[input.priority],
+            input.idempotencyKey, input.nextRunAt || new Date(), input.maxAttempts || 8,
+            JSON.stringify(input.payload || {}), JSON.stringify(input.checkpoint || {}),
+          );
+          return `($${start + 1},$${start + 2}::uuid,$${start + 3},$${start + 4},$${start + 5},$${start + 6},$${start + 7},$${start + 8},$${start + 9},$${start + 10}::jsonb,$${start + 11}::jsonb)`;
+        });
+        const result = await client.query<Row>(`INSERT INTO importer_lite_tasks
+          (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint)
+          VALUES ${rows.join(',')}
+          ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`, values);
+        inserted += result.rowCount || 0;
+      }
+      for (const workKey of new Set(inputs.map((input) => input.workKey))) await this.refreshReadyWork(client, workKey);
+      await client.query('COMMIT');
+      return { inserted };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+
   async claim(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
     const result = await this.db.query<Row>(
       'SELECT * FROM public.importer_lite_claim_task($1,$2::interval)',

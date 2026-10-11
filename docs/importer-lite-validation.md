@@ -17,7 +17,8 @@ integration suite verifies:
 - concurrent claim fencing: exactly one worker can lease a durable task;
 - a ready work remains claimable behind 1,300 blocked task rows and peers of
   the same priority rotate fairly by work, including a 1,300-chapter ready
-  work that cannot monopolize other P1 works;
+  work that cannot monopolize other P1 works; a 1,300-chapter catalog batch is
+  also materialised through the bounded batch enqueue path;
 - expired leases, due retries, publish-task materialisation and bounded,
   per-work blocked-task re-evaluation, with the origin import settled after
   publication so recovery does not recreate completed work;

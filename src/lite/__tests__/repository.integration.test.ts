@@ -153,6 +153,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('worker-b', 120))?.idempotencyKey).toBe('small-work');
   });
 
+  it('materializes a 1,300-chapter catalog batch in bounded inserts and keeps its queue durable', async () => {
+    const result = await repo.enqueueMany(Array.from({ length: 1300 }, (_, index) => ({
+      taskType: 'IMPORT_CHAPTER' as const, workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: `batch:${index + 1}`, priority: 'P1' as const, idempotencyKey: `catalog-batch-${index + 1}`,
+      payload: { displayNumber: String(index + 1), orderKey: String(index + 1) },
+    })));
+    expect(result.inserted).toBe(1300);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks WHERE idempotency_key LIKE 'catalog-batch-%'`)).rows[0].count).toBe(1300);
+    expect((await repo.claim('worker-a', 120))?.workId).toBe(ids.p1a);
+  });
+
   it('recovers an expired lease and materializes a publish task from completed media without a global scan', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:1', priority: 'P1', idempotencyKey: 'recover' });
     const claimed = await repo.claim('worker-a', 30);

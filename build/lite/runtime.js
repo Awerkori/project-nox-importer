@@ -74,6 +74,23 @@ export class ImporterLiteRuntime {
                 idempotencyKey: `lite:discover:${id}`, payload: { source: id }, checkpoint: { cursor: null } });
         }
     }
+    async upsertChapterSources(rows) {
+        for (let offset = 0; offset < rows.length; offset += 500) {
+            const batch = rows.slice(offset, offset + 500);
+            const values = [];
+            const tuples = batch.map((row, index) => {
+                const start = index * 8;
+                values.push(row.workId, row.chapterKey, row.source, row.sourceChapterId, row.language, row.edition, row.orderKey, row.sourceRank);
+                return `($${start + 1}::uuid,$${start + 2},$${start + 3},$${start + 4},$${start + 5},$${start + 6},$${start + 7},$${start + 8},true,true,now())`;
+            });
+            await this.pool.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter,last_verified_at)
+        VALUES ${tuples.join(',')}
+        ON CONFLICT(source,source_chapter_id) DO UPDATE SET canonical_chapter_key=excluded.canonical_chapter_key,
+          language=excluded.language,edition=excluded.edition,order_key=excluded.order_key,source_rank=excluded.source_rank,
+          confirmed=true,has_chapter=true,last_verified_at=now(),updated_at=now()`, values);
+        }
+    }
     async worker(workerId, slotIndex) {
         telemetryCollector.registerSlot(slotIndex);
         while (!this.stopped) {
@@ -224,21 +241,28 @@ export class ImporterLiteRuntime {
           FROM importer_lite_chapter_sources WHERE work_id=$1::uuid AND order_key LIKE 'n|%'`, [resolved.workId])
                 : { rows: [{ order_key: null }] };
             const knownNormalOrder = knownFrontier.rows[0]?.order_key || null;
+            const sourceRows = [];
+            const chapterTasks = [];
+            const sourceChapterIds = new Set();
             for (const chapter of snapshot.chapters) {
+                // A duplicate manifest entry cannot be allowed to make one batched
+                // UPSERT fail and delay every other chapter in this catalog pass.
+                if (sourceChapterIds.has(chapter.sourceChapterId))
+                    continue;
+                sourceChapterIds.add(chapter.sourceChapterId);
                 const displayNumber = chapter.displayNumber || String(chapter.number);
                 const chapterKey = canonicalChapterKey({ displayNumber, title: chapter.title, language, edition });
                 const orderKey = chapterOrderKey({ displayNumber, title: chapter.title });
                 const historicalRepair = p0Monitoring && orderKey.startsWith('n|') && Boolean(knownNormalOrder && orderKey <= knownNormalOrder);
                 const chapterPriority = p0Monitoring && !historicalRepair ? 'P0' : 'P1';
-                await this.pool.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter,last_verified_at)
-          VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8,true,true,now())
-          ON CONFLICT(source,source_chapter_id) DO UPDATE SET canonical_chapter_key=excluded.canonical_chapter_key,
-            language=excluded.language,edition=excluded.edition,order_key=excluded.order_key,source_rank=excluded.source_rank,
-            confirmed=true,has_chapter=true,last_verified_at=now(),updated_at=now()`, [resolved.workId, chapterKey, source, chapter.sourceChapterId, language, edition, orderKey, rankForSource(source)]);
-                await this.queue.enqueue({ taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
+                sourceRows.push({ workId: resolved.workId, chapterKey, source, sourceChapterId: chapter.sourceChapterId,
+                    language, edition, orderKey, sourceRank: rankForSource(source) });
+                chapterTasks.push({ taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
                     chapterKey, priority: chapterPriority, idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,
                     payload: { displayNumber, chapterTitle: chapter.title || '', orderKey, language, edition } });
             }
+            await this.upsertChapterSources(sourceRows);
+            await this.queue.enqueueMany(chapterTasks);
             // A newly confirmed mapping (or repaired presentation metadata) is
             // evidence worth re-evaluating. This indexed, per-work wake-up replaces
             // the legacy global blocked-task sweeps.
