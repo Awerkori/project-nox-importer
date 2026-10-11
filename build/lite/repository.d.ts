@@ -98,6 +98,7 @@ export declare class LiteRepository {
         exhausted: number;
         uploads: number;
         publishable: number;
+        publishRepairs: number;
     }>;
     operationalSnapshot(): Promise<Array<{
         priority: LitePriority;
