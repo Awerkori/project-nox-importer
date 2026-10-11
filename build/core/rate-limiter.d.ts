@@ -10,6 +10,14 @@ export declare class HostRateLimiter {
     private getBucket;
     recordSuccess(host: string): void;
     getHostRate(host: string): number;
+    /** Compact, host-anonymous diagnostic state for the Lite heartbeat. */
+    getSummary(activeWithinMs?: number): {
+        activeHosts: number;
+        blockedHosts: number;
+        minRatePerSecond: number | null;
+        maxRatePerSecond: number | null;
+        averageRatePerSecond: number | null;
+    };
     /**
      * Acquire a token for host with jitter and sleep if necessary
      */

@@ -444,6 +444,7 @@ export class ImporterLiteRuntime {
                 chapterWorkers: Math.max(1, Math.min(this.config.LITE_CHAPTER_WORKERS ?? 1, this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING)),
                 snapshotDeferred: 'POOL_BUSY',
                 ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+                sourceRate: this.sourceRateLimiter.getSummary(),
                 observedAt: new Date().toISOString(),
             };
             this.logger.info('Lite operational heartbeat deferred', deferred);
@@ -478,7 +479,7 @@ export class ImporterLiteRuntime {
                 external: Math.round(memory.external / 1024 / 1024), arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024),
             },
             ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
-            telegram, site: this.lastSiteProbe,
+            telegram, sourceRate: this.sourceRateLimiter.getSummary(), site: this.lastSiteProbe,
         };
         this.logger.info('Lite operational progress', snapshot);
         // A compact durable marker makes a native deploy auditable even when its
