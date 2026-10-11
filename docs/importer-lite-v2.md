@@ -26,7 +26,9 @@ Invariants:
 - An upload with an explicit Telegram rejection remains retryable using the
   same reserved media ID. A timeout, lost response, or a Telegram success
   followed by failed receipt persistence becomes `UNKNOWN` and blocks that
-  page for recovery instead of blindly uploading it again.
+  page for recovery instead of blindly uploading it again. The reconciler
+  also surfaces an `UNKNOWN` (or a stale intent) left by a restart as an
+  explicit task block; it never silently replays it.
 - Fallback is allowed before media persists. Once a page receipt exists, the
   task is pinned to its selected source and page-manifest hash; an alternative
   cannot silently mix another edition into a partial chapter.
@@ -36,10 +38,30 @@ Invariants:
   limiter; an executor-local per-source chapter semaphore stops one slow
   provider from claiming the entire worker pool.
 - One bounded reconciler handles expired leases, due retries, and completed
-  imports without a publish task. It has no global work sweep.
+  imports without a publish task. It also isolates durable upload outcomes
+  that need operator reconciliation. Lease and retry recovery stop at each
+  task's durable `max_attempts` and become a reasoned block rather than an
+  infinite crash/retry loop. It has no global work sweep.
+- Discovery, cataloguing and chapter import record source health in the same
+  durable table. A successful operation clears a temporary cooldown; a failed
+  preferred source therefore makes a confirmed alternative selectable without
+  changing the task's `STAFF > P0 > P1 > P2` priority.
 - Idle workers share one short claim backoff, so an empty Lite queue performs
   one bounded probe per interval rather than multiplying empty claims by the
   configured worker count.
+
+## Chapter sequence policy
+
+The source manifest, not a numerical gap, is the authority on what chapters
+exist. Lite persists a textual canonical identity with display number, order
+key, edition, language and special-kind information; `12.1`, `12.10`, an
+extra numbered `12`, and another edition are never conflated by the importer.
+The Reader contract currently permits independent publication of a complete,
+valid canonical chapter, so Lite does **not** manufacture predecessor tasks or
+hold a valid chapter behind a missing number. If the Reader later requires an
+editorial sequence barrier, the dependency must be persisted explicitly for
+that verified manifest relation and reawakened by the predecessor's publish
+event—not inferred from a float or a gap.
 
 The migration is additive. It creates no worker, removes no source, modifies
 no legacy task, and does not activate Lite. A cutover needs an approved backup,

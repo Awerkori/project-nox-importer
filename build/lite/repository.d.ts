@@ -38,10 +38,20 @@ export declare class LiteRepository {
      * blocked until an operator changes the underlying condition.
      */
     wakeCatalogBlocked(workId: string, workKey: string): Promise<number>;
+    /**
+     * Source health is durable operational evidence, shared by discovery,
+     * cataloguing and chapter execution.  It is deliberately separate from
+     * task priority: a cooled-down preferred source must not suppress a
+     * confirmed healthy alternative.
+     */
+    recordSourceFailure(source: string, error: unknown): Promise<void>;
+    recordSourceSuccess(source: string): Promise<void>;
     /** One bounded recovery turn; it cannot consume the claim path or scan works. */
     reconcile(limit?: number): Promise<{
         leases: number;
         retries: number;
+        exhausted: number;
+        uploads: number;
         publishable: number;
     }>;
     operationalSnapshot(): Promise<Array<{

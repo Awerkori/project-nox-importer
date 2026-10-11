@@ -139,25 +139,76 @@ export class LiteRepository {
     } finally { client.release(); }
   }
 
+  /**
+   * Source health is durable operational evidence, shared by discovery,
+   * cataloguing and chapter execution.  It is deliberately separate from
+   * task priority: a cooled-down preferred source must not suppress a
+   * confirmed healthy alternative.
+   */
+  async recordSourceFailure(source: string, error: unknown): Promise<void> {
+    const detail = error as { retryAfter?: unknown; parameters?: { retry_after?: unknown }; message?: unknown } | undefined;
+    const retryAfter = Number(detail?.retryAfter || detail?.parameters?.retry_after || 0);
+    const cooldownSeconds = retryAfter > 0 ? Math.min(3600, retryAfter + 2) : 60;
+    const health = retryAfter > 0 ? 'RATE_LIMITED' : 'DEGRADED';
+    await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+      VALUES($1,$2,now()+($3 || ' seconds')::interval,1,$4)
+      ON CONFLICT(source) DO UPDATE SET health=excluded.health,cooldown_until=excluded.cooldown_until,
+        consecutive_failures=importer_lite_source_health.consecutive_failures+1,last_error=excluded.last_error,updated_at=now()`,
+    [source, health, String(cooldownSeconds), String(detail?.message || 'SOURCE_FAILURE').slice(0, 500)]).catch(() => {});
+  }
+
+  async recordSourceSuccess(source: string): Promise<void> {
+    await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+      VALUES($1,'HEALTHY',NULL,0,NULL)
+      ON CONFLICT(source) DO UPDATE SET health='HEALTHY',cooldown_until=NULL,
+        consecutive_failures=0,last_error=NULL,updated_at=now()`, [source]).catch(() => {});
+  }
+
   /** One bounded recovery turn; it cannot consume the claim path or scan works. */
-  async reconcile(limit = 50): Promise<{ leases: number; retries: number; publishable: number }> {
+  async reconcile(limit = 50): Promise<{ leases: number; retries: number; exhausted: number; uploads: number; publishable: number }> {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
       const leases = await client.query<Row>(
         `WITH picked AS (
-           SELECT id,work_key FROM importer_lite_tasks WHERE state='RUNNING' AND lease_until<now()
+           SELECT id,work_key,attempts,max_attempts FROM importer_lite_tasks WHERE state='RUNNING' AND lease_until<now()
            ORDER BY lease_until LIMIT $1 FOR UPDATE SKIP LOCKED
-         ) UPDATE importer_lite_tasks t SET state='RETRY_WAIT', lease_owner=NULL, lease_until=NULL,
-           next_run_at=now() + interval '30 seconds', reason='LEASE_EXPIRED', updated_at=now()
-         FROM picked WHERE t.id=picked.id RETURNING picked.work_key`, [limit],
+         ) UPDATE importer_lite_tasks t SET
+           state=CASE WHEN picked.attempts >= picked.max_attempts THEN 'BLOCKED' ELSE 'RETRY_WAIT' END,
+           lease_owner=NULL, lease_until=NULL,
+           next_run_at=CASE WHEN picked.attempts >= picked.max_attempts THEN t.next_run_at ELSE now() + interval '30 seconds' END,
+           reason=CASE WHEN picked.attempts >= picked.max_attempts THEN 'LEASE_EXPIRED_MAX_ATTEMPTS' ELSE 'LEASE_EXPIRED' END,
+           updated_at=now()
+         FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state`, [limit],
       );
       const retries = await client.query<Row>(
         `WITH picked AS (
-           SELECT id,work_key FROM importer_lite_tasks WHERE state='RETRY_WAIT' AND next_run_at<=now()
+           SELECT id,work_key,attempts,max_attempts FROM importer_lite_tasks WHERE state='RETRY_WAIT' AND next_run_at<=now()
            ORDER BY next_run_at LIMIT $1 FOR UPDATE SKIP LOCKED
-         ) UPDATE importer_lite_tasks t SET state='READY', updated_at=now()
-         FROM picked WHERE t.id=picked.id RETURNING picked.work_key`, [limit],
+         ) UPDATE importer_lite_tasks t SET
+           state=CASE WHEN picked.attempts >= picked.max_attempts THEN 'BLOCKED' ELSE 'READY' END,
+           reason=CASE WHEN picked.attempts >= picked.max_attempts THEN 'MAX_ATTEMPTS_EXHAUSTED' ELSE t.reason END,
+           updated_at=now()
+         FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state`, [limit],
+      );
+      // A Telegram request with an unknown outcome must never be replayed.
+      // Likewise, an old intent left by a crashed process has no proof that
+      // Telegram did not accept it.  Mark only the owning task BLOCKED;
+      // this bounded, indexed pass never holds up unrelated work.
+      const uploads = await client.query<Row>(
+        `WITH picked AS (
+           SELECT u.task_id,t.work_key,u.page_position
+           FROM importer_lite_uploads u
+           JOIN importer_lite_tasks t ON t.id=u.task_id
+           WHERE t.state NOT IN ('BLOCKED','DONE') AND (
+             u.state='UNKNOWN' OR
+             (u.state IN ('INTENT','UPLOADED') AND u.updated_at < now() - interval '15 minutes')
+           )
+           ORDER BY u.updated_at LIMIT $1 FOR UPDATE OF u,t SKIP LOCKED
+         ) UPDATE importer_lite_tasks t
+           SET state='BLOCKED',lease_owner=NULL,lease_until=NULL,
+               reason='UPLOAD_OUTCOME_UNKNOWN:' || picked.page_position::text,updated_at=now()
+         FROM picked WHERE t.id=picked.task_id RETURNING picked.work_key`, [limit],
       );
       // A completed media checkpoint never waits for a global sweep: it gains
       // one durable PUBLISH task. The unique key makes this idempotent.
@@ -176,11 +227,14 @@ export class LiteRepository {
             JSON.stringify({ importTaskId: row.id }), JSON.stringify({})],
         );
       }
-      for (const key of new Set([...leases.rows, ...retries.rows, ...ready.rows].map((row) => row.work_key))) {
+      for (const key of new Set([...leases.rows, ...retries.rows, ...uploads.rows, ...ready.rows].map((row) => row.work_key))) {
         await this.refreshReadyWork(client, key);
       }
       await client.query('COMMIT');
-      return { leases: leases.rowCount || 0, retries: retries.rowCount || 0, publishable: ready.rowCount || 0 };
+      const leaseRetries = leases.rows.filter((row) => row.state === 'RETRY_WAIT').length;
+      const readyRetries = retries.rows.filter((row) => row.state === 'READY').length;
+      const exhausted = [...leases.rows, ...retries.rows].filter((row) => row.state === 'BLOCKED').length;
+      return { leases: leaseRetries, retries: readyRetries, exhausted, uploads: uploads.rowCount || 0, publishable: ready.rowCount || 0 };
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
       throw error;

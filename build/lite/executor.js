@@ -2,8 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readImageBody } from '../core/bounded-body.js';
 import { calculateSha256, inspectImage } from '../storage/media.js';
 import { selectableChapterSources } from './source-selector.js';
-import { AsyncSemaphore } from '../core/concurrency.js';
-import { SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
+import { AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
@@ -124,15 +123,6 @@ export class LiteExecutor {
         finally {
             client.release();
         }
-    }
-    async recordSourceFailure(source, error) {
-        const retryAfter = Number(error?.retryAfter || error?.parameters?.retry_after || 0);
-        const cooldownSeconds = retryAfter > 0 ? Math.min(3600, retryAfter + 2) : 60;
-        const health = retryAfter > 0 ? 'RATE_LIMITED' : 'DEGRADED';
-        await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
-      VALUES($1,$2,now()+($3 || ' seconds')::interval,1,$4)
-      ON CONFLICT(source) DO UPDATE SET health=excluded.health,cooldown_until=excluded.cooldown_until,
-        consecutive_failures=importer_lite_source_health.consecutive_failures+1,last_error=excluded.last_error,updated_at=now()`, [source, health, String(cooldownSeconds), String(error?.message || 'SOURCE_FAILURE').slice(0, 500)]).catch(() => { });
     }
     async hasPersistedUpload(taskId) {
         const result = await this.db.query(`SELECT EXISTS(SELECT 1 FROM importer_lite_uploads WHERE task_id=$1::uuid AND state='PERSISTED') AS persisted`, [taskId]);
@@ -264,6 +254,7 @@ export class LiteExecutor {
                 });
                 await this.queue.checkpoint(task, workerId, { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source, mediaStoredAt: new Date().toISOString() });
                 await this.queue.finish(task, workerId, { state: 'DONE', checkpoint: { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source } });
+                await this.queue.recordSourceSuccess(route.source);
                 await this.queue.enqueue({ taskType: 'PUBLISH', workId: task.workId, workKey: task.workKey, chapterKey: task.chapterKey,
                     priority: task.basePriority === 'STAFF' ? 'P0' : task.basePriority,
                     idempotencyKey: `lite:publish:${task.workId}:${task.chapterKey}`, payload: { importTaskId: task.id } });
@@ -272,7 +263,7 @@ export class LiteExecutor {
             catch (error) {
                 lastError = error;
                 if (isSourceFailure(error)) {
-                    await this.recordSourceFailure(route.source, error);
+                    await this.queue.recordSourceFailure(route.source, error);
                     // Never blend a partially persisted chapter with an alternative
                     // source. The task will retry the pinned route after its cooldown.
                     if (await this.hasPersistedUpload(task.id))

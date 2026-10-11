@@ -16,6 +16,9 @@ only a controlled benchmark can establish sustained production capacity.
 | STAGED/paused work was invisible | PR #416, #417 | media-complete import enqueues PUBLISH immediately; reconciler repairs only bounded missing publication tasks | repository reconciler | stored-but-unpublished age |
 | RSS pressure permanently reduced capacity | PR #420 | Lite uses fixed, global limits and does not alter concurrency from RSS; pressure must backpressure admission, not permanently shrink limits | legacy memory tests retained; Lite limits are explicit | RSS/heap/external + productive slots |
 | Telegram state existed only in RAM | direct storage `metadataMap` and historical recovery code | upload intent/receipt journal is durable; uncertain outcomes are BLOCKED, never blindly duplicated | upload state schema; executor path | INTENT/UNKNOWN uploads |
+| A restart could leave an upload outcome unclassified | no transaction spans Telegram and YSQL | bounded reconciler turns `UNKNOWN` and stale intents into one explicit per-task block, never a blind resend | integration: unknown upload recovery | old unknown-upload age |
+| Source failures were observed only by a chapter worker | discovery/catalog failures could keep being retried without a shared cooldown | all source-facing stages write one durable health record; success clears transient degradation | integration: discovery source health | source health/cooldown, failures |
+| Crash recovery could keep re-leasing the same task | lease expiry alone does not prove the work remains safe to retry forever | reconciler respects `max_attempts` for expired leases and due retries | integration: crash-exhausted lease | exhausted-task count |
 
 ## Causal map retained from the audit
 

@@ -20,7 +20,6 @@ export declare class LiteExecutor {
     private sourceSlot;
     private routes;
     private createOrLoadChapter;
-    private recordSourceFailure;
     private hasPersistedUpload;
     importChapter(task: LiteTask, workerId: string): Promise<void>;
     publish(task: LiteTask, workerId: string): Promise<void>;

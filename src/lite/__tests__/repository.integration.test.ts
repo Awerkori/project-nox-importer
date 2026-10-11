@@ -171,6 +171,50 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(publish.rows).toEqual([{ task_type: 'PUBLISH', state: 'READY' }]);
   });
 
+  it('turns a durable unknown Telegram outcome into a visible per-task block without touching other work', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:unknown', priority: 'P1', idempotencyKey: 'unknown-recovery' });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`, chapterKey: 'chapter:healthy', priority: 'P1', idempotencyKey: 'healthy-neighbour' });
+    const unknown = await db.query<{ id: string }>(`SELECT id FROM importer_lite_tasks WHERE idempotency_key='unknown-recovery'`);
+    await repo.reserveUpload(unknown.rows[0].id, 1, 'unknown-sha');
+    await repo.markUploadUnknown(unknown.rows[0].id, 1);
+
+    expect((await repo.reconcile(10)).uploads).toBe(1);
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`, [unknown.rows[0].id])).rows[0])
+      .toMatchObject({ state: 'BLOCKED', reason: 'UPLOAD_OUTCOME_UNKNOWN:1' });
+    expect((await repo.claim('worker-a', 30))?.idempotencyKey).toBe('healthy-neighbour');
+  });
+
+  it('does not retry a repeatedly crashed lease beyond its durable attempt limit', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:crash', priority: 'P1', idempotencyKey: 'crash-exhausted', maxAttempts: 1 });
+    const claimed = await repo.claim('worker-a', 30);
+    await db.query(`UPDATE importer_lite_tasks SET lease_until=now()-interval '1 second' WHERE id=$1`, [claimed!.id]);
+
+    const recovered = await repo.reconcile(10);
+    expect(recovered).toMatchObject({ leases: 0, exhausted: 1 });
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`, [claimed!.id])).rows[0])
+      .toMatchObject({ state: 'BLOCKED', reason: 'LEASE_EXPIRED_MAX_ATTEMPTS' });
+  });
+
+  it('persists discovery failure health and clears it after a confirmed healthy source operation', async () => {
+    const adapter = { id: 'source-a', fetchUpdatedWorks: vi.fn(async () => { throw new Error('SOURCE_A_TIMEOUT'); }) };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    await repo.enqueue({ taskType: 'DISCOVER', workKey: 'source:source-a', priority: 'P2', idempotencyKey: 'unhealthy-discovery', payload: { source: 'source-a' } });
+    const task = await repo.claim('discover', 30);
+    await (runtime as any).handle(task, 'discover');
+    expect((await db.query(`SELECT health,consecutive_failures FROM importer_lite_source_health WHERE source='source-a'`)).rows[0])
+      .toMatchObject({ health: 'DEGRADED', consecutive_failures: 1 });
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('RETRY_WAIT');
+
+    await repo.recordSourceSuccess('source-a');
+    expect((await db.query(`SELECT health,cooldown_until,consecutive_failures,last_error FROM importer_lite_source_health WHERE source='source-a'`)).rows[0])
+      .toMatchObject({ health: 'HEALTHY', cooldown_until: null, consecutive_failures: 0, last_error: null });
+  });
+
   it('reopens only source-blocked work after fresh catalog evidence, never an unknown upload outcome', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:1', priority: 'P1', idempotencyKey: 'source-blocked' });
     const sourceBlocked = await repo.claim('worker-a', 30);

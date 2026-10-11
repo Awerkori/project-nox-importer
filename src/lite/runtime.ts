@@ -120,6 +120,7 @@ export class ImporterLiteRuntime {
     if (!adapter) return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'SOURCE_ADAPTER_UNAVAILABLE' });
     try {
       const page = await adapter.fetchUpdatedWorks(String(task.checkpoint.cursor || '') || null, { mode: 'maintenance' });
+      await this.queue.recordSourceSuccess(source);
       for (const work of page.works.slice(0, 100)) {
         await this.queue.enqueue({ taskType: 'CATALOG', workKey: `source:${source}:${work.sourceWorkId}`, priority: 'P2',
           idempotencyKey: `lite:catalog:${source}:${work.sourceWorkId}`, payload: { source, sourceWorkId: work.sourceWorkId } });
@@ -128,6 +129,7 @@ export class ImporterLiteRuntime {
       await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', priority: 'P2', nextRunAt: new Date(Date.now() + (page.nextCursor ? 1_000 : 10 * 60_000)),
         checkpoint: { cursor: page.nextCursor } });
     } catch (error: any) {
+      await this.queue.recordSourceFailure(source, error);
       await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: String(error?.message || 'DISCOVERY_FAILED'), nextRunAt: new Date(Date.now() + 60_000) });
     }
   }
@@ -136,10 +138,12 @@ export class ImporterLiteRuntime {
     const source = String(task.payload.source || ''); const sourceWorkId = String(task.payload.sourceWorkId || '');
     const adapter = this.registry.get(source);
     if (!adapter || !sourceWorkId) return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CATALOG_INPUT_INVALID' });
+    let fetchedSnapshot = false;
     try {
       const snapshot = adapter.fetchWorkSnapshot ? await adapter.fetchWorkSnapshot(sourceWorkId) : {
         details: await adapter.fetchWorkDetails(sourceWorkId), chapters: await adapter.fetchChapters(sourceWorkId),
       };
+      fetchedSnapshot = true;
       const resolved = await this.dedupe.resolveWork({ source, sourceWorkId, title: snapshot.details.title, slug: snapshot.details.slug,
         aliases: snapshot.details.alternativeTitles, genres: snapshot.details.genres, author: snapshot.details.author,
         artist: snapshot.details.artist, synopsis: snapshot.details.synopsis, rawMetadata: snapshot.details.raw,
@@ -174,7 +178,9 @@ export class ImporterLiteRuntime {
       // stay catalogued and are revisited only through discovery/repair.
       const ongoing = snapshot.details.status === 'ONGOING';
       await this.queue.finish(task, workerId, ongoing ? { state: 'RETRY_WAIT', priority: 'P0', nextRunAt: new Date(Date.now() + 15 * 60_000), checkpoint: { workId: resolved.workId } } : { state: 'DONE', checkpoint: { workId: resolved.workId } });
+      await this.queue.recordSourceSuccess(source);
     } catch (error: any) {
+      if (!fetchedSnapshot) await this.queue.recordSourceFailure(source, error);
       await this.queue.finish(task, workerId, { state: task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
         reason: String(error?.message || 'CATALOG_FAILED').slice(0,500), nextRunAt: new Date(Date.now() + 60_000) });
     }

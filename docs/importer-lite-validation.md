@@ -25,7 +25,14 @@ integration suite verifies:
 - healthy source fallback before storage, and safe source/manifest pinning
   after partial storage;
 - explicit Telegram 429 retry versus ambiguous upload/receipt failure, which
-  becomes durable `UNKNOWN` rather than a blind duplicate upload;
+  becomes durable `UNKNOWN` rather than a blind duplicate upload, including a
+  reconciler pass that surfaces a crash-surviving unknown upload as one
+  observable blocked task while healthy neighbouring work proceeds;
+- source-health persistence across discovery/catalog/import: failures create a
+  bounded cooldown and successful operations clear it, allowing a confirmed
+  alternative source route without changing task priority;
+- a repeatedly expired lease reaches `max_attempts` and becomes an explicit
+  blocked task, rather than cycling forever through recovery;
 - P0 monitoring materialises newly observed chapters as P0 without rebucketing
   initial P1 fill work;
 - a fully isolated path from `DISCOVER` through `CATALOG`, source route,
