@@ -458,6 +458,22 @@ export class LiteRepository {
 
   /** Stable ID is reserved before the non-transactional Telegram call. */
   async reserveUpload(taskId: string, pagePosition: number, sha256: string): Promise<{ mediaId: string; state: string }> {
+    // The normal new-page path used to make three sequential round trips:
+    // read receipt, look for a reusable media row, then insert the intent.
+    // Under a two-connection YSQL pool that turns a 30-page chapter into a
+    // large local queue.  Optimistically reserve in one statement instead;
+    // only the uncommon already-present/race path reads the receipt back.
+    const freshId = randomUUID();
+    const inserted = await this.db.query<Row>(`WITH reusable AS (
+        SELECT id FROM media WHERE sha256=$3 AND storage_ready=true
+          AND bytes>0 AND mime LIKE 'image/%' ORDER BY created_at LIMIT 1
+      ) INSERT INTO importer_lite_uploads(task_id,page_position,media_id,sha256,state)
+      SELECT $1::uuid,$2,COALESCE((SELECT id FROM reusable),$4::uuid),$3,
+        CASE WHEN EXISTS(SELECT 1 FROM reusable) THEN 'PERSISTED' ELSE 'INTENT' END
+      ON CONFLICT(task_id,page_position) DO NOTHING
+      RETURNING media_id,state`, [taskId, pagePosition, sha256, freshId]);
+    if (inserted.rows[0]) return { mediaId: inserted.rows[0].media_id, state: inserted.rows[0].state };
+
     const existing = await this.db.query<Row>(`SELECT u.media_id,u.state,u.sha256,m.storage_ready,m.bytes,m.mime,m.sha256 AS media_sha256
       FROM importer_lite_uploads u LEFT JOIN media m ON m.id=u.media_id
       WHERE u.task_id=$1::uuid AND u.page_position=$2`, [taskId, pagePosition]);
@@ -491,25 +507,6 @@ export class LiteRepository {
       }
       return { mediaId: row.media_id, state: row.state };
     }
-    const reusable = await this.db.query<Row>(`SELECT id FROM media WHERE sha256=$1 AND storage_ready=true
-      AND bytes>0 AND mime LIKE 'image/%' ORDER BY created_at LIMIT 1`, [sha256]);
-    if (reusable.rows[0]?.id) {
-      const reused = await this.db.query<Row>(
-        `INSERT INTO importer_lite_uploads(task_id,page_position,media_id,sha256,state)
-         VALUES($1::uuid,$2,$3::uuid,$4,'PERSISTED')
-         ON CONFLICT(task_id,page_position) DO UPDATE SET updated_at=now()
-         RETURNING media_id,state`, [taskId,pagePosition,reusable.rows[0].id,sha256],
-      );
-      return { mediaId: reused.rows[0].media_id, state: reused.rows[0].state };
-    }
-    const id = randomUUID();
-    const result = await this.db.query<Row>(
-      `INSERT INTO importer_lite_uploads(task_id,page_position,media_id,sha256)
-       VALUES($1::uuid,$2,$3::uuid,$4)
-       ON CONFLICT(task_id,page_position) DO NOTHING
-       RETURNING media_id,state`, [taskId, pagePosition, id, sha256],
-    );
-    if (result.rows[0]) return { mediaId: result.rows[0].media_id, state: result.rows[0].state };
     // Another claimant won between the read and INSERT. Treat it exactly as
     // an interrupted attempt; a lease fencing failure must not duplicate it.
     const raced = await this.db.query<Row>(`UPDATE importer_lite_uploads SET state='UNKNOWN',updated_at=now()
@@ -525,23 +522,21 @@ export class LiteRepository {
     taskId: string; pagePosition: number; mediaId: string; sha256: string; bytes: number; mime: string; width: number; height: number;
     providerKey: string; botReference: string | null; shardId: string | null; channelId: string | null; messageId: number | null; createdBy: string;
   }): Promise<void> {
-    const client = await this.db.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query(
-        `INSERT INTO media(id,provider,provider_key,bot_reference,storage_shard_id,mime,width,height,bytes,sha256,created_by,storage_ready,purpose)
-         SELECT $1::uuid,'telegram',$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid,true,'chapter'
-         WHERE NOT EXISTS (SELECT 1 FROM media WHERE id=$1::uuid)`,
-        [input.mediaId, input.providerKey, input.botReference, input.shardId, input.mime, input.width, input.height, input.bytes, input.sha256, input.createdBy],
-      );
-      await client.query(
-        `UPDATE importer_lite_uploads SET state='PERSISTED',provider_key=$4,bot_reference=$5,storage_shard_id=$6,
-           channel_id=$7,telegram_message_id=$8,bytes=$9,mime=$10,updated_at=now()
-         WHERE task_id=$1::uuid AND page_position=$2 AND media_id=$3::uuid`,
-        [input.taskId,input.pagePosition,input.mediaId,input.providerKey,input.botReference,input.shardId,input.channelId,input.messageId,input.bytes,input.mime],
-      );
-      await client.query('COMMIT');
-    } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; } finally { client.release(); }
+    // A writable CTE is one atomic YSQL statement: either both the media row
+    // and durable Telegram receipt appear, or neither does.  It replaces the
+    // per-page BEGIN/INSERT/UPDATE/COMMIT sequence without widening the
+    // ambiguous-upload window.
+    await this.db.query(
+      `WITH media_insert AS (
+        INSERT INTO media(id,provider,provider_key,bot_reference,storage_shard_id,mime,width,height,bytes,sha256,created_by,storage_ready,purpose)
+        VALUES($1::uuid,'telegram',$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid,true,'chapter')
+        ON CONFLICT(id) DO NOTHING
+      ) UPDATE importer_lite_uploads SET state='PERSISTED',provider_key=$2,bot_reference=$3,storage_shard_id=$4,
+          channel_id=$11,telegram_message_id=$12,bytes=$8,mime=$5,updated_at=now()
+        WHERE task_id=$13::uuid AND page_position=$14 AND media_id=$1::uuid`,
+      [input.mediaId, input.providerKey, input.botReference, input.shardId, input.mime, input.width, input.height,
+        input.bytes, input.sha256, input.createdBy, input.channelId, input.messageId, input.taskId, input.pagePosition],
+    );
   }
 
   async markUploadUnknown(taskId: string, position: number): Promise<void> {

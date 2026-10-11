@@ -656,6 +656,24 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT id FROM media WHERE id=$1`, [ids.page])).rows[0].id).toBe(ids.page);
   });
 
+  it('persists a Telegram receipt and its media row atomically after an intent reservation', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'chapter:atomic-receipt', priority: 'P1', idempotencyKey: 'atomic-receipt' });
+    const task = await db.query<{ id: string }>(`SELECT id FROM importer_lite_tasks WHERE idempotency_key='atomic-receipt'`);
+    const reserved = await repo.reserveUpload(task.rows[0].id, 1, 'atomic-page-sha');
+    expect(reserved.state).toBe('INTENT');
+
+    await repo.recordUploadReceipt({
+      taskId: task.rows[0].id, pagePosition: 1, mediaId: reserved.mediaId, sha256: 'atomic-page-sha',
+      bytes: 4096, mime: 'image/png', width: 64, height: 64, providerKey: 'telegram-file',
+      botReference: 'bot-a', shardId: 'shard-a', channelId: 'channel-a', messageId: 42, createdBy: ids.staff,
+    });
+    expect((await db.query(`SELECT state,bytes,mime FROM importer_lite_uploads WHERE task_id=$1`, [task.rows[0].id])).rows[0])
+      .toEqual({ state: 'PERSISTED', bytes: 4096, mime: 'image/png' });
+    expect((await db.query(`SELECT storage_ready,sha256 FROM media WHERE id=$1`, [reserved.mediaId])).rows[0])
+      .toEqual({ storage_ready: true, sha256: 'atomic-page-sha' });
+  });
+
   it('does not retry a repeatedly crashed lease beyond its durable attempt limit', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:crash', priority: 'P1', idempotencyKey: 'crash-exhausted', maxAttempts: 1 });
     const claimed = await repo.claim('worker-a', 30);
