@@ -1307,6 +1307,16 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
   });
 
+  it('uses the measured two-chapter Hanami fence instead of serializing a healthy source', () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    expect((runtime as any).executor.sourceSlot('hanamiheaven').capacity).toBe(2);
+  });
+
   it('shares an empty P0 monitor probe and leaves the normal pool untouched', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
