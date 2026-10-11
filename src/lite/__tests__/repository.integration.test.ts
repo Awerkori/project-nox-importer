@@ -408,4 +408,38 @@ describe('LiteRepository against the additive Lite migration', () => {
     await Promise.all(Array.from({ length: 12 }, (_, index) => (runtime as any).claimNext(`idle-${index}`)));
     expect(claim).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps retained page buffers globally bounded while uploads are slow', async () => {
+    const key = 'pt-br|default|chapter|6|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
+      VALUES ($1,$2,'source-a','a-6','pt-BR','default',true)`, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key, priority: 'P1', idempotencyKey: 'buffered-pages',
+      payload: { displayNumber: '6', chapterTitle: 'Six', language: 'pt-BR', edition: 'default', orderKey: '6' } });
+    const task = await repo.claim('worker-a', 120);
+    const registry = { get: () => ({ id: 'source-a', fetchChapterPages: async () => ['https://source-a.test/one.png', 'https://source-a.test/two.png'] }) } as unknown as SourceRegistry;
+    let activeUploads = 0;
+    let maxActiveUploads = 0;
+    const storage: StorageProvider = {
+      upload: async () => {
+        activeUploads++;
+        maxActiveUploads = Math.max(maxActiveUploads, activeUploads);
+        await new Promise<void>((resolve) => setTimeout(resolve, 15));
+        activeUploads--;
+        return `telegram-${maxActiveUploads}`;
+      }, healthCheck: async () => true, getProviderKey: () => 'telegram',
+    };
+    const pngA = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const pngB = Uint8Array.from(pngA);
+    pngB[pngB.length - 13] ^= 1; // different valid IDAT payload/hash; parser intentionally does not decode pixels
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => new Response(url.includes('one') ? pngA : pngB, { status: 200 })));
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 2,
+        new AsyncSemaphore(1, 'test-buffered-pages'), new HostRateLimiter(100));
+      await executor.importChapter(task!, 'worker-a');
+    } finally { vi.stubGlobal('fetch', originalFetch); }
+    expect(maxActiveUploads).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);
+  });
 });

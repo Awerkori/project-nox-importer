@@ -29,6 +29,8 @@ integration suite verifies:
   initial P1 fill work;
 - a fully isolated path from `DISCOVER` through `CATALOG`, source route,
   Telegram receipt, `PUBLISH`, `published_at` and the Reader page manifest.
+- slow uploads with concurrent page discovery, proving that the global retained
+  page-buffer limit is applied rather than multiplied by chapter workers.
 
 This is an integration and regression gate, not an external capacity result:
 PGlite does not model Yugabyte latency, real source limits, Telegram capacity,
