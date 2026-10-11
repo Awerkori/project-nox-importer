@@ -364,7 +364,8 @@ describe('LiteRepository against the additive Lite migration', () => {
       SET enabled=false,status='PAUSED',sync_interval_minutes=7,cooldown_until=now()+interval '11 minutes'
       WHERE id='source-a'`);
     const policy = await repo.sourcePolicy('source-a');
-    expect(policy).toMatchObject({ enabled: false, status: 'PAUSED', runnable: false, syncIntervalMs: 7 * 60_000 });
+    expect(policy).toMatchObject({ enabled: false, status: 'PAUSED', runnable: false, syncIntervalMs: 7 * 60_000,
+      catalogDiscoveryEnabled: true, chapterIngestionEnabled: true });
     expect(policy?.cooldownUntil?.getTime()).toBeGreaterThan(Date.now());
 
     const adapter = {
@@ -392,9 +393,14 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`, [catalog!.id])).rows[0])
       .toMatchObject({ state: 'RETRY_WAIT', reason: 'SOURCE_NOT_READY:PAUSED' });
 
+    // These controls are optional in older schemas. The Lite query reads them
+    // safely when present without requiring them for migration compatibility.
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN catalog_discovery_enabled boolean NOT NULL DEFAULT true`);
+    await db.query(`UPDATE importer_sources SET catalog_discovery_enabled=false WHERE id='source-b'`);
+    expect((await repo.sourcePolicy('source-b'))?.catalogDiscoveryEnabled).toBe(false);
     await (runtime as any).seedDiscovery();
     expect((await db.query(`SELECT idempotency_key FROM importer_lite_tasks WHERE idempotency_key LIKE 'lite:discover:%' ORDER BY idempotency_key`)).rows)
-      .toEqual([{ idempotency_key: 'lite:discover:source-b' }]);
+      .toEqual([]);
   });
 
   it('reopens only source-blocked work after fresh catalog evidence, never an unknown upload outcome', async () => {
@@ -477,12 +483,13 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(1);
   });
 
-  it('skips an administratively disabled preferred source and immediately uses its confirmed alternative', async () => {
+  it('skips a preferred source with chapter ingestion disabled and immediately uses its confirmed alternative', async () => {
     const key = 'pt-br|default|chapter|admin-fallback|-';
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,source_rank,confirmed)
       VALUES ($1,$2,'source-a','disabled-a','pt-BR','default',10,true),
              ($1,$2,'source-b','enabled-b','pt-BR','default',20,true)`, [ids.p1a, key]);
-    await db.query(`UPDATE importer_sources SET enabled=false,status='DISABLED' WHERE id='source-a'`);
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN chapter_ingestion_enabled boolean NOT NULL DEFAULT true`);
+    await db.query(`UPDATE importer_sources SET chapter_ingestion_enabled=false WHERE id='source-a'`);
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key,
       priority: 'P1', idempotencyKey: 'admin-source-fallback',
       payload: { displayNumber: '7', chapterTitle: 'Seven', language: 'pt-BR', edition: 'default', orderKey: '7' } });
@@ -740,6 +747,34 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
     expect(candidate.synopsis).toContain('Primeiro parágrafo seguro.');
     expect(candidate.synopsis).toContain('\n');
+  });
+
+  it('keeps catalog metadata and source mappings while honoring chapter ingestion disablement', async () => {
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN chapter_ingestion_enabled boolean NOT NULL DEFAULT true`);
+    await db.query(`UPDATE importer_sources SET chapter_ingestion_enabled=false WHERE id='source-a'`);
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:metadata-only', priority: 'P2',
+      idempotencyKey: 'metadata-only-catalog', payload: { source: 'source-a', sourceWorkId: 'metadata-only' } });
+    const task = await repo.claim('catalog-worker', 120);
+    const adapter = {
+      id: 'source-a',
+      fetchWorkSnapshot: vi.fn(async () => ({
+        details: { sourceWorkId: 'metadata-only', title: 'P1 A', slug: 'p1-a', status: 'ONGOING' as const, language: 'pt-BR',
+          genres: ['Hentai'], alternativeTitles: ['Metadata only'] },
+        chapters: [{ sourceChapterId: 'not-admitted', number: 1, displayNumber: '1', title: 'One' }],
+      })),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
+    await (runtime as any).catalog(task, 'catalog-worker');
+    expect(adapter.fetchWorkSnapshot).toHaveBeenCalledOnce();
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapter_sources
+      WHERE source='source-a' AND source_chapter_id='not-admitted'`)).rows[0].count).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks WHERE task_type='IMPORT_CHAPTER'`)).rows[0].count).toBe(0);
   });
 
   it('runs an isolated durable path from discovery to a Reader-visible published chapter', async () => {

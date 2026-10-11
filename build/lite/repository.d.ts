@@ -21,6 +21,8 @@ export interface LiteSourcePolicy {
     health: string;
     cooldownUntil: Date | null;
     syncIntervalMs: number;
+    catalogDiscoveryEnabled: boolean;
+    chapterIngestionEnabled: boolean;
     runnable: boolean;
 }
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */

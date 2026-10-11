@@ -76,7 +76,9 @@ export class ImporterLiteRuntime {
         clearInterval(timer); this.timers = []; }
     async seedDiscovery() {
         const sources = await this.pool.query(`SELECT id,sync_interval_minutes FROM importer_sources
-      WHERE enabled=true AND COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') ORDER BY id`);
+      WHERE enabled=true AND COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+        AND COALESCE((to_jsonb(importer_sources)->>'catalog_discovery_enabled')::boolean,true)
+      ORDER BY id`);
         for (const { id, sync_interval_minutes } of sources.rows) {
             await this.queue.enqueue({ taskType: 'DISCOVER', workKey: `source:${id}`, priority: 'P2',
                 idempotencyKey: `lite:discover:${id}`, payload: { source: id, syncIntervalMinutes: sync_interval_minutes }, checkpoint: { cursor: null } });
@@ -226,10 +228,11 @@ export class ImporterLiteRuntime {
         if (!adapter)
             return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'SOURCE_ADAPTER_UNAVAILABLE' });
         const policy = await this.queue.sourcePolicy(source);
-        if (!policy?.runnable) {
+        if (!policy?.runnable || !policy.catalogDiscoveryEnabled) {
             const nextRunAt = policy?.cooldownUntil && policy.cooldownUntil > new Date()
                 ? policy.cooldownUntil : new Date(Date.now() + (policy?.syncIntervalMs || 60 * 60_000));
-            await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: `SOURCE_NOT_READY:${policy?.status || 'MISSING'}`, nextRunAt });
+            await this.queue.finish(task, workerId, { state: 'RETRY_WAIT',
+                reason: !policy?.catalogDiscoveryEnabled ? 'SOURCE_DISCOVERY_DISABLED' : `SOURCE_NOT_READY:${policy?.status || 'MISSING'}`, nextRunAt });
             return;
         }
         try {
@@ -315,9 +318,11 @@ export class ImporterLiteRuntime {
                 const chapterPriority = p0Monitoring && !historicalRepair ? 'P0' : 'P1';
                 sourceRows.push({ workId: resolved.workId, chapterKey, source, sourceWorkId, sourceChapterId: chapter.sourceChapterId,
                     language, edition, orderKey, sourceRank: rankForSource(source) });
-                chapterTasks.push({ taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
-                    chapterKey, priority: chapterPriority, idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,
-                    payload: { displayNumber, chapterTitle: chapter.title || '', orderKey, language, edition } });
+                if (policy.chapterIngestionEnabled) {
+                    chapterTasks.push({ taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
+                        chapterKey, priority: chapterPriority, idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,
+                        payload: { displayNumber, chapterTitle: chapter.title || '', orderKey, language, edition } });
+                }
             }
             await this.upsertChapterSources(sourceRows);
             const materialized = await this.queue.enqueueMany(chapterTasks);
@@ -325,7 +330,8 @@ export class ImporterLiteRuntime {
             // A newly confirmed mapping (or repaired presentation metadata) is
             // evidence worth re-evaluating. This indexed, per-work wake-up replaces
             // the legacy global blocked-task sweeps.
-            await this.queue.wakeCatalogBlocked(resolved.workId, `work:${resolved.workId}`);
+            if (policy.chapterIngestionEnabled)
+                await this.queue.wakeCatalogBlocked(resolved.workId, `work:${resolved.workId}`);
             // Ongoing/hiatus works retain one cheap persistent monitor. The monitor
             // remains base P2 and outside normal claims; only its newly inserted
             // chapters are P0. Completed works remain available to discovery/repair.

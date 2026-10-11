@@ -73,14 +73,15 @@ export class LiteExecutor {
             return [];
         const result = await this.db.query(`SELECT s.source,s.source_work_id,s.source_chapter_id,s.canonical_chapter_key,s.work_id,s.language,s.edition,s.source_rank,
          s.confirmed,s.has_chapter,COALESCE(h.health,'HEALTHY') health,h.cooldown_until,
-         p.enabled,p.status,p.cooldown_until AS source_cooldown
+         p.enabled,p.status,p.cooldown_until AS source_cooldown,
+         COALESCE((to_jsonb(p)->>'chapter_ingestion_enabled')::boolean,true) AS chapter_ingestion_enabled
        FROM importer_lite_chapter_sources s
        JOIN importer_sources p ON p.id=s.source
        LEFT JOIN importer_lite_source_health h ON h.source=s.source
        WHERE s.work_id=$1::uuid AND s.canonical_chapter_key=$2`, [task.workId, task.chapterKey]);
         return result.rows.map((row) => {
             const status = String(row.status || 'ACTIVE').toUpperCase();
-            const sourceEnabled = row.enabled === true && ['ACTIVE', 'DEGRADED', 'RECOVERING'].includes(status);
+            const sourceEnabled = row.enabled === true && row.chapter_ingestion_enabled !== false && ['ACTIVE', 'DEGRADED', 'RECOVERING'].includes(status);
             const healthCooldown = row.cooldown_until ? new Date(row.cooldown_until) : null;
             const sourceCooldown = row.source_cooldown ? new Date(row.source_cooldown) : null;
             const cooldownUntil = [healthCooldown, sourceCooldown]

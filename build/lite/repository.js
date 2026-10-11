@@ -115,6 +115,8 @@ export class LiteRepository {
      */
     async sourcePolicy(source) {
         const result = await this.db.query(`SELECT s.enabled,s.status,s.sync_interval_minutes,
+        COALESCE((to_jsonb(s)->>'catalog_discovery_enabled')::boolean,true) AS catalog_discovery_enabled,
+        COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true) AS chapter_ingestion_enabled,
         s.cooldown_until AS source_cooldown,h.health,h.cooldown_until AS health_cooldown
       FROM importer_sources s
       LEFT JOIN importer_lite_source_health h ON h.source=s.id
@@ -137,6 +139,8 @@ export class LiteRepository {
             enabled: row.enabled === true,
             status, health, cooldownUntil,
             syncIntervalMs: Math.max(5, Math.min(24 * 60, Number.isFinite(minutes) ? minutes : 30)) * 60_000,
+            catalogDiscoveryEnabled: row.catalog_discovery_enabled !== false,
+            chapterIngestionEnabled: row.chapter_ingestion_enabled !== false,
             runnable,
         };
     }

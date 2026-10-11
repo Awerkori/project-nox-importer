@@ -91,7 +91,11 @@ Invariants:
   disabled or cooling preferred source cannot consume a slot or keep a
   confirmed alternative from running. Startup discovery uses only the stable
   `importer_sources` columns (`enabled`, `status`, `sync_interval_minutes`),
-  not an optional legacy flag.
+  and safely honours optional legacy panel controls
+  `catalog_discovery_enabled` and `chapter_ingestion_enabled` when present.
+  A source may therefore contribute verified catalog metadata and mappings
+  while its chapter ingestion is disabled; it never generates new chapter
+  claims in that state.
 - Discovery and recurring P0 observations are each one durable, bounded
   source/work row. A persistent upstream outage increases their cadence only
   to a six-hour cap; it cannot create task rows or terminally lose the watch.

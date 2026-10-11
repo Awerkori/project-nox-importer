@@ -39,7 +39,8 @@ integration suite verifies:
 - source administration uses the actual stable `importer_sources` contract:
   paused/disabled sources are not seeded or contacted, cooldown is respected,
   and a disabled preferred chapter route yields immediately to a confirmed
-  healthy alternative;
+  healthy alternative; optional panel flags are read safely when they exist,
+  including metadata-only cataloguing with chapter ingestion disabled;
 - a recurring P0 observation remains exactly one durable, recoverable row
   after a prolonged upstream outage, with a six-hour capped retry cadence;
   it does not block ready P1 work even after its ordinary attempt threshold;
