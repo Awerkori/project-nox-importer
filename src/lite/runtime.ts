@@ -78,23 +78,23 @@ export class ImporterLiteRuntime {
   }
 
   private async upsertChapterSources(rows: Array<{
-    workId: string; chapterKey: string; source: string; sourceChapterId: string;
+    workId: string; chapterKey: string; source: string; sourceWorkId: string; sourceChapterId: string;
     language: string; edition: string; orderKey: string; sourceRank: number;
   }>): Promise<void> {
     for (let offset = 0; offset < rows.length; offset += 500) {
       const batch = rows.slice(offset, offset + 500);
       const values: unknown[] = [];
       const tuples = batch.map((row, index) => {
-        const start = index * 8;
-        values.push(row.workId, row.chapterKey, row.source, row.sourceChapterId,
+        const start = index * 9;
+        values.push(row.workId, row.chapterKey, row.source, row.sourceWorkId, row.sourceChapterId,
           row.language, row.edition, row.orderKey, row.sourceRank);
-        return `($${start + 1}::uuid,$${start + 2},$${start + 3},$${start + 4},$${start + 5},$${start + 6},$${start + 7},$${start + 8},true,true,now())`;
+        return `($${start + 1}::uuid,$${start + 2},$${start + 3},$${start + 4},$${start + 5},$${start + 6},$${start + 7},$${start + 8},$${start + 9},true,true,now())`;
       });
       await this.pool.query(`INSERT INTO importer_lite_chapter_sources
-        (work_id,canonical_chapter_key,source,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter,last_verified_at)
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter,last_verified_at)
         VALUES ${tuples.join(',')}
         ON CONFLICT(source,source_chapter_id) DO UPDATE SET canonical_chapter_key=excluded.canonical_chapter_key,
-          language=excluded.language,edition=excluded.edition,order_key=excluded.order_key,source_rank=excluded.source_rank,
+          source_work_id=excluded.source_work_id,language=excluded.language,edition=excluded.edition,order_key=excluded.order_key,source_rank=excluded.source_rank,
           confirmed=true,has_chapter=true,last_verified_at=now(),updated_at=now()`, values);
     }
   }
@@ -247,7 +247,7 @@ export class ImporterLiteRuntime {
         : { rows: [{ order_key: null }] };
       const knownNormalOrder = knownFrontier.rows[0]?.order_key || null;
       const sourceRows: Array<{
-        workId: string; chapterKey: string; source: string; sourceChapterId: string;
+        workId: string; chapterKey: string; source: string; sourceWorkId: string; sourceChapterId: string;
         language: string; edition: string; orderKey: string; sourceRank: number;
       }> = [];
       const chapterTasks: EnqueueLiteTask[] = [];
@@ -262,7 +262,7 @@ export class ImporterLiteRuntime {
         const orderKey = chapterOrderKey({ displayNumber, title: chapter.title });
         const historicalRepair = p0Monitoring && orderKey.startsWith('n|') && Boolean(knownNormalOrder && orderKey <= knownNormalOrder);
         const chapterPriority = p0Monitoring && !historicalRepair ? 'P0' : 'P1';
-        sourceRows.push({ workId: resolved.workId, chapterKey, source, sourceChapterId: chapter.sourceChapterId,
+        sourceRows.push({ workId: resolved.workId, chapterKey, source, sourceWorkId, sourceChapterId: chapter.sourceChapterId,
           language, edition, orderKey, sourceRank: rankForSource(source) });
         chapterTasks.push({ taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
           chapterKey, priority: chapterPriority, idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,

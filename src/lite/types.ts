@@ -40,6 +40,7 @@ export type SourceHealth = 'HEALTHY' | 'DEGRADED' | 'RATE_LIMITED' | 'BROKEN' | 
 
 export interface ChapterSourceRoute {
   source: string;
+  sourceWorkId?: string | null;
   sourceChapterId: string;
   canonicalChapterKey: string;
   workId: string;

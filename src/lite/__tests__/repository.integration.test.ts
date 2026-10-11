@@ -306,6 +306,31 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(1);
   });
 
+  it('requires adapter ownership proof before using a fallback route that can verify it', async () => {
+    const key = 'pt-br|default|chapter|2|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,source_rank,confirmed)
+      VALUES ($1,$2,'source-a','wrong-work','a-2','pt-BR','default',10,true),
+             ($1,$2,'source-b','right-work','b-2','pt-BR','default',20,true)`, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key, priority: 'P1', idempotencyKey: 'ownership-fallback',
+      payload: { displayNumber: '2', chapterTitle: 'Two', language: 'pt-BR', edition: 'default', orderKey: '2' } });
+    const task = await repo.claim('worker-a', 120);
+    const sourceA = { id: 'source-a', isChapterOwnedByWork: () => false, fetchChapterPages: vi.fn(async () => ['https://source-a.test/wrong.png']) };
+    const sourceB = { id: 'source-b', isChapterOwnedByWork: () => true, fetchChapterPages: vi.fn(async () => ['https://source-b.test/right.png']) };
+    const registry = { get: (id: string) => id === 'source-a' ? sourceA : sourceB } as unknown as SourceRegistry;
+    const storage: StorageProvider = { upload: vi.fn(async () => 'telegram-file'), healthCheck: async () => true, getProviderKey: () => 'telegram' };
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })));
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 1);
+      await executor.importChapter(task!, 'worker-a');
+    } finally { vi.stubGlobal('fetch', originalFetch); }
+    expect(sourceA.fetchChapterPages).not.toHaveBeenCalled();
+    expect(sourceB.fetchChapterPages).toHaveBeenCalledOnce();
+    expect((await db.query(`SELECT checkpoint->>'selectedSource' AS source FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].source).toBe('source-b');
+  });
+
   it('never mixes a fallback source into a chapter after the preferred source stored one page', async () => {
     const key = 'pt-br|default|chapter|3|-';
     await db.query(`

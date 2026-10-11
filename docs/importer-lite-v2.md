@@ -41,6 +41,10 @@ Invariants:
 - Fallback is allowed before media persists. Once a page receipt exists, the
   task is pinned to its selected source and page-manifest hash; an alternative
   cannot silently mix another edition into a partial chapter.
+- When an adapter exposes an ownership verifier, the durable source-work and
+  source-chapter IDs must pass it before the route is downloaded. A failed
+  proof is an integrity block for that route, not a reason to publish from a
+  merely similar work.
 - Download request slots and retained page buffers have separate global
   semaphores. Neither is multiplied by the number of chapter workers.
 - Direct image and cover downloads also acquire the existing per-host rate

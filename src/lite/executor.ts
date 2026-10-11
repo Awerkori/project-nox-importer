@@ -70,13 +70,13 @@ export class LiteExecutor {
   private async routes(task: LiteTask): Promise<ChapterSourceRoute[]> {
     if (!task.workId || !task.chapterKey) return [];
     const result = await this.db.query<any>(
-      `SELECT s.source,s.source_chapter_id,s.canonical_chapter_key,s.work_id,s.language,s.edition,s.source_rank,
+      `SELECT s.source,s.source_work_id,s.source_chapter_id,s.canonical_chapter_key,s.work_id,s.language,s.edition,s.source_rank,
          s.confirmed,s.has_chapter,COALESCE(h.health,'HEALTHY') health,h.cooldown_until
        FROM importer_lite_chapter_sources s LEFT JOIN importer_lite_source_health h ON h.source=s.source
        WHERE s.work_id=$1::uuid AND s.canonical_chapter_key=$2`, [task.workId, task.chapterKey],
     );
     return result.rows.map((row) => ({
-      source: row.source, sourceChapterId: row.source_chapter_id, canonicalChapterKey: row.canonical_chapter_key,
+      source: row.source, sourceWorkId: row.source_work_id, sourceChapterId: row.source_chapter_id, canonicalChapterKey: row.canonical_chapter_key,
       workId: row.work_id, language: row.language, edition: row.edition, sourceRank: row.source_rank,
       confirmed: row.confirmed, hasChapter: row.has_chapter, health: row.health,
       cooldownUntil: row.cooldown_until ? new Date(row.cooldown_until) : null,
@@ -157,6 +157,10 @@ export class LiteExecutor {
     for (const route of routes) {
       const adapter = this.registry.get(route.source);
       if (!adapter) { lastError = new Error('SOURCE_ADAPTER_UNAVAILABLE'); continue; }
+      if (adapter.isChapterOwnedByWork && (!route.sourceWorkId || !adapter.isChapterOwnedByWork(route.sourceWorkId, route.sourceChapterId))) {
+        lastError = new Error('SOURCE_CHAPTER_OWNERSHIP_UNVERIFIED');
+        continue;
+      }
       const sourceSlot = this.sourceSlot(route.source);
       await sourceSlot.acquire();
       try {
@@ -256,7 +260,7 @@ export class LiteExecutor {
       } finally { sourceSlot.release(); }
     }
     const message = String((lastError as Error | null)?.message || 'IMPORT_FAILED');
-    const permanent = /UPLOAD_OUTCOME_UNKNOWN|CHAPTER_DISPLAY_NUMBER|CHAPTER_NUMBER_COLLISION|SOURCE_PAGE_MANIFEST_CHANGED_AFTER_PARTIAL_STORAGE|LEASE_LOST_BEFORE_MEDIA_STORAGE/.test(message);
+    const permanent = /UPLOAD_OUTCOME_UNKNOWN|CHAPTER_DISPLAY_NUMBER|CHAPTER_NUMBER_COLLISION|SOURCE_PAGE_MANIFEST_CHANGED_AFTER_PARTIAL_STORAGE|LEASE_LOST_BEFORE_MEDIA_STORAGE|SOURCE_CHAPTER_OWNERSHIP_UNVERIFIED/.test(message);
     const retryAfter = Number((lastError as SourceFailure | null)?.retryAfter || (lastError as any)?.parameters?.retry_after || 0);
     await this.queue.finish(task, workerId, {
       state: permanent || task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT', reason: message.slice(0, 500),

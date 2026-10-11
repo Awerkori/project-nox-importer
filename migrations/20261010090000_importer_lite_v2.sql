@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS public.importer_lite_chapter_sources (
   work_id uuid NOT NULL REFERENCES public.works(id) ON DELETE RESTRICT,
   canonical_chapter_key text NOT NULL,
   source text NOT NULL REFERENCES public.importer_sources(id) ON DELETE RESTRICT,
+  source_work_id text NULL,
   source_chapter_id text NOT NULL,
   language text NOT NULL DEFAULT 'und',
   edition text NOT NULL DEFAULT 'default',
@@ -80,6 +81,8 @@ CREATE TABLE IF NOT EXISTS public.importer_lite_chapter_sources (
 );
 ALTER TABLE public.importer_lite_chapter_sources
   ADD COLUMN IF NOT EXISTS order_key text NOT NULL DEFAULT '';
+ALTER TABLE public.importer_lite_chapter_sources
+  ADD COLUMN IF NOT EXISTS source_work_id text NULL;
 CREATE INDEX IF NOT EXISTS importer_lite_chapter_sources_select_idx
   ON public.importer_lite_chapter_sources (work_id, canonical_chapter_key, confirmed, source_rank);
 CREATE INDEX IF NOT EXISTS importer_lite_chapter_sources_order_idx

@@ -24,7 +24,8 @@ integration suite verifies:
   publication so recovery does not recreate completed work;
 - atomic Reader-visible publication only after cover and page media validation;
 - healthy source fallback before storage, and safe source/manifest pinning
-  after partial storage;
+  after partial storage, including adapter ownership proof before an
+  alternative source route is used;
 - explicit Telegram 429 retry versus ambiguous upload/receipt failure, which
   becomes durable `UNKNOWN` rather than a blind duplicate upload, including a
   reconciler pass that surfaces a crash-surviving unknown upload as one

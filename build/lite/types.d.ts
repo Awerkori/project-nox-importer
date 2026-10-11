@@ -31,6 +31,7 @@ export interface LiteTask {
 export type SourceHealth = 'HEALTHY' | 'DEGRADED' | 'RATE_LIMITED' | 'BROKEN' | 'DISABLED';
 export interface ChapterSourceRoute {
     source: string;
+    sourceWorkId?: string | null;
     sourceChapterId: string;
     canonicalChapterKey: string;
     workId: string;
