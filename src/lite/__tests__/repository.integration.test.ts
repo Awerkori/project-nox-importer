@@ -605,6 +605,37 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(1);
   });
 
+  it('drains in-flight page uploads before source fallback decides whether a chapter is pinned', async () => {
+    const key = 'pt-br|default|chapter|3-concurrent|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,source_rank,confirmed)
+      VALUES ($1,$2,'source-a','a-3-concurrent','pt-BR','default',10,true), ($1,$2,'source-b','b-3-concurrent','pt-BR','default',20,true)
+    `, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key, priority: 'P1', idempotencyKey: 'partial-concurrent-fallback',
+      payload: { displayNumber: '3.1', chapterTitle: 'Three point one', language: 'pt-BR', edition: 'default', orderKey: '3.1' } });
+    const task = await repo.claim('worker-a', 120);
+    const sourceA = { id: 'source-a', fetchChapterPages: vi.fn(async () => ['https://source-a.test/slow-good.png', 'https://source-a.test/fast-bad.png']) };
+    const sourceB = { id: 'source-b', fetchChapterPages: vi.fn(async () => ['https://source-b.test/one.png', 'https://source-b.test/two.png']) };
+    const registry = { get: (id: string) => id === 'source-a' ? sourceA : sourceB } as unknown as SourceRegistry;
+    const storage: StorageProvider = { upload: vi.fn(async () => 'telegram-file'), healthCheck: async () => true, getProviderKey: () => 'telegram' };
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.includes('fast-bad')) return new Response('source unavailable', { status: 503 });
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      return new Response(png, { status: 200 });
+    }));
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 2,
+        new AsyncSemaphore(2, 'test-buffers'));
+      await executor.importChapter(task!, 'worker-a');
+    } finally { vi.stubGlobal('fetch', originalFetch); }
+    expect(sourceB.fetchChapterPages).not.toHaveBeenCalled();
+    expect((await db.query(`SELECT state,checkpoint->>'selectedSource' AS source FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
+      .toMatchObject({ state: 'RETRY_WAIT', source: 'source-a' });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(1);
+  });
+
   it('records an unknown durable upload outcome instead of blindly uploading again after DB receipt failure', async () => {
     const key = 'pt-br|default|chapter|4|-';
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)

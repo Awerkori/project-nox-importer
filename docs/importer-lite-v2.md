@@ -72,7 +72,9 @@ Invariants:
   upload also avoids the cooling channel.
 - Fallback is allowed before media persists. Once a page receipt exists, the
   task is pinned to its selected source and page-manifest hash; an alternative
-  cannot silently mix another edition into a partial chapter.
+  cannot silently mix another edition into a partial chapter. Parallel page
+  batches drain operations already in flight before they evaluate fallback, so
+  a late durable receipt is never missed by that decision.
 - When an adapter exposes an ownership verifier, the durable source-work and
   source-chapter IDs must pass it before the route is downloaded. A failed
   proof is an integrity block for that route, not a reason to publish from a

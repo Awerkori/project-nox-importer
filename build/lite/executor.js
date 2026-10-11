@@ -7,15 +7,34 @@ import { HostRateLimiter } from '../core/rate-limiter.js';
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
     let cursor = 0;
+    let failed = false;
+    let firstError;
     const worker = async () => {
         while (true) {
+            // Do not start more network/media work after a sibling failed, but do
+            // drain the operations already in flight. Returning immediately from
+            // Promise.all would race a late successful receipt against source
+            // fallback and could mix two manifests in one durable chapter.
+            if (failed)
+                return;
             const index = cursor++;
             if (index >= items.length)
                 return;
-            result[index] = await fn(items[index], index);
+            try {
+                result[index] = await fn(items[index], index);
+            }
+            catch (error) {
+                if (!failed) {
+                    failed = true;
+                    firstError = error;
+                }
+                return;
+            }
         }
     };
     await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+    if (failed)
+        throw firstError;
     return result;
 }
 function sourceFailure(error) {
