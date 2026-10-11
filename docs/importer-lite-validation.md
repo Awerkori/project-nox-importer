@@ -6,6 +6,30 @@ claim: `benchmark_homologation_30m_final.json` is from 2026-09-21 and the
 later 30-minute legacy validation still reported 1,295 staged rows, so it is
 not accepted as proof of the Lite antiblock invariant.
 
+## Isolated validation completed
+
+The additive Lite migration was applied in an ephemeral PGlite database (not
+to production) and the direct repository/executor path was exercised with
+actual SQL functions and the existing atomic Reader page function. The current
+integration suite verifies:
+
+- panel-triggered STAFF promotion followed by strict `STAFF > P0 > P1 > P2`;
+- a ready work remains claimable behind 1,300 blocked task rows and peers of
+  the same priority rotate fairly by work;
+- expired leases, due retries, publish-task materialisation and bounded,
+  per-work blocked-task re-evaluation;
+- atomic Reader-visible publication only after cover and page media validation;
+- healthy source fallback before storage, and safe source/manifest pinning
+  after partial storage;
+- explicit Telegram 429 retry versus ambiguous upload/receipt failure, which
+  becomes durable `UNKNOWN` rather than a blind duplicate upload;
+- P0 monitoring materialises newly observed chapters as P0 without rebucketing
+  initial P1 fill work.
+
+This is an integration and regression gate, not an external capacity result:
+PGlite does not model Yugabyte latency, real source limits, Telegram capacity,
+DIScloud RSS, or public-site contention.
+
 Historical representative sample:
 
 | Measure | Observed |

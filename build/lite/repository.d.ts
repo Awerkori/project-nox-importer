@@ -31,6 +31,13 @@ export declare class LiteRepository {
         checkpoint?: Record<string, unknown>;
         priority?: Exclude<LitePriority, 'STAFF'>;
     }): Promise<boolean>;
+    /**
+     * Catalog evidence is the only event that reopens a source-blocked chapter.
+     * It is scoped by the indexed canonical work/chapter keys, so a new mapping
+     * never causes a global BLOCKED sweep. Terminal integrity failures stay
+     * blocked until an operator changes the underlying condition.
+     */
+    wakeCatalogBlocked(workId: string, workKey: string): Promise<number>;
     /** One bounded recovery turn; it cannot consume the claim path or scan works. */
     reconcile(limit?: number): Promise<{
         leases: number;
@@ -64,6 +71,8 @@ export declare class LiteRepository {
         createdBy: string;
     }): Promise<void>;
     markUploadUnknown(taskId: string, position: number): Promise<void>;
+    /** The provider explicitly rejected the attempt, so the same reserved ID may retry safely. */
+    markUploadRetryable(taskId: string, position: number): Promise<void>;
     publish(input: {
         task: LiteTask;
         workerId: string;

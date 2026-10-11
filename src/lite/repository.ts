@@ -110,6 +110,33 @@ export class LiteRepository {
     } finally { client.release(); }
   }
 
+  /**
+   * Catalog evidence is the only event that reopens a source-blocked chapter.
+   * It is scoped by the indexed canonical work/chapter keys, so a new mapping
+   * never causes a global BLOCKED sweep. Terminal integrity failures stay
+   * blocked until an operator changes the underlying condition.
+   */
+  async wakeCatalogBlocked(workId: string, workKey: string): Promise<number> {
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(`UPDATE importer_lite_tasks
+        SET state='READY',reason=NULL,next_run_at=now(),updated_at=now()
+        WHERE work_id=$1::uuid AND state='BLOCKED' AND (
+          (task_type='IMPORT_CHAPTER' AND COALESCE(reason,'') NOT LIKE 'UPLOAD_OUTCOME_UNKNOWN%'
+             AND COALESCE(reason,'') NOT LIKE 'CHAPTER_DISPLAY_NUMBER%'
+             AND COALESCE(reason,'') NOT LIKE 'CHAPTER_NUMBER_COLLISION%') OR
+          (task_type='PUBLISH' AND reason='WORK_PRESENTATION_INCOMPLETE')
+        )`, [workId]);
+      await this.refreshReadyWork(client, workKey);
+      await client.query('COMMIT');
+      return result.rowCount || 0;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+
   /** One bounded recovery turn; it cannot consume the claim path or scan works. */
   async reconcile(limit = 50): Promise<{ leases: number; retries: number; publishable: number }> {
     const client = await this.db.connect();
@@ -141,7 +168,7 @@ export class LiteRepository {
       for (const row of ready.rows) {
         await client.query(
           `INSERT INTO importer_lite_tasks(task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,payload,checkpoint)
-           VALUES ('PUBLISH',$1,$2,$3,$4,$5,'lite:publish:'||$1::text||':'||$3,$6::jsonb,$7::jsonb)
+           VALUES ('PUBLISH',$1::uuid,$2,$3,$4,$5,'lite:publish:'||$1::text||':'||$3,$6::jsonb,$7::jsonb)
            ON CONFLICT(idempotency_key) DO NOTHING`,
           [row.work_id, row.work_key, row.chapter_key, row.priority, row.base_priority,
             JSON.stringify({ importTaskId: row.id }), JSON.stringify({})],
@@ -168,6 +195,19 @@ export class LiteRepository {
 
   /** Stable ID is reserved before the non-transactional Telegram call. */
   async reserveUpload(taskId: string, pagePosition: number, sha256: string): Promise<{ mediaId: string; state: string }> {
+    const existing = await this.db.query<Row>(`SELECT media_id,state FROM importer_lite_uploads
+      WHERE task_id=$1::uuid AND page_position=$2`, [taskId, pagePosition]);
+    if (existing.rows[0]) {
+      // An INTENT surviving a crash has no durable confirmation that the
+      // request did not reach Telegram. Convert it to UNKNOWN rather than
+      // initiating an indistinguishable duplicate upload.
+      if (existing.rows[0].state === 'INTENT') {
+        await this.db.query(`UPDATE importer_lite_uploads SET state='UNKNOWN',updated_at=now()
+          WHERE task_id=$1::uuid AND page_position=$2 AND state='INTENT'`, [taskId, pagePosition]);
+        return { mediaId: existing.rows[0].media_id, state: 'UNKNOWN' };
+      }
+      return { mediaId: existing.rows[0].media_id, state: existing.rows[0].state };
+    }
     const reusable = await this.db.query<Row>(`SELECT id FROM media WHERE sha256=$1 AND storage_ready=true
       AND bytes>0 AND mime LIKE 'image/%' ORDER BY created_at LIMIT 1`, [sha256]);
     if (reusable.rows[0]?.id) {
@@ -183,10 +223,19 @@ export class LiteRepository {
     const result = await this.db.query<Row>(
       `INSERT INTO importer_lite_uploads(task_id,page_position,media_id,sha256)
        VALUES($1::uuid,$2,$3::uuid,$4)
-       ON CONFLICT(task_id,page_position) DO UPDATE SET updated_at=now()
+       ON CONFLICT(task_id,page_position) DO NOTHING
        RETURNING media_id,state`, [taskId, pagePosition, id, sha256],
     );
-    return { mediaId: result.rows[0].media_id, state: result.rows[0].state };
+    if (result.rows[0]) return { mediaId: result.rows[0].media_id, state: result.rows[0].state };
+    // Another claimant won between the read and INSERT. Treat it exactly as
+    // an interrupted attempt; a lease fencing failure must not duplicate it.
+    const raced = await this.db.query<Row>(`UPDATE importer_lite_uploads SET state='UNKNOWN',updated_at=now()
+      WHERE task_id=$1::uuid AND page_position=$2 AND state='INTENT' RETURNING media_id,state`, [taskId, pagePosition]);
+    if (raced.rows[0]) return { mediaId: raced.rows[0].media_id, state: 'UNKNOWN' };
+    const durable = await this.db.query<Row>(`SELECT media_id,state FROM importer_lite_uploads
+      WHERE task_id=$1::uuid AND page_position=$2`, [taskId, pagePosition]);
+    if (!durable.rows[0]) throw new Error('UPLOAD_INTENT_RACE_NOT_FOUND');
+    return { mediaId: durable.rows[0].media_id, state: durable.rows[0].state };
   }
 
   async recordUploadReceipt(input: {
@@ -217,12 +266,18 @@ export class LiteRepository {
       WHERE task_id=$1::uuid AND page_position=$2 AND state IN ('INTENT','UPLOADED')`, [taskId, position]).catch(() => {});
   }
 
+  /** The provider explicitly rejected the attempt, so the same reserved ID may retry safely. */
+  async markUploadRetryable(taskId: string, position: number): Promise<void> {
+    await this.db.query(`UPDATE importer_lite_uploads SET state='RETRYABLE',updated_at=now()
+      WHERE task_id=$1::uuid AND page_position=$2 AND state='INTENT'`, [taskId, position]).catch(() => {});
+  }
+
   async publish(input: { task: LiteTask; workerId: string; chapterId: string; workId: string; mediaIds: string[]; fresh: boolean }): Promise<boolean> {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
       const presentation = await client.query<Row>(`SELECT w.cover_id,w.title,w.slug,m.storage_ready,m.bytes
-        FROM works w LEFT JOIN media m ON m.id=w.cover_id WHERE w.id=$1::uuid FOR UPDATE`, [input.workId]);
+        FROM works w LEFT JOIN media m ON m.id=w.cover_id WHERE w.id=$1::uuid FOR UPDATE OF w`, [input.workId]);
       const work = presentation.rows[0];
       if (!work?.title || !work?.slug || !work?.cover_id || work.storage_ready !== true || Number(work.bytes) < 1500) {
         throw new Error('WORK_PRESENTATION_INCOMPLETE');
@@ -242,7 +297,7 @@ export class LiteRepository {
       const publishedAt = visible.rows[0]?.published_at || null;
       if (publishedAt) {
         await client.query(`INSERT INTO importer_publication_events(chapter_id,transition_at,recorded_at,bucket_minute,is_fresh_release)
-          VALUES($1::uuid,$2,clock_timestamp(),date_trunc('minute',$2),$3) ON CONFLICT(chapter_id) DO NOTHING`, [input.chapterId,publishedAt,input.fresh]);
+          VALUES($1::uuid,$2::timestamptz,clock_timestamp(),date_trunc('minute',$2::timestamptz),$3) ON CONFLICT(chapter_id) DO NOTHING`, [input.chapterId,publishedAt,input.fresh]);
         await client.query(`UPDATE works SET published=true,latest_chapter_published_at=GREATEST(COALESCE(latest_chapter_published_at,$2),$2),updated_at=now() WHERE id=$1::uuid`, [input.workId,publishedAt]);
       }
       const done = await client.query(`UPDATE importer_lite_tasks SET state='DONE',lease_owner=NULL,lease_until=NULL,

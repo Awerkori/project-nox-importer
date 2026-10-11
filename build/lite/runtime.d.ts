@@ -16,6 +16,7 @@ export declare class ImporterLiteRuntime {
     private readonly dedupe;
     private readonly logger;
     private readonly downloads;
+    private readonly bufferedPages;
     private sitePausedUntil;
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config);
     start(): Promise<void>;

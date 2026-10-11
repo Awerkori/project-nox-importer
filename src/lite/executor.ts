@@ -5,7 +5,7 @@ import { calculateSha256, inspectImage } from '../storage/media.js';
 import type { StorageProvider } from '../storage/provider.js';
 import type { SourceRegistry } from '../sources/registry.js';
 import { LiteRepository } from './repository.js';
-import { selectChapterSource } from './source-selector.js';
+import { selectableChapterSources } from './source-selector.js';
 import type { ChapterSourceRoute, LiteTask } from './types.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 
@@ -23,7 +23,22 @@ async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T, index: 
   return result;
 }
 
+type SourceFailure = Error & { sourceFailure?: boolean; retryAfter?: number };
+
+function sourceFailure(error: unknown): SourceFailure {
+  const normalized: SourceFailure = error instanceof Error ? error : new Error(String(error || 'SOURCE_FAILURE'));
+  normalized.sourceFailure = true;
+  return normalized;
+}
+
+function isSourceFailure(error: unknown): error is SourceFailure {
+  return Boolean((error as SourceFailure | undefined)?.sourceFailure);
+}
+
 export class LiteExecutor {
+  // Held from byte download through receipt persistence. This is distinct
+  // from request concurrency: it bounds real image buffers across every
+  // chapter worker while Telegram is slow or cooling down.
   constructor(
     private readonly db: Pool,
     private readonly queue: LiteRepository,
@@ -32,6 +47,7 @@ export class LiteExecutor {
     private readonly importerUserId: string,
     private readonly downloads: AsyncSemaphore,
     private readonly perChapterPageConcurrency = 4,
+    private readonly bufferedPages: AsyncSemaphore = downloads,
   ) {}
 
   private async routes(task: LiteTask): Promise<ChapterSourceRoute[]> {
@@ -99,79 +115,140 @@ export class LiteExecutor {
       [source,health,String(cooldownSeconds),String(error?.message || 'SOURCE_FAILURE').slice(0,500)]).catch(() => {});
   }
 
+  private async hasPersistedUpload(taskId: string): Promise<boolean> {
+    const result = await this.db.query<{ persisted: boolean }>(
+      `SELECT EXISTS(SELECT 1 FROM importer_lite_uploads WHERE task_id=$1::uuid AND state='PERSISTED') AS persisted`, [taskId],
+    );
+    return result.rows[0]?.persisted === true;
+  }
+
   async importChapter(task: LiteTask, workerId: string): Promise<void> {
     const routeSet = await this.routes(task);
-    const choice = selectChapterSource(routeSet, { language: String(task.payload.language || 'und'), edition: String(task.payload.edition || 'default') });
-    if (!choice.route) {
+    const selection = selectableChapterSources(routeSet, { language: String(task.payload.language || 'und'), edition: String(task.payload.edition || 'default') });
+    if (!selection.routes.length) {
       const until = routeSet.map((route) => route.cooldownUntil?.getTime() || 0).filter(Boolean).sort()[0];
       await this.queue.finish(task, workerId, {
-        state: choice.reason === 'ALL_ROUTES_COOLDOWN' ? 'RETRY_WAIT' : 'BLOCKED', reason: choice.reason,
+        state: selection.reason === 'ALL_ROUTES_COOLDOWN' ? 'RETRY_WAIT' : 'BLOCKED', reason: selection.reason,
         nextRunAt: until ? new Date(until) : undefined,
       });
       return;
     }
-    const route = choice.route;
-    const adapter = this.registry.get(route.source);
-    if (!adapter) {
-      await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'SOURCE_ADAPTER_UNAVAILABLE' });
+    const hasPersistedUpload = await this.hasPersistedUpload(task.id);
+    const pinnedSource = typeof task.checkpoint.selectedSource === 'string' ? task.checkpoint.selectedSource : null;
+    const routes = hasPersistedUpload
+      ? selection.routes.filter((route) => route.source === pinnedSource)
+      : selection.routes;
+    if (!routes.length) {
+      await this.queue.finish(task, workerId, {
+        state: 'BLOCKED',
+        reason: hasPersistedUpload ? 'PARTIAL_UPLOAD_SOURCE_ROUTE_UNAVAILABLE' : 'NO_CONFIRMED_ROUTE',
+      });
       return;
     }
-    try {
-      const urls = await adapter.fetchChapterPages(route.sourceChapterId, Number(task.payload.displayNumber));
-      if (!urls.length || urls.length > 1000) throw new Error('INVALID_PAGE_MANIFEST');
-      const chapterId = await this.createOrLoadChapter(task);
-      const mediaIds = await mapBounded(urls, this.perChapterPageConcurrency, async (url, index) => {
-        const position = index + 1;
-        const already = await this.db.query<{ media_id: string; state: string }>(
-          'SELECT media_id,state FROM importer_lite_uploads WHERE task_id=$1::uuid AND page_position=$2', [task.id, position],
-        );
-        if (already.rows[0]?.state === 'PERSISTED') return already.rows[0].media_id;
-        if (already.rows[0]?.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
-        const { bytes, image } = await this.downloads.runExclusive(async () => {
-          const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: AbortSignal.timeout(45_000) });
-          if (!response.ok) throw Object.assign(new Error(`PAGE_HTTP_${response.status}`), { status: response.status });
-          const bytes = await readImageBody(response, { signal: AbortSignal.timeout(45_000) });
-          return { bytes, image: inspectImage(bytes) };
-        });
-        const reserved = await this.queue.reserveUpload(task.id, position, calculateSha256(bytes));
-        if (reserved.state === 'PERSISTED') return reserved.mediaId;
-        if (reserved.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
-        let receiptNeeded = false;
+    let lastError: unknown = null;
+    // A failed preferred source must not make a canonical chapter wait for a
+    // confirmed, healthy alternative.  This loop is bounded by its routes.
+    for (const route of routes) {
+      const adapter = this.registry.get(route.source);
+      if (!adapter) { lastError = new Error('SOURCE_ADAPTER_UNAVAILABLE'); continue; }
+      try {
+        let urls: string[];
         try {
-          const providerKey = await this.storage.upload(bytes, image.mime, reserved.mediaId, chapterId);
-          receiptNeeded = true;
-          await this.queue.recordUploadReceipt({
-            taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256: calculateSha256(bytes),
-            bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
-            botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,
-            shardId: this.storage.getLastShardId?.(reserved.mediaId) || null,
-            channelId: this.storage.getLastChannelId?.(reserved.mediaId) || null, createdBy: this.importerUserId,
-          });
-          return reserved.mediaId;
-        } catch (error) {
-          // Only a confirmed Telegram success followed by DB failure is not
-          // safely retryable. A plain request failure remains retryable.
-          if (receiptNeeded) await this.queue.markUploadUnknown(task.id, position);
-          throw error;
+          urls = await adapter.fetchChapterPages(route.sourceChapterId, Number(task.payload.displayNumber));
+          if (!urls.length || urls.length > 1000) throw new Error('INVALID_PAGE_MANIFEST');
+        } catch (error) { throw sourceFailure(error); }
+        const pageManifestHash = calculateSha256(Buffer.from(JSON.stringify(urls)));
+        const previousManifestHash = typeof task.checkpoint.pageManifestHash === 'string' ? task.checkpoint.pageManifestHash : null;
+        if (hasPersistedUpload && previousManifestHash && previousManifestHash !== pageManifestHash) {
+          throw new Error('SOURCE_PAGE_MANIFEST_CHANGED_AFTER_PARTIAL_STORAGE');
         }
-      });
-      await this.queue.checkpoint(task, workerId, { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source, mediaStoredAt: new Date().toISOString() });
-      await this.queue.finish(task, workerId, { state: 'DONE', checkpoint: { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source } });
-      await this.queue.enqueue({ taskType: 'PUBLISH', workId: task.workId, workKey: task.workKey, chapterKey: task.chapterKey,
-        priority: task.basePriority === 'STAFF' ? 'P0' : task.basePriority,
-        idempotencyKey: `lite:publish:${task.workId}:${task.chapterKey}`, payload: { importTaskId: task.id } });
-    } catch (error: any) {
-      await this.recordSourceFailure(route.source, error);
-      const permanent = /INVALID_PAGE_MANIFEST|UPLOAD_OUTCOME_UNKNOWN|CHAPTER_DISPLAY_NUMBER/.test(String(error?.message));
-      const retryAfter = Number(error?.retryAfter || error?.parameters?.retry_after || 0);
-      await this.queue.finish(task, workerId, {
-        state: permanent || task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
-        reason: String(error?.message || 'IMPORT_FAILED').slice(0, 500),
-        nextRunAt: permanent ? undefined : new Date(Date.now() + (retryAfter > 0
-          ? (retryAfter + 2) * 1_000
-          : Math.min(30 * 60_000, 30_000 * Math.max(1, task.attempts)))),
-      });
+        // Persist the chosen source and manifest before storing page bytes.
+        // From this point a partial chapter can only resume from the exact
+        // same route; otherwise a valid alternative could create a mixed
+        // edition without any detectable corruption.
+        if (!await this.queue.checkpoint(task, workerId, {
+          selectedSource: route.source, sourceChapterId: route.sourceChapterId, pageManifestHash, plannedPageCount: urls.length,
+        })) throw new Error('LEASE_LOST_BEFORE_MEDIA_STORAGE');
+        const chapterId = await this.createOrLoadChapter(task);
+        const mediaIds = await mapBounded(urls, this.perChapterPageConcurrency, async (url, index) => {
+          const position = index + 1;
+          const already = await this.db.query<{ media_id: string; state: string }>(
+            'SELECT media_id,state FROM importer_lite_uploads WHERE task_id=$1::uuid AND page_position=$2', [task.id, position],
+          );
+          if (already.rows[0]?.state === 'PERSISTED') return already.rows[0].media_id;
+          if (already.rows[0]?.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+          return this.bufferedPages.runExclusive(async () => {
+            let downloaded: { bytes: Uint8Array; image: ReturnType<typeof inspectImage> };
+            try {
+              downloaded = await this.downloads.runExclusive(async () => {
+                const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: AbortSignal.timeout(45_000) });
+                if (!response.ok) {
+                  const error = sourceFailure(new Error(`PAGE_HTTP_${response.status}`));
+                  error.retryAfter = Number(response.headers.get('retry-after') || 0);
+                  throw error;
+                }
+                const bytes = await readImageBody(response, { signal: AbortSignal.timeout(45_000) });
+                return { bytes, image: inspectImage(bytes) };
+              });
+            } catch (error) { throw sourceFailure(error); }
+            const { bytes, image } = downloaded;
+            const reserved = await this.queue.reserveUpload(task.id, position, calculateSha256(bytes));
+            if (reserved.state === 'PERSISTED') return reserved.mediaId;
+            if (reserved.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+            let receiptNeeded = false;
+            try {
+              const providerKey = await this.storage.upload(bytes, image.mime, reserved.mediaId, chapterId);
+              receiptNeeded = true;
+              await this.queue.recordUploadReceipt({
+                taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256: calculateSha256(bytes),
+                bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
+                botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,
+                shardId: this.storage.getLastShardId?.(reserved.mediaId) || null,
+                channelId: this.storage.getLastChannelId?.(reserved.mediaId) || null, createdBy: this.importerUserId,
+              });
+              return reserved.mediaId;
+            } catch (error) {
+              // A confirmed Telegram success followed by a DB failure is
+              // ambiguous. Network failures without an explicit Telegram HTTP
+              // rejection are ambiguous too: a response can be lost after the
+              // server accepted the upload. Only known HTTP rejections (notably
+              // 429) may retry with the reserved media ID.
+              if (receiptNeeded || !(error as any)?.statusCode) {
+                await this.queue.markUploadUnknown(task.id, position);
+                throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+              }
+              await this.queue.markUploadRetryable(task.id, position);
+              throw error;
+            }
+          });
+        });
+        await this.queue.checkpoint(task, workerId, { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source, mediaStoredAt: new Date().toISOString() });
+        await this.queue.finish(task, workerId, { state: 'DONE', checkpoint: { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source } });
+        await this.queue.enqueue({ taskType: 'PUBLISH', workId: task.workId, workKey: task.workKey, chapterKey: task.chapterKey,
+          priority: task.basePriority === 'STAFF' ? 'P0' : task.basePriority,
+          idempotencyKey: `lite:publish:${task.workId}:${task.chapterKey}`, payload: { importTaskId: task.id } });
+        return;
+      } catch (error) {
+        lastError = error;
+        if (isSourceFailure(error)) {
+          await this.recordSourceFailure(route.source, error);
+          // Never blend a partially persisted chapter with an alternative
+          // source. The task will retry the pinned route after its cooldown.
+          if (await this.hasPersistedUpload(task.id)) break;
+          continue;
+        }
+        break;
+      }
     }
+    const message = String((lastError as Error | null)?.message || 'IMPORT_FAILED');
+    const permanent = /UPLOAD_OUTCOME_UNKNOWN|CHAPTER_DISPLAY_NUMBER|CHAPTER_NUMBER_COLLISION|SOURCE_PAGE_MANIFEST_CHANGED_AFTER_PARTIAL_STORAGE|LEASE_LOST_BEFORE_MEDIA_STORAGE/.test(message);
+    const retryAfter = Number((lastError as SourceFailure | null)?.retryAfter || (lastError as any)?.parameters?.retry_after || 0);
+    await this.queue.finish(task, workerId, {
+      state: permanent || task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT', reason: message.slice(0, 500),
+      nextRunAt: permanent ? undefined : new Date(Date.now() + (retryAfter > 0
+        ? (retryAfter + 2) * 1_000
+        : Math.min(30 * 60_000, 30_000 * Math.max(1, task.attempts)))),
+    });
   }
 
   async publish(task: LiteTask, workerId: string): Promise<void> {

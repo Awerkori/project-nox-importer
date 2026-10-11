@@ -23,6 +23,15 @@ Invariants:
 - Media is not publication. An intent precedes upload, a receipt precedes page
   persistence, and the atomic publish transaction validates every page before
   setting `published_at`.
+- An upload with an explicit Telegram rejection remains retryable using the
+  same reserved media ID. A timeout, lost response, or a Telegram success
+  followed by failed receipt persistence becomes `UNKNOWN` and blocks that
+  page for recovery instead of blindly uploading it again.
+- Fallback is allowed before media persists. Once a page receipt exists, the
+  task is pinned to its selected source and page-manifest hash; an alternative
+  cannot silently mix another edition into a partial chapter.
+- Download request slots and retained page buffers have separate global
+  semaphores. Neither is multiplied by the number of chapter workers.
 - One bounded reconciler handles expired leases, due retries, and completed
   imports without a publish task. It has no global work sweep.
 

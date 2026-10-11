@@ -10,22 +10,37 @@ export function selectChapterSource(
   expected: { language?: string | null; edition?: string | null },
   now = new Date(),
 ): SourceSelection {
+  const candidates = selectableChapterSources(routes, expected, now);
+  if (candidates.routes.length) return { route: candidates.routes[0] };
+  return { route: null, reason: candidates.reason };
+}
+
+/**
+ * Ordered alternatives for one already-canonical chapter.  The executor uses
+ * this list to fail over in the same claim after a source-only failure; task
+ * priority is intentionally absent from this decision.
+ */
+export function selectableChapterSources(
+  routes: ChapterSourceRoute[],
+  expected: { language?: string | null; edition?: string | null },
+  now = new Date(),
+): { routes: ChapterSourceRoute[]; reason?: SourceSelection['reason'] } {
   const matching = routes.filter((route) =>
     route.confirmed && route.hasChapter &&
     (!expected.language || !route.language || route.language === expected.language) &&
     (!expected.edition || !route.edition || route.edition === expected.edition),
   );
-  if (matching.length === 0) return { route: null, reason: 'NO_CONFIRMED_ROUTE' };
+  if (matching.length === 0) return { routes: [], reason: 'NO_CONFIRMED_ROUTE' };
   const eligible = matching.filter((route) =>
     route.health !== 'BROKEN' && route.health !== 'DISABLED' &&
     (!route.cooldownUntil || route.cooldownUntil <= now),
   );
   if (eligible.length === 0) {
     const anyCooldown = matching.some((route) => route.cooldownUntil && route.cooldownUntil > now);
-    return { route: null, reason: anyCooldown ? 'ALL_ROUTES_COOLDOWN' : 'ALL_ROUTES_UNHEALTHY' };
+    return { routes: [], reason: anyCooldown ? 'ALL_ROUTES_COOLDOWN' : 'ALL_ROUTES_UNHEALTHY' };
   }
   eligible.sort((a, b) => a.sourceRank - b.sourceRank || a.source.localeCompare(b.source));
-  return { route: eligible[0] };
+  return { routes: eligible };
 }
 
 export function nextSourceCooldown(routes: ChapterSourceRoute[], now = new Date()): Date | null {

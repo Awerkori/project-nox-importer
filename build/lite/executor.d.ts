@@ -12,10 +12,12 @@ export declare class LiteExecutor {
     private readonly importerUserId;
     private readonly downloads;
     private readonly perChapterPageConcurrency;
-    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number);
+    private readonly bufferedPages;
+    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore);
     private routes;
     private createOrLoadChapter;
     private recordSourceFailure;
+    private hasPersistedUpload;
     importChapter(task: LiteTask, workerId: string): Promise<void>;
     publish(task: LiteTask, workerId: string): Promise<void>;
 }

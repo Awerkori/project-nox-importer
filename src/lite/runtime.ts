@@ -24,6 +24,7 @@ export class ImporterLiteRuntime {
   private readonly dedupe: DeduplicationEngine;
   private readonly logger = new Logger('ImporterLite');
   private readonly downloads: AsyncSemaphore;
+  private readonly bufferedPages: AsyncSemaphore;
   private sitePausedUntil = 0;
 
   constructor(
@@ -36,8 +37,9 @@ export class ImporterLiteRuntime {
     if (!config.IMPORTER_USER_ID) throw new Error('IMPORTER_USER_ID is required when IMPORTER_RUNTIME_MODE=lite');
     this.queue = new LiteRepository(pool);
     this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
+    this.bufferedPages = new AsyncSemaphore(config.BUFFERED_PAGE_CONCURRENCY, 'lite_global_page_buffers');
     this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads,
-      Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)));
+      Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages);
     this.dedupe = new DeduplicationEngine(catalogClient);
   }
 
@@ -133,6 +135,11 @@ export class ImporterLiteRuntime {
       }
       const language = String(snapshot.details.language || (snapshot.details.raw as any)?.language || 'pt-BR');
       const edition = String(snapshot.details.edition || (snapshot.details.raw as any)?.edition || 'default');
+      // The recurring catalog task is P0 only for works already under
+      // monitoring. New rows it materializes are therefore new releases;
+      // initial P2 cataloguing still creates P1 fill work. Existing P1 tasks
+      // retain their durable priority through the idempotency key.
+      const chapterPriority = task.priority === 'P0' || task.priority === 'STAFF' ? 'P0' : 'P1';
       for (const chapter of snapshot.chapters) {
         const displayNumber = chapter.displayNumber || String(chapter.number);
         const chapterKey = canonicalChapterKey({ displayNumber, title: chapter.title, language, edition });
@@ -142,9 +149,13 @@ export class ImporterLiteRuntime {
           ON CONFLICT(source,source_chapter_id) DO UPDATE SET canonical_chapter_key=excluded.canonical_chapter_key,confirmed=true,has_chapter=true,last_verified_at=now(),updated_at=now()`,
           [resolved.workId,chapterKey,source,chapter.sourceChapterId,language,edition,rankForSource(source)]);
         await this.queue.enqueue({ taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
-          chapterKey, priority: 'P1', idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,
+          chapterKey, priority: chapterPriority, idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,
           payload: { displayNumber, chapterTitle: chapter.title || '', orderKey, language, edition } });
       }
+      // A newly confirmed mapping (or repaired presentation metadata) is
+      // evidence worth re-evaluating. This indexed, per-work wake-up replaces
+      // the legacy global blocked-task sweeps.
+      await this.queue.wakeCatalogBlocked(resolved.workId, `work:${resolved.workId}`);
       // Ongoing works retain one cheap, persistent P0 check; completed works
       // stay catalogued and are revisited only through discovery/repair.
       const ongoing = snapshot.details.status === 'ONGOING';

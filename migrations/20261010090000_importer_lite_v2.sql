@@ -110,13 +110,16 @@ CREATE TABLE IF NOT EXISTS public.importer_lite_uploads (
   storage_shard_id text NULL,
   channel_id text NULL,
   provider_key text NULL,
-  state text NOT NULL DEFAULT 'INTENT' CHECK (state IN ('INTENT', 'UPLOADED', 'PERSISTED', 'UNKNOWN')),
+  -- RETRYABLE means Telegram explicitly rejected the request (for example
+  -- 429), while UNKNOWN means an outcome may have reached Telegram and must
+  -- never be blindly sent again.
+  state text NOT NULL DEFAULT 'INTENT' CHECK (state IN ('INTENT', 'RETRYABLE', 'UPLOADED', 'PERSISTED', 'UNKNOWN')),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (task_id, page_position)
 );
 CREATE INDEX IF NOT EXISTS importer_lite_uploads_recovery_idx
-  ON public.importer_lite_uploads (state, updated_at) WHERE state IN ('INTENT', 'UPLOADED', 'UNKNOWN');
+  ON public.importer_lite_uploads (state, updated_at) WHERE state IN ('INTENT', 'RETRYABLE', 'UPLOADED', 'UNKNOWN');
 
 -- The panel remains the authority for STAFF.  Its existing writes immediately
 -- promote/demote Lite tasks; no restart or periodic global scan is required.
