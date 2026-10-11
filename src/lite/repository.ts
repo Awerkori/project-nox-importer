@@ -205,7 +205,11 @@ export class LiteRepository {
         await client.query('COMMIT');
         return 0;
       }
-      const limit = Math.min(maximum, floor - current);
+      // The floor is an early-warning gate, not the desired total task
+      // count.  Once it is crossed, queue one small catalog batch now so the
+      // next P1 source check is already waiting behind the remaining imports
+      // instead of creating an avoidable empty interval at zero.
+      const limit = maximum;
       const candidates = await client.query<Row>(`WITH bounded AS (
           SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id
           FROM importer_work_mappings m
