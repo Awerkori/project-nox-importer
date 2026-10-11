@@ -67,12 +67,10 @@ const ConfigSchema = z.object({
   // Production ramp 2026-10-11: real P1 media flow sustained only 70–128
   // pages/min at the former 16-page fence, while Telegram stayed below
   // 1.6 MiB/s with no 429 and the 24-upload/storage fences remained unused.
-  // With the 24-page fence, production sustained 193 pages/min while recent
-  // complete chapters averaged 37.4 pages (p95=120): below the ~299 pages/min
-  // needed for the 8/min acceptance floor. Telegram had no 429 and used only
-  // ~1.9 MiB/s of its 8 MiB/s budget. Thirty-two is the next reversible page
-  // fetch ramp; uploads remain bounded at 24 and retained buffers at 48.
-  DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(32),
+  // A 32-page production ramp regressed to 143 pages/min and increased RSS
+  // without Telegram 429. Keep the measured 24-page fence until a distinct
+  // bottleneck is proven; uploads remain bounded at 24 and buffers at 48.
+  DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(24),
   BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(48),
   // Upstream adapter calls are network work, not a reason to monopolize a
   // chapter slot. The timeout is deliberately independent from the durable
