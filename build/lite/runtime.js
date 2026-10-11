@@ -88,7 +88,10 @@ export class ImporterLiteRuntime {
         this.queue = new LiteRepository(pool);
         this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
         this.bufferedPages = new AsyncSemaphore(config.BUFFERED_PAGE_CONCURRENCY, 'lite_global_page_buffers');
-        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter);
+        // Four healthy MangaFlix workers previously filled the 24-page fence at
+        // six pages each. Permit eight per chapter only under the explicit global
+        // 32-page cap; Telegram (24) and retained buffers (48) remain hard limits.
+        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(8, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter);
         this.dedupe = new DeduplicationEngine(catalogClient);
     }
     async start() {
