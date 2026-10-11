@@ -54,6 +54,16 @@ export declare class ImporterLiteRuntime {
     private releaseRuntimeLeadership;
     private seedDiscovery;
     private upsertChapterSources;
+    /**
+     * Catalog passes can rediscover a whole work that the legacy importer has
+     * already published.  A source/id match plus the canonical work id is
+     * sufficient evidence to reuse it; similarity or a numeric display value
+     * is deliberately never used here.  Returning this map before admission
+     * keeps hundreds of no-op IMPORT_CHAPTER claims out of the P1 lane.
+     */
+    private legacyPublishedChapterMap;
+    /** Persist the exact legacy identity without rewriting any Reader chapter. */
+    private upsertLegacyChapterMappings;
     private worker;
     /** One empty claim probe per idle interval, shared by every worker. */
     private claimNext;
