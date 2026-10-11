@@ -1,8 +1,10 @@
+import { performance } from 'node:perf_hooks';
 import { readImageBody } from '../core/bounded-body.js';
 import { calculateSha256, inspectImage } from '../storage/media.js';
 import { selectableChapterSources } from './source-selector.js';
 import { AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
+import { telemetryCollector } from '../core/telemetry-collector.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
@@ -312,21 +314,29 @@ export class LiteExecutor {
                     return this.bufferedPages.runExclusive(async () => {
                         let downloaded;
                         try {
-                            downloaded = await this.downloads.runExclusive(async () => {
-                                const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: AbortSignal.timeout(45_000) });
-                                if (!response.ok) {
-                                    if (response.status === 429 && host)
-                                        this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));
-                                    const error = sourceFailure(new Error(`PAGE_HTTP_${response.status}`));
-                                    error.retryAfter = Number(response.headers.get('retry-after') || 0);
-                                    throw error;
-                                }
-                                const bytes = await readImageBody(response, { signal: AbortSignal.timeout(45_000) });
-                                const image = inspectImage(bytes);
-                                if (host)
-                                    this.sourceRateLimiter.recordSuccess(host);
-                                return { bytes, image };
-                            });
+                            const startedAt = performance.now();
+                            telemetryCollector.trackActiveDownload(1);
+                            try {
+                                downloaded = await this.downloads.runExclusive(async () => {
+                                    const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: AbortSignal.timeout(45_000) });
+                                    if (!response.ok) {
+                                        if (response.status === 429 && host)
+                                            this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));
+                                        const error = sourceFailure(new Error(`PAGE_HTTP_${response.status}`));
+                                        error.retryAfter = Number(response.headers.get('retry-after') || 0);
+                                        throw error;
+                                    }
+                                    const bytes = await readImageBody(response, { signal: AbortSignal.timeout(45_000) });
+                                    const image = inspectImage(bytes);
+                                    if (host)
+                                        this.sourceRateLimiter.recordSuccess(host);
+                                    return { bytes, image };
+                                });
+                                telemetryCollector.recordImageDownload(route.source, performance.now() - startedAt, downloaded.bytes.length);
+                            }
+                            finally {
+                                telemetryCollector.trackActiveDownload(-1);
+                            }
                         }
                         catch (error) {
                             throw sourceFailure(error);
@@ -339,7 +349,16 @@ export class LiteExecutor {
                             throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
                         let receiptNeeded = false;
                         try {
-                            const providerKey = await this.storage.upload(bytes, image.mime, reserved.mediaId, chapterId);
+                            const uploadStartedAt = performance.now();
+                            telemetryCollector.trackActiveTelegramUpload(1);
+                            let providerKey;
+                            try {
+                                providerKey = await this.storage.upload(bytes, image.mime, reserved.mediaId, chapterId);
+                                telemetryCollector.recordTelegramUpload(performance.now() - uploadStartedAt, bytes.length);
+                            }
+                            finally {
+                                telemetryCollector.trackActiveTelegramUpload(-1);
+                            }
                             receiptNeeded = true;
                             await this.queue.recordUploadReceipt({
                                 taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256: calculateSha256(bytes),

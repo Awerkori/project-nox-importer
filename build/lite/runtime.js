@@ -458,6 +458,10 @@ export class ImporterLiteRuntime {
         ]);
         const memory = process.memoryUsage();
         const storageMetrics = this.storage.getMetricsSummary?.();
+        // Keep the durable heartbeat compact, but include independently measured
+        // download and Telegram occupancy.  Aggregate publication rate cannot
+        // distinguish a slow CDN from a slow upload/persistence path.
+        const pipelineTelemetry = telemetryCollector.getSnapshotReport();
         const telegram = storageMetrics ? {
             uploads: Number(storageMetrics.totalBotUploads || 0),
             shardUploads: Number(storageMetrics.totalShardUploads || 0),
@@ -479,6 +483,12 @@ export class ImporterLiteRuntime {
                 external: Math.round(memory.external / 1024 / 1024), arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024),
             },
             ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+            pipeline: {
+                downloads: pipelineTelemetry.imageDownload,
+                telegram: pipelineTelemetry.telegramStorage,
+                pageDownloadLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_downloads,
+                pageBufferLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_buffers,
+            },
             telegram, sourceRate: this.sourceRateLimiter.getSummary(), site: this.lastSiteProbe,
         };
         this.logger.info('Lite operational progress', snapshot);
