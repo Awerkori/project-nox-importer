@@ -100,10 +100,14 @@ horarios, operador e resultados de cada gate.
 2. Preservar logs, SHA, owner do lease, IDs das tarefas e recibos Telegram para
    diagnostico. Reconciliar uploads incertos em vez de reenviar cegamente.
 3. So' reativar o produtor v1 se ele tiver sido validado contra o schema Reader
-   fase 2 no staging restaurado e depois que o lease Lite tiver sido liberado
-   ou expirado. Caso essa compatibilidade nao esteja comprovada, corrigir ou
-   reimplantar o artefato Lite/Reader; nao executar rollback destrutivo de
-   schema.
+   fase 2 no staging restaurado, com
+   `IMPORTER_LEGACY_READER_CANONICAL_IDENTITY=1`, e depois que o lease Lite
+   tiver sido liberado ou expirado. Esse modo de compatibilidade usa o
+   mapeamento duravel `source + source_chapter_id`, e nao a antiga unicidade
+   numerica. Sem essa variavel o v1 e' propositalmente incompativel com a fase
+   2 e nao deve ser iniciado. Caso a compatibilidade nao esteja comprovada,
+   corrigir ou reimplantar o artefato Lite/Reader; nao executar rollback
+   destrutivo de schema.
 4. Confirmar novamente um unico owner, uma unica linha de publicacao por
    capitulo e Reader saudavel antes de admitir backlog.
 

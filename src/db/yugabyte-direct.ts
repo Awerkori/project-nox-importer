@@ -234,6 +234,14 @@ export async function closeYugabytePool(): Promise<void> {
   }
 }
 
+/** Test-only injection for disposable SQL contract tests. */
+export function setYugabytePoolForTest(testPool: pg.Pool | null): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('setYugabytePoolForTest is available only under NODE_ENV=test');
+  }
+  pool = testPool;
+}
+
 export async function testConnection(): Promise<{
   connected: boolean;
   database: string;
@@ -667,6 +675,32 @@ export interface PublishBatchDirectResult {
   metrics: PublishBatchDirectMetrics;
 }
 
+/**
+ * The v1 publisher only receives a JavaScript number, so it cannot recover a
+ * textual scale that was already lost (for example 12.10 vs 12.1).  During a
+ * rollback after the Reader canonical-identity cutover it must therefore use
+ * the stable source chapter id as its identity, rather than recreating the
+ * removed `(work_id, number)` collision.  Lite itself supplies the richer
+ * source-independent identity and never uses this compatibility path.
+ */
+export function legacyRollbackChapterIdentity(source: string, sourceChapterId: string, number: number): {
+  canonicalKey: string;
+  displayNumber: string;
+  orderKey: string;
+} {
+  const component = (value: string) => encodeURIComponent(value.normalize('NFKC').trim().replace(/\s+/g, ' '));
+  const numeric = String(number);
+  const [whole = '0', fraction = ''] = numeric.split('.');
+  const sourceIdentity = component(sourceChapterId);
+  return {
+    canonicalKey: `legacy-v1|${component(source)}|${sourceIdentity}`,
+    displayNumber: numeric,
+    // The source-id suffix is a deterministic tie-breaker for values which
+    // JavaScript/Postgres numeric representation considers equal.
+    orderKey: `n|${whole.padStart(12, '0')}|${fraction.padEnd(12, '0')}|${sourceIdentity}`,
+  };
+}
+
 /* 4. Direct Atomic Chapter Publication Batch */
 export async function publishBatchDirect(payload: PublishBatchParams): Promise<PublishBatchDirectResult> {
   const startTime = Date.now();
@@ -803,19 +837,64 @@ export async function publishBatchDirect(payload: PublishBatchParams): Promise<P
       ? JSON.stringify(payload.workMapping.metadata)
       : (payload.workMapping?.metadata || '{}');
     const wmConfidence = payload.workMapping?.confidenceScore ?? 1.0;
+    // This remains opt-in so v1 stays compatible with the pre-cutover schema.
+    // It is used only for an approved rollback after Reader phase 2. Failing
+    // closed is safer than accepting the former numeric identity collision.
+    const useCanonicalRollbackIdentity = process.env.IMPORTER_LEGACY_READER_CANONICAL_IDENTITY === '1';
+    const sourceChapterId = String(payload.chapter.sourceChapterId || '').trim();
+    if (useCanonicalRollbackIdentity && (!wmSource || !sourceChapterId)) {
+      throw new Error('LEGACY_CANONICAL_IDENTITY_REQUIRES_SOURCE_CHAPTER_MAPPING');
+    }
+    const rollbackIdentity = useCanonicalRollbackIdentity
+      ? legacyRollbackChapterIdentity(String(wmSource), sourceChapterId, chapterNumber)
+      : null;
+    const chapterCte = useCanonicalRollbackIdentity
+      ? `matched_ch AS (
+           SELECT chapter_id AS id
+           FROM importer_chapter_mappings
+           WHERE source=$7::text AND source_chapter_id=$14::text AND chapter_id IS NOT NULL
+           LIMIT 1
+         ),
+         updated_ch AS (
+           UPDATE chapters AS existing
+           SET title=$4::text,
+               published_at=COALESCE(existing.published_at,$5::timestamptz)
+           FROM matched_ch
+           WHERE existing.id=matched_ch.id
+           RETURNING existing.id,existing.published_at
+         ),
+         inserted_ch AS (
+           INSERT INTO chapters (
+             id,work_id,number,title,published_at,origin,views_total,created_at,
+             canonical_chapter_key,display_number,chapter_order_key,chapter_kind,edition,language
+           )
+           SELECT $1::uuid,$2::uuid,$3::numeric,$4::text,$5::timestamptz,'importer',0,$5::timestamptz,
+             $28::text,$29::text,$30::text,$31::text,$32::text,$33::text
+           WHERE NOT EXISTS (SELECT 1 FROM matched_ch)
+           ON CONFLICT (work_id,canonical_chapter_key) WHERE canonical_chapter_key IS NOT NULL DO UPDATE SET
+             title=EXCLUDED.title,
+             published_at=COALESCE(chapters.published_at,EXCLUDED.published_at)
+           RETURNING id,published_at
+         ),
+         upsert_ch AS (
+           SELECT id,published_at FROM updated_ch
+           UNION ALL
+           SELECT id,published_at FROM inserted_ch
+         )`
+      : `upsert_ch AS (
+           INSERT INTO chapters (
+             id, work_id, number, title, published_at, origin, views_total, created_at
+           ) VALUES (
+             $1::uuid, $2::uuid, $3::numeric, $4::text, $5::timestamptz, 'importer', 0, $5::timestamptz
+           )
+           ON CONFLICT (work_id, number) DO UPDATE SET
+             title = EXCLUDED.title,
+             published_at = COALESCE(chapters.published_at, EXCLUDED.published_at)
+           RETURNING id, published_at
+         )`;
 
     const giantRes = await client.query(`
-      WITH upsert_ch AS (
-        INSERT INTO chapters (
-          id, work_id, number, title, published_at, origin, views_total, created_at
-        ) VALUES (
-          $1::uuid, $2::uuid, $3::numeric, $4::text, $5::timestamptz, 'importer', 0, $5::timestamptz
-        )
-        ON CONFLICT (work_id, number) DO UPDATE SET
-          title = EXCLUDED.title,
-          published_at = COALESCE(chapters.published_at, EXCLUDED.published_at)
-        RETURNING id, published_at
-      ),
+      WITH ${chapterCte},
       upsert_wm AS (
         INSERT INTO importer_work_mappings (
           id, source, source_work_id, work_id, source_slug, source_title,
@@ -921,10 +1000,14 @@ export async function publishBatchDirect(payload: PublishBatchParams): Promise<P
       newChapterId, workId, chapterNumber, payload.chapter.title || `Capítulo ${chapterNumber}`, nowIso,
       newWorkMappingId, wmSource, wmSourceWorkId, wmSourceSlug, wmSourceTitle,
       wmMeta, wmConfidence,
-      newChapterMappingId, payload.chapter.sourceChapterId, sortKey, payload.pages.length,
+      newChapterMappingId, sourceChapterId, sortKey, payload.pages.length,
       payload.jobId || null,
       mediaIds, providerKeys, mimes, widths, heights, bytesArr, sha256s, botRefs, shardIds,
-      positions
+      positions,
+      ...(rollbackIdentity ? [
+        rollbackIdentity.canonicalKey, rollbackIdentity.displayNumber, rollbackIdentity.orderKey,
+        'chapter', 'default', 'und',
+      ] : []),
     ]);
     queryCount++;
     roundTrips++;
