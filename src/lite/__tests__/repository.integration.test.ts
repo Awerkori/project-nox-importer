@@ -674,6 +674,14 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual({ storage_ready: true, sha256: 'atomic-page-sha' });
   });
 
+  it('reuses an already validated media hash without creating a Telegram intent', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'chapter:hash-reuse', priority: 'P1', idempotencyKey: 'hash-reuse' });
+    const task = await db.query<{ id: string }>(`SELECT id FROM importer_lite_tasks WHERE idempotency_key='hash-reuse'`);
+    const reserved = await repo.reserveUpload(task.rows[0].id, 1, 'page-sha');
+    expect(reserved).toEqual({ mediaId: ids.page, state: 'PERSISTED' });
+  });
+
   it('does not retry a repeatedly crashed lease beyond its durable attempt limit', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:crash', priority: 'P1', idempotencyKey: 'crash-exhausted', maxAttempts: 1 });
     const claimed = await repo.claim('worker-a', 30);
