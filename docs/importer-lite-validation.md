@@ -76,13 +76,14 @@ DIScloud RSS, or public-site contention.
 
 ## Full-suite result in this workspace
 
-The complete repository suite was run after the Lite tests. It reported 100
-passing files / 582 passing tests and 8 failing files / 15 failures. None is
-in `src/lite/`: the failures are legacy tests that either require an absent
-direct-YSQL password in this isolated workspace, wait on the legacy memory
-autotuner until their 30-second timeout, or assert pre-existing legacy
-scheduler snapshots (including the known `claim-filters` 4-vs-5 assertion).
-They are recorded as baseline debt and are not presented as Lite validation.
+The complete repository suite was run after the Lite tests. It reported 102
+passing files / 606 passing tests / 15 skipped tests and 7 failing files / 13
+failures. None is in `src/lite/` or `src/storage/__tests__/direct-telegram`:
+the failures are legacy tests that either require an absent direct-YSQL
+password in this isolated workspace, wait on the legacy memory autotuner until
+their 30-second timeout, or assert pre-existing legacy scheduler snapshots
+(including the known `claim-filters` 4-vs-5 assertion). They are recorded as
+baseline debt and are not presented as Lite validation.
 
 Historical representative sample:
 
