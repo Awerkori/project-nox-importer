@@ -64,9 +64,12 @@ const ConfigSchema = z.object({
     // Production ramp 2026-10-11: real P1 media flow sustained only 70–128
     // pages/min at the former 16-page fence, while Telegram stayed below
     // 1.6 MiB/s with no 429 and the 24-upload/storage fences remained unused.
-    // Twenty is a reversible intermediate step; it is still below both the
-    // Telegram and bounded-buffer ceilings, and does not increase workers.
-    DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(20),
+    // Twenty sustained 6.4 published chapters/min with no Telegram 429, only
+    // ~1.4 MiB/s of the 8 MiB/s budget, and a 24-upload/buffer ceiling still
+    // unused. Twenty-four is the next reversible global ramp: it matches the
+    // Telegram media fence, remains below retained buffers, and does not add
+    // chapter workers or YSQL connections.
+    DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(24),
     BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(48),
     // Upstream adapter calls are network work, not a reason to monopolize a
     // chapter slot. The timeout is deliberately independent from the durable
