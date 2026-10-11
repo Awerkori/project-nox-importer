@@ -147,6 +147,20 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual({ priority: 2, base_priority: 2 });
   });
 
+  it('keeps an active STAFF work monitorable without turning its check into a normal claim loop', async () => {
+    await db.query(`INSERT INTO importer_staff_requests(work_id,status) VALUES($1,'ACTIVE')`, [ids.staff]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.staff, workKey: `work:${ids.staff}`, priority: 'P1',
+      idempotencyKey: 'staff-recurring-catalog', payload: { source: 'source-a', sourceWorkId: 'staff-work' } });
+    const catalog = await repo.claim('staff-worker', 120);
+    expect(catalog).toMatchObject({ priority: 'STAFF', monitoring: false });
+    await repo.finish(catalog!, 'staff-worker', { state: 'RETRY_WAIT', priority: 'P2', monitoring: true, nextRunAt: new Date() });
+    await db.query(`UPDATE importer_lite_tasks SET state='READY',next_run_at=now() WHERE id=$1`, [catalog!.id]);
+    // The still-active overlay remains STAFF, but its cheap recurring check
+    // cannot occupy a chapter slot or become permanently unclaimable.
+    expect(await repo.claim('normal-worker', 120)).toBeNull();
+    expect(await repo.claimMonitor('monitor-worker', 120)).toMatchObject({ id: catalog!.id, priority: 'STAFF', monitoring: true });
+  });
+
   it('reserves recurring P0 monitoring for one lightweight lane while normal P1/P2 work advances', async () => {
     await repo.enqueueMany(Array.from({ length: 1300 }, (_, index) => ({
       taskType: 'CATALOG' as const, workKey: `source:source-a:watch:${index}`, priority: 'P2' as const,

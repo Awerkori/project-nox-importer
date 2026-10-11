@@ -242,7 +242,10 @@ BEGIN
   SELECT id INTO v_task_id
   FROM public.importer_lite_tasks
   WHERE state='READY' AND task_type='CATALOG' AND monitoring=true
-    AND priority BETWEEN 1 AND 3 AND next_run_at<=now()
+    -- A STAFF request can remain active after a catalog pass. Its recurring
+    -- observation is still a monitor (not a chapter admission), so it must
+    -- remain recoverable in this one-slot lane rather than becoming invisible.
+    AND next_run_at<=now()
   ORDER BY next_run_at,created_at
   LIMIT 1 FOR UPDATE SKIP LOCKED;
   IF NOT FOUND THEN RETURN; END IF;
