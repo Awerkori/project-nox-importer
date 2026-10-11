@@ -15,9 +15,11 @@ integration suite verifies:
 
 - panel-triggered STAFF promotion followed by strict `STAFF > P0 > P1 > P2`;
 - a ready work remains claimable behind 1,300 blocked task rows and peers of
-  the same priority rotate fairly by work;
+  the same priority rotate fairly by work, including a 1,300-chapter ready
+  work that cannot monopolize other P1 works;
 - expired leases, due retries, publish-task materialisation and bounded,
-  per-work blocked-task re-evaluation;
+  per-work blocked-task re-evaluation, with the origin import settled after
+  publication so recovery does not recreate completed work;
 - atomic Reader-visible publication only after cover and page media validation;
 - healthy source fallback before storage, and safe source/manifest pinning
   after partial storage;

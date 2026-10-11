@@ -125,7 +125,9 @@ export class LiteRepository {
         WHERE work_id=$1::uuid AND state='BLOCKED' AND (
           (task_type='IMPORT_CHAPTER' AND COALESCE(reason,'') NOT LIKE 'UPLOAD_OUTCOME_UNKNOWN%'
              AND COALESCE(reason,'') NOT LIKE 'CHAPTER_DISPLAY_NUMBER%'
-             AND COALESCE(reason,'') NOT LIKE 'CHAPTER_NUMBER_COLLISION%') OR
+             AND COALESCE(reason,'') NOT LIKE 'CHAPTER_NUMBER_COLLISION%'
+             AND COALESCE(reason,'') NOT LIKE 'SOURCE_PAGE_MANIFEST_CHANGED_AFTER_PARTIAL_STORAGE%'
+             AND COALESCE(reason,'') NOT LIKE 'PARTIAL_UPLOAD_SOURCE_ROUTE_UNAVAILABLE%') OR
           (task_type='PUBLISH' AND reason='WORK_PRESENTATION_INCOMPLETE')
         )`, [workId]);
       await this.refreshReadyWork(client, workKey);
@@ -294,11 +296,24 @@ export class LiteRepository {
         `UPDATE chapters SET published_at=clock_timestamp(),is_fresh_release=$2
           WHERE id=$1::uuid AND published_at IS NULL RETURNING published_at`, [input.chapterId,input.fresh],
       );
-      const publishedAt = visible.rows[0]?.published_at || null;
+      // A retry after a commit can see an already-visible chapter. Preserve
+      // that real timestamp and settle the originating import task too, so
+      // the reconciler never keeps re-materialising the same publish task.
+      let publishedAt = visible.rows[0]?.published_at || null;
+      if (!publishedAt) {
+        const existing = await client.query<Row>('SELECT published_at FROM chapters WHERE id=$1::uuid', [input.chapterId]);
+        publishedAt = existing.rows[0]?.published_at || null;
+      }
       if (publishedAt) {
         await client.query(`INSERT INTO importer_publication_events(chapter_id,transition_at,recorded_at,bucket_minute,is_fresh_release)
           VALUES($1::uuid,$2::timestamptz,clock_timestamp(),date_trunc('minute',$2::timestamptz),$3) ON CONFLICT(chapter_id) DO NOTHING`, [input.chapterId,publishedAt,input.fresh]);
         await client.query(`UPDATE works SET published=true,latest_chapter_published_at=GREATEST(COALESCE(latest_chapter_published_at,$2),$2),updated_at=now() WHERE id=$1::uuid`, [input.workId,publishedAt]);
+        const importTaskId = typeof input.task.payload.importTaskId === 'string' ? input.task.payload.importTaskId : null;
+        if (importTaskId) {
+          await client.query(`UPDATE importer_lite_tasks
+            SET checkpoint=checkpoint || jsonb_build_object('publishedAt',$2::text),updated_at=now()
+            WHERE id=$1::uuid AND task_type='IMPORT_CHAPTER'`, [importTaskId,publishedAt]);
+        }
       }
       const done = await client.query(`UPDATE importer_lite_tasks SET state='DONE',lease_owner=NULL,lease_until=NULL,
         checkpoint=checkpoint || jsonb_build_object('publishedAt',COALESCE($3::text,checkpoint->>'publishedAt')),updated_at=now()

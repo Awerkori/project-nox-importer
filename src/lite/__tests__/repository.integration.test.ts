@@ -129,6 +129,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(second?.idempotencyKey).toBe('b-1');
   });
 
+  it('does not let a 1,300-chapter work monopolize same-priority workers', async () => {
+    await db.query(`
+      INSERT INTO importer_lite_tasks(task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key)
+      SELECT 'IMPORT_CHAPTER',$1::uuid,'work:' || $1::text,'bulk:' || n,2,2,'bulk-' || n FROM generate_series(1,1300) n
+    `, [ids.p1a]);
+    await db.query(`SELECT importer_lite_refresh_ready_work('work:' || $1)`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`, chapterKey: 'chapter:1', priority: 'P1', idempotencyKey: 'small-work' });
+
+    const giant = await repo.claim('worker-a', 120);
+    expect(giant?.workId).toBe(ids.p1a);
+    await repo.finish(giant!, 'worker-a', { state: 'DONE' });
+    expect((await repo.claim('worker-b', 120))?.idempotencyKey).toBe('small-work');
+  });
+
   it('recovers an expired lease and materializes a publish task from completed media without a global scan', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:1', priority: 'P1', idempotencyKey: 'recover' });
     const claimed = await repo.claim('worker-a', 30);
@@ -154,10 +168,14 @@ describe('LiteRepository against the additive Lite migration', () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:2', priority: 'P1', idempotencyKey: 'unknown-upload' });
     const unknownUpload = await repo.claim('worker-a', 30);
     await repo.finish(unknownUpload!, 'worker-a', { state: 'BLOCKED', reason: 'UPLOAD_OUTCOME_UNKNOWN:1' });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:3', priority: 'P1', idempotencyKey: 'changed-manifest' });
+    const changedManifest = await repo.claim('worker-a', 30);
+    await repo.finish(changedManifest!, 'worker-a', { state: 'BLOCKED', reason: 'SOURCE_PAGE_MANIFEST_CHANGED_AFTER_PARTIAL_STORAGE' });
 
     expect(await repo.wakeCatalogBlocked(ids.p1a, `work:${ids.p1a}`)).toBe(1);
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [sourceBlocked!.id])).rows[0].state).toBe('READY');
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [unknownUpload!.id])).rows[0].state).toBe('BLOCKED');
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [changedManifest!.id])).rows[0].state).toBe('BLOCKED');
   });
 
   it('publishes only after durable media validation and leaves a Reader-compatible page manifest', async () => {
@@ -171,6 +189,18 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT media_id,position FROM pages WHERE chapter_id=$1`, [ids.chapter])).rows)
       .toEqual([{ media_id: ids.page, position: 1 }]);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_publication_events WHERE chapter_id=$1`, [ids.chapter])).rows[0].count).toBe(1);
+  });
+
+  it('settles the originating import after publication so bounded recovery does not rematerialize it', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.publish, workKey: `work:${ids.publish}`, chapterKey: 'chapter:1', priority: 'P1', idempotencyKey: 'origin-import' });
+    const imported = await repo.claim('importer', 120);
+    await repo.finish(imported!, 'importer', { state: 'DONE', checkpoint: { chapterId: ids.chapter, mediaIds: [ids.page] } });
+    expect((await repo.reconcile(10)).publishable).toBe(1);
+    const publish = await repo.claim('publisher', 120);
+    expect(publish?.taskType).toBe('PUBLISH');
+    expect(await repo.publish({ task: publish!, workerId: 'publisher', chapterId: ids.chapter, workId: ids.publish, mediaIds: [ids.page], fresh: false })).toBe(true);
+    expect((await db.query(`SELECT checkpoint ? 'publishedAt' AS settled FROM importer_lite_tasks WHERE id=$1`, [imported!.id])).rows[0].settled).toBe(true);
+    expect((await repo.reconcile(10)).publishable).toBe(0);
   });
 
   it('falls back within the same claim when the preferred source fails before media storage', async () => {

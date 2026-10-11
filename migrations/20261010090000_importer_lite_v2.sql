@@ -45,6 +45,14 @@ CREATE INDEX IF NOT EXISTS importer_lite_tasks_recovery_idx
   WHERE state IN ('RUNNING', 'RETRY_WAIT');
 CREATE INDEX IF NOT EXISTS importer_lite_tasks_work_chapter_idx
   ON public.importer_lite_tasks (work_id, chapter_key) WHERE chapter_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS importer_lite_tasks_blocked_work_idx
+  ON public.importer_lite_tasks (work_id, updated_at) WHERE state = 'BLOCKED';
+-- The reconciler's stored-but-unpublished query must not degrade as DONE
+-- history grows. This narrow partial index contains only recovery candidates.
+CREATE INDEX IF NOT EXISTS importer_lite_tasks_publish_recovery_idx
+  ON public.importer_lite_tasks (updated_at)
+  WHERE state = 'DONE' AND task_type = 'IMPORT_CHAPTER'
+    AND checkpoint ? 'mediaIds' AND NOT checkpoint ? 'publishedAt';
 CREATE INDEX IF NOT EXISTS importer_lite_ready_works_claim_idx
   ON public.importer_lite_ready_works (priority, next_run_at, last_claimed_at);
 
