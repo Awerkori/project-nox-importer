@@ -52,7 +52,11 @@ const ConfigSchema = z.object({
     // two leave a real reader and operational headroom. Media/network latency
     // does not benefit from a larger direct pool.
     DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(2),
-    UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.coerce.number().int().default(4194304),
+    // At the measured 52.75 MiB median chapter size, the former 4 MiB/s global
+    // ceiling could never reach the 8/min acceptance floor (4.55/min before
+    // network and publication overhead). Eight MiB/s is the first reversible
+    // ramp; bot, shard, request and global-media limits still apply.
+    UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.coerce.number().int().default(8 * 1024 * 1024),
     // These are global pipeline ceilings, not per-chapter multipliers.  Keep
     // them aligned with the small production container so a chapter ramp cannot
     // create a hidden 24+ request/media burst behind five chapter slots.
