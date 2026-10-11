@@ -157,7 +157,7 @@ END;
 $$;
 DROP TRIGGER IF EXISTS importer_lite_staff_priority_sync_trigger ON public.importer_staff_requests;
 CREATE TRIGGER importer_lite_staff_priority_sync_trigger
-AFTER INSERT OR UPDATE OF status, work_id OR DELETE ON public.importer_staff_requests
+AFTER INSERT OR UPDATE OR DELETE ON public.importer_staff_requests
 FOR EACH ROW EXECUTE FUNCTION public.importer_lite_staff_priority_sync();
 
 -- Atomic, bounded claim. No source joins, metadata reads, predecessor scans or
