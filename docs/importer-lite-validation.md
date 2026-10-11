@@ -30,6 +30,8 @@ integration suite verifies:
   per-work blocked-task re-evaluation, with the origin import settled after
   publication so recovery does not recreate completed work;
 - atomic Reader-visible publication only after cover and page media validation;
+- duplicate/recovered canonical chapter creation converges to one deterministic
+  Reader chapter ID and one Lite identity mapping;
 - healthy source fallback before storage, and safe source/manifest pinning
   after partial storage, including concurrent in-flight page drainage and
   adapter ownership proof before an alternative source route is used;

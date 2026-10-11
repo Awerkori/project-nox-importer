@@ -60,6 +60,9 @@ Invariants:
   persistence, and the atomic publish transaction validates every page before
   setting `published_at`. The durable receipt records Telegram `file_id`, bot,
   shard, channel and `message_id` when supplied by the provider.
+- Canonical chapter IDs are deterministic from canonical work+chapter identity.
+  A stale/recovered-worker overlap therefore cannot create two physical Reader
+  chapter rows before the unique Lite chapter mapping is observed.
 - An upload with an explicit Telegram rejection remains retryable using the
   same reserved media ID. A timeout, lost response, or a Telegram success
   followed by failed receipt persistence becomes `UNKNOWN` and blocks that

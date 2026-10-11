@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { readImageBody } from '../core/bounded-body.js';
 import { calculateSha256, inspectImage } from '../storage/media.js';
 import { selectableChapterSources } from './source-selector.js';
@@ -52,6 +51,17 @@ function hostFor(url) {
     catch {
         return null;
     }
+}
+/**
+ * The canonical chapter mapping is unique in SQL, but a stale worker can race
+ * a recovered worker before either observes that mapping. A stable UUID makes
+ * the underlying Reader chapter insert idempotent as well, so that race can
+ * never leave an orphan duplicate `chapters` row behind.
+ */
+function canonicalChapterId(workId, chapterKey) {
+    const hex = calculateSha256(Buffer.from(`project-nox:lite-chapter:${workId}:${chapterKey}`)).slice(0, 32);
+    const variant = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 export class LiteExecutor {
     db;
@@ -122,7 +132,7 @@ export class LiteExecutor {
         const numeric = Number.parseFloat(display.replace(',', '.'));
         if (!Number.isFinite(numeric))
             throw new Error('CHAPTER_DISPLAY_NUMBER_NOT_READER_COMPATIBLE');
-        const chapterId = randomUUID();
+        const chapterId = canonicalChapterId(String(task.workId), String(task.chapterKey));
         const client = await this.db.connect();
         try {
             await client.query('BEGIN');

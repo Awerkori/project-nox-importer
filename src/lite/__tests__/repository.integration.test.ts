@@ -332,6 +332,26 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM pages WHERE chapter_id=$1`, [ids.chapter])).rows[0].count).toBe(0);
   });
 
+  it('uses one deterministic Reader chapter row when two recovered workers race the same canonical identity', async () => {
+    const task = {
+      id: '00000000-0000-4000-8000-000000000099', taskType: 'IMPORT_CHAPTER', workId: ids.p1a,
+      workKey: `work:${ids.p1a}`, chapterKey: 'pt-br|default|chapter|race|-', priority: 'P1', basePriority: 'P1', state: 'RUNNING',
+      idempotencyKey: 'canonical-race', nextRunAt: new Date(), attempts: 1, maxAttempts: 8,
+      leaseOwner: 'worker-a', leaseUntil: new Date(Date.now() + 60_000), reason: null, monitoring: false,
+      payload: { displayNumber: '9', chapterTitle: 'Race Safe', language: 'pt-BR', edition: 'default', orderKey: '9' }, checkpoint: {},
+    } as any;
+    const executor = new LiteExecutor(poolFor(db) as Pool, repo, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(1, 'test-downloads'));
+    const [first, second] = await Promise.all([
+      (executor as any).createOrLoadChapter(task),
+      (executor as any).createOrLoadChapter(task),
+    ]);
+    expect(first).toBe(second);
+    expect((await db.query(`SELECT count(*)::int AS count FROM chapters WHERE work_id=$1 AND title='Race Safe'`, [ids.p1a])).rows[0].count).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapters WHERE work_id=$1 AND canonical_chapter_key=$2`, [ids.p1a, task.chapterKey])).rows[0].count).toBe(1);
+  });
+
   it('uses the shared runtime lease to gate a Lite contender without gating in-flight finalization', async () => {
     const makeRuntime = (workerId: string) => new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
