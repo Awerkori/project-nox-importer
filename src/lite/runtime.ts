@@ -13,6 +13,7 @@ import { processAndStoreMedia } from '../storage/media.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
+import { sanitizeSynopsis } from './metadata.js';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const rankForSource = (source: string) => source === 'mangaflix' ? 10 : source === 'manhastro' ? 20 : 100;
@@ -223,9 +224,13 @@ export class ImporterLiteRuntime {
         details: await adapter.fetchWorkDetails(sourceWorkId), chapters: await adapter.fetchChapters(sourceWorkId),
       };
       fetchedSnapshot = true;
+      const rawContentRating = String((snapshot.details.raw as any)?.contentRating || (snapshot.details.raw as any)?.content_rating || '').toUpperCase();
       const resolved = await this.dedupe.resolveWork({ source, sourceWorkId, title: snapshot.details.title, slug: snapshot.details.slug,
         aliases: snapshot.details.alternativeTitles, genres: snapshot.details.genres, author: snapshot.details.author,
-        artist: snapshot.details.artist, synopsis: snapshot.details.synopsis, rawMetadata: snapshot.details.raw,
+        artist: snapshot.details.artist, synopsis: sanitizeSynopsis(snapshot.details.synopsis) || undefined, kind: snapshot.details.kind,
+        status: snapshot.details.status, year: snapshot.details.year, ageRating: snapshot.details.ageRating,
+        contentRating: rawContentRating === 'ADULT_18' || Number(snapshot.details.ageRating || 0) >= 18 ? 'ADULT_18' : undefined,
+        rawMetadata: snapshot.details.raw,
         loadCoverId: snapshot.details.coverUrl ? () => this.loadCover(adapter, snapshot.details.coverUrl!) : undefined } as any);
       if (!resolved.workId || resolved.status === 'AMBIGUOUS') {
         await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: resolved.reason || 'AMBIGUOUS_CATALOG_MATCH' }); return;

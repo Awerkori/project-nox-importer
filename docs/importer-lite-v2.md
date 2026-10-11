@@ -78,6 +78,14 @@ editorial sequence barrier, the dependency must be persisted explicitly for
 that verified manifest relation and reawakened by the predecessor's publish
 event—not inferred from a float or a gap.
 
+## Catalog metadata boundary
+
+Lite passes the adapter's title aliases, sanitized synopsis, author, artist,
+kind, status, year, age rating, adult rating and source genres to the existing
+conservative deduplication engine. That engine remains the only writer of
+canonical work metadata/tags and preserves manual provenance, healthy covers
+and specific adult genres; selecting a chapter source never deletes metadata.
+
 The migration is additive. It creates no worker, removes no source, modifies
 no legacy task, and does not activate Lite. A cutover needs an approved backup,
 legacy producer fence, migration application, site baseline, controlled

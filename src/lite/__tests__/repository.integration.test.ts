@@ -443,6 +443,37 @@ describe('LiteRepository against the additive Lite migration', () => {
     ]);
   });
 
+  it('passes complete, sanitized source metadata to the conservative catalog engine', async () => {
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:metadata', priority: 'P2', idempotencyKey: 'metadata-catalog', payload: { source: 'source-a', sourceWorkId: 'metadata-work' } });
+    const task = await repo.claim('catalog', 120);
+    const adapter = {
+      id: 'source-a',
+      fetchWorkSnapshot: async () => ({
+        details: {
+          sourceWorkId: 'metadata-work', title: 'Metadata Work', slug: 'metadata-work',
+          synopsis: '<p>Primeiro parágrafo seguro.</p><p>Segundo parágrafo.</p>', author: 'Author', artist: 'Artist',
+          kind: 'PORNHWA' as const, status: 'ONGOING' as const, year: 2024, ageRating: 18,
+          alternativeTitles: ['Título alternativo', 'Original title'], genres: ['MILF', 'Yaoi', 'Hentai'],
+          raw: { content_rating: 'ADULT_18' }, language: 'pt-BR',
+        }, chapters: [],
+      }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    let candidate: any;
+    (runtime as any).dedupe = { resolveWork: async (value: any) => { candidate = value; return { workId: ids.p1a, status: 'CONFIRMED_EXISTING' }; } };
+    await (runtime as any).catalog(task, 'catalog');
+    expect(candidate).toMatchObject({
+      kind: 'PORNHWA', status: 'ONGOING', year: 2024, ageRating: 18, contentRating: 'ADULT_18',
+      aliases: ['Título alternativo', 'Original title'], genres: ['MILF', 'Yaoi', 'Hentai'],
+    });
+    expect(candidate.synopsis).toContain('Primeiro parágrafo seguro.');
+    expect(candidate.synopsis).toContain('\n');
+  });
+
   it('runs an isolated durable path from discovery to a Reader-visible published chapter', async () => {
     const adapter = {
       id: 'source-a',

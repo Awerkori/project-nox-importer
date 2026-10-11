@@ -44,6 +44,9 @@ integration suite verifies:
 - a compact Lite progress probe counts publication events rather than download
   completion, including ready/stored age so an online process cannot be
   mistaken for real progress;
+- the Lite catalog boundary forwards full work metadata (including aliases,
+  adult classification and specific source tags) to the existing conservative
+  deduplication/tag writer after synopsis sanitization;
 - slow uploads with concurrent page discovery, proving that the global retained
   page-buffer limit is applied rather than multiplied by chapter workers.
 
