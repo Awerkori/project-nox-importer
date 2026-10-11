@@ -188,7 +188,11 @@ export function resolveChapterUploadConcurrency(chapterConcurrency: number, medi
 }
 
 export const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig> = {
-  mangaflix: { maxChapters: 3, maxPagesPerChapter: 6 },
+  // Production ramp 2026-10-11: MangaFlix is the only selected healthy P1
+  // route, with four Lite workers busy, no cooldown/failure streak and no
+  // Telegram 429.  Allow its fourth chapter to use the existing worker; page
+  // downloads remain bounded by the separate 20-request global fence.
+  mangaflix: { maxChapters: 4, maxPagesPerChapter: 6 },
   manhastro: { maxChapters: 3, maxPagesPerChapter: 6 },
   mangotoons: { maxChapters: 2, maxPagesPerChapter: 4 },
   megahentai: { maxChapters: 2, maxPagesPerChapter: 4 },
