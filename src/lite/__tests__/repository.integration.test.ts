@@ -1263,6 +1263,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(claim).toHaveBeenCalledTimes(1);
   });
 
+  it('does not freeze normal chapter admission for a transient local pool waiter', () => {
+    const pool = poolFor(db) as Pool & { waitingCount?: number };
+    const runtime = new ImporterLiteRuntime(
+      pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    pool.waitingCount = 1;
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(false);
+    (runtime as any).sitePausedUntil = Date.now() + 1_000;
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
+  });
+
   it('shares an empty P0 monitor probe and leaves the normal pool untouched', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,

@@ -65,6 +65,16 @@ export class ImporterLiteRuntime {
     lastSiteProbe = {
         state: 'UNKNOWN', checkedAt: new Date(0).toISOString(), latencyMs: null,
     };
+    /**
+     * A queued checkout from the importer's two-connection pool is a local,
+     * transient condition, not proof that the Reader is unhealthy.  Claims are
+     * already serialized by `claimGate`; freezing every chapter slot whenever
+     * one write is queued turns ordinary receipt persistence into avoidable
+     * idle time.  Only the independent site-health gate pauses new work.
+     */
+    shouldPauseChapterAdmission() {
+        return Date.now() < this.sitePausedUntil;
+    }
     constructor(pool, catalogClient, registry, storage, config, sourceRateLimiter = new HostRateLimiter(2)) {
         this.pool = pool;
         this.catalogClient = catalogClient;
@@ -282,8 +292,8 @@ export class ImporterLiteRuntime {
                     await sleep(250);
                     continue;
                 }
-                if (Date.now() < this.sitePausedUntil || this.pool.waitingCount > 0) {
-                    telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'site-or-pool-protection');
+                if (this.shouldPauseChapterAdmission()) {
+                    telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'site-protection');
                     await sleep(250);
                     continue;
                 }
@@ -362,8 +372,24 @@ export class ImporterLiteRuntime {
     }
     /** A small diagnostic snapshot; it deliberately skips contention and scans. */
     async emitOperationalSnapshot() {
-        if (this.pool.waitingCount > 0)
+        if (this.pool.waitingCount > 0) {
+            // Do not run four diagnostic scans while the small direct pool is busy.
+            // Keep a tiny durable liveness marker instead: an old full snapshot must
+            // never be mistaken for a stopped runtime during productive traffic.
+            const deferred = {
+                runtime: 'lite',
+                runtimeInstanceId: this.runtimeInstanceId,
+                leader: this.isRuntimeLeader,
+                chapterWorkers: Math.max(1, Math.min(this.config.LITE_CHAPTER_WORKERS ?? 1, this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING)),
+                snapshotDeferred: 'POOL_BUSY',
+                ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+                observedAt: new Date().toISOString(),
+            };
+            this.logger.info('Lite operational heartbeat deferred', deferred);
+            await this.pool.query(`INSERT INTO settings(key,value) VALUES('importer_heartbeat',$1)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [JSON.stringify(deferred)]);
             return;
+        }
         const [tasks, progress, blocked, sourceHealth] = await Promise.all([
             this.queue.operationalSnapshot(), this.queue.progressSnapshot(),
             this.queue.blockedReasonSnapshot(), this.queue.sourceHealthSnapshot(),

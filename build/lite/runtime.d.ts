@@ -30,6 +30,14 @@ export declare class ImporterLiteRuntime {
     private idleClaimUntil;
     private idleMonitorUntil;
     private lastSiteProbe;
+    /**
+     * A queued checkout from the importer's two-connection pool is a local,
+     * transient condition, not proof that the Reader is unhealthy.  Claims are
+     * already serialized by `claimGate`; freezing every chapter slot whenever
+     * one write is queued turns ordinary receipt persistence into avoidable
+     * idle time.  Only the independent site-health gate pauses new work.
+     */
+    private shouldPauseChapterAdmission;
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter);
     start(): Promise<void>;
     private assertReaderCanonicalIdentitySchema;
