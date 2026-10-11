@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { readImageBody } from '../core/bounded-body.js';
 import { calculateSha256, inspectImage } from '../storage/media.js';
 import { selectableChapterSources } from './source-selector.js';
+import { AsyncSemaphore } from '../core/concurrency.js';
+import { SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
+import { HostRateLimiter } from '../core/rate-limiter.js';
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
     let cursor = 0;
@@ -24,6 +27,14 @@ function sourceFailure(error) {
 function isSourceFailure(error) {
     return Boolean(error?.sourceFailure);
 }
+function hostFor(url) {
+    try {
+        return new URL(url).host;
+    }
+    catch {
+        return null;
+    }
+}
 export class LiteExecutor {
     db;
     queue;
@@ -33,10 +44,12 @@ export class LiteExecutor {
     downloads;
     perChapterPageConcurrency;
     bufferedPages;
+    sourceRateLimiter;
+    sourceSlots = new Map();
     // Held from byte download through receipt persistence. This is distinct
     // from request concurrency: it bounds real image buffers across every
     // chapter worker while Telegram is slow or cooling down.
-    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = downloads) {
+    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = downloads, sourceRateLimiter = new HostRateLimiter(2)) {
         this.db = db;
         this.queue = queue;
         this.registry = registry;
@@ -45,6 +58,16 @@ export class LiteExecutor {
         this.downloads = downloads;
         this.perChapterPageConcurrency = perChapterPageConcurrency;
         this.bufferedPages = bufferedPages;
+        this.sourceRateLimiter = sourceRateLimiter;
+    }
+    sourceSlot(source) {
+        let slot = this.sourceSlots.get(source);
+        if (!slot) {
+            const configured = SOURCE_CONCURRENCY_LIMITS[source]?.maxChapters ?? 2;
+            slot = new AsyncSemaphore(configured, `lite_source_${source}`);
+            this.sourceSlots.set(source, slot);
+        }
+        return slot;
     }
     async routes(task) {
         if (!task.workId || !task.chapterKey)
@@ -147,6 +170,8 @@ export class LiteExecutor {
                 lastError = new Error('SOURCE_ADAPTER_UNAVAILABLE');
                 continue;
             }
+            const sourceSlot = this.sourceSlot(route.source);
+            await sourceSlot.acquire();
             try {
                 let urls;
                 try {
@@ -178,18 +203,26 @@ export class LiteExecutor {
                         return already.rows[0].media_id;
                     if (already.rows[0]?.state === 'UNKNOWN')
                         throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+                    const host = hostFor(url);
+                    if (host)
+                        await this.sourceRateLimiter.acquire(host);
                     return this.bufferedPages.runExclusive(async () => {
                         let downloaded;
                         try {
                             downloaded = await this.downloads.runExclusive(async () => {
                                 const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: AbortSignal.timeout(45_000) });
                                 if (!response.ok) {
+                                    if (response.status === 429 && host)
+                                        this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));
                                     const error = sourceFailure(new Error(`PAGE_HTTP_${response.status}`));
                                     error.retryAfter = Number(response.headers.get('retry-after') || 0);
                                     throw error;
                                 }
                                 const bytes = await readImageBody(response, { signal: AbortSignal.timeout(45_000) });
-                                return { bytes, image: inspectImage(bytes) };
+                                const image = inspectImage(bytes);
+                                if (host)
+                                    this.sourceRateLimiter.recordSuccess(host);
+                                return { bytes, image };
                             });
                         }
                         catch (error) {
@@ -247,6 +280,9 @@ export class LiteExecutor {
                     continue;
                 }
                 break;
+            }
+            finally {
+                sourceSlot.release();
             }
         }
         const message = String(lastError?.message || 'IMPORT_FAILED');

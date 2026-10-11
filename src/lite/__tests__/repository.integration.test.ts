@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import type { Pool } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AsyncSemaphore } from '../../core/concurrency.js';
+import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { LiteExecutor } from '../executor.js';
 import { ImporterLiteRuntime } from '../runtime.js';
 import { LiteRepository } from '../repository.js';
@@ -344,5 +345,67 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).catalog(task, 'monitor');
     const created = await db.query(`SELECT priority,base_priority FROM importer_lite_tasks WHERE idempotency_key='lite:chapter:' || $1 || ':pt-br|default|chapter|2|-'`, [ids.p1a]);
     expect(created.rows[0]).toEqual({ priority: 1, base_priority: 1 });
+  });
+
+  it('runs an isolated durable path from discovery to a Reader-visible published chapter', async () => {
+    const adapter = {
+      id: 'source-a',
+      fetchUpdatedWorks: async () => ({ works: [{ sourceWorkId: 'work-publish', title: 'Publish', slug: 'publish' }], nextCursor: null }),
+      fetchWorkSnapshot: async () => ({
+        details: { sourceWorkId: 'work-publish', title: 'Publish', slug: 'publish', status: 'COMPLETED' as const, language: 'pt-BR' },
+        chapters: [{ sourceChapterId: 'chapter-publish', number: 1, displayNumber: '1', title: 'Chapter One' }],
+      }),
+      fetchChapterPages: async () => ['https://source-a.test/reader-page.png'],
+    };
+    const storage: StorageProvider = {
+      upload: vi.fn(async () => 'reader-file'), healthCheck: async () => true, getProviderKey: () => 'telegram',
+      getLastBotReference: () => 'bot-a', getLastShardId: () => 'shard-a', getLastChannelId: () => 'channel-a',
+    };
+    const rateLimiter = new HostRateLimiter(100);
+    const acquire = vi.spyOn(rateLimiter, 'acquire');
+    const success = vi.spyOn(rateLimiter, 'recordSuccess');
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry, storage,
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 2,
+        BUFFERED_PAGE_CONCURRENCY: 2, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any, rateLimiter,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.publish, status: 'CONFIRMED_EXISTING' }) };
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })));
+    try {
+      await repo.enqueue({ taskType: 'DISCOVER', workKey: 'source:source-a', priority: 'P2', idempotencyKey: 'e2e-discover', payload: { source: 'source-a' } });
+      const discovery = await repo.claim('worker-discover', 120);
+      await (runtime as any).handle(discovery, 'worker-discover');
+      const catalog = await repo.claim('worker-catalog', 120);
+      expect(catalog?.taskType).toBe('CATALOG');
+      await (runtime as any).handle(catalog, 'worker-catalog');
+      const chapter = await repo.claim('worker-import', 120);
+      expect(chapter?.taskType).toBe('IMPORT_CHAPTER');
+      await (runtime as any).handle(chapter, 'worker-import');
+      const publish = await repo.claim('worker-publish', 120);
+      expect(publish?.taskType).toBe('PUBLISH');
+      await (runtime as any).handle(publish, 'worker-publish');
+    } finally { vi.stubGlobal('fetch', originalFetch); }
+    const visible = await db.query(`SELECT c.published_at,p.position,p.media_id
+      FROM chapters c JOIN pages p ON p.chapter_id=c.id WHERE c.work_id=$1 ORDER BY p.position`, [ids.publish]);
+    expect(visible.rows).toHaveLength(1);
+    expect(visible.rows[0].published_at).toBeTruthy();
+    expect(visible.rows[0].position).toBe(1);
+    expect(storage.upload).toHaveBeenCalledOnce();
+    expect(acquire).toHaveBeenCalledWith('source-a.test');
+    expect(success).toHaveBeenCalledWith('source-a.test');
+  });
+
+  it('shares idle claim backoff across workers instead of generating an empty-claim storm', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    const claim = vi.spyOn((runtime as any).queue, 'claim');
+    await Promise.all(Array.from({ length: 12 }, (_, index) => (runtime as any).claimNext(`idle-${index}`)));
+    expect(claim).toHaveBeenCalledTimes(1);
   });
 });

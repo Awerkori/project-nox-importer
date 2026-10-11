@@ -105,7 +105,7 @@ async function main() {
         throw new Error('Importer Lite requires IMPORTER_DB_MODE=direct');
     }
     const engine = config.IMPORTER_RUNTIME_MODE === 'lite'
-        ? new ImporterLiteRuntime(supabase.getPool(), supabase, registry, storage, config)
+        ? new ImporterLiteRuntime(supabase.getPool(), supabase, registry, storage, config, rateLimiter)
         : new ImporterEngine(supabase, storage, registry, rateLimiter, config);
     // 6. Graceful Shutdown & Forensics Handlers
     diagnostics.initProcessHandlers(async (signal) => {

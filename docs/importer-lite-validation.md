@@ -26,11 +26,23 @@ integration suite verifies:
 - explicit Telegram 429 retry versus ambiguous upload/receipt failure, which
   becomes durable `UNKNOWN` rather than a blind duplicate upload;
 - P0 monitoring materialises newly observed chapters as P0 without rebucketing
-  initial P1 fill work.
+  initial P1 fill work;
+- a fully isolated path from `DISCOVER` through `CATALOG`, source route,
+  Telegram receipt, `PUBLISH`, `published_at` and the Reader page manifest.
 
 This is an integration and regression gate, not an external capacity result:
 PGlite does not model Yugabyte latency, real source limits, Telegram capacity,
 DIScloud RSS, or public-site contention.
+
+## Full-suite result in this workspace
+
+The complete repository suite was run after the Lite tests. It reported 100
+passing files / 582 passing tests and 8 failing files / 15 failures. None is
+in `src/lite/`: the failures are legacy tests that either require an absent
+direct-YSQL password in this isolated workspace, wait on the legacy memory
+autotuner until their 30-second timeout, or assert pre-existing legacy
+scheduler snapshots (including the known `claim-filters` 4-vs-5 assertion).
+They are recorded as baseline debt and are not presented as Lite validation.
 
 Historical representative sample:
 

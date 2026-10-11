@@ -32,8 +32,14 @@ Invariants:
   cannot silently mix another edition into a partial chapter.
 - Download request slots and retained page buffers have separate global
   semaphores. Neither is multiplied by the number of chapter workers.
+- Direct image and cover downloads also acquire the existing per-host rate
+  limiter; an executor-local per-source chapter semaphore stops one slow
+  provider from claiming the entire worker pool.
 - One bounded reconciler handles expired leases, due retries, and completed
   imports without a publish task. It has no global work sweep.
+- Idle workers share one short claim backoff, so an empty Lite queue performs
+  one bounded probe per interval rather than multiplying empty claims by the
+  configured worker count.
 
 The migration is additive. It creates no worker, removes no source, modifies
 no legacy task, and does not activate Lite. A cutover needs an approved backup,

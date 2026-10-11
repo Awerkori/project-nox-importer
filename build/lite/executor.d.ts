@@ -4,6 +4,7 @@ import type { SourceRegistry } from '../sources/registry.js';
 import { LiteRepository } from './repository.js';
 import type { LiteTask } from './types.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
+import { HostRateLimiter } from '../core/rate-limiter.js';
 export declare class LiteExecutor {
     private readonly db;
     private readonly queue;
@@ -13,7 +14,10 @@ export declare class LiteExecutor {
     private readonly downloads;
     private readonly perChapterPageConcurrency;
     private readonly bufferedPages;
-    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore);
+    private readonly sourceRateLimiter;
+    private readonly sourceSlots;
+    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter);
+    private sourceSlot;
     private routes;
     private createOrLoadChapter;
     private recordSourceFailure;

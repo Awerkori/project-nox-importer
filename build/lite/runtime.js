@@ -6,6 +6,7 @@ import { Logger } from '../core/logger.js';
 import { readImageBody } from '../core/bounded-body.js';
 import { processAndStoreMedia } from '../storage/media.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
+import { HostRateLimiter } from '../core/rate-limiter.js';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const rankForSource = (source) => source === 'mangaflix' ? 10 : source === 'manhastro' ? 20 : 100;
 /** One process, one executor pool, one bounded reconciler. */
@@ -15,6 +16,7 @@ export class ImporterLiteRuntime {
     registry;
     storage;
     config;
+    sourceRateLimiter;
     stopped = false;
     timers = [];
     queue;
@@ -23,19 +25,22 @@ export class ImporterLiteRuntime {
     logger = new Logger('ImporterLite');
     downloads;
     bufferedPages;
+    claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
     sitePausedUntil = 0;
-    constructor(pool, catalogClient, registry, storage, config) {
+    idleClaimUntil = 0;
+    constructor(pool, catalogClient, registry, storage, config, sourceRateLimiter = new HostRateLimiter(2)) {
         this.pool = pool;
         this.catalogClient = catalogClient;
         this.registry = registry;
         this.storage = storage;
         this.config = config;
+        this.sourceRateLimiter = sourceRateLimiter;
         if (!config.IMPORTER_USER_ID)
             throw new Error('IMPORTER_USER_ID is required when IMPORTER_RUNTIME_MODE=lite');
         this.queue = new LiteRepository(pool);
         this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
         this.bufferedPages = new AsyncSemaphore(config.BUFFERED_PAGE_CONCURRENCY, 'lite_global_page_buffers');
-        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages);
+        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter);
         this.dedupe = new DeduplicationEngine(catalogClient);
     }
     async start() {
@@ -68,7 +73,7 @@ export class ImporterLiteRuntime {
                     await sleep(250);
                     continue;
                 }
-                const task = await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS);
+                const task = await this.claimNext(workerId);
                 if (!task) {
                     await sleep(750);
                     continue;
@@ -79,6 +84,16 @@ export class ImporterLiteRuntime {
                 await sleep(1_000);
             }
         }
+    }
+    /** One empty claim probe per idle interval, shared by every worker. */
+    async claimNext(workerId) {
+        return this.claimGate.runExclusive(async () => {
+            if (Date.now() < this.idleClaimUntil)
+                return null;
+            const task = await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS);
+            this.idleClaimUntil = task ? 0 : Date.now() + 750;
+            return task;
+        });
     }
     /** A small protective gate, deliberately not another scheduler. */
     async probeSharedResources() {
@@ -181,10 +196,23 @@ export class ImporterLiteRuntime {
     async loadCover(adapter, url) {
         try {
             const bytes = await this.downloads.runExclusive(async () => {
+                let host = null;
+                try {
+                    host = new URL(url).host;
+                }
+                catch { }
+                if (host)
+                    await this.sourceRateLimiter.acquire(host);
                 const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: AbortSignal.timeout(30_000) });
-                if (!response.ok)
+                if (!response.ok) {
+                    if (response.status === 429 && host)
+                        this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));
                     throw new Error(`COVER_HTTP_${response.status}`);
-                return readImageBody(response, { signal: AbortSignal.timeout(30_000), maxBytes: 8 * 1024 * 1024 });
+                }
+                const bytes = await readImageBody(response, { signal: AbortSignal.timeout(30_000), maxBytes: 8 * 1024 * 1024 });
+                if (host)
+                    this.sourceRateLimiter.recordSuccess(host);
+                return bytes;
             });
             const stored = await processAndStoreMedia(this.catalogClient, this.storage, bytes, this.config.IMPORTER_USER_ID, 'cover');
             return stored.mediaId;

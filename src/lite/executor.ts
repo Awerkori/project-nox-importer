@@ -8,6 +8,8 @@ import { LiteRepository } from './repository.js';
 import { selectableChapterSources } from './source-selector.js';
 import type { ChapterSourceRoute, LiteTask } from './types.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
+import { SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
+import { HostRateLimiter } from '../core/rate-limiter.js';
 
 async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const result = new Array<R>(items.length);
@@ -35,7 +37,12 @@ function isSourceFailure(error: unknown): error is SourceFailure {
   return Boolean((error as SourceFailure | undefined)?.sourceFailure);
 }
 
+function hostFor(url: string): string | null {
+  try { return new URL(url).host; } catch { return null; }
+}
+
 export class LiteExecutor {
+  private readonly sourceSlots = new Map<string, AsyncSemaphore>();
   // Held from byte download through receipt persistence. This is distinct
   // from request concurrency: it bounds real image buffers across every
   // chapter worker while Telegram is slow or cooling down.
@@ -48,7 +55,18 @@ export class LiteExecutor {
     private readonly downloads: AsyncSemaphore,
     private readonly perChapterPageConcurrency = 4,
     private readonly bufferedPages: AsyncSemaphore = downloads,
+    private readonly sourceRateLimiter: HostRateLimiter = new HostRateLimiter(2),
   ) {}
+
+  private sourceSlot(source: string): AsyncSemaphore {
+    let slot = this.sourceSlots.get(source);
+    if (!slot) {
+      const configured = SOURCE_CONCURRENCY_LIMITS[source]?.maxChapters ?? 2;
+      slot = new AsyncSemaphore(configured, `lite_source_${source}`);
+      this.sourceSlots.set(source, slot);
+    }
+    return slot;
+  }
 
   private async routes(task: LiteTask): Promise<ChapterSourceRoute[]> {
     if (!task.workId || !task.chapterKey) return [];
@@ -151,6 +169,8 @@ export class LiteExecutor {
     for (const route of routes) {
       const adapter = this.registry.get(route.source);
       if (!adapter) { lastError = new Error('SOURCE_ADAPTER_UNAVAILABLE'); continue; }
+      const sourceSlot = this.sourceSlot(route.source);
+      await sourceSlot.acquire();
       try {
         let urls: string[];
         try {
@@ -177,18 +197,23 @@ export class LiteExecutor {
           );
           if (already.rows[0]?.state === 'PERSISTED') return already.rows[0].media_id;
           if (already.rows[0]?.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+          const host = hostFor(url);
+          if (host) await this.sourceRateLimiter.acquire(host);
           return this.bufferedPages.runExclusive(async () => {
             let downloaded: { bytes: Uint8Array; image: ReturnType<typeof inspectImage> };
             try {
               downloaded = await this.downloads.runExclusive(async () => {
                 const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: AbortSignal.timeout(45_000) });
                 if (!response.ok) {
+                  if (response.status === 429 && host) this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));
                   const error = sourceFailure(new Error(`PAGE_HTTP_${response.status}`));
                   error.retryAfter = Number(response.headers.get('retry-after') || 0);
                   throw error;
                 }
                 const bytes = await readImageBody(response, { signal: AbortSignal.timeout(45_000) });
-                return { bytes, image: inspectImage(bytes) };
+                const image = inspectImage(bytes);
+                if (host) this.sourceRateLimiter.recordSuccess(host);
+                return { bytes, image };
               });
             } catch (error) { throw sourceFailure(error); }
             const { bytes, image } = downloaded;
@@ -238,7 +263,7 @@ export class LiteExecutor {
           continue;
         }
         break;
-      }
+      } finally { sourceSlot.release(); }
     }
     const message = String((lastError as Error | null)?.message || 'IMPORT_FAILED');
     const permanent = /UPLOAD_OUTCOME_UNKNOWN|CHAPTER_DISPLAY_NUMBER|CHAPTER_NUMBER_COLLISION|SOURCE_PAGE_MANIFEST_CHANGED_AFTER_PARTIAL_STORAGE|LEASE_LOST_BEFORE_MEDIA_STORAGE/.test(message);
