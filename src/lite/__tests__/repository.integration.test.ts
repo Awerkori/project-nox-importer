@@ -130,6 +130,12 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(claimed?.taskType).toBe('CATALOG');
   });
 
+  it('admits ready publication before another same-priority chapter download', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: 'work:download', chapterKey: 'download', priority: 'P1', idempotencyKey: 'p1-download' });
+    await repo.enqueue({ taskType: 'PUBLISH', workId: ids.p1b, workKey: 'work:publish', chapterKey: 'publish', priority: 'P1', idempotencyKey: 'p1-publish' });
+    expect((await repo.claim('publisher-first', 30))?.taskType).toBe('PUBLISH');
+  });
+
   it('reapplies the additive migration without changing pre-existing Reader data', async () => {
     // This is deliberately a second application in a disposable database:
     // the deployment procedure must be safe to resume after an interrupted
