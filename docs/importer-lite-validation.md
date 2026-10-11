@@ -42,6 +42,8 @@ integration suite verifies:
   becomes durable `UNKNOWN` rather than a blind duplicate upload, including a
   reconciler pass that surfaces a crash-surviving unknown upload as one
   observable blocked task while healthy neighbouring work proceeds;
+- invalid persisted-media repair replaces only the affected page receipt while
+  retaining the prior media row and all healthy page receipts;
 - source-health persistence across discovery/catalog/import: failures create a
   bounded cooldown and successful operations clear it, allowing a confirmed
   alternative source route without changing task priority;

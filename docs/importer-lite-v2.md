@@ -75,6 +75,10 @@ Invariants:
   page for recovery instead of blindly uploading it again. The reconciler
   also surfaces an `UNKNOWN` (or a stale intent) left by a restart as an
   explicit task block; it never silently replays it.
+- A persisted receipt is reused only while its media record remains ready,
+  image-shaped, non-empty and hash-consistent. If that minimal durable check
+  fails, Lite retains the old media row for audit and replaces only that page's
+  receipt with a new retryable upload; valid sibling pages are preserved.
 - A Telegram 429 cools both the selected bot and selected destination shard.
   The provider returns that same request to the durable executor rather than
   switching bots to evade the server-provided wait; the next independent

@@ -352,18 +352,40 @@ export class LiteRepository {
     }
     /** Stable ID is reserved before the non-transactional Telegram call. */
     async reserveUpload(taskId, pagePosition, sha256) {
-        const existing = await this.db.query(`SELECT media_id,state FROM importer_lite_uploads
-      WHERE task_id=$1::uuid AND page_position=$2`, [taskId, pagePosition]);
+        const existing = await this.db.query(`SELECT u.media_id,u.state,u.sha256,m.storage_ready,m.bytes,m.mime,m.sha256 AS media_sha256
+      FROM importer_lite_uploads u LEFT JOIN media m ON m.id=u.media_id
+      WHERE u.task_id=$1::uuid AND u.page_position=$2`, [taskId, pagePosition]);
         if (existing.rows[0]) {
+            const row = existing.rows[0];
             // An INTENT surviving a crash has no durable confirmation that the
             // request did not reach Telegram. Convert it to UNKNOWN rather than
             // initiating an indistinguishable duplicate upload.
-            if (existing.rows[0].state === 'INTENT') {
+            if (row.state === 'INTENT') {
                 await this.db.query(`UPDATE importer_lite_uploads SET state='UNKNOWN',updated_at=now()
           WHERE task_id=$1::uuid AND page_position=$2 AND state='INTENT'`, [taskId, pagePosition]);
-                return { mediaId: existing.rows[0].media_id, state: 'UNKNOWN' };
+                return { mediaId: row.media_id, state: 'UNKNOWN' };
             }
-            return { mediaId: existing.rows[0].media_id, state: existing.rows[0].state };
+            if (row.state === 'PERSISTED') {
+                const valid = row.storage_ready === true && Number(row.bytes) > 0 &&
+                    String(row.mime || '').startsWith('image/') && row.media_sha256 === row.sha256;
+                if (valid)
+                    return { mediaId: row.media_id, state: row.state };
+                // Keep the historical media row for audit/recovery, but detach this
+                // unpublishable page reference and retry only this page with a fresh
+                // id. Valid sibling page receipts remain untouched.
+                const replacement = randomUUID();
+                const repaired = await this.db.query(`UPDATE importer_lite_uploads
+          SET media_id=$3::uuid,sha256=$4,state='RETRYABLE',bytes=NULL,mime=NULL,bot_reference=NULL,
+              storage_shard_id=NULL,channel_id=NULL,telegram_message_id=NULL,provider_key=NULL,updated_at=now()
+          WHERE task_id=$1::uuid AND page_position=$2 AND state='PERSISTED' AND media_id=$5::uuid
+          RETURNING media_id,state`, [taskId, pagePosition, replacement, sha256, row.media_id]);
+                if (repaired.rows[0])
+                    return { mediaId: repaired.rows[0].media_id, state: repaired.rows[0].state };
+                // A valid task lease gives one executor ownership, but retain a safe
+                // fallback if an operator/reconciler changed the receipt concurrently.
+                return this.reserveUpload(taskId, pagePosition, sha256);
+            }
+            return { mediaId: row.media_id, state: row.state };
         }
         const reusable = await this.db.query(`SELECT id FROM media WHERE sha256=$1 AND storage_ready=true
       AND bytes>0 AND mime LIKE 'image/%' ORDER BY created_at LIMIT 1`, [sha256]);

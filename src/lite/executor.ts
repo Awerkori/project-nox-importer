@@ -233,11 +233,15 @@ export class LiteExecutor {
         const chapterId = await this.createOrLoadChapter(task);
         const mediaIds = await mapBounded(urls, this.perChapterPageConcurrency, async (url, index) => {
           const position = index + 1;
-          const already = await this.db.query<{ media_id: string; state: string }>(
-            'SELECT media_id,state FROM importer_lite_uploads WHERE task_id=$1::uuid AND page_position=$2', [task.id, position],
+          const already = await this.db.query<{ media_id: string; state: string; storage_ready: boolean | null; bytes: number | null; mime: string | null; media_sha256: string | null; sha256: string }>(
+            `SELECT u.media_id,u.state,u.sha256,m.storage_ready,m.bytes,m.mime,m.sha256 AS media_sha256
+             FROM importer_lite_uploads u LEFT JOIN media m ON m.id=u.media_id
+             WHERE u.task_id=$1::uuid AND u.page_position=$2`, [task.id, position],
           );
-          if (already.rows[0]?.state === 'PERSISTED') return already.rows[0].media_id;
-          if (already.rows[0]?.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+          const receipt = already.rows[0];
+          if (receipt?.state === 'PERSISTED' && receipt.storage_ready === true && Number(receipt.bytes) > 0 &&
+              String(receipt.mime || '').startsWith('image/') && receipt.media_sha256 === receipt.sha256) return receipt.media_id;
+          if (receipt?.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
           const host = hostFor(url);
           if (host) await this.sourceRateLimiter.acquire(host);
           return this.bufferedPages.runExclusive(async () => {

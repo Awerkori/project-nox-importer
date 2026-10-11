@@ -450,6 +450,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('worker-a', 30))?.idempotencyKey).toBe('healthy-neighbour');
   });
 
+  it('repairs only an invalid persisted page receipt and preserves its historical media row', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:repair-page', priority: 'P1', idempotencyKey: 'repair-page' });
+    const task = await db.query<{ id: string }>(`SELECT id FROM importer_lite_tasks WHERE idempotency_key='repair-page'`);
+    await db.query(`INSERT INTO importer_lite_uploads(task_id,page_position,media_id,sha256,state)
+      VALUES($1,1,$2,'old-page-sha','PERSISTED')`, [task.rows[0].id, ids.page]);
+    await db.query(`UPDATE media SET storage_ready=false WHERE id=$1`, [ids.page]);
+    const replacement = await repo.reserveUpload(task.rows[0].id, 1, 'replacement-page-sha');
+    expect(replacement).toMatchObject({ state: 'RETRYABLE' });
+    expect(replacement.mediaId).not.toBe(ids.page);
+    expect((await db.query(`SELECT media_id,state,sha256 FROM importer_lite_uploads WHERE task_id=$1 AND page_position=1`, [task.rows[0].id])).rows[0])
+      .toEqual({ media_id: replacement.mediaId, state: 'RETRYABLE', sha256: 'replacement-page-sha' });
+    expect((await db.query(`SELECT id FROM media WHERE id=$1`, [ids.page])).rows[0].id).toBe(ids.page);
+  });
+
   it('does not retry a repeatedly crashed lease beyond its durable attempt limit', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:crash', priority: 'P1', idempotencyKey: 'crash-exhausted', maxAttempts: 1 });
     const claimed = await repo.claim('worker-a', 30);
