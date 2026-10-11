@@ -22,6 +22,7 @@ export declare class ImporterLiteRuntime {
     private readonly claimGate;
     private sitePausedUntil;
     private idleClaimUntil;
+    private lastSiteProbe;
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter);
     start(): Promise<void>;
     stop(): void;
@@ -31,6 +32,8 @@ export declare class ImporterLiteRuntime {
     private claimNext;
     /** A small protective gate, deliberately not another scheduler. */
     private probeSharedResources;
+    /** A small diagnostic snapshot; it deliberately skips contention and scans. */
+    private emitOperationalSnapshot;
     private handle;
     private discover;
     private catalog;

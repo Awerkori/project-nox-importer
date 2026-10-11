@@ -243,6 +243,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT media_id,position FROM pages WHERE chapter_id=$1`, [ids.chapter])).rows)
       .toEqual([{ media_id: ids.page, position: 1 }]);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_publication_events WHERE chapter_id=$1`, [ids.chapter])).rows[0].count).toBe(1);
+    expect(await repo.progressSnapshot()).toMatchObject({ publishedLastMinute: 1, oldestReadyAt: null, oldestStoredUnpublishedAt: null });
   });
 
   it('settles the originating import after publication so bounded recovery does not rematerialize it', async () => {

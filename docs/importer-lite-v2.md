@@ -55,6 +55,12 @@ Invariants:
 - Idle workers share one short claim backoff, so an empty Lite queue performs
   one bounded probe per interval rather than multiplying empty claims by the
   configured worker count.
+- Every 60 seconds, when the direct pool has no waiter, Lite emits one compact
+  operational snapshot: real publications in the last minute, ready and
+  stored-but-unpublished age, queue counts, top blocked reasons, source health,
+  productive/idle slots, RSS/heap/external memory, pool state, aggregate
+  Telegram activity/429s, and last site-probe result. It does not write a new
+  telemetry table or scan catalog rows.
 
 ## Chapter sequence policy
 

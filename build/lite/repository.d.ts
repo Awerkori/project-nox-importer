@@ -60,6 +60,20 @@ export declare class LiteRepository {
         count: number;
         oldestReadyAt: Date | null;
     }>>;
+    /** Small, indexed progress probe used for a human-operable Lite heartbeat. */
+    progressSnapshot(): Promise<{
+        publishedLastMinute: number;
+        oldestReadyAt: Date | null;
+        oldestStoredUnpublishedAt: Date | null;
+    }>;
+    blockedReasonSnapshot(limit?: number): Promise<Array<{
+        reason: string;
+        count: number;
+    }>>;
+    sourceHealthSnapshot(): Promise<Array<{
+        health: string;
+        count: number;
+    }>>;
     /** Stable ID is reserved before the non-transactional Telegram call. */
     reserveUpload(taskId: string, pagePosition: number, sha256: string): Promise<{
         mediaId: string;

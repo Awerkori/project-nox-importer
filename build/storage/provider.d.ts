@@ -26,4 +26,5 @@ export interface StorageProvider {
     getLastShardId?(id?: string): string | null;
     getLastChannelId?(id?: string): string | null;
     getLastMessageId?(id?: string): number | null;
+    getMetricsSummary?(): unknown;
 }

@@ -7,6 +7,7 @@ import { readImageBody } from '../core/bounded-body.js';
 import { processAndStoreMedia } from '../storage/media.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
+import { telemetryCollector } from '../core/telemetry-collector.js';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const rankForSource = (source) => source === 'mangaflix' ? 10 : source === 'manhastro' ? 20 : 100;
 /** One process, one executor pool, one bounded reconciler. */
@@ -28,6 +29,9 @@ export class ImporterLiteRuntime {
     claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
     sitePausedUntil = 0;
     idleClaimUntil = 0;
+    lastSiteProbe = {
+        state: 'UNKNOWN', checkedAt: new Date(0).toISOString(), latencyMs: null,
+    };
     constructor(pool, catalogClient, registry, storage, config, sourceRateLimiter = new HostRateLimiter(2)) {
         this.pool = pool;
         this.catalogClient = catalogClient;
@@ -46,14 +50,18 @@ export class ImporterLiteRuntime {
     async start() {
         await this.seedDiscovery();
         const workers = Math.max(1, Math.min(this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING));
+        telemetryCollector.configureChapterSlots(workers, () => workers);
         for (let i = 0; i < workers; i++)
-            void this.worker(`${this.config.WORKER_ID}:lite:${i + 1}`);
+            void this.worker(`${this.config.WORKER_ID}:lite:${i + 1}`, i);
         const timer = setInterval(() => void this.queue.reconcile(50).catch(() => { }), 30_000);
         timer.unref();
         this.timers.push(timer);
         const healthTimer = setInterval(() => void this.probeSharedResources(), 30_000);
         healthTimer.unref();
         this.timers.push(healthTimer);
+        const metricsTimer = setInterval(() => void this.emitOperationalSnapshot().catch(() => { }), 60_000);
+        metricsTimer.unref();
+        this.timers.push(metricsTimer);
         await this.probeSharedResources();
     }
     stop() { this.stopped = true; for (const timer of this.timers)
@@ -66,21 +74,28 @@ export class ImporterLiteRuntime {
                 idempotencyKey: `lite:discover:${id}`, payload: { source: id }, checkpoint: { cursor: null } });
         }
     }
-    async worker(workerId) {
+    async worker(workerId, slotIndex) {
+        telemetryCollector.registerSlot(slotIndex);
         while (!this.stopped) {
             try {
                 if (Date.now() < this.sitePausedUntil || this.pool.waitingCount > 0) {
+                    telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'site-or-pool-protection');
                     await sleep(250);
                     continue;
                 }
+                telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
                 const task = await this.claimNext(workerId);
                 if (!task) {
+                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
                     await sleep(750);
                     continue;
                 }
+                telemetryCollector.setSlotState(slotIndex, task.taskType === 'IMPORT_CHAPTER' ? 'ACTIVE_DOWNLOAD' : task.taskType === 'PUBLISH' ? 'ACTIVE_DB' : 'ACTIVE_SOURCE', task.taskType);
                 await this.handle(task, workerId);
+                telemetryCollector.setSlotState(slotIndex, 'IDLE');
             }
             catch {
+                telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 await sleep(1_000);
             }
         }
@@ -104,13 +119,47 @@ export class ImporterLiteRuntime {
             const elapsed = Date.now() - started;
             if (!response.ok || elapsed > 1_500) {
                 this.sitePausedUntil = Date.now() + 30_000;
+                this.lastSiteProbe = { state: 'PAUSED', checkedAt: new Date().toISOString(), latencyMs: elapsed };
                 this.logger.warn('Pausing new Lite claims to protect shared site resources', { status: response.status, elapsed });
+            }
+            else {
+                this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: elapsed };
             }
         }
         catch {
             // A probe outage should reduce pressure, not cause retries or a restart.
             this.sitePausedUntil = Date.now() + 30_000;
+            this.lastSiteProbe = { state: 'PAUSED', checkedAt: new Date().toISOString(), latencyMs: null };
         }
+    }
+    /** A small diagnostic snapshot; it deliberately skips contention and scans. */
+    async emitOperationalSnapshot() {
+        if (this.pool.waitingCount > 0)
+            return;
+        const [tasks, progress, blocked, sourceHealth] = await Promise.all([
+            this.queue.operationalSnapshot(), this.queue.progressSnapshot(),
+            this.queue.blockedReasonSnapshot(), this.queue.sourceHealthSnapshot(),
+        ]);
+        const memory = process.memoryUsage();
+        const storageMetrics = this.storage.getMetricsSummary?.();
+        const telegram = storageMetrics ? {
+            uploads: Number(storageMetrics.totalBotUploads || 0),
+            shardUploads: Number(storageMetrics.totalShardUploads || 0),
+            active: (storageMetrics.bots || []).reduce((sum, bot) => sum + Number(bot.active || 0), 0),
+            rateLimits429: (storageMetrics.bots || []).reduce((sum, bot) => sum + Number(bot.rateLimits429 || 0), 0),
+        } : null;
+        this.logger.info('Lite operational progress', {
+            publishedLastMinute: progress.publishedLastMinute,
+            oldestReadyAt: progress.oldestReadyAt?.toISOString() || null,
+            oldestStoredUnpublishedAt: progress.oldestStoredUnpublishedAt?.toISOString() || null,
+            tasks, blocked, sourceHealth, slots: telemetryCollector.getSlotProductivitySnapshot(),
+            memoryMiB: {
+                rss: Math.round(memory.rss / 1024 / 1024), heapUsed: Math.round(memory.heapUsed / 1024 / 1024),
+                external: Math.round(memory.external / 1024 / 1024), arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024),
+            },
+            ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+            telegram, site: this.lastSiteProbe,
+        });
     }
     async handle(task, workerId) {
         if (task.taskType === 'DISCOVER')

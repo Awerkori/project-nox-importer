@@ -206,6 +206,33 @@ export class LiteRepository {
         return result.rows.map((row) => ({ priority: priorityName(row.priority), state: row.state,
             count: Number(row.count), oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null }));
     }
+    /** Small, indexed progress probe used for a human-operable Lite heartbeat. */
+    async progressSnapshot() {
+        const result = await this.db.query(`SELECT
+      (SELECT count(*)::int FROM importer_publication_events
+        WHERE transition_at >= now() - interval '1 minute') AS published_last_minute,
+      (SELECT min(created_at) FROM importer_lite_tasks WHERE state='READY') AS oldest_ready_at,
+      (SELECT min(updated_at) FROM importer_lite_tasks
+        WHERE state='DONE' AND task_type='IMPORT_CHAPTER'
+          AND checkpoint ? 'mediaIds' AND NOT checkpoint ? 'publishedAt') AS oldest_stored_unpublished_at`);
+        const row = result.rows[0] || {};
+        return {
+            publishedLastMinute: Number(row.published_last_minute || 0),
+            oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null,
+            oldestStoredUnpublishedAt: row.oldest_stored_unpublished_at ? new Date(row.oldest_stored_unpublished_at) : null,
+        };
+    }
+    async blockedReasonSnapshot(limit = 8) {
+        const result = await this.db.query(`SELECT COALESCE(reason,'UNSPECIFIED') AS reason,count(*)::int AS count
+      FROM importer_lite_tasks WHERE state='BLOCKED'
+      GROUP BY reason ORDER BY count DESC,reason LIMIT $1`, [Math.max(1, Math.min(limit, 20))]);
+        return result.rows.map((row) => ({ reason: String(row.reason), count: Number(row.count) }));
+    }
+    async sourceHealthSnapshot() {
+        const result = await this.db.query(`SELECT health,count(*)::int AS count
+      FROM importer_lite_source_health GROUP BY health ORDER BY health`);
+        return result.rows.map((row) => ({ health: String(row.health), count: Number(row.count) }));
+    }
     /** Stable ID is reserved before the non-transactional Telegram call. */
     async reserveUpload(taskId, pagePosition, sha256) {
         const existing = await this.db.query(`SELECT media_id,state FROM importer_lite_uploads

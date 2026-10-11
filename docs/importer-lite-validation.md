@@ -40,6 +40,9 @@ integration suite verifies:
   Telegram receipt, `PUBLISH`, `published_at` and the Reader page manifest.
 - the Telegram receipt journal persists provider file ID, bot, shard, channel
   and message ID before a page can enter the publish transaction;
+- a compact Lite progress probe counts publication events rather than download
+  completion, including ready/stored age so an online process cannot be
+  mistaken for real progress;
 - slow uploads with concurrent page discovery, proving that the global retained
   page-buffer limit is applied rather than multiplied by chapter workers.
 
