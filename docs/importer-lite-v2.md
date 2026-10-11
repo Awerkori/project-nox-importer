@@ -81,6 +81,19 @@ Invariants:
   durable table. A successful operation clears a temporary cooldown; a failed
   preferred source therefore makes a confirmed alternative selectable without
   changing the task's `STAFF > P0 > P1 > P2` priority.
+- Source administration is checked before every Lite discovery/catalog network
+  call and while selecting a chapter route. `enabled`, source `status`, source
+  cooldown and Lite health are distinct from task priority: a paused,
+  disabled or cooling preferred source cannot consume a slot or keep a
+  confirmed alternative from running. Startup discovery uses only the stable
+  `importer_sources` columns (`enabled`, `status`, `sync_interval_minutes`),
+  not an optional legacy flag.
+- Discovery and recurring P0 observations are each one durable, bounded
+  source/work row. A persistent upstream outage increases their cadence only
+  to a six-hour cap; it cannot create task rows or terminally lose the watch.
+  A successful observation resets that recurrence failure window. In contrast,
+  an ordinary chapter/catalog task still reaches a visible terminal block at
+  its configured attempt limit.
 - Idle workers share one short claim backoff, so an empty Lite queue performs
   one bounded probe per interval rather than multiplying empty claims by the
   configured worker count.

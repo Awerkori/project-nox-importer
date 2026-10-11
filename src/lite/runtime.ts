@@ -239,10 +239,14 @@ export class ImporterLiteRuntime {
       }
       // The durable task itself holds the cursor; no new cursor rows or sweep.
       await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', priority: 'P2', nextRunAt: new Date(Date.now() + (page.nextCursor ? 1_000 : policy.syncIntervalMs)),
-        checkpoint: { cursor: page.nextCursor } });
+        checkpoint: { cursor: page.nextCursor }, resetAttempts: true });
     } catch (error: any) {
       await this.queue.recordSourceFailure(source, error);
-      await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: String(error?.message || 'DISCOVERY_FAILED'), nextRunAt: new Date(Date.now() + 60_000) });
+      // Discovery is one durable recurring observation per source. A long
+      // upstream outage must not create an unbounded task set or make that
+      // source permanently invisible; its retry cadence is capped instead.
+      await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: String(error?.message || 'DISCOVERY_FAILED'),
+        nextRunAt: new Date(Date.now() + this.recurringRetryDelayMs(task.attempts)) });
     }
   }
 
@@ -335,17 +339,22 @@ export class ImporterLiteRuntime {
           lastNewReleaseCount: newReleaseCount,
           emptyChecks: newReleaseCount ? 0 : Number(task.checkpoint.emptyChecks || 0) + 1,
         },
-      } : { state: 'DONE', workId: resolved.workId, checkpoint: { workId: resolved.workId } });
+        resetAttempts: true,
+      } : { state: 'DONE', workId: resolved.workId, checkpoint: { workId: resolved.workId }, resetAttempts: true });
       await this.queue.recordSourceSuccess(source);
     } catch (error: any) {
       if (!fetchedSnapshot) await this.queue.recordSourceFailure(source, error);
       const monitorRetry = task.monitoring;
-      const retryDelay = monitorRetry
-        ? Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(task.attempts, 8))
-        : 60_000;
-      await this.queue.finish(task, workerId, { state: task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
+      const retryDelay = monitorRetry ? this.recurringRetryDelayMs(task.attempts) : 60_000;
+      // A monitoring row is an ongoing P0 observation, not a failed chapter.
+      // Keep exactly one durable row with a capped cadence; its successful
+      // next observation resets the failure window. A manually-awakened
+      // STAFF catalog task is no longer marked monitoring and still obtains a
+      // visible terminal block after its normal bounded attempts.
+      await this.queue.finish(task, workerId, { state: monitorRetry ? 'RETRY_WAIT' : task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
         reason: String(error?.message || 'CATALOG_FAILED').slice(0,500), nextRunAt: new Date(Date.now() + retryDelay),
-        priority: monitorRetry ? 'P2' : undefined, monitoring: monitorRetry || undefined });
+        priority: monitorRetry ? 'P2' : undefined, monitoring: monitorRetry || undefined,
+        checkpoint: monitorRetry ? { monitorFailures: Number(task.checkpoint.monitorFailures || 0) + 1 } : undefined });
     }
   }
 
@@ -355,6 +364,11 @@ export class ImporterLiteRuntime {
     if (newReleaseCount > 0) return 5 * 60_000;
     const emptyChecks = Math.max(0, Number(task.checkpoint.emptyChecks || 0));
     return Math.min(6 * 60 * 60_000, 15 * 60_000 * 2 ** Math.min(emptyChecks, 5));
+  }
+
+  /** Bounded health recovery for the two recurring observation task types. */
+  private recurringRetryDelayMs(attempts: number): number {
+    return Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(Math.max(0, attempts), 8));
   }
 
   /** Invalid/blocked covers remain absent; they never overwrite a known cover. */

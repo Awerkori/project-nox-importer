@@ -98,6 +98,17 @@ describe('LiteRepository against the additive Lite migration', () => {
 
   afterEach(async () => { await db.close(); });
 
+  it('reapplies the additive migration without changing pre-existing Reader data', async () => {
+    // This is deliberately a second application in a disposable database:
+    // the deployment procedure must be safe to resume after an interrupted
+    // staging run, but this suite never touches a production database.
+    await db.exec(migration);
+    expect((await db.query(`SELECT title,cover_id FROM works WHERE id=$1`, [ids.publish])).rows[0])
+      .toEqual({ title: 'Publish', cover_id: ids.cover });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks`)).rows[0].count).toBe(0);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapter_sources`)).rows[0].count).toBe(0);
+  });
+
   it('claims strict STAFF > P0 > P1 > P2 priority immediately after a panel request', async () => {
     await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P1', idempotencyKey: 'p1' });
     await repo.enqueue({ taskType: 'CATALOG', workId: ids.p0, workKey: `work:${ids.p0}`, priority: 'P0', idempotencyKey: 'p0' });
@@ -193,6 +204,31 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.reconcile(10)).retries).toBe(1);
     expect(await repo.claim('chapter-worker', 30)).toBeNull();
     expect((await repo.claimMonitor('monitor-after-restart', 30))?.id).toBe(running!.id);
+  });
+
+  it('keeps one failed P0 observation recoverable at a capped cadence without blocking normal work', async () => {
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:long-outage', priority: 'P2', monitoring: true,
+      idempotencyKey: 'long-outage-watch', payload: { source: 'source-a', sourceWorkId: 'long-outage' } });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'healthy-during-p0-outage', priority: 'P1', idempotencyKey: 'healthy-during-p0-outage' });
+    await db.query(`UPDATE importer_lite_tasks SET attempts=max_attempts WHERE idempotency_key='long-outage-watch'`);
+    const watch = await repo.claimMonitor('p0-monitor', 30);
+    const adapter = { id: 'source-a', fetchWorkSnapshot: vi.fn(async () => { throw new Error('UPSTREAM_TIMEOUT'); }) };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    await (runtime as any).handle(watch, 'p0-monitor');
+    expect((await db.query(`SELECT state,monitoring,attempts,reason FROM importer_lite_tasks WHERE id=$1`, [watch!.id])).rows[0])
+      .toMatchObject({ state: 'RETRY_WAIT', monitoring: true, attempts: 9, reason: 'UPSTREAM_TIMEOUT' });
+    // The outage remains an observation problem, not an execution barrier.
+    expect((await repo.claim('p1-worker', 30))?.idempotencyKey).toBe('healthy-during-p0-outage');
+    await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second' WHERE id=$1`, [watch!.id]);
+    expect((await repo.reconcile(10)).exhausted).toBe(0);
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [watch!.id])).rows[0].state).toBe('READY');
+    expect((await repo.claimMonitor('recovered-p0-monitor', 30))?.id).toBe(watch!.id);
   });
 
   it('uses quick rechecks for releases and bounded intervals for quiet or hiatus P0 watches', async () => {

@@ -64,6 +64,8 @@ export declare class LiteRepository {
         monitoring?: boolean;
         /** Catalog attaches the resolved canonical work without changing source identity. */
         workId?: string;
+        /** A healthy recurring observation starts a fresh bounded failure window. */
+        resetAttempts?: boolean;
     }): Promise<boolean>;
     /**
      * Catalog evidence is the only event that reopens a source-blocked chapter.

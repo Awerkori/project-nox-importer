@@ -48,6 +48,8 @@ export declare class ImporterLiteRuntime {
     private catalog;
     /** Release bursts get a quick recheck; quiet works exponentially back off. */
     private monitorIntervalMs;
+    /** Bounded health recovery for the two recurring observation task types. */
+    private recurringRetryDelayMs;
     /** Invalid/blocked covers remain absent; they never overwrite a known cover. */
     private loadCover;
 }

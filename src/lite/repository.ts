@@ -196,6 +196,8 @@ export class LiteRepository {
     monitoring?: boolean;
     /** Catalog attaches the resolved canonical work without changing source identity. */
     workId?: string;
+    /** A healthy recurring observation starts a fresh bounded failure window. */
+    resetAttempts?: boolean;
   }): Promise<boolean> {
     const client = await this.db.connect();
     try {
@@ -212,9 +214,10 @@ export class LiteRepository {
               checkpoint=checkpoint || $6::jsonb,
               monitoring=COALESCE($8::boolean,monitoring),
               work_id=COALESCE($9::uuid,work_id),
+              attempts=CASE WHEN $10::boolean THEN 0 ELSE attempts END,
               lease_owner=NULL, lease_until=NULL, updated_at=now()
          WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2`,
-        [task.id, workerId, outcome.state, outcome.reason || null, outcome.nextRunAt || null, JSON.stringify(outcome.checkpoint || {}), outcome.priority === undefined ? null : LITE_PRIORITY_RANK[outcome.priority], outcome.monitoring === undefined ? null : outcome.monitoring, outcome.workId || null],
+        [task.id, workerId, outcome.state, outcome.reason || null, outcome.nextRunAt || null, JSON.stringify(outcome.checkpoint || {}), outcome.priority === undefined ? null : LITE_PRIORITY_RANK[outcome.priority], outcome.monitoring === undefined ? null : outcome.monitoring, outcome.workId || null, Boolean(outcome.resetAttempts)],
       );
       await this.refreshReadyWork(client, task.workKey);
       await client.query('COMMIT');
@@ -286,23 +289,33 @@ export class LiteRepository {
       await client.query('BEGIN');
       const leases = await client.query<Row>(
         `WITH picked AS (
-           SELECT id,work_key,attempts,max_attempts FROM importer_lite_tasks WHERE state='RUNNING' AND lease_until<now()
+           SELECT id,work_key,attempts,max_attempts,task_type,monitoring FROM importer_lite_tasks WHERE state='RUNNING' AND lease_until<now()
            ORDER BY lease_until LIMIT $1 FOR UPDATE SKIP LOCKED
          ) UPDATE importer_lite_tasks t SET
-           state=CASE WHEN picked.attempts >= picked.max_attempts THEN 'BLOCKED' ELSE 'RETRY_WAIT' END,
+           state=CASE WHEN picked.attempts >= picked.max_attempts
+             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND picked.monitoring))
+             THEN 'BLOCKED' ELSE 'RETRY_WAIT' END,
            lease_owner=NULL, lease_until=NULL,
-           next_run_at=CASE WHEN picked.attempts >= picked.max_attempts THEN t.next_run_at ELSE now() + interval '30 seconds' END,
-           reason=CASE WHEN picked.attempts >= picked.max_attempts THEN 'LEASE_EXPIRED_MAX_ATTEMPTS' ELSE 'LEASE_EXPIRED' END,
+           next_run_at=CASE WHEN picked.attempts >= picked.max_attempts
+             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND picked.monitoring))
+             THEN t.next_run_at ELSE now() + interval '30 seconds' END,
+           reason=CASE WHEN picked.attempts >= picked.max_attempts
+             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND picked.monitoring))
+             THEN 'LEASE_EXPIRED_MAX_ATTEMPTS' ELSE 'LEASE_EXPIRED' END,
            updated_at=now()
          FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state`, [limit],
       );
       const retries = await client.query<Row>(
         `WITH picked AS (
-           SELECT id,work_key,attempts,max_attempts FROM importer_lite_tasks WHERE state='RETRY_WAIT' AND next_run_at<=now()
+           SELECT id,work_key,attempts,max_attempts,task_type,monitoring FROM importer_lite_tasks WHERE state='RETRY_WAIT' AND next_run_at<=now()
            ORDER BY next_run_at LIMIT $1 FOR UPDATE SKIP LOCKED
          ) UPDATE importer_lite_tasks t SET
-           state=CASE WHEN picked.attempts >= picked.max_attempts THEN 'BLOCKED' ELSE 'READY' END,
-           reason=CASE WHEN picked.attempts >= picked.max_attempts THEN 'MAX_ATTEMPTS_EXHAUSTED' ELSE t.reason END,
+           state=CASE WHEN picked.attempts >= picked.max_attempts
+             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND picked.monitoring))
+             THEN 'BLOCKED' ELSE 'READY' END,
+           reason=CASE WHEN picked.attempts >= picked.max_attempts
+             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND picked.monitoring))
+             THEN 'MAX_ATTEMPTS_EXHAUSTED' ELSE t.reason END,
            updated_at=now()
          FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state`, [limit],
       );

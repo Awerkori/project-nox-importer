@@ -36,6 +36,13 @@ integration suite verifies:
 - source-health persistence across discovery/catalog/import: failures create a
   bounded cooldown and successful operations clear it, allowing a confirmed
   alternative source route without changing task priority;
+- source administration uses the actual stable `importer_sources` contract:
+  paused/disabled sources are not seeded or contacted, cooldown is respected,
+  and a disabled preferred chapter route yields immediately to a confirmed
+  healthy alternative;
+- a recurring P0 observation remains exactly one durable, recoverable row
+  after a prolonged upstream outage, with a six-hour capped retry cadence;
+  it does not block ready P1 work even after its ordinary attempt threshold;
 - a repeatedly expired lease reaches `max_attempts` and becomes an explicit
   blocked task, rather than cycling forever through recovery;
 - P0 monitoring materialises newly observed chapters as P0 without rebucketing
@@ -56,6 +63,9 @@ integration suite verifies:
   deduplication/tag writer after synopsis sanitization;
 - slow uploads with concurrent page discovery, proving that the global retained
   page-buffer limit is applied rather than multiplied by chapter workers.
+- the additive migration is re-applied in the same ephemeral database,
+  confirming that it preserves pre-existing Reader rows and Lite tables rather
+  than requiring a destructive reset.
 
 This is an integration and regression gate, not an external capacity result:
 PGlite does not model Yugabyte latency, real source limits, Telegram capacity,
