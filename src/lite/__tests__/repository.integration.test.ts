@@ -1494,14 +1494,14 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).executor.sourceSlot('hanamiheaven').capacity).toBe(3);
   });
 
-  it('lets the fourth existing worker use the measured healthy MangaFlix route', () => {
+  it('lets a fifth producer fill MangaFlix page-wave gaps without widening the global page fence', () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
         BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
-    expect((runtime as any).executor.sourceSlot('mangaflix').capacity).toBe(4);
+    expect((runtime as any).executor.sourceSlot('mangaflix').capacity).toBe(5);
   });
 
   it('keeps six bounded page fetches per active chapter under the global fence', () => {

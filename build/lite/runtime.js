@@ -89,9 +89,9 @@ export class ImporterLiteRuntime {
         this.queue = new LiteRepository(pool);
         this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
         this.bufferedPages = new AsyncSemaphore(config.BUFFERED_PAGE_CONCURRENCY, 'lite_global_page_buffers');
-        // Four healthy MangaFlix workers fill the measured 24-page fence at six
-        // pages each. The 32/8 production ramp regressed, so retain this bounded
-        // distribution until a distinct bottleneck is demonstrated.
+        // Five independent MangaFlix chapter waves can fill the measured 24-page
+        // fence while each remains capped at six pages. The regressed 32/8 ramp
+        // widened the global fence itself; this controlled ramp does not.
         this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter);
         this.dedupe = new DeduplicationEngine(catalogClient);
     }
