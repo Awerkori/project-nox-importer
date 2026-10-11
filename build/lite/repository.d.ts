@@ -57,6 +57,20 @@ export declare class LiteRepository {
      */
     staggerReadyDiscoveries(spacingMs: number, limit?: number): Promise<number>;
     /**
+     * The v1 catalog contains durable, confirmed source/work mappings that may
+     * predate Lite's chapter-manifest table.  They are evidence worth checking,
+     * but are not evidence that a numeric chapter gap exists.  This bounded
+     * admission turns only a few such mappings into P1 catalog passes when the
+     * real P1 reserve becomes low.  Cataloging remains outside the claim SQL;
+     * its confirmed manifest is what may subsequently create IMPORT_CHAPTER
+     * tasks.
+     *
+     * The inner window is deliberately small and indexed by the legacy mapping
+     * status.  Limiting each source to two candidates prevents a large legacy
+     * mapping set from monopolising the next P1 refill.
+     */
+    refillHistoricalP1Catalog(readyFloor?: number, batchLimit?: number): Promise<number>;
+    /**
      * Source administration and transient Lite health remain durable authority.
      * This indexed one-source read happens before source networking, never in a
      * normal task claim, and prevents a paused/cooling provider from consuming
