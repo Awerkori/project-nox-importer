@@ -99,11 +99,17 @@ async function main() {
     const defaultHostRate = parseFloat(process.env.DEFAULT_HOST_RATE_PER_SECOND || '5.0');
     const rateLimiter = new HostRateLimiter(defaultHostRate);
     const registry = new SourceRegistry(rateLimiter, config.NOX_STORAGE_BRIDGE_TOKEN, config.NOX_MANGA_URL);
-    // 5. Lite is an explicit direct-YSQL cutover mode. Until approval, legacy
-    // stays the default and both runtimes cannot publish concurrently.
+    // 5. Lite is the default in the approved cutover artifact. Both runtimes
+    // share a durable leadership lease, so a rolling deploy cannot publish from
+    // both schedulers concurrently.
     if (config.IMPORTER_RUNTIME_MODE === 'lite' && config.IMPORTER_DB_MODE !== 'direct') {
         throw new Error('Importer Lite requires IMPORTER_DB_MODE=direct');
     }
+    rootLogger.info('IMPORTER RUNTIME MODE', {
+        mode: config.IMPORTER_RUNTIME_MODE,
+        liteChapterWorkers: config.LITE_CHAPTER_WORKERS,
+        directDb: config.IMPORTER_DB_MODE === 'direct',
+    });
     const engine = config.IMPORTER_RUNTIME_MODE === 'lite'
         ? new ImporterLiteRuntime(supabase.getPool(), supabase, registry, storage, config, rateLimiter)
         : new ImporterEngine(supabase, storage, registry, rateLimiter, config);
