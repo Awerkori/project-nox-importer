@@ -41,6 +41,9 @@ const ConfigSchema = z.object({
   QUEUE_LEASE_DURATION_SECONDS: z.coerce.number().int().min(30).default(600),
   QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
   MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(128).default(10),
+  // Lite does not inherit the legacy chapter-worker setting at cutover.  A
+  // measured staging ramp must explicitly raise this safe admission cap.
+  LITE_CHAPTER_WORKERS: z.coerce.number().int().min(1).max(32).default(1),
   ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(3),
   // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),

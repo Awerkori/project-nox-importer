@@ -69,7 +69,10 @@ export class ImporterLiteRuntime {
         if (!(await this.waitForRuntimeLeadership()))
             return;
         await this.seedDiscovery();
-        const workers = Math.max(1, Math.min(this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING));
+        // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
+        // Lite cutover.  The Lite-specific cap begins safely and can only rise
+        // through an explicit, benchmarked staging configuration.
+        const workers = Math.max(1, Math.min(this.config.LITE_CHAPTER_WORKERS ?? 1, this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING));
         telemetryCollector.configureChapterSlots(workers, () => workers);
         // Queue lease owners include the per-boot leader identity. A process that
         // lost leadership can never checkpoint or finish a lease reclaimed by a

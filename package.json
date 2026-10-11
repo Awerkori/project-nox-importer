@@ -13,6 +13,7 @@
     "build": "tsc && node scripts/build-id.mjs",
     "start": "node --max-old-space-size=288 build/index.js",
     "package:discloud": "python3 scripts/package-discloud.py",
+    "validate:lite:staging": "node scripts/validate-lite-migration-staging.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
