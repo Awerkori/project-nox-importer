@@ -42,10 +42,10 @@ const ConfigSchema = z.object({
   QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
   MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(128).default(10),
   // Lite does not inherit the legacy chapter-worker setting. The approved
-  // first production ramp uses two global slots after the one-worker health
-  // gate; an explicit protected value still wins immediately (including a
-  // one-worker rollback) without reviving any legacy scheduler behavior.
-  LITE_CHAPTER_WORKERS: z.coerce.number().int().min(1).max(32).default(2),
+  // second production ramp uses four global slots after the one- and two-
+  // worker health gates; an explicit protected value still wins immediately
+  // (including a one-worker rollback) without reviving legacy behavior.
+  LITE_CHAPTER_WORKERS: z.coerce.number().int().min(1).max(32).default(4),
   ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(3),
   // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
