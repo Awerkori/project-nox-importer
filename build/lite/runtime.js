@@ -283,6 +283,43 @@ export class ImporterLiteRuntime {
           confirmed=true,has_chapter=true,last_verified_at=now(),updated_at=now()`, values);
         }
     }
+    /**
+     * Catalog passes can rediscover a whole work that the legacy importer has
+     * already published.  A source/id match plus the canonical work id is
+     * sufficient evidence to reuse it; similarity or a numeric display value
+     * is deliberately never used here.  Returning this map before admission
+     * keeps hundreds of no-op IMPORT_CHAPTER claims out of the P1 lane.
+     */
+    async legacyPublishedChapterMap(source, workId, sourceChapterIds) {
+        const mapped = new Map();
+        for (let offset = 0; offset < sourceChapterIds.length; offset += 500) {
+            const result = await this.pool.query(`SELECT m.source_chapter_id,m.chapter_id
+         FROM importer_chapter_mappings m
+         JOIN chapters c ON c.id=m.chapter_id
+         WHERE m.source=$1 AND m.source_chapter_id=ANY($2::text[])
+           AND c.work_id=$3::uuid AND c.published_at IS NOT NULL`, [source, sourceChapterIds.slice(offset, offset + 500), workId]);
+            for (const row of result.rows)
+                mapped.set(String(row.source_chapter_id), String(row.chapter_id));
+        }
+        return mapped;
+    }
+    /** Persist the exact legacy identity without rewriting any Reader chapter. */
+    async upsertLegacyChapterMappings(rows) {
+        for (let offset = 0; offset < rows.length; offset += 500) {
+            const batch = rows.slice(offset, offset + 500);
+            const values = [];
+            const tuples = batch.map((row, index) => {
+                const start = index * 7;
+                values.push(row.workId, row.chapterKey, row.chapterId, row.displayNumber, row.orderKey, row.edition, row.language);
+                return `($${start + 1}::uuid,$${start + 2},$${start + 3}::uuid,$${start + 4},$${start + 5},$${start + 6},$${start + 7})`;
+            });
+            await this.pool.query(`INSERT INTO importer_lite_chapters
+        (work_id,canonical_chapter_key,chapter_id,display_number,order_key,edition,language)
+        VALUES ${tuples.join(',')}
+        ON CONFLICT(work_id,canonical_chapter_key) DO UPDATE
+          SET chapter_id=importer_lite_chapters.chapter_id`, values);
+        }
+    }
     async worker(workerId, slotIndex) {
         telemetryCollector.registerSlot(slotIndex);
         while (!this.stopped) {
@@ -524,7 +561,12 @@ export class ImporterLiteRuntime {
           FROM importer_lite_chapter_sources WHERE work_id=$1::uuid AND order_key LIKE 'n|%'`, [resolved.workId])
                 : { rows: [{ order_key: null }] };
             const knownNormalOrder = knownFrontier.rows[0]?.order_key || null;
+            const manifestSourceIds = [...new Set(snapshot.chapters
+                    .map((chapter) => String(chapter.sourceChapterId || ''))
+                    .filter(Boolean))];
+            const legacyPublished = await this.legacyPublishedChapterMap(source, resolved.workId, manifestSourceIds);
             const sourceRows = [];
+            const legacyRows = [];
             const chapterTasks = [];
             const sourceChapterIds = new Set();
             for (const chapter of snapshot.chapters) {
@@ -541,13 +583,21 @@ export class ImporterLiteRuntime {
                 const chapterPriority = p0Monitoring && !historicalRepair ? 'P0' : 'P1';
                 sourceRows.push({ workId: resolved.workId, chapterKey, source, sourceWorkId, sourceChapterId: chapter.sourceChapterId,
                     language, edition, orderKey, sourceRank: rankForSource(source) });
-                if (policy.chapterIngestionEnabled) {
+                const legacyChapterId = legacyPublished.get(String(chapter.sourceChapterId));
+                if (legacyChapterId) {
+                    // The existing Reader publication remains authoritative.  This only
+                    // gives Lite its canonical identity, so a future catalog pass cannot
+                    // spend a P1 slot rediscovering the same source chapter.
+                    legacyRows.push({ workId: resolved.workId, chapterKey, chapterId: legacyChapterId, displayNumber, orderKey, language, edition });
+                }
+                else if (policy.chapterIngestionEnabled) {
                     chapterTasks.push({ taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
                         chapterKey, priority: chapterPriority, idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,
                         payload: { displayNumber, chapterTitle: chapter.title || '', chapterKind: chapterKindValue, orderKey, language, edition } });
                 }
             }
             await this.upsertChapterSources(sourceRows);
+            await this.upsertLegacyChapterMappings(legacyRows);
             const materialized = await this.queue.enqueueMany(chapterTasks);
             const newReleaseCount = chapterTasks.filter((candidate) => candidate.priority === 'P0' && materialized.insertedKeys.has(candidate.idempotencyKey)).length;
             // A newly confirmed mapping (or repaired presentation metadata) is

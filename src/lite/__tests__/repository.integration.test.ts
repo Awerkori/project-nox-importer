@@ -1196,6 +1196,36 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks WHERE task_type='IMPORT_CHAPTER'`)).rows[0].count).toBe(0);
   });
 
+  it('maps an exactly matched published legacy chapter during catalog without admitting a no-op P1 import', async () => {
+    await db.query(`UPDATE chapters SET published_at=now() WHERE id=$1`, [ids.chapter]);
+    await db.query(`INSERT INTO importer_chapter_mappings(source,source_chapter_id,chapter_id)
+      VALUES('source-a','legacy-catalog-1',$1)`, [ids.chapter]);
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:legacy-published', priority: 'P2',
+      idempotencyKey: 'legacy-published-catalog', payload: { source: 'source-a', sourceWorkId: 'legacy-published' } });
+    const task = await repo.claim('catalog-worker', 120);
+    const adapter = {
+      id: 'source-a',
+      fetchWorkSnapshot: async () => ({
+        details: { sourceWorkId: 'legacy-published', title: 'Publish', slug: 'publish', status: 'COMPLETED' as const, language: 'pt-BR' },
+        chapters: [{ sourceChapterId: 'legacy-catalog-1', number: 1, displayNumber: '1', title: 'Chapter 1' }],
+      }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.publish, status: 'CONFIRMED_EXISTING' }) };
+    await (runtime as any).catalog(task, 'catalog-worker');
+    expect((await db.query(`SELECT chapter_id FROM importer_lite_chapters
+      WHERE work_id=$1 AND canonical_chapter_key='pt-br|default|chapter|1|-'`, [ids.publish])).rows[0].chapter_id).toBe(ids.chapter);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE task_type='IMPORT_CHAPTER' AND work_id=$1`, [ids.publish])).rows[0].count).toBe(0);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapter_sources
+      WHERE source='source-a' AND source_chapter_id='legacy-catalog-1'`, [])).rows[0].count).toBe(1);
+  });
+
   it('runs an isolated durable path from discovery to a Reader-visible published chapter', async () => {
     const adapter = {
       id: 'source-a',
