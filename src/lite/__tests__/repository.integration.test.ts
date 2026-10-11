@@ -77,6 +77,11 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
       source text NOT NULL, source_chapter_id text NOT NULL, chapter_id uuid NULL REFERENCES chapters(id),
       PRIMARY KEY(source,source_chapter_id)
     );
+    CREATE TABLE importer_work_mappings (
+      id uuid PRIMARY KEY, source text NOT NULL, source_work_id text NOT NULL, work_id uuid,
+      sync_status text NOT NULL DEFAULT 'WAITING_ADMISSION', updated_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE(source,source_work_id)
+    );
     CREATE TABLE settings (key text PRIMARY KEY, value text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE importer_publication_events (
       chapter_id uuid PRIMARY KEY, transition_at timestamptz NOT NULL, recorded_at timestamptz NOT NULL,
@@ -128,6 +133,46 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.staggerReadyDiscoveries(60_000)).toBe(2);
     const claimed = await repo.claim('stagger-worker', 600);
     expect(claimed?.taskType).toBe('CATALOG');
+  });
+
+  it('refills a low P1 reserve from durable historical mappings without inventing numeric gaps or letting one source monopolize', async () => {
+    await db.query(`INSERT INTO importer_sources(id) VALUES('source-c')`);
+    const mappings = [
+      ['00000000-0000-4000-8000-000000000101', 'source-a', 'a-1', ids.p1a],
+      ['00000000-0000-4000-8000-000000000102', 'source-a', 'a-2', ids.p1a],
+      ['00000000-0000-4000-8000-000000000103', 'source-a', 'a-3', ids.p1a],
+      ['00000000-0000-4000-8000-000000000104', 'source-b', 'b-1', ids.p1b],
+      ['00000000-0000-4000-8000-000000000105', 'source-b', 'b-2', ids.p1b],
+      ['00000000-0000-4000-8000-000000000106', 'source-c', 'c-1', ids.p1a],
+    ];
+    for (const [id, source, sourceWorkId, workId] of mappings) {
+      await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+        VALUES($1::uuid,$2,$3,$4::uuid,'WAITING_ADMISSION')`, [id, source, sourceWorkId, workId]);
+    }
+
+    expect(await repo.refillHistoricalP1Catalog(4, 4)).toBe(4);
+    const admitted = await db.query(`SELECT priority,base_priority,task_type,payload->>'source' AS source,
+      payload->>'historicalP1Backfill' AS historical
+      FROM importer_lite_tasks ORDER BY idempotency_key`);
+    expect(admitted.rows).toHaveLength(4);
+    expect(admitted.rows.every((row: any) => row.priority === 2 && row.base_priority === 2 && row.task_type === 'CATALOG' && row.historical === 'true')).toBe(true);
+    const perSource = admitted.rows.reduce((counts: Record<string, number>, row: any) => {
+      counts[row.source] = (counts[row.source] || 0) + 1;
+      return counts;
+    }, {});
+    expect(Math.max(...Object.values(perSource))).toBeLessThanOrEqual(2);
+
+    // Existing executable P1 work is the reserve.  Backfill must not fill a
+    // second hidden queue while that reserve is already healthy.
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'ready-reserve-1', priority: 'P1', idempotencyKey: 'ready-reserve-1' });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'ready-reserve-2', priority: 'P1', idempotencyKey: 'ready-reserve-2' });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      chapterKey: 'ready-reserve-3', priority: 'P1', idempotencyKey: 'ready-reserve-3' });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      chapterKey: 'ready-reserve-4', priority: 'P1', idempotencyKey: 'ready-reserve-4' });
+    expect(await repo.refillHistoricalP1Catalog(4, 4)).toBe(0);
   });
 
   it('admits ready publication before another same-priority chapter download', async () => {

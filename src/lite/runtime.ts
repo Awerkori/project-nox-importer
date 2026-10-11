@@ -50,6 +50,7 @@ export class ImporterLiteRuntime {
   private readonly downloads: AsyncSemaphore;
   private readonly bufferedPages: AsyncSemaphore;
   private readonly claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
+  private readonly historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
   // Observation is intentionally a one-slot lane. It may create P0 chapter
   // work, but an empty observation must never compete with chapter workers.
   private readonly monitorGate = new AsyncSemaphore(1, 'lite_p0_monitor');
@@ -108,6 +109,7 @@ export class ImporterLiteRuntime {
     // Stagger only discovery rows; executable catalog/chapter work remains
     // immediately eligible under the normal strict priority contract.
     await this.queue.staggerReadyDiscoveries(60_000, 64);
+    await this.refillHistoricalP1Catalog();
     // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
     // Lite cutover.  The Lite-specific cap begins safely and can only rise
     // through an explicit, benchmarked staging configuration.
@@ -119,7 +121,7 @@ export class ImporterLiteRuntime {
     // successor which happens to use the same configured WORKER_ID.
     for (let i = 0; i < workers; i++) void this.worker(`${this.runtimeInstanceId}:lite:${i + 1}`, i);
     const timer = setInterval(() => {
-      if (this.isRuntimeLeader) void this.queue.reconcile(50).catch(() => {});
+      if (this.isRuntimeLeader) void this.runRecoveryTurn();
     }, 30_000);
     timer.unref(); this.timers.push(timer);
     const monitorTimer = setInterval(() => void this.runMonitorTurn().catch(() => {}), 1_000);
@@ -282,6 +284,30 @@ export class ImporterLiteRuntime {
         idempotencyKey: `lite:discover:${id}`, payload: { source: id, syncIntervalMinutes: sync_interval_minutes },
         checkpoint: { cursor: null }, nextRunAt: new Date(firstRun + index * 60_000) });
     }
+  }
+
+  /**
+   * One periodic, bounded P1 reserve refill.  It runs after reconciliation
+   * and never in the claim path, so legacy mappings cannot turn into a new
+   * global scheduler scan.  The repository only admits catalog checks when
+   * the existing P1-ready reserve is low; those checks remain behind ready
+   * P1 imports in normal claim ordering.
+   */
+  private async refillHistoricalP1Catalog(): Promise<void> {
+    if (!this.isRuntimeLeader || !this.historicalP1BackfillGate.tryAcquire()) return;
+    try {
+      const admitted = await this.queue.refillHistoricalP1Catalog();
+      if (admitted) this.logger.info('Admitted bounded historical P1 catalog checks', { admitted });
+    } catch (error: any) {
+      this.logger.warn('Historical P1 catalog refill failed', { error: error?.message });
+    } finally {
+      this.historicalP1BackfillGate.release();
+    }
+  }
+
+  private async runRecoveryTurn(): Promise<void> {
+    try { await this.queue.reconcile(50); } catch { /* bounded recovery retries next turn */ }
+    await this.refillHistoricalP1Catalog();
   }
 
   private async upsertChapterSources(rows: Array<{
@@ -484,6 +510,10 @@ export class ImporterLiteRuntime {
     ]);
     const memory = process.memoryUsage();
     const storageMetrics = this.storage.getMetricsSummary?.() as any;
+    // Keep the durable heartbeat compact, but include independently measured
+    // download and Telegram occupancy.  Aggregate publication rate cannot
+    // distinguish a slow CDN from a slow upload/persistence path.
+    const pipelineTelemetry = telemetryCollector.getSnapshotReport() as any;
     const telegram = storageMetrics ? {
       uploads: Number(storageMetrics.totalBotUploads || 0),
       shardUploads: Number(storageMetrics.totalShardUploads || 0),
@@ -506,6 +536,12 @@ export class ImporterLiteRuntime {
         external: Math.round(memory.external / 1024 / 1024), arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024),
       },
       ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+      pipeline: {
+        downloads: pipelineTelemetry.imageDownload,
+        telegram: pipelineTelemetry.telegramStorage,
+        pageDownloadLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_downloads,
+        pageBufferLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_buffers,
+      },
       telegram, sourceRate: this.sourceRateLimiter.getSummary(), site: this.lastSiteProbe,
     };
     this.logger.info('Lite operational progress', snapshot);

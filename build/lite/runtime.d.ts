@@ -20,6 +20,7 @@ export declare class ImporterLiteRuntime {
     private readonly downloads;
     private readonly bufferedPages;
     private readonly claimGate;
+    private readonly historicalP1BackfillGate;
     private readonly monitorGate;
     private readonly runtimeInstanceId;
     private readonly runtimeBootedAt;
@@ -53,6 +54,15 @@ export declare class ImporterLiteRuntime {
     private waitForRuntimeLeadership;
     private releaseRuntimeLeadership;
     private seedDiscovery;
+    /**
+     * One periodic, bounded P1 reserve refill.  It runs after reconciliation
+     * and never in the claim path, so legacy mappings cannot turn into a new
+     * global scheduler scan.  The repository only admits catalog checks when
+     * the existing P1-ready reserve is low; those checks remain behind ready
+     * P1 imports in normal claim ordering.
+     */
+    private refillHistoricalP1Catalog;
+    private runRecoveryTurn;
     private upsertChapterSources;
     /**
      * Catalog passes can rediscover a whole work that the legacy importer has

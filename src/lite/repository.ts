@@ -177,6 +177,101 @@ export class LiteRepository {
   }
 
   /**
+   * The v1 catalog contains durable, confirmed source/work mappings that may
+   * predate Lite's chapter-manifest table.  They are evidence worth checking,
+   * but are not evidence that a numeric chapter gap exists.  This bounded
+   * admission turns only a few such mappings into P1 catalog passes when the
+   * real P1 reserve becomes low.  Cataloging remains outside the claim SQL;
+   * its confirmed manifest is what may subsequently create IMPORT_CHAPTER
+   * tasks.
+   *
+   * The inner window is deliberately small and indexed by the legacy mapping
+   * status.  Limiting each source to two candidates prevents a large legacy
+   * mapping set from monopolising the next P1 refill.
+   */
+  async refillHistoricalP1Catalog(readyFloor = 64, batchLimit = 16): Promise<number> {
+    const floor = Math.max(1, Math.min(512, readyFloor));
+    const maximum = Math.max(1, Math.min(32, batchLimit));
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const reserve = await client.query<{ count: string }>(`SELECT count(*)::int AS count FROM (
+        SELECT 1 FROM importer_lite_tasks
+        WHERE state='READY' AND monitoring=false AND priority=2
+        LIMIT $1
+      ) AS bounded_ready`, [floor]);
+      const current = Number(reserve.rows[0]?.count || 0);
+      if (current >= floor) {
+        await client.query('COMMIT');
+        return 0;
+      }
+      // The floor is an early-warning gate, not the desired total task
+      // count.  Once it is crossed, queue one small catalog batch now so the
+      // next P1 source check is already waiting behind the remaining imports
+      // instead of creating an avoidable empty interval at zero.
+      const limit = maximum;
+      const candidates = await client.query<Row>(`WITH bounded AS (
+          SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id
+          FROM importer_work_mappings m
+          JOIN importer_sources s ON s.id=m.source
+          LEFT JOIN importer_lite_source_health h ON h.source=m.source
+          WHERE m.work_id IS NOT NULL
+            AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+            AND s.enabled=true
+            AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
+                 (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+            -- This is P1 repair for an existing canonical mapping, not P2
+            -- discovery.  An operator may disable new-work discovery while
+            -- still allowing an already-mapped work to fill its chapters.
+            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+            AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+            AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+            AND NOT EXISTS (
+              SELECT 1 FROM importer_lite_tasks t
+              WHERE t.idempotency_key='lite:catalog:' || m.source || ':' || m.source_work_id
+            )
+          ORDER BY m.updated_at DESC,m.id DESC
+          LIMIT $1
+        ), fair AS (
+          SELECT *,row_number() OVER (PARTITION BY source ORDER BY updated_at DESC,id DESC) AS source_position
+          FROM bounded
+        )
+        SELECT source,source_work_id,work_id FROM fair
+        WHERE source_position<=2
+        ORDER BY updated_at DESC,id DESC
+        LIMIT $2`, [Math.max(128, maximum * 16), limit]);
+      if (!candidates.rowCount) {
+        await client.query('COMMIT');
+        return 0;
+      }
+      const values: unknown[] = [];
+      const tuples = candidates.rows.map((row, index) => {
+        const start = index * 12;
+        const source = String(row.source);
+        const sourceWorkId = String(row.source_work_id);
+        values.push(
+          'CATALOG', String(row.work_id), `work:${row.work_id}`, null,
+          LITE_PRIORITY_RANK.P1, LITE_PRIORITY_RANK.P1,
+          `lite:catalog:${source}:${sourceWorkId}`, new Date(), 8,
+          JSON.stringify({ source, sourceWorkId, historicalP1Backfill: true }), JSON.stringify({}), false,
+        );
+        return `($${start + 1},$${start + 2}::uuid,$${start + 3},$${start + 4},$${start + 5},$${start + 6},$${start + 7},$${start + 8},$${start + 9},$${start + 10}::jsonb,$${start + 11}::jsonb,$${start + 12})`;
+      });
+      const inserted = await client.query<Row>(`INSERT INTO importer_lite_tasks
+        (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
+        VALUES ${tuples.join(',')}
+        ON CONFLICT(idempotency_key) DO NOTHING
+        RETURNING work_key`, values);
+      for (const workKey of new Set(inserted.rows.map((row) => String(row.work_key)))) await this.refreshReadyWork(client, workKey);
+      await client.query('COMMIT');
+      return inserted.rowCount || 0;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+
+  /**
    * Source administration and transient Lite health remain durable authority.
    * This indexed one-source read happens before source networking, never in a
    * normal task claim, and prevents a paused/cooling provider from consuming
