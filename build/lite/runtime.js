@@ -468,6 +468,7 @@ export class ImporterLiteRuntime {
             // Do not run four diagnostic scans while the small direct pool is busy.
             // Keep a tiny durable liveness marker instead: an old full snapshot must
             // never be mistaken for a stopped runtime during productive traffic.
+            const pipelineTelemetry = telemetryCollector.getSnapshotReport();
             const deferred = {
                 runtime: 'lite',
                 runtimeInstanceId: this.runtimeInstanceId,
@@ -475,6 +476,16 @@ export class ImporterLiteRuntime {
                 chapterWorkers: Math.max(1, Math.min(this.config.LITE_CHAPTER_WORKERS ?? 1, this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING)),
                 snapshotDeferred: 'POOL_BUSY',
                 ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+                // In-memory stage telemetry is safe to sample while the two YSQL
+                // connections are busy.  Without it, the exact periods that need
+                // diagnosis lose download/upload evidence to the protective snapshot
+                // deferral.
+                pipeline: {
+                    downloads: pipelineTelemetry.imageDownload,
+                    telegram: pipelineTelemetry.telegramStorage,
+                    pageDownloadLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_downloads,
+                    pageBufferLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_buffers,
+                },
                 sourceRate: this.sourceRateLimiter.getSummary(),
                 observedAt: new Date().toISOString(),
             };
