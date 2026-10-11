@@ -400,6 +400,37 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(created.rows[0]).toEqual({ priority: 1, base_priority: 1 });
   });
 
+  it('keeps a newly revealed historical chapter as P1 while P0 monitors a newer release', async () => {
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,order_key,confirmed)
+      VALUES($1,'pt-br|default|chapter|100|-','source-a','known-100','pt-BR','default','n|000000000100|000000000000||||-',true)`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P0', idempotencyKey: 'p0-repair-catalog', payload: { source: 'source-a', sourceWorkId: 'work-a' } });
+    const task = await repo.claim('monitor', 120);
+    const adapter = {
+      id: 'source-a',
+      fetchWorkSnapshot: async () => ({
+        details: { sourceWorkId: 'work-a', title: 'P1 A', slug: 'p1-a', status: 'ONGOING' as const, language: 'pt-BR' },
+        chapters: [
+          { sourceChapterId: 'revealed-10', number: 10, displayNumber: '10', title: 'Ten' },
+          { sourceChapterId: 'release-101', number: 101, displayNumber: '101', title: 'One Hundred One' },
+        ],
+      }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 2, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
+    await (runtime as any).catalog(task, 'monitor');
+    const priorities = await db.query(`SELECT payload->>'displayNumber' AS display_number,priority,base_priority
+      FROM importer_lite_tasks WHERE idempotency_key IN ('lite:chapter:' || $1 || ':pt-br|default|chapter|10|-',
+        'lite:chapter:' || $1 || ':pt-br|default|chapter|101|-') ORDER BY display_number`, [ids.p1a]);
+    expect(priorities.rows).toEqual([
+      { display_number: '10', priority: 2, base_priority: 2 },
+      { display_number: '101', priority: 1, base_priority: 1 },
+    ]);
+  });
+
   it('runs an isolated durable path from discovery to a Reader-visible published chapter', async () => {
     const adapter = {
       id: 'source-a',

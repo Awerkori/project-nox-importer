@@ -16,6 +16,11 @@ Invariants:
   work fairly inside the highest priority that actually has eligible work.
 - Priority is `STAFF > P0 > P1 > P2`; the panel’s existing staff request table
   promotes or restores Lite task rows through a database trigger.
+- A recurring P0 catalog pass compares the durable source-manifest order
+  frontier: chapters beyond it are P0 releases, while a newly revealed older
+  manifest entry becomes a P1 repair. This is evidence from the source
+  manifest, never a guessed numerical gap; existing P1 tasks keep their
+  priority through their idempotency key.
 - Source rank is independent of task priority. MangaFlix is rank 10 and
   Manhastro (the configured technical source corresponding to the requested
   Manhua source) rank 20; either loses to a confirmed healthy alternative only

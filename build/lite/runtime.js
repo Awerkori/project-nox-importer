@@ -166,18 +166,26 @@ export class ImporterLiteRuntime {
             }
             const language = String(snapshot.details.language || snapshot.details.raw?.language || 'pt-BR');
             const edition = String(snapshot.details.edition || snapshot.details.raw?.edition || 'default');
-            // The recurring catalog task is P0 only for works already under
-            // monitoring. New rows it materializes are therefore new releases;
-            // initial P2 cataloguing still creates P1 fill work. Existing P1 tasks
-            // retain their durable priority through the idempotency key.
-            const chapterPriority = task.priority === 'P0' || task.priority === 'STAFF' ? 'P0' : 'P1';
+            // P0 only accelerates releases beyond the durable manifest frontier.
+            // A source can reveal historical chapters later; those are P1 repairs,
+            // not P0, without inferring that every numeric gap is a missing chapter.
+            const p0Monitoring = task.priority === 'P0' || task.priority === 'STAFF';
+            const knownFrontier = p0Monitoring
+                ? await this.pool.query(`SELECT max(order_key) AS order_key
+          FROM importer_lite_chapter_sources WHERE work_id=$1::uuid AND order_key LIKE 'n|%'`, [resolved.workId])
+                : { rows: [{ order_key: null }] };
+            const knownNormalOrder = knownFrontier.rows[0]?.order_key || null;
             for (const chapter of snapshot.chapters) {
                 const displayNumber = chapter.displayNumber || String(chapter.number);
                 const chapterKey = canonicalChapterKey({ displayNumber, title: chapter.title, language, edition });
                 const orderKey = chapterOrderKey({ displayNumber, title: chapter.title });
-                await this.pool.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,source_rank,confirmed,has_chapter,last_verified_at)
-          VALUES($1::uuid,$2,$3,$4,$5,$6,$7,true,true,now())
-          ON CONFLICT(source,source_chapter_id) DO UPDATE SET canonical_chapter_key=excluded.canonical_chapter_key,confirmed=true,has_chapter=true,last_verified_at=now(),updated_at=now()`, [resolved.workId, chapterKey, source, chapter.sourceChapterId, language, edition, rankForSource(source)]);
+                const historicalRepair = p0Monitoring && orderKey.startsWith('n|') && Boolean(knownNormalOrder && orderKey <= knownNormalOrder);
+                const chapterPriority = p0Monitoring && !historicalRepair ? 'P0' : 'P1';
+                await this.pool.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter,last_verified_at)
+          VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8,true,true,now())
+          ON CONFLICT(source,source_chapter_id) DO UPDATE SET canonical_chapter_key=excluded.canonical_chapter_key,
+            language=excluded.language,edition=excluded.edition,order_key=excluded.order_key,source_rank=excluded.source_rank,
+            confirmed=true,has_chapter=true,last_verified_at=now(),updated_at=now()`, [resolved.workId, chapterKey, source, chapter.sourceChapterId, language, edition, orderKey, rankForSource(source)]);
                 await this.queue.enqueue({ taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
                     chapterKey, priority: chapterPriority, idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,
                     payload: { displayNumber, chapterTitle: chapter.title || '', orderKey, language, edition } });

@@ -34,7 +34,8 @@ integration suite verifies:
 - a repeatedly expired lease reaches `max_attempts` and becomes an explicit
   blocked task, rather than cycling forever through recovery;
 - P0 monitoring materialises newly observed chapters as P0 without rebucketing
-  initial P1 fill work;
+  initial P1 fill work, while a source manifest entry at or before the durable
+  frontier is materialised as a P1 repair;
 - a fully isolated path from `DISCOVER` through `CATALOG`, source route,
   Telegram receipt, `PUBLISH`, `published_at` and the Reader page manifest.
 - slow uploads with concurrent page discovery, proving that the global retained

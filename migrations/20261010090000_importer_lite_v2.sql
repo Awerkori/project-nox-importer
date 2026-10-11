@@ -65,6 +65,10 @@ CREATE TABLE IF NOT EXISTS public.importer_lite_chapter_sources (
   source_chapter_id text NOT NULL,
   language text NOT NULL DEFAULT 'und',
   edition text NOT NULL DEFAULT 'default',
+  -- The source manifest order is durable evidence for distinguishing a P0
+  -- release from a newly-discovered historical repair. It is not a Reader
+  -- identity and is never derived from a missing numeric chapter.
+  order_key text NOT NULL DEFAULT '',
   source_rank integer NOT NULL DEFAULT 100,
   confirmed boolean NOT NULL DEFAULT false,
   has_chapter boolean NOT NULL DEFAULT true,
@@ -74,8 +78,12 @@ CREATE TABLE IF NOT EXISTS public.importer_lite_chapter_sources (
   UNIQUE (source, source_chapter_id),
   UNIQUE (work_id, canonical_chapter_key, source, source_chapter_id)
 );
+ALTER TABLE public.importer_lite_chapter_sources
+  ADD COLUMN IF NOT EXISTS order_key text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS importer_lite_chapter_sources_select_idx
   ON public.importer_lite_chapter_sources (work_id, canonical_chapter_key, confirmed, source_rank);
+CREATE INDEX IF NOT EXISTS importer_lite_chapter_sources_order_idx
+  ON public.importer_lite_chapter_sources (work_id, order_key);
 
 CREATE TABLE IF NOT EXISTS public.importer_lite_source_health (
   source text PRIMARY KEY REFERENCES public.importer_sources(id) ON DELETE RESTRICT,
