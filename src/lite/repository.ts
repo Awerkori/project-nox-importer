@@ -148,6 +148,35 @@ export class LiteRepository {
   }
 
   /**
+   * Discovery is a low-cost producer, never a reason to monopolize P2.  This
+   * bounded startup repair only defers due DISCOVER rows; catalog and chapter
+   * tasks are untouched.  Each ready-work projection is refreshed in the
+   * same short transaction so a stale projection cannot create empty claims.
+   */
+  async staggerReadyDiscoveries(spacingMs: number, limit = 64): Promise<number> {
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const candidates = await client.query<{ id: string; work_key: string }>(
+        `SELECT id,work_key FROM importer_lite_tasks
+         WHERE task_type='DISCOVER' AND state='READY' AND next_run_at<=now()
+         ORDER BY created_at,id LIMIT $1 FOR UPDATE SKIP LOCKED`, [Math.max(1, Math.min(limit, 256))],
+      );
+      const base = Date.now();
+      for (const [index, row] of candidates.rows.entries()) {
+        await client.query(`UPDATE importer_lite_tasks SET next_run_at=$2,updated_at=now() WHERE id=$1::uuid`,
+          [row.id, new Date(base + index * Math.max(1_000, spacingMs))]);
+      }
+      for (const workKey of new Set(candidates.rows.map((row) => row.work_key))) await this.refreshReadyWork(client, workKey);
+      await client.query('COMMIT');
+      return candidates.rowCount || 0;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+
+  /**
    * Source administration and transient Lite health remain durable authority.
    * This indexed one-source read happens before source networking, never in a
    * normal task claim, and prevents a paused/cooling provider from consuming

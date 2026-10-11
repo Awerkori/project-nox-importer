@@ -17,6 +17,20 @@ import { telemetryCollector } from '../core/telemetry-collector.js';
 import { sanitizeSynopsis } from './metadata.js';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const withTimeout = async <T>(operation: Promise<T>, timeoutMs: number, code: string): Promise<T> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(code)), timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
 const rankForSource = (source: string) => source === 'mangaflix' ? 10 : source === 'manhastro' ? 20 : 100;
 // Deliberately shared with the legacy runtime.  This fences a rolling
 // cutover: Lite must stand by while v1 owns the producer lease (and vice
@@ -76,6 +90,10 @@ export class ImporterLiteRuntime {
     await this.assertReaderCanonicalIdentitySchema();
     if (!(await this.waitForRuntimeLeadership())) return;
     await this.seedDiscovery();
+    // A former runtime may have left every source observation due at once.
+    // Stagger only discovery rows; executable catalog/chapter work remains
+    // immediately eligible under the normal strict priority contract.
+    await this.queue.staggerReadyDiscoveries(60_000, 64);
     // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
     // Lite cutover.  The Lite-specific cap begins safely and can only rise
     // through an explicit, benchmarked staging configuration.
@@ -241,9 +259,11 @@ export class ImporterLiteRuntime {
       WHERE enabled=true AND COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
         AND COALESCE((to_jsonb(importer_sources)->>'catalog_discovery_enabled')::boolean,true)
       ORDER BY id`);
-    for (const { id, sync_interval_minutes } of sources.rows) {
+    const firstRun = Date.now();
+    for (const [index, { id, sync_interval_minutes }] of sources.rows.entries()) {
       await this.queue.enqueue({ taskType: 'DISCOVER', workKey: `source:${id}`, priority: 'P2',
-        idempotencyKey: `lite:discover:${id}`, payload: { source: id, syncIntervalMinutes: sync_interval_minutes }, checkpoint: { cursor: null } });
+        idempotencyKey: `lite:discover:${id}`, payload: { source: id, syncIntervalMinutes: sync_interval_minutes },
+        checkpoint: { cursor: null }, nextRunAt: new Date(firstRun + index * 60_000) });
     }
   }
 
@@ -416,14 +436,24 @@ export class ImporterLiteRuntime {
       return;
     }
     try {
-      const page = await adapter.fetchUpdatedWorks(String(task.checkpoint.cursor || '') || null, { mode: 'maintenance' });
+      const page = await withTimeout(
+        adapter.fetchUpdatedWorks(String(task.checkpoint.cursor || '') || null, { mode: 'maintenance' }),
+        this.config.SOURCE_OPERATION_TIMEOUT_MS,
+        'DISCOVERY_SOURCE_TIMEOUT',
+      );
       await this.queue.recordSourceSuccess(source);
       for (const work of page.works.slice(0, 100)) {
         await this.queue.enqueue({ taskType: 'CATALOG', workKey: `source:${source}:${work.sourceWorkId}`, priority: 'P2',
           idempotencyKey: `lite:catalog:${source}:${work.sourceWorkId}`, payload: { source, sourceWorkId: work.sourceWorkId } });
       }
       // The durable task itself holds the cursor; no new cursor rows or sweep.
-      await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', priority: 'P2', nextRunAt: new Date(Date.now() + (page.nextCursor ? 1_000 : policy.syncIntervalMs)),
+      // A cursor asks for a later small batch, not an immediate unbounded
+      // sweep. This leaves a one-worker cutover free to catalog materialized
+      // works and prevents one source from filling every P2 admission slot.
+      const nextDelay = page.nextCursor
+        ? Math.max(60_000, Math.min(policy.syncIntervalMs, 5 * 60_000))
+        : policy.syncIntervalMs;
+      await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', priority: 'P2', nextRunAt: new Date(Date.now() + nextDelay),
         checkpoint: { cursor: page.nextCursor }, resetAttempts: true });
     } catch (error: any) {
       await this.queue.recordSourceFailure(source, error);
@@ -452,9 +482,12 @@ export class ImporterLiteRuntime {
     }
     let fetchedSnapshot = false;
     try {
-      const snapshot = adapter.fetchWorkSnapshot ? await adapter.fetchWorkSnapshot(sourceWorkId) : {
-        details: await adapter.fetchWorkDetails(sourceWorkId), chapters: await adapter.fetchChapters(sourceWorkId),
-      };
+      const snapshot = await withTimeout(adapter.fetchWorkSnapshot
+        ? adapter.fetchWorkSnapshot(sourceWorkId)
+        : Promise.all([adapter.fetchWorkDetails(sourceWorkId), adapter.fetchChapters(sourceWorkId)])
+          .then(([details, chapters]) => ({ details, chapters })),
+      this.config.SOURCE_OPERATION_TIMEOUT_MS,
+      'CATALOG_SOURCE_TIMEOUT');
       fetchedSnapshot = true;
       const rawContentRating = String((snapshot.details.raw as any)?.contentRating || (snapshot.details.raw as any)?.content_rating || '').toUpperCase();
       const resolved = await this.dedupe.resolveWork({ source, sourceWorkId, title: snapshot.details.title, slug: snapshot.details.slug,
