@@ -66,6 +66,7 @@ async function createSchema(db: PGlite): Promise<void> {
       cooldown_until timestamptz NULL
     );
     CREATE TABLE importer_staff_requests (work_id uuid NOT NULL REFERENCES works(id), status text NOT NULL);
+    CREATE TABLE settings (key text PRIMARY KEY, value text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE importer_publication_events (
       chapter_id uuid PRIMARY KEY, transition_at timestamptz NOT NULL, recorded_at timestamptz NOT NULL,
       bucket_minute timestamptz NOT NULL, is_fresh_release boolean NOT NULL
@@ -313,6 +314,44 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.reconcile(10)).publishable).toBe(1);
     const publish = await db.query(`SELECT task_type,state FROM importer_lite_tasks WHERE idempotency_key='lite:publish:' || $1 || ':chapter:2'`, [ids.p1a]);
     expect(publish.rows).toEqual([{ task_type: 'PUBLISH', state: 'READY' }]);
+  });
+
+  it('fences stale owners from settling or publishing after their lease expires', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:stale', priority: 'P1', idempotencyKey: 'stale-finish' });
+    const staleFinish = await repo.claim('old-runtime', 30);
+    await db.query(`UPDATE importer_lite_tasks SET lease_until=now()-interval '1 second' WHERE id=$1`, [staleFinish!.id]);
+    expect(await repo.finish(staleFinish!, 'old-runtime', { state: 'DONE' })).toBe(false);
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [staleFinish!.id])).rows[0].state).toBe('RUNNING');
+
+    await repo.enqueue({ taskType: 'PUBLISH', workId: ids.publish, workKey: `work:${ids.publish}`, chapterKey: 'chapter:stale-publish', priority: 'P1', idempotencyKey: 'stale-publish' });
+    const stalePublish = await repo.claim('old-runtime', 30);
+    await db.query(`UPDATE importer_lite_tasks SET lease_until=now()-interval '1 second' WHERE id=$1`, [stalePublish!.id]);
+    await expect(repo.publish({ task: stalePublish!, workerId: 'old-runtime', chapterId: ids.chapter,
+      workId: ids.publish, mediaIds: [ids.page], fresh: false })).rejects.toThrow('LEASE_LOST_BEFORE_PUBLISH');
+    expect((await db.query(`SELECT published_at FROM chapters WHERE id=$1`, [ids.chapter])).rows[0].published_at).toBeNull();
+    expect((await db.query(`SELECT count(*)::int AS count FROM pages WHERE chapter_id=$1`, [ids.chapter])).rows[0].count).toBe(0);
+  });
+
+  it('uses the shared runtime lease to gate a Lite contender without gating in-flight finalization', async () => {
+    const makeRuntime = (workerId: string) => new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { WORKER_ID: workerId, IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    const first = makeRuntime('lite-a');
+    const second = makeRuntime('lite-b');
+    expect(await (first as any).tryAcquireRuntimeLeadership()).toBe(true);
+    expect(await (second as any).tryAcquireRuntimeLeadership()).toBe(false);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:leader', priority: 'P1', idempotencyKey: 'leader-gate' });
+    expect(await (second as any).claimNext('standby-worker')).toBeNull();
+    // A task already leased by the leader may still complete: runtime
+    // leadership is an admission fence, never a global finalization lock.
+    const inFlight = await repo.claim('leader-worker', 30);
+    expect(await repo.finish(inFlight!, 'leader-worker', { state: 'DONE' })).toBe(true);
+    await (first as any).releaseRuntimeLeadership();
+    expect(await (second as any).tryAcquireRuntimeLeadership()).toBe(true);
+    await (second as any).releaseRuntimeLeadership();
   });
 
   it('turns a durable unknown Telegram outcome into a visible per-task block without touching other work', async () => {
@@ -838,6 +877,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
         BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
+    (runtime as any).isRuntimeLeader = true;
     const claim = vi.spyOn((runtime as any).queue, 'claim');
     await Promise.all(Array.from({ length: 12 }, (_, index) => (runtime as any).claimNext(`idle-${index}`)));
     expect(claim).toHaveBeenCalledTimes(1);
@@ -850,6 +890,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
         BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
+    (runtime as any).isRuntimeLeader = true;
     const monitorClaim = vi.spyOn((runtime as any).queue, 'claimMonitor');
     const normalClaim = vi.spyOn((runtime as any).queue, 'claim');
     await Promise.all(Array.from({ length: 20 }, () => (runtime as any).runMonitorTurn()));

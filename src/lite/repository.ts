@@ -222,10 +222,10 @@ export class LiteRepository {
               work_id=COALESCE($9::uuid,work_id),
               attempts=CASE WHEN $10::boolean THEN 0 ELSE attempts END,
               lease_owner=NULL, lease_until=NULL, updated_at=now()
-         WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2`,
+         WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`,
         [task.id, workerId, outcome.state, outcome.reason || null, outcome.nextRunAt || null, JSON.stringify(outcome.checkpoint || {}), outcome.priority === undefined ? null : LITE_PRIORITY_RANK[outcome.priority], outcome.monitoring === undefined ? null : outcome.monitoring, outcome.workId || null, Boolean(outcome.resetAttempts)],
       );
-      await this.refreshReadyWork(client, task.workKey);
+      if (result.rowCount === 1) await this.refreshReadyWork(client, task.workKey);
       await client.query('COMMIT');
       return result.rowCount === 1;
     } catch (error) {
@@ -504,6 +504,13 @@ export class LiteRepository {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
+      // A lease may expire while a previous runtime is still doing network
+      // work. Fence the irreversible Reader-visible transition before any
+      // page replacement or publication mutation; the reconciler will give
+      // the current owner a clean retry instead of allowing two publishers.
+      const lease = await client.query(`SELECT 1 FROM importer_lite_tasks
+        WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now() FOR UPDATE`, [input.task.id, input.workerId]);
+      if (lease.rowCount !== 1) throw new Error('LEASE_LOST_BEFORE_PUBLISH');
       const presentation = await client.query<Row>(`SELECT w.cover_id,w.title,w.slug,m.storage_ready,m.bytes
         FROM works w LEFT JOIN media m ON m.id=w.cover_id WHERE w.id=$1::uuid FOR UPDATE OF w`, [input.workId]);
       const work = presentation.rows[0];
@@ -543,8 +550,8 @@ export class LiteRepository {
       }
       const done = await client.query(`UPDATE importer_lite_tasks SET state='DONE',lease_owner=NULL,lease_until=NULL,
         checkpoint=checkpoint || jsonb_build_object('publishedAt',COALESCE($3::text,checkpoint->>'publishedAt')),updated_at=now()
-        WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2`, [input.task.id,input.workerId,publishedAt]);
-      await this.refreshReadyWork(client, input.task.workKey);
+        WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`, [input.task.id,input.workerId,publishedAt]);
+      if (done.rowCount === 1) await this.refreshReadyWork(client, input.task.workKey);
       await client.query('COMMIT');
       return done.rowCount === 1;
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; } finally { client.release(); }

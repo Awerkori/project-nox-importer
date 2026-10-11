@@ -18,6 +18,10 @@ integration suite verifies:
   tasks already running complete safely while duplicated panel requests are
   collapsed logically, and cancellation restores the durable base priority;
 - concurrent claim fencing: exactly one worker can lease a durable task;
+- shared legacy/Lite runtime leadership fencing: a second Lite contender
+  remains in standby, while a task already leased by the leader can finish;
+  an expired owner cannot settle a task or replace Reader pages/publish a
+  chapter after a successor can recover it;
 - a ready work remains claimable behind 1,300 blocked task rows and peers of
   the same priority rotate fairly by work, including a 1,300-chapter ready
   work that cannot monopolize other P1 works; a 1,300-chapter catalog batch is

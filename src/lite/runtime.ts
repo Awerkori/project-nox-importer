@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { DeduplicationEngine } from '../core/deduplication.js';
 import type { Config } from '../config.js';
@@ -17,6 +18,12 @@ import { sanitizeSynopsis } from './metadata.js';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const rankForSource = (source: string) => source === 'mangaflix' ? 10 : source === 'manhastro' ? 20 : 100;
+// Deliberately shared with the legacy runtime.  This fences a rolling
+// cutover: Lite must stand by while v1 owns the producer lease (and vice
+// versa), rather than merely avoiding duplicate Lite claims.
+const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
+const RUNTIME_LEASE_SECONDS = 45;
+const RUNTIME_LEASE_RENEW_MS = 15_000;
 
 /** One process, one executor pool, one bounded reconciler. */
 export class ImporterLiteRuntime {
@@ -32,6 +39,11 @@ export class ImporterLiteRuntime {
   // Observation is intentionally a one-slot lane. It may create P0 chapter
   // work, but an empty observation must never compete with chapter workers.
   private readonly monitorGate = new AsyncSemaphore(1, 'lite_p0_monitor');
+  private readonly runtimeInstanceId: string;
+  private readonly runtimeBootedAt = new Date();
+  private isRuntimeLeader = false;
+  private runtimeLeadershipTimer: NodeJS.Timeout | null = null;
+  private runtimeLeadershipRenewing = false;
   private sitePausedUntil = 0;
   private idleClaimUntil = 0;
   private idleMonitorUntil = 0;
@@ -48,6 +60,7 @@ export class ImporterLiteRuntime {
     private readonly sourceRateLimiter: HostRateLimiter = new HostRateLimiter(2),
   ) {
     if (!config.IMPORTER_USER_ID) throw new Error('IMPORTER_USER_ID is required when IMPORTER_RUNTIME_MODE=lite');
+    this.runtimeInstanceId = `${config.WORKER_ID}@${process.pid}-${randomUUID().slice(0, 8)}`;
     this.queue = new LiteRepository(pool);
     this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
     this.bufferedPages = new AsyncSemaphore(config.BUFFERED_PAGE_CONCURRENCY, 'lite_global_page_buffers');
@@ -57,11 +70,14 @@ export class ImporterLiteRuntime {
   }
 
   async start(): Promise<void> {
+    if (!(await this.waitForRuntimeLeadership())) return;
     await this.seedDiscovery();
     const workers = Math.max(1, Math.min(this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING));
     telemetryCollector.configureChapterSlots(workers, () => workers);
     for (let i = 0; i < workers; i++) void this.worker(`${this.config.WORKER_ID}:lite:${i + 1}`, i);
-    const timer = setInterval(() => void this.queue.reconcile(50).catch(() => {}), 30_000);
+    const timer = setInterval(() => {
+      if (this.isRuntimeLeader) void this.queue.reconcile(50).catch(() => {});
+    }, 30_000);
     timer.unref(); this.timers.push(timer);
     const monitorTimer = setInterval(() => void this.runMonitorTurn().catch(() => {}), 1_000);
     monitorTimer.unref(); this.timers.push(monitorTimer);
@@ -72,7 +88,106 @@ export class ImporterLiteRuntime {
     await this.probeSharedResources();
   }
 
-  stop(): void { this.stopped = true; for (const timer of this.timers) clearInterval(timer); this.timers = []; }
+  stop(): void {
+    this.stopped = true;
+    for (const timer of this.timers) clearInterval(timer);
+    this.timers = [];
+    void this.releaseRuntimeLeadership();
+  }
+
+  /**
+   * The shared settings lease is the only cross-runtime coordination point.
+   * It gates admission only: workers which already hold a task lease may
+   * finish their durable write while a new STAFF request or a successor
+   * runtime waits to claim new work.
+   */
+  private async tryAcquireRuntimeLeadership(): Promise<boolean> {
+    try {
+      const result = await this.pool.query(
+        `INSERT INTO settings AS leader (key,value)
+         VALUES($1,json_build_object('owner',$2::text,'started_at',$4::timestamptz,
+           'expires_at',now()+($3::int * interval '1 second'))::text)
+         ON CONFLICT(key) DO UPDATE SET value=json_build_object('owner',$2::text,
+           'started_at',$4::timestamptz,'expires_at',now()+($3::int * interval '1 second'))::text
+         WHERE (leader.value::jsonb->>'owner')=$2::text
+            OR COALESCE((leader.value::jsonb->>'expires_at')::timestamptz,'epoch'::timestamptz)<=now()
+            OR COALESCE((leader.value::jsonb->>'started_at')::timestamptz,'epoch'::timestamptz)<$4::timestamptz
+         RETURNING value`,
+        [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS, this.runtimeBootedAt.toISOString()],
+      );
+      const acquired = result.rows.length > 0;
+      if (acquired && !this.isRuntimeLeader) {
+        this.isRuntimeLeader = true;
+        this.logger.info('Acquired Lite runtime leadership', { instanceId: this.runtimeInstanceId, leaseSeconds: RUNTIME_LEASE_SECONDS });
+      }
+      return acquired;
+    } catch (error: any) {
+      this.logger.warn('Failed to acquire Lite runtime leadership', { error: error?.message });
+      return false;
+    }
+  }
+
+  private startRuntimeLeadershipRenewal(): void {
+    if (this.runtimeLeadershipTimer) return;
+    this.runtimeLeadershipTimer = setInterval(async () => {
+      if (!this.isRuntimeLeader || this.runtimeLeadershipRenewing || this.stopped) return;
+      this.runtimeLeadershipRenewing = true;
+      try {
+        const result = await this.pool.query(
+          `UPDATE settings SET value=json_build_object('owner',$2::text,'started_at',$4::timestamptz,
+             'expires_at',now()+($3::int * interval '1 second'))::text
+           WHERE key=$1 AND (value::jsonb->>'owner')=$2::text RETURNING value`,
+          [RUNTIME_LEADER_KEY, this.runtimeInstanceId, RUNTIME_LEASE_SECONDS, this.runtimeBootedAt.toISOString()],
+        );
+        if (result.rows.length === 0) {
+          this.isRuntimeLeader = false;
+          this.logger.error('Lost Lite runtime leadership; new claims are gated.', { instanceId: this.runtimeInstanceId });
+        }
+      } catch (error: any) {
+        // The durable lease remains valid for its remaining window. Retrying
+        // renewal is safer than treating a transient YSQL fault as permission
+        // for another runtime to publish immediately.
+        this.logger.warn('Lite runtime leadership renewal failed', { error: error?.message });
+      } finally {
+        this.runtimeLeadershipRenewing = false;
+      }
+    }, RUNTIME_LEASE_RENEW_MS);
+    this.runtimeLeadershipTimer.unref();
+  }
+
+  private async waitForRuntimeLeadership(): Promise<boolean> {
+    let lastStandbyLog = 0;
+    while (!this.stopped) {
+      if (await this.tryAcquireRuntimeLeadership()) {
+        this.startRuntimeLeadershipRenewal();
+        return true;
+      }
+      if (Date.now() - lastStandbyLog >= 30_000) {
+        this.logger.warn('Lite is on standby; another importer owns the runtime lease.');
+        lastStandbyLog = Date.now();
+      }
+      await sleep(5_000);
+    }
+    return false;
+  }
+
+  private async releaseRuntimeLeadership(): Promise<void> {
+    if (this.runtimeLeadershipTimer) {
+      clearInterval(this.runtimeLeadershipTimer);
+      this.runtimeLeadershipTimer = null;
+    }
+    if (!this.isRuntimeLeader) return;
+    this.isRuntimeLeader = false;
+    try {
+      await this.pool.query(
+        `UPDATE settings SET value=json_build_object('owner',$2::text,'expires_at',now())::text
+         WHERE key=$1 AND (value::jsonb->>'owner')=$2::text`,
+        [RUNTIME_LEADER_KEY, this.runtimeInstanceId],
+      );
+    } catch (error: any) {
+      this.logger.warn('Failed to release Lite runtime leadership', { error: error?.message });
+    }
+  }
 
   private async seedDiscovery(): Promise<void> {
     const sources = await this.pool.query<{ id: string; sync_interval_minutes: number }>(`SELECT id,sync_interval_minutes FROM importer_sources
@@ -111,6 +226,11 @@ export class ImporterLiteRuntime {
     telemetryCollector.registerSlot(slotIndex);
     while (!this.stopped) {
       try {
+        if (!this.isRuntimeLeader) {
+          telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'runtime-standby');
+          await sleep(250);
+          continue;
+        }
         if (Date.now() < this.sitePausedUntil || this.pool.waitingCount > 0) {
           telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'site-or-pool-protection');
           await sleep(250);
@@ -138,6 +258,7 @@ export class ImporterLiteRuntime {
   /** One empty claim probe per idle interval, shared by every worker. */
   private async claimNext(workerId: string): Promise<LiteTask | null> {
     return this.claimGate.runExclusive(async () => {
+      if (!this.isRuntimeLeader) return null;
       if (Date.now() < this.idleClaimUntil) return null;
       const task = await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS);
       this.idleClaimUntil = task ? 0 : Date.now() + 750;
@@ -151,7 +272,7 @@ export class ImporterLiteRuntime {
    * claims. This is a resource budget, not a second priority scheduler.
    */
   private async runMonitorTurn(): Promise<void> {
-    if (this.stopped || Date.now() < this.sitePausedUntil || this.pool.waitingCount > 0) return;
+    if (this.stopped || !this.isRuntimeLeader || Date.now() < this.sitePausedUntil || this.pool.waitingCount > 0) return;
     if (!this.monitorGate.tryAcquire()) return;
     try {
       if (Date.now() < this.idleMonitorUntil) return;

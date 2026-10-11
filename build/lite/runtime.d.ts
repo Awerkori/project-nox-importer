@@ -21,6 +21,11 @@ export declare class ImporterLiteRuntime {
     private readonly bufferedPages;
     private readonly claimGate;
     private readonly monitorGate;
+    private readonly runtimeInstanceId;
+    private readonly runtimeBootedAt;
+    private isRuntimeLeader;
+    private runtimeLeadershipTimer;
+    private runtimeLeadershipRenewing;
     private sitePausedUntil;
     private idleClaimUntil;
     private idleMonitorUntil;
@@ -28,6 +33,16 @@ export declare class ImporterLiteRuntime {
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter);
     start(): Promise<void>;
     stop(): void;
+    /**
+     * The shared settings lease is the only cross-runtime coordination point.
+     * It gates admission only: workers which already hold a task lease may
+     * finish their durable write while a new STAFF request or a successor
+     * runtime waits to claim new work.
+     */
+    private tryAcquireRuntimeLeadership;
+    private startRuntimeLeadershipRenewal;
+    private waitForRuntimeLeadership;
+    private releaseRuntimeLeadership;
     private seedDiscovery;
     private upsertChapterSources;
     private worker;

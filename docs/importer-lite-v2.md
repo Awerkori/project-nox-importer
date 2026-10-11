@@ -14,6 +14,12 @@ Invariants:
 
 - Only a durable `READY` task is claimable. The database projection chooses a
   work fairly inside the highest priority that actually has eligible work.
+- Lite and the legacy importer share the existing durable
+  `settings.importer_runtime_leader` lease during rollout. A standby runtime
+  performs no discovery, reconciliation or new claim; renewal loss gates new
+  claims. Per-task leases fence stale owners from `finish` and the
+  Reader-visible publish transaction, while already-valid in-flight work is
+  still allowed to make its bounded durable finalization.
 - Priority is `STAFF > P0 > P1 > P2`; the panel’s existing staff request table
   promotes or restores Lite task rows through a database trigger.
 - Priority governs **admission only**. A task that was already claimed keeps
