@@ -444,6 +444,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     const storage: StorageProvider = {
       upload: vi.fn(async () => 'reader-file'), healthCheck: async () => true, getProviderKey: () => 'telegram',
       getLastBotReference: () => 'bot-a', getLastShardId: () => 'shard-a', getLastChannelId: () => 'channel-a',
+      getLastMessageId: () => 12345,
     };
     const rateLimiter = new HostRateLimiter(100);
     const acquire = vi.spyOn(rateLimiter, 'acquire');
@@ -479,6 +480,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(storage.upload).toHaveBeenCalledOnce();
     expect(acquire).toHaveBeenCalledWith('source-a.test');
     expect(success).toHaveBeenCalledWith('source-a.test');
+    expect((await db.query(`SELECT provider_key,bot_reference,storage_shard_id,channel_id,telegram_message_id
+      FROM importer_lite_uploads ORDER BY created_at LIMIT 1`)).rows[0])
+      .toEqual({ provider_key: 'reader-file', bot_reference: 'bot-a', storage_shard_id: 'shard-a', channel_id: 'channel-a', telegram_message_id: 12345 });
   });
 
   it('shares idle claim backoff across workers instead of generating an empty-claim storm', async () => {

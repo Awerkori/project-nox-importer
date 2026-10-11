@@ -34,6 +34,7 @@ export interface UploadRecordMetadata {
     shardId: string;
     channelId: string;
     fileId: string;
+    messageId: number;
     timestamp: number;
     byteSize: number;
     latencyMs: number;
@@ -70,6 +71,7 @@ export declare class DirectTelegramStorageProvider implements StorageProvider {
     getLastBotReference(id?: string): string;
     getLastShardId(id?: string): string | null;
     getLastChannelId(id?: string): string | null;
+    getLastMessageId(id?: string): number | null;
     healthCheck(): Promise<boolean>;
     private cleanRecentWindows;
     private acquireGlobalSlot;

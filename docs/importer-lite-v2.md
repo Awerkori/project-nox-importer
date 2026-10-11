@@ -27,7 +27,8 @@ Invariants:
   when it is unavailable, unhealthy, cooling down, or not the same edition.
 - Media is not publication. An intent precedes upload, a receipt precedes page
   persistence, and the atomic publish transaction validates every page before
-  setting `published_at`.
+  setting `published_at`. The durable receipt records Telegram `file_id`, bot,
+  shard, channel and `message_id` when supplied by the provider.
 - An upload with an explicit Telegram rejection remains retryable using the
   same reserved media ID. A timeout, lost response, or a Telegram success
   followed by failed receipt persistence becomes `UNKNOWN` and blocks that

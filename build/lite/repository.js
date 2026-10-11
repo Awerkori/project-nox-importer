@@ -257,8 +257,8 @@ export class LiteRepository {
          SELECT $1::uuid,'telegram',$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid,true,'chapter'
          WHERE NOT EXISTS (SELECT 1 FROM media WHERE id=$1::uuid)`, [input.mediaId, input.providerKey, input.botReference, input.shardId, input.mime, input.width, input.height, input.bytes, input.sha256, input.createdBy]);
             await client.query(`UPDATE importer_lite_uploads SET state='PERSISTED',provider_key=$4,bot_reference=$5,storage_shard_id=$6,
-           channel_id=$7,bytes=$8,mime=$9,updated_at=now()
-         WHERE task_id=$1::uuid AND page_position=$2 AND media_id=$3::uuid`, [input.taskId, input.pagePosition, input.mediaId, input.providerKey, input.botReference, input.shardId, input.channelId, input.bytes, input.mime]);
+           channel_id=$7,telegram_message_id=$8,bytes=$9,mime=$10,updated_at=now()
+         WHERE task_id=$1::uuid AND page_position=$2 AND media_id=$3::uuid`, [input.taskId, input.pagePosition, input.mediaId, input.providerKey, input.botReference, input.shardId, input.channelId, input.messageId, input.bytes, input.mime]);
             await client.query('COMMIT');
         }
         catch (error) {

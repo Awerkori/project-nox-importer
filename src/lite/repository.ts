@@ -296,7 +296,7 @@ export class LiteRepository {
 
   async recordUploadReceipt(input: {
     taskId: string; pagePosition: number; mediaId: string; sha256: string; bytes: number; mime: string; width: number; height: number;
-    providerKey: string; botReference: string | null; shardId: string | null; channelId: string | null; createdBy: string;
+    providerKey: string; botReference: string | null; shardId: string | null; channelId: string | null; messageId: number | null; createdBy: string;
   }): Promise<void> {
     const client = await this.db.connect();
     try {
@@ -309,9 +309,9 @@ export class LiteRepository {
       );
       await client.query(
         `UPDATE importer_lite_uploads SET state='PERSISTED',provider_key=$4,bot_reference=$5,storage_shard_id=$6,
-           channel_id=$7,bytes=$8,mime=$9,updated_at=now()
+           channel_id=$7,telegram_message_id=$8,bytes=$9,mime=$10,updated_at=now()
          WHERE task_id=$1::uuid AND page_position=$2 AND media_id=$3::uuid`,
-        [input.taskId,input.pagePosition,input.mediaId,input.providerKey,input.botReference,input.shardId,input.channelId,input.bytes,input.mime],
+        [input.taskId,input.pagePosition,input.mediaId,input.providerKey,input.botReference,input.shardId,input.channelId,input.messageId,input.bytes,input.mime],
       );
       await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; } finally { client.release(); }

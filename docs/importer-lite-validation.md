@@ -38,6 +38,8 @@ integration suite verifies:
   frontier is materialised as a P1 repair;
 - a fully isolated path from `DISCOVER` through `CATALOG`, source route,
   Telegram receipt, `PUBLISH`, `published_at` and the Reader page manifest.
+- the Telegram receipt journal persists provider file ID, bot, shard, channel
+  and message ID before a page can enter the publish transaction;
 - slow uploads with concurrent page discovery, proving that the global retained
   page-buffer limit is applied rather than multiplied by chapter workers.
 

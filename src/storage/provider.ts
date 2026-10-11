@@ -28,4 +28,5 @@ export interface StorageProvider {
   getLastBotReference?(id?: string): string;
   getLastShardId?(id?: string): string | null;
   getLastChannelId?(id?: string): string | null;
+  getLastMessageId?(id?: string): number | null;
 }

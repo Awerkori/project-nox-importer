@@ -230,6 +230,12 @@ export class DirectTelegramStorageProvider {
         }
         return this.lastChannelId;
     }
+    getLastMessageId(id) {
+        if (id && this.metadataMap.has(id)) {
+            return this.metadataMap.get(id).messageId;
+        }
+        return null;
+    }
     async healthCheck() {
         const activeBots = this.bots.filter(b => b.cooldownUntil <= Date.now());
         return activeBots.length >= 3 && this.shards.length === 21;
@@ -489,6 +495,7 @@ export class DirectTelegramStorageProvider {
                         shardId: shard.shardId,
                         channelId: shard.channelId,
                         fileId: result.fileId,
+                        messageId: result.messageId,
                         timestamp: Date.now(),
                         byteSize: bytes.byteLength,
                         latencyMs: duration,

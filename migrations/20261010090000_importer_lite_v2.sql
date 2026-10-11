@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS public.importer_lite_uploads (
   bot_reference text NULL,
   storage_shard_id text NULL,
   channel_id text NULL,
+  telegram_message_id bigint NULL,
   provider_key text NULL,
   -- RETRYABLE means Telegram explicitly rejected the request (for example
   -- 429), while UNKNOWN means an outcome may have reached Telegram and must
@@ -134,6 +135,8 @@ CREATE TABLE IF NOT EXISTS public.importer_lite_uploads (
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (task_id, page_position)
 );
+ALTER TABLE public.importer_lite_uploads
+  ADD COLUMN IF NOT EXISTS telegram_message_id bigint NULL;
 CREATE INDEX IF NOT EXISTS importer_lite_uploads_recovery_idx
   ON public.importer_lite_uploads (state, updated_at) WHERE state IN ('INTENT', 'RETRYABLE', 'UPLOADED', 'UNKNOWN');
 

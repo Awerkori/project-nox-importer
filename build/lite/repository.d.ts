@@ -78,6 +78,7 @@ export declare class LiteRepository {
         botReference: string | null;
         shardId: string | null;
         channelId: string | null;
+        messageId: number | null;
         createdBy: string;
     }): Promise<void>;
     markUploadUnknown(taskId: string, position: number): Promise<void>;

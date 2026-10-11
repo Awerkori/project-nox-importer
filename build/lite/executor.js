@@ -234,6 +234,7 @@ export class LiteExecutor {
                                 botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,
                                 shardId: this.storage.getLastShardId?.(reserved.mediaId) || null,
                                 channelId: this.storage.getLastChannelId?.(reserved.mediaId) || null, createdBy: this.importerUserId,
+                                messageId: this.storage.getLastMessageId?.(reserved.mediaId) || null,
                             });
                             return reserved.mediaId;
                         }

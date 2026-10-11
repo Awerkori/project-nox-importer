@@ -44,6 +44,7 @@ export interface UploadRecordMetadata {
   shardId: string;
   channelId: string;
   fileId: string;
+  messageId: number;
   timestamp: number;
   byteSize: number;
   latencyMs: number;
@@ -300,6 +301,13 @@ export class DirectTelegramStorageProvider implements StorageProvider {
       return this.metadataMap.get(id)!.channelId;
     }
     return this.lastChannelId;
+  }
+
+  getLastMessageId(id?: string): number | null {
+    if (id && this.metadataMap.has(id)) {
+      return this.metadataMap.get(id)!.messageId;
+    }
+    return null;
   }
 
   async healthCheck(): Promise<boolean> {
@@ -599,6 +607,7 @@ export class DirectTelegramStorageProvider implements StorageProvider {
             shardId: shard.shardId,
             channelId: shard.channelId,
             fileId: result.fileId,
+            messageId: result.messageId,
             timestamp: Date.now(),
             byteSize: bytes.byteLength,
             latencyMs: duration,
