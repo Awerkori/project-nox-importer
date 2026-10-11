@@ -113,6 +113,15 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(third?.idempotencyKey).toBe('p1');
   });
 
+  it('fences concurrent workers so one durable task has only one claim', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:1', priority: 'P1', idempotencyKey: 'single-claim' });
+    const claims = await Promise.all([repo.claim('worker-a', 120), repo.claim('worker-b', 120)]);
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    expect(claims.find(Boolean)?.idempotencyKey).toBe('single-claim');
+    expect((await db.query(`SELECT attempts,state FROM importer_lite_tasks WHERE idempotency_key='single-claim'`)).rows[0])
+      .toMatchObject({ attempts: 1, state: 'RUNNING' });
+  });
+
   it('does not let 1,300 blocked rows hide a ready chapter and fairly rotates ready works', async () => {
     await db.query(`
       INSERT INTO importer_lite_tasks(task_type,work_key,priority,base_priority,state,idempotency_key,reason)

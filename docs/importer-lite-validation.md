@@ -14,6 +14,7 @@ actual SQL functions and the existing atomic Reader page function. The current
 integration suite verifies:
 
 - panel-triggered STAFF promotion followed by strict `STAFF > P0 > P1 > P2`;
+- concurrent claim fencing: exactly one worker can lease a durable task;
 - a ready work remains claimable behind 1,300 blocked task rows and peers of
   the same priority rotate fairly by work, including a 1,300-chapter ready
   work that cannot monopolize other P1 works;
