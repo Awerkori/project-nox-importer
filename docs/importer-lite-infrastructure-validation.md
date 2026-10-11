@@ -37,11 +37,17 @@ value of 32. No secret was inspected or changed. Lite now uses its separate
 
 The real Reader has `chapters_work_id_number_key` on `(work_id, number)`. A
 numeric Reader row cannot represent two distinct canonical identities which
-parse to one number, such as `12.1` and `12.10`. Lite safely blocks this with
-`CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION`; it must not be treated as
-Reader compatibility. Before cutover, approve a Reader schema/contract change
-or explicitly constrain accepted source identities. That decision is outside
-the additive Lite migration and has not been applied anywhere.
+parse to one number, such as `12.1` and `12.10`. The isolated Reader branch
+`feat/reader-canonical-chapter-identity` now contains the compatible two-phase
+migration, UUID-route/API changes and its own guarded staging verifier.
+
+Lite refuses to start until the Reader phase-two contract is present:
+`canonical_chapter_key`, `display_number`, `chapter_order_key`, kind/edition/
+language fields, a canonical unique index, nullable legacy `number`, and no
+`chapters_work_id_number_key`. It fails closed with
+`READER_CANONICAL_IDENTITY_MIGRATION_REQUIRED`; this prevents downloads or
+uploads from beginning against a schema that could collapse identities. Neither
+Reader migration has been applied outside local disposable tests.
 
 ## Disposable/staging YSQL migration gate
 
@@ -77,10 +83,11 @@ move the same request to another bot to evade a Telegram retry delay.
 
 1. Record a quiet baseline for home, catalog, work page, Reader and API:
    p50/p95, 5xx, direct-pool wait and database connections.
-2. Apply the Lite migration to the disposable/staging clone and run the
-   integration fixture through discovery, catalog, media persistence,
-   publication and a real Reader fetch. Verify `published_at`, page ordering,
-   Telegram references and no duplicate event.
+2. Apply Reader phase 1, backfill/verify it, then Reader phase 2 and the Lite
+   migration to the disposable/staging clone. Run the integration fixture
+   through discovery, catalog, media persistence, publication and a real
+   Reader fetch. Verify `published_at`, textual chapter ordering, old UUID
+   URLs, Telegram references and no duplicate event.
 3. Supply a known eligible queue. Ramp chapter, source, Telegram and DB limits
    one dimension at a time. Record pages/chapter, bytes/chapter, source latency,
    upload latency, pool wait, RSS/heap/external memory and 429s.

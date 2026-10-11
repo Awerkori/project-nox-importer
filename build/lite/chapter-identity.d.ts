@@ -11,6 +11,7 @@ export interface ChapterIdentityInput {
     language?: string | null;
     edition?: string | null;
 }
+export declare function chapterKind(input: ChapterIdentityInput): string;
 /** A stable opaque key; callers must never parse it back into a float. */
 export declare function canonicalChapterKey(input: ChapterIdentityInput): string;
 /**

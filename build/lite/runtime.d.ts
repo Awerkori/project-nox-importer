@@ -32,6 +32,7 @@ export declare class ImporterLiteRuntime {
     private lastSiteProbe;
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter);
     start(): Promise<void>;
+    private assertReaderCanonicalIdentitySchema;
     stop(): void;
     /**
      * The shared settings lease is the only cross-runtime coordination point.

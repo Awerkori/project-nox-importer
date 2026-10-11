@@ -4,7 +4,7 @@ import { DeduplicationEngine } from '../core/deduplication.js';
 import type { Config } from '../config.js';
 import type { SourceRegistry } from '../sources/registry.js';
 import type { StorageProvider } from '../storage/provider.js';
-import { canonicalChapterKey, chapterOrderKey } from './chapter-identity.js';
+import { canonicalChapterKey, chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { LiteExecutor } from './executor.js';
 import { LiteRepository, type EnqueueLiteTask } from './repository.js';
 import type { LiteTask } from './types.js';
@@ -70,6 +70,10 @@ export class ImporterLiteRuntime {
   }
 
   async start(): Promise<void> {
+    // Do this before taking the shared producer lease or creating a task. A
+    // Lite process must fail closed against an old Reader schema, rather than
+    // discover a numeric collision after it has downloaded/uploaded media.
+    await this.assertReaderCanonicalIdentitySchema();
     if (!(await this.waitForRuntimeLeadership())) return;
     await this.seedDiscovery();
     // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
@@ -93,6 +97,42 @@ export class ImporterLiteRuntime {
     const metricsTimer = setInterval(() => void this.emitOperationalSnapshot().catch(() => {}), 60_000);
     metricsTimer.unref(); this.timers.push(metricsTimer);
     await this.probeSharedResources();
+  }
+
+  private async assertReaderCanonicalIdentitySchema(): Promise<void> {
+    const required = ['canonical_chapter_key', 'display_number', 'chapter_order_key', 'chapter_kind', 'edition', 'language'];
+    const columns = await this.pool.query<{ column_name: string; is_nullable: string }>(
+      `SELECT column_name,is_nullable
+       FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='chapters'
+         AND column_name IN ('canonical_chapter_key','display_number','chapter_order_key','chapter_kind','edition','language','number')`,
+    );
+    const present = new Map(columns.rows.map((row) => [row.column_name, row.is_nullable]));
+    const missing = required.filter((column) => !present.has(column));
+    const numberNullable = present.get('number') === 'YES';
+    const canonicalIndex = await this.pool.query<{ exists: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1 FROM pg_indexes
+         WHERE schemaname='public' AND tablename='chapters'
+           AND indexname='chapters_work_canonical_chapter_key_uq'
+       ) AS exists`,
+    );
+    const numericConstraint = await this.pool.query<{ exists: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1 FROM pg_indexes
+         WHERE schemaname='public' AND tablename='chapters'
+           AND indexname='chapters_work_id_number_key'
+       ) AS exists`,
+    );
+    if (missing.length || !numberNullable || canonicalIndex.rows[0]?.exists !== true || numericConstraint.rows[0]?.exists === true) {
+      const detail = [
+        missing.length ? `missing=${missing.join(',')}` : null,
+        !numberNullable ? 'number_is_still_required' : null,
+        canonicalIndex.rows[0]?.exists !== true ? 'canonical_unique_index_missing' : null,
+        numericConstraint.rows[0]?.exists === true ? 'legacy_numeric_uniqueness_active' : null,
+      ].filter(Boolean).join(';');
+      throw new Error(`READER_CANONICAL_IDENTITY_MIGRATION_REQUIRED:${detail}`);
+    }
   }
 
   stop(): void {
@@ -436,8 +476,9 @@ export class ImporterLiteRuntime {
         if (sourceChapterIds.has(chapter.sourceChapterId)) continue;
         sourceChapterIds.add(chapter.sourceChapterId);
         const displayNumber = chapter.displayNumber || String(chapter.number);
-        const chapterKey = canonicalChapterKey({ displayNumber, title: chapter.title, language, edition });
-        const orderKey = chapterOrderKey({ displayNumber, title: chapter.title });
+        const chapterKindValue = chapterKind({ displayNumber, title: chapter.title });
+        const chapterKey = canonicalChapterKey({ displayNumber, title: chapter.title, kind: chapterKindValue, language, edition });
+        const orderKey = chapterOrderKey({ displayNumber, title: chapter.title, kind: chapterKindValue });
         const historicalRepair = p0Monitoring && orderKey.startsWith('n|') && Boolean(knownNormalOrder && orderKey <= knownNormalOrder);
         const chapterPriority = p0Monitoring && !historicalRepair ? 'P0' : 'P1';
         sourceRows.push({ workId: resolved.workId, chapterKey, source, sourceWorkId, sourceChapterId: chapter.sourceChapterId,
@@ -445,7 +486,7 @@ export class ImporterLiteRuntime {
         if (policy.chapterIngestionEnabled) {
           chapterTasks.push({ taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
             chapterKey, priority: chapterPriority, idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,
-            payload: { displayNumber, chapterTitle: chapter.title || '', orderKey, language, edition } });
+            payload: { displayNumber, chapterTitle: chapter.title || '', chapterKind: chapterKindValue, orderKey, language, edition } });
         }
       }
       await this.upsertChapterSources(sourceRows);

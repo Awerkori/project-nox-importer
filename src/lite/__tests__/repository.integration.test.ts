@@ -47,9 +47,13 @@ async function createSchema(db: PGlite): Promise<void> {
     );
     CREATE TABLE chapters (
       id uuid PRIMARY KEY, work_id uuid NOT NULL REFERENCES works(id), number numeric,
+      display_number text, canonical_chapter_key text, chapter_order_key text,
+      chapter_kind text, edition text, language text,
       title text, origin text NOT NULL DEFAULT 'IMPORTER', published_at timestamptz,
       is_fresh_release boolean NOT NULL DEFAULT false
     );
+    CREATE UNIQUE INDEX chapters_work_canonical_chapter_key_uq
+      ON chapters(work_id,canonical_chapter_key) WHERE canonical_chapter_key IS NOT NULL;
     CREATE TABLE media (
       id uuid PRIMARY KEY, provider text, provider_key text, bot_reference text,
       storage_shard_id text, mime text, width integer, height integer, bytes integer,
@@ -256,6 +260,19 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(interval({}, 'HIATUS', 0)).toBe(6 * 60 * 60_000);
   });
 
+  it('fails closed before Lite acquires leadership when the Reader still uses numeric identity', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    await expect((runtime as any).assertReaderCanonicalIdentitySchema()).resolves.toBeUndefined();
+    await db.exec(`CREATE UNIQUE INDEX chapters_work_id_number_key ON chapters(work_id,number)`);
+    await expect((runtime as any).assertReaderCanonicalIdentitySchema())
+      .rejects.toThrow('READER_CANONICAL_IDENTITY_MIGRATION_REQUIRED:legacy_numeric_uniqueness_active');
+  });
+
   it('fences concurrent workers so one durable task has only one claim', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:1', priority: 'P1', idempotencyKey: 'single-claim' });
     const claims = await Promise.all([repo.claim('worker-a', 120), repo.claim('worker-b', 120)]);
@@ -384,6 +401,46 @@ describe('LiteRepository against the additive Lite migration', () => {
     })).rejects.toThrow('CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION');
     expect((await db.query(`SELECT count(*)::int AS count FROM chapters WHERE work_id=$1 AND title='Same rendered title'`, [ids.p1a])).rows[0].count).toBe(1);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapters WHERE work_id=$1`, [ids.p1a])).rows[0].count).toBe(1);
+  });
+
+  it('persists textual Reader identities for trailing decimals, specials, and editions', async () => {
+    const base = {
+      id: '00000000-0000-4000-8000-000000000096', taskType: 'IMPORT_CHAPTER', workId: ids.p1a,
+      workKey: `work:${ids.p1a}`, priority: 'P1', basePriority: 'P1', state: 'RUNNING',
+      idempotencyKey: 'reader-text-identity', nextRunAt: new Date(), attempts: 1, maxAttempts: 8,
+      leaseOwner: 'worker-a', leaseUntil: new Date(Date.now() + 60_000), reason: null, monitoring: false,
+      checkpoint: {},
+    } as any;
+    const executor = new LiteExecutor(poolFor(db) as Pool, repo, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(1, 'test-downloads'));
+
+    await (executor as any).createOrLoadChapter({ ...base,
+      chapterKey: 'pt-br|default|chapter|12.1|-',
+      payload: { displayNumber: '12.1', chapterTitle: 'Doze ponto um', chapterKind: 'chapter', language: 'pt-BR', edition: 'default', orderKey: 'n|000000000012|100000000000|1||' },
+    });
+    await (executor as any).createOrLoadChapter({ ...base, id: '00000000-0000-4000-8000-000000000095',
+      chapterKey: 'pt-br|default|chapter|12.10|-',
+      payload: { displayNumber: '12.10', chapterTitle: 'Doze ponto dez', chapterKind: 'chapter', language: 'pt-BR', edition: 'default', orderKey: 'n|000000000012|100000000000|10||' },
+    });
+    await (executor as any).createOrLoadChapter({ ...base, id: '00000000-0000-4000-8000-000000000094',
+      chapterKey: 'pt-br|default|special|pr%C3%B3logo|pr%C3%B3logo',
+      payload: { displayNumber: 'Prólogo', chapterTitle: 'Prólogo', chapterKind: 'special', language: 'pt-BR', edition: 'default', orderKey: 'z|pr%C3%B3logo|pr%C3%B3logo' },
+    });
+    await (executor as any).createOrLoadChapter({ ...base, id: '00000000-0000-4000-8000-000000000093',
+      chapterKey: 'en|official|chapter|12.1|-',
+      payload: { displayNumber: '12.1', chapterTitle: 'Twelve point one', chapterKind: 'chapter', language: 'en', edition: 'official', orderKey: 'n|000000000012|100000000000|1||' },
+    });
+
+    const rows = await db.query(`SELECT number::text,display_number,canonical_chapter_key,chapter_kind,edition,language
+      FROM chapters WHERE work_id=$1 ORDER BY canonical_chapter_key`, [ids.p1a]);
+    expect(rows.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ display_number: '12.1', canonical_chapter_key: 'pt-br|default|chapter|12.1|-', edition: 'default', language: 'pt-BR' }),
+      expect.objectContaining({ display_number: '12.10', canonical_chapter_key: 'pt-br|default|chapter|12.10|-' }),
+      expect.objectContaining({ display_number: 'Prólogo', canonical_chapter_key: 'pt-br|default|special|pr%C3%B3logo|pr%C3%B3logo', chapter_kind: 'special', number: null }),
+      expect.objectContaining({ display_number: '12.1', canonical_chapter_key: 'en|official|chapter|12.1|-', edition: 'official', language: 'en' }),
+    ]));
+    expect(rows.rows).toHaveLength(4);
   });
 
   it('reuses an exactly mapped legacy published chapter without rewriting its pages', async () => {

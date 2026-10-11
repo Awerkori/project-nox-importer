@@ -1,10 +1,17 @@
 const clean = (value) => String(value ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim();
 const folded = (value) => clean(value).toLocaleLowerCase('und');
+export function chapterKind(input) {
+    const explicit = folded(input.kind);
+    if (explicit)
+        return explicit;
+    const title = folded(input.title);
+    return /(?:extra|especial|special|omake|prologue|pr[oó]logo|side)/i.test(title) ? 'special' : 'chapter';
+}
 /** A stable opaque key; callers must never parse it back into a float. */
 export function canonicalChapterKey(input) {
     const number = folded(input.displayNumber);
     const title = folded(input.title);
-    const kind = folded(input.kind || (/(?:extra|special|omake|prologue|side)/i.test(title) ? 'special' : 'chapter'));
+    const kind = chapterKind(input);
     const language = folded(input.language || 'und');
     const edition = folded(input.edition || 'default');
     if (!number && !title)

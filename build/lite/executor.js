@@ -3,6 +3,7 @@ import { calculateSha256, inspectImage } from '../storage/media.js';
 import { selectableChapterSources } from './source-selector.js';
 import { AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
+import { chapterKind, chapterOrderKey } from './chapter-identity.js';
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
     let cursor = 0;
@@ -51,6 +52,12 @@ function hostFor(url) {
     catch {
         return null;
     }
+}
+function numericDisplayValue(display) {
+    const normalized = display.trim().replace(',', '.');
+    // Keep the textual display separately. This value exists only for legacy
+    // integrations that still inspect `chapters.number`; it is never an id.
+    return /^\d+(?:\.\d+)?$/.test(normalized) ? normalized : null;
 }
 /**
  * The canonical chapter mapping is unique in SQL, but a stale worker can race
@@ -166,9 +173,11 @@ export class LiteExecutor {
         if (existing.rows[0])
             return existing.rows[0].chapter_id;
         const display = String(task.payload.displayNumber || '0');
-        const numeric = Number.parseFloat(display.replace(',', '.'));
-        if (!Number.isFinite(numeric))
-            throw new Error('CHAPTER_DISPLAY_NUMBER_NOT_READER_COMPATIBLE');
+        const numeric = numericDisplayValue(display);
+        const language = String(task.payload.language || 'und');
+        const edition = String(task.payload.edition || 'default');
+        const kind = String(task.payload.chapterKind || chapterKind({ displayNumber: display, title: String(task.payload.chapterTitle || '') }));
+        const orderKey = String(task.payload.orderKey || chapterOrderKey({ displayNumber: display, title: String(task.payload.chapterTitle || ''), kind }));
         const chapterId = canonicalChapterId(String(task.workId), String(task.chapterKey));
         const client = await this.db.connect();
         try {
@@ -180,28 +189,29 @@ export class LiteExecutor {
                 return mapped;
             }
             const title = String(task.payload.chapterTitle || '').slice(0, 200);
-            const inserted = await client.query(`INSERT INTO chapters(id,work_id,number,title,origin) VALUES($1::uuid,$2::uuid,$3,$4,'IMPORTER')
-        ON CONFLICT DO NOTHING RETURNING id`, [chapterId, task.workId, numeric, title]);
-            let durableChapterId = inserted.rows[0]?.id;
-            if (!durableChapterId) {
-                // The legacy Reader may still have a numeric uniqueness constraint.
-                // Reuse only a clearly identical existing chapter; never silently map
-                // a special/edition to a different chapter sharing its number.  In
-                // particular, a Reader numeric column can collapse 12.1 and 12.10.
-                // The Lite mapping is the durable authority for that distinction, so
-                // a row already mapped under another canonical identity is a schema
-                // incompatibility to surface, never an excuse to merge chapters.
-                const same = await client.query(`SELECT id FROM chapters
-          WHERE work_id=$1::uuid AND number=$2 AND lower(title)=lower($3) LIMIT 1 FOR UPDATE`, [task.workId, numeric, title]);
-                if (!same.rows[0])
-                    throw new Error('CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION');
-                const mappedIdentity = await client.query(`SELECT canonical_chapter_key
-          FROM importer_lite_chapters WHERE chapter_id=$1::uuid LIMIT 1 FOR UPDATE`, [same.rows[0].id]);
-                if (mappedIdentity.rows[0] && mappedIdentity.rows[0].canonical_chapter_key !== task.chapterKey) {
+            let inserted;
+            try {
+                inserted = await client.query(`INSERT INTO chapters(
+            id,work_id,number,display_number,canonical_chapter_key,chapter_order_key,chapter_kind,edition,language,title,origin
+          ) VALUES($1::uuid,$2::uuid,$3::numeric,$4,$5,$6,$7,$8,$9,$10,'IMPORTER')
+          ON CONFLICT (work_id,canonical_chapter_key) WHERE canonical_chapter_key IS NOT NULL
+          DO UPDATE SET canonical_chapter_key=EXCLUDED.canonical_chapter_key
+          RETURNING id`, [chapterId, task.workId, numeric, display, task.chapterKey, orderKey, kind, edition, language, title]);
+            }
+            catch (error) {
+                // This can only occur when an old Reader numeric unique constraint is
+                // still installed. Never merge distinct text identities to bypass it.
+                if (error?.code === '23505' || /chapters.*number|unique constraint/i.test(String(error?.message || ''))) {
                     throw new Error('CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION');
                 }
-                durableChapterId = same.rows[0].id;
+                if (/canonical_chapter_key|display_number|chapter_order_key/i.test(String(error?.message || ''))) {
+                    throw new Error('READER_CANONICAL_IDENTITY_MIGRATION_REQUIRED');
+                }
+                throw error;
             }
+            let durableChapterId = inserted.rows[0]?.id;
+            if (!durableChapterId)
+                throw new Error('CANONICAL_CHAPTER_UPSERT_DID_NOT_RETURN_ID');
             const mapped = await this.mapCanonicalChapter(client, task, durableChapterId);
             await client.query('COMMIT');
             return mapped;
