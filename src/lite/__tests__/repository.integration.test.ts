@@ -178,6 +178,34 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('discovery-worker', 120))?.idempotencyKey).toBe('p2-healthy');
   });
 
+  it('recovers an interrupted P0 monitor through the bounded lease reconciler', async () => {
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:restart-watch', priority: 'P2', monitoring: true,
+      idempotencyKey: 'restart-watch', payload: { source: 'source-a', sourceWorkId: 'restart-watch' } });
+    const running = await repo.claimMonitor('monitor-before-restart', 30);
+    expect(running).toMatchObject({ monitoring: true, state: 'RUNNING' });
+    await db.query(`UPDATE importer_lite_tasks SET lease_until=now()-interval '1 second' WHERE id=$1`, [running!.id]);
+    expect((await repo.reconcile(10)).leases).toBe(1);
+    await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second' WHERE id=$1`, [running!.id]);
+    expect((await repo.reconcile(10)).retries).toBe(1);
+    expect(await repo.claim('chapter-worker', 30)).toBeNull();
+    expect((await repo.claimMonitor('monitor-after-restart', 30))?.id).toBe(running!.id);
+  });
+
+  it('uses quick rechecks for releases and bounded intervals for quiet or hiatus P0 watches', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    const interval = (checkpoint: Record<string, unknown>, status: string, releases: number) =>
+      (runtime as any).monitorIntervalMs({ checkpoint }, status, releases);
+    expect(interval({}, 'ONGOING', 1)).toBe(5 * 60_000);
+    expect(interval({ emptyChecks: 0 }, 'ONGOING', 0)).toBe(15 * 60_000);
+    expect(interval({ emptyChecks: 5 }, 'ONGOING', 0)).toBe(6 * 60 * 60_000);
+    expect(interval({}, 'HIATUS', 0)).toBe(6 * 60 * 60_000);
+  });
+
   it('fences concurrent workers so one durable task has only one claim', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:1', priority: 'P1', idempotencyKey: 'single-claim' });
     const claims = await Promise.all([repo.claim('worker-a', 120), repo.claim('worker-b', 120)]);
