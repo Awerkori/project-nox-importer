@@ -15,6 +15,7 @@ import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
 import { sanitizeSynopsis } from './metadata.js';
+import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const withTimeout = async <T>(operation: Promise<T>, timeoutMs: number, code: string): Promise<T> => {
@@ -62,6 +63,7 @@ export class ImporterLiteRuntime {
   private readonly logger = new Logger('ImporterLite');
   private readonly downloads: AsyncSemaphore;
   private readonly bufferedPages: AsyncSemaphore;
+  private readonly bufferedPageBytes: PageByteBudget;
   private readonly claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
   private readonly historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
   // Observation is intentionally a one-slot lane. It may create P0 chapter
@@ -110,6 +112,7 @@ export class ImporterLiteRuntime {
     this.queue = new LiteRepository(pool);
     this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
     this.bufferedPages = new AsyncSemaphore(Math.min(config.BUFFERED_PAGE_CONCURRENCY, SAFE_BUFFERED_PAGE_CAP), 'lite_global_page_buffers');
+    this.bufferedPageBytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
     this.chapterWorkerCapacity = Math.max(1, Math.min(config.LITE_CHAPTER_WORKERS ?? 1,
       config.MAX_CONCURRENT_CHAPTERS, config.TESTED_CONCURRENCY_CEILING));
     // Five independent MangaFlix chapter waves can fill the measured 24-page
@@ -117,7 +120,7 @@ export class ImporterLiteRuntime {
     // widened the global fence itself; this controlled ramp does not.
     this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads,
       Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter,
-      this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source));
+      this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes);
     this.dedupe = new DeduplicationEngine(catalogClient);
   }
 
@@ -478,6 +481,7 @@ export class ImporterLiteRuntime {
         heapTotal: Math.round(memory.heapTotal / 1024 / 1024), external: Math.round(memory.external / 1024 / 1024),
         arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024) },
       ysqlPool: { total: this.pool.totalCount, idle: this.pool.idleCount, waiting: this.pool.waitingCount },
+      pageByteBudget: this.bufferedPageBytes.snapshot(),
       heartbeat: { startedAt: this.heartbeatStartedAt, completedAt: this.heartbeatCompletedAt },
       lease: { startedAt: this.leaseRenewStartedAt, completedAt: this.leaseRenewCompletedAt, error: this.leaseRenewError },
       workers: [...this.workerLiveness.entries()].map(([workerId, value]) => ({ workerId, ...value })),
@@ -588,6 +592,7 @@ export class ImporterLiteRuntime {
           limits: {
             pageDownloads: this.downloads.capacity,
             pageBuffers: this.bufferedPages.capacity,
+            pageBufferBytes: this.bufferedPageBytes.capacityBytes,
             pagesPerChapter: Math.max(1, Math.min(6, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
             telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
             uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
@@ -596,6 +601,7 @@ export class ImporterLiteRuntime {
           telegram: pipelineTelemetry.telegramStorage,
           pageDownloadLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_downloads,
           pageBufferLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_buffers,
+          pageByteBudget: this.bufferedPageBytes.snapshot(),
         },
         sourceRate: this.sourceRateLimiter.getSummary(),
         liveness,
@@ -648,6 +654,7 @@ export class ImporterLiteRuntime {
         limits: {
           pageDownloads: this.downloads.capacity,
           pageBuffers: this.bufferedPages.capacity,
+          pageBufferBytes: this.bufferedPageBytes.capacityBytes,
           pagesPerChapter: Math.max(1, Math.min(6, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
           telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
           uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
@@ -656,6 +663,7 @@ export class ImporterLiteRuntime {
         telegram: pipelineTelemetry.telegramStorage,
         pageDownloadLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_downloads,
         pageBufferLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_buffers,
+        pageByteBudget: this.bufferedPageBytes.snapshot(),
       },
       telegram, sourceRate: this.sourceRateLimiter.getSummary(), diversity,
       sourceFairness: { readySources: fairSources, count: fairSources.length },

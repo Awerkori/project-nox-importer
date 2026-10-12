@@ -11,6 +11,7 @@ import { AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.j
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
+import { PageByteBudget } from './page-byte-budget.js';
 
 async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const result = new Array<R>(items.length);
@@ -251,6 +252,7 @@ export class LiteExecutor {
     private readonly sourceRateLimiter: HostRateLimiter = new HostRateLimiter(2),
     private readonly chapterWorkerCapacity = 1,
     private readonly onRouteSelected?: (taskId: string, source: string) => void,
+    private readonly pageBytes = new PageByteBudget(),
   ) {
     this.receiptBatcher = new UploadReceiptBatcher(queue);
     this.reservationBatcher = new UploadReservationBatcher(queue);
@@ -500,79 +502,90 @@ export class LiteExecutor {
           const host = hostFor(url);
           if (host) await this.sourceRateLimiter.acquire(host);
           return this.bufferedPages.runExclusive(async () => {
-            let downloaded: { bytes: Uint8Array; image: ReturnType<typeof inspectImage> };
+            // Reserve bytes before requesting the body. The reservation grows
+            // from the response length while it is read, remains held through
+            // Telegram and durable receipt persistence, then releases even on
+            // every error path. This bounds actual retained media, not merely
+            // the number of page promises.
+            const pageSignal = AbortSignal.timeout(45_000);
+            const byteReservation = await this.pageBytes.reserve(undefined, pageSignal);
             try {
-              const startedAt = performance.now();
-              telemetryCollector.trackActiveDownload(1);
+              let downloaded: { bytes: Uint8Array; image: ReturnType<typeof inspectImage> };
               try {
-                downloaded = await this.downloads.runExclusive(async () => {
-                  const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: AbortSignal.timeout(45_000) });
-                  if (!response.ok) {
-                    if (response.status === 429 && host) this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));
-                    const error = sourceFailure(new Error(`PAGE_HTTP_${response.status}`));
-                    error.retryAfter = Number(response.headers.get('retry-after') || 0);
-                    throw error;
-                  }
-                  const bytes = await readImageBody(response, { signal: AbortSignal.timeout(45_000) });
-                  const image = inspectImage(bytes);
-                  if (host) this.sourceRateLimiter.recordSuccess(host);
-                  return { bytes, image };
-                });
-                telemetryCollector.recordImageDownload(route.source, performance.now() - startedAt, downloaded.bytes.length);
-              } finally {
-                telemetryCollector.trackActiveDownload(-1);
-              }
-            } catch (error) { throw sourceFailure(error); }
-            const { bytes, image } = downloaded;
-            const sha256 = calculateSha256(bytes);
-            const reserved = await this.reservationBatcher.reserve({ taskId: task.id, pagePosition: position, sha256 });
-            if (reserved.state === 'PERSISTED') return reserved.mediaId;
-            if (reserved.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
-            let receiptNeeded = false;
-            try {
-              const uploadStartedAt = performance.now();
-              telemetryCollector.trackActiveTelegramUpload(1);
-              let providerKey: string;
+                const startedAt = performance.now();
+                telemetryCollector.trackActiveDownload(1);
+                try {
+                  downloaded = await this.downloads.runExclusive(async () => {
+                    const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: pageSignal });
+                    if (!response.ok) {
+                      if (response.status === 429 && host) this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));
+                      const error = sourceFailure(new Error(`PAGE_HTTP_${response.status}`));
+                      error.retryAfter = Number(response.headers.get('retry-after') || 0);
+                      throw error;
+                    }
+                    const bytes = await readImageBody(response, { signal: pageSignal, reservation: byteReservation });
+                    const image = inspectImage(bytes);
+                    if (host) this.sourceRateLimiter.recordSuccess(host);
+                    return { bytes, image };
+                  });
+                  telemetryCollector.recordImageDownload(route.source, performance.now() - startedAt, downloaded.bytes.length);
+                } finally {
+                  telemetryCollector.trackActiveDownload(-1);
+                }
+              } catch (error) { throw sourceFailure(error); }
+              const { bytes, image } = downloaded;
+              const sha256 = calculateSha256(bytes);
+              const reserved = await this.reservationBatcher.reserve({ taskId: task.id, pagePosition: position, sha256 });
+              if (reserved.state === 'PERSISTED') return reserved.mediaId;
+              if (reserved.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+              let receiptNeeded = false;
               try {
-                providerKey = await this.storage.upload(bytes, image.mime, reserved.mediaId, chapterId);
-                telemetryCollector.recordTelegramUpload(performance.now() - uploadStartedAt, bytes.length);
-              } finally {
-                telemetryCollector.trackActiveTelegramUpload(-1);
-              }
-              receiptNeeded = true;
-              await this.receiptBatcher.persist({
-                taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256,
-                bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
-                botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,
-                shardId: this.storage.getLastShardId?.(reserved.mediaId) || null,
-                channelId: this.storage.getLastChannelId?.(reserved.mediaId) || null, createdBy: this.importerUserId,
-                messageId: this.storage.getLastMessageId?.(reserved.mediaId) || null,
-              });
-              return reserved.mediaId;
-            } catch (error) {
-              // A confirmed Telegram success followed by a DB failure is
-              // ambiguous. Network failures without an explicit Telegram HTTP
-              // rejection are ambiguous too: a response can be lost after the
-              // server accepted the upload. Only known HTTP rejections (notably
-              // 429) may retry with the reserved media ID.
-              if (receiptNeeded || !(error as any)?.statusCode) {
-                // UNKNOWN is intentionally terminal for this page: retain a
-                // redacted, durable stage/class so production can distinguish
-                // Telegram transport from post-upload receipt persistence
-                // without logging provider responses or credentials.
-                await this.queue.checkpoint(task, workerId, {
-                  lastUploadFailure: {
-                    position,
-                    phase: receiptNeeded ? 'RECEIPT_PERSISTENCE' : 'TELEGRAM_TRANSPORT',
-                    class: uploadFailureClass(error),
-                    at: new Date().toISOString(),
-                  },
+                const uploadStartedAt = performance.now();
+                telemetryCollector.trackActiveTelegramUpload(1);
+                let providerKey: string;
+                try {
+                  providerKey = await this.storage.upload(bytes, image.mime, reserved.mediaId, chapterId);
+                  telemetryCollector.recordTelegramUpload(performance.now() - uploadStartedAt, bytes.length);
+                } finally {
+                  telemetryCollector.trackActiveTelegramUpload(-1);
+                }
+                receiptNeeded = true;
+                await this.receiptBatcher.persist({
+                  taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256,
+                  bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
+                  botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,
+                  shardId: this.storage.getLastShardId?.(reserved.mediaId) || null,
+                  channelId: this.storage.getLastChannelId?.(reserved.mediaId) || null, createdBy: this.importerUserId,
+                  messageId: this.storage.getLastMessageId?.(reserved.mediaId) || null,
                 });
-                await this.queue.markUploadUnknown(task.id, position);
-                throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+                return reserved.mediaId;
+              } catch (error) {
+                // A confirmed Telegram success followed by a DB failure is
+                // ambiguous. Network failures without an explicit Telegram HTTP
+                // rejection are ambiguous too: a response can be lost after the
+                // server accepted the upload. Only known HTTP rejections (notably
+                // 429) may retry with the reserved media ID.
+                if (receiptNeeded || !(error as any)?.statusCode) {
+                  // UNKNOWN is intentionally terminal for this page: retain a
+                  // redacted, durable stage/class so production can distinguish
+                  // Telegram transport from post-upload receipt persistence
+                  // without logging provider responses or credentials.
+                  await this.queue.checkpoint(task, workerId, {
+                    lastUploadFailure: {
+                      position,
+                      phase: receiptNeeded ? 'RECEIPT_PERSISTENCE' : 'TELEGRAM_TRANSPORT',
+                      class: uploadFailureClass(error),
+                      at: new Date().toISOString(),
+                    },
+                  });
+                  await this.queue.markUploadUnknown(task.id, position);
+                  throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+                }
+                await this.queue.markUploadRetryable(task.id, position);
+                throw error;
               }
-              await this.queue.markUploadRetryable(task.id, position);
-              throw error;
+            } finally {
+              byteReservation.release();
             }
           });
         });

@@ -5,6 +5,7 @@ import { LiteRepository, type UploadReceiptInput, type UploadReservationInput } 
 import type { LiteTask } from './types.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
+import { PageByteBudget } from './page-byte-budget.js';
 /**
  * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
  * a per-page fence, so a crash can never make a successful send retryable.
@@ -49,11 +50,12 @@ export declare class LiteExecutor {
     private readonly sourceRateLimiter;
     private readonly chapterWorkerCapacity;
     private readonly onRouteSelected?;
+    private readonly pageBytes;
     private readonly sourceSlots;
     private readonly receiptBatcher;
     private readonly reservationBatcher;
     private fairDemandSources;
-    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined);
+    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined, pageBytes?: PageByteBudget);
     /**
      * A bounded runtime sample of sources with ready imports. It only controls
      * local execution permits; the durable queue remains authority for task
