@@ -1152,7 +1152,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     const originalReceiptBatch = repo.recordUploadReceipts.bind(repo);
     const originalFetch = globalThis.fetch;
     vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })));
-    (repo as any).recordUploadReceipts = async () => { throw new Error('DB_RECEIPT_WRITE_FAILED'); };
+    (repo as any).recordUploadReceipts = async () => {
+      throw Object.assign(new Error('DB_RECEIPT_WRITE_FAILED'), { code: '40001' });
+    };
     try {
       const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
         '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 1);
@@ -1162,7 +1164,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       vi.stubGlobal('fetch', originalFetch);
     }
     expect((await db.query(`SELECT state,checkpoint->'lastUploadFailure' AS failure FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
-      .toMatchObject({ state: 'BLOCKED', failure: { position: 1, phase: 'RECEIPT_PERSISTENCE', class: 'PERSISTENCE_ERROR' } });
+      .toMatchObject({ state: 'BLOCKED', failure: { position: 1, phase: 'RECEIPT_PERSISTENCE', class: 'SQLSTATE_40001' } });
     expect((await db.query(`SELECT state FROM importer_lite_uploads WHERE task_id=$1`, [task!.id])).rows[0].state).toBe('UNKNOWN');
     expect(storage.upload).toHaveBeenCalledOnce();
   });

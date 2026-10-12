@@ -61,7 +61,12 @@ function uploadFailureClass(error) {
     const status = Number(detail?.statusCode);
     if (Number.isInteger(status) && status > 0)
         return `HTTP_${status}`;
-    const code = String(detail?.code || '').toUpperCase();
+    const code = String(detail?.code || detail?.cause?.code || '').toUpperCase();
+    // PostgreSQL/YSQL SQLSTATEs commonly start with a digit (for example
+    // 40001).  Keep that safe, structured diagnostic instead of collapsing it
+    // into UNKNOWN_ERROR; the raw database message remains deliberately absent.
+    if (/^(?:\d[A-Z0-9]{4}|[A-Z]{2}\d{3})$/.test(code))
+        return `SQLSTATE_${code}`;
     if (/^[A-Z][A-Z0-9_]{1,47}$/.test(code))
         return code;
     const message = String(detail?.message || '').toLowerCase();
