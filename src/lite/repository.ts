@@ -5,6 +5,15 @@ import { LITE_PRIORITY_RANK, type LitePriority, type LiteTask, type LiteTaskStat
 type Db = Pick<Pool, 'query' | 'connect'>;
 type Row = QueryResultRow & Record<string, any>;
 
+/**
+ * Older catalog passes could put two legacy mappings for one canonical chapter
+ * in a single UPSERT. PostgreSQL/YSQL rejects that statement before its
+ * conflict clause can decide either row. Keep the exact durable reason
+ * narrowly scoped so recovery gives only those code-bug failures one clean
+ * retry.
+ */
+export const DUPLICATE_CANONICAL_BATCH_REASON = 'ON CONFLICT DO UPDATE command cannot affect row a second time';
+
 const priorityName = (value: number): LitePriority => (['STAFF', 'P0', 'P1', 'P2'] as LitePriority[])[value] || 'P2';
 const asTask = (row: Row): LiteTask => ({
   id: row.id, taskType: row.task_type, workId: row.work_id, workKey: row.work_key,
@@ -110,11 +119,16 @@ export class LiteRepository {
    * once.  It intentionally does no network work and never claims anything.
    */
   async enqueueMany(inputs: EnqueueLiteTask[]): Promise<{ inserted: number; insertedKeys: Set<string> }> {
-    if (inputs.length === 0) return { inserted: 0, insertedKeys: new Set() };
+    // A provider can expose the same canonical chapter through more than one
+    // source entry. The catalog persists every source route as an alternative,
+    // but executable work has one idempotency key per canonical chapter. Keep
+    // the queue batch compact even when a caller has not already coalesced it.
+    const uniqueInputs = [...new Map(inputs.map((input) => [input.idempotencyKey, input])).values()];
+    if (uniqueInputs.length === 0) return { inserted: 0, insertedKeys: new Set() };
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
-      const workIds = [...new Set(inputs.map((input) => input.workId).filter((id): id is string => Boolean(id)))];
+      const workIds = [...new Set(uniqueInputs.map((input) => input.workId).filter((id): id is string => Boolean(id)))];
       const staff = workIds.length ? await client.query<Row>(`SELECT DISTINCT work_id::text AS work_id
         FROM importer_staff_requests WHERE work_id=ANY($1::uuid[])
           AND status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')`, [workIds]) : { rows: [] as Row[] };
@@ -123,8 +137,8 @@ export class LiteRepository {
       const insertedKeys = new Set<string>();
       // Keep far below PostgreSQL's parameter limit even if a source returns
       // an unusually large manifest.
-      for (let offset = 0; offset < inputs.length; offset += 500) {
-        const batch = inputs.slice(offset, offset + 500);
+      for (let offset = 0; offset < uniqueInputs.length; offset += 500) {
+        const batch = uniqueInputs.slice(offset, offset + 500);
         const values: unknown[] = [];
         const rows = batch.map((input, index) => {
           const start = index * 12;
@@ -143,7 +157,7 @@ export class LiteRepository {
         inserted += result.rowCount || 0;
         for (const row of result.rows) insertedKeys.add(String(row.idempotency_key));
       }
-      for (const workKey of new Set(inputs.map((input) => input.workKey))) await this.refreshReadyWork(client, workKey);
+      for (const workKey of new Set(uniqueInputs.map((input) => input.workKey))) await this.refreshReadyWork(client, workKey);
       await client.query('COMMIT');
       return { inserted, insertedKeys };
     } catch (error) {
@@ -306,6 +320,37 @@ export class LiteRepository {
       for (const workKey of new Set(inserted.rows.map((row) => String(row.work_key)))) await this.refreshReadyWork(client, workKey);
       await client.query('COMMIT');
       return inserted.rowCount || 0;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+
+  /**
+   * Recover only catalog tasks blocked by the pre-deduplication batch bug.
+   * This is deliberately not a generic BLOCKED retry: normal permanent
+   * failures retain their diagnosis and need their own safe repair path.
+   */
+  async recoverDuplicateCanonicalCatalogFailures(limit = 32): Promise<number> {
+    const maximum = Math.max(1, Math.min(64, limit));
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const recovered = await client.query<Row>(
+        `WITH picked AS (
+           SELECT id,work_key FROM importer_lite_tasks
+           WHERE state='BLOCKED' AND task_type='CATALOG' AND reason=$1
+           ORDER BY updated_at,id LIMIT $2 FOR UPDATE SKIP LOCKED
+         ) UPDATE importer_lite_tasks task SET
+           state='READY',attempts=0,reason=NULL,next_run_at=now(),
+           lease_owner=NULL,lease_until=NULL,updated_at=now()
+         FROM picked WHERE task.id=picked.id
+         RETURNING picked.work_key`,
+        [DUPLICATE_CANONICAL_BATCH_REASON, maximum],
+      );
+      for (const row of recovered.rows) await this.refreshReadyWork(client, String(row.work_key));
+      await client.query('COMMIT');
+      return recovered.rowCount || 0;
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
       throw error;

@@ -1,6 +1,14 @@
 import type { Pool } from 'pg';
 import { type LitePriority, type LiteTask, type LiteTaskState, type LiteTaskType } from './types.js';
 type Db = Pick<Pool, 'query' | 'connect'>;
+/**
+ * Older catalog passes could put two legacy mappings for one canonical chapter
+ * in a single UPSERT. PostgreSQL/YSQL rejects that statement before its
+ * conflict clause can decide either row. Keep the exact durable reason
+ * narrowly scoped so recovery gives only those code-bug failures one clean
+ * retry.
+ */
+export declare const DUPLICATE_CANONICAL_BATCH_REASON = "ON CONFLICT DO UPDATE command cannot affect row a second time";
 export interface EnqueueLiteTask {
     taskType: LiteTaskType;
     workId?: string | null;
@@ -93,6 +101,12 @@ export declare class LiteRepository {
      * mapping set from monopolising the next P1 refill.
      */
     refillHistoricalP1Catalog(readyFloor?: number, batchLimit?: number): Promise<number>;
+    /**
+     * Recover only catalog tasks blocked by the pre-deduplication batch bug.
+     * This is deliberately not a generic BLOCKED retry: normal permanent
+     * failures retain their diagnosis and need their own safe repair path.
+     */
+    recoverDuplicateCanonicalCatalogFailures(limit?: number): Promise<number>;
     /**
      * Source administration and transient Lite health remain durable authority.
      * This indexed one-source read happens before source networking, never in a

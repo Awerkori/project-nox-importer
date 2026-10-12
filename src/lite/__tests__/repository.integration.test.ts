@@ -8,7 +8,7 @@ import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { ImporterEngine } from '../../core/engine.js';
 import { LiteExecutor, UploadReceiptBatcher, UploadReservationBatcher } from '../executor.js';
 import { ImporterLiteRuntime } from '../runtime.js';
-import { LiteRepository } from '../repository.js';
+import { DUPLICATE_CANONICAL_BATCH_REASON, LiteRepository } from '../repository.js';
 import type { SourceRegistry } from '../../sources/registry.js';
 import type { StorageProvider } from '../../storage/provider.js';
 
@@ -177,6 +177,24 @@ describe('LiteRepository against the additive Lite migration', () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
       chapterKey: 'ready-reserve-4', priority: 'P1', idempotencyKey: 'ready-reserve-4' });
     expect(await repo.refillHistoricalP1Catalog(8, 4)).toBe(0);
+  });
+
+  it('retries only catalog tasks blocked by the fixed duplicate canonical batch bug', async () => {
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:duplicate-bug', priority: 'P1',
+      idempotencyKey: 'duplicate-bug', maxAttempts: 1, payload: { source: 'source-a', sourceWorkId: 'duplicate-bug' } });
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:unrelated', priority: 'P1',
+      idempotencyKey: 'unrelated-bug', maxAttempts: 1, payload: { source: 'source-a', sourceWorkId: 'unrelated' } });
+    await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED',attempts=max_attempts,reason=$1
+      WHERE idempotency_key='duplicate-bug'`, [DUPLICATE_CANONICAL_BATCH_REASON]);
+    await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED',attempts=max_attempts,reason='INVALID_SOURCE_PAYLOAD'
+      WHERE idempotency_key='unrelated-bug'`);
+
+    expect(await repo.recoverDuplicateCanonicalCatalogFailures()).toBe(1);
+    const rows = await db.query(`SELECT idempotency_key,state,attempts,reason FROM importer_lite_tasks ORDER BY idempotency_key`);
+    expect(rows.rows).toEqual([
+      { idempotency_key: 'duplicate-bug', state: 'READY', attempts: 0, reason: null },
+      { idempotency_key: 'unrelated-bug', state: 'BLOCKED', attempts: 1, reason: 'INVALID_SOURCE_PAYLOAD' },
+    ]);
   });
 
   it('admits ready publication before another same-priority chapter download', async () => {
@@ -1247,6 +1265,42 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).catalog(task, 'monitor');
     const created = await db.query(`SELECT priority,base_priority FROM importer_lite_tasks WHERE idempotency_key='lite:chapter:' || $1 || ':pt-br|default|chapter|2|-'`, [ids.p1a]);
     expect(created.rows[0]).toEqual({ priority: 1, base_priority: 1 });
+  });
+
+  it('coalesces duplicate canonical legacy mappings without collapsing distinct decimal chapters', async () => {
+    await db.query(`INSERT INTO chapters(id,work_id,number,display_number,published_at) VALUES
+      ('00000000-0000-4000-8000-000000000011',$1,12.1,'12.10',now()),
+      ('00000000-0000-4000-8000-000000000012',$1,12.1,'12.10',now())`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_chapter_mappings(source,source_chapter_id,chapter_id) VALUES
+      ('source-a','source-12-10-a','00000000-0000-4000-8000-000000000011'),
+      ('source-a','source-12-10-b','00000000-0000-4000-8000-000000000012')`);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P1', idempotencyKey: 'duplicate-canonical-catalog', payload: { source: 'source-a', sourceWorkId: 'duplicate-canonical-work' } });
+    const task = await repo.claim('catalog-worker', 120);
+    const adapter = {
+      id: 'source-a',
+      fetchWorkSnapshot: async () => ({
+        details: { sourceWorkId: 'duplicate-canonical-work', title: 'P1 A', slug: 'p1-a', status: 'COMPLETED' as const, language: 'pt-BR' },
+        chapters: [
+          { sourceChapterId: 'source-12-10-a', number: 12.1, displayNumber: '12.10', title: 'First provider label' },
+          { sourceChapterId: 'source-12-10-b', number: 12.1, displayNumber: '12.10', title: 'Second provider label' },
+          { sourceChapterId: 'source-12-1', number: 12.1, displayNumber: '12.1', title: 'Decimal chapter' },
+        ],
+      }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 2, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
+    await (runtime as any).catalog(task, 'catalog-worker');
+
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapter_sources WHERE work_id=$1 AND source='source-a'`, [ids.p1a])).rows[0].count).toBe(3);
+    expect((await db.query(`SELECT chapter_id FROM importer_lite_chapters WHERE work_id=$1 AND canonical_chapter_key='pt-br|default|chapter|12.10|-'`, [ids.p1a])).rows[0].chapter_id)
+      .toBe('00000000-0000-4000-8000-000000000011');
+    expect(new Set((await db.query(`SELECT chapter_key FROM importer_lite_tasks WHERE work_id=$1 AND task_type='IMPORT_CHAPTER'`, [ids.p1a])).rows.map((row: any) => row.chapter_key)))
+      .toEqual(new Set(['pt-br|default|chapter|12.1|-']));
   });
 
   it('turns only a genuinely new monitor observation into P0 and returns the watch to its bounded lane', async () => {
