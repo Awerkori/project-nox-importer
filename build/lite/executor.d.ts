@@ -1,10 +1,25 @@
 import type { Pool } from 'pg';
 import type { StorageProvider } from '../storage/provider.js';
 import type { SourceRegistry } from '../sources/registry.js';
-import { LiteRepository } from './repository.js';
+import { LiteRepository, type UploadReceiptInput } from './repository.js';
 import type { LiteTask } from './types.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
+/**
+ * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
+ * a per-page fence, so a crash can never make a successful send retryable.
+ * Five milliseconds is enough to join a page wave without adding meaningful
+ * latency or a second scheduler/queue.
+ */
+export declare class UploadReceiptBatcher {
+    private readonly queue;
+    private pending;
+    private flushTimer;
+    private flushing;
+    constructor(queue: LiteRepository);
+    persist(input: UploadReceiptInput): Promise<void>;
+    private flush;
+}
 export declare class LiteExecutor {
     private readonly db;
     private readonly queue;
