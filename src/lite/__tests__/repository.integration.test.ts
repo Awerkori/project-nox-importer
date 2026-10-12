@@ -723,6 +723,24 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual({ storage_ready: true, sha256: 'atomic-page-sha' });
   });
 
+  it('persists a bounded wave of confirmed Telegram receipts in one durable batch', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'chapter:batched-receipts', priority: 'P1', idempotencyKey: 'batched-receipts' });
+    const task = await db.query<{ id: string }>(`SELECT id FROM importer_lite_tasks WHERE idempotency_key='batched-receipts'`);
+    const first = await repo.reserveUpload(task.rows[0].id, 1, 'batch-page-one');
+    const second = await repo.reserveUpload(task.rows[0].id, 2, 'batch-page-two');
+
+    await repo.recordUploadReceipts([
+      { taskId: task.rows[0].id, pagePosition: 1, mediaId: first.mediaId, sha256: 'batch-page-one', bytes: 1024,
+        mime: 'image/png', width: 16, height: 16, providerKey: 'file-one', botReference: 'bot-a', shardId: 'shard-a', channelId: 'channel-a', messageId: 1, createdBy: ids.staff },
+      { taskId: task.rows[0].id, pagePosition: 2, mediaId: second.mediaId, sha256: 'batch-page-two', bytes: 2048,
+        mime: 'image/png', width: 32, height: 32, providerKey: 'file-two', botReference: 'bot-b', shardId: 'shard-b', channelId: 'channel-b', messageId: 2, createdBy: ids.staff },
+    ]);
+
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task.rows[0].id])).rows[0].count).toBe(2);
+    expect((await db.query(`SELECT count(*)::int AS count FROM media WHERE id=ANY($1::uuid[])`, [[first.mediaId, second.mediaId]])).rows[0].count).toBe(2);
+  });
+
   it('loads durable page receipts once for a chapter without including another task', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'chapter:receipt-snapshot', priority: 'P1', idempotencyKey: 'receipt-snapshot' });
@@ -1093,16 +1111,16 @@ describe('LiteRepository against the additive Lite migration', () => {
     const registry = { get: () => ({ id: 'source-a', fetchChapterPages: async () => ['https://source-a.test/page.png'] }) } as unknown as SourceRegistry;
     const storage: StorageProvider = { upload: vi.fn(async () => 'telegram-file'), healthCheck: async () => true, getProviderKey: () => 'telegram' };
     const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
-    const originalReceipt = repo.recordUploadReceipt.bind(repo);
+    const originalReceiptBatch = repo.recordUploadReceipts.bind(repo);
     const originalFetch = globalThis.fetch;
     vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })));
-    (repo as any).recordUploadReceipt = async () => { throw new Error('DB_RECEIPT_WRITE_FAILED'); };
+    (repo as any).recordUploadReceipts = async () => { throw new Error('DB_RECEIPT_WRITE_FAILED'); };
     try {
       const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
         '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 1);
       await executor.importChapter(task!, 'worker-a');
     } finally {
-      (repo as any).recordUploadReceipt = originalReceipt;
+      (repo as any).recordUploadReceipts = originalReceiptBatch;
       vi.stubGlobal('fetch', originalFetch);
     }
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('BLOCKED');

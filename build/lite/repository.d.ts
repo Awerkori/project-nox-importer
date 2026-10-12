@@ -25,6 +25,23 @@ export interface LiteSourcePolicy {
     chapterIngestionEnabled: boolean;
     runnable: boolean;
 }
+/** A page upload that Telegram has confirmed and now needs one durable receipt. */
+export interface UploadReceiptInput {
+    taskId: string;
+    pagePosition: number;
+    mediaId: string;
+    sha256: string;
+    bytes: number;
+    mime: string;
+    width: number;
+    height: number;
+    providerKey: string;
+    botReference: string | null;
+    shardId: string | null;
+    channelId: string | null;
+    messageId: number | null;
+    createdBy: string;
+}
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export declare class LiteRepository {
     private readonly db;
@@ -157,22 +174,14 @@ export declare class LiteRepository {
         mediaId: string;
         state: string;
     }>;
-    recordUploadReceipt(input: {
-        taskId: string;
-        pagePosition: number;
-        mediaId: string;
-        sha256: string;
-        bytes: number;
-        mime: string;
-        width: number;
-        height: number;
-        providerKey: string;
-        botReference: string | null;
-        shardId: string | null;
-        channelId: string | null;
-        messageId: number | null;
-        createdBy: string;
-    }): Promise<void>;
+    recordUploadReceipt(input: UploadReceiptInput): Promise<void>;
+    /**
+     * Persist confirmed Telegram outcomes in one statement.  A page intent is
+     * still durable before its upload; batching only removes independent YSQL
+     * round trips after Telegram has replied.  On a batch error every caller
+     * retains the exact same UNKNOWN-outcome path as the single-page method.
+     */
+    recordUploadReceipts(inputs: UploadReceiptInput[]): Promise<void>;
     markUploadUnknown(taskId: string, position: number): Promise<void>;
     /** The provider explicitly rejected the attempt, so the same reserved ID may retry safely. */
     markUploadRetryable(taskId: string, position: number): Promise<void>;

@@ -612,18 +612,44 @@ export class LiteRepository {
         return { mediaId: durable.rows[0].media_id, state: durable.rows[0].state };
     }
     async recordUploadReceipt(input) {
-        // A writable CTE is one atomic YSQL statement: either both the media row
-        // and durable Telegram receipt appear, or neither does.  It replaces the
-        // per-page BEGIN/INSERT/UPDATE/COMMIT sequence without widening the
-        // ambiguous-upload window.
-        await this.db.query(`WITH media_insert AS (
-        INSERT INTO media(id,provider,provider_key,bot_reference,storage_shard_id,mime,width,height,bytes,sha256,created_by,storage_ready,purpose)
-        VALUES($1::uuid,'telegram',$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid,true,'chapter')
-        ON CONFLICT(id) DO NOTHING
-      ) UPDATE importer_lite_uploads SET state='PERSISTED',provider_key=$2,bot_reference=$3,storage_shard_id=$4,
-          channel_id=$11,telegram_message_id=$12,bytes=$8,mime=$5,updated_at=now()
-        WHERE task_id=$13::uuid AND page_position=$14 AND media_id=$1::uuid`, [input.mediaId, input.providerKey, input.botReference, input.shardId, input.mime, input.width, input.height,
-            input.bytes, input.sha256, input.createdBy, input.channelId, input.messageId, input.taskId, input.pagePosition]);
+        await this.recordUploadReceipts([input]);
+    }
+    /**
+     * Persist confirmed Telegram outcomes in one statement.  A page intent is
+     * still durable before its upload; batching only removes independent YSQL
+     * round trips after Telegram has replied.  On a batch error every caller
+     * retains the exact same UNKNOWN-outcome path as the single-page method.
+     */
+    async recordUploadReceipts(inputs) {
+        if (!inputs.length)
+            return;
+        // The executor flushes at most one bounded page-buffer window.  Keep the
+        // repository defensive so another caller cannot build a giant statement.
+        for (let offset = 0; offset < inputs.length; offset += 48) {
+            const batch = inputs.slice(offset, offset + 48);
+            await this.db.query(`WITH input AS (
+          SELECT * FROM unnest(
+            $1::uuid[],$2::int[],$3::uuid[],$4::text[],$5::int[],$6::text[],$7::int[],$8::int[],
+            $9::text[],$10::text[],$11::text[],$12::text[],$13::bigint[],$14::uuid[]
+          ) AS v(task_id,page_position,media_id,sha256,bytes,mime,width,height,provider_key,bot_reference,storage_shard_id,channel_id,telegram_message_id,created_by)
+        ), media_insert AS (
+          INSERT INTO media(id,provider,provider_key,bot_reference,storage_shard_id,mime,width,height,bytes,sha256,created_by,storage_ready,purpose)
+          SELECT media_id,'telegram',provider_key,bot_reference,storage_shard_id,mime,width,height,bytes,sha256,created_by,true,'chapter'
+          FROM input ON CONFLICT(id) DO NOTHING
+        ) UPDATE importer_lite_uploads u SET state='PERSISTED',provider_key=i.provider_key,bot_reference=i.bot_reference,
+            storage_shard_id=i.storage_shard_id,channel_id=i.channel_id,telegram_message_id=i.telegram_message_id,
+            bytes=i.bytes,mime=i.mime,updated_at=now()
+          FROM input i
+          WHERE u.task_id=i.task_id AND u.page_position=i.page_position AND u.media_id=i.media_id`, [
+                batch.map((input) => input.taskId), batch.map((input) => input.pagePosition),
+                batch.map((input) => input.mediaId), batch.map((input) => input.sha256),
+                batch.map((input) => input.bytes), batch.map((input) => input.mime),
+                batch.map((input) => input.width), batch.map((input) => input.height),
+                batch.map((input) => input.providerKey), batch.map((input) => input.botReference),
+                batch.map((input) => input.shardId), batch.map((input) => input.channelId),
+                batch.map((input) => input.messageId), batch.map((input) => input.createdBy),
+            ]);
+        }
     }
     async markUploadUnknown(taskId, position) {
         await this.db.query(`UPDATE importer_lite_uploads SET state='UNKNOWN',updated_at=now()
