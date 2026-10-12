@@ -57,6 +57,7 @@ export class ImporterLiteRuntime {
     monitorGate = new AsyncSemaphore(1, 'lite_p0_monitor');
     runtimeInstanceId;
     runtimeBootedAt = new Date();
+    chapterWorkerCapacity;
     isRuntimeLeader = false;
     runtimeLeadershipTimer = null;
     runtimeLeadershipRenewing = false;
@@ -89,10 +90,11 @@ export class ImporterLiteRuntime {
         this.queue = new LiteRepository(pool);
         this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
         this.bufferedPages = new AsyncSemaphore(config.BUFFERED_PAGE_CONCURRENCY, 'lite_global_page_buffers');
+        this.chapterWorkerCapacity = Math.max(1, Math.min(config.LITE_CHAPTER_WORKERS ?? 1, config.MAX_CONCURRENT_CHAPTERS, config.TESTED_CONCURRENCY_CEILING));
         // Five independent MangaFlix chapter waves can fill the measured 24-page
         // fence while each remains capped at six pages. The regressed 32/8 ramp
         // widened the global fence itself; this controlled ramp does not.
-        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter);
+        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter, this.chapterWorkerCapacity);
         this.dedupe = new DeduplicationEngine(catalogClient);
     }
     async start() {
@@ -109,10 +111,11 @@ export class ImporterLiteRuntime {
         await this.queue.staggerReadyDiscoveries(60_000, 64);
         await this.queue.recoverDuplicateCanonicalCatalogFailures();
         await this.refillHistoricalP1Catalog();
+        await this.refreshSourceFairness();
         // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
         // Lite cutover.  The Lite-specific cap begins safely and can only rise
         // through an explicit, benchmarked staging configuration.
-        const workers = Math.max(1, Math.min(this.config.LITE_CHAPTER_WORKERS ?? 1, this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING));
+        const workers = this.chapterWorkerCapacity;
         telemetryCollector.configureChapterSlots(workers, () => workers);
         // Queue lease owners include the per-boot leader identity. A process that
         // lost leadership can never checkpoint or finish a lease reclaimed by a
@@ -307,6 +310,16 @@ export class ImporterLiteRuntime {
         }
         catch { /* bounded recovery retries next turn */ }
         await this.refillHistoricalP1Catalog();
+        await this.refreshSourceFairness();
+    }
+    /** A bounded source view refreshes only outside claims and only once per recovery turn. */
+    async refreshSourceFairness() {
+        try {
+            this.executor.setFairSourceDemand(await this.queue.readyImportSources());
+        }
+        catch (error) {
+            this.logger.warn('Source fairness sample failed', { error: error?.message });
+        }
     }
     async upsertChapterSources(rows) {
         for (let offset = 0; offset < rows.length; offset += 500) {
@@ -478,7 +491,7 @@ export class ImporterLiteRuntime {
                 runtime: 'lite',
                 runtimeInstanceId: this.runtimeInstanceId,
                 leader: this.isRuntimeLeader,
-                chapterWorkers: Math.max(1, Math.min(this.config.LITE_CHAPTER_WORKERS ?? 1, this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING)),
+                chapterWorkers: this.chapterWorkerCapacity,
                 snapshotDeferred: 'POOL_BUSY',
                 ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
                 // In-memory stage telemetry is safe to sample while the two YSQL
@@ -513,6 +526,11 @@ export class ImporterLiteRuntime {
             this.queue.operationalSnapshot(), this.queue.progressSnapshot(),
             this.queue.blockedReasonSnapshot(), this.queue.sourceHealthSnapshot(),
         ]);
+        // The importer intentionally keeps a small YSQL pool shared with the
+        // site. Optional diversity telemetry must not add another concurrent
+        // heartbeat query and manufacture pool waiters by itself.
+        const diversity = await this.queue.publicationDiversitySnapshot();
+        const fairSources = this.executor.getFairSourceDemand();
         const memory = process.memoryUsage();
         const storageMetrics = this.storage.getMetricsSummary?.();
         // Keep the durable heartbeat compact, but include independently measured
@@ -529,7 +547,7 @@ export class ImporterLiteRuntime {
             runtime: 'lite',
             runtimeInstanceId: this.runtimeInstanceId,
             leader: this.isRuntimeLeader,
-            chapterWorkers: Math.max(1, Math.min(this.config.LITE_CHAPTER_WORKERS ?? 1, this.config.MAX_CONCURRENT_CHAPTERS, this.config.TESTED_CONCURRENCY_CEILING)),
+            chapterWorkers: this.chapterWorkerCapacity,
             publishedLastMinute: progress.publishedLastMinute,
             oldestReadyAt: progress.oldestReadyAt?.toISOString() || null,
             oldestStoredUnpublishedAt: progress.oldestStoredUnpublishedAt?.toISOString() || null,
@@ -553,7 +571,9 @@ export class ImporterLiteRuntime {
                 pageDownloadLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_downloads,
                 pageBufferLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_buffers,
             },
-            telegram, sourceRate: this.sourceRateLimiter.getSummary(), site: this.lastSiteProbe,
+            telegram, sourceRate: this.sourceRateLimiter.getSummary(), diversity,
+            sourceFairness: { readySources: fairSources, count: fairSources.length },
+            site: this.lastSiteProbe,
         };
         this.logger.info('Lite operational progress', snapshot);
         // A compact durable marker makes a native deploy auditable even when its

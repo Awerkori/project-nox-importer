@@ -24,6 +24,7 @@ export declare class ImporterLiteRuntime {
     private readonly monitorGate;
     private readonly runtimeInstanceId;
     private readonly runtimeBootedAt;
+    private readonly chapterWorkerCapacity;
     private isRuntimeLeader;
     private runtimeLeadershipTimer;
     private runtimeLeadershipRenewing;
@@ -63,6 +64,8 @@ export declare class ImporterLiteRuntime {
      */
     private refillHistoricalP1Catalog;
     private runRecoveryTurn;
+    /** A bounded source view refreshes only outside claims and only once per recovery turn. */
+    private refreshSourceFairness;
     private upsertChapterSources;
     /**
      * Catalog passes can rediscover a whole work that the legacy importer has

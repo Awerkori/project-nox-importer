@@ -30,6 +30,25 @@ async function probe(route,url) {
     probes.push({at:new Date().toISOString(),route,status:r.status,ttfbMs,bytes:Buffer.byteLength(html),routeError:/data-error="true"|Internal Error|Internal Server Error/.test(html)});
   } catch(e) {probes.push({at:new Date().toISOString(),route,status:0,ttfbMs:Math.round(performance.now()-started),error:e.name});}
 }
+async function visibleReleaseIds(start) {
+  const ids=new Set(); let cursorTime=null,cursorId=null;
+  // At most five small, public pages after the window. This is validation of
+  // the user-visible releases contract, not a load test or a source of truth.
+  for(let page=0;page<5;page++) {
+    const params=new URLSearchParams({limit:'48'});
+    if(cursorTime&&cursorId) { params.set('cursorTime',cursorTime);params.set('cursorId',cursorId); }
+    const r=await fetch(`https://manga.project-nox-awerkori.workers.dev/api/releases?${params}`,{
+      signal:AbortSignal.timeout(12000),headers:{'User-Agent':'NoxBoundedValidation/1.0','Cache-Control':'no-cache'}});
+    if(!r.ok) return {status:r.status,ids:[...ids]};
+    const body=await r.json(); const releases=Array.isArray(body.releases)?body.releases:[];
+    for(const release of releases) for(const chapter of (release.chapters||[])) {
+      if(chapter?.id && Date.parse(chapter.publishedAt||'')>=start.getTime()) ids.add(chapter.id);
+    }
+    if(!body.hasMore || !body.nextCursorTime || Date.parse(body.nextCursorTime)<start.getTime()) return {status:r.status,ids:[...ids]};
+    cursorTime=body.nextCursorTime;cursorId=body.nextCursorId;
+  }
+  return {status:200,ids:[...ids],truncated:true};
+}
 try {
   const clock=(await query("SELECT date_trunc('minute',clock_timestamp()) + interval '1 minute' AS start"))[0];
   const start=new Date(clock.start), end=new Date(start.getTime()+minutes*60000);
@@ -40,7 +59,7 @@ try {
   let nextSample=Date.now();
   while(Date.now()<end.getTime()) {
     const at=new Date().toISOString();
-    const routes=[['home','/'],['work',`/obra/${reader.slug}`],['reader',`/ler/${reader.id}`]];
+    const routes=[['home','/'],['releases','/lancamentos'],['releasesApi','/api/releases?limit=48'],['work',`/obra/${reader.slug}`],['reader',`/ler/${reader.id}`]];
     await Promise.allSettled(routes.map(([route,path])=>probe(route,`https://manga.project-nox-awerkori.workers.dev${path}`)));
     try {
       const [t]=await query("SELECT created_at,data FROM importer_diagnostic_telemetry WHERE session_id='runtime'");
@@ -73,14 +92,43 @@ try {
     percentile_cont(.95) WITHIN GROUP(ORDER BY duration_ms) AS occupancy_p95,
     avg(db_ms)::int AS db_ms,avg(download_ms)::int AS download_ms,avg(upload_ms)::int AS upload_ms
     FROM importer_job_metrics WHERE created_at >= $1 AND created_at < $2 GROUP BY source`,[start,end]);
-  const health=Object.fromEntries(['home','work','reader'].map(route=>{
+  const diversity=await query(`WITH visible AS (
+      SELECT e.chapter_id,COALESCE(to_jsonb(e)->>'source','(unattributed)') AS source,
+        COALESCE(to_jsonb(e)->>'work_id',c.work_id::text) AS work_id,
+        COALESCE(to_jsonb(e)->>'priority','(unattributed)') AS priority
+      FROM importer_publication_events e JOIN chapters c ON c.id=e.chapter_id
+      WHERE e.transition_at >= $1 AND e.transition_at < $2
+    ), source_counts AS (
+      SELECT source,count(*)::int AS chapters,count(DISTINCT work_id)::int AS works FROM visible GROUP BY source
+    ), work_counts AS (SELECT work_id,count(*)::int AS chapters FROM visible GROUP BY work_id),
+    priority_counts AS (SELECT priority,count(*)::int AS chapters FROM visible GROUP BY priority)
+    SELECT (SELECT count(*)::int FROM visible) AS chapters,
+      (SELECT count(DISTINCT source)::int FROM visible WHERE source <> '(unattributed)') AS unique_sources,
+      (SELECT count(DISTINCT work_id)::int FROM visible) AS unique_works,
+      (SELECT COALESCE(max(chapters),0)::int FROM source_counts) AS top_source_chapters,
+      (SELECT COALESCE(sum(chapters),0)::int FROM (SELECT chapters FROM source_counts ORDER BY chapters DESC LIMIT 3) x) AS top_three_source_chapters,
+      (SELECT COALESCE(max(chapters),0)::int FROM work_counts) AS top_work_chapters,
+      (SELECT COALESCE(sum(chapters),0)::int FROM (SELECT chapters FROM work_counts ORDER BY chapters DESC LIMIT 3) x) AS top_three_work_chapters,
+      (SELECT COALESCE(jsonb_agg(jsonb_build_object('source',source,'chapters',chapters,'works',works) ORDER BY chapters DESC,source),'[]'::jsonb) FROM source_counts) AS by_source,
+      (SELECT COALESCE(jsonb_agg(jsonb_build_object('priority',priority,'chapters',chapters) ORDER BY priority),'[]'::jsonb) FROM priority_counts) AS by_priority`,[start,end]);
+  const publishedIds=await query(`SELECT id::text AS id FROM chapters WHERE published_at >= $1 AND published_at < $2`,[start,end]);
+  const releases=await visibleReleaseIds(start);
+  const visibleIds=new Set(releases.ids), visiblePublic=publishedIds.filter(row=>visibleIds.has(row.id)).length;
+  const health=Object.fromEntries(['home','releases','releasesApi','work','reader'].map(route=>{
     const p=probes.filter(x=>x.route===route);return [route,{samples:p.length,success:p.filter(x=>x.status===200&&!x.routeError).length,
       notFound:p.filter(x=>x.status===404).length,serverError:p.filter(x=>x.status>=500).length,transportError:p.filter(x=>x.status===0).length,
       p50:quantile(p.map(x=>x.ttfbMs),.5),p95:quantile(p.map(x=>x.ttfbMs),.95)}];
   }));
   const values=buckets.map(b=>b.canonical), total=values.reduce((a,b)=>a+b,0), mean=total/minutes;
+  const d=diversity[0]||{}; const share=value=>total?Math.round(Number(value||0)*10000/total)/100:0;
   const report={start,end,minutes,buckets,total,rate:mean,median:quantile(values,.5),min:Math.min(...values),max:Math.max(...values),
-    standardDeviation:Math.sqrt(values.reduce((a,b)=>a+(b-mean)**2,0)/minutes),events,workload,health,samples,probes};
+    standardDeviation:Math.sqrt(values.reduce((a,b)=>a+(b-mean)**2,0)/minutes),events,workload,
+    diversity:{chapters:Number(d.chapters||0),uniqueSources:Number(d.unique_sources||0),uniqueWorks:Number(d.unique_works||0),
+      topSourceSharePercent:share(d.top_source_chapters),topThreeSourcesSharePercent:share(d.top_three_source_chapters),
+      topWorkSharePercent:share(d.top_work_chapters),topThreeWorksSharePercent:share(d.top_three_work_chapters),
+      bySource:d.by_source||[],byPriority:d.by_priority||[]},
+    publicReleases:{status:releases.status,visibleChapters:visiblePublic,publishedChapters:publishedIds.length,truncated:Boolean(releases.truncated)},
+    health,samples,probes};
   if(output) fs.writeFileSync(output,JSON.stringify(report,null,2),{mode:0o600});
   console.log(JSON.stringify({phase:'complete',...report,samples:report.samples.length,probes:report.probes.length}));
 } catch(e) {console.log(JSON.stringify({phase:'error',code:e.code||e.name}));process.exitCode=1;}

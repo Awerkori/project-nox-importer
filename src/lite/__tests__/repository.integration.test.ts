@@ -14,6 +14,7 @@ import type { StorageProvider } from '../../storage/provider.js';
 
 const migration = readFileSync(resolve(process.cwd(), 'migrations/20261010090000_importer_lite_v2.sql'), 'utf8');
 const readerMigration = readFileSync(resolve(process.cwd(), 'migrations/20260914171000_atomic_reader_repair.sql'), 'utf8');
+const fairHistoricalP1Migration = readFileSync(resolve(process.cwd(), 'migrations/20261012083000_lite_fair_historical_p1_catalog.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -101,6 +102,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   `);
   if (optionalRoles) await db.exec(readerMigration);
   await db.exec(migration);
+  await db.exec(fairHistoricalP1Migration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -177,6 +179,131 @@ describe('LiteRepository against the additive Lite migration', () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
       chapterKey: 'ready-reserve-4', priority: 'P1', idempotencyKey: 'ready-reserve-4' });
     expect(await repo.refillHistoricalP1Catalog(8, 4)).toBe(0);
+  });
+
+  it('admits the bounded historical P1 source reserve alongside P1 imports instead of hiding it behind a giant work', async () => {
+    const giant = '00000000-0000-4000-8000-000000000099';
+    await db.query(`INSERT INTO works(id,title,slug) VALUES($1::uuid,'Giant','giant')`, [giant]);
+    for (let index = 0; index < 32; index++) {
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: giant, workKey: `work:${giant}`,
+        chapterKey: `giant-${index}`, priority: 'P1', idempotencyKey: `giant-${index}` });
+    }
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      priority: 'P1', idempotencyKey: 'historical-source-a',
+      payload: { source: 'source-a', sourceWorkId: 'a', historicalP1Backfill: true } });
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      priority: 'P1', idempotencyKey: 'historical-source-b',
+      payload: { source: 'source-b', sourceWorkId: 'b', historicalP1Backfill: true } });
+
+    const claimed = [] as string[];
+    for (let index = 0; index < 3; index++) {
+      const task = await repo.claim(`historical-fair-${index}`, 120);
+      expect(task).toBeTruthy();
+      claimed.push(task!.taskType);
+      expect(await repo.finish(task!, `historical-fair-${index}`, { state: 'DONE' })).toBe(true);
+    }
+
+    // Both bounded source checks receive a turn before the giant can consume
+    // a second wave. Without the equal admission rank they remain hidden
+    // behind all 32 IMPORT_CHAPTER tasks.
+    expect(claimed.filter((type) => type === 'CATALOG')).toHaveLength(2);
+  });
+
+  it('samples multiple ready P1 source routes outside the claim path', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'source-fair-a', priority: 'P1', idempotencyKey: 'source-fair-a' });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      chapterKey: 'source-fair-b', priority: 'P1', idempotencyKey: 'source-fair-b' });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+      VALUES($1::uuid,'source-fair-a','source-a','a','a-1','pt-BR','default','n|000001|000000|0',10,true),
+            ($2::uuid,'source-fair-b','source-b','b','b-1','pt-BR','default','n|000001|000000|0',10,true)`, [ids.p1a, ids.p1b]);
+
+    expect(await repo.readyImportSources()).toEqual(['source-a', 'source-b']);
+  });
+
+  it('does not consume an import source slot for historical catalog work before it materializes chapters', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'hot-source-a', priority: 'P1', idempotencyKey: 'hot-source-a' });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+      VALUES($1::uuid,'hot-source-a','source-a','a','hot-a','pt-BR','default','n|000001|000000|0',10,true)`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      priority: 'P1', idempotencyKey: 'historical-visible-source-b',
+      payload: { source: 'source-b', sourceWorkId: 'b', historicalP1Backfill: true } });
+
+    expect(await repo.readyImportSources()).toEqual(['source-a']);
+  });
+
+  it('caps one source only while other ready sources can use a chapter slot', () => {
+    const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
+      new AsyncSemaphore(24, 'fair-downloads'), 4, new AsyncSemaphore(48, 'fair-buffers'), new HostRateLimiter(2), 5);
+    const mangaFlix = (executor as any).sourceSlot('mangaflix') as AsyncSemaphore;
+    expect(mangaFlix.capacity).toBe(5);
+    executor.setFairSourceDemand(['mangaflix', 'source-b', 'source-c', 'source-d', 'source-e']);
+    expect(mangaFlix.capacity).toBe(1);
+    // A selected fallback is folded into the current bounded set rather than
+    // bypassing source fairness until the next periodic sample.
+    const fallback = (executor as any).sourceSlot('fallback') as AsyncSemaphore;
+    expect(fallback.capacity).toBe(1);
+  });
+
+  it('yields a source-capped claim without spending a retry attempt', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'yield-source', priority: 'P1', idempotencyKey: 'yield-source' });
+    const task = await repo.claim('source-yield-worker', 120);
+    expect(task).toBeTruthy();
+    expect(task!.attempts).toBe(1);
+    expect(await repo.yieldForSourceFairness(task!, 'source-yield-worker', 50)).toBe(true);
+    const row = await db.query(`SELECT state,attempts,lease_owner,lease_until,next_run_at>now() AS delayed
+      FROM importer_lite_tasks WHERE id=$1::uuid`, [task!.id]);
+    expect(row.rows[0]).toMatchObject({ state: 'READY', attempts: 0, lease_owner: null, lease_until: null, delayed: true });
+  });
+
+  it('yields an actual hot-source import before networking when another ready source has capacity', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'hot-source-import', priority: 'P1', idempotencyKey: 'hot-source-import',
+      payload: { language: 'pt-BR', edition: 'default' } });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      chapterKey: 'other-source-import', priority: 'P1', idempotencyKey: 'other-source-import',
+      payload: { language: 'pt-BR', edition: 'default' } });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+      VALUES($1::uuid,'hot-source-import','source-a','a','hot-a','pt-BR','default','n|000001|000000|0',10,true),
+            ($2::uuid,'other-source-import','source-b','b','other-b','pt-BR','default','n|000001|000000|0',10,true)`, [ids.p1a, ids.p1b]);
+    const task = await repo.claim('fair-hot-worker', 120);
+    expect(task?.chapterKey).toBe('hot-source-import');
+    const adapter = { fetchChapterPages: vi.fn(async () => ['https://source-a.test/page.png']) };
+    const executor = new LiteExecutor(poolFor(db) as Pool, repo, { get: () => adapter } as unknown as SourceRegistry,
+      {} as StorageProvider, ids.staff, new AsyncSemaphore(2, 'fair-hot-downloads'), 1,
+      new AsyncSemaphore(2, 'fair-hot-buffers'), new HostRateLimiter(2), 2);
+    executor.setFairSourceDemand(['source-a', 'source-b']);
+    const hotSlot = (executor as any).sourceSlot('source-a') as AsyncSemaphore;
+    expect(hotSlot.tryAcquire()).toBe(true);
+    try {
+      await executor.importChapter(task!, 'fair-hot-worker');
+    } finally {
+      hotSlot.release();
+    }
+    expect(adapter.fetchChapterPages).not.toHaveBeenCalled();
+    const row = await db.query(`SELECT state,attempts,lease_owner,next_run_at>now() AS delayed
+      FROM importer_lite_tasks WHERE id=$1::uuid`, [task!.id]);
+    expect(row.rows[0]).toMatchObject({ state: 'READY', attempts: 0, lease_owner: null, delayed: true });
+  });
+
+  it('reports durable public publication diversity rather than task completion', async () => {
+    await db.query(`INSERT INTO importer_publication_events
+      (chapter_id,transition_at,recorded_at,bucket_minute,is_fresh_release,source,work_id,priority)
+      VALUES
+        ('00000000-0000-4000-8000-000000000201',now(),now(),date_trunc('minute',now()),false,'source-a',$1::uuid,2),
+        ('00000000-0000-4000-8000-000000000202',now(),now(),date_trunc('minute',now()),false,'source-a',$1::uuid,2),
+        ('00000000-0000-4000-8000-000000000203',now(),now(),date_trunc('minute',now()),true,'source-b',$2::uuid,1)`, [ids.p1a, ids.p1b]);
+    const snapshot = await repo.publicationDiversitySnapshot();
+    expect(snapshot).toMatchObject({
+      chapters: 3, attributedChapters: 3, uniqueSources: 2, uniqueWorks: 2,
+      topSourceSharePercent: 66.67, topThreeSourcesSharePercent: 100,
+      topWorkSharePercent: 66.67, topThreeWorksSharePercent: 100,
+    });
   });
 
   it('retries only catalog tasks blocked by the fixed duplicate canonical batch bug', async () => {
@@ -1592,6 +1719,10 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT provider_key,bot_reference,storage_shard_id,channel_id,telegram_message_id
       FROM importer_lite_uploads ORDER BY created_at LIMIT 1`)).rows[0])
       .toEqual({ provider_key: 'reader-file', bot_reference: 'bot-a', storage_shard_id: 'shard-a', channel_id: 'channel-a', telegram_message_id: 12345 });
+    // Diversity accounting is emitted only by the atomic public publication
+    // transition, never by discovery, storage or task completion.
+    expect((await db.query(`SELECT source,work_id,priority FROM importer_publication_events`)).rows)
+      .toEqual([{ source: 'source-a', work_id: ids.publish, priority: 2 }]);
   });
 
   it('shares idle claim backoff across workers instead of generating an empty-claim storm', async () => {

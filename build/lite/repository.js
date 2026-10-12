@@ -121,6 +121,131 @@ export class LiteRepository {
         return result.rows[0] ? asTask(result.rows[0]) : null;
     }
     /**
+     * A bounded view of sources that can serve an actual next-priority chapter
+     * import. One task is sampled per ready work, rather than the first N task
+     * rows, so a single large work cannot hide other ready works. Historical P1
+     * catalog work is admitted by the ready-work projection separately; it must
+     * not consume a chapter slot until it has materialised a real chapter.
+     *
+     * The sample is outside claim; durable claim remains authority for task
+     * existence, priority and work-level round-robin.
+     */
+    async readyImportSources(limit = 64) {
+        const maximum = Math.max(1, Math.min(128, limit));
+        const result = await this.db.query(`WITH lane AS (
+        SELECT min(priority) AS priority
+        FROM importer_lite_tasks
+        WHERE state='READY' AND monitoring=false AND task_type='IMPORT_CHAPTER' AND next_run_at<=now()
+      ), candidate_works AS (
+        SELECT rw.work_key
+        FROM importer_lite_ready_works rw JOIN lane ON lane.priority=rw.priority
+        ORDER BY rw.last_claimed_at NULLS FIRST,rw.next_run_at,rw.work_key
+        LIMIT $1
+      ), candidates AS (
+        SELECT t.id,t.work_id,t.chapter_key
+        FROM candidate_works rw
+        JOIN LATERAL (
+          SELECT id,work_id,chapter_key
+          FROM importer_lite_tasks t JOIN lane ON lane.priority=t.priority
+          WHERE t.work_key=rw.work_key AND t.state='READY' AND t.monitoring=false
+            AND t.task_type='IMPORT_CHAPTER' AND t.next_run_at<=now()
+          ORDER BY t.next_run_at,t.created_at
+          LIMIT 1
+        ) t ON true
+      ), import_routes AS (
+        SELECT DISTINCT ON (c.id) c.id,cs.source
+        FROM candidates c
+        JOIN importer_lite_chapter_sources cs
+          ON cs.work_id=c.work_id AND cs.canonical_chapter_key=c.chapter_key
+        JOIN importer_sources s ON s.id=cs.source
+        LEFT JOIN importer_lite_source_health h ON h.source=cs.source
+        WHERE cs.confirmed=true AND cs.has_chapter=true
+          AND s.enabled=true
+          AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+          AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
+               (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+          AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+          AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+      )
+      SELECT DISTINCT source FROM import_routes ORDER BY source`, [maximum]);
+        return result.rows.map((row) => String(row.source));
+    }
+    /**
+     * Recent public publication attribution. It reads the durable publication
+     * event rather than task DONE, so media storage or a stale task can never
+     * inflate throughput/diversity metrics.
+     */
+    async publicationDiversitySnapshot(windowSeconds = 60) {
+        const seconds = Math.max(10, Math.min(3_600, Math.floor(windowSeconds)));
+        const result = await this.db.query(`WITH events AS (
+        SELECT source,work_id,priority
+        FROM importer_publication_events
+        WHERE transition_at>=now()+($1::int * interval '1 second')
+      ), source_counts AS (
+        SELECT source,count(*)::int AS chapters,count(DISTINCT work_id)::int AS works
+        FROM events WHERE source IS NOT NULL GROUP BY source
+      ), work_counts AS (
+        SELECT work_id,count(*)::int AS chapters FROM events WHERE work_id IS NOT NULL GROUP BY work_id
+      ), priority_counts AS (
+        SELECT priority,count(*)::int AS chapters,count(DISTINCT work_id)::int AS works
+        FROM events GROUP BY priority
+      )
+      SELECT
+        (SELECT count(*)::int FROM events) AS chapters,
+        (SELECT count(*)::int FROM events WHERE source IS NOT NULL) AS attributed_chapters,
+        (SELECT count(DISTINCT source)::int FROM events WHERE source IS NOT NULL) AS unique_sources,
+        (SELECT count(DISTINCT work_id)::int FROM events WHERE work_id IS NOT NULL) AS unique_works,
+        (SELECT COALESCE(max(chapters),0)::int FROM source_counts) AS top_source_chapters,
+        (SELECT COALESCE(sum(chapters),0)::int FROM (SELECT chapters FROM source_counts ORDER BY chapters DESC LIMIT 3) top_sources) AS top_three_source_chapters,
+        (SELECT COALESCE(max(chapters),0)::int FROM work_counts) AS top_work_chapters,
+        (SELECT COALESCE(sum(chapters),0)::int FROM (SELECT chapters FROM work_counts ORDER BY chapters DESC LIMIT 3) top_works) AS top_three_work_chapters,
+        (SELECT COALESCE(jsonb_agg(jsonb_build_object('source',source,'chapters',chapters,'works',works) ORDER BY chapters DESC,source),'[]'::jsonb) FROM source_counts) AS by_source,
+        (SELECT COALESCE(jsonb_agg(jsonb_build_object('priority',priority,'chapters',chapters,'works',works) ORDER BY priority),'[]'::jsonb) FROM priority_counts) AS by_priority`, [-seconds]);
+        const row = result.rows[0] || {};
+        const chapters = Number(row.chapters || 0);
+        const share = (value) => chapters ? Math.round(Number(value || 0) * 10_000 / chapters) / 100 : 0;
+        return {
+            windowSeconds: seconds,
+            chapters,
+            attributedChapters: Number(row.attributed_chapters || 0),
+            uniqueSources: Number(row.unique_sources || 0),
+            uniqueWorks: Number(row.unique_works || 0),
+            topSourceSharePercent: share(row.top_source_chapters),
+            topThreeSourcesSharePercent: share(row.top_three_source_chapters),
+            topWorkSharePercent: share(row.top_work_chapters),
+            topThreeWorksSharePercent: share(row.top_three_work_chapters),
+            bySource: row.by_source || [],
+            byPriority: row.by_priority || [],
+        };
+    }
+    /**
+     * Source fairness is an admission yield, not a retry: no provider request
+     * was started and consuming retry budget would eventually block healthy
+     * work. Moving the work briefly behind its peers lets a source with an
+     * available permit proceed without changing durable priority.
+     */
+    async yieldForSourceFairness(task, workerId, delayMs = 750) {
+        const client = await this.db.connect();
+        try {
+            await client.query('BEGIN');
+            const result = await client.query(`UPDATE importer_lite_tasks
+        SET state='READY',attempts=GREATEST(attempts-1,0),lease_owner=NULL,lease_until=NULL,
+            next_run_at=GREATEST(next_run_at,now()+($3::int * interval '1 millisecond')),updated_at=now()
+        WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2`, [task.id, workerId, Math.max(50, Math.min(5_000, delayMs))]);
+            if (result.rowCount === 1)
+                await this.refreshReadyWork(client, task.workKey);
+            await client.query('COMMIT');
+            return result.rowCount === 1;
+        }
+        catch (error) {
+            await client.query('ROLLBACK').catch(() => { });
+            throw error;
+        }
+        finally {
+            client.release();
+        }
+    }
+    /**
      * Discovery is a low-cost producer, never a reason to monopolize P2.  This
      * bounded startup repair only defers due DISCOVER rows; catalog and chapter
      * tasks are untouched.  Each ready-work projection is refreshed in the
@@ -814,8 +939,12 @@ export class LiteRepository {
                 publishedAt = existing.rows[0]?.published_at || null;
             }
             if (publishedAt) {
-                await client.query(`INSERT INTO importer_publication_events(chapter_id,transition_at,recorded_at,bucket_minute,is_fresh_release)
-          VALUES($1::uuid,$2::timestamptz,clock_timestamp(),date_trunc('minute',$2::timestamptz),$3) ON CONFLICT(chapter_id) DO NOTHING`, [input.chapterId, publishedAt, input.fresh]);
+                await client.query(`INSERT INTO importer_publication_events
+          (chapter_id,transition_at,recorded_at,bucket_minute,is_fresh_release,source,work_id,priority)
+          VALUES($1::uuid,$2::timestamptz,clock_timestamp(),date_trunc('minute',$2::timestamptz),$3,$4,$5::uuid,$6)
+          ON CONFLICT(chapter_id) DO NOTHING`, [input.chapterId, publishedAt, input.fresh,
+                    typeof input.task.payload.source === 'string' ? input.task.payload.source : null,
+                    input.workId, LITE_PRIORITY_RANK[input.task.priority]]);
                 await client.query(`UPDATE works SET published=true,latest_chapter_published_at=GREATEST(COALESCE(latest_chapter_published_at,$2),$2),updated_at=now() WHERE id=$1::uuid`, [input.workId, publishedAt]);
                 const importTaskId = typeof input.task.payload.importTaskId === 'string' ? input.task.payload.importTaskId : null;
                 if (importTaskId) {
