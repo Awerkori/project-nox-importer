@@ -60,13 +60,16 @@ export class ManhastroAdapter {
                 });
                 if (response.status === 429) {
                     const retryAfter = response.headers.get('Retry-After');
-                    this.rateLimiter.handle429(parsedUrl.host, retryAfter, attempts);
+                    // A source-level 429 is already a durable Lite retry boundary. Do
+                    // not issue the remaining adapter retries immediately: doing so
+                    // ignores the limiter's just-recorded cooldown, burns provider
+                    // budget and holds a chapter slot while every peer waits. Propagate
+                    // the exact bounded cooldown to the executor instead.
+                    const retryAfterSeconds = this.rateLimiter.handle429(parsedUrl.host, retryAfter, attempts);
                     const error = new Error(`Rate limit reached (HTTP 429) for ${parsedUrl.host}`);
                     error.status = 429;
-                    error.retryAfter = retryAfter;
-                    if (attempts >= maxAttempts)
-                        throw error;
-                    continue;
+                    error.retryAfter = retryAfterSeconds;
+                    throw error;
                 }
                 if (!response.ok) {
                     const errText = await response.text().catch(() => '');
@@ -78,6 +81,8 @@ export class ManhastroAdapter {
                 return JSON.parse(cleaned);
             }
             catch (err) {
+                if (err?.status === 429)
+                    throw err;
                 if (attempts >= maxAttempts)
                     throw err;
                 await new Promise((r) => setTimeout(r, 1000 * attempts));

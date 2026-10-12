@@ -69,4 +69,23 @@ describe('ManhastroAdapter', () => {
       'https://albums.manhastro.net/t/123/temp/manga_abc/cap-1/3.webp',
     ]);
   });
+
+  it('propagates the first 429 to Lite instead of immediately retrying the same provider request', async () => {
+    const limiter = {
+      setHostRate: vi.fn(),
+      acquire: vi.fn(async () => undefined),
+      handle429: vi.fn(() => 17),
+      recordSuccess: vi.fn(),
+    } as unknown as HostRateLimiter;
+    const mockTransport = vi.fn().mockResolvedValue({
+      ok: false, status: 429, headers: new Headers({ 'Retry-After': '15' }), text: async () => 'slow down',
+    });
+    const adapter = new ManhastroAdapter(limiter, mockTransport as any);
+
+    await expect(adapter.fetchChapterPages('429')).rejects.toMatchObject({ status: 429, retryAfter: 17 });
+
+    expect(mockTransport).toHaveBeenCalledOnce();
+    expect((limiter as any).acquire).toHaveBeenCalledOnce();
+    expect((limiter as any).handle429).toHaveBeenCalledOnce();
+  });
 });
