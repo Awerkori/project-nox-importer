@@ -48,11 +48,12 @@ export declare class LiteExecutor {
     private readonly bufferedPages;
     private readonly sourceRateLimiter;
     private readonly chapterWorkerCapacity;
+    private readonly onRouteSelected?;
     private readonly sourceSlots;
     private readonly receiptBatcher;
     private readonly reservationBatcher;
     private fairDemandSources;
-    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number);
+    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined);
     /**
      * A bounded runtime sample of sources with ready imports. It only controls
      * local execution permits; the durable queue remains authority for task

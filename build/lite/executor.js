@@ -244,6 +244,7 @@ export class LiteExecutor {
     bufferedPages;
     sourceRateLimiter;
     chapterWorkerCapacity;
+    onRouteSelected;
     sourceSlots = new Map();
     receiptBatcher;
     reservationBatcher;
@@ -251,7 +252,7 @@ export class LiteExecutor {
     // Held from byte download through receipt persistence. This is distinct
     // from request concurrency: it bounds real image buffers across every
     // chapter worker while Telegram is slow or cooling down.
-    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = defaultBufferedPages(downloads), sourceRateLimiter = new HostRateLimiter(2), chapterWorkerCapacity = 1) {
+    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = defaultBufferedPages(downloads), sourceRateLimiter = new HostRateLimiter(2), chapterWorkerCapacity = 1, onRouteSelected) {
         this.db = db;
         this.queue = queue;
         this.registry = registry;
@@ -262,6 +263,7 @@ export class LiteExecutor {
         this.bufferedPages = bufferedPages;
         this.sourceRateLimiter = sourceRateLimiter;
         this.chapterWorkerCapacity = chapterWorkerCapacity;
+        this.onRouteSelected = onRouteSelected;
         this.receiptBatcher = new UploadReceiptBatcher(queue);
         this.reservationBatcher = new UploadReservationBatcher(queue);
     }
@@ -463,6 +465,7 @@ export class LiteExecutor {
         // A failed preferred source must not make a canonical chapter wait for a
         // confirmed, healthy alternative.  This loop is bounded by its routes.
         for (const route of routes) {
+            this.onRouteSelected?.(task.id, route.source);
             const adapter = this.registry.get(route.source);
             if (!adapter) {
                 lastError = new Error('SOURCE_ADAPTER_UNAVAILABLE');

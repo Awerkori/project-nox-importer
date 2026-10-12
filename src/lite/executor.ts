@@ -250,6 +250,7 @@ export class LiteExecutor {
     private readonly bufferedPages: AsyncSemaphore = defaultBufferedPages(downloads),
     private readonly sourceRateLimiter: HostRateLimiter = new HostRateLimiter(2),
     private readonly chapterWorkerCapacity = 1,
+    private readonly onRouteSelected?: (taskId: string, source: string) => void,
   ) {
     this.receiptBatcher = new UploadReceiptBatcher(queue);
     this.reservationBatcher = new UploadReservationBatcher(queue);
@@ -453,6 +454,7 @@ export class LiteExecutor {
     // A failed preferred source must not make a canonical chapter wait for a
     // confirmed, healthy alternative.  This loop is bounded by its routes.
     for (const route of routes) {
+      this.onRouteSelected?.(task.id, route.source);
       const adapter = this.registry.get(route.source);
       if (!adapter) { lastError = new Error('SOURCE_ADAPTER_UNAVAILABLE'); continue; }
       if (adapter.isChapterOwnedByWork && (!route.sourceWorkId || !adapter.isChapterOwnedByWork(route.sourceWorkId, route.sourceChapterId))) {

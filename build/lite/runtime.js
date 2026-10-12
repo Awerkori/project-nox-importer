@@ -61,6 +61,10 @@ export class ImporterLiteRuntime {
     isRuntimeLeader = false;
     runtimeLeadershipTimer = null;
     runtimeLeadershipRenewing = false;
+    leaseRenewStartedAt = null;
+    leaseRenewCompletedAt = null;
+    leaseRenewError = null;
+    workerLiveness = new Map();
     sitePausedUntil = 0;
     idleClaimUntil = 0;
     idleMonitorUntil = 0;
@@ -94,7 +98,7 @@ export class ImporterLiteRuntime {
         // Five independent MangaFlix chapter waves can fill the measured 24-page
         // fence while each remains capped at six pages. The regressed 32/8 ramp
         // widened the global fence itself; this controlled ramp does not.
-        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter, this.chapterWorkerCapacity);
+        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter, this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source));
         this.dedupe = new DeduplicationEngine(catalogClient);
     }
     async start() {
@@ -211,6 +215,7 @@ export class ImporterLiteRuntime {
             if (!this.isRuntimeLeader || this.runtimeLeadershipRenewing || this.stopped)
                 return;
             this.runtimeLeadershipRenewing = true;
+            this.leaseRenewStartedAt = new Date().toISOString();
             try {
                 const result = await this.pool.query(`UPDATE settings SET value=json_build_object('owner',$2::text,'started_at',$4::timestamptz,
              'expires_at',now()+($3::int * interval '1 second'))::text
@@ -219,12 +224,16 @@ export class ImporterLiteRuntime {
                     this.isRuntimeLeader = false;
                     this.logger.error('Lost Lite runtime leadership; new claims are gated.', { instanceId: this.runtimeInstanceId });
                 }
+                this.leaseRenewCompletedAt = new Date().toISOString();
+                this.leaseRenewError = null;
             }
             catch (error) {
                 // The durable lease remains valid for its remaining window. Retrying
                 // renewal is safer than treating a transient YSQL fault as permission
                 // for another runtime to publish immediately.
                 this.logger.warn('Lite runtime leadership renewal failed', { error: error?.message });
+                this.leaseRenewCompletedAt = new Date().toISOString();
+                this.leaseRenewError = String(error?.message || 'UNKNOWN').slice(0, 160);
             }
             finally {
                 this.runtimeLeadershipRenewing = false;
@@ -379,6 +388,7 @@ export class ImporterLiteRuntime {
         telemetryCollector.registerSlot(slotIndex);
         while (!this.stopped) {
             try {
+                this.setWorkerLiveness(workerId, 'CLAIM');
                 if (!this.isRuntimeLeader) {
                     telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'runtime-standby');
                     await sleep(250);
@@ -392,18 +402,37 @@ export class ImporterLiteRuntime {
                 telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
                 const task = await this.claimNext(workerId);
                 if (!task) {
+                    this.setWorkerLiveness(workerId, 'IDLE');
                     telemetryCollector.setSlotState(slotIndex, 'IDLE');
                     await sleep(750);
                     continue;
                 }
                 telemetryCollector.setSlotState(slotIndex, task.taskType === 'IMPORT_CHAPTER' ? 'ACTIVE_DOWNLOAD' : task.taskType === 'PUBLISH' ? 'ACTIVE_DB' : 'ACTIVE_SOURCE', task.taskType);
+                this.setWorkerLiveness(workerId, task.taskType === 'PUBLISH' ? 'PUBLISH' : task.taskType === 'IMPORT_CHAPTER' ? 'DOWNLOAD' : 'FETCH', task);
                 await this.handle(task, workerId);
+                this.setWorkerLiveness(workerId, 'FINALIZE', task);
                 telemetryCollector.setSlotState(slotIndex, 'IDLE');
+                this.setWorkerLiveness(workerId, 'IDLE');
             }
             catch {
+                this.setWorkerLiveness(workerId, 'IDLE');
                 telemetryCollector.setSlotState(slotIndex, 'IDLE');
                 await sleep(1_000);
             }
+        }
+    }
+    setWorkerLiveness(workerId, stage, task) {
+        this.workerLiveness.set(workerId, {
+            taskId: task?.id || null,
+            source: task ? String(task.payload.source || '') || null : null,
+            stage,
+            since: new Date().toISOString(),
+        });
+    }
+    setWorkerSource(taskId, source) {
+        for (const value of this.workerLiveness.values()) {
+            if (value.taskId === taskId)
+                value.source = source;
         }
     }
     /** One empty claim probe per idle interval, shared by every worker. */
@@ -482,6 +511,18 @@ export class ImporterLiteRuntime {
     }
     /** A small diagnostic snapshot; it deliberately skips contention and scans. */
     async emitOperationalSnapshot() {
+        const memory = process.memoryUsage();
+        // This must run before any optional diagnostic query. It is a bounded
+        // process log, so a future stall leaves the last local state without
+        // competing for a YSQL connection or retaining per-page telemetry.
+        this.logger.info('Lite liveness', {
+            at: new Date().toISOString(), leader: this.isRuntimeLeader,
+            memoryMiB: { rss: Math.round(memory.rss / 1024 / 1024), heapUsed: Math.round(memory.heapUsed / 1024 / 1024),
+                heapTotal: Math.round(memory.heapTotal / 1024 / 1024), external: Math.round(memory.external / 1024 / 1024) },
+            ysqlPool: { total: this.pool.totalCount, idle: this.pool.idleCount, waiting: this.pool.waitingCount },
+            lease: { startedAt: this.leaseRenewStartedAt, completedAt: this.leaseRenewCompletedAt, error: this.leaseRenewError },
+            workers: [...this.workerLiveness.entries()].map(([workerId, value]) => ({ workerId, ...value })),
+        });
         if (this.pool.waitingCount > 0) {
             // Do not run four diagnostic scans while the small direct pool is busy.
             // Keep a tiny durable liveness marker instead: an old full snapshot must
@@ -531,7 +572,6 @@ export class ImporterLiteRuntime {
         // heartbeat query and manufacture pool waiters by itself.
         const diversity = await this.queue.publicationDiversitySnapshot();
         const fairSources = this.executor.getFairSourceDemand();
-        const memory = process.memoryUsage();
         const storageMetrics = this.storage.getMetricsSummary?.();
         // Keep the durable heartbeat compact, but include independently measured
         // download and Telegram occupancy.  Aggregate publication rate cannot
