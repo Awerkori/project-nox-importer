@@ -70,6 +70,8 @@ export class ImporterLiteRuntime {
   private leaseRenewStartedAt: string | null = null;
   private leaseRenewCompletedAt: string | null = null;
   private leaseRenewError: string | null = null;
+  private heartbeatStartedAt: string | null = null;
+  private heartbeatCompletedAt: string | null = null;
   private readonly workerLiveness = new Map<string, WorkerLiveness>();
   private sitePausedUntil = 0;
   private idleClaimUntil = 0;
@@ -462,6 +464,20 @@ export class ImporterLiteRuntime {
     }
   }
 
+  private livenessSnapshot() {
+    const memory = process.memoryUsage();
+    return {
+      at: new Date().toISOString(),
+      memoryMiB: { rss: Math.round(memory.rss / 1024 / 1024), heapUsed: Math.round(memory.heapUsed / 1024 / 1024),
+        heapTotal: Math.round(memory.heapTotal / 1024 / 1024), external: Math.round(memory.external / 1024 / 1024),
+        arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024) },
+      ysqlPool: { total: this.pool.totalCount, idle: this.pool.idleCount, waiting: this.pool.waitingCount },
+      heartbeat: { startedAt: this.heartbeatStartedAt, completedAt: this.heartbeatCompletedAt },
+      lease: { startedAt: this.leaseRenewStartedAt, completedAt: this.leaseRenewCompletedAt, error: this.leaseRenewError },
+      workers: [...this.workerLiveness.entries()].map(([workerId, value]) => ({ workerId, ...value })),
+    };
+  }
+
   /** One empty claim probe per idle interval, shared by every worker. */
   private async claimNext(workerId: string): Promise<LiteTask | null> {
     return this.claimGate.runExclusive(async () => {
@@ -534,17 +550,14 @@ export class ImporterLiteRuntime {
 
   /** A small diagnostic snapshot; it deliberately skips contention and scans. */
   private async emitOperationalSnapshot(): Promise<void> {
+    this.heartbeatStartedAt = new Date().toISOString();
+    const liveness = this.livenessSnapshot();
     const memory = process.memoryUsage();
     // This must run before any optional diagnostic query. It is a bounded
     // process log, so a future stall leaves the last local state without
     // competing for a YSQL connection or retaining per-page telemetry.
     this.logger.info('Lite liveness', {
-      at: new Date().toISOString(), leader: this.isRuntimeLeader,
-      memoryMiB: { rss: Math.round(memory.rss / 1024 / 1024), heapUsed: Math.round(memory.heapUsed / 1024 / 1024),
-        heapTotal: Math.round(memory.heapTotal / 1024 / 1024), external: Math.round(memory.external / 1024 / 1024) },
-      ysqlPool: { total: this.pool.totalCount, idle: this.pool.idleCount, waiting: this.pool.waitingCount },
-      lease: { startedAt: this.leaseRenewStartedAt, completedAt: this.leaseRenewCompletedAt, error: this.leaseRenewError },
-      workers: [...this.workerLiveness.entries()].map(([workerId, value]) => ({ workerId, ...value })),
+      leader: this.isRuntimeLeader, ...liveness,
     });
     if (this.pool.waitingCount > 0) {
       // Do not run four diagnostic scans while the small direct pool is busy.
@@ -579,6 +592,7 @@ export class ImporterLiteRuntime {
           pageBufferLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_buffers,
         },
         sourceRate: this.sourceRateLimiter.getSummary(),
+        liveness,
         observedAt: new Date().toISOString(),
       };
       this.logger.info('Lite operational heartbeat deferred', deferred);
@@ -639,6 +653,7 @@ export class ImporterLiteRuntime {
       },
       telegram, sourceRate: this.sourceRateLimiter.getSummary(), diversity,
       sourceFairness: { readySources: fairSources, count: fairSources.length },
+      liveness,
       site: this.lastSiteProbe,
     };
     this.logger.info('Lite operational progress', snapshot);
@@ -650,6 +665,7 @@ export class ImporterLiteRuntime {
        ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
       [JSON.stringify({ ...snapshot, observedAt: new Date().toISOString() })],
     );
+    this.heartbeatCompletedAt = new Date().toISOString();
   }
 
   private async handle(task: LiteTask, workerId: string): Promise<void> {

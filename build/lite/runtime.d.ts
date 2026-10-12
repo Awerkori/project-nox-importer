@@ -31,6 +31,8 @@ export declare class ImporterLiteRuntime {
     private leaseRenewStartedAt;
     private leaseRenewCompletedAt;
     private leaseRenewError;
+    private heartbeatStartedAt;
+    private heartbeatCompletedAt;
     private readonly workerLiveness;
     private sitePausedUntil;
     private idleClaimUntil;
@@ -84,6 +86,7 @@ export declare class ImporterLiteRuntime {
     private worker;
     private setWorkerLiveness;
     private setWorkerSource;
+    private livenessSnapshot;
     /** One empty claim probe per idle interval, shared by every worker. */
     private claimNext;
     /**
