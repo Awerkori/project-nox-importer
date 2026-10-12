@@ -300,31 +300,42 @@ export class LiteRepository {
         LIMIT $1
       ) AS bounded_ready`, [floor]);
             const current = Number(reserve.rows[0]?.count || 0);
-            if (current >= floor) {
-                await client.query('COMMIT');
-                return 0;
-            }
+            // A large hot P1 import reserve is productive work, but it must not
+            // permanently prevent the bounded historical catalog producer from
+            // checking other mapped, healthy sources.  Keep only four such checks
+            // alive while the reserve is healthy (one per source); when it is low,
+            // retain the larger existing refill behavior needed to avoid starvation.
+            const maintainingHealthyReserve = current >= floor;
+            const target = maintainingHealthyReserve ? Math.min(4, maximum) : maximum;
+            const perSource = maintainingHealthyReserve ? 1 : 2;
             // The refill batch itself is durable work.  Count it separately from
             // imports: otherwise a steadily draining import reserve can trigger a
             // fresh 16-row catalog batch every recovery turn and grow a hidden P1
             // producer queue.  Existing work is never discarded; this merely caps
             // new pending historical checks at one small batch.
-            const pendingBackfill = await client.query(`SELECT count(*)::int AS count FROM (
-        SELECT 1 FROM importer_lite_tasks
-        WHERE state='READY' AND priority=2 AND task_type='CATALOG'
+            const pendingBackfill = await client.query(`WITH bounded_backfill AS (
+        SELECT state,next_run_at FROM importer_lite_tasks
+        WHERE state IN ('READY','RUNNING','RETRY_WAIT') AND priority=2 AND task_type='CATALOG'
           AND payload ? 'historicalP1Backfill'
+        ORDER BY CASE WHEN state='RUNNING' OR (state='READY' AND next_run_at<=now()) THEN 0 ELSE 1 END,
+          next_run_at,created_at
         LIMIT $1
-      ) AS bounded_backfill`, [maximum]);
-            const pending = Number(pendingBackfill.rows[0]?.count || 0);
-            if (pending >= maximum) {
+      ) SELECT count(*)::int AS total,
+        count(*) FILTER (WHERE state='RUNNING' OR (state='READY' AND next_run_at<=now()))::int AS active
+        FROM bounded_backfill`, [maximum]);
+            const pending = Number(pendingBackfill.rows[0]?.total || 0);
+            const activePending = Number(pendingBackfill.rows[0]?.active || 0);
+            // A provider in cooldown remains durable, but it must not occupy every
+            // healthy-source check in this tiny producer lane. Total pending work is
+            // still capped, while only runnable/running checks consume the target.
+            if (pending >= maximum || activePending >= target) {
                 await client.query('COMMIT');
                 return 0;
             }
-            // The floor is an early-warning gate, not the desired total task
-            // count.  Once it is crossed, queue one small catalog batch now so the
-            // next P1 source check is already waiting behind the remaining imports
-            // instead of creating an avoidable empty interval at zero.
-            const limit = maximum - pending;
+            // This is an explicitly bounded source-diverse producer reserve, not a
+            // second scheduler and not a scan in the claim path. It gives genuine
+            // alternatives a chance to materialize while a hot source is healthy.
+            const limit = Math.min(maximum - pending, target - activePending);
             const candidates = await client.query(`WITH bounded AS (
           SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id
           FROM importer_work_mappings m
@@ -352,9 +363,9 @@ export class LiteRepository {
           FROM bounded
         )
         SELECT source,source_work_id,work_id FROM fair
-        WHERE source_position<=2
+        WHERE source_position<=$3
         ORDER BY updated_at DESC,id DESC
-        LIMIT $2`, [Math.max(128, maximum * 16), limit]);
+        LIMIT $2`, [Math.max(128, maximum * 16), limit, perSource]);
             if (!candidates.rowCount) {
                 await client.query('COMMIT');
                 return 0;

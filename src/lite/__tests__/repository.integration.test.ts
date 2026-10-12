@@ -168,8 +168,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     // the first historical catalog batch is still waiting behind imports.
     expect(await repo.refillHistoricalP1Catalog(8, 4)).toBe(0);
 
-    // Existing executable P1 work is the reserve.  Backfill must not fill a
-    // second hidden queue while that reserve is already healthy.
+    // Existing executable P1 work limits the producer to the small existing
+    // reserve; it cannot grow a hidden queue on every recovery turn.
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'ready-reserve-1', priority: 'P1', idempotencyKey: 'ready-reserve-1' });
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
@@ -179,6 +179,59 @@ describe('LiteRepository against the additive Lite migration', () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
       chapterKey: 'ready-reserve-4', priority: 'P1', idempotencyKey: 'ready-reserve-4' });
     expect(await repo.refillHistoricalP1Catalog(8, 4)).toBe(0);
+  });
+
+  it('keeps a four-source historical P1 producer lane while a hot import reserve is healthy', async () => {
+    await db.query(`INSERT INTO importer_sources(id) VALUES('source-c'),('source-d'),('source-e')`);
+    for (let index = 0; index < 8; index++) {
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+        chapterKey: `hot-${index}`, priority: 'P1', idempotencyKey: `hot-${index}` });
+    }
+    const mappings = [
+      ['00000000-0000-4000-8000-000000000111', 'source-a', 'a-hot', ids.p1a],
+      ['00000000-0000-4000-8000-000000000112', 'source-b', 'b-hot', ids.p1b],
+      ['00000000-0000-4000-8000-000000000113', 'source-c', 'c-hot', ids.p1a],
+      ['00000000-0000-4000-8000-000000000114', 'source-d', 'd-hot', ids.p1b],
+      ['00000000-0000-4000-8000-000000000115', 'source-e', 'e-hot', ids.p1a],
+    ];
+    for (const [id, source, sourceWorkId, workId] of mappings) {
+      await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+        VALUES($1::uuid,$2,$3,$4::uuid,'WAITING_ADMISSION')`, [id, source, sourceWorkId, workId]);
+    }
+
+    expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(4);
+    const admitted = await db.query(`SELECT payload->>'source' AS source FROM importer_lite_tasks
+      WHERE task_type='CATALOG' AND payload ? 'historicalP1Backfill' ORDER BY source`);
+    expect(new Set(admitted.rows.map((row: any) => row.source)).size).toBe(4);
+    // Four pending checks cap the healthy-reserve producer; the fifth mapped
+    // source waits durably without turning recovery into a catalog sweep.
+    expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(0);
+  });
+
+  it('does not let delayed source cooldown checks occupy the healthy historical P1 producer lane', async () => {
+    await db.query(`INSERT INTO importer_sources(id) VALUES('source-c'),('source-d'),('source-e'),('source-f')`);
+    for (let index = 0; index < 4; index++) {
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+        chapterKey: `reserve-${index}`, priority: 'P1', idempotencyKey: `reserve-${index}` });
+      await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1b, workKey: `work:${ids.p1b}`, priority: 'P1',
+        idempotencyKey: `cooldown-${index}`, nextRunAt: new Date(Date.now() + 60_000),
+        payload: { source: index % 2 ? 'source-a' : 'source-b', sourceWorkId: `cooldown-${index}`, historicalP1Backfill: true } });
+    }
+    const mappings = [
+      ['00000000-0000-4000-8000-000000000121', 'source-c', 'c-ready', ids.p1a],
+      ['00000000-0000-4000-8000-000000000122', 'source-d', 'd-ready', ids.p1b],
+      ['00000000-0000-4000-8000-000000000123', 'source-e', 'e-ready', ids.p1a],
+      ['00000000-0000-4000-8000-000000000124', 'source-f', 'f-ready', ids.p1b],
+    ];
+    for (const [id, source, sourceWorkId, workId] of mappings) {
+      await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+        VALUES($1::uuid,$2,$3,$4::uuid,'WAITING_ADMISSION')`, [id, source, sourceWorkId, workId]);
+    }
+
+    expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(4);
+    const fresh = await db.query(`SELECT count(*)::int AS tasks FROM importer_lite_tasks
+      WHERE task_type='CATALOG' AND payload ? 'historicalP1Backfill' AND next_run_at<=now()`);
+    expect(fresh.rows[0].tasks).toBe(4);
   });
 
   it('admits the bounded historical P1 source reserve alongside P1 imports instead of hiding it behind a giant work', async () => {
