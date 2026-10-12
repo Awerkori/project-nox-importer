@@ -58,7 +58,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
       ON chapters(work_id,canonical_chapter_key) WHERE canonical_chapter_key IS NOT NULL;
     CREATE TABLE media (
       id uuid PRIMARY KEY, provider text, provider_key text, bot_reference text,
-      storage_shard_id text, mime text, width integer, height integer, bytes integer,
+      storage_shard_id uuid, mime text, width integer, height integer, bytes integer,
       sha256 text, created_by uuid, storage_ready boolean NOT NULL DEFAULT false,
       status text NOT NULL DEFAULT 'ACTIVE', purpose text, created_at timestamptz NOT NULL DEFAULT now()
     );
@@ -772,11 +772,15 @@ describe('LiteRepository against the additive Lite migration', () => {
       { taskId: task.rows[0].id, pagePosition: 1, mediaId: first.mediaId, sha256: 'batch-page-one', bytes: 1024,
         mime: 'image/png', width: 16, height: 16, providerKey: 'file-one', botReference: 'bot-a', shardId: 'shard-a', channelId: 'channel-a', messageId: 1, createdBy: ids.staff },
       { taskId: task.rows[0].id, pagePosition: 2, mediaId: second.mediaId, sha256: 'batch-page-two', bytes: 2048,
-        mime: 'image/png', width: 32, height: 32, providerKey: 'file-two', botReference: 'bot-b', shardId: 'shard-b', channelId: 'channel-b', messageId: 2, createdBy: ids.staff },
+        mime: 'image/png', width: 32, height: 32, providerKey: 'file-two', botReference: 'bot-b', shardId: '00000000-0000-4000-8000-000000000014', channelId: 'channel-b', messageId: 2, createdBy: ids.staff },
     ]);
 
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task.rows[0].id])).rows[0].count).toBe(2);
     expect((await db.query(`SELECT count(*)::int AS count FROM media WHERE id=ANY($1::uuid[])`, [[first.mediaId, second.mediaId]])).rows[0].count).toBe(2);
+    const mediaShards = (await db.query(`SELECT storage_shard_id FROM media WHERE id=ANY($1::uuid[]) ORDER BY id`, [[first.mediaId, second.mediaId]])).rows
+      .map((row) => row.storage_shard_id);
+    expect(mediaShards).toContain(null);
+    expect(mediaShards).toContain('00000000-0000-4000-8000-000000000014');
   });
 
   it('loads durable page receipts once for a chapter without including another task', async () => {
