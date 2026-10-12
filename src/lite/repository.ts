@@ -501,7 +501,13 @@ export class LiteRepository {
     await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
       VALUES($1,'HEALTHY',NULL,0,NULL)
       ON CONFLICT(source) DO UPDATE SET health='HEALTHY',cooldown_until=NULL,
-        consecutive_failures=0,last_error=NULL,updated_at=now()`, [source]).catch(() => {});
+        consecutive_failures=0,last_error=NULL,updated_at=now()
+      -- A completion which started before another worker received a provider
+      -- 429 must not erase that newer, durable retry boundary. Once the
+      -- bounded rate-limit cooldown expires, a later success resumes normal
+      -- health clearing as before.
+      WHERE NOT (importer_lite_source_health.health='RATE_LIMITED'
+        AND importer_lite_source_health.cooldown_until>now())`, [source]).catch(() => {});
   }
 
   /** One bounded recovery turn; it cannot consume the claim path or scan works. */
