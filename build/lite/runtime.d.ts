@@ -28,6 +28,10 @@ export declare class ImporterLiteRuntime {
     private isRuntimeLeader;
     private runtimeLeadershipTimer;
     private runtimeLeadershipRenewing;
+    private leaseRenewStartedAt;
+    private leaseRenewCompletedAt;
+    private leaseRenewError;
+    private readonly workerLiveness;
     private sitePausedUntil;
     private idleClaimUntil;
     private idleMonitorUntil;
@@ -78,6 +82,8 @@ export declare class ImporterLiteRuntime {
     /** Persist the exact legacy identity without rewriting any Reader chapter. */
     private upsertLegacyChapterMappings;
     private worker;
+    private setWorkerLiveness;
+    private setWorkerSource;
     /** One empty claim probe per idle interval, shared by every worker. */
     private claimNext;
     /**
