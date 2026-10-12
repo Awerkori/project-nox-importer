@@ -376,29 +376,31 @@ export class LiteRepository {
       // fresh 16-row catalog batch every recovery turn and grow a hidden P1
       // producer queue.  Existing work is never discarded; this merely caps
       // new pending historical checks at one small batch.
-      const pendingBackfill = await client.query<{ total: string; active: string }>(`WITH bounded_backfill AS (
-        SELECT state,next_run_at FROM importer_lite_tasks
+      const pendingBackfill = await client.query<{ total: string; active_sources: string }>(`WITH bounded_backfill AS (
+        SELECT state,next_run_at,payload FROM importer_lite_tasks
         WHERE state IN ('READY','RUNNING','RETRY_WAIT') AND priority=2 AND task_type='CATALOG'
           AND payload ? 'historicalP1Backfill'
         ORDER BY CASE WHEN state='RUNNING' OR (state='READY' AND next_run_at<=now()) THEN 0 ELSE 1 END,
           next_run_at,created_at
         LIMIT $1
       ) SELECT count(*)::int AS total,
-        count(*) FILTER (WHERE state='RUNNING' OR (state='READY' AND next_run_at<=now()))::int AS active
+        count(DISTINCT payload->>'source') FILTER (
+          WHERE state='RUNNING' OR (state='READY' AND next_run_at<=now())
+        )::int AS active_sources
         FROM bounded_backfill`, [maximum]);
       const pending = Number(pendingBackfill.rows[0]?.total || 0);
-      const activePending = Number(pendingBackfill.rows[0]?.active || 0);
+      const activeSources = Number(pendingBackfill.rows[0]?.active_sources || 0);
       // A provider in cooldown remains durable, but it must not occupy every
       // healthy-source check in this tiny producer lane. Total pending work is
       // still capped, while only runnable/running checks consume the target.
-      if (pending >= maximum || activePending >= target) {
+      if (pending >= maximum || activeSources >= target) {
         await client.query('COMMIT');
         return 0;
       }
       // This is an explicitly bounded source-diverse producer reserve, not a
       // second scheduler and not a scan in the claim path. It gives genuine
       // alternatives a chance to materialize while a hot source is healthy.
-      const limit = Math.min(maximum - pending, target - activePending);
+      const limit = Math.min(maximum - pending, target - activeSources);
       const candidates = await client.query<Row>(`WITH bounded AS (
           SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id
           FROM importer_work_mappings m
@@ -418,6 +420,18 @@ export class LiteRepository {
             AND NOT EXISTS (
               SELECT 1 FROM importer_lite_tasks t
               WHERE t.idempotency_key='lite:catalog:' || m.source || ':' || m.source_work_id
+            )
+            -- An old failed check stays durable for diagnosis and bounded
+            -- retry, but cannot consume every source seat in the producer
+            -- lane.  Never queue another mapping from a source that already
+            -- has a pending historical check: use this small opportunity to
+            -- ask a different healthy source for a manifest instead.
+            AND NOT EXISTS (
+              SELECT 1 FROM importer_lite_tasks t
+              WHERE t.state IN ('READY','RUNNING','RETRY_WAIT')
+                AND t.priority=2 AND t.task_type='CATALOG'
+                AND t.payload ? 'historicalP1Backfill'
+                AND t.payload->>'source'=m.source
             )
           ORDER BY m.updated_at DESC,m.id DESC
           LIMIT $1

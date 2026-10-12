@@ -209,6 +209,41 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(0);
   });
 
+  it('replaces duplicate pending source seats with distinct healthy P1 catalog sources', async () => {
+    await db.query(`INSERT INTO importer_sources(id) VALUES('source-c'),('source-d'),('source-e')`);
+    for (let index = 0; index < 4; index++) {
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+        chapterKey: `reserve-diverse-${index}`, priority: 'P1', idempotencyKey: `reserve-diverse-${index}` });
+    }
+    // These emulate durable retries from a previously unhealthy source. They
+    // remain intact, but must count as one active source seat, not three.
+    for (let index = 0; index < 3; index++) {
+      await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+        priority: 'P1', idempotencyKey: `stale-source-a-${index}`,
+        payload: { source: 'source-a', sourceWorkId: `a-stale-${index}`, historicalP1Backfill: true } });
+    }
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      priority: 'P1', idempotencyKey: 'stale-source-b',
+      payload: { source: 'source-b', sourceWorkId: 'b-stale', historicalP1Backfill: true } });
+    const mappings = [
+      ['00000000-0000-4000-8000-000000000131', 'source-c', 'c-fresh', ids.p1a],
+      ['00000000-0000-4000-8000-000000000132', 'source-d', 'd-fresh', ids.p1b],
+      ['00000000-0000-4000-8000-000000000133', 'source-e', 'e-fresh', ids.p1a],
+    ];
+    for (const [id, source, sourceWorkId, workId] of mappings) {
+      await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+        VALUES($1::uuid,$2,$3,$4::uuid,'WAITING_ADMISSION')`, [id, source, sourceWorkId, workId]);
+    }
+
+    // The healthy reserve has four seats. Two are already represented by
+    // source-a/source-b, so only two distinct alternatives are admitted.
+    expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(2);
+    const fresh = await db.query(`SELECT payload->>'source' AS source FROM importer_lite_tasks
+      WHERE payload->>'sourceWorkId' IN ('c-fresh','d-fresh','e-fresh') ORDER BY source`);
+    expect(fresh.rows.map((row: any) => row.source)).toHaveLength(2);
+    expect(fresh.rows.every((row: any) => !['source-a', 'source-b'].includes(row.source))).toBe(true);
+  });
+
   it('does not let delayed source cooldown checks occupy the healthy historical P1 producer lane', async () => {
     await db.query(`INSERT INTO importer_sources(id) VALUES('source-c'),('source-d'),('source-e'),('source-f')`);
     for (let index = 0; index < 4; index++) {
