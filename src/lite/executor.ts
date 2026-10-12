@@ -58,6 +58,19 @@ function hostFor(url: string): string | null {
   try { return new URL(url).host; } catch { return null; }
 }
 
+/** Persist a safe operational class, never a raw provider response or secret. */
+function uploadFailureClass(error: unknown): string {
+  const detail = error as { code?: unknown; statusCode?: unknown; message?: unknown } | undefined;
+  const status = Number(detail?.statusCode);
+  if (Number.isInteger(status) && status > 0) return `HTTP_${status}`;
+  const code = String(detail?.code || '').toUpperCase();
+  if (/^[A-Z][A-Z0-9_]{1,47}$/.test(code)) return code;
+  const message = String(detail?.message || '').toLowerCase();
+  if (message.includes('timeout')) return 'TIMEOUT';
+  if (message.includes('receipt') || message.includes('database') || message.includes('ysql')) return 'PERSISTENCE_ERROR';
+  return 'UNKNOWN_ERROR';
+}
+
 function numericDisplayValue(display: string): string | null {
   const normalized = display.trim().replace(',', '.');
   // Keep the textual display separately. This value exists only for legacy
@@ -473,6 +486,18 @@ export class LiteExecutor {
               // server accepted the upload. Only known HTTP rejections (notably
               // 429) may retry with the reserved media ID.
               if (receiptNeeded || !(error as any)?.statusCode) {
+                // UNKNOWN is intentionally terminal for this page: retain a
+                // redacted, durable stage/class so production can distinguish
+                // Telegram transport from post-upload receipt persistence
+                // without logging provider responses or credentials.
+                await this.queue.checkpoint(task, workerId, {
+                  lastUploadFailure: {
+                    position,
+                    phase: receiptNeeded ? 'RECEIPT_PERSISTENCE' : 'TELEGRAM_TRANSPORT',
+                    class: uploadFailureClass(error),
+                    at: new Date().toISOString(),
+                  },
+                });
                 await this.queue.markUploadUnknown(task.id, position);
                 throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
               }

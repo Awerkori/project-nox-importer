@@ -1161,7 +1161,8 @@ describe('LiteRepository against the additive Lite migration', () => {
       (repo as any).recordUploadReceipts = originalReceiptBatch;
       vi.stubGlobal('fetch', originalFetch);
     }
-    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('BLOCKED');
+    expect((await db.query(`SELECT state,checkpoint->'lastUploadFailure' AS failure FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
+      .toMatchObject({ state: 'BLOCKED', failure: { position: 1, phase: 'RECEIPT_PERSISTENCE', class: 'PERSISTENCE_ERROR' } });
     expect((await db.query(`SELECT state FROM importer_lite_uploads WHERE task_id=$1`, [task!.id])).rows[0].state).toBe('UNKNOWN');
     expect(storage.upload).toHaveBeenCalledOnce();
   });
