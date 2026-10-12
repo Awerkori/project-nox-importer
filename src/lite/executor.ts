@@ -121,7 +121,16 @@ export class UploadReceiptBatcher {
           await this.queue.recordUploadReceipts(batch.map((entry) => entry.input));
           for (const entry of batch) entry.resolve();
         } catch (error) {
-          for (const entry of batch) entry.reject(error);
+          // Telegram has already confirmed these exact media ids. Retrying the
+          // idempotent YSQL receipt write once is safe and avoids turning a
+          // transient pool/serialization failure into an ambiguous re-upload.
+          // A second failure still reaches the existing UNKNOWN safety fence.
+          try {
+            await this.queue.recordUploadReceipts(batch.map((entry) => entry.input));
+            for (const entry of batch) entry.resolve();
+          } catch (retryError) {
+            for (const entry of batch) entry.reject(retryError);
+          }
         }
       }
     } finally {

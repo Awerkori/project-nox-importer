@@ -1167,6 +1167,39 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(storage.upload).toHaveBeenCalledOnce();
   });
 
+  it('retries a transient receipt write once without repeating a confirmed Telegram upload', async () => {
+    const key = 'pt-br|default|chapter|4.1|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
+      VALUES ($1,$2,'source-a','a-4-1','pt-BR','default',true)`, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key, priority: 'P1', idempotencyKey: 'retry-transient-receipt',
+      payload: { displayNumber: '4.1', chapterTitle: 'Four Point One', language: 'pt-BR', edition: 'default', orderKey: '4.1' } });
+    const task = await repo.claim('worker-a', 120);
+    const registry = { get: () => ({ id: 'source-a', fetchChapterPages: async () => ['https://source-a.test/page.png'] }) } as unknown as SourceRegistry;
+    const storage: StorageProvider = { upload: vi.fn(async () => 'telegram-file'), healthCheck: async () => true, getProviderKey: () => 'telegram' };
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const originalReceiptBatch = repo.recordUploadReceipts.bind(repo);
+    const originalFetch = globalThis.fetch;
+    let receiptWrites = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })));
+    (repo as any).recordUploadReceipts = async (inputs: any[]) => {
+      receiptWrites++;
+      if (receiptWrites === 1) throw new Error('TRANSIENT_DB_RECEIPT_WRITE_FAILED');
+      return originalReceiptBatch(inputs);
+    };
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 1);
+      await executor.importChapter(task!, 'worker-a');
+    } finally {
+      (repo as any).recordUploadReceipts = originalReceiptBatch;
+      vi.stubGlobal('fetch', originalFetch);
+    }
+    expect(receiptWrites).toBe(2);
+    expect(storage.upload).toHaveBeenCalledOnce();
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
+    expect((await db.query(`SELECT state FROM importer_lite_uploads WHERE task_id=$1`, [task!.id])).rows[0].state).toBe('PERSISTED');
+  });
+
   it('keeps an explicit Telegram 429 retryable without switching bots or duplicating its upload intent', async () => {
     const key = 'pt-br|default|chapter|5|-';
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
