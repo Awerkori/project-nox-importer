@@ -864,6 +864,15 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toMatchObject({ health: 'HEALTHY', cooldown_until: null, consecutive_failures: 0, last_error: null });
   });
 
+  it('does not let a concurrent source success clear an active durable rate-limit cooldown', async () => {
+    await repo.recordSourceFailure('source-a', { retryAfter: 30, message: 'HTTP_429' });
+    await repo.recordSourceSuccess('source-a');
+    const row = (await db.query(`SELECT health,cooldown_until,consecutive_failures,last_error
+      FROM importer_lite_source_health WHERE source='source-a'`)).rows[0];
+    expect(row).toMatchObject({ health: 'RATE_LIMITED', consecutive_failures: 1, last_error: 'HTTP_429' });
+    expect(new Date(row.cooldown_until).getTime()).toBeGreaterThan(Date.now());
+  });
+
   it('bounds a hanging discovery call and returns its worker to durable retry', async () => {
     const adapter = { id: 'source-a', fetchUpdatedWorks: vi.fn(() => new Promise<never>(() => {})) };
     const runtime = new ImporterLiteRuntime(
