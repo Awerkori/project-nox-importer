@@ -277,9 +277,15 @@ export class LiteExecutor {
     );
     return result.rows.map((row) => {
       const status = String(row.status || 'ACTIVE').toUpperCase();
-      const sourceEnabled = row.enabled === true && row.chapter_ingestion_enabled !== false && ['ACTIVE', 'DEGRADED', 'RECOVERING'].includes(status);
       const healthCooldown = row.cooldown_until ? new Date(row.cooldown_until) : null;
       const sourceCooldown = row.source_cooldown ? new Date(row.source_cooldown) : null;
+      // Keep this admission rule exactly aligned with LiteRepository.sourcePolicy:
+      // an administrative cooldown with a passed durable deadline resumes the
+      // source.  Treating it as disabled here made catalog materialize P1 work
+      // which the executor immediately blocked as ALL_ROUTES_UNHEALTHY.
+      const administrativeCooldownExpired = status === 'COOLDOWN' && Boolean(sourceCooldown && sourceCooldown <= new Date());
+      const sourceEnabled = row.enabled === true && row.chapter_ingestion_enabled !== false &&
+        (['ACTIVE', 'DEGRADED', 'RECOVERING'].includes(status) || administrativeCooldownExpired);
       const cooldownUntil = [healthCooldown, sourceCooldown]
         .filter((value): value is Date => Boolean(value && Number.isFinite(value.getTime())))
         .sort((a, b) => b.getTime() - a.getTime())[0] || null;
