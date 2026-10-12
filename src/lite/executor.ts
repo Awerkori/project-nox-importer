@@ -4,7 +4,7 @@ import { readImageBody } from '../core/bounded-body.js';
 import { calculateSha256, inspectImage } from '../storage/media.js';
 import type { StorageProvider } from '../storage/provider.js';
 import type { SourceRegistry } from '../sources/registry.js';
-import { LiteRepository, type UploadReceiptInput } from './repository.js';
+import { LiteRepository, type UploadReceiptInput, type UploadReservationInput } from './repository.js';
 import { selectableChapterSources } from './source-selector.js';
 import type { ChapterSourceRoute, LiteTask } from './types.js';
 import { AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
@@ -122,6 +122,64 @@ export class UploadReceiptBatcher {
 }
 
 /**
+ * Coalesce only the durable pre-upload intents.  The batch is committed before
+ * any caller receives its media id, so it preserves the crash fence that
+ * prevents ambiguous Telegram sends from being replayed.
+ */
+export class UploadReservationBatcher {
+  private pending: Array<{
+    input: UploadReservationInput;
+    resolve: (value: { mediaId: string; state: string }) => void;
+    reject: (error: unknown) => void;
+  }> = [];
+  private flushTimer: NodeJS.Timeout | null = null;
+  private flushing = false;
+
+  constructor(private readonly queue: LiteRepository) {}
+
+  reserve(input: UploadReservationInput): Promise<{ mediaId: string; state: string }> {
+    return new Promise((resolve, reject) => {
+      this.pending.push({ input, resolve, reject });
+      if (this.pending.length >= 48) {
+        void this.flush();
+      } else if (!this.flushTimer) {
+        this.flushTimer = setTimeout(() => void this.flush(), 5);
+        this.flushTimer.unref();
+      }
+    });
+  }
+
+  private async flush(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    // See UploadReceiptBatcher: a fired timer must not suppress the follow-up
+    // batch while an earlier YSQL write is still in flight.
+    if (this.flushing) return;
+    this.flushing = true;
+    try {
+      while (this.pending.length) {
+        const batch = this.pending.splice(0, 48);
+        try {
+          const reservations = await this.queue.reserveUploads(batch.map((entry) => entry.input));
+          if (reservations.length !== batch.length) throw new Error('UPLOAD_RESERVATION_BATCH_INCOMPLETE');
+          for (let index = 0; index < batch.length; index++) batch[index].resolve(reservations[index]);
+        } catch (error) {
+          for (const entry of batch) entry.reject(error);
+        }
+      }
+    } finally {
+      this.flushing = false;
+      if (this.pending.length && !this.flushTimer) {
+        this.flushTimer = setTimeout(() => void this.flush(), 5);
+        this.flushTimer.unref();
+      }
+    }
+  }
+}
+
+/**
  * The canonical chapter mapping is unique in SQL, but a stale worker can race
  * a recovered worker before either observes that mapping. A stable UUID makes
  * the underlying Reader chapter insert idempotent as well, so that race can
@@ -145,6 +203,7 @@ function defaultBufferedPages(downloads: AsyncSemaphore): AsyncSemaphore {
 export class LiteExecutor {
   private readonly sourceSlots = new Map<string, AsyncSemaphore>();
   private readonly receiptBatcher: UploadReceiptBatcher;
+  private readonly reservationBatcher: UploadReservationBatcher;
   // Held from byte download through receipt persistence. This is distinct
   // from request concurrency: it bounds real image buffers across every
   // chapter worker while Telegram is slow or cooling down.
@@ -160,6 +219,7 @@ export class LiteExecutor {
     private readonly sourceRateLimiter: HostRateLimiter = new HostRateLimiter(2),
   ) {
     this.receiptBatcher = new UploadReceiptBatcher(queue);
+    this.reservationBatcher = new UploadReservationBatcher(queue);
   }
 
   private sourceSlot(source: string): AsyncSemaphore {
@@ -381,7 +441,8 @@ export class LiteExecutor {
               }
             } catch (error) { throw sourceFailure(error); }
             const { bytes, image } = downloaded;
-            const reserved = await this.queue.reserveUpload(task.id, position, calculateSha256(bytes));
+            const sha256 = calculateSha256(bytes);
+            const reserved = await this.reservationBatcher.reserve({ taskId: task.id, pagePosition: position, sha256 });
             if (reserved.state === 'PERSISTED') return reserved.mediaId;
             if (reserved.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
             let receiptNeeded = false;
@@ -397,7 +458,7 @@ export class LiteExecutor {
               }
               receiptNeeded = true;
               await this.receiptBatcher.persist({
-                taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256: calculateSha256(bytes),
+                taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256,
                 bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
                 botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,
                 shardId: this.storage.getLastShardId?.(reserved.mediaId) || null,

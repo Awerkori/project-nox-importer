@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AsyncSemaphore } from '../../core/concurrency.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { ImporterEngine } from '../../core/engine.js';
-import { LiteExecutor, UploadReceiptBatcher } from '../executor.js';
+import { LiteExecutor, UploadReceiptBatcher, UploadReservationBatcher } from '../executor.js';
 import { ImporterLiteRuntime } from '../runtime.js';
 import { LiteRepository } from '../repository.js';
 import type { SourceRegistry } from '../../sources/registry.js';
@@ -721,6 +721,26 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual({ state: 'PERSISTED', bytes: 4096, mime: 'image/png' });
     expect((await db.query(`SELECT storage_ready,sha256 FROM media WHERE id=$1`, [reserved.mediaId])).rows[0])
       .toEqual({ storage_ready: true, sha256: 'atomic-page-sha' });
+  });
+
+  it('reserves a bounded wave of durable pre-upload intents before Telegram work starts', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'chapter:batched-intents', priority: 'P1', idempotencyKey: 'batched-intents' });
+    const task = await db.query<{ id: string }>(`SELECT id FROM importer_lite_tasks WHERE idempotency_key='batched-intents'`);
+    const reservations = await repo.reserveUploads([
+      { taskId: task.rows[0].id, pagePosition: 1, sha256: 'intent-page-one' },
+      { taskId: task.rows[0].id, pagePosition: 2, sha256: 'intent-page-two' },
+    ]);
+    expect(reservations).toHaveLength(2);
+    expect(reservations.map((entry) => entry.state)).toEqual(['INTENT', 'INTENT']);
+    expect(new Set(reservations.map((entry) => entry.mediaId)).size).toBe(2);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads
+      WHERE task_id=$1 AND state='INTENT'`, [task.rows[0].id])).rows[0].count).toBe(2);
+
+    // The bulk fast path delegates a pre-existing intent to the established
+    // single-row recovery rule: no second Telegram attempt is ever allowed.
+    const resumed = await repo.reserveUploads([{ taskId: task.rows[0].id, pagePosition: 1, sha256: 'intent-page-one' }]);
+    expect(resumed[0]).toMatchObject({ mediaId: reservations[0].mediaId, state: 'UNKNOWN' });
   });
 
   it('persists a bounded wave of confirmed Telegram receipts in one durable batch', async () => {
@@ -1621,6 +1641,35 @@ describe('LiteRepository against the additive Lite migration', () => {
     const first = batcher.persist(input);
     await firstStarted;
     const second = batcher.persist({ ...input, pagePosition: 2 });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    releaseFirst();
+    const result = await Promise.race([
+      Promise.all([first, second]).then(() => 'completed'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+    expect(result).toBe('completed');
+    expect(calls).toHaveLength(2);
+  });
+
+  it('flushes reservation arrivals that occur while a prior durable batch is in flight', async () => {
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const calls: number[] = [];
+    const batcher = new UploadReservationBatcher({
+      reserveUploads: async () => {
+        calls.push(1);
+        if (calls.length === 1) {
+          markFirstStarted();
+          await firstGate;
+        }
+        return [{ mediaId: ids.page, state: 'INTENT' }];
+      },
+    } as unknown as LiteRepository);
+    const first = batcher.reserve({ taskId: ids.p1a, pagePosition: 1, sha256: 'reservation-race-one' });
+    await firstStarted;
+    const second = batcher.reserve({ taskId: ids.p1a, pagePosition: 2, sha256: 'reservation-race-two' });
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
     releaseFirst();
     const result = await Promise.race([

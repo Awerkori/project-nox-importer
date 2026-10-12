@@ -42,6 +42,12 @@ export interface UploadReceiptInput {
     messageId: number | null;
     createdBy: string;
 }
+/** A durable intent must exist before the matching Telegram upload starts. */
+export interface UploadReservationInput {
+    taskId: string;
+    pagePosition: number;
+    sha256: string;
+}
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export declare class LiteRepository {
     private readonly db;
@@ -168,6 +174,17 @@ export declare class LiteRepository {
         bytes: number | null;
         mime: string | null;
         mediaSha256: string | null;
+    }>>;
+    /**
+     * Reserve a bounded wave of pre-upload intents in one statement.  This is
+     * equivalent to `reserveUpload` for a fresh page, but lets concurrently
+     * completed downloads share the small direct YSQL pool.  Existing rows use
+     * the single-page path below, which retains its stricter stale-intent and
+     * invalid-media repair semantics.
+     */
+    reserveUploads(inputs: UploadReservationInput[]): Promise<Array<{
+        mediaId: string;
+        state: string;
     }>>;
     /** Stable ID is reserved before the non-transactional Telegram call. */
     reserveUpload(taskId: string, pagePosition: number, sha256: string): Promise<{

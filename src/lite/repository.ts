@@ -60,6 +60,13 @@ export interface UploadReceiptInput {
   createdBy: string;
 }
 
+/** A durable intent must exist before the matching Telegram upload starts. */
+export interface UploadReservationInput {
+  taskId: string;
+  pagePosition: number;
+  sha256: string;
+}
+
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export class LiteRepository {
   constructor(private readonly db: Db) {}
@@ -639,6 +646,62 @@ export class LiteRepository {
       mime: row.mime === null || row.mime === undefined ? null : String(row.mime),
       mediaSha256: row.media_sha256 === null || row.media_sha256 === undefined ? null : String(row.media_sha256),
     }]));
+  }
+
+  /**
+   * Reserve a bounded wave of pre-upload intents in one statement.  This is
+   * equivalent to `reserveUpload` for a fresh page, but lets concurrently
+   * completed downloads share the small direct YSQL pool.  Existing rows use
+   * the single-page path below, which retains its stricter stale-intent and
+   * invalid-media repair semantics.
+   */
+  async reserveUploads(inputs: UploadReservationInput[]): Promise<Array<{ mediaId: string; state: string }>> {
+    if (!inputs.length) return [];
+    const output: Array<{ mediaId: string; state: string }> = [];
+    for (let offset = 0; offset < inputs.length; offset += 48) {
+      const batch = inputs.slice(offset, offset + 48);
+      const freshIds = batch.map(() => randomUUID());
+      const result = await this.db.query<Row>(
+        `WITH input AS (
+           SELECT * FROM unnest($1::uuid[],$2::int[],$3::text[],$4::uuid[])
+             AS v(task_id,page_position,sha256,fresh_id)
+         ), reusable AS (
+           SELECT i.*, (SELECT m.id FROM media m
+             WHERE m.sha256=i.sha256 AND m.storage_ready=true AND m.bytes>0 AND m.mime LIKE 'image/%'
+             ORDER BY m.created_at LIMIT 1) AS reusable_media_id
+           FROM input i
+         ), inserted AS (
+           INSERT INTO importer_lite_uploads(task_id,page_position,media_id,sha256,state)
+           SELECT task_id,page_position,COALESCE(reusable_media_id,fresh_id),sha256,
+             CASE WHEN reusable_media_id IS NULL THEN 'INTENT' ELSE 'PERSISTED' END
+           FROM reusable
+           ON CONFLICT(task_id,page_position) DO NOTHING
+           RETURNING task_id,page_position,media_id,state
+         )
+         SELECT i.task_id,i.page_position,
+           COALESCE(ins.media_id,prior.media_id) AS media_id,
+           COALESCE(ins.state,prior.state) AS state,
+           (ins.task_id IS NULL) AS existing
+         FROM input i
+         LEFT JOIN inserted ins ON ins.task_id=i.task_id AND ins.page_position=i.page_position
+         LEFT JOIN importer_lite_uploads prior ON prior.task_id=i.task_id AND prior.page_position=i.page_position`,
+        [batch.map((input) => input.taskId), batch.map((input) => input.pagePosition),
+          batch.map((input) => input.sha256), freshIds],
+      );
+      const rows = new Map(result.rows.map((row) => [`${row.task_id}:${row.page_position}`, row]));
+      for (const input of batch) {
+        const row = rows.get(`${input.taskId}:${input.pagePosition}`);
+        // A conflict can be a recovery race or a historical invalid media
+        // reference.  Defer it to the proven single-row repair path; this is
+        // uncommon and never lets an ambiguous intent proceed to Telegram.
+        if (!row?.media_id || row.existing === true) {
+          output.push(await this.reserveUpload(input.taskId, input.pagePosition, input.sha256));
+        } else {
+          output.push({ mediaId: String(row.media_id), state: String(row.state) });
+        }
+      }
+    }
+    return output;
   }
 
   /** Stable ID is reserved before the non-transactional Telegram call. */
