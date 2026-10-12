@@ -62,6 +62,63 @@ function numericDisplayValue(display) {
     return /^\d+(?:\.\d+)?$/.test(normalized) ? normalized : null;
 }
 /**
+ * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
+ * a per-page fence, so a crash can never make a successful send retryable.
+ * Five milliseconds is enough to join a page wave without adding meaningful
+ * latency or a second scheduler/queue.
+ */
+class UploadReceiptBatcher {
+    queue;
+    pending = [];
+    flushTimer = null;
+    flushing = false;
+    constructor(queue) {
+        this.queue = queue;
+    }
+    persist(input) {
+        return new Promise((resolve, reject) => {
+            this.pending.push({ input, resolve, reject });
+            if (this.pending.length >= 48) {
+                void this.flush();
+            }
+            else if (!this.flushTimer) {
+                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer.unref();
+            }
+        });
+    }
+    async flush() {
+        if (this.flushing)
+            return;
+        if (this.flushTimer) {
+            clearTimeout(this.flushTimer);
+            this.flushTimer = null;
+        }
+        this.flushing = true;
+        try {
+            while (this.pending.length) {
+                const batch = this.pending.splice(0, 48);
+                try {
+                    await this.queue.recordUploadReceipts(batch.map((entry) => entry.input));
+                    for (const entry of batch)
+                        entry.resolve();
+                }
+                catch (error) {
+                    for (const entry of batch)
+                        entry.reject(error);
+                }
+            }
+        }
+        finally {
+            this.flushing = false;
+            if (this.pending.length && !this.flushTimer) {
+                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer.unref();
+            }
+        }
+    }
+}
+/**
  * The canonical chapter mapping is unique in SQL, but a stale worker can race
  * a recovered worker before either observes that mapping. A stable UUID makes
  * the underlying Reader chapter insert idempotent as well, so that race can
@@ -91,6 +148,7 @@ export class LiteExecutor {
     bufferedPages;
     sourceRateLimiter;
     sourceSlots = new Map();
+    receiptBatcher;
     // Held from byte download through receipt persistence. This is distinct
     // from request concurrency: it bounds real image buffers across every
     // chapter worker while Telegram is slow or cooling down.
@@ -104,6 +162,7 @@ export class LiteExecutor {
         this.perChapterPageConcurrency = perChapterPageConcurrency;
         this.bufferedPages = bufferedPages;
         this.sourceRateLimiter = sourceRateLimiter;
+        this.receiptBatcher = new UploadReceiptBatcher(queue);
     }
     sourceSlot(source) {
         let slot = this.sourceSlots.get(source);
@@ -360,7 +419,7 @@ export class LiteExecutor {
                                 telemetryCollector.trackActiveTelegramUpload(-1);
                             }
                             receiptNeeded = true;
-                            await this.queue.recordUploadReceipt({
+                            await this.receiptBatcher.persist({
                                 taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256: calculateSha256(bytes),
                                 bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
                                 botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,

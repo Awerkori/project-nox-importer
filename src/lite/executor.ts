@@ -4,7 +4,7 @@ import { readImageBody } from '../core/bounded-body.js';
 import { calculateSha256, inspectImage } from '../storage/media.js';
 import type { StorageProvider } from '../storage/provider.js';
 import type { SourceRegistry } from '../sources/registry.js';
-import { LiteRepository } from './repository.js';
+import { LiteRepository, type UploadReceiptInput } from './repository.js';
 import { selectableChapterSources } from './source-selector.js';
 import type { ChapterSourceRoute, LiteTask } from './types.js';
 import { AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
@@ -66,6 +66,58 @@ function numericDisplayValue(display: string): string | null {
 }
 
 /**
+ * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
+ * a per-page fence, so a crash can never make a successful send retryable.
+ * Five milliseconds is enough to join a page wave without adding meaningful
+ * latency or a second scheduler/queue.
+ */
+class UploadReceiptBatcher {
+  private pending: Array<{ input: UploadReceiptInput; resolve: () => void; reject: (error: unknown) => void }> = [];
+  private flushTimer: NodeJS.Timeout | null = null;
+  private flushing = false;
+
+  constructor(private readonly queue: LiteRepository) {}
+
+  persist(input: UploadReceiptInput): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.pending.push({ input, resolve, reject });
+      if (this.pending.length >= 48) {
+        void this.flush();
+      } else if (!this.flushTimer) {
+        this.flushTimer = setTimeout(() => void this.flush(), 5);
+        this.flushTimer.unref();
+      }
+    });
+  }
+
+  private async flush(): Promise<void> {
+    if (this.flushing) return;
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.flushing = true;
+    try {
+      while (this.pending.length) {
+        const batch = this.pending.splice(0, 48);
+        try {
+          await this.queue.recordUploadReceipts(batch.map((entry) => entry.input));
+          for (const entry of batch) entry.resolve();
+        } catch (error) {
+          for (const entry of batch) entry.reject(error);
+        }
+      }
+    } finally {
+      this.flushing = false;
+      if (this.pending.length && !this.flushTimer) {
+        this.flushTimer = setTimeout(() => void this.flush(), 5);
+        this.flushTimer.unref();
+      }
+    }
+  }
+}
+
+/**
  * The canonical chapter mapping is unique in SQL, but a stale worker can race
  * a recovered worker before either observes that mapping. A stable UUID makes
  * the underlying Reader chapter insert idempotent as well, so that race can
@@ -88,6 +140,7 @@ function defaultBufferedPages(downloads: AsyncSemaphore): AsyncSemaphore {
 
 export class LiteExecutor {
   private readonly sourceSlots = new Map<string, AsyncSemaphore>();
+  private readonly receiptBatcher: UploadReceiptBatcher;
   // Held from byte download through receipt persistence. This is distinct
   // from request concurrency: it bounds real image buffers across every
   // chapter worker while Telegram is slow or cooling down.
@@ -101,7 +154,9 @@ export class LiteExecutor {
     private readonly perChapterPageConcurrency = 4,
     private readonly bufferedPages: AsyncSemaphore = defaultBufferedPages(downloads),
     private readonly sourceRateLimiter: HostRateLimiter = new HostRateLimiter(2),
-  ) {}
+  ) {
+    this.receiptBatcher = new UploadReceiptBatcher(queue);
+  }
 
   private sourceSlot(source: string): AsyncSemaphore {
     let slot = this.sourceSlots.get(source);
@@ -337,7 +392,7 @@ export class LiteExecutor {
                 telemetryCollector.trackActiveTelegramUpload(-1);
               }
               receiptNeeded = true;
-              await this.queue.recordUploadReceipt({
+              await this.receiptBatcher.persist({
                 taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256: calculateSha256(bytes),
                 bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
                 botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,

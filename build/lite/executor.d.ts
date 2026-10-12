@@ -16,6 +16,7 @@ export declare class LiteExecutor {
     private readonly bufferedPages;
     private readonly sourceRateLimiter;
     private readonly sourceSlots;
+    private readonly receiptBatcher;
     constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter);
     private sourceSlot;
     private routes;
