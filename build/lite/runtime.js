@@ -481,6 +481,16 @@ export class ImporterLiteRuntime {
                 // diagnosis lose download/upload evidence to the protective snapshot
                 // deferral.
                 pipeline: {
+                    // These are effective parsed runtime limits, not inferred load.
+                    // Persisting them makes a low production ceiling distinguishable
+                    // from a slow provider without exposing any endpoint or credential.
+                    limits: {
+                        pageDownloads: this.downloads.capacity,
+                        pageBuffers: this.bufferedPages.capacity,
+                        pagesPerChapter: Math.max(1, Math.min(6, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
+                        telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
+                        uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
+                    },
                     downloads: pipelineTelemetry.imageDownload,
                     telegram: pipelineTelemetry.telegramStorage,
                     pageDownloadLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_downloads,
@@ -526,6 +536,13 @@ export class ImporterLiteRuntime {
             },
             ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
             pipeline: {
+                limits: {
+                    pageDownloads: this.downloads.capacity,
+                    pageBuffers: this.bufferedPages.capacity,
+                    pagesPerChapter: Math.max(1, Math.min(6, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
+                    telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
+                    uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
+                },
                 downloads: pipelineTelemetry.imageDownload,
                 telegram: pipelineTelemetry.telegramStorage,
                 pageDownloadLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_downloads,
