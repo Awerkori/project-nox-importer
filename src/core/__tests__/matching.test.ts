@@ -19,6 +19,15 @@ describe('work matching safety', () => {
     expect(result.matched).toBe(true);
   });
 
+  it('matches an explicit native-script alias without transliterating it', () => {
+    const result = matchWorkCandidate(
+      { title: 'Solo Leveling', aliases: ['나 혼자만 레벨업'] },
+      { title: '나 혼자만 레벨업' },
+    );
+    expect(result.matched).toBe(true);
+    expect(result.matchMethod).toBe('ALIAS_EXACT');
+  });
+
   it('only upgrades creator metadata when title, kind and synopsis corroborate it', () => {
     const evidence = evaluateMetadataMatchEvidence(
       {
