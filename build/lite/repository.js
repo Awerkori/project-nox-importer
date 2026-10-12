@@ -733,7 +733,15 @@ export class LiteRepository {
           ) AS v(task_id,page_position,media_id,sha256,bytes,mime,width,height,provider_key,bot_reference,storage_shard_id,channel_id,telegram_message_id,created_by)
         ), media_insert AS (
           INSERT INTO media(id,provider,provider_key,bot_reference,storage_shard_id,mime,width,height,bytes,sha256,created_by,storage_ready,purpose)
-          SELECT media_id,'telegram',provider_key,bot_reference,storage_shard_id,mime,width,height,bytes,sha256,created_by,true,'chapter'
+          -- importer_lite_uploads preserves the Telegram shard reference as
+          -- text, while the legacy media contract stores only a UUID shard.
+          -- Do not let a non-UUID adapter label invalidate an already
+          -- confirmed Telegram receipt; retain it in the Lite receipt and
+          -- omit it from media when it cannot be represented there.
+          SELECT media_id,'telegram',provider_key,bot_reference,
+            CASE WHEN storage_shard_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+              THEN storage_shard_id::uuid ELSE NULL END,
+            mime,width,height,bytes,sha256,created_by,true,'chapter'
           FROM input ON CONFLICT(id) DO NOTHING
         ) UPDATE importer_lite_uploads u SET state='PERSISTED',provider_key=i.provider_key,bot_reference=i.bot_reference,
             storage_shard_id=i.storage_shard_id,channel_id=i.channel_id,telegram_message_id=i.telegram_message_id,
