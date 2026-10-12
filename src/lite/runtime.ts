@@ -38,6 +38,12 @@ const rankForSource = (source: string) => source === 'mangaflix' ? 10 : source =
 const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
 const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
+// Five chapter workers can otherwise retain up to thirty decoded/downloaded
+// pages while Telegram receipts drain.  Production repeatedly reached the
+// 512 MiB container boundary before control-plane timers could run.  This
+// bounds only *new page buffers*; uploads, receipts, publication and lease
+// renewal remain unblocked so the in-memory wave can drain.
+const SAFE_BUFFERED_PAGE_CAP = 24;
 
 type WorkerLiveness = {
   taskId: string | null;
@@ -103,7 +109,7 @@ export class ImporterLiteRuntime {
     this.runtimeInstanceId = `${config.WORKER_ID}@${process.pid}-${randomUUID().slice(0, 8)}`;
     this.queue = new LiteRepository(pool);
     this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
-    this.bufferedPages = new AsyncSemaphore(config.BUFFERED_PAGE_CONCURRENCY, 'lite_global_page_buffers');
+    this.bufferedPages = new AsyncSemaphore(Math.min(config.BUFFERED_PAGE_CONCURRENCY, SAFE_BUFFERED_PAGE_CAP), 'lite_global_page_buffers');
     this.chapterWorkerCapacity = Math.max(1, Math.min(config.LITE_CHAPTER_WORKERS ?? 1,
       config.MAX_CONCURRENT_CHAPTERS, config.TESTED_CONCURRENCY_CEILING));
     // Five independent MangaFlix chapter waves can fill the measured 24-page
