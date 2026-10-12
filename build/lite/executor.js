@@ -123,6 +123,66 @@ export class UploadReceiptBatcher {
     }
 }
 /**
+ * Coalesce only the durable pre-upload intents.  The batch is committed before
+ * any caller receives its media id, so it preserves the crash fence that
+ * prevents ambiguous Telegram sends from being replayed.
+ */
+export class UploadReservationBatcher {
+    queue;
+    pending = [];
+    flushTimer = null;
+    flushing = false;
+    constructor(queue) {
+        this.queue = queue;
+    }
+    reserve(input) {
+        return new Promise((resolve, reject) => {
+            this.pending.push({ input, resolve, reject });
+            if (this.pending.length >= 48) {
+                void this.flush();
+            }
+            else if (!this.flushTimer) {
+                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer.unref();
+            }
+        });
+    }
+    async flush() {
+        if (this.flushTimer) {
+            clearTimeout(this.flushTimer);
+            this.flushTimer = null;
+        }
+        // See UploadReceiptBatcher: a fired timer must not suppress the follow-up
+        // batch while an earlier YSQL write is still in flight.
+        if (this.flushing)
+            return;
+        this.flushing = true;
+        try {
+            while (this.pending.length) {
+                const batch = this.pending.splice(0, 48);
+                try {
+                    const reservations = await this.queue.reserveUploads(batch.map((entry) => entry.input));
+                    if (reservations.length !== batch.length)
+                        throw new Error('UPLOAD_RESERVATION_BATCH_INCOMPLETE');
+                    for (let index = 0; index < batch.length; index++)
+                        batch[index].resolve(reservations[index]);
+                }
+                catch (error) {
+                    for (const entry of batch)
+                        entry.reject(error);
+                }
+            }
+        }
+        finally {
+            this.flushing = false;
+            if (this.pending.length && !this.flushTimer) {
+                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer.unref();
+            }
+        }
+    }
+}
+/**
  * The canonical chapter mapping is unique in SQL, but a stale worker can race
  * a recovered worker before either observes that mapping. A stable UUID makes
  * the underlying Reader chapter insert idempotent as well, so that race can
@@ -153,6 +213,7 @@ export class LiteExecutor {
     sourceRateLimiter;
     sourceSlots = new Map();
     receiptBatcher;
+    reservationBatcher;
     // Held from byte download through receipt persistence. This is distinct
     // from request concurrency: it bounds real image buffers across every
     // chapter worker while Telegram is slow or cooling down.
@@ -167,6 +228,7 @@ export class LiteExecutor {
         this.bufferedPages = bufferedPages;
         this.sourceRateLimiter = sourceRateLimiter;
         this.receiptBatcher = new UploadReceiptBatcher(queue);
+        this.reservationBatcher = new UploadReservationBatcher(queue);
     }
     sourceSlot(source) {
         let slot = this.sourceSlots.get(source);
@@ -405,7 +467,8 @@ export class LiteExecutor {
                             throw sourceFailure(error);
                         }
                         const { bytes, image } = downloaded;
-                        const reserved = await this.queue.reserveUpload(task.id, position, calculateSha256(bytes));
+                        const sha256 = calculateSha256(bytes);
+                        const reserved = await this.reservationBatcher.reserve({ taskId: task.id, pagePosition: position, sha256 });
                         if (reserved.state === 'PERSISTED')
                             return reserved.mediaId;
                         if (reserved.state === 'UNKNOWN')
@@ -424,7 +487,7 @@ export class LiteExecutor {
                             }
                             receiptNeeded = true;
                             await this.receiptBatcher.persist({
-                                taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256: calculateSha256(bytes),
+                                taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256,
                                 bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
                                 botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,
                                 shardId: this.storage.getLastShardId?.(reserved.mediaId) || null,

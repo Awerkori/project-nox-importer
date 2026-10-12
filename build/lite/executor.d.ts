@@ -1,7 +1,7 @@
 import type { Pool } from 'pg';
 import type { StorageProvider } from '../storage/provider.js';
 import type { SourceRegistry } from '../sources/registry.js';
-import { LiteRepository, type UploadReceiptInput } from './repository.js';
+import { LiteRepository, type UploadReceiptInput, type UploadReservationInput } from './repository.js';
 import type { LiteTask } from './types.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
@@ -20,6 +20,23 @@ export declare class UploadReceiptBatcher {
     persist(input: UploadReceiptInput): Promise<void>;
     private flush;
 }
+/**
+ * Coalesce only the durable pre-upload intents.  The batch is committed before
+ * any caller receives its media id, so it preserves the crash fence that
+ * prevents ambiguous Telegram sends from being replayed.
+ */
+export declare class UploadReservationBatcher {
+    private readonly queue;
+    private pending;
+    private flushTimer;
+    private flushing;
+    constructor(queue: LiteRepository);
+    reserve(input: UploadReservationInput): Promise<{
+        mediaId: string;
+        state: string;
+    }>;
+    private flush;
+}
 export declare class LiteExecutor {
     private readonly db;
     private readonly queue;
@@ -32,6 +49,7 @@ export declare class LiteExecutor {
     private readonly sourceRateLimiter;
     private readonly sourceSlots;
     private readonly receiptBatcher;
+    private readonly reservationBatcher;
     constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter);
     private sourceSlot;
     private routes;
