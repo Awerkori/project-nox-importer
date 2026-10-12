@@ -71,7 +71,7 @@ function numericDisplayValue(display: string): string | null {
  * Five milliseconds is enough to join a page wave without adding meaningful
  * latency or a second scheduler/queue.
  */
-class UploadReceiptBatcher {
+export class UploadReceiptBatcher {
   private pending: Array<{ input: UploadReceiptInput; resolve: () => void; reject: (error: unknown) => void }> = [];
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing = false;
@@ -91,11 +91,15 @@ class UploadReceiptBatcher {
   }
 
   private async flush(): Promise<void> {
-    if (this.flushing) return;
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
+    // A timer can fire while a previous database flush is still awaiting its
+    // reply. Clear that consumed timer before returning, otherwise the first
+    // flush sees a non-null (already-fired) handle and leaves later receipts
+    // stranded in memory.
+    if (this.flushing) return;
     this.flushing = true;
     try {
       while (this.pending.length) {

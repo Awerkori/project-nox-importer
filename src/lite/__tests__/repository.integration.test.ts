@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AsyncSemaphore } from '../../core/concurrency.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { ImporterEngine } from '../../core/engine.js';
-import { LiteExecutor } from '../executor.js';
+import { LiteExecutor, UploadReceiptBatcher } from '../executor.js';
 import { ImporterLiteRuntime } from '../runtime.js';
 import { LiteRepository } from '../repository.js';
 import type { SourceRegistry } from '../../sources/registry.js';
@@ -1596,5 +1596,38 @@ describe('LiteRepository against the additive Lite migration', () => {
     } finally { vi.stubGlobal('fetch', originalFetch); }
     expect(maxActiveUploads).toBe(1);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);
+  });
+
+  it('flushes receipt arrivals that occur while a prior durable batch is in flight', async () => {
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const calls: number[] = [];
+    const batcher = new UploadReceiptBatcher({
+      recordUploadReceipts: async () => {
+        calls.push(1);
+        if (calls.length === 1) {
+          markFirstStarted();
+          await firstGate;
+        }
+      },
+    } as unknown as LiteRepository);
+    const input = {
+      taskId: ids.p1a, pagePosition: 1, mediaId: ids.page, sha256: 'receipt-race', bytes: 1024,
+      mime: 'image/png', width: 16, height: 16, providerKey: 'file', botReference: null,
+      shardId: null, channelId: null, messageId: null, createdBy: ids.staff,
+    };
+    const first = batcher.persist(input);
+    await firstStarted;
+    const second = batcher.persist({ ...input, pagePosition: 2 });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    releaseFirst();
+    const result = await Promise.race([
+      Promise.all([first, second]).then(() => 'completed'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+    expect(result).toBe('completed');
+    expect(calls).toHaveLength(2);
   });
 });
