@@ -14,4 +14,20 @@ describe('Lite metadata policy', () => {
     expect(merged.synopsis).toBeUndefined();
     expect(sanitizeSynopsis('<p>Uma sinopse &amp; válida.</p><p>Segundo parágrafo.</p>')).toBe('Uma sinopse & válida.\n\nSegundo parágrafo.');
   });
+
+  it('merges aliases from confirmed metadata sources without losing native scripts', () => {
+    const first = mergeMetadata({}, {
+      title: 'Solo Leveling',
+      aliases: ['나 혼자만 레벨업', 'Only I Level Up']
+    });
+    const merged = mergeMetadata(first, {
+      aliases: [' only-i-level-up ', '俺だけレベルアップな件']
+    });
+
+    expect(merged.aliases?.value).toEqual([
+      '나 혼자만 레벨업',
+      'Only I Level Up',
+      '俺だけレベルアップな件'
+    ]);
+  });
 });
