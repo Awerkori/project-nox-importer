@@ -1,11 +1,11 @@
-import type { BufferReservation } from './concurrency.js';
+import type { BufferReservationRequestOptions } from './concurrency.js';
 import { Logger } from './logger.js';
 import { InvalidMediaError } from './retry-policy.js';
 import { performance } from 'node:perf_hooks';
 
 export interface ReadImageBodyOptions {
   maxBytes?: number;
-  reservation?: BufferReservation;
+  reservation?: BufferReservationLike;
   signal?: AbortSignal;
   /**
    * Optional, opt-in lifecycle hooks used by the bounded request trace. They
@@ -29,6 +29,15 @@ export interface ReadImageBodyOptions {
       error: unknown;
     }) => void;
   };
+}
+
+/** Structural contract shared by the legacy engine and Lite's byte budget. */
+export interface BufferReservationLike {
+  readonly reservedBytes: number;
+  readonly isCommitted: boolean;
+  readonly isReleased: boolean;
+  upgrade(newBytes: number, signal?: AbortSignal, options?: BufferReservationRequestOptions): Promise<void>;
+  release(): void;
 }
 
 export const MAX_IMAGE_BODY_BYTES = 20 * 1024 * 1024;

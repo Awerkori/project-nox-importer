@@ -7,6 +7,7 @@ import { AsyncSemaphore } from '../../core/concurrency.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { ImporterEngine } from '../../core/engine.js';
 import { LiteExecutor, UploadReceiptBatcher, UploadReservationBatcher } from '../executor.js';
+import { PageByteBudget } from '../page-byte-budget.js';
 import { ImporterLiteRuntime } from '../runtime.js';
 import { DUPLICATE_CANONICAL_BATCH_REASON, LiteRepository } from '../repository.js';
 import type { SourceRegistry } from '../../sources/registry.js';
@@ -1918,12 +1919,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     const pngB = Uint8Array.from(pngA);
     pngB[pngB.length - 13] ^= 1; // different valid IDAT payload/hash; parser intentionally does not decode pixels
     const originalFetch = globalThis.fetch;
-    vi.stubGlobal('fetch', vi.fn(async (url: string) => new Response(url.includes('one') ? pngA : pngB, { status: 200 })));
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const body = url.includes('one') ? pngA : pngB;
+      return new Response(body, { status: 200, headers: { 'content-length': String(body.byteLength) } });
+    }));
     try {
+      const byteBudget = new PageByteBudget(2 * 1024 * 1024);
       const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
         '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 2,
-        new AsyncSemaphore(1, 'test-buffered-pages'), new HostRateLimiter(100));
+        new AsyncSemaphore(1, 'test-buffered-pages'), new HostRateLimiter(100), 1, undefined, byteBudget);
       await executor.importChapter(task!, 'worker-a');
+      expect(byteBudget.snapshot().reservedBytes).toBe(0);
     } finally { vi.stubGlobal('fetch', originalFetch); }
     expect(maxActiveUploads).toBe(1);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);

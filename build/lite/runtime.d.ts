@@ -19,6 +19,7 @@ export declare class ImporterLiteRuntime {
     private readonly logger;
     private readonly downloads;
     private readonly bufferedPages;
+    private readonly bufferedPageBytes;
     private readonly claimGate;
     private readonly historicalP1BackfillGate;
     private readonly monitorGate;
