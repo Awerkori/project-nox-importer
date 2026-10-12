@@ -81,6 +81,30 @@ export declare class LiteRepository {
      */
     claimMonitor(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /**
+     * A bounded view of sources that can serve an actual next-priority chapter
+     * import. One task is sampled per ready work, rather than the first N task
+     * rows, so a single large work cannot hide other ready works. Historical P1
+     * catalog work is admitted by the ready-work projection separately; it must
+     * not consume a chapter slot until it has materialised a real chapter.
+     *
+     * The sample is outside claim; durable claim remains authority for task
+     * existence, priority and work-level round-robin.
+     */
+    readyImportSources(limit?: number): Promise<string[]>;
+    /**
+     * Recent public publication attribution. It reads the durable publication
+     * event rather than task DONE, so media storage or a stale task can never
+     * inflate throughput/diversity metrics.
+     */
+    publicationDiversitySnapshot(windowSeconds?: number): Promise<Record<string, unknown>>;
+    /**
+     * Source fairness is an admission yield, not a retry: no provider request
+     * was started and consuming retry budget would eventually block healthy
+     * work. Moving the work briefly behind its peers lets a source with an
+     * available permit proceed without changing durable priority.
+     */
+    yieldForSourceFairness(task: LiteTask, workerId: string, delayMs?: number): Promise<boolean>;
+    /**
      * Discovery is a low-cost producer, never a reason to monopolize P2.  This
      * bounded startup repair only defers due DISCOVER rows; catalog and chapter
      * tasks are untouched.  Each ready-work projection is refreshed in the

@@ -243,13 +243,15 @@ export class LiteExecutor {
     perChapterPageConcurrency;
     bufferedPages;
     sourceRateLimiter;
+    chapterWorkerCapacity;
     sourceSlots = new Map();
     receiptBatcher;
     reservationBatcher;
+    fairDemandSources = new Set();
     // Held from byte download through receipt persistence. This is distinct
     // from request concurrency: it bounds real image buffers across every
     // chapter worker while Telegram is slow or cooling down.
-    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = defaultBufferedPages(downloads), sourceRateLimiter = new HostRateLimiter(2)) {
+    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = defaultBufferedPages(downloads), sourceRateLimiter = new HostRateLimiter(2), chapterWorkerCapacity = 1) {
         this.db = db;
         this.queue = queue;
         this.registry = registry;
@@ -259,16 +261,49 @@ export class LiteExecutor {
         this.perChapterPageConcurrency = perChapterPageConcurrency;
         this.bufferedPages = bufferedPages;
         this.sourceRateLimiter = sourceRateLimiter;
+        this.chapterWorkerCapacity = chapterWorkerCapacity;
         this.receiptBatcher = new UploadReceiptBatcher(queue);
         this.reservationBatcher = new UploadReservationBatcher(queue);
     }
+    /**
+     * A bounded runtime sample of sources with ready imports. It only controls
+     * local execution permits; the durable queue remains authority for task
+     * existence, priority and work-level round-robin.
+     */
+    setFairSourceDemand(sources) {
+        this.fairDemandSources = new Set([...sources].filter(Boolean));
+        for (const [source, slot] of this.sourceSlots)
+            slot.setCapacity(this.sourceCapacity(source));
+    }
+    getFairSourceDemand() { return [...this.fairDemandSources].sort(); }
+    sourceCapacity(source) {
+        const configured = SOURCE_CONCURRENCY_LIMITS[source]?.maxChapters ?? 2;
+        if (this.fairDemandSources.size <= 1 || !this.fairDemandSources.has(source))
+            return configured;
+        const fairShare = Math.max(1, Math.ceil(Math.max(1, this.chapterWorkerCapacity) /
+            Math.min(5, this.fairDemandSources.size)));
+        return Math.min(configured, fairShare);
+    }
+    hasFairAlternative(source) {
+        return this.fairDemandSources.size > 1 &&
+            [...this.fairDemandSources].some((candidate) => candidate !== source);
+    }
     sourceSlot(source) {
+        // A confirmed fallback can become the actual producer after the bounded
+        // sample was taken. Fold it into the current fair set immediately so it
+        // cannot bypass the same per-source cap until the next refresh.
+        if (this.fairDemandSources.size > 0 && !this.fairDemandSources.has(source)) {
+            this.fairDemandSources.add(source);
+            for (const [knownSource, knownSlot] of this.sourceSlots)
+                knownSlot.setCapacity(this.sourceCapacity(knownSource));
+        }
         let slot = this.sourceSlots.get(source);
         if (!slot) {
             const configured = SOURCE_CONCURRENCY_LIMITS[source]?.maxChapters ?? 2;
             slot = new AsyncSemaphore(configured, `lite_source_${source}`);
             this.sourceSlots.set(source, slot);
         }
+        slot.setCapacity(this.sourceCapacity(source));
         return slot;
     }
     async routes(task) {
@@ -438,7 +473,16 @@ export class LiteExecutor {
                 continue;
             }
             const sourceSlot = this.sourceSlot(route.source);
-            await sourceSlot.acquire();
+            // A hot source must not keep a worker parked when the bounded runtime
+            // sample has a healthy alternative ready. This is a durable yield, not
+            // a retry: no provider call has started and the task keeps its priority.
+            if (!sourceSlot.tryAcquire()) {
+                if (this.hasFairAlternative(route.source)) {
+                    await this.queue.yieldForSourceFairness(task, workerId);
+                    return;
+                }
+                await sourceSlot.acquire();
+            }
             try {
                 let urls;
                 try {
@@ -572,7 +616,8 @@ export class LiteExecutor {
                 await this.queue.recordSourceSuccess(route.source);
                 await this.queue.enqueue({ taskType: 'PUBLISH', workId: task.workId, workKey: task.workKey, chapterKey: task.chapterKey,
                     priority: task.basePriority === 'STAFF' ? 'P0' : task.basePriority,
-                    idempotencyKey: `lite:publish:${task.workId}:${task.chapterKey}`, payload: { importTaskId: task.id } });
+                    idempotencyKey: `lite:publish:${task.workId}:${task.chapterKey}`,
+                    payload: { importTaskId: task.id, source: route.source } });
                 return;
             }
             catch (error) {

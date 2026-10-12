@@ -47,10 +47,21 @@ export declare class LiteExecutor {
     private readonly perChapterPageConcurrency;
     private readonly bufferedPages;
     private readonly sourceRateLimiter;
+    private readonly chapterWorkerCapacity;
     private readonly sourceSlots;
     private readonly receiptBatcher;
     private readonly reservationBatcher;
-    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter);
+    private fairDemandSources;
+    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number);
+    /**
+     * A bounded runtime sample of sources with ready imports. It only controls
+     * local execution permits; the durable queue remains authority for task
+     * existence, priority and work-level round-robin.
+     */
+    setFairSourceDemand(sources: Iterable<string>): void;
+    getFairSourceDemand(): string[];
+    private sourceCapacity;
+    private hasFairAlternative;
     private sourceSlot;
     private routes;
     /**
