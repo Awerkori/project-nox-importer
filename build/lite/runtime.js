@@ -107,6 +107,7 @@ export class ImporterLiteRuntime {
         // Stagger only discovery rows; executable catalog/chapter work remains
         // immediately eligible under the normal strict priority contract.
         await this.queue.staggerReadyDiscoveries(60_000, 64);
+        await this.queue.recoverDuplicateCanonicalCatalogFailures();
         await this.refillHistoricalP1Catalog();
         // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
         // Lite cutover.  The Lite-specific cap begins safely and can only rise
@@ -299,6 +300,10 @@ export class ImporterLiteRuntime {
     async runRecoveryTurn() {
         try {
             await this.queue.reconcile(50);
+        }
+        catch { /* bounded recovery retries next turn */ }
+        try {
+            await this.queue.recoverDuplicateCanonicalCatalogFailures();
         }
         catch { /* bounded recovery retries next turn */ }
         await this.refillHistoricalP1Catalog();
@@ -660,8 +665,8 @@ export class ImporterLiteRuntime {
                     .filter(Boolean))];
             const legacyPublished = await this.legacyPublishedChapterMap(source, resolved.workId, manifestSourceIds);
             const sourceRows = [];
-            const legacyRows = [];
-            const chapterTasks = [];
+            const legacyByChapterKey = new Map();
+            const chapterTaskByKey = new Map();
             const sourceChapterIds = new Set();
             for (const chapter of snapshot.chapters) {
                 // A duplicate manifest entry cannot be allowed to make one batched
@@ -682,14 +687,26 @@ export class ImporterLiteRuntime {
                     // The existing Reader publication remains authoritative.  This only
                     // gives Lite its canonical identity, so a future catalog pass cannot
                     // spend a P1 slot rediscovering the same source chapter.
-                    legacyRows.push({ workId: resolved.workId, chapterKey, chapterId: legacyChapterId, displayNumber, orderKey, language, edition });
+                    // Multiple provider entries can normalize to one canonical chapter.
+                    // Keep the first durable legacy binding; alternatives remain in
+                    // importer_lite_chapter_sources and must never create a second
+                    // Reader chapter or a multi-row UPSERT collision.
+                    if (!legacyByChapterKey.has(chapterKey)) {
+                        legacyByChapterKey.set(chapterKey, { workId: resolved.workId, chapterKey, chapterId: legacyChapterId, displayNumber, orderKey, language, edition });
+                    }
                 }
                 else if (policy.chapterIngestionEnabled) {
-                    chapterTasks.push({ taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
+                    const candidate = { taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
                         chapterKey, priority: chapterPriority, idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,
-                        payload: { displayNumber, chapterTitle: chapter.title || '', chapterKind: chapterKindValue, orderKey, language, edition } });
+                        payload: { displayNumber, chapterTitle: chapter.title || '', chapterKind: chapterKindValue, orderKey, language, edition } };
+                    if (!chapterTaskByKey.has(candidate.idempotencyKey))
+                        chapterTaskByKey.set(candidate.idempotencyKey, candidate);
                 }
             }
+            const legacyRows = [...legacyByChapterKey.values()];
+            // A mapped legacy publication is authoritative even if another source
+            // entry for the same canonical identity was not mapped yet.
+            const chapterTasks = [...chapterTaskByKey.values()].filter((task) => !legacyByChapterKey.has(String(task.chapterKey)));
             await this.upsertChapterSources(sourceRows);
             await this.upsertLegacyChapterMappings(legacyRows);
             const materialized = await this.queue.enqueueMany(chapterTasks);
