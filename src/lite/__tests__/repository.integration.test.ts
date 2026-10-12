@@ -1058,6 +1058,30 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toMatchObject({ state: 'DONE', source: 'source-b' });
   });
 
+  it('executes a confirmed source after its administrative cooldown deadline has passed', async () => {
+    const key = 'pt-br|default|chapter|expired-cooldown|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,source_rank,confirmed)
+      VALUES ($1,$2,'source-a','expired-cooldown-a','pt-BR','default',10,true)`, [ids.p1a, key]);
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()-interval '1 second' WHERE id='source-a'`);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key,
+      priority: 'P1', idempotencyKey: 'expired-cooldown-source',
+      payload: { displayNumber: '8', chapterTitle: 'Eight', language: 'pt-BR', edition: 'default', orderKey: '8' } });
+    const task = await repo.claim('worker-a', 120);
+    const sourceA = { id: 'source-a', fetchChapterPages: vi.fn(async () => ['https://source-a.test/page.png']) };
+    const storage: StorageProvider = { upload: vi.fn(async () => 'telegram-file-a'), healthCheck: async () => true, getProviderKey: () => 'telegram' };
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })));
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, { get: () => sourceA } as unknown as SourceRegistry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 1);
+      await executor.importChapter(task!, 'worker-a');
+    } finally { vi.stubGlobal('fetch', originalFetch); }
+    expect(sourceA.fetchChapterPages).toHaveBeenCalledOnce();
+    expect((await db.query(`SELECT state,checkpoint->>'selectedSource' AS source FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
+      .toMatchObject({ state: 'DONE', source: 'source-a' });
+  });
+
   it('requires adapter ownership proof before using a fallback route that can verify it', async () => {
     const key = 'pt-br|default|chapter|2|-';
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,source_rank,confirmed)
