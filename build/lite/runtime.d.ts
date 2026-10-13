@@ -65,9 +65,9 @@ export declare class ImporterLiteRuntime {
     /**
      * One periodic, bounded P1 reserve refill.  It runs after reconciliation
      * and never in the claim path, so legacy mappings cannot turn into a new
-     * global scheduler scan.  The repository only admits catalog checks when
-     * the existing P1-ready reserve is low; those checks remain behind ready
-     * P1 imports in normal claim ordering.
+     * global scheduler scan.  A healthy reserve keeps only a tiny, deferred
+     * source-diverse producer set; low reserve checks retain fair P1 admission
+     * so a giant work cannot hide missing manifests indefinitely.
      */
     private refillHistoricalP1Catalog;
     private runRecoveryTurn;
