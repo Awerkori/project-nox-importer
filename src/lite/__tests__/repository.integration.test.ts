@@ -929,7 +929,7 @@ describe('LiteRepository against the additive Lite migration', () => {
         return {
           ...client,
           query: async (text: string, values?: unknown[]) => {
-            if (text.includes("UPDATE importer_lite_tasks SET state='DONE'")) return { rows: [], rowCount: 0 } as any;
+            if (text.includes("UPDATE importer_lite_tasks t SET state='DONE'")) return { rows: [{ done: 0 }], rowCount: 1 } as any;
             return client.query(text, values);
           },
         };
@@ -1314,6 +1314,17 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual([{ media_id: ids.page, position: 1 }]);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_publication_events WHERE chapter_id=$1`, [ids.chapter])).rows[0].count).toBe(1);
     expect(await repo.progressSnapshot()).toMatchObject({ publishedLastMinute: 1, oldestReadyAt: null, oldestStoredUnpublishedAt: null });
+  });
+
+  it('keeps the chapter non-public when the atomic page replacement rejects an incomplete manifest', async () => {
+    await repo.enqueue({ taskType: 'PUBLISH', workId: ids.publish, workKey: `work:${ids.publish}`,
+      chapterKey: 'chapter:incomplete-media', priority: 'P1', idempotencyKey: 'publish-incomplete-media' });
+    const task = await repo.claim('publisher', 120);
+    await expect(repo.publish({ task: task!, workerId: 'publisher', chapterId: ids.chapter, workId: ids.publish,
+      mediaIds: ['00000000-0000-4000-8000-000000000009'], fresh: true })).rejects.toThrow('Incomplete stored page manifest');
+    expect((await db.query(`SELECT published_at FROM chapters WHERE id=$1`, [ids.chapter])).rows[0].published_at).toBeNull();
+    expect((await db.query(`SELECT count(*)::int AS count FROM pages WHERE chapter_id=$1`, [ids.chapter])).rows[0].count).toBe(0);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_publication_events WHERE chapter_id=$1`, [ids.chapter])).rows[0].count).toBe(0);
   });
 
   it('atomically settles stored media and materializes exactly one staff-aware publish task', async () => {
