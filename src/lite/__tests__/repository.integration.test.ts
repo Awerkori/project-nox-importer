@@ -319,6 +319,31 @@ describe('LiteRepository against the additive Lite migration', () => {
     }
   });
 
+  it('promotes only one deferred historical source check per bounded recovery turn', async () => {
+    const giant = '00000000-0000-4000-8000-000000000097';
+    await db.query(`INSERT INTO works(id,title,slug) VALUES($1::uuid,'Quota giant','quota-giant')`, [giant]);
+    for (let index = 0; index < 80; index++) {
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: giant, workKey: `work:${giant}`,
+        chapterKey: `quota-${index}`, priority: 'P1', idempotencyKey: `quota-${index}` });
+    }
+    for (const [index, workId] of [ids.p1a, ids.p1b].entries()) {
+      await repo.enqueue({ taskType: 'CATALOG', workId, workKey: `work:${workId}`,
+        priority: 'P1', idempotencyKey: `deferred-turn-${index}`,
+        payload: { source: `source-${index + 1}`, sourceWorkId: `turn-${index}`, historicalP1Backfill: true, deferBehindReadyImport: true } });
+    }
+
+    expect(await repo.promoteDeferredHistoricalP1Catalog(['source-1'])).toBe(true);
+    const turns = await db.query(`SELECT payload->>'source' AS source,payload->>'deferBehindReadyImport' AS deferred,count(*)::int AS tasks
+      FROM importer_lite_tasks WHERE idempotency_key LIKE 'deferred-turn-%'
+      GROUP BY source,deferred ORDER BY source`);
+    expect(turns.rows).toEqual([
+      { source: 'source-1', deferred: 'true', tasks: 1 },
+      { source: 'source-2', deferred: null, tasks: 1 },
+    ]);
+    expect((await db.query(`SELECT operation_rank FROM importer_lite_ready_works
+      WHERE work_key=$1`, [`work:${ids.p1b}`])).rows[0].operation_rank).toBe(1);
+  });
+
   it('samples multiple ready P1 source routes outside the claim path', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'source-fair-a', priority: 'P1', idempotencyKey: 'source-fair-a' });
