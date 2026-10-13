@@ -823,6 +823,31 @@ export class ImporterLiteRuntime {
             const chapterTasks = [...chapterTaskByKey.values()].filter((task) => !legacyByChapterKey.has(String(task.chapterKey)));
             await this.upsertChapterSources(sourceRows);
             await this.upsertLegacyChapterMappings(legacyRows);
+            // Do not spend download, Telegram and YSQL capacity on a chapter that
+            // cannot legally become Reader-visible.  Source mappings remain durable
+            // and this catalog task retries on its bounded cadence, so a later valid
+            // cover (from this or another confirmed source) admits the same manifest
+            // without inventing metadata or losing the historical repair.
+            if (chapterTasks.length && !await this.queue.workPresentationReady(resolved.workId)) {
+                await this.queue.parkUnpublishableWork(resolved.workId, `work:${resolved.workId}`);
+                const status = String(snapshot.details.status || 'UNKNOWN').toUpperCase();
+                const monitored = task.monitoring || task.priority === 'P0' || task.priority === 'STAFF';
+                await this.queue.finish(task, workerId, monitored ? {
+                    state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
+                    nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, 0)),
+                    workId: resolved.workId,
+                    checkpoint: { workId: resolved.workId, presentationIncomplete: true, lastCheckedAt: new Date().toISOString() },
+                    resetAttempts: true,
+                } : {
+                    state: task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
+                    reason: 'WORK_PRESENTATION_INCOMPLETE',
+                    nextRunAt: new Date(Date.now() + this.recurringRetryDelayMs(task.attempts)),
+                    workId: resolved.workId,
+                    checkpoint: { workId: resolved.workId, presentationIncomplete: true, lastCheckedAt: new Date().toISOString() },
+                });
+                await this.queue.recordSourceSuccess(source);
+                return;
+            }
             const materialized = await this.queue.enqueueMany(chapterTasks);
             const newReleaseCount = chapterTasks.filter((candidate) => candidate.priority === 'P0' && materialized.insertedKeys.has(candidate.idempotencyKey)).length;
             // A newly confirmed mapping (or repaired presentation metadata) is

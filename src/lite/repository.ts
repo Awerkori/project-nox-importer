@@ -633,6 +633,51 @@ export class LiteRepository {
     };
   }
 
+  /**
+   * Chapter media is expensive and a Reader chapter cannot be exposed without
+   * a minimally valid work presentation.  Catalog checks this once per work
+   * snapshot, never on the page or chapter hot path, so a missing cover does
+   * not turn into completed-but-unpublishable Telegram uploads.
+   */
+  async workPresentationReady(workId: string): Promise<boolean> {
+    const result = await this.db.query<Row>(`SELECT w.title,w.slug,w.cover_id,m.storage_ready,m.bytes
+      FROM works w LEFT JOIN media m ON m.id=w.cover_id
+      WHERE w.id=$1::uuid`, [workId]);
+    const work = result.rows[0];
+    return Boolean(work?.title && work?.slug && work?.cover_id &&
+      work.storage_ready === true && Number(work.bytes) >= 1500);
+  }
+
+  /**
+   * A catalog pass can prove that a work is not Reader-presentable before a
+   * large historical manifest reaches chapter workers. Park only work that
+   * has not started: in-flight lower-priority operations must still drain
+   * safely, and a later valid catalog pass reopens these exact durable rows.
+   */
+  async parkUnpublishableWork(workId: string, workKey: string): Promise<number> {
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const parked = await client.query<Row>(`UPDATE importer_lite_tasks
+        SET state='BLOCKED',reason='WORK_PRESENTATION_INCOMPLETE',
+            lease_owner=NULL,lease_until=NULL,
+            checkpoint=checkpoint || jsonb_build_object(
+              'presentationBlockedAt',clock_timestamp(),
+              'presentationPreviousReason',reason
+            ),updated_at=now()
+        WHERE work_id=$1::uuid
+          AND task_type IN ('IMPORT_CHAPTER','PUBLISH')
+          AND state IN ('READY','RETRY_WAIT')
+        RETURNING id`, [workId]);
+      await this.refreshReadyWork(client, workKey);
+      await client.query('COMMIT');
+      return parked.rowCount || 0;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+
   async checkpoint(task: LiteTask, workerId: string, patch: Record<string, unknown>): Promise<boolean> {
     const result = await this.db.query(
       `UPDATE importer_lite_tasks SET checkpoint=checkpoint || $3::jsonb, updated_at=now()
