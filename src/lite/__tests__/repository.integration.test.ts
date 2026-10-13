@@ -968,6 +968,32 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (second as any).releaseRuntimeLeadership();
   });
 
+  it('coalesces an overlapping operational snapshot instead of adding diagnostic pool work', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { WORKER_ID: 'snapshot', IMPORTER_USER_ID: ids.staff, DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, TELEGRAM_MEDIA_CONCURRENCY: 1,
+        UPLOAD_RATE_LIMIT_BYTES_PER_SEC: 1 } as any,
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const queue = (runtime as any).queue;
+    queue.operationalSnapshot = vi.fn(async () => { await gate; return []; });
+    queue.progressSnapshot = async () => ({ publishedLastMinute: 0, oldestReadyAt: null, oldestStoredUnpublishedAt: null, nextMonitorAt: null });
+    queue.blockedReasonSnapshot = async () => [];
+    queue.sourceHealthSnapshot = async () => [];
+    queue.publicationDiversitySnapshot = async () => ({ chapters: 0 });
+
+    const first = (runtime as any).emitOperationalSnapshot();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await (runtime as any).emitOperationalSnapshot();
+    expect(queue.operationalSnapshot).toHaveBeenCalledTimes(1);
+    release();
+    await first;
+    expect((runtime as any).operationalSnapshotRunning).toBe(false);
+  });
+
   it('fences a legacy runtime and Lite during cutover without stranding an in-flight durable task', async () => {
     // This is deliberately cross-runtime rather than a second Lite instance:
     // a rolling DIScloud deployment must never leave both v1 and Lite able to

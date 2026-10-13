@@ -34,6 +34,7 @@ export declare class ImporterLiteRuntime {
     private leaseRenewError;
     private heartbeatStartedAt;
     private heartbeatCompletedAt;
+    private operationalSnapshotRunning;
     private readonly workerLiveness;
     private sitePausedUntil;
     private idleClaimUntil;
@@ -101,6 +102,7 @@ export declare class ImporterLiteRuntime {
     private probeSharedResources;
     /** A small diagnostic snapshot; it deliberately skips contention and scans. */
     private emitOperationalSnapshot;
+    private emitOperationalSnapshotOnce;
     private handle;
     private discover;
     private catalog;
