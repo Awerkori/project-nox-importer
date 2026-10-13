@@ -80,6 +80,10 @@ export class ImporterLiteRuntime {
   private leaseRenewError: string | null = null;
   private heartbeatStartedAt: string | null = null;
   private heartbeatCompletedAt: string | null = null;
+  // A full operational snapshot includes optional aggregate diagnostics. It
+  // must never overlap itself when the shared two-connection pool is slow:
+  // concurrent timer turns otherwise amplify the very YSQL wait they report.
+  private operationalSnapshotRunning = false;
   private readonly workerLiveness = new Map<string, WorkerLiveness>();
   private sitePausedUntil = 0;
   private idleClaimUntil = 0;
@@ -568,6 +572,16 @@ export class ImporterLiteRuntime {
 
   /** A small diagnostic snapshot; it deliberately skips contention and scans. */
   private async emitOperationalSnapshot(): Promise<void> {
+    if (this.operationalSnapshotRunning) return;
+    this.operationalSnapshotRunning = true;
+    try {
+      await this.emitOperationalSnapshotOnce();
+    } finally {
+      this.operationalSnapshotRunning = false;
+    }
+  }
+
+  private async emitOperationalSnapshotOnce(): Promise<void> {
     this.heartbeatStartedAt = new Date().toISOString();
     const liveness = this.livenessSnapshot();
     const memory = process.memoryUsage();
