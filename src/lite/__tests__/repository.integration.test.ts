@@ -191,6 +191,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     for (let index = 0; index < 8; index++) {
       await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
         chapterKey: `hot-${index}`, priority: 'P1', idempotencyKey: `hot-${index}` });
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+        VALUES($1,$2,'source-a','hot-a',$3,'pt-BR','default',$2,10,true)`, [ids.p1a, `hot-${index}`, `hot-source-${index}`]);
     }
     const mappings = [
       ['00000000-0000-4000-8000-000000000111', 'source-a', 'a-hot', ids.p1a],
@@ -218,9 +221,12 @@ describe('LiteRepository against the additive Lite migration', () => {
     for (let index = 0; index < 64; index++) {
       await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
         chapterKey: `abundant-${index}`, priority: 'P1', idempotencyKey: `abundant-${index}` });
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+        VALUES($1,$2,'source-a','abundant-a',$3,'pt-BR','default',$2,10,true)`, [ids.p1a, `abundant-${index}`, `abundant-source-${index}`]);
     }
     await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
-      VALUES('00000000-0000-4000-8000-000000000125'::uuid,'source-a','abundant-a',$1::uuid,'WAITING_ADMISSION')`, [ids.p1a]);
+      VALUES('00000000-0000-4000-8000-000000000125'::uuid,'source-b','abundant-b',$1::uuid,'WAITING_ADMISSION')`, [ids.p1a]);
 
     expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(0);
     expect(repo.hasAbundantHistoricalP1Reserve()).toBe(true);
@@ -228,11 +234,35 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE task_type='CATALOG' AND payload ? 'historicalP1Backfill'`)).rows[0].count).toBe(0);
   });
 
+  it('does not let a cooled single-source P1 backlog suppress healthy catalog alternatives', async () => {
+    for (let index = 0; index < 64; index++) {
+      const chapterKey = `cooled-${index}`;
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+        chapterKey, priority: 'P1', idempotencyKey: `cooled-${index}` });
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+        VALUES($1,$2,'source-a','cooled-a',$3,'pt-BR','default',$2,10,true)`, [ids.p1a, chapterKey, `cooled-source-${index}`]);
+    }
+    await db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until)
+      VALUES('source-a','RATE_LIMITED',now()+interval '5 minutes')`);
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000126'::uuid,'source-b','healthy-alternative',$1::uuid,'WAITING_ADMISSION')`, [ids.p1b]);
+
+    expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(1);
+    expect(repo.hasAbundantHistoricalP1Reserve()).toBe(false);
+    expect((await db.query(`SELECT payload->>'source' AS source FROM importer_lite_tasks
+      WHERE idempotency_key='lite:catalog:source-b:healthy-alternative'`)).rows[0])
+      .toEqual({ source: 'source-b' });
+  });
+
   it('replaces duplicate pending source seats with distinct healthy P1 catalog sources', async () => {
     await db.query(`INSERT INTO importer_sources(id) VALUES('source-c'),('source-d'),('source-e')`);
     for (let index = 0; index < 4; index++) {
       await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
         chapterKey: `reserve-diverse-${index}`, priority: 'P1', idempotencyKey: `reserve-diverse-${index}` });
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+        VALUES($1,$2,'source-a','reserve-a',$3,'pt-BR','default',$2,10,true)`, [ids.p1a, `reserve-diverse-${index}`, `reserve-source-${index}`]);
     }
     // These emulate durable retries from a previously unhealthy source. They
     // remain intact, but must count as one active source seat, not three.

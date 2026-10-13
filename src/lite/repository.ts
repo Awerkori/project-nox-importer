@@ -385,16 +385,35 @@ export class LiteRepository {
     const floor = Math.max(1, Math.min(512, readyFloor));
     const maximum = Math.max(1, Math.min(32, batchLimit));
     // Four normal reserve windows is enough to keep workers supplied while
-    // making catalog production strictly yield to a genuinely large, already
-    // executable P1 backlog. Bound the count query itself as well.
+    // making catalog production strictly yield to a genuinely large,
+    // executable P1 backlog. A raw READY row behind a cooled-down or disabled
+    // route is not executable demand: counting it here would suppress the
+    // bounded, source-diverse catalog producer precisely when healthy sources
+    // need to materialize their alternatives. Bound the eligibility check as
+    // well; it remains outside the claim path.
     const abundantFloor = Math.min(512, Math.max(64, floor * 4));
     this.historicalP1ReserveAbundant = false;
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
       const reserve = await client.query<{ count: string }>(`SELECT count(*)::int AS count FROM (
-        SELECT 1 FROM importer_lite_tasks
-        WHERE state='READY' AND monitoring=false AND priority=2 AND task_type='IMPORT_CHAPTER'
+        SELECT 1 FROM importer_lite_tasks t
+        WHERE t.state='READY' AND t.monitoring=false AND t.priority=2 AND t.task_type='IMPORT_CHAPTER'
+          AND t.next_run_at<=now()
+          AND EXISTS (
+            SELECT 1
+            FROM importer_lite_chapter_sources cs
+            JOIN importer_sources s ON s.id=cs.source
+            LEFT JOIN importer_lite_source_health h ON h.source=cs.source
+            WHERE cs.work_id=t.work_id AND cs.canonical_chapter_key=t.chapter_key
+              AND cs.confirmed=true AND cs.has_chapter=true
+              AND s.enabled=true
+              AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+              AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
+                   (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+              AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+              AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+          )
         LIMIT $1
       ) AS bounded_ready`, [abundantFloor]);
       const current = Number(reserve.rows[0]?.count || 0);
