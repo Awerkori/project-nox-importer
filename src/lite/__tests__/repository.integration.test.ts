@@ -100,7 +100,9 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
     INSERT INTO media(id,mime,width,height,bytes,sha256,storage_ready,status) VALUES
       ('${ids.cover}','image/jpeg',600,900,2000,'cover-sha',true,'ACTIVE'),
       ('${ids.page}','image/jpeg',800,1200,3000,'page-sha',true,'ACTIVE');
-    UPDATE works SET cover_id='${ids.cover}' WHERE id='${ids.publish}';
+    -- Most catalog scenarios model already-presentable existing works. Tests
+    -- for the catalog admission gate explicitly clear a cover instead.
+    UPDATE works SET cover_id='${ids.cover}';
   `);
   if (optionalRoles) await db.exec(readerMigration);
   await db.exec(migration);
@@ -1868,6 +1870,41 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).catalog(task, 'monitor');
     const created = await db.query(`SELECT priority,base_priority FROM importer_lite_tasks WHERE idempotency_key='lite:chapter:' || $1 || ':pt-br|default|chapter|2|-'`, [ids.p1a]);
     expect(created.rows[0]).toEqual({ priority: 1, base_priority: 1 });
+  });
+
+  it('keeps a manifest durable but defers chapter admission until the work has a public presentation', async () => {
+    await db.query(`UPDATE works SET cover_id=NULL WHERE id=$1`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P1',
+      idempotencyKey: 'presentation-gated-catalog', payload: { source: 'source-a', sourceWorkId: 'presentation-gated' } });
+    const task = await repo.claim('catalog-worker', 120);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'already-queued', priority: 'P1', idempotencyKey: 'presentation-already-queued' });
+    const adapter = {
+      id: 'source-a',
+      fetchWorkSnapshot: async () => ({
+        details: { sourceWorkId: 'presentation-gated', title: 'P1 A', slug: 'p1-a', status: 'COMPLETED' as const, language: 'pt-BR' },
+        chapters: [{ sourceChapterId: 'presentation-gated-1', number: 1, displayNumber: '1', title: 'One' }],
+      }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'EXISTING_MAPPING' }) };
+
+    await (runtime as any).catalog(task, 'catalog-worker');
+
+    expect((await db.query(`SELECT state,reason,checkpoint->>'presentationIncomplete' AS incomplete
+      FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
+      .toEqual({ state: 'RETRY_WAIT', reason: 'WORK_PRESENTATION_INCOMPLETE', incomplete: 'true' });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapter_sources
+      WHERE work_id=$1 AND source_chapter_id='presentation-gated-1'`, [ids.p1a])).rows[0].count).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE task_type='IMPORT_CHAPTER' AND work_id=$1`, [ids.p1a])).rows[0].count).toBe(1);
+    expect((await db.query(`SELECT state,reason,checkpoint->>'presentationPreviousReason' AS previous_reason
+      FROM importer_lite_tasks WHERE idempotency_key='presentation-already-queued'`)).rows[0])
+      .toEqual({ state: 'BLOCKED', reason: 'WORK_PRESENTATION_INCOMPLETE', previous_reason: null });
   });
 
   it('coalesces duplicate canonical legacy mappings without collapsing distinct decimal chapters', async () => {

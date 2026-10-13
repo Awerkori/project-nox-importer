@@ -161,6 +161,20 @@ export declare class LiteRepository {
      * a catalog or discovery slot.
      */
     sourcePolicy(source: string): Promise<LiteSourcePolicy | null>;
+    /**
+     * Chapter media is expensive and a Reader chapter cannot be exposed without
+     * a minimally valid work presentation.  Catalog checks this once per work
+     * snapshot, never on the page or chapter hot path, so a missing cover does
+     * not turn into completed-but-unpublishable Telegram uploads.
+     */
+    workPresentationReady(workId: string): Promise<boolean>;
+    /**
+     * A catalog pass can prove that a work is not Reader-presentable before a
+     * large historical manifest reaches chapter workers. Park only work that
+     * has not started: in-flight lower-priority operations must still drain
+     * safely, and a later valid catalog pass reopens these exact durable rows.
+     */
+    parkUnpublishableWork(workId: string, workKey: string): Promise<number>;
     checkpoint(task: LiteTask, workerId: string, patch: Record<string, unknown>): Promise<boolean>;
     /**
      * Atomically fence the imported chapter, acknowledge its healthy source and
