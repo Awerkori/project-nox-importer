@@ -1279,8 +1279,10 @@ describe('LiteRepository against the additive Lite migration', () => {
       checkpoint->>'selectedSource' AS source FROM importer_lite_tasks WHERE id=$1`, [task!.id]);
     expect(imported.rows[0]).toMatchObject({ state: 'DONE', lease_owner: null, chapter_id: ids.chapter, source: 'source-a' });
     const publish = await db.query(`SELECT priority,base_priority,payload->>'importTaskId' AS import_task_id,
-      payload->>'source' AS source FROM importer_lite_tasks WHERE idempotency_key=$1`, [`lite:publish:${ids.p1a}:${key}`]);
-    expect(publish.rows).toEqual([expect.objectContaining({ priority: 0, base_priority: 2, import_task_id: task!.id, source: 'source-a' })]);
+      payload->>'source' AS source,payload->>'chapterId' AS chapter_id,payload->'mediaIds' AS media_ids
+      FROM importer_lite_tasks WHERE idempotency_key=$1`, [`lite:publish:${ids.p1a}:${key}`]);
+    expect(publish.rows).toEqual([expect.objectContaining({ priority: 0, base_priority: 2, import_task_id: task!.id,
+      source: 'source-a', chapter_id: ids.chapter, media_ids: [ids.page] })]);
     expect((await db.query(`SELECT health,consecutive_failures FROM importer_lite_source_health WHERE source='source-a'`)).rows[0])
       .toMatchObject({ health: 'HEALTHY', consecutive_failures: 0 });
     // A repeat cannot create another public task, and an expired/lost fence
@@ -1291,6 +1293,42 @@ describe('LiteRepository against the additive Lite migration', () => {
     })).toBe(false);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
       WHERE idempotency_key=$1`, [`lite:publish:${ids.p1a}:${key}`])).rows[0].count).toBe(1);
+  });
+
+  it('publishes an atomic completion payload without rereading its import checkpoint', async () => {
+    await repo.enqueue({ taskType: 'PUBLISH', workId: ids.publish, workKey: `work:${ids.publish}`,
+      chapterKey: 'chapter:payload', priority: 'P1', idempotencyKey: 'publish-payload',
+      payload: { importTaskId: '00000000-0000-4000-8000-000000000099', source: 'source-a',
+        chapterId: ids.chapter, mediaIds: [ids.page] } });
+    const task = await repo.claim('publisher-payload', 120);
+    const dbForExecutor = { query: vi.fn(async () => {
+      throw new Error('PUBLISH_PAYLOAD_SHOULD_NOT_REREAD_IMPORT_CHECKPOINT');
+    }) } as unknown as Pool;
+    const executor = new LiteExecutor(dbForExecutor, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
+      new AsyncSemaphore(1, 'publish-payload-downloads'));
+
+    await executor.publish(task!, 'publisher-payload');
+
+    expect((dbForExecutor.query as any)).not.toHaveBeenCalled();
+    expect((await db.query(`SELECT published_at IS NOT NULL AS published FROM chapters WHERE id=$1`, [ids.chapter])).rows[0].published).toBe(true);
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
+  });
+
+  it('keeps the checkpoint lookup for a legacy recovery publish task', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.publish, workKey: `work:${ids.publish}`,
+      chapterKey: 'chapter:legacy-publish', priority: 'P1', idempotencyKey: 'legacy-publish-origin' });
+    const imported = await repo.claim('legacy-importer', 120);
+    await repo.finish(imported!, 'legacy-importer', { state: 'DONE', checkpoint: { chapterId: ids.chapter, mediaIds: [ids.page] } });
+    expect((await repo.reconcile(10)).publishable).toBe(1);
+    const task = await repo.claim('legacy-publisher', 120);
+    expect(task?.payload).toEqual({ importTaskId: imported!.id });
+    const executor = new LiteExecutor(poolFor(db) as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
+      new AsyncSemaphore(1, 'legacy-publish-downloads'));
+
+    await executor.publish(task!, 'legacy-publisher');
+
+    expect((await db.query(`SELECT published_at IS NOT NULL AS published FROM chapters WHERE id=$1`, [ids.chapter])).rows[0].published).toBe(true);
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
   });
 
   it('settles the originating import after publication so bounded recovery does not rematerialize it', async () => {

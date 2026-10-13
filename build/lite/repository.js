@@ -581,7 +581,13 @@ export class LiteRepository {
           $4::smallint,$5,$6::jsonb
         ON CONFLICT(idempotency_key) DO NOTHING`, [task.workId, task.workKey, task.chapterKey, LITE_PRIORITY_RANK[publishPriority],
                 `lite:publish:${task.workId}:${task.chapterKey}`,
-                JSON.stringify({ importTaskId: task.id, source: completion.selectedSource })]);
+                // The completion transaction already owns these durable, scalar
+                // references. Carry them with the PUBLISH task so its normal path
+                // does not spend an extra pool round trip rereading the import
+                // checkpoint. Legacy/recovery tasks without them still use the
+                // conservative checkpoint lookup in the executor.
+                JSON.stringify({ importTaskId: task.id, source: completion.selectedSource,
+                    chapterId: completion.chapterId, mediaIds: completion.mediaIds })]);
             await this.refreshReadyWork(client, task.workKey);
             await client.query('COMMIT');
             return true;

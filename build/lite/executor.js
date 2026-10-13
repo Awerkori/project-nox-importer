@@ -787,16 +787,32 @@ export class LiteExecutor {
         });
     }
     async publish(task, workerId) {
-        const importTaskId = String(task.payload.importTaskId || '');
-        const imported = await this.db.query('SELECT work_id,checkpoint FROM importer_lite_tasks WHERE id=$1::uuid', [importTaskId]);
-        const checkpoint = imported.rows[0]?.checkpoint || {};
-        if (!imported.rows[0]?.work_id || !checkpoint.chapterId || !Array.isArray(checkpoint.mediaIds)) {
+        // Normal imports materialize this payload atomically with their durable
+        // completion. It is safe only when every value is present and shaped as a
+        // scalar reference: LiteRepository.publish still fences the task and
+        // validates every media row before anything becomes Reader-visible.
+        // Recovery tasks created by older deployments deliberately retain the
+        // checkpoint read below, rather than assuming their payload is complete.
+        let workId = task.workId;
+        let chapterId = typeof task.payload.chapterId === 'string' ? task.payload.chapterId : null;
+        let mediaIds = Array.isArray(task.payload.mediaIds) && task.payload.mediaIds.every((id) => typeof id === 'string')
+            ? task.payload.mediaIds : null;
+        if (!workId || !chapterId || !mediaIds) {
+            const importTaskId = String(task.payload.importTaskId || '');
+            const imported = await this.db.query('SELECT work_id,checkpoint FROM importer_lite_tasks WHERE id=$1::uuid', [importTaskId]);
+            const checkpoint = imported.rows[0]?.checkpoint || {};
+            workId = imported.rows[0]?.work_id || null;
+            chapterId = typeof checkpoint.chapterId === 'string' ? checkpoint.chapterId : null;
+            mediaIds = Array.isArray(checkpoint.mediaIds) && checkpoint.mediaIds.every((id) => typeof id === 'string')
+                ? checkpoint.mediaIds : null;
+        }
+        if (!workId || !chapterId || !mediaIds) {
             await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'IMPORT_CHECKPOINT_INCOMPLETE' });
             return;
         }
         try {
-            await this.queue.publish({ task, workerId, chapterId: checkpoint.chapterId, workId: imported.rows[0].work_id,
-                mediaIds: checkpoint.mediaIds, fresh: task.priority === 'P0' || task.priority === 'STAFF' });
+            await this.queue.publish({ task, workerId, chapterId, workId,
+                mediaIds, fresh: task.priority === 'P0' || task.priority === 'STAFF' });
         }
         catch (error) {
             const presentation = String(error?.message || '').includes('WORK_PRESENTATION_INCOMPLETE');
