@@ -491,10 +491,6 @@ export class LiteExecutor {
   }
 
   private async createOrLoadChapter(task: LiteTask, knownLegacy?: LegacyMappedChapter | null): Promise<string> {
-    const existing = await this.db.query<{ chapter_id: string }>(
-      'SELECT chapter_id FROM importer_lite_chapters WHERE work_id=$1::uuid AND canonical_chapter_key=$2', [task.workId, task.chapterKey],
-    );
-    if (existing.rows[0]) return existing.rows[0].chapter_id;
     const display = String(task.payload.displayNumber || '0');
     const numeric = numericDisplayValue(display);
     const language = String(task.payload.language || 'und');
@@ -516,14 +512,35 @@ export class LiteExecutor {
         return mapped;
       }
       const title = String(task.payload.chapterTitle || '').slice(0, 200);
-      let inserted: { rows: Array<{ id: string }> };
+      let mapped: { rows: Array<{ chapter_id: string }> };
       try {
-        inserted = await client.query<{ id: string }>(`INSERT INTO chapters(
-            id,work_id,number,display_number,canonical_chapter_key,chapter_order_key,chapter_kind,edition,language,title,origin
-          ) VALUES($1::uuid,$2::uuid,$3::numeric,$4,$5,$6,$7,$8,$9,$10,'IMPORTER')
-          ON CONFLICT (work_id,canonical_chapter_key) WHERE canonical_chapter_key IS NOT NULL
-          DO UPDATE SET canonical_chapter_key=EXCLUDED.canonical_chapter_key
-          RETURNING id`, [chapterId, task.workId, numeric, display, task.chapterKey, orderKey, kind, edition, language, title]);
+        // The common fresh-chapter path used three sequential YSQL requests:
+        // check Lite mapping, materialize Reader chapter, then create Lite
+        // mapping.  The mapping is the durable identity fence, so select it
+        // first *inside one statement* and materialize a Reader row only when
+        // absent.  This preserves recovery races and avoids holding a client
+        // while any network work occurs.
+        mapped = await client.query<{ chapter_id: string }>(`WITH existing_mapping AS (
+            SELECT chapter_id FROM importer_lite_chapters
+            WHERE work_id=$2::uuid AND canonical_chapter_key=$5
+          ), durable_chapter AS (
+            INSERT INTO chapters(
+              id,work_id,number,display_number,canonical_chapter_key,chapter_order_key,chapter_kind,edition,language,title,origin
+            )
+            SELECT $1::uuid,$2::uuid,$3::numeric,$4,$5,$6,$7,$8,$9,$10,'IMPORTER'
+            WHERE NOT EXISTS (SELECT 1 FROM existing_mapping)
+            ON CONFLICT (work_id,canonical_chapter_key) WHERE canonical_chapter_key IS NOT NULL
+            DO UPDATE SET canonical_chapter_key=EXCLUDED.canonical_chapter_key
+            RETURNING id
+          ), chosen_chapter AS (
+            SELECT chapter_id FROM existing_mapping
+            UNION ALL
+            SELECT id AS chapter_id FROM durable_chapter
+          )
+          INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key,edition,language)
+          SELECT $2::uuid,$5,chapter_id,$4,$6,$8,$9 FROM chosen_chapter
+          ON CONFLICT(work_id,canonical_chapter_key) DO UPDATE SET chapter_id=importer_lite_chapters.chapter_id
+          RETURNING chapter_id`, [chapterId, task.workId, numeric, display, task.chapterKey, orderKey, kind, edition, language, title]);
       } catch (error: any) {
         // This can only occur when an old Reader numeric unique constraint is
         // still installed. Never merge distinct text identities to bypass it.
@@ -535,11 +552,10 @@ export class LiteExecutor {
         }
         throw error;
       }
-      let durableChapterId = inserted.rows[0]?.id;
+      const durableChapterId = mapped.rows[0]?.chapter_id;
       if (!durableChapterId) throw new Error('CANONICAL_CHAPTER_UPSERT_DID_NOT_RETURN_ID');
-      const mapped = await this.mapCanonicalChapter(client, task, durableChapterId);
       await client.query('COMMIT');
-      return mapped;
+      return durableChapterId;
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; } finally { client.release(); }
   }
 

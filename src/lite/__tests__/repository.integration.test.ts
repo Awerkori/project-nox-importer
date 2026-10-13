@@ -850,6 +850,35 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapters WHERE work_id=$1 AND canonical_chapter_key=$2`, [ids.p1a, task.chapterKey])).rows[0].count).toBe(1);
   });
 
+  it('fuses fresh Reader chapter materialization with the Lite identity fence', async () => {
+    const task = {
+      id: '00000000-0000-4000-8000-000000000090', taskType: 'IMPORT_CHAPTER', workId: ids.p1a,
+      workKey: `work:${ids.p1a}`, chapterKey: 'pt-br|default|chapter|fused|-', priority: 'P1', basePriority: 'P1', state: 'RUNNING',
+      idempotencyKey: 'canonical-fused', nextRunAt: new Date(), attempts: 1, maxAttempts: 8,
+      leaseOwner: 'worker-a', leaseUntil: new Date(Date.now() + 60_000), reason: null, monitoring: false,
+      payload: { displayNumber: '10', chapterTitle: 'Fused identity', language: 'pt-BR', edition: 'default', orderKey: '10' }, checkpoint: {},
+    } as any;
+    const queries: string[] = [];
+    const tracedPool = {
+      query: (text: string, values?: unknown[]) => { queries.push(text); return db.query(text, values); },
+      connect: async () => ({
+        query: (text: string, values?: unknown[]) => { queries.push(text); return db.query(text, values); },
+        release: () => undefined,
+      }),
+    } as unknown as Pool;
+    const executor = new LiteExecutor(tracedPool, repo, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(1, 'test-downloads'));
+
+    await (executor as any).createOrLoadChapter(task, null);
+
+    const materialization = queries.filter((query) => query.includes('INSERT INTO chapters'));
+    expect(materialization).toHaveLength(1);
+    expect(materialization[0]).toContain('WITH existing_mapping');
+    expect(materialization[0]).toContain('INSERT INTO importer_lite_chapters');
+    expect(queries.some((query) => /^\s*SELECT chapter_id FROM importer_lite_chapters/i.test(query))).toBe(false);
+  });
+
   it('blocks a Reader numeric collision instead of merging distinct canonical chapters', async () => {
     // Some deployed Reader schemas still constrain a work to one numeric
     // chapter number.  `12.1` and `12.10` are distinct source identities but
