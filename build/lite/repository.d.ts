@@ -204,6 +204,7 @@ export declare class LiteRepository {
         uploads: number;
         publishable: number;
         publishRepairs: number;
+        sourceCooldownRecoveries: number;
     }>;
     operationalSnapshot(): Promise<Array<{
         priority: LitePriority;
