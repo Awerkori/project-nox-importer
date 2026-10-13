@@ -1,6 +1,55 @@
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { slugify, decodeHtmlEntities, stripHtml } from './html-utils.js';
+const cleanMetadataValue = (value) => {
+    if (typeof value !== 'string')
+        return null;
+    const cleaned = decodeHtmlEntities(stripHtml(value)).normalize('NFKC').replace(/\s+/g, ' ').trim();
+    return cleaned.length >= 2 && cleaned.length <= 250 ? cleaned : null;
+};
+const metadataValues = (value) => {
+    const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[\n;|]+/) : [];
+    return raw.map(cleanMetadataValue).filter((item) => Boolean(item));
+};
+/**
+ * WordPress exposes post categories/tags through the embedded `wp:term`
+ * relation.  These are provider-declared taxonomy values, not terms guessed
+ * from a title or synopsis.  Some themes surface the same explicit taxonomy
+ * through Yoast's articleSection; merge both defensively.
+ */
+export function extractWpGenres(post) {
+    const values = [];
+    const embedded = post?._embedded?.['wp:term'];
+    if (Array.isArray(embedded)) {
+        for (const group of embedded) {
+            if (!Array.isArray(group))
+                continue;
+            for (const term of group) {
+                const value = cleanMetadataValue(term?.name);
+                if (value && !/^uncategorized$/i.test(value))
+                    values.push(value);
+            }
+        }
+    }
+    values.push(...metadataValues(post?.yoast_head_json?.articleSection));
+    return [...new Map(values.map((value) => [value.toLocaleLowerCase(), value])).values()];
+}
+/**
+ * Only consume fields whose provider schema explicitly labels them as an
+ * alternative/original/native title.  Keeping this narrow avoids turning
+ * navigation, prose, or machine translations into false aliases.
+ */
+export function extractWpAlternativeTitles(post) {
+    const fields = [
+        post?.alternative_titles, post?.alternativeTitles, post?.aliases,
+        post?.original_title, post?.originalTitle, post?.native_title, post?.nativeTitle,
+        post?.meta?.alternative_titles, post?.meta?.alternativeTitles, post?.meta?.aliases,
+        post?.meta?.original_title, post?.meta?.originalTitle, post?.meta?.native_title, post?.meta?.nativeTitle,
+        post?.yoast_head_json?.alternateName,
+    ];
+    const values = fields.flatMap(metadataValues);
+    return [...new Map(values.map((value) => [value.normalize('NFKC').toLocaleLowerCase(), value])).values()];
+}
 export class WpGalleryAdapter {
     rateLimiter;
     transport;
@@ -104,7 +153,7 @@ export class WpGalleryAdapter {
         }
     }
     async fetchWorkDetails(sourceWorkId) {
-        const url = `${this.baseUrl}/wp-json/wp/v2/posts/${sourceWorkId}?_embed=wp:featuredmedia`;
+        const url = `${this.baseUrl}/wp-json/wp/v2/posts/${sourceWorkId}?_embed=wp:featuredmedia,wp:term`;
         try {
             const p = await this.fetchJson(url);
             const title = decodeHtmlEntities(stripHtml(p.title?.rendered || '')).trim();
@@ -112,6 +161,8 @@ export class WpGalleryAdapter {
             const coverUrl = p._embedded?.['wp:featuredmedia']?.[0]?.source_url ||
                 p.yoast_head_json?.og_image?.[0]?.url ||
                 null;
+            const genres = extractWpGenres(p);
+            const alternativeTitles = extractWpAlternativeTitles(p);
             return {
                 sourceWorkId,
                 title,
@@ -119,6 +170,8 @@ export class WpGalleryAdapter {
                 coverUrl,
                 synopsis,
                 status: 'UNKNOWN',
+                genres: genres.length ? genres : undefined,
+                alternativeTitles: alternativeTitles.length ? alternativeTitles : undefined,
             };
         }
         catch (err) {

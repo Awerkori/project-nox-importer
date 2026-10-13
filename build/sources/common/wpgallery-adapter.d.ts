@@ -7,6 +7,19 @@ export interface WpGalleryOptions {
     baseUrl: string;
     rateLimitRps?: number;
 }
+/**
+ * WordPress exposes post categories/tags through the embedded `wp:term`
+ * relation.  These are provider-declared taxonomy values, not terms guessed
+ * from a title or synopsis.  Some themes surface the same explicit taxonomy
+ * through Yoast's articleSection; merge both defensively.
+ */
+export declare function extractWpGenres(post: any): string[];
+/**
+ * Only consume fields whose provider schema explicitly labels them as an
+ * alternative/original/native title.  Keeping this narrow avoids turning
+ * navigation, prose, or machine translations into false aliases.
+ */
+export declare function extractWpAlternativeTitles(post: any): string[];
 export declare class WpGalleryAdapter implements SourceAdapter {
     protected rateLimiter: HostRateLimiter;
     protected transport: typeof fetch;

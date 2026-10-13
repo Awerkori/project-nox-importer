@@ -1902,6 +1902,43 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(created.rows[0]).toEqual({ priority: 1, base_priority: 1 });
   });
 
+  it('repairs only manifest-proven historical gaps and preserves textual chapter identities', async () => {
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P1',
+      idempotencyKey: 'manifest-evidence-only', payload: { source: 'source-a', sourceWorkId: 'manifest-evidence-only' } });
+    const task = await repo.claim('catalog-worker', 120);
+    const adapter = {
+      id: 'source-a',
+      fetchWorkSnapshot: async () => ({
+        details: { sourceWorkId: 'manifest-evidence-only', title: 'P1 A', slug: 'p1-a', status: 'COMPLETED' as const, language: 'pt-BR' },
+        chapters: [
+          { sourceChapterId: 'one', number: 1, displayNumber: '1', title: 'One' },
+          { sourceChapterId: 'decimal-one', number: 12.1, displayNumber: '12.1', title: 'Part one' },
+          { sourceChapterId: 'decimal-ten', number: 12.1, displayNumber: '12.10', title: 'Part ten' },
+          { sourceChapterId: 'two-hundred', number: 200, displayNumber: '200', title: 'Two hundred' },
+        ],
+      }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
+
+    await (runtime as any).catalog(task, 'catalog-worker');
+
+    const materialized = await db.query(`SELECT chapter_key FROM importer_lite_tasks
+      WHERE task_type='IMPORT_CHAPTER' AND work_id=$1 ORDER BY chapter_key`, [ids.p1a]);
+    expect(materialized.rows.map((row: any) => row.chapter_key)).toEqual([
+      'pt-br|default|chapter|12.10|-',
+      'pt-br|default|chapter|12.1|-',
+      'pt-br|default|chapter|1|-',
+      'pt-br|default|chapter|200|-',
+    ]);
+    // A numerical span from 1 to 200 is not evidence for chapters 2–199.
+    expect(materialized.rows.some((row: any) => row.chapter_key.includes('|2|-'))).toBe(false);
+  });
+
   it('keeps a manifest durable but defers chapter admission until the work has a public presentation', async () => {
     await db.query(`UPDATE works SET cover_id=NULL WHERE id=$1`, [ids.p1a]);
     await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P1',
