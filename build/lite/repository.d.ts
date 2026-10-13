@@ -56,6 +56,19 @@ export interface UploadReservationInput {
     pagePosition: number;
     sha256: string;
 }
+/**
+ * The final import transition is deliberately one short database transaction.
+ * Media has already been durably receipted before this point; combining the
+ * DONE checkpoint with its PUBLISH task removes an avoidable finish/enqueue
+ * gap and several YSQL round trips without holding a connection during I/O.
+ */
+export interface CompleteImportInput {
+    chapterId: string;
+    mediaIds: string[];
+    pageCount: number;
+    selectedSource: string;
+    mediaStoredAt: string;
+}
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export declare class LiteRepository {
     private readonly db;
@@ -139,6 +152,13 @@ export declare class LiteRepository {
      */
     sourcePolicy(source: string): Promise<LiteSourcePolicy | null>;
     checkpoint(task: LiteTask, workerId: string, patch: Record<string, unknown>): Promise<boolean>;
+    /**
+     * Atomically fence the imported chapter, acknowledge its healthy source and
+     * materialize the idempotent publication task.  This runs only after every
+     * page has a durable receipt.  Network and Telegram work are intentionally
+     * outside this transaction.
+     */
+    completeImportAndEnqueuePublish(task: LiteTask, workerId: string, completion: CompleteImportInput): Promise<boolean>;
     finish(task: LiteTask, workerId: string, outcome: {
         state: Extract<LiteTaskState, 'DONE' | 'RETRY_WAIT' | 'BLOCKED'>;
         reason?: string | null;

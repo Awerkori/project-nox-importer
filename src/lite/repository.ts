@@ -76,6 +76,20 @@ export interface UploadReservationInput {
   sha256: string;
 }
 
+/**
+ * The final import transition is deliberately one short database transaction.
+ * Media has already been durably receipted before this point; combining the
+ * DONE checkpoint with its PUBLISH task removes an avoidable finish/enqueue
+ * gap and several YSQL round trips without holding a connection during I/O.
+ */
+export interface CompleteImportInput {
+  chapterId: string;
+  mediaIds: string[];
+  pageCount: number;
+  selectedSource: string;
+  mediaStoredAt: string;
+}
+
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export class LiteRepository {
   constructor(private readonly db: Db) {}
@@ -555,6 +569,67 @@ export class LiteRepository {
       [task.id, workerId, JSON.stringify(patch)],
     );
     return result.rowCount === 1;
+  }
+
+  /**
+   * Atomically fence the imported chapter, acknowledge its healthy source and
+   * materialize the idempotent publication task.  This runs only after every
+   * page has a durable receipt.  Network and Telegram work are intentionally
+   * outside this transaction.
+   */
+  async completeImportAndEnqueuePublish(task: LiteTask, workerId: string, completion: CompleteImportInput): Promise<boolean> {
+    if (!task.workId || !task.chapterKey) return false;
+    const publishPriority: Exclude<LitePriority, 'STAFF'> = task.basePriority === 'STAFF' ? 'P0' : task.basePriority;
+    const checkpoint = {
+      chapterId: completion.chapterId,
+      mediaIds: completion.mediaIds,
+      pageCount: completion.pageCount,
+      selectedSource: completion.selectedSource,
+      mediaStoredAt: completion.mediaStoredAt,
+    };
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const completed = await client.query(
+        `UPDATE importer_lite_tasks
+           SET state='DONE', checkpoint=checkpoint || $3::jsonb,
+               lease_owner=NULL, lease_until=NULL, updated_at=now()
+         WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`,
+        [task.id, workerId, JSON.stringify(checkpoint)],
+      );
+      if (completed.rowCount !== 1) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      // A completed upload which began before a later provider 429 must not
+      // erase that newer cooldown. This mirrors recordSourceSuccess exactly,
+      // but keeps the successful transition in one brief transaction.
+      await client.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+        VALUES($1,'HEALTHY',NULL,0,NULL)
+        ON CONFLICT(source) DO UPDATE SET health='HEALTHY',cooldown_until=NULL,
+          consecutive_failures=0,last_error=NULL,updated_at=now()
+        WHERE NOT (importer_lite_source_health.health='RATE_LIMITED'
+          AND importer_lite_source_health.cooldown_until>now())`, [completion.selectedSource]);
+      await client.query(`INSERT INTO importer_lite_tasks
+          (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,payload)
+        SELECT 'PUBLISH',$1::uuid,$2,$3,
+          CASE WHEN EXISTS (
+            SELECT 1 FROM importer_staff_requests s
+            WHERE s.work_id=$1::uuid AND s.status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')
+          ) THEN 0 ELSE $4::smallint END,
+          $4::smallint,$5,$6::jsonb
+        ON CONFLICT(idempotency_key) DO NOTHING`,
+        [task.workId, task.workKey, task.chapterKey, LITE_PRIORITY_RANK[publishPriority],
+          `lite:publish:${task.workId}:${task.chapterKey}`,
+          JSON.stringify({ importTaskId: task.id, source: completion.selectedSource })],
+      );
+      await this.refreshReadyWork(client, task.workKey);
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
   }
 
   async finish(task: LiteTask, workerId: string, outcome: {

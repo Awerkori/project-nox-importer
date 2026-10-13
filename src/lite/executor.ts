@@ -672,17 +672,9 @@ export class LiteExecutor {
             }
           });
         });
-        if (!await this.queue.checkpoint(task, workerId, {
+        if (!await this.queue.completeImportAndEnqueuePublish(task, workerId, {
           chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source, mediaStoredAt: new Date().toISOString(),
         })) throw new Error('LEASE_LOST_AFTER_MEDIA_STORAGE');
-        if (!await this.queue.finish(task, workerId, {
-          state: 'DONE', checkpoint: { chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source },
-        })) throw new Error('LEASE_LOST_AFTER_MEDIA_STORAGE');
-        await this.queue.recordSourceSuccess(route.source);
-        await this.queue.enqueue({ taskType: 'PUBLISH', workId: task.workId, workKey: task.workKey, chapterKey: task.chapterKey,
-          priority: task.basePriority === 'STAFF' ? 'P0' : task.basePriority,
-          idempotencyKey: `lite:publish:${task.workId}:${task.chapterKey}`,
-          payload: { importTaskId: task.id, source: route.source } });
         return;
       } catch (error) {
         lastError = error;

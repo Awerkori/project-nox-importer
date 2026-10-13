@@ -795,15 +795,13 @@ describe('LiteRepository against the additive Lite migration', () => {
     const registry = { get: () => ({ id: 'source-a', fetchChapterPages: async () => ['https://source-a.test/page.png'] }) } as unknown as SourceRegistry;
     const storage: StorageProvider = { upload: async () => 'telegram-file', healthCheck: async () => true, getProviderKey: () => 'telegram' };
     const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
-    const originalCheckpoint = repo.checkpoint.bind(repo);
-    let checkpoints = 0;
-    (repo as any).checkpoint = async (...args: any[]) => {
-      checkpoints++;
-      if (checkpoints === 2) {
-        await db.query(`UPDATE importer_lite_tasks SET lease_until=now()-interval '1 second' WHERE id=$1`, [task!.id]);
-        return false;
-      }
-      return originalCheckpoint(...args);
+    const originalComplete = repo.completeImportAndEnqueuePublish.bind(repo);
+    // Expire after every page receipt is durable but just before the atomic
+    // completion fence. The replacement keeps the production path free of a
+    // redundant final checkpoint query solely for this test.
+    (repo as any).completeImportAndEnqueuePublish = async (...args: any[]) => {
+      await db.query(`UPDATE importer_lite_tasks SET lease_until=now()-interval '1 second' WHERE id=$1`, [task!.id]);
+      return originalComplete(...args);
     };
     const originalFetch = globalThis.fetch;
     vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })));
@@ -812,7 +810,7 @@ describe('LiteRepository against the additive Lite migration', () => {
         '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(1, 'test-downloads'), 1);
       await executor.importChapter(task!, 'worker-a');
     } finally {
-      (repo as any).checkpoint = originalCheckpoint;
+      (repo as any).completeImportAndEnqueuePublish = originalComplete;
       vi.stubGlobal('fetch', originalFetch);
     }
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('RUNNING');
@@ -1203,6 +1201,37 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual([{ media_id: ids.page, position: 1 }]);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_publication_events WHERE chapter_id=$1`, [ids.chapter])).rows[0].count).toBe(1);
     expect(await repo.progressSnapshot()).toMatchObject({ publishedLastMinute: 1, oldestReadyAt: null, oldestStoredUnpublishedAt: null });
+  });
+
+  it('atomically settles stored media and materializes exactly one staff-aware publish task', async () => {
+    const key = 'pt-br|default|chapter|atomic-completion|-';
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: key, priority: 'P1', idempotencyKey: 'atomic-completion' });
+    const task = await repo.claim('importer', 120);
+    expect(task).toBeTruthy();
+    // A panel request can arrive after the import claim. Its overlay must be
+    // applied to the newly-created PUBLISH task without another round trip.
+    await db.query(`INSERT INTO importer_staff_requests(work_id,status) VALUES($1,'ACTIVE')`, [ids.p1a]);
+    expect(await repo.completeImportAndEnqueuePublish(task!, 'importer', {
+      chapterId: ids.chapter, mediaIds: [ids.page], pageCount: 1,
+      selectedSource: 'source-a', mediaStoredAt: new Date().toISOString(),
+    })).toBe(true);
+    const imported = await db.query(`SELECT state,lease_owner,checkpoint->>'chapterId' AS chapter_id,
+      checkpoint->>'selectedSource' AS source FROM importer_lite_tasks WHERE id=$1`, [task!.id]);
+    expect(imported.rows[0]).toMatchObject({ state: 'DONE', lease_owner: null, chapter_id: ids.chapter, source: 'source-a' });
+    const publish = await db.query(`SELECT priority,base_priority,payload->>'importTaskId' AS import_task_id,
+      payload->>'source' AS source FROM importer_lite_tasks WHERE idempotency_key=$1`, [`lite:publish:${ids.p1a}:${key}`]);
+    expect(publish.rows).toEqual([expect.objectContaining({ priority: 0, base_priority: 2, import_task_id: task!.id, source: 'source-a' })]);
+    expect((await db.query(`SELECT health,consecutive_failures FROM importer_lite_source_health WHERE source='source-a'`)).rows[0])
+      .toMatchObject({ health: 'HEALTHY', consecutive_failures: 0 });
+    // A repeat cannot create another public task, and an expired/lost fence
+    // never acknowledges media that this worker no longer owns.
+    expect(await repo.completeImportAndEnqueuePublish(task!, 'importer', {
+      chapterId: ids.chapter, mediaIds: [ids.page], pageCount: 1,
+      selectedSource: 'source-a', mediaStoredAt: new Date().toISOString(),
+    })).toBe(false);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key=$1`, [`lite:publish:${ids.p1a}:${key}`])).rows[0].count).toBe(1);
   });
 
   it('settles the originating import after publication so bounded recovery does not rematerialize it', async () => {
