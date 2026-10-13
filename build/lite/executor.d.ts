@@ -6,6 +6,25 @@ import type { LiteTask } from './types.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { PageByteBudget } from './page-byte-budget.js';
+export type UploadBatchSnapshot = {
+    sampledFlushes: number;
+    totalFlushes: number;
+    totalItems: number;
+    totalWrites: number;
+    failedFlushes: number;
+    batchSize: {
+        avg: number;
+        p50: number;
+        p95: number;
+        max: number;
+    };
+    flushDurationMs: {
+        avg: number;
+        p50: number;
+        p95: number;
+        max: number;
+    };
+};
 /**
  * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
  * a per-page fence, so a crash can never make a successful send retryable.
@@ -17,8 +36,10 @@ export declare class UploadReceiptBatcher {
     private pending;
     private flushTimer;
     private flushing;
+    private readonly stats;
     constructor(queue: LiteRepository);
     persist(input: UploadReceiptInput): Promise<void>;
+    snapshot(): UploadBatchSnapshot;
     private flush;
 }
 /**
@@ -31,11 +52,13 @@ export declare class UploadReservationBatcher {
     private pending;
     private flushTimer;
     private flushing;
+    private readonly stats;
     constructor(queue: LiteRepository);
     reserve(input: UploadReservationInput): Promise<{
         mediaId: string;
         state: string;
     }>;
+    snapshot(): UploadBatchSnapshot;
     private flush;
 }
 export declare class LiteExecutor {
@@ -63,6 +86,11 @@ export declare class LiteExecutor {
      */
     setFairSourceDemand(sources: Iterable<string>): void;
     getFairSourceDemand(): string[];
+    /** Aggregate-only batch evidence for the existing heartbeat. */
+    getUploadBatchSnapshot(): {
+        reservations: UploadBatchSnapshot;
+        receipts: UploadBatchSnapshot;
+    };
     private sourceCapacity;
     private hasFairAlternative;
     private sourceSlot;

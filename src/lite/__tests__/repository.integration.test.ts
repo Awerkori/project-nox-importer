@@ -2001,6 +2001,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     ]);
     expect(result).toBe('completed');
     expect(calls).toHaveLength(2);
+    expect(batcher.snapshot()).toMatchObject({ sampledFlushes: 2, totalItems: 2, totalWrites: 2, failedFlushes: 0 });
   });
 
   it('flushes reservation arrivals that occur while a prior durable batch is in flight', async () => {
@@ -2030,5 +2031,6 @@ describe('LiteRepository against the additive Lite migration', () => {
     ]);
     expect(result).toBe('completed');
     expect(calls).toHaveLength(2);
+    expect(batcher.snapshot()).toMatchObject({ sampledFlushes: 2, totalItems: 2, totalWrites: 2, failedFlushes: 0 });
   });
 });

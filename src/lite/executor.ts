@@ -10,6 +10,7 @@ import type { ChapterSourceRoute, LiteTask } from './types.js';
 import { AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
+import { BoundedSamples } from '../core/bounded-samples.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { PageByteBudget } from './page-byte-budget.js';
 
@@ -59,6 +60,63 @@ function hostFor(url: string): string | null {
   try { return new URL(url).host; } catch { return null; }
 }
 
+function batchPercentile(values: number[], percentile: number): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  return Math.round(sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * percentile))] * 10) / 10;
+}
+
+function batchAverage(values: number[]): number {
+  if (!values.length) return 0;
+  return Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 10) / 10;
+}
+
+export type UploadBatchSnapshot = {
+  sampledFlushes: number;
+  totalFlushes: number;
+  totalItems: number;
+  totalWrites: number;
+  failedFlushes: number;
+  batchSize: { avg: number; p50: number; p95: number; max: number };
+  flushDurationMs: { avg: number; p50: number; p95: number; max: number };
+};
+
+/**
+ * Small, in-process evidence for the existing durable batchers.  It retains
+ * only numeric samples and is emitted with the heartbeat that already exists;
+ * it never records a page, task, source, or new database row.
+ */
+class UploadBatchStats {
+  private readonly sizes = new BoundedSamples<number>(256);
+  private readonly durations = new BoundedSamples<number>(256);
+  private totalFlushes = 0;
+  private totalItems = 0;
+  private totalWrites = 0;
+  private failedFlushes = 0;
+
+  record(size: number, durationMs: number, writes: number, succeeded: boolean): void {
+    this.sizes.push(size);
+    this.durations.push(Math.max(0, durationMs));
+    this.totalFlushes++;
+    this.totalItems += size;
+    this.totalWrites += writes;
+    if (!succeeded) this.failedFlushes++;
+  }
+
+  snapshot(): UploadBatchSnapshot {
+    const max = (values: number[]) => values.length ? Math.max(...values) : 0;
+    return {
+      sampledFlushes: this.sizes.length,
+      totalFlushes: this.totalFlushes,
+      totalItems: this.totalItems,
+      totalWrites: this.totalWrites,
+      failedFlushes: this.failedFlushes,
+      batchSize: { avg: batchAverage(this.sizes), p50: batchPercentile(this.sizes, 0.5), p95: batchPercentile(this.sizes, 0.95), max: max(this.sizes) },
+      flushDurationMs: { avg: batchAverage(this.durations), p50: batchPercentile(this.durations, 0.5), p95: batchPercentile(this.durations, 0.95), max: max(this.durations) },
+    };
+  }
+}
+
 /** Persist a safe operational class, never a raw provider response or secret. */
 function uploadFailureClass(error: unknown): string {
   const detail = error as {
@@ -98,6 +156,7 @@ export class UploadReceiptBatcher {
   private pending: Array<{ input: UploadReceiptInput; resolve: () => void; reject: (error: unknown) => void }> = [];
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing = false;
+  private readonly stats = new UploadBatchStats();
 
   constructor(private readonly queue: LiteRepository) {}
 
@@ -113,6 +172,8 @@ export class UploadReceiptBatcher {
     });
   }
 
+  snapshot(): UploadBatchSnapshot { return this.stats.snapshot(); }
+
   private async flush(): Promise<void> {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
@@ -127,20 +188,29 @@ export class UploadReceiptBatcher {
     try {
       while (this.pending.length) {
         const batch = this.pending.splice(0, 48);
+        const startedAt = performance.now();
+        let writes = 0;
+        let succeeded = false;
         try {
+          writes++;
           await this.queue.recordUploadReceipts(batch.map((entry) => entry.input));
           for (const entry of batch) entry.resolve();
+          succeeded = true;
         } catch (error) {
           // Telegram has already confirmed these exact media ids. Retrying the
           // idempotent YSQL receipt write once is safe and avoids turning a
           // transient pool/serialization failure into an ambiguous re-upload.
           // A second failure still reaches the existing UNKNOWN safety fence.
           try {
+            writes++;
             await this.queue.recordUploadReceipts(batch.map((entry) => entry.input));
             for (const entry of batch) entry.resolve();
+            succeeded = true;
           } catch (retryError) {
             for (const entry of batch) entry.reject(retryError);
           }
+        } finally {
+          this.stats.record(batch.length, performance.now() - startedAt, writes, succeeded);
         }
       }
     } finally {
@@ -166,6 +236,7 @@ export class UploadReservationBatcher {
   }> = [];
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing = false;
+  private readonly stats = new UploadBatchStats();
 
   constructor(private readonly queue: LiteRepository) {}
 
@@ -181,6 +252,8 @@ export class UploadReservationBatcher {
     });
   }
 
+  snapshot(): UploadBatchSnapshot { return this.stats.snapshot(); }
+
   private async flush(): Promise<void> {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
@@ -193,12 +266,17 @@ export class UploadReservationBatcher {
     try {
       while (this.pending.length) {
         const batch = this.pending.splice(0, 48);
+        const startedAt = performance.now();
+        let succeeded = false;
         try {
           const reservations = await this.queue.reserveUploads(batch.map((entry) => entry.input));
           if (reservations.length !== batch.length) throw new Error('UPLOAD_RESERVATION_BATCH_INCOMPLETE');
           for (let index = 0; index < batch.length; index++) batch[index].resolve(reservations[index]);
+          succeeded = true;
         } catch (error) {
           for (const entry of batch) entry.reject(error);
+        } finally {
+          this.stats.record(batch.length, performance.now() - startedAt, 1, succeeded);
         }
       }
     } finally {
@@ -269,6 +347,11 @@ export class LiteExecutor {
   }
 
   getFairSourceDemand(): string[] { return [...this.fairDemandSources].sort(); }
+
+  /** Aggregate-only batch evidence for the existing heartbeat. */
+  getUploadBatchSnapshot(): { reservations: UploadBatchSnapshot; receipts: UploadBatchSnapshot } {
+    return { reservations: this.reservationBatcher.snapshot(), receipts: this.receiptBatcher.snapshot() };
+  }
 
   private sourceCapacity(source: string): number {
     const configured = SOURCE_CONCURRENCY_LIMITS[source]?.maxChapters ?? 2;
