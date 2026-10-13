@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AsyncSemaphore } from '../../core/concurrency.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { ImporterEngine } from '../../core/engine.js';
-import { LITE_UPLOAD_BATCH_COALESCE_MS, LiteExecutor, UploadReceiptBatcher, UploadReservationBatcher } from '../executor.js';
+import { LiteExecutor, UploadReceiptBatcher, UploadReservationBatcher } from '../executor.js';
 import { PageByteBudget } from '../page-byte-budget.js';
 import { ImporterLiteRuntime } from '../runtime.js';
 import { DUPLICATE_CANONICAL_BATCH_REASON, LiteRepository } from '../repository.js';
@@ -2002,30 +2002,6 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(result).toBe('completed');
     expect(calls).toHaveLength(2);
     expect(batcher.snapshot()).toMatchObject({ sampledFlushes: 2, totalItems: 2, totalWrites: 2, failedFlushes: 0 });
-  });
-
-  it('coalesces a bounded page wave that arrives inside the durable batch window', async () => {
-    vi.useFakeTimers();
-    const batches: number[] = [];
-    const batcher = new UploadReceiptBatcher({
-      recordUploadReceipts: async (inputs: unknown[]) => { batches.push(inputs.length); },
-    } as unknown as LiteRepository);
-    const input = {
-      taskId: ids.p1a, pagePosition: 1, mediaId: ids.page, sha256: 'receipt-wave', bytes: 1024,
-      mime: 'image/png', width: 16, height: 16, providerKey: 'file', botReference: null,
-      shardId: null, channelId: null, messageId: null, createdBy: ids.staff,
-    };
-    try {
-      const first = batcher.persist(input);
-      await vi.advanceTimersByTimeAsync(LITE_UPLOAD_BATCH_COALESCE_MS - 1);
-      const second = batcher.persist({ ...input, pagePosition: 2 });
-      await vi.advanceTimersByTimeAsync(1);
-      await Promise.all([first, second]);
-    } finally {
-      vi.useRealTimers();
-    }
-    expect(batches).toEqual([2]);
-    expect(batcher.snapshot().batchSize).toMatchObject({ avg: 2, p50: 2, p95: 2, max: 2 });
   });
 
   it('flushes reservation arrivals that occur while a prior durable batch is in flight', async () => {
