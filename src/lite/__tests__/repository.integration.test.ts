@@ -858,11 +858,26 @@ describe('LiteRepository against the additive Lite migration', () => {
     const task = await repo.claim('worker-a', 120);
     const adapter = { id: 'source-a', fetchChapterPages: vi.fn(async () => { throw new Error('published chapter must not download'); }) };
     const storage: StorageProvider = { upload: vi.fn(async () => 'must-not-upload'), healthCheck: async () => true, getProviderKey: () => 'telegram' };
-    const executor = new LiteExecutor(poolFor(db) as Pool, repo, { get: () => adapter } as unknown as SourceRegistry, storage,
+    const legacyLookups: string[] = [];
+    const tracedPool = {
+      query: (text: string, values?: unknown[]) => {
+        if (text.includes('FROM importer_lite_chapter_sources s\n      JOIN importer_chapter_mappings')) legacyLookups.push(text);
+        return db.query(text, values);
+      },
+      connect: async () => ({
+        query: (text: string, values?: unknown[]) => {
+          if (text.includes('FROM importer_lite_chapter_sources s\n      JOIN importer_chapter_mappings')) legacyLookups.push(text);
+          return db.query(text, values);
+        },
+        release: () => undefined,
+      }),
+    } as unknown as Pool;
+    const executor = new LiteExecutor(tracedPool, repo, { get: () => adapter } as unknown as SourceRegistry, storage,
       '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(1, 'test-downloads'));
     await executor.importChapter(task!, 'worker-a');
     expect(adapter.fetchChapterPages).not.toHaveBeenCalled();
     expect(storage.upload).not.toHaveBeenCalled();
+    expect(legacyLookups).toHaveLength(1);
     expect((await db.query(`SELECT state,checkpoint->>'publishedAt' AS published_at,checkpoint->>'legacyPublishedReuse' AS reused
       FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
       .toMatchObject({ state: 'DONE', reused: 'true' });

@@ -52,6 +52,7 @@ async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T, index: 
 }
 
 type SourceFailure = Error & { sourceFailure?: boolean; retryAfter?: number };
+type LegacyMappedChapter = { chapterId: string; publishedAt: Date | null };
 
 function sourceFailure(error: unknown): SourceFailure {
   const normalized: SourceFailure = error instanceof Error ? error : new Error(String(error || 'SOURCE_FAILURE'));
@@ -444,7 +445,7 @@ export class LiteExecutor {
    * display value. Reuse them during migration so Lite never overwrites a
    * published editorial chapter merely because its own mapping table is new.
    */
-  private async legacyMappedChapter(task: LiteTask, db: Pick<Pool, 'query'> = this.db): Promise<{ chapterId: string; publishedAt: Date | null } | null> {
+  private async legacyMappedChapter(task: LiteTask, db: Pick<Pool, 'query'> = this.db): Promise<LegacyMappedChapter | null> {
     if (!task.workId || !task.chapterKey) return null;
     const result = await db.query<{ chapter_id: string; published_at: Date | string | null }>(`SELECT m.chapter_id,c.published_at
       FROM importer_lite_chapter_sources s
@@ -471,7 +472,7 @@ export class LiteExecutor {
     return mapped.rows[0].chapter_id;
   }
 
-  private async createOrLoadChapter(task: LiteTask): Promise<string> {
+  private async createOrLoadChapter(task: LiteTask, knownLegacy?: LegacyMappedChapter | null): Promise<string> {
     const existing = await this.db.query<{ chapter_id: string }>(
       'SELECT chapter_id FROM importer_lite_chapters WHERE work_id=$1::uuid AND canonical_chapter_key=$2', [task.workId, task.chapterKey],
     );
@@ -486,7 +487,11 @@ export class LiteExecutor {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
-      const legacy = await this.legacyMappedChapter(task, client);
+      // importChapter already performs this exact indexed lookup before any
+      // source work. Reuse that scalar result so a normal new chapter does
+      // not queue a duplicate YSQL read behind the two-connection pool.
+      // Callers without that snapshot retain the conservative lookup.
+      const legacy = knownLegacy === undefined ? await this.legacyMappedChapter(task, client) : knownLegacy;
       if (legacy) {
         const mapped = await this.mapCanonicalChapter(client, task, legacy.chapterId);
         await client.query('COMMIT');
@@ -523,7 +528,7 @@ export class LiteExecutor {
   async importChapter(task: LiteTask, workerId: string): Promise<void> {
     const legacy = await this.legacyMappedChapter(task);
     if (legacy?.publishedAt) {
-      const chapterId = await this.createOrLoadChapter(task);
+      const chapterId = await this.createOrLoadChapter(task, legacy);
       await this.queue.finish(task, workerId, {
         state: 'DONE', checkpoint: { chapterId, publishedAt: legacy.publishedAt.toISOString(), legacyPublishedReuse: true },
       });
@@ -607,7 +612,7 @@ export class LiteExecutor {
         if (!await this.queue.checkpoint(task, workerId, {
           selectedSource: route.source, sourceChapterId: route.sourceChapterId, pageManifestHash, plannedPageCount: urls.length,
         })) throw new Error('LEASE_LOST_BEFORE_MEDIA_STORAGE');
-        const chapterId = await this.createOrLoadChapter(task);
+        const chapterId = await this.createOrLoadChapter(task, legacy);
         let mediaIds: string[];
         try {
           mediaIds = await mapBounded(urls, this.perChapterPageConcurrency, async (url, index) => {

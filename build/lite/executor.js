@@ -464,7 +464,7 @@ export class LiteExecutor {
             String(task.payload.edition || 'default'), String(task.payload.language || 'und')]);
         return mapped.rows[0].chapter_id;
     }
-    async createOrLoadChapter(task) {
+    async createOrLoadChapter(task, knownLegacy) {
         const existing = await this.db.query('SELECT chapter_id FROM importer_lite_chapters WHERE work_id=$1::uuid AND canonical_chapter_key=$2', [task.workId, task.chapterKey]);
         if (existing.rows[0])
             return existing.rows[0].chapter_id;
@@ -478,7 +478,11 @@ export class LiteExecutor {
         const client = await this.db.connect();
         try {
             await client.query('BEGIN');
-            const legacy = await this.legacyMappedChapter(task, client);
+            // importChapter already performs this exact indexed lookup before any
+            // source work. Reuse that scalar result so a normal new chapter does
+            // not queue a duplicate YSQL read behind the two-connection pool.
+            // Callers without that snapshot retain the conservative lookup.
+            const legacy = knownLegacy === undefined ? await this.legacyMappedChapter(task, client) : knownLegacy;
             if (legacy) {
                 const mapped = await this.mapCanonicalChapter(client, task, legacy.chapterId);
                 await client.query('COMMIT');
@@ -523,7 +527,7 @@ export class LiteExecutor {
     async importChapter(task, workerId) {
         const legacy = await this.legacyMappedChapter(task);
         if (legacy?.publishedAt) {
-            const chapterId = await this.createOrLoadChapter(task);
+            const chapterId = await this.createOrLoadChapter(task, legacy);
             await this.queue.finish(task, workerId, {
                 state: 'DONE', checkpoint: { chapterId, publishedAt: legacy.publishedAt.toISOString(), legacyPublishedReuse: true },
             });
@@ -616,7 +620,7 @@ export class LiteExecutor {
                     selectedSource: route.source, sourceChapterId: route.sourceChapterId, pageManifestHash, plannedPageCount: urls.length,
                 }))
                     throw new Error('LEASE_LOST_BEFORE_MEDIA_STORAGE');
-                const chapterId = await this.createOrLoadChapter(task);
+                const chapterId = await this.createOrLoadChapter(task, legacy);
                 let mediaIds;
                 try {
                     mediaIds = await mapBounded(urls, this.perChapterPageConcurrency, async (url, index) => {
