@@ -1999,6 +1999,61 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);
   });
 
+  it('overlaps the next bounded page wave while scalar receipt persistence waits, then drains before completion', async () => {
+    const key = 'pt-br|default|chapter|6-receipt-overlap|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
+      VALUES ($1,$2,'source-a','a-6-receipt-overlap','pt-BR','default',true)`, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key, priority: 'P1', idempotencyKey: 'receipt-overlap',
+      payload: { displayNumber: '6.1', chapterTitle: 'Six Point One', language: 'pt-BR', edition: 'default', orderKey: '6.1' } });
+    const task = await repo.claim('worker-a', 120);
+    const registry = { get: () => ({ id: 'source-a', fetchChapterPages: async () => [
+      'https://source-a.test/one.png', 'https://source-a.test/two.png', 'https://source-a.test/three.png',
+    ] }) } as unknown as SourceRegistry;
+    const storage: StorageProvider = { upload: vi.fn(async () => 'telegram-file'), healthCheck: async () => true, getProviderKey: () => 'telegram' };
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const originalFetch = globalThis.fetch;
+    const originalReceiptBatch = repo.recordUploadReceipts.bind(repo);
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let receiptWrites = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      const body = Uint8Array.from(png);
+      if (url.includes('two')) body[body.length - 13] ^= 1;
+      if (url.includes('three')) body[body.length - 14] ^= 1;
+      return new Response(body, { status: 200, headers: { 'content-length': String(body.byteLength) } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    (repo as any).recordUploadReceipts = async (inputs: any[]) => {
+      receiptWrites++;
+      if (receiptWrites === 1) {
+        markFirstStarted();
+        await firstGate;
+      }
+      return originalReceiptBatch(inputs);
+    };
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'receipt-overlap-downloads'), 2,
+        new AsyncSemaphore(2, 'receipt-overlap-buffers'));
+      const importing = executor.importChapter(task!, 'worker-a');
+      await firstStarted;
+      await expect(Promise.race([
+        (async () => { while (fetchMock.mock.calls.length < 3) await new Promise<void>((resolve) => setTimeout(resolve, 2)); })(),
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('NEXT_PAGE_WAITED_FOR_RECEIPT')), 250)),
+      ])).resolves.toBeUndefined();
+      releaseFirst();
+      await importing;
+    } finally {
+      (repo as any).recordUploadReceipts = originalReceiptBatch;
+      vi.stubGlobal('fetch', originalFetch);
+    }
+    expect(storage.upload).toHaveBeenCalledTimes(3);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(3);
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
+  });
+
   it('flushes receipt arrivals that occur while a prior durable batch is in flight', async () => {
     let releaseFirst!: () => void;
     let markFirstStarted!: () => void;

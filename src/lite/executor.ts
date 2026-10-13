@@ -315,9 +315,11 @@ export class LiteExecutor {
   private readonly receiptBatcher: UploadReceiptBatcher;
   private readonly reservationBatcher: UploadReservationBatcher;
   private fairDemandSources = new Set<string>();
-  // Held from byte download through receipt persistence. This is distinct
-  // from request concurrency: it bounds real image buffers across every
-  // chapter worker while Telegram is slow or cooling down.
+  // Held from byte download through Telegram acknowledgement. Receipt
+  // persistence retains only scalar metadata, never image bytes, so it can
+  // overlap the next bounded page wave without weakening the memory budget.
+  // This is distinct from request concurrency: it bounds real image buffers
+  // across every chapter worker while Telegram is slow or cooling down.
   constructor(
     private readonly db: Pool,
     private readonly queue: LiteRepository,
@@ -558,6 +560,18 @@ export class LiteExecutor {
         await sourceSlot.acquire();
       }
       try {
+        // Telegram has accepted these pages, but their durable receipts still
+        // need the small YSQL pool. Do not make every page worker idle behind
+        // that write: queue the scalar receipt, continue the bounded wave,
+        // and drain every receipt before the chapter can advance. A crash in
+        // this interval leaves its pre-Telegram intent durable and recovery
+        // treats the result as UNKNOWN rather than sending the page again.
+        const deferredReceipts: Promise<void>[] = [];
+        const drainDeferredReceipts = async (): Promise<void> => {
+          const settled = await Promise.allSettled(deferredReceipts);
+          const rejected = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+          if (rejected) throw rejected.reason;
+        };
         let urls: string[];
         try {
           urls = await adapter.fetchChapterPages(route.sourceChapterId, Number(task.payload.displayNumber));
@@ -576,7 +590,9 @@ export class LiteExecutor {
           selectedSource: route.source, sourceChapterId: route.sourceChapterId, pageManifestHash, plannedPageCount: urls.length,
         })) throw new Error('LEASE_LOST_BEFORE_MEDIA_STORAGE');
         const chapterId = await this.createOrLoadChapter(task);
-        const mediaIds = await mapBounded(urls, this.perChapterPageConcurrency, async (url, index) => {
+        let mediaIds: string[];
+        try {
+          mediaIds = await mapBounded(urls, this.perChapterPageConcurrency, async (url, index) => {
           const position = index + 1;
           const receipt = uploadReceipts.get(position);
           if (receipt?.state === 'PERSISTED' && receipt.storageReady === true && Number(receipt.bytes) > 0 &&
@@ -586,10 +602,10 @@ export class LiteExecutor {
           if (host) await this.sourceRateLimiter.acquire(host);
           return this.bufferedPages.runExclusive(async () => {
             // Reserve bytes before requesting the body. The reservation grows
-            // from the response length while it is read, remains held through
-            // Telegram and durable receipt persistence, then releases even on
-            // every error path. This bounds actual retained media, not merely
-            // the number of page promises.
+            // from the response length while it is read and remains held until
+            // Telegram has acknowledged the send. The deferred receipt only
+            // captures scalar metadata, so releasing here still bounds actual
+            // retained media rather than merely page promises.
             const pageSignal = AbortSignal.timeout(45_000);
             const byteReservation = await this.pageBytes.reserve(undefined, pageSignal);
             try {
@@ -621,7 +637,6 @@ export class LiteExecutor {
               const reserved = await this.reservationBatcher.reserve({ taskId: task.id, pagePosition: position, sha256 });
               if (reserved.state === 'PERSISTED') return reserved.mediaId;
               if (reserved.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
-              let receiptNeeded = false;
               try {
                 const uploadStartedAt = performance.now();
                 telemetryCollector.trackActiveTelegramUpload(1);
@@ -632,15 +647,27 @@ export class LiteExecutor {
                 } finally {
                   telemetryCollector.trackActiveTelegramUpload(-1);
                 }
-                receiptNeeded = true;
-                await this.receiptBatcher.persist({
+                const receipt = this.receiptBatcher.persist({
                   taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256,
                   bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
                   botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,
                   shardId: this.storage.getLastShardId?.(reserved.mediaId) || null,
                   channelId: this.storage.getLastChannelId?.(reserved.mediaId) || null, createdBy: this.importerUserId,
                   messageId: this.storage.getLastMessageId?.(reserved.mediaId) || null,
+                }).catch(async (error) => {
+                  await this.queue.checkpoint(task, workerId, {
+                    lastUploadFailure: {
+                      position, phase: 'RECEIPT_PERSISTENCE', class: uploadFailureClass(error), at: new Date().toISOString(),
+                    },
+                  });
+                  await this.queue.markUploadUnknown(task.id, position);
+                  throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
                 });
+                // A rejected promise can happen while sibling page work is
+                // still running. Attach a no-op handler now; the durable
+                // drain below remains the authority that propagates it.
+                void receipt.catch(() => {});
+                deferredReceipts.push(receipt);
                 return reserved.mediaId;
               } catch (error) {
                 // A confirmed Telegram success followed by a DB failure is
@@ -648,7 +675,7 @@ export class LiteExecutor {
                 // rejection are ambiguous too: a response can be lost after the
                 // server accepted the upload. Only known HTTP rejections (notably
                 // 429) may retry with the reserved media ID.
-                if (receiptNeeded || !(error as any)?.statusCode) {
+                if (!(error as any)?.statusCode) {
                   // UNKNOWN is intentionally terminal for this page: retain a
                   // redacted, durable stage/class so production can distinguish
                   // Telegram transport from post-upload receipt persistence
@@ -656,7 +683,7 @@ export class LiteExecutor {
                   await this.queue.checkpoint(task, workerId, {
                     lastUploadFailure: {
                       position,
-                      phase: receiptNeeded ? 'RECEIPT_PERSISTENCE' : 'TELEGRAM_TRANSPORT',
+                      phase: 'TELEGRAM_TRANSPORT',
                       class: uploadFailureClass(error),
                       at: new Date().toISOString(),
                     },
@@ -672,6 +699,14 @@ export class LiteExecutor {
             }
           });
         });
+        } catch (error) {
+          // Do not let source fallback inspect an incomplete durable receipt
+          // wave. If a receipt failed, its UNKNOWN fence is more important
+          // than the source error that happened alongside it.
+          try { await drainDeferredReceipts(); } catch (receiptError) { throw receiptError; }
+          throw error;
+        }
+        await drainDeferredReceipts();
         if (!await this.queue.completeImportAndEnqueuePublish(task, workerId, {
           chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source, mediaStoredAt: new Date().toISOString(),
         })) throw new Error('LEASE_LOST_AFTER_MEDIA_STORAGE');
