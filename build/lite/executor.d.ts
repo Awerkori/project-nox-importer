@@ -28,7 +28,7 @@ export type UploadBatchSnapshot = {
 /**
  * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
  * a per-page fence, so a crash can never make a successful send retryable.
- * A 20ms join is short relative to the measured durable write and source
+ * A 60ms join is short relative to the measured durable write and source
  * latencies, while allowing staggered pages in one bounded wave to share a
  * write. It adds no queue, state, or retry path and a full batch still flushes
  * immediately.
