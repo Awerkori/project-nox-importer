@@ -409,6 +409,39 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(row.rows[0]).toMatchObject({ state: 'READY', attempts: 0, lease_owner: null, lease_until: null, delayed: true });
   });
 
+  it('defers sole-route imports for a provider retry boundary so lower executable work is not hidden', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'cooling-source', priority: 'P1', idempotencyKey: 'cooling-source',
+      payload: { language: 'pt-BR', edition: 'default' } });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+      VALUES($1::uuid,'cooling-source','source-a','a','cooling-source','pt-BR','default','n|000001|000000|0',10,true)`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:still-executable', priority: 'P2', idempotencyKey: 'still-executable' });
+
+    await repo.recordSourceFailure('source-a', { retryAfter: 30, message: 'PAGE_HTTP_429' });
+
+    const deferred = await db.query(`SELECT state,attempts,reason,next_run_at>now() AS delayed
+      FROM importer_lite_tasks WHERE idempotency_key='cooling-source'`);
+    expect(deferred.rows[0]).toMatchObject({ state: 'RETRY_WAIT', attempts: 0, reason: 'SOURCE_RATE_LIMITED', delayed: true });
+    expect((await repo.claim('cooldown-skips-ineligible', 120))?.idempotencyKey).toBe('still-executable');
+  });
+
+  it('keeps an import ready when a confirmed healthy alternative can satisfy the same chapter', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'fallback-survives-cooldown', priority: 'P1', idempotencyKey: 'fallback-survives-cooldown',
+      payload: { language: 'pt-BR', edition: 'default' } });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+      VALUES($1::uuid,'fallback-survives-cooldown','source-a','a','fallback-a','pt-BR','default','n|000001|000000|0',10,true),
+            ($1::uuid,'fallback-survives-cooldown','source-b','b','fallback-b','pt-BR','default','n|000001|000000|0',20,true)`, [ids.p1a]);
+
+    await repo.recordSourceFailure('source-a', { retryAfter: 30, message: 'PAGE_HTTP_429' });
+
+    const row = await db.query(`SELECT state,attempts FROM importer_lite_tasks WHERE idempotency_key='fallback-survives-cooldown'`);
+    expect(row.rows[0]).toMatchObject({ state: 'READY', attempts: 0 });
+    expect((await repo.claim('fallback-remains-executable', 120))?.idempotencyKey).toBe('fallback-survives-cooldown');
+  });
+
   it('yields an actual hot-source import before networking when another ready source has capacity', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'hot-source-import', priority: 'P1', idempotencyKey: 'hot-source-import',
