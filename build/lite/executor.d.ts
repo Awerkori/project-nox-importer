@@ -6,6 +6,7 @@ import type { LiteTask } from './types.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { PageByteBudget } from './page-byte-budget.js';
+export declare const LITE_UPLOAD_BATCH_COALESCE_MS = 20;
 export type UploadBatchSnapshot = {
     sampledFlushes: number;
     totalFlushes: number;
@@ -28,8 +29,8 @@ export type UploadBatchSnapshot = {
 /**
  * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
  * a per-page fence, so a crash can never make a successful send retryable.
- * Five milliseconds is enough to join a page wave without adding meaningful
- * latency or a second scheduler/queue.
+ * The bounded coalescing interval joins a page wave without adding a second
+ * scheduler or weakening the durable pre/post-upload fences.
  */
 export declare class UploadReceiptBatcher {
     private readonly queue;

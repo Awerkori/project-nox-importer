@@ -8,6 +8,12 @@ import { telemetryCollector } from '../core/telemetry-collector.js';
 import { BoundedSamples } from '../core/bounded-samples.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { PageByteBudget } from './page-byte-budget.js';
+// Durable page writes share a two-connection YSQL pool. Production snapshots
+// showed the old 5ms window producing mostly two-page batches while writes
+// waited hundreds of milliseconds. Twenty milliseconds is deliberately small
+// beside that wait, but lets one bounded page wave arrive before its one SQL
+// statement. The 48-item ceiling remains unchanged.
+export const LITE_UPLOAD_BATCH_COALESCE_MS = 20;
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
     let cursor = 0;
@@ -132,8 +138,8 @@ function numericDisplayValue(display) {
 /**
  * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
  * a per-page fence, so a crash can never make a successful send retryable.
- * Five milliseconds is enough to join a page wave without adding meaningful
- * latency or a second scheduler/queue.
+ * The bounded coalescing interval joins a page wave without adding a second
+ * scheduler or weakening the durable pre/post-upload fences.
  */
 export class UploadReceiptBatcher {
     queue;
@@ -151,7 +157,7 @@ export class UploadReceiptBatcher {
                 void this.flush();
             }
             else if (!this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer = setTimeout(() => void this.flush(), LITE_UPLOAD_BATCH_COALESCE_MS);
                 this.flushTimer.unref();
             }
         });
@@ -207,7 +213,7 @@ export class UploadReceiptBatcher {
         finally {
             this.flushing = false;
             if (this.pending.length && !this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer = setTimeout(() => void this.flush(), LITE_UPLOAD_BATCH_COALESCE_MS);
                 this.flushTimer.unref();
             }
         }
@@ -234,7 +240,7 @@ export class UploadReservationBatcher {
                 void this.flush();
             }
             else if (!this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer = setTimeout(() => void this.flush(), LITE_UPLOAD_BATCH_COALESCE_MS);
                 this.flushTimer.unref();
             }
         });
@@ -275,7 +281,7 @@ export class UploadReservationBatcher {
         finally {
             this.flushing = false;
             if (this.pending.length && !this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer = setTimeout(() => void this.flush(), LITE_UPLOAD_BATCH_COALESCE_MS);
                 this.flushTimer.unref();
             }
         }
