@@ -1111,12 +1111,17 @@ export class LiteRepository {
       // work. Fence the irreversible Reader-visible transition before any
       // page replacement or publication mutation; the reconciler will give
       // the current owner a clean retry instead of allowing two publishers.
-      const lease = await client.query(`SELECT 1 FROM importer_lite_tasks
-        WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now() FOR UPDATE`, [input.task.id, input.workerId]);
-      if (lease.rowCount !== 1) throw new Error('LEASE_LOST_BEFORE_PUBLISH');
+      // The task fence and the small work-presentation read are always
+      // adjacent and both hold short row locks. Read them together instead
+      // of consuming two scarce YSQL round trips per published chapter.
       const presentation = await client.query<Row>(`SELECT w.cover_id,w.title,w.slug,m.storage_ready,m.bytes
-        FROM works w LEFT JOIN media m ON m.id=w.cover_id WHERE w.id=$1::uuid FOR UPDATE OF w`, [input.workId]);
+        FROM importer_lite_tasks t
+        JOIN works w ON w.id=$3::uuid
+        LEFT JOIN media m ON m.id=w.cover_id
+        WHERE t.id=$1::uuid AND t.state='RUNNING' AND t.lease_owner=$2 AND t.lease_until>now()
+        FOR UPDATE OF t,w`, [input.task.id, input.workerId, input.workId]);
       const work = presentation.rows[0];
+      if (!work) throw new Error('LEASE_LOST_BEFORE_PUBLISH');
       if (!work?.title || !work?.slug || !work?.cover_id || work.storage_ready !== true || Number(work.bytes) < 1500) {
         throw new Error('WORK_PRESENTATION_INCOMPLETE');
       }
@@ -1146,19 +1151,39 @@ export class LiteRepository {
         publishedAt = existing.rows[0]?.published_at || null;
       }
       if (publishedAt) {
-        await client.query(`INSERT INTO importer_publication_events
-          (chapter_id,transition_at,recorded_at,bucket_minute,is_fresh_release,source,work_id,priority)
-          VALUES($1::uuid,$2::timestamptz,clock_timestamp(),date_trunc('minute',$2::timestamptz),$3,$4,$5::uuid,$6)
-          ON CONFLICT(chapter_id) DO NOTHING`, [input.chapterId,publishedAt,input.fresh,
-          typeof input.task.payload.source === 'string' ? input.task.payload.source : null,
-          input.workId, LITE_PRIORITY_RANK[input.task.priority]]);
-        await client.query(`UPDATE works SET published=true,latest_chapter_published_at=GREATEST(COALESCE(latest_chapter_published_at,$2),$2),updated_at=now() WHERE id=$1::uuid`, [input.workId,publishedAt]);
         const importTaskId = typeof input.task.payload.importTaskId === 'string' ? input.task.payload.importTaskId : null;
-        if (importTaskId) {
-          await client.query(`UPDATE importer_lite_tasks
-            SET checkpoint=checkpoint || jsonb_build_object('publishedAt',$2::text),updated_at=now()
-            WHERE id=$1::uuid AND task_type='IMPORT_CHAPTER'`, [importTaskId,publishedAt]);
-        }
+        // Once the chapter has a durable timestamp, the public event, work
+        // freshness, originating-import marker and PUBLISH completion are
+        // independent short writes. Put them in one statement under the
+        // existing transaction. If the final lease fence fails, throwing
+        // rolls every one of these writes back exactly as before.
+        const done = await client.query(`WITH event_row AS (
+            INSERT INTO importer_publication_events
+              (chapter_id,transition_at,recorded_at,bucket_minute,is_fresh_release,source,work_id,priority)
+            VALUES($1::uuid,$2::timestamptz,clock_timestamp(),date_trunc('minute',$2::timestamptz),$3,$4,$5::uuid,$6)
+            ON CONFLICT(chapter_id) DO NOTHING
+          ), work_row AS (
+            UPDATE works SET published=true,
+              latest_chapter_published_at=GREATEST(COALESCE(latest_chapter_published_at,$2::timestamptz),$2::timestamptz),
+              updated_at=now()
+            WHERE id=$5::uuid
+          ), origin_row AS (
+            UPDATE importer_lite_tasks SET checkpoint=checkpoint || jsonb_build_object('publishedAt',$2::text),updated_at=now()
+            WHERE id=$7::uuid AND task_type='IMPORT_CHAPTER'
+          ) UPDATE importer_lite_tasks SET state='DONE',lease_owner=NULL,lease_until=NULL,
+            checkpoint=checkpoint || jsonb_build_object('publishedAt',COALESCE($2::text,checkpoint->>'publishedAt')),updated_at=now()
+          WHERE id=$8::uuid AND state='RUNNING' AND lease_owner=$9 AND lease_until>now()
+          RETURNING id`, [input.chapterId,publishedAt,input.fresh,
+          typeof input.task.payload.source === 'string' ? input.task.payload.source : null,
+          input.workId,LITE_PRIORITY_RANK[input.task.priority],importTaskId,input.task.id,input.workerId]);
+        // The task lock prevents a reclaimer from claiming this row during the
+        // transaction, but wall-clock lease expiry must still roll back every
+        // Reader-visible write. A stale owner is never allowed to commit pages
+        // or published_at and leave the durable task unsettled.
+        if (done.rowCount !== 1) throw new Error('LEASE_LOST_DURING_PUBLISH');
+        await this.refreshReadyWork(client, input.task.workKey);
+        await client.query('COMMIT');
+        return true;
       }
       const done = await client.query(`UPDATE importer_lite_tasks SET state='DONE',lease_owner=NULL,lease_until=NULL,
         checkpoint=checkpoint || jsonb_build_object('publishedAt',COALESCE($3::text,checkpoint->>'publishedAt')),updated_at=now()
