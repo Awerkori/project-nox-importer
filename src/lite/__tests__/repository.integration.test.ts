@@ -212,6 +212,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(0);
   });
 
+  it('lets an abundant materialized P1 import reserve suppress catalog maintenance completely', async () => {
+    for (let index = 0; index < 64; index++) {
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+        chapterKey: `abundant-${index}`, priority: 'P1', idempotencyKey: `abundant-${index}` });
+    }
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000125'::uuid,'source-a','abundant-a',$1::uuid,'WAITING_ADMISSION')`, [ids.p1a]);
+
+    expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(0);
+    expect(repo.hasAbundantHistoricalP1Reserve()).toBe(true);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE task_type='CATALOG' AND payload ? 'historicalP1Backfill'`)).rows[0].count).toBe(0);
+  });
+
   it('replaces duplicate pending source seats with distinct healthy P1 catalog sources', async () => {
     await db.query(`INSERT INTO importer_sources(id) VALUES('source-c'),('source-d'),('source-e')`);
     for (let index = 0; index < 4; index++) {

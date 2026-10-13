@@ -72,6 +72,8 @@ export interface CompleteImportInput {
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export declare class LiteRepository {
     private readonly db;
+    private historicalP1ReserveAbundant;
+    hasAbundantHistoricalP1Reserve(): boolean;
     constructor(db: Db);
     private refreshReadyWork;
     enqueue(input: EnqueueLiteTask): Promise<{

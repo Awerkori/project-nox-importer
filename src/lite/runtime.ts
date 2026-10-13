@@ -331,8 +331,12 @@ export class ImporterLiteRuntime {
       const admitted = await this.queue.refillHistoricalP1Catalog();
       // One turn per already-bounded recovery interval lets an alternative
       // healthy source materialize without returning to a continuously
-      // competing catalog lane. It does not affect STAFF/P0/P1/P2 ordering.
-      const promoted = await this.queue.promoteDeferredHistoricalP1Catalog(this.executor.getFairSourceDemand());
+      // competing catalog lane. An abundant materialised P1 reserve is
+      // already executable work, so catalog must yield without consuming a
+      // second pool turn. It does not affect STAFF/P0/P1/P2 ordering.
+      const promoted = this.queue.hasAbundantHistoricalP1Reserve()
+        ? false
+        : await this.queue.promoteDeferredHistoricalP1Catalog(this.executor.getFairSourceDemand());
       if (admitted || promoted) this.logger.info('Advanced bounded historical P1 catalog producer', { admitted, promoted });
     } catch (error: any) {
       this.logger.warn('Historical P1 catalog refill failed', { error: error?.message });
