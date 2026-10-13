@@ -1,4 +1,5 @@
 import { canonicalAdultTagName } from '../core/tag-normalization.js';
+import { mergeAlternativeTitles } from '../core/alternative-titles.js';
 const html = (value) => value
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
@@ -36,7 +37,7 @@ export function mergeMetadata(existing, incoming, sourceRank = 100) {
     if (synopsis && !oldSynopsis?.protected && (!oldSynopsis?.value || synopsis.length >= oldSynopsis.value.length || !oldSynopsis.validated)) {
         result.synopsis = { value: synopsis, validated: true, sourceRank };
     }
-    const aliases = [...new Set([...(result.aliases?.value || []), ...(incoming.aliases || []).map(html).map((x) => x.trim()).filter(Boolean)])];
+    const aliases = mergeAlternativeTitles(result.aliases?.value, (incoming.aliases || []).map(html), (result.title?.value || incoming.title));
     if (aliases.length)
         result.aliases = { value: aliases, validated: true, sourceRank: Math.min(result.aliases?.sourceRank ?? Infinity, sourceRank) };
     const tags = [...new Set([...(result.tags?.value || []), ...(incoming.tags || []).map(normalizeSourceTag).filter((x) => Boolean(x))])];

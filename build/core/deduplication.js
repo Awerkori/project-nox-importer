@@ -2,6 +2,7 @@ import { Logger } from './logger.js';
 import { decodeHtmlEntities } from '../sources/common/html-utils.js';
 import { evaluateMetadataMatchEvidence, matchWorkCandidate, getCanonicalSynonyms } from './matching.js';
 import { CANONICAL_ADULT_TAG_NAME, CANONICAL_ADULT_TAG_SLUG, canonicalAdultTagName } from './tag-normalization.js';
+import { mergeAlternativeTitles } from './alternative-titles.js';
 export const ADULT_SOURCES = new Set([
     'hanamiheaven',
     'hipercool',
@@ -167,9 +168,12 @@ export class DeduplicationEngine {
             .filter(t => t.length > 0);
         // Automatically enrich with curated canonical translation synonyms
         const synonymTitles = initialTitles.flatMap(t => getCanonicalSynonyms(t));
-        const rawIncomingTitles = Array.from(new Set([...initialTitles, ...synonymTitles]));
+        const rawIncomingTitles = mergeAlternativeTitles([], [...initialTitles, ...synonymTitles]);
         const cleanSlug = this.sanitizeSlug(slug || title);
-        const incomingSlugs = Array.from(new Set([cleanSlug, ...rawIncomingTitles.map(t => this.sanitizeSlug(t))]));
+        const incomingSlugs = Array.from(new Set([
+            cleanSlug,
+            ...rawIncomingTitles.map((t) => this.sanitizeSlug(t)).filter((value) => value !== 'obra'),
+        ]));
         const incomingTitles = Array.from(new Set(rawIncomingTitles));
         if (incomingSlugs.length === 0) {
             incomingSlugs.push(cleanSlug);
@@ -381,17 +385,10 @@ export class DeduplicationEngine {
                 // High-confidence single match: Link this source to the canonical work_id
                 const matched = bestMatch;
                 // Non-destructively merge missing incoming aliases into canonical work
-                const existingAliasSlugs = new Set((matched.aliases || []).map((a) => this.sanitizeSlug(a)));
-                const newAliases = [...(matched.aliases || [])];
-                let addedAliases = false;
-                for (const t of incomingTitles) {
-                    if (!existingAliasSlugs.has(this.sanitizeSlug(t)) && t.toLowerCase() !== matched.title.toLowerCase()) {
-                        newAliases.push(t);
-                        addedAliases = true;
-                        existingAliasSlugs.add(this.sanitizeSlug(t));
-                    }
-                }
-                if (addedAliases) {
+                const newAliases = mergeAlternativeTitles(matched.aliases, incomingTitles, matched.title);
+                const aliasesChanged = newAliases.length !== (matched.aliases || []).length
+                    || newAliases.some((alias, index) => alias !== matched.aliases[index]);
+                if (aliasesChanged) {
                     await this.supabase.from('works').update({ aliases: newAliases }).eq('id', matched.id);
                 }
                 const { data: insertedMapping } = await this.supabase
@@ -515,7 +512,7 @@ export class DeduplicationEngine {
                 id: newWorkId,
                 slug: uniqueSlug,
                 title: decodeHtmlEntities(title).slice(0, 200),
-                aliases: (candidate.aliases || []).map((a) => decodeHtmlEntities(a)),
+                aliases: mergeAlternativeTitles([], (candidate.aliases || []).map((a) => decodeHtmlEntities(a)), title),
                 synopsis: decodeHtmlEntities(candidate.synopsis || '').slice(0, 5000),
                 description: decodeHtmlEntities(candidate.synopsis || '').slice(0, 10000),
                 author: candidate.author?.slice(0, 100) || '',
@@ -655,8 +652,10 @@ export class DeduplicationEngine {
         if (candidate.aliases && Array.isArray(candidate.aliases) && candidate.aliases.length > 0) {
             if (prov.aliases?.source !== 'manual') {
                 const existingAliases = Array.isArray(work.aliases) ? work.aliases : [];
-                const mergedAliases = Array.from(new Set([...existingAliases, ...candidate.aliases.map((a) => a.trim()).filter(Boolean)])).slice(0, 50);
-                if (mergedAliases.length > existingAliases.length || (source === 'kuro' && existingAliases.length === 0)) {
+                const mergedAliases = mergeAlternativeTitles(existingAliases, candidate.aliases.map((a) => decodeHtmlEntities(a)), updates.title || work.title);
+                const aliasesChanged = mergedAliases.length !== existingAliases.length
+                    || mergedAliases.some((alias, index) => alias !== existingAliases[index]);
+                if (aliasesChanged || (source === 'kuro' && existingAliases.length === 0)) {
                     updates.aliases = mergedAliases;
                     prov.aliases = { source, updated_at: now };
                 }
@@ -833,11 +832,32 @@ export class DeduplicationEngine {
             'mystery': 'Mistério',
             'thriller': 'Suspense'
         };
+        // These are display canonicalizations only: each key is an exact
+        // case/spacing variant of the provider-declared category.  Do not fold
+        // related adult concepts together (for example NTR and Netorare remain
+        // distinct) and never infer them from title or synopsis text.
+        const exactSpecificTags = {
+            'milf': 'MILF',
+            'bdsm': 'BDSM',
+            'ntr': 'NTR',
+            'netorare': 'Netorare',
+            'netorase': 'Netorase',
+            'netori': 'Netori',
+            'vanilla': 'Vanilla',
+            'hentai': 'Hentai',
+            'ecchi': 'Ecchi',
+            'yuri': 'Yuri',
+            'yaoi': 'Yaoi',
+            'harem': 'Harem',
+            'anal': 'Anal',
+        };
         let cleaned = decodeHtmlEntities(raw).replace(/\s+/g, ' ').trim();
         const lower = cleaned.toLowerCase().replace(/[’']/g, '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ');
         if (canonicalAliases[lower]) {
             return canonicalAliases[lower];
         }
+        if (exactSpecificTags[lower])
+            return exactSpecificTags[lower];
         // Default capitalization (first letter upper)
         if (cleaned.length > 0) {
             cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase();

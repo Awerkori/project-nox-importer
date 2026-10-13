@@ -34,6 +34,15 @@ describe('Tag Normalization', () => {
     expect(engine['normalizeTagName']('Psychological')).toBe('Psicológico');
     expect(engine['normalizeTagName']('Reincarnation')).toBe('Reencarnação');
   });
+
+  it('keeps explicit detailed adult taxonomy distinct from the generic adult rating', () => {
+    const engine = new DeduplicationEngine({} as any);
+    expect(engine['normalizeTagName']('milf')).toBe('MILF');
+    expect(engine['normalizeTagName']('NTR')).toBe('NTR');
+    expect(engine['normalizeTagName']('netorare')).toBe('Netorare');
+    expect(engine['normalizeTagName']('vanilla')).toBe('Vanilla');
+    expect(engine['normalizeTagName']('Adulto')).toBe(CANONICAL_ADULT_TAG_NAME);
+  });
   
   it('provides default tags for specialized sources', () => {
      const engine = new DeduplicationEngine({} as any);

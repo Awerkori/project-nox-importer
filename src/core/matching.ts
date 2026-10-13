@@ -154,7 +154,7 @@ export function normalizeTitle(text: string): string {
 
   // 2. Replace punctuation, brackets, special symbols with spaces
   normalized = normalized.replace(/['’`´"״]/g, ''); // keep words joined without apostrophes (e.g. Academy's -> Academys)
-  normalized = normalized.replace(/[^\w\s]/g, ' ');
+  normalized = normalized.replace(/[^\p{L}\p{N}\s]/gu, ' ');
 
   // 3. Filter noise tokens
   const tokens = normalized
