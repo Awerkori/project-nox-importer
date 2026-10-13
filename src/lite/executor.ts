@@ -18,10 +18,8 @@ import { PageByteBudget } from './page-byte-budget.js';
 // milliseconds on the small direct YSQL pool.  Keep a short, bounded join
 // window so pages finishing the same download wave share one write instead of
 // immediately competing for the second connection.  This is deliberately far
-// below normal source/Telegram latency and never delays a full batch.  A
-// 120ms window remains small against the measured ~0.5s YSQL batch writes,
-// but gives an in-flight write's follow-up wave enough time to coalesce.
-const DURABLE_PAGE_BATCH_JOIN_MS = 120;
+// below normal source/Telegram latency and never delays a full batch.
+const DURABLE_PAGE_BATCH_JOIN_MS = 60;
 
 async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const result = new Array<R>(items.length);
