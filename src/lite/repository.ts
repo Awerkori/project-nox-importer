@@ -980,11 +980,16 @@ export class LiteRepository {
         `WITH input AS (
            SELECT * FROM unnest($1::uuid[],$2::int[],$3::text[],$4::uuid[])
              AS v(task_id,page_position,sha256,fresh_id)
+         ), input_hashes AS (
+           SELECT DISTINCT sha256 FROM input
+         ), reusable_media AS (
+           SELECT DISTINCT ON (m.sha256) m.sha256,m.id
+           FROM media m JOIN input_hashes h ON h.sha256=m.sha256
+           WHERE m.storage_ready=true AND m.bytes>0 AND m.mime LIKE 'image/%'
+           ORDER BY m.sha256,m.created_at
          ), reusable AS (
-           SELECT i.*, (SELECT m.id FROM media m
-             WHERE m.sha256=i.sha256 AND m.storage_ready=true AND m.bytes>0 AND m.mime LIKE 'image/%'
-             ORDER BY m.created_at LIMIT 1) AS reusable_media_id
-           FROM input i
+           SELECT i.*,m.id AS reusable_media_id
+           FROM input i LEFT JOIN reusable_media m ON m.sha256=i.sha256
          ), inserted AS (
            INSERT INTO importer_lite_uploads(task_id,page_position,media_id,sha256,state)
            SELECT task_id,page_position,COALESCE(reusable_media_id,fresh_id),sha256,
