@@ -13,7 +13,7 @@ import { PageByteBudget } from './page-byte-budget.js';
 // window so pages finishing the same download wave share one write instead of
 // immediately competing for the second connection.  This is deliberately far
 // below normal source/Telegram latency and never delays a full batch.
-const DURABLE_PAGE_BATCH_JOIN_MS = 20;
+const DURABLE_PAGE_BATCH_JOIN_MS = 60;
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
     let cursor = 0;
@@ -138,7 +138,7 @@ function numericDisplayValue(display) {
 /**
  * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
  * a per-page fence, so a crash can never make a successful send retryable.
- * A 20ms join is short relative to the measured durable write and source
+ * A 60ms join is short relative to the measured durable write and source
  * latencies, while allowing staggered pages in one bounded wave to share a
  * write. It adds no queue, state, or retry path and a full batch still flushes
  * immediately.
