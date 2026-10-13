@@ -53,6 +53,7 @@ async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T, index: 
 
 type SourceFailure = Error & { sourceFailure?: boolean; retryAfter?: number };
 type LegacyMappedChapter = { chapterId: string; publishedAt: Date | null };
+type ChapterRouteSnapshot = { routes: ChapterSourceRoute[]; legacy: LegacyMappedChapter | null };
 
 function sourceFailure(error: unknown): SourceFailure {
   const normalized: SourceFailure = error instanceof Error ? error : new Error(String(error || 'SOURCE_FAILURE'));
@@ -405,19 +406,35 @@ export class LiteExecutor {
     return slot;
   }
 
-  private async routes(task: LiteTask): Promise<ChapterSourceRoute[]> {
-    if (!task.workId || !task.chapterKey) return [];
+  private async routes(task: LiteTask): Promise<ChapterRouteSnapshot> {
+    if (!task.workId || !task.chapterKey) return { routes: [], legacy: null };
     const result = await this.db.query<any>(
       `SELECT s.source,s.source_work_id,s.source_chapter_id,s.canonical_chapter_key,s.work_id,s.language,s.edition,s.source_rank,
-         s.confirmed,s.has_chapter,COALESCE(h.health,'HEALTHY') health,h.cooldown_until,
+         s.confirmed,s.has_chapter,s.created_at,COALESCE(h.health,'HEALTHY') health,h.cooldown_until,
          p.enabled,p.status,p.cooldown_until AS source_cooldown,
-         COALESCE((to_jsonb(p)->>'chapter_ingestion_enabled')::boolean,true) AS chapter_ingestion_enabled
+         COALESCE((to_jsonb(p)->>'chapter_ingestion_enabled')::boolean,true) AS chapter_ingestion_enabled,
+         c.id AS legacy_chapter_id,c.published_at AS legacy_published_at
        FROM importer_lite_chapter_sources s
        JOIN importer_sources p ON p.id=s.source
        LEFT JOIN importer_lite_source_health h ON h.source=s.source
+       LEFT JOIN importer_chapter_mappings m ON m.source=s.source AND m.source_chapter_id=s.source_chapter_id
+       LEFT JOIN chapters c ON c.id=m.chapter_id AND c.work_id=s.work_id
        WHERE s.work_id=$1::uuid AND s.canonical_chapter_key=$2`, [task.workId, task.chapterKey],
     );
-    return result.rows.map((row) => {
+    // Every import formerly issued a second, almost-identical indexed lookup
+    // solely to find an exact legacy mapping.  Carry that scalar through the
+    // route snapshot instead.  It is still constrained to the canonical work
+    // and confirmed source identity, and createOrLoadChapter retains its
+    // conservative query for callers without this snapshot.
+    const legacyRow = result.rows
+      .filter((row) => row.confirmed === true && row.legacy_chapter_id)
+      .sort((left, right) => Number(left.source_rank || 0) - Number(right.source_rank || 0) ||
+        String(left.created_at || '').localeCompare(String(right.created_at || '')))[0];
+    const legacy = legacyRow ? {
+      chapterId: String(legacyRow.legacy_chapter_id),
+      publishedAt: legacyRow.legacy_published_at ? new Date(legacyRow.legacy_published_at) : null,
+    } : null;
+    const routes = result.rows.map((row) => {
       const status = String(row.status || 'ACTIVE').toUpperCase();
       const healthCooldown = row.cooldown_until ? new Date(row.cooldown_until) : null;
       const sourceCooldown = row.source_cooldown ? new Date(row.source_cooldown) : null;
@@ -438,6 +455,7 @@ export class LiteExecutor {
       cooldownUntil,
     };
     });
+    return { routes, legacy };
   }
 
   /**
@@ -526,7 +544,8 @@ export class LiteExecutor {
   }
 
   async importChapter(task: LiteTask, workerId: string): Promise<void> {
-    const legacy = await this.legacyMappedChapter(task);
+    const routeSnapshot = await this.routes(task);
+    const legacy = routeSnapshot.legacy;
     if (legacy?.publishedAt) {
       const chapterId = await this.createOrLoadChapter(task, legacy);
       await this.queue.finish(task, workerId, {
@@ -539,7 +558,7 @@ export class LiteExecutor {
     // indexed read without allowing a cache to become authority.
     const uploadReceipts = await this.queue.uploadReceipts(task.id);
     const hasPersistedUpload = [...uploadReceipts.values()].some((receipt) => receipt.state === 'PERSISTED');
-    const routeSet = await this.routes(task);
+    const routeSet = routeSnapshot.routes;
     const selection = selectableChapterSources(routeSet, { language: String(task.payload.language || 'und'), edition: String(task.payload.edition || 'default') });
     if (!selection.routes.length) {
       const until = routeSet.map((route) => route.cooldownUntil?.getTime() || 0).filter(Boolean).sort()[0];
