@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AsyncSemaphore } from '../../core/concurrency.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { ImporterEngine } from '../../core/engine.js';
-import { LiteExecutor, UploadReceiptBatcher, UploadReservationBatcher } from '../executor.js';
+import { DURABLE_RECEIPT_BATCH_JOIN_MS, DURABLE_RESERVATION_BATCH_JOIN_MS, LiteExecutor, UploadReceiptBatcher, UploadReservationBatcher } from '../executor.js';
 import { PageByteBudget } from '../page-byte-budget.js';
 import { ImporterLiteRuntime } from '../runtime.js';
 import { DUPLICATE_CANONICAL_BATCH_REASON, LiteRepository } from '../repository.js';
@@ -2183,11 +2183,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     const third = batcher.persist({ ...input, pagePosition: 3 });
     const result = await Promise.race([
       Promise.all([first, second, third]).then(() => 'completed'),
-      new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+      new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 500)),
     ]);
     expect(result).toBe('completed');
     expect(calls).toEqual([1, 2]);
     expect(batcher.snapshot()).toMatchObject({ sampledFlushes: 2, totalItems: 3, totalWrites: 2, failedFlushes: 0 });
+  });
+
+  it('uses a longer join only for deferred receipts, not pre-upload intents', () => {
+    expect(DURABLE_RESERVATION_BATCH_JOIN_MS).toBe(60);
+    expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBe(120);
+    expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBeGreaterThan(DURABLE_RESERVATION_BATCH_JOIN_MS);
   });
 
   it('flushes reservation arrivals that occur while a prior durable batch is in flight', async () => {

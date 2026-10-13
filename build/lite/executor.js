@@ -8,12 +8,12 @@ import { telemetryCollector } from '../core/telemetry-collector.js';
 import { BoundedSamples } from '../core/bounded-samples.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { PageByteBudget } from './page-byte-budget.js';
-// A page upload's durable intent/receipt normally takes hundreds of
-// milliseconds on the small direct YSQL pool.  Keep a short, bounded join
-// window so pages finishing the same download wave share one write instead of
-// immediately competing for the second connection.  This is deliberately far
-// below normal source/Telegram latency and never delays a full batch.
-const DURABLE_PAGE_BATCH_JOIN_MS = 60;
+// A pre-upload intent gates Telegram, so keep its join window short. A
+// confirmed receipt is deferred and can safely coalesce a little longer while
+// the next bounded page wave proceeds. This separates pool amortisation from
+// pre-upload latency without changing a full-batch flush or any concurrency.
+export const DURABLE_RESERVATION_BATCH_JOIN_MS = 60;
+export const DURABLE_RECEIPT_BATCH_JOIN_MS = 120;
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
     let cursor = 0;
@@ -159,7 +159,7 @@ export class UploadReceiptBatcher {
                 void this.flush();
             }
             else if (!this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_PAGE_BATCH_JOIN_MS);
+                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_RECEIPT_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         });
@@ -221,7 +221,7 @@ export class UploadReceiptBatcher {
                 void this.flush();
             }
             else if (this.pending.length && !this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_PAGE_BATCH_JOIN_MS);
+                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_RECEIPT_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         }
@@ -248,7 +248,7 @@ export class UploadReservationBatcher {
                 void this.flush();
             }
             else if (!this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_PAGE_BATCH_JOIN_MS);
+                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_RESERVATION_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         });
@@ -294,7 +294,7 @@ export class UploadReservationBatcher {
                 void this.flush();
             }
             else if (this.pending.length && !this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_PAGE_BATCH_JOIN_MS);
+                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_RESERVATION_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         }
