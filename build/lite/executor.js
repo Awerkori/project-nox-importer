@@ -8,6 +8,12 @@ import { telemetryCollector } from '../core/telemetry-collector.js';
 import { BoundedSamples } from '../core/bounded-samples.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { PageByteBudget } from './page-byte-budget.js';
+// A page upload's durable intent/receipt normally takes hundreds of
+// milliseconds on the small direct YSQL pool.  Keep a short, bounded join
+// window so pages finishing the same download wave share one write instead of
+// immediately competing for the second connection.  This is deliberately far
+// below normal source/Telegram latency and never delays a full batch.
+const DURABLE_PAGE_BATCH_JOIN_MS = 20;
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
     let cursor = 0;
@@ -132,8 +138,10 @@ function numericDisplayValue(display) {
 /**
  * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
  * a per-page fence, so a crash can never make a successful send retryable.
- * Five milliseconds is enough to join a page wave without adding meaningful
- * latency or a second scheduler/queue.
+ * A 20ms join is short relative to the measured durable write and source
+ * latencies, while allowing staggered pages in one bounded wave to share a
+ * write. It adds no queue, state, or retry path and a full batch still flushes
+ * immediately.
  */
 export class UploadReceiptBatcher {
     queue;
@@ -151,7 +159,7 @@ export class UploadReceiptBatcher {
                 void this.flush();
             }
             else if (!this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_PAGE_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         });
@@ -207,7 +215,7 @@ export class UploadReceiptBatcher {
         finally {
             this.flushing = false;
             if (this.pending.length && !this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_PAGE_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         }
@@ -234,7 +242,7 @@ export class UploadReservationBatcher {
                 void this.flush();
             }
             else if (!this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_PAGE_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         });
@@ -275,7 +283,7 @@ export class UploadReservationBatcher {
         finally {
             this.flushing = false;
             if (this.pending.length && !this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), 5);
+                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_PAGE_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         }
