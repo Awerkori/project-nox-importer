@@ -861,12 +861,12 @@ describe('LiteRepository against the additive Lite migration', () => {
     const legacyLookups: string[] = [];
     const tracedPool = {
       query: (text: string, values?: unknown[]) => {
-        if (text.includes('FROM importer_lite_chapter_sources s\n      JOIN importer_chapter_mappings')) legacyLookups.push(text);
+        if (text.includes('FROM importer_lite_chapter_sources s')) legacyLookups.push(text);
         return db.query(text, values);
       },
       connect: async () => ({
         query: (text: string, values?: unknown[]) => {
-          if (text.includes('FROM importer_lite_chapter_sources s\n      JOIN importer_chapter_mappings')) legacyLookups.push(text);
+          if (text.includes('FROM importer_lite_chapter_sources s')) legacyLookups.push(text);
           return db.query(text, values);
         },
         release: () => undefined,
