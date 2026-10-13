@@ -13,11 +13,12 @@ import type { BufferReservationRequestOptions } from '../core/concurrency.js';
  * always drain instead of forming a backpressure deadlock.
  */
 export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
-// Production showed the 24 page permits spending sustained time blocked on
-// byte-reservation upgrades while RSS remained below the safety incident
-// threshold and download/Telegram had headroom.  This is a deliberately
-// small, single-variable increase; the page-count fence remains 24.
-export const LITE_PAGE_BUFFER_BUDGET_BYTES = 56 * 1024 * 1024;
+// With the 24-page fence stable for more than an hour, production still
+// showed all byte reservations occupied, queued upgrades, and download/
+// Telegram headroom while RSS remained about 400 MiB (below the prior
+// 500 MiB incident).  This is one 8 MiB admission increment only; the
+// page-count fence, workers, database pool, and upload limits stay fixed.
+export const LITE_PAGE_BUFFER_BUDGET_BYTES = 64 * 1024 * 1024;
 
 type Waiter = {
   bytes: number;
