@@ -707,6 +707,31 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(publish.rows).toEqual([{ task_type: 'PUBLISH', state: 'READY' }]);
   });
 
+  it('does not repeatedly insert a publication already blocked on work presentation during recovery', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'presentation-blocked', priority: 'P1', idempotencyKey: 'presentation-blocked-import' });
+    const imported = await repo.claim('worker-a', 30);
+    await repo.finish(imported!, 'worker-a', { state: 'DONE', checkpoint: { mediaIds: [ids.page] } });
+    expect((await repo.reconcile(10)).publishable).toBe(1);
+    await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED',reason='WORK_PRESENTATION_INCOMPLETE'
+      WHERE idempotency_key='lite:publish:' || $1 || ':presentation-blocked'`, [ids.p1a]);
+
+    const queries: string[] = [];
+    const tracedPool = {
+      query: (text: string, values?: unknown[]) => { queries.push(text); return db.query(text, values); },
+      connect: async () => ({
+        query: (text: string, values?: unknown[]) => { queries.push(text); return db.query(text, values); },
+        release: () => undefined,
+      }),
+    } as unknown as Pool;
+
+    expect((await new LiteRepository(tracedPool).reconcile(10)).publishable).toBe(0);
+    expect(queries.some((text) => text.includes('INSERT INTO importer_lite_tasks'))).toBe(false);
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks
+      WHERE idempotency_key='lite:publish:' || $1 || ':presentation-blocked'`, [ids.p1a])).rows)
+      .toEqual([{ state: 'BLOCKED', reason: 'WORK_PRESENTATION_INCOMPLETE' }]);
+  });
+
   it('fences stale owners from settling or publishing after their lease expires', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:stale', priority: 'P1', idempotencyKey: 'stale-finish' });
     const staleFinish = await repo.claim('old-runtime', 30);

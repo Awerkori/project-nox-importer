@@ -839,10 +839,19 @@ export class LiteRepository {
       // A completed media checkpoint never waits for a global sweep: it gains
       // one durable PUBLISH task. The unique key makes this idempotent.
       const ready = await client.query<Row>(
-        `SELECT id,work_id,work_key,chapter_key,priority,base_priority FROM importer_lite_tasks
-          WHERE state='DONE' AND task_type='IMPORT_CHAPTER'
-            AND checkpoint ? 'mediaIds' AND NOT checkpoint ? 'publishedAt'
-          ORDER BY updated_at LIMIT $1`, [limit],
+        `SELECT i.id,i.work_id,i.work_key,i.chapter_key,i.priority,i.base_priority FROM importer_lite_tasks i
+          WHERE i.state='DONE' AND i.task_type='IMPORT_CHAPTER'
+            AND i.checkpoint ? 'mediaIds' AND NOT i.checkpoint ? 'publishedAt'
+            -- An existing PUBLISH task is the durable recovery authority.
+            -- Re-inserting its idempotency key every recovery turn is a
+            -- no-op that still consumes the shared two-connection pool.
+            -- In particular, a presentation-blocked task is reopened by
+            -- wakeCatalogBlocked when catalog evidence repairs the work.
+            AND NOT EXISTS (
+              SELECT 1 FROM importer_lite_tasks p
+              WHERE p.idempotency_key='lite:publish:' || i.work_id::text || ':' || i.chapter_key
+            )
+          ORDER BY i.updated_at LIMIT $1`, [limit],
       );
       for (const row of ready.rows) {
         await client.query(
