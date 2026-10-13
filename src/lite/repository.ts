@@ -377,11 +377,12 @@ export class LiteRepository {
         LIMIT $1
       ) AS bounded_ready`, [floor]);
       const current = Number(reserve.rows[0]?.count || 0);
-      // A large hot P1 import reserve is productive work, but it must not
-      // permanently prevent the bounded historical catalog producer from
-      // checking other mapped, healthy sources.  Keep only four such checks
-      // alive while the reserve is healthy (one per source); when it is low,
-      // retain the larger existing refill behavior needed to avoid starvation.
+      // A large hot P1 import reserve is productive work.  Keep only a small,
+      // source-diverse historical producer reserve while it is healthy, but
+      // mark that reserve as deferred: it must not take a chapter worker or a
+      // YSQL connection ahead of already-materialised imports.  Once the
+      // import reserve is low, newly admitted checks keep their normal fair
+      // P1 rank so mappings cannot remain hidden behind one giant work.
       const maintainingHealthyReserve = current >= floor;
       const target = maintainingHealthyReserve ? Math.min(4, maximum) : maximum;
       const perSource = maintainingHealthyReserve ? 1 : 2;
@@ -470,7 +471,8 @@ export class LiteRepository {
           'CATALOG', String(row.work_id), `work:${row.work_id}`, null,
           LITE_PRIORITY_RANK.P1, LITE_PRIORITY_RANK.P1,
           `lite:catalog:${source}:${sourceWorkId}`, new Date(), 8,
-          JSON.stringify({ source, sourceWorkId, historicalP1Backfill: true }), JSON.stringify({}), false,
+          JSON.stringify({ source, sourceWorkId, historicalP1Backfill: true,
+            deferBehindReadyImport: maintainingHealthyReserve }), JSON.stringify({}), false,
         );
         return `($${start + 1},$${start + 2}::uuid,$${start + 3},$${start + 4},$${start + 5},$${start + 6},$${start + 7},$${start + 8},$${start + 9},$${start + 10}::jsonb,$${start + 11}::jsonb,$${start + 12})`;
       });

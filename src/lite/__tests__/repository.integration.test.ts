@@ -16,6 +16,7 @@ import type { StorageProvider } from '../../storage/provider.js';
 const migration = readFileSync(resolve(process.cwd(), 'migrations/20261010090000_importer_lite_v2.sql'), 'utf8');
 const readerMigration = readFileSync(resolve(process.cwd(), 'migrations/20260914171000_atomic_reader_repair.sql'), 'utf8');
 const fairHistoricalP1Migration = readFileSync(resolve(process.cwd(), 'migrations/20261012083000_lite_fair_historical_p1_catalog.sql'), 'utf8');
+const deferHealthyP1CatalogMigration = readFileSync(resolve(process.cwd(), 'migrations/20261013040000_lite_defer_healthy_p1_catalog.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -104,6 +105,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   if (optionalRoles) await db.exec(readerMigration);
   await db.exec(migration);
   await db.exec(fairHistoricalP1Migration);
+  await db.exec(deferHealthyP1CatalogMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -201,9 +203,10 @@ describe('LiteRepository against the additive Lite migration', () => {
     }
 
     expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(4);
-    const admitted = await db.query(`SELECT payload->>'source' AS source FROM importer_lite_tasks
+    const admitted = await db.query(`SELECT payload->>'source' AS source,payload->>'deferBehindReadyImport' AS deferred FROM importer_lite_tasks
       WHERE task_type='CATALOG' AND payload ? 'historicalP1Backfill' ORDER BY source`);
     expect(new Set(admitted.rows.map((row: any) => row.source)).size).toBe(4);
+    expect(admitted.rows.every((row: any) => row.deferred === 'true')).toBe(true);
     // Four pending checks cap the healthy-reserve producer; the fifth mapped
     // source waits durably without turning recovery into a catalog sweep.
     expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(0);
@@ -296,6 +299,24 @@ describe('LiteRepository against the additive Lite migration', () => {
     // a second wave. Without the equal admission rank they remain hidden
     // behind all 32 IMPORT_CHAPTER tasks.
     expect(claimed.filter((type) => type === 'CATALOG')).toHaveLength(2);
+  });
+
+  it('keeps a healthy historical P1 producer reserve behind a deep materialized import backlog', async () => {
+    const giant = '00000000-0000-4000-8000-000000000098';
+    await db.query(`INSERT INTO works(id,title,slug) VALUES($1::uuid,'Deep giant','deep-giant')`, [giant]);
+    for (let index = 0; index < 80; index++) {
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: giant, workKey: `work:${giant}`,
+        chapterKey: `deep-${index}`, priority: 'P1', idempotencyKey: `deep-${index}` });
+    }
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      priority: 'P1', idempotencyKey: 'deferred-historical-source',
+      payload: { source: 'source-a', sourceWorkId: 'deep-a', historicalP1Backfill: true, deferBehindReadyImport: true } });
+
+    for (let index = 0; index < 4; index++) {
+      const task = await repo.claim(`deep-import-${index}`, 120);
+      expect(task?.taskType).toBe('IMPORT_CHAPTER');
+      await repo.finish(task!, `deep-import-${index}`, { state: 'DONE' });
+    }
   });
 
   it('samples multiple ready P1 source routes outside the claim path', async () => {
