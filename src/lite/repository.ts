@@ -92,6 +92,13 @@ export interface CompleteImportInput {
 
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export class LiteRepository {
+  // This is only a local maintenance hint. Durable task state remains the
+  // authority; the runtime uses the hint to avoid a second catalog turn when
+  // the materialised P1 import reserve is already abundant.
+  private historicalP1ReserveAbundant = false;
+
+  hasAbundantHistoricalP1Reserve(): boolean { return this.historicalP1ReserveAbundant; }
+
   constructor(private readonly db: Db) {}
 
   private async refreshReadyWork(client: Pick<PoolClient, 'query'>, workKey: string): Promise<void> {
@@ -368,15 +375,29 @@ export class LiteRepository {
   async refillHistoricalP1Catalog(readyFloor = 64, batchLimit = 16): Promise<number> {
     const floor = Math.max(1, Math.min(512, readyFloor));
     const maximum = Math.max(1, Math.min(32, batchLimit));
+    // Four normal reserve windows is enough to keep workers supplied while
+    // making catalog production strictly yield to a genuinely large, already
+    // executable P1 backlog. Bound the count query itself as well.
+    const abundantFloor = Math.min(512, Math.max(64, floor * 4));
+    this.historicalP1ReserveAbundant = false;
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
       const reserve = await client.query<{ count: string }>(`SELECT count(*)::int AS count FROM (
         SELECT 1 FROM importer_lite_tasks
-        WHERE state='READY' AND monitoring=false AND priority=2
+        WHERE state='READY' AND monitoring=false AND priority=2 AND task_type='IMPORT_CHAPTER'
         LIMIT $1
-      ) AS bounded_ready`, [floor]);
+      ) AS bounded_ready`, [abundantFloor]);
       const current = Number(reserve.rows[0]?.count || 0);
+      if (current >= abundantFloor) {
+        // Do not spend the shared pool on catalog selection or promotion
+        // while hundreds of P1 chapters are already executable. When this
+        // reserve drains, the next recovery turn automatically resumes the
+        // bounded, source-diverse producer.
+        this.historicalP1ReserveAbundant = true;
+        await client.query('COMMIT');
+        return 0;
+      }
       // A large hot P1 import reserve is productive work.  Keep only a small,
       // source-diverse historical producer reserve while it is healthy, but
       // mark that reserve as deferred: it must not take a chapter worker or a
