@@ -125,8 +125,8 @@ export class ImporterLiteRuntime {
         // immediately eligible under the normal strict priority contract.
         await this.queue.staggerReadyDiscoveries(60_000, 64);
         await this.queue.recoverDuplicateCanonicalCatalogFailures();
-        await this.refillHistoricalP1Catalog();
         await this.refreshSourceFairness();
+        await this.refillHistoricalP1Catalog();
         // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
         // Lite cutover.  The Lite-specific cap begins safely and can only rise
         // through an explicit, benchmarked staging configuration.
@@ -310,8 +310,12 @@ export class ImporterLiteRuntime {
             return;
         try {
             const admitted = await this.queue.refillHistoricalP1Catalog();
-            if (admitted)
-                this.logger.info('Admitted bounded historical P1 catalog checks', { admitted });
+            // One turn per already-bounded recovery interval lets an alternative
+            // healthy source materialize without returning to a continuously
+            // competing catalog lane. It does not affect STAFF/P0/P1/P2 ordering.
+            const promoted = await this.queue.promoteDeferredHistoricalP1Catalog(this.executor.getFairSourceDemand());
+            if (admitted || promoted)
+                this.logger.info('Advanced bounded historical P1 catalog producer', { admitted, promoted });
         }
         catch (error) {
             this.logger.warn('Historical P1 catalog refill failed', { error: error?.message });
@@ -329,8 +333,8 @@ export class ImporterLiteRuntime {
             await this.queue.recoverDuplicateCanonicalCatalogFailures();
         }
         catch { /* bounded recovery retries next turn */ }
-        await this.refillHistoricalP1Catalog();
         await this.refreshSourceFairness();
+        await this.refillHistoricalP1Catalog();
     }
     /** A bounded source view refreshes only outside claims and only once per recovery turn. */
     async refreshSourceFairness() {

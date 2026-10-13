@@ -139,6 +139,14 @@ export declare class LiteRepository {
      */
     refillHistoricalP1Catalog(readyFloor?: number, batchLimit?: number): Promise<number>;
     /**
+     * A healthy P1 reserve keeps historical catalog checks deferred so they do
+     * not continuously consume chapter workers. Promote one existing check on
+     * the already-bounded recovery turn: this is a producer quota, not a
+     * second scheduler. It keeps alternative mapped sources progressing while
+     * leaving the materialised import reserve dominant.
+     */
+    promoteDeferredHistoricalP1Catalog(activeImportSources?: Iterable<string>): Promise<boolean>;
+    /**
      * Recover only catalog tasks blocked by the pre-deduplication batch bug.
      * This is deliberately not a generic BLOCKED retry: normal permanent
      * failures retain their diagnosis and need their own safe repair path.

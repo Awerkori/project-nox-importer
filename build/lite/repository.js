@@ -413,6 +413,48 @@ export class LiteRepository {
         }
     }
     /**
+     * A healthy P1 reserve keeps historical catalog checks deferred so they do
+     * not continuously consume chapter workers. Promote one existing check on
+     * the already-bounded recovery turn: this is a producer quota, not a
+     * second scheduler. It keeps alternative mapped sources progressing while
+     * leaving the materialised import reserve dominant.
+     */
+    async promoteDeferredHistoricalP1Catalog(activeImportSources = []) {
+        const client = await this.db.connect();
+        try {
+            await client.query('BEGIN');
+            const busySources = [...new Set([...activeImportSources].filter(Boolean))];
+            const sourcePenalty = busySources.length
+                ? `CASE WHEN payload->>'source'=ANY($1::text[]) THEN 1 ELSE 0 END,`
+                : '';
+            const candidate = await client.query(`SELECT id,work_key
+        FROM importer_lite_tasks
+        WHERE state='READY' AND monitoring=false AND priority=2 AND task_type='CATALOG'
+          AND next_run_at<=now() AND payload ? 'historicalP1Backfill'
+          AND COALESCE(payload->>'deferBehindReadyImport','false')='true'
+        ORDER BY ${sourcePenalty} next_run_at,created_at,id
+        LIMIT 1 FOR UPDATE SKIP LOCKED`, busySources.length ? [busySources] : []);
+            const row = candidate.rows[0];
+            if (!row) {
+                await client.query('COMMIT');
+                return false;
+            }
+            await client.query(`UPDATE importer_lite_tasks
+        SET payload=payload-'deferBehindReadyImport',updated_at=now()
+        WHERE id=$1::uuid`, [row.id]);
+            await this.refreshReadyWork(client, row.work_key);
+            await client.query('COMMIT');
+            return true;
+        }
+        catch (error) {
+            await client.query('ROLLBACK').catch(() => { });
+            throw error;
+        }
+        finally {
+            client.release();
+        }
+    }
+    /**
      * Recover only catalog tasks blocked by the pre-deduplication batch bug.
      * This is deliberately not a generic BLOCKED retry: normal permanent
      * failures retain their diagnosis and need their own safe repair path.
