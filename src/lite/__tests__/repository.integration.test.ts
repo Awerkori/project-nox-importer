@@ -2107,8 +2107,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const calls: number[] = [];
     const batcher = new UploadReceiptBatcher({
-      recordUploadReceipts: async () => {
-        calls.push(1);
+      recordUploadReceipts: async (inputs) => {
+        calls.push(inputs.length);
         if (calls.length === 1) {
           markFirstStarted();
           await firstGate;
@@ -2125,13 +2125,18 @@ describe('LiteRepository against the additive Lite migration', () => {
     const second = batcher.persist({ ...input, pagePosition: 2 });
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
     releaseFirst();
+    // This arrives after the first write completes but before the bounded
+    // follow-up join window. It must join the queued second receipt instead
+    // of becoming a third one-row durable write.
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    const third = batcher.persist({ ...input, pagePosition: 3 });
     const result = await Promise.race([
-      Promise.all([first, second]).then(() => 'completed'),
+      Promise.all([first, second, third]).then(() => 'completed'),
       new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
     ]);
     expect(result).toBe('completed');
-    expect(calls).toHaveLength(2);
-    expect(batcher.snapshot()).toMatchObject({ sampledFlushes: 2, totalItems: 2, totalWrites: 2, failedFlushes: 0 });
+    expect(calls).toEqual([1, 2]);
+    expect(batcher.snapshot()).toMatchObject({ sampledFlushes: 2, totalItems: 3, totalWrites: 2, failedFlushes: 0 });
   });
 
   it('flushes reservation arrivals that occur while a prior durable batch is in flight', async () => {
@@ -2141,13 +2146,13 @@ describe('LiteRepository against the additive Lite migration', () => {
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const calls: number[] = [];
     const batcher = new UploadReservationBatcher({
-      reserveUploads: async () => {
-        calls.push(1);
+      reserveUploads: async (inputs) => {
+        calls.push(inputs.length);
         if (calls.length === 1) {
           markFirstStarted();
           await firstGate;
         }
-        return [{ mediaId: ids.page, state: 'INTENT' }];
+        return inputs.map(() => ({ mediaId: ids.page, state: 'INTENT' }));
       },
     } as unknown as LiteRepository);
     const first = batcher.reserve({ taskId: ids.p1a, pagePosition: 1, sha256: 'reservation-race-one' });
@@ -2155,12 +2160,14 @@ describe('LiteRepository against the additive Lite migration', () => {
     const second = batcher.reserve({ taskId: ids.p1a, pagePosition: 2, sha256: 'reservation-race-two' });
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
     releaseFirst();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    const third = batcher.reserve({ taskId: ids.p1a, pagePosition: 3, sha256: 'reservation-race-three' });
     const result = await Promise.race([
-      Promise.all([first, second]).then(() => 'completed'),
+      Promise.all([first, second, third]).then(() => 'completed'),
       new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
     ]);
     expect(result).toBe('completed');
-    expect(calls).toHaveLength(2);
-    expect(batcher.snapshot()).toMatchObject({ sampledFlushes: 2, totalItems: 2, totalWrites: 2, failedFlushes: 0 });
+    expect(calls).toEqual([1, 2]);
+    expect(batcher.snapshot()).toMatchObject({ sampledFlushes: 2, totalItems: 3, totalWrites: 2, failedFlushes: 0 });
   });
 });

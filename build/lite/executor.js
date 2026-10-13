@@ -178,7 +178,7 @@ export class UploadReceiptBatcher {
             return;
         this.flushing = true;
         try {
-            while (this.pending.length) {
+            if (this.pending.length) {
                 const batch = this.pending.splice(0, 48);
                 const startedAt = performance.now();
                 let writes = 0;
@@ -214,7 +214,13 @@ export class UploadReceiptBatcher {
         }
         finally {
             this.flushing = false;
-            if (this.pending.length && !this.flushTimer) {
+            // Arrivals collected while YSQL was busy deserve the same bounded join
+            // window as the first arrival.  Draining them immediately made the
+            // configured join interval ineffective for sustained page waves.
+            if (this.pending.length >= 48) {
+                void this.flush();
+            }
+            else if (this.pending.length && !this.flushTimer) {
                 this.flushTimer = setTimeout(() => void this.flush(), DURABLE_PAGE_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
@@ -259,7 +265,7 @@ export class UploadReservationBatcher {
             return;
         this.flushing = true;
         try {
-            while (this.pending.length) {
+            if (this.pending.length) {
                 const batch = this.pending.splice(0, 48);
                 const startedAt = performance.now();
                 let succeeded = false;
@@ -282,7 +288,12 @@ export class UploadReservationBatcher {
         }
         finally {
             this.flushing = false;
-            if (this.pending.length && !this.flushTimer) {
+            // See UploadReceiptBatcher: queue a bounded next join after an in-flight
+            // YSQL write instead of serialising every arriving page immediately.
+            if (this.pending.length >= 48) {
+                void this.flush();
+            }
+            else if (this.pending.length && !this.flushTimer) {
                 this.flushTimer = setTimeout(() => void this.flush(), DURABLE_PAGE_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
