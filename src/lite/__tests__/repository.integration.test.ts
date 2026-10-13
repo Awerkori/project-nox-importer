@@ -1072,6 +1072,19 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(reserved).toEqual({ mediaId: ids.page, state: 'PERSISTED' });
   });
 
+  it('reuses ready media set-wise while reserving a mixed page wave', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'chapter:batch-hash-reuse', priority: 'P1', idempotencyKey: 'batch-hash-reuse' });
+    const task = await db.query<{ id: string }>(`SELECT id FROM importer_lite_tasks WHERE idempotency_key='batch-hash-reuse'`);
+    const reserved = await repo.reserveUploads([
+      { taskId: task.rows[0].id, pagePosition: 1, sha256: 'page-sha' },
+      { taskId: task.rows[0].id, pagePosition: 2, sha256: 'new-batch-page-sha' },
+    ]);
+    expect(reserved[0]).toEqual({ mediaId: ids.page, state: 'PERSISTED' });
+    expect(reserved[1].state).toBe('INTENT');
+    expect(reserved[1].mediaId).not.toBe(ids.page);
+  });
+
   it('repairs a legacy exhausted publication with repeated valid page media exactly once', async () => {
     const key = 'pt-br|default|chapter|duplicate-pages|-';
     await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key,edition,language)
