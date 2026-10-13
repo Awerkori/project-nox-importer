@@ -115,11 +115,11 @@ export class ImporterLiteRuntime {
     this.bufferedPageBytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
     this.chapterWorkerCapacity = Math.max(1, Math.min(config.LITE_CHAPTER_WORKERS ?? 1,
       config.MAX_CONCURRENT_CHAPTERS, config.TESTED_CONCURRENCY_CEILING));
-    // Five independent MangaFlix chapter waves can fill the measured 24-page
-    // fence while each remains capped at six pages. The regressed 32/8 ramp
-    // widened the global fence itself; this controlled ramp does not.
+    // Keep the known-safe 24-page global fence. A seven-page chapter wave is
+    // the smallest measured admission increase after telemetry showed spare
+    // download and Telegram permits at six; it does not widen global memory.
     this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads,
-      Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter,
+      Math.max(1, Math.min(7, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter,
       this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes);
     this.dedupe = new DeduplicationEngine(catalogClient);
   }
@@ -597,7 +597,7 @@ export class ImporterLiteRuntime {
             pageDownloads: this.downloads.capacity,
             pageBuffers: this.bufferedPages.capacity,
             pageBufferBytes: this.bufferedPageBytes.capacityBytes,
-            pagesPerChapter: Math.max(1, Math.min(6, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
+            pagesPerChapter: Math.max(1, Math.min(7, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
             telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
             uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
           },
@@ -660,7 +660,7 @@ export class ImporterLiteRuntime {
           pageDownloads: this.downloads.capacity,
           pageBuffers: this.bufferedPages.capacity,
           pageBufferBytes: this.bufferedPageBytes.capacityBytes,
-          pagesPerChapter: Math.max(1, Math.min(6, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
+          pagesPerChapter: Math.max(1, Math.min(7, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
           telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
           uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
         },
