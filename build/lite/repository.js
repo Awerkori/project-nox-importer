@@ -8,6 +8,14 @@ import { LITE_PRIORITY_RANK } from './types.js';
  * retry.
  */
 export const DUPLICATE_CANONICAL_BATCH_REASON = 'ON CONFLICT DO UPDATE command cannot affect row a second time';
+// A provider 429 can durably defer a large sole-route backlog in one event.
+// Once its deadline expires, recovery must not take tens of minutes merely
+// because the generic retry pass is intentionally small. Keep re-admission
+// bounded per source and per recovery turn so a recovered large source cannot
+// crowd out other healthy work or immediately recreate the rate limit.
+const SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN = 4;
+const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE = 8;
+const SOURCE_COOLDOWN_RECOVERY_CANDIDATE_TASKS = 48;
 const priorityName = (value) => ['STAFF', 'P0', 'P1', 'P2'][value] || 'P2';
 const asTask = (row) => ({
     id: row.id, taskType: row.task_type, workId: row.work_id, workKey: row.work_key,
@@ -804,7 +812,12 @@ export class LiteRepository {
            updated_at=now()
          FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state`, [limit]);
             const retries = await client.query(`WITH picked AS (
-           SELECT id,work_key,attempts,max_attempts,task_type,monitoring FROM importer_lite_tasks WHERE state='RETRY_WAIT' AND next_run_at<=now()
+           SELECT id,work_key,attempts,max_attempts,task_type,monitoring FROM importer_lite_tasks
+           WHERE state='RETRY_WAIT' AND next_run_at<=now()
+             -- Explicit provider cooldown work is admitted only by the
+             -- per-source pass below. A later 429 may extend health cooldown
+             -- after this task received its own retry timestamp.
+             AND COALESCE(reason,'')<>'SOURCE_RATE_LIMITED'
            ORDER BY next_run_at LIMIT $1 FOR UPDATE SKIP LOCKED
          ) UPDATE importer_lite_tasks t SET
            state=CASE WHEN picked.attempts >= picked.max_attempts
@@ -815,6 +828,60 @@ export class LiteRepository {
              THEN 'MAX_ATTEMPTS_EXHAUSTED' ELSE t.reason END,
            updated_at=now()
          FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state`, [limit]);
+            // `recordSourceFailure` moves only sole-route work to a durable
+            // SOURCE_RATE_LIMITED cooldown. The normal retry pass above is kept
+            // deliberately small for crash recovery, so it must not be the only
+            // mechanism that reopens a large healthy source backlog. Start from a
+            // small indexed retry head, then select a few routes per source after
+            // its explicit cooldown has elapsed. This runs only in the 30-second
+            // reconciler and refreshes the normal ready-work projection.
+            const sourceCooldownRecovery = await client.query(`WITH due AS (
+           SELECT id,work_key,work_id,chapter_key,payload,next_run_at,created_at
+           FROM importer_lite_tasks
+           WHERE state='RETRY_WAIT' AND monitoring=false AND task_type='IMPORT_CHAPTER'
+             AND reason='SOURCE_RATE_LIMITED' AND next_run_at<=now()
+           ORDER BY next_run_at,created_at
+           LIMIT $1 FOR UPDATE SKIP LOCKED
+         ), routes AS (
+           SELECT DISTINCT ON (due.id) due.id,due.work_key,due.next_run_at,due.created_at,route.source
+           FROM due
+           JOIN importer_lite_chapter_sources route
+             ON route.work_id=due.work_id AND route.canonical_chapter_key=due.chapter_key
+           JOIN importer_sources s ON s.id=route.source
+           LEFT JOIN importer_lite_source_health h ON h.source=route.source
+           WHERE route.confirmed=true AND route.has_chapter=true
+             AND route.language=COALESCE(NULLIF(due.payload->>'language',''),'und')
+             AND route.edition=COALESCE(NULLIF(due.payload->>'edition',''),'default')
+             AND s.enabled=true
+             AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+             AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
+                  (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+             AND COALESCE(h.health,'HEALTHY') IN ('HEALTHY','DEGRADED','RATE_LIMITED')
+             AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+           ORDER BY due.id,route.source_rank,route.source
+         ), source_lanes AS (
+           SELECT source,min(next_run_at) AS oldest_due
+           FROM routes GROUP BY source
+           ORDER BY oldest_due,source LIMIT $2
+         ), ranked AS (
+           SELECT routes.id,routes.work_key,
+             row_number() OVER (PARTITION BY routes.source ORDER BY routes.next_run_at,routes.created_at) AS source_position
+           FROM routes JOIN source_lanes USING(source)
+         ), picked AS (
+           SELECT id,work_key FROM ranked
+           WHERE source_position<=$3
+         ), reopened AS (
+           UPDATE importer_lite_tasks t
+           SET state='READY',reason=NULL,updated_at=now()
+           FROM picked WHERE t.id=picked.id
+           RETURNING picked.work_key
+         ), refreshed AS (
+           SELECT public.importer_lite_refresh_ready_work(work_key)
+           FROM (SELECT DISTINCT work_key FROM reopened) affected
+         )
+         SELECT (SELECT count(*)::int FROM reopened) AS count, count(*)::int AS refreshed
+         FROM refreshed`, [SOURCE_COOLDOWN_RECOVERY_CANDIDATE_TASKS, SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN,
+                SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE]);
             // A Telegram request with an unknown outcome must never be replayed.
             // Likewise, an old intent left by a crashed process has no proof that
             // Telegram did not accept it.  Mark only the owning task BLOCKED;
@@ -890,7 +957,8 @@ export class LiteRepository {
             const readyRetries = retries.rows.filter((row) => row.state === 'READY').length;
             const exhausted = [...leases.rows, ...retries.rows].filter((row) => row.state === 'BLOCKED').length;
             return { leases: leaseRetries, retries: readyRetries, exhausted, uploads: uploads.rowCount || 0,
-                publishable: ready.rowCount || 0, publishRepairs: repairedPublishes.rowCount || 0 };
+                publishable: ready.rowCount || 0, publishRepairs: repairedPublishes.rowCount || 0,
+                sourceCooldownRecoveries: Number(sourceCooldownRecovery.rows[0]?.count || 0) };
         }
         catch (error) {
             await client.query('ROLLBACK').catch(() => { });

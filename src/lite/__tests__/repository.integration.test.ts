@@ -423,7 +423,42 @@ describe('LiteRepository against the additive Lite migration', () => {
     const deferred = await db.query(`SELECT state,attempts,reason,next_run_at>now() AS delayed
       FROM importer_lite_tasks WHERE idempotency_key='cooling-source'`);
     expect(deferred.rows[0]).toMatchObject({ state: 'RETRY_WAIT', attempts: 0, reason: 'SOURCE_RATE_LIMITED', delayed: true });
+    expect((await repo.reconcile(1)).sourceCooldownRecoveries).toBe(0);
     expect((await repo.claim('cooldown-skips-ineligible', 120))?.idempotencyKey).toBe('still-executable');
+  });
+
+  it('reopens an expired source cooldown in bounded per-source waves', async () => {
+    // Keep generic recovery occupied with an older unrelated retry. The
+    // source-specific pass must then admit only its small bounded wave rather
+    // than leaving a recovered rate-limited source to wait behind thousands
+    // of unrelated retries.
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:older-retry', priority: 'P2',
+      idempotencyKey: 'older-retry', nextRunAt: new Date(Date.now() - 60_000) });
+    await db.query(`UPDATE importer_lite_tasks SET state='RETRY_WAIT',reason='TRANSIENT',next_run_at=now()-interval '1 minute'
+      WHERE idempotency_key='older-retry'`);
+    for (let index = 0; index < 9; index++) {
+      const chapterKey = `cooldown-recovery-${index}`;
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+        chapterKey, priority: 'P1', idempotencyKey: chapterKey,
+        payload: { language: 'pt-BR', edition: 'default' } });
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+        VALUES($1::uuid,$2,'source-a','a',$2,'pt-BR','default','n|000001|000000|0',10,true)`, [ids.p1a, chapterKey]);
+    }
+    await repo.recordSourceFailure('source-a', { retryAfter: 30, message: 'PAGE_HTTP_429' });
+    await db.query(`UPDATE importer_lite_source_health SET cooldown_until=now()-interval '1 second' WHERE source='source-a'`);
+    await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second'
+      WHERE idempotency_key LIKE 'cooldown-recovery-%'`);
+
+    const recovered = await repo.reconcile(1);
+    expect(recovered.sourceCooldownRecoveries).toBe(8);
+    const rows = await db.query(`SELECT state,reason,count(*)::int AS count
+      FROM importer_lite_tasks WHERE idempotency_key LIKE 'cooldown-recovery-%'
+      GROUP BY state,reason ORDER BY state,reason`);
+    expect(rows.rows).toEqual([
+      { state: 'READY', reason: null, count: 8 },
+      { state: 'RETRY_WAIT', reason: 'SOURCE_RATE_LIMITED', count: 1 },
+    ]);
   });
 
   it('keeps an import ready when a confirmed healthy alternative can satisfy the same chapter', async () => {
