@@ -693,10 +693,82 @@ export class LiteRepository {
         const retryAfter = Number(detail?.retryAfter || detail?.parameters?.retry_after || 0);
         const cooldownSeconds = retryAfter > 0 ? Math.min(3600, retryAfter + 2) : 60;
         const health = retryAfter > 0 ? 'RATE_LIMITED' : 'DEGRADED';
-        await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
-      VALUES($1,$2,now()+($3 || ' seconds')::interval,1,$4)
-      ON CONFLICT(source) DO UPDATE SET health=excluded.health,cooldown_until=excluded.cooldown_until,
-        consecutive_failures=importer_lite_source_health.consecutive_failures+1,last_error=excluded.last_error,updated_at=now()`, [source, health, String(cooldownSeconds), String(detail?.message || 'SOURCE_FAILURE').slice(0, 500)]).catch(() => { });
+        const message = String(detail?.message || 'SOURCE_FAILURE').slice(0, 500);
+        // Ordinary transient failures retain the one-statement health update: a
+        // failure must never make the error path compete with normal imports for
+        // extra pool time. A provider-specified retry boundary is different. If
+        // a source has explicitly rate-limited us, leaving thousands of its
+        // single-route tasks READY makes workers repeatedly claim, inspect and
+        // immediately defer them while lower executable work waits. Move only
+        // those tasks to the same durable cooldown in one bounded event. Tasks
+        // with a healthy confirmed alternative stay READY for executor fallback.
+        if (!(retryAfter > 0)) {
+            await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+        VALUES($1,$2,now()+($3 || ' seconds')::interval,1,$4)
+        ON CONFLICT(source) DO UPDATE SET health=excluded.health,cooldown_until=excluded.cooldown_until,
+          consecutive_failures=importer_lite_source_health.consecutive_failures+1,last_error=excluded.last_error,updated_at=now()`, [source, health, String(cooldownSeconds), message]).catch(() => { });
+            return;
+        }
+        const client = await this.db.connect().catch(() => null);
+        if (!client)
+            return;
+        try {
+            await client.query('BEGIN');
+            const healthRow = await client.query(`INSERT INTO importer_lite_source_health
+          (source,health,cooldown_until,consecutive_failures,last_error)
+        VALUES($1,'RATE_LIMITED',now()+($2 || ' seconds')::interval,1,$3)
+        ON CONFLICT(source) DO UPDATE SET health='RATE_LIMITED',
+          cooldown_until=GREATEST(importer_lite_source_health.cooldown_until,excluded.cooldown_until),
+          consecutive_failures=importer_lite_source_health.consecutive_failures+1,
+          last_error=excluded.last_error,updated_at=now()
+        RETURNING cooldown_until`, [source, String(cooldownSeconds), message]);
+            const cooldownUntil = healthRow.rows[0]?.cooldown_until;
+            if (cooldownUntil) {
+                await client.query(`WITH deferred AS (
+            UPDATE importer_lite_tasks t
+            SET state='RETRY_WAIT',lease_owner=NULL,lease_until=NULL,
+                next_run_at=GREATEST(t.next_run_at,$2::timestamptz),
+                reason='SOURCE_RATE_LIMITED',updated_at=now()
+            WHERE t.state='READY' AND t.monitoring=false AND t.task_type='IMPORT_CHAPTER'
+              AND EXISTS (
+                SELECT 1 FROM importer_lite_chapter_sources blocked
+                WHERE blocked.work_id=t.work_id AND blocked.canonical_chapter_key=t.chapter_key
+                  AND blocked.source=$1 AND blocked.confirmed=true AND blocked.has_chapter=true
+                  AND (blocked.language=COALESCE(NULLIF(t.payload->>'language',''),'und'))
+                  AND (blocked.edition=COALESCE(NULLIF(t.payload->>'edition',''),'default'))
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM importer_lite_chapter_sources alternative
+                JOIN importer_sources source_policy ON source_policy.id=alternative.source
+                LEFT JOIN importer_lite_source_health alternative_health ON alternative_health.source=alternative.source
+                WHERE alternative.work_id=t.work_id AND alternative.canonical_chapter_key=t.chapter_key
+                  AND alternative.source<>$1 AND alternative.confirmed=true AND alternative.has_chapter=true
+                  AND alternative.language=COALESCE(NULLIF(t.payload->>'language',''),'und')
+                  AND alternative.edition=COALESCE(NULLIF(t.payload->>'edition',''),'default')
+                  AND source_policy.enabled=true
+                  AND COALESCE((to_jsonb(source_policy)->>'chapter_ingestion_enabled')::boolean,true)
+                  AND (COALESCE(source_policy.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
+                       (source_policy.status='COOLDOWN' AND source_policy.cooldown_until IS NOT NULL
+                         AND source_policy.cooldown_until<=now()))
+                  AND COALESCE(alternative_health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+                  AND (alternative_health.cooldown_until IS NULL OR alternative_health.cooldown_until<=now())
+              )
+            RETURNING t.work_key
+          ), refreshed AS (
+            SELECT public.importer_lite_refresh_ready_work(work_key)
+            FROM (SELECT DISTINCT work_key FROM deferred) affected
+          ) SELECT count(*)::int AS refreshed FROM refreshed`, [source, cooldownUntil]);
+            }
+            await client.query('COMMIT');
+        }
+        catch {
+            await client.query('ROLLBACK').catch(() => { });
+            // Source health must never turn a provider failure into a fatal worker
+            // failure. The current task still follows its ordinary retry path.
+        }
+        finally {
+            client.release();
+        }
     }
     async recordSourceSuccess(source) {
         await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
