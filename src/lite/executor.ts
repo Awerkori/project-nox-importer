@@ -19,7 +19,7 @@ import { PageByteBudget } from './page-byte-budget.js';
 // the next bounded page wave proceeds. This separates pool amortisation from
 // pre-upload latency without changing a full-batch flush or any concurrency.
 export const DURABLE_RESERVATION_BATCH_JOIN_MS = 60;
-export const DURABLE_RECEIPT_BATCH_JOIN_MS = 240;
+export const DURABLE_RECEIPT_BATCH_JOIN_MS = 120;
 
 async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const result = new Array<R>(items.length);
