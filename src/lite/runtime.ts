@@ -50,7 +50,11 @@ const SAFE_BUFFERED_PAGE_CAP = 24;
 // responsive, but poll the source-mapping producer less often: it uses the
 // same small YSQL pool as chapter work and only needs to refill a two-task
 // buffer, not rescan mappings every timer tick.
-const STORED_METADATA_REPLAY_INTERVAL_MS = 1_000;
+// The metadata replay remains a single, worker-independent lane, but each
+// no-network merge still performs YSQL reads/writes. Production snapshots
+// showed sustained pool wait; pace replay admission at 0.5/sec to return
+// some YSQL headroom to chapter publication without starving the P2 lane.
+const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
 const STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS = 5_000;
 
 type WorkerLiveness = {
