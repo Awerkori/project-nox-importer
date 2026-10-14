@@ -54,7 +54,7 @@ export class LiteRepository {
      * records PENDING durably before inserting an idempotent catalog task.
      */
     async refillSourceMetadataEnrichment(maxPending = 2) {
-        const ceiling = Math.max(1, Math.min(3, maxPending));
+        const ceiling = Math.max(1, Math.min(2, maxPending));
         const client = await this.db.connect();
         try {
             await client.query('BEGIN');
