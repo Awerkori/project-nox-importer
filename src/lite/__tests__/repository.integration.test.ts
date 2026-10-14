@@ -308,6 +308,29 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual({ priority: 2, repair: 'true' });
   });
 
+  it('applies source and work fairness sequentially so crossed manifest order cannot erase every repair candidate', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1b]);
+    const rows = [
+      ['3', '2026-01-01T00:00:00Z'], ['4', '2026-01-02T00:00:00Z'],
+      ['1', '2026-01-03T00:00:00Z'], ['2', '2026-01-04T00:00:00Z'],
+    ];
+    for (const [display, updatedAt] of rows) {
+      const whole = String(display).padStart(12, '0');
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter,updated_at)
+        VALUES($1,$2,'source-a','crossed',$3,'pt-BR','default',$4,10,true,true,$5::timestamptz)`, [
+        ids.p1b, `pt-br|default|chapter|${display}|-`, `crossed-${display}`,
+        `n|${whole}|000000000000|||`, updatedAt,
+      ]);
+    }
+    expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(2);
+    const tasks = await db.query(`SELECT chapter_key FROM importer_lite_tasks
+      WHERE payload ? 'manifestP1Repair' ORDER BY chapter_key`);
+    expect(tasks.rows.map((row: any) => row.chapter_key)).toEqual([
+      'pt-br|default|chapter|3|-', 'pt-br|default|chapter|4|-',
+    ]);
+  });
+
   it('lets an abundant materialized P1 import reserve suppress catalog maintenance completely', async () => {
     for (let index = 0; index < 64; index++) {
       await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,

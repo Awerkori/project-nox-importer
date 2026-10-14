@@ -194,14 +194,18 @@ export class LiteRepository {
         SELECT DISTINCT ON (work_id,canonical_chapter_key) *
         FROM bounded
         ORDER BY work_id,canonical_chapter_key,source_rank,source
+      ), source_fair AS (
+        SELECT *,
+          row_number() OVER (PARTITION BY source ORDER BY updated_at,work_id,canonical_chapter_key) AS source_position
+        FROM canonical_routes
       ), fair AS (
         SELECT *,
-          row_number() OVER (PARTITION BY source ORDER BY updated_at,work_id,canonical_chapter_key) AS source_position,
           row_number() OVER (PARTITION BY work_id ORDER BY updated_at,order_key,canonical_chapter_key) AS work_position
-        FROM canonical_routes
+        FROM source_fair
+        WHERE source_position<=2
       )
       SELECT * FROM fair
-      WHERE source_position<=2 AND work_position<=2
+      WHERE work_position<=2
       ORDER BY updated_at,source_position,work_position,source,work_id,order_key
       LIMIT $1`, [limit]);
         const tasks = [];
