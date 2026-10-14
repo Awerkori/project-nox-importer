@@ -93,6 +93,19 @@ export declare class LiteRepository {
         nextRetryAt?: Date | null;
         rawMetadata?: Record<string, unknown>;
     }): Promise<void>;
+    /** Commit a successful source refresh, its durable classification, source
+     * health and task completion together. This avoids two YSQL transactions
+     * between one external metadata fetch and the next available task. */
+    completeSourceMetadataRefresh(task: LiteTask, workerId: string, input: {
+        source: string;
+        sourceWorkId: string;
+        workId: string;
+        aliasesState: 'ENRICHED' | 'NO_ALIASES';
+        tagsState: 'ENRICHED' | 'NO_TAGS';
+        aliasesAdded: number;
+        tagsAdded: number;
+        rawMetadata: Record<string, unknown>;
+    }, checkpoint: Record<string, unknown>): Promise<boolean>;
     /**
      * Incrementally replays explicit aliases/genres already stored on legacy
      * mappings.  It is deliberately a tiny P2 producer: no chapter is claimed,

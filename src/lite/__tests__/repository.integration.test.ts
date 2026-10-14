@@ -2824,9 +2824,36 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(completed.checkpoint.metadataTiming).toMatchObject({
       claimSqlMs: expect.any(Number), mappingQueryMs: expect.any(Number), sourcePolicyQueryMs: expect.any(Number),
       rateLimitWaitMs: expect.any(Number), httpMs: expect.any(Number), parseNormalizeMs: expect.any(Number),
-      mergePersistenceMs: expect.any(Number), verifyDeltaQueryMs: expect.any(Number), metadataPersistCommitMs: expect.any(Number),
+      mergePersistenceMs: expect.any(Number), verifyDeltaQueryMs: expect.any(Number), metadataFinalizeBeforeCommitMs: expect.any(Number),
       totalBeforeFinalizeMs: expect.any(Number),
     });
+  });
+
+  it('classifies a source alias equal to the primary title as NO_ALIASES, not PARSER_ERROR', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000213','source-a','same-title-alias',$1::uuid,
+        'p1-a','P1 A','{}'::jsonb,'SYNCED')`, [ids.p1a]);
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:'source-same-title-alias',payload:{source:'source-a',sourceWorkId:'same-title-alias',metadataSourceRefresh:true} });
+    const task=await repo.claimSourceMetadataRefresh('metadata-same-title-worker',60);
+    const adapter={id:'source-a',baseUrl:'https://source-a.example',fetchWorkDetails:async()=>({
+      sourceWorkId:'same-title-alias',title:'P1 A',slug:'p1-a',alternativeTitles:['P1 A'],genres:[],
+      raw:{alternativeTitles:['P1 A']},
+    })};
+    const runtime=new ImporterLiteRuntime(
+      poolFor(db) as Pool,{}, {get:()=>adapter} as unknown as SourceRegistry,
+      {upload:async()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram'},
+      {IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000} as any,
+    );
+    (runtime as any).dedupe={resolveWork:async()=>({workId:ids.p1a,status:'EXISTING_MAPPING'})};
+    await (runtime as any).catalog(task,'metadata-same-title-worker',{claimSqlMs:1,queueDwellMs:0});
+    const result=(await db.query(`SELECT aliases_state,tags_state FROM importer_lite_metadata_enrichment
+      WHERE source='source-a' AND source_work_id='same-title-alias'`)).rows[0];
+    expect(result).toMatchObject({aliases_state:'NO_ALIASES',tags_state:'NO_TAGS'});
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`,[task!.id])).rows[0].state).toBe('DONE');
   });
 
   it('classifies source login/challenge pages as external blocks instead of parser errors', async () => {

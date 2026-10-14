@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { LITE_PRIORITY_RANK } from './types.js';
 import { parseCanonicalChapterKey } from './chapter-identity.js';
 /**
@@ -180,6 +181,59 @@ export class LiteRepository {
         version=3,updated_at=now()`, [input.source, input.sourceWorkId, input.workId, input.aliasesState, input.tagsState,
                 Math.max(0, input.aliasesAdded || 0), Math.max(0, input.tagsAdded || 0), input.nextRetryAt || null, input.error || null]);
             await client.query('COMMIT');
+        }
+        catch (error) {
+            await client.query('ROLLBACK').catch(() => { });
+            throw error;
+        }
+        finally {
+            client.release();
+        }
+    }
+    /** Commit a successful source refresh, its durable classification, source
+     * health and task completion together. This avoids two YSQL transactions
+     * between one external metadata fetch and the next available task. */
+    async completeSourceMetadataRefresh(task, workerId, input, checkpoint) {
+        const transactionStartedAt = performance.now();
+        const client = await this.db.connect();
+        try {
+            await client.query('BEGIN');
+            if (Object.keys(input.rawMetadata).length) {
+                await client.query(`UPDATE importer_work_mappings
+          SET metadata=COALESCE(metadata,'{}'::jsonb) || $3::jsonb
+          WHERE source=$1 AND source_work_id=$2 AND work_id=$4::uuid`, [input.source, input.sourceWorkId, JSON.stringify(input.rawMetadata), input.workId]);
+            }
+            await client.query(`INSERT INTO importer_lite_metadata_enrichment
+        (source,source_work_id,work_id,aliases_state,tags_state,aliases_added,tags_added,attempt_count,
+         last_checked_at,next_retry_at,last_error,version,updated_at)
+        VALUES($1,$2,$3::uuid,$4,$5,$6,$7,1,now(),NULL,NULL,1,now())
+        ON CONFLICT(source,source_work_id) DO UPDATE SET work_id=excluded.work_id,
+          aliases_state=excluded.aliases_state,tags_state=excluded.tags_state,
+          aliases_added=importer_lite_metadata_enrichment.aliases_added+excluded.aliases_added,
+          tags_added=importer_lite_metadata_enrichment.tags_added+excluded.tags_added,
+          attempt_count=importer_lite_metadata_enrichment.attempt_count+1,
+          last_checked_at=now(),next_retry_at=NULL,last_error=NULL,version=3,updated_at=now()`, [input.source, input.sourceWorkId, input.workId, input.aliasesState, input.tagsState,
+                Math.max(0, input.aliasesAdded), Math.max(0, input.tagsAdded)]);
+            await client.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+        VALUES($1,'HEALTHY',NULL,0,NULL)
+        ON CONFLICT(source) DO UPDATE SET health='HEALTHY',cooldown_until=NULL,
+          consecutive_failures=0,last_error=NULL,updated_at=now()
+        WHERE NOT (importer_lite_source_health.health='RATE_LIMITED'
+          AND importer_lite_source_health.cooldown_until>now())`, [input.source]);
+            const completed = await client.query(`UPDATE importer_lite_tasks
+        SET state='DONE',reason=NULL,checkpoint=checkpoint || $3::jsonb,work_id=$4::uuid,
+          attempts=0,lease_owner=NULL,lease_until=NULL,updated_at=now()
+        WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()
+        RETURNING id`, [task.id, workerId, JSON.stringify({
+                    ...checkpoint,
+                    metadataTiming: { ...(checkpoint.metadataTiming || {}),
+                        metadataFinalizeBeforeCommitMs: Math.round(performance.now() - transactionStartedAt) },
+                }), input.workId]);
+            if (completed.rowCount !== 1)
+                throw new Error('METADATA_TASK_LEASE_LOST');
+            await this.refreshReadyWork(client, task.workKey);
+            await client.query('COMMIT');
+            return true;
         }
         catch (error) {
             await client.query('ROLLBACK').catch(() => { });
