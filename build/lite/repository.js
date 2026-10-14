@@ -12,11 +12,12 @@ export const DUPLICATE_CANONICAL_BATCH_REASON = 'ON CONFLICT DO UPDATE command c
 // A provider 429 can durably defer a large sole-route backlog in one event.
 // Once its deadline expires, recovery must not take tens of minutes merely
 // because the generic retry pass is intentionally small. Keep re-admission
-// bounded per source and per recovery turn so a recovered large source cannot
-// crowd out other healthy work or immediately recreate the rate limit.
+// bounded per source, work and recovery turn so a large work cannot hide other
+// confirmed chapter gaps or immediately recreate the rate limit.
 const SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN = 4;
 const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE = 8;
-const SOURCE_COOLDOWN_RECOVERY_CANDIDATE_TASKS = 48;
+const SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS = 48;
+const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK = 2;
 const priorityName = (value) => ['STAFF', 'P0', 'P1', 'P2'][value] || 'P2';
 const asTask = (row) => ({
     id: row.id, taskType: row.task_type, workId: row.work_id, workKey: row.work_key,
@@ -1163,17 +1164,34 @@ export class LiteRepository {
             // `recordSourceFailure` moves only sole-route work to a durable
             // SOURCE_RATE_LIMITED cooldown. The normal retry pass above is kept
             // deliberately small for crash recovery, so it must not be the only
-            // mechanism that reopens a large healthy source backlog. Start from a
-            // small indexed retry head, then select a few routes per source after
-            // its explicit cooldown has elapsed. This runs only in the 30-second
-            // reconciler and refreshes the normal ready-work projection.
-            const sourceCooldownRecovery = await client.query(`WITH due AS (
-           SELECT id,work_key,work_id,chapter_key,payload,next_run_at,created_at
-           FROM importer_lite_tasks
-           WHERE state='RETRY_WAIT' AND monitoring=false AND task_type='IMPORT_CHAPTER'
-             AND reason='SOURCE_RATE_LIMITED' AND next_run_at<=now()
-           ORDER BY next_run_at,created_at
-           LIMIT $1 FOR UPDATE SKIP LOCKED
+            // mechanism that reopens a large healthy source backlog. It selects a
+            // bounded, work-fair retry head (least recently refreshed work first,
+            // earliest canonical chapter within each work), then a few routes per
+            // source. This runs only in the 30-second reconciler and refreshes the
+            // normal ready-work projection.
+            const sourceCooldownRecovery = await client.query(`WITH candidate_works AS (
+           SELECT task.work_key,
+             COALESCE(ready.updated_at,max(task.updated_at)) AS work_turn_at,
+             min(task.next_run_at) AS oldest_due
+           FROM importer_lite_tasks task
+           LEFT JOIN importer_lite_ready_works ready ON ready.work_key=task.work_key
+           WHERE task.state='RETRY_WAIT' AND task.monitoring=false AND task.task_type='IMPORT_CHAPTER'
+             AND task.reason='SOURCE_RATE_LIMITED' AND task.next_run_at<=now()
+           GROUP BY task.work_key,ready.updated_at
+           ORDER BY COALESCE(ready.updated_at,max(task.updated_at)) NULLS FIRST,
+             min(task.next_run_at),task.work_key
+           LIMIT $1
+         ), due AS (
+           SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,task.created_at
+           FROM candidate_works candidate
+           JOIN LATERAL (
+             SELECT id,work_key,work_id,chapter_key,payload,next_run_at,created_at
+             FROM importer_lite_tasks
+             WHERE work_key=candidate.work_key AND state='RETRY_WAIT' AND monitoring=false
+               AND task_type='IMPORT_CHAPTER' AND reason='SOURCE_RATE_LIMITED' AND next_run_at<=now()
+             ORDER BY NULLIF(payload->>'orderKey','') NULLS LAST,next_run_at,created_at,id
+             LIMIT $4 FOR UPDATE SKIP LOCKED
+           ) task ON true
          ), routes AS (
            SELECT DISTINCT ON (due.id) due.id,due.work_key,due.next_run_at,due.created_at,route.source
            FROM due
@@ -1197,7 +1215,7 @@ export class LiteRepository {
            ORDER BY oldest_due,source LIMIT $2
          ), ranked AS (
            SELECT routes.id,routes.work_key,
-             row_number() OVER (PARTITION BY routes.source ORDER BY routes.next_run_at,routes.created_at) AS source_position
+             row_number() OVER (PARTITION BY routes.source ORDER BY routes.next_run_at,routes.created_at,routes.work_key) AS source_position
            FROM routes JOIN source_lanes USING(source)
          ), picked AS (
            SELECT id,work_key FROM ranked
@@ -1212,8 +1230,8 @@ export class LiteRepository {
            FROM (SELECT DISTINCT work_key FROM reopened) affected
          )
          SELECT (SELECT count(*)::int FROM reopened) AS count, count(*)::int AS refreshed
-         FROM refreshed`, [SOURCE_COOLDOWN_RECOVERY_CANDIDATE_TASKS, SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN,
-                SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE]);
+         FROM refreshed`, [SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS, SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN,
+                SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE, SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK]);
             // A Telegram request with an unknown outcome must never be replayed.
             // Likewise, an old intent left by a crashed process has no proof that
             // Telegram did not accept it.  Mark only the owning task BLOCKED;
