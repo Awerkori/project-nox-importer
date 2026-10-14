@@ -12,7 +12,7 @@ import { PageByteBudget } from './page-byte-budget.js';
 // confirmed receipt is deferred and can safely coalesce a little longer while
 // the next bounded page wave proceeds. This separates pool amortisation from
 // pre-upload latency without changing a full-batch flush or any concurrency.
-export const DURABLE_RESERVATION_BATCH_JOIN_MS = 240;
+export const DURABLE_RESERVATION_BATCH_JOIN_MS = 120;
 export const DURABLE_RECEIPT_BATCH_JOIN_MS = 360;
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
