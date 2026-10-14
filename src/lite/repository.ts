@@ -161,7 +161,7 @@ export class LiteRepository {
             EXISTS (SELECT 1 FROM importer_lite_tasks rich
               WHERE rich.task_type='CATALOG' AND rich.state='DONE'
                 AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=s.id
-                AND rich.checkpoint->>'aliases' ~ '^[1-9][0-9]*$') AS alias_rich_source
+                AND rich.checkpoint->>'aliasDelta' ~ '^[1-9][0-9]*$') AS alias_productive_source
           FROM importer_sources s
           LEFT JOIN importer_lite_source_health health ON health.source=s.id
           LEFT JOIN LATERAL (
@@ -177,7 +177,7 @@ export class LiteRepository {
             AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
             AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
         ), next_mapping AS (
-          SELECT turn.source,turn.last_admitted_at,turn.alias_rich_source,
+          SELECT turn.source,turn.last_admitted_at,turn.alias_productive_source,
             (aliasless_after.source_work_id IS NOT NULL OR aliasless_wrap.source_work_id IS NOT NULL) AS selected_aliasless,
             COALESCE(aliasless_after.source_work_id,aliasless_wrap.source_work_id,
               fallback_after.source_work_id,fallback_wrap.source_work_id) AS source_work_id,
@@ -210,9 +210,10 @@ export class LiteRepository {
         SELECT source,source_work_id,work_id FROM next_mapping WHERE source_work_id IS NOT NULL
         -- A mapping for a work with no aliases has higher product value than
         -- a complementary source mapping for a work that already has aliases.
-        -- Within each tier, prefer providers that have actually yielded
-        -- explicit aliases, then rotate by source recency.
-        ORDER BY selected_aliasless DESC,alias_rich_source DESC,last_admitted_at NULLS FIRST,source LIMIT $1`,
+        -- Within each tier, prefer providers that have actually added an
+        -- alias to a work. Merely returning aliases is insufficient: many
+        -- mappings already contain every title the source supplies.
+        ORDER BY selected_aliasless DESC,alias_productive_source DESC,last_admitted_at NULLS FIRST,source LIMIT $1`,
         [ceiling - Number(pending.rows[0]?.count || 0)]);
 
       for (const row of candidates.rows) {

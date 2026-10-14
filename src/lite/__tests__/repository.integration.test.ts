@@ -354,7 +354,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillSourceMetadataEnrichment(2)).toBe(0);
   });
 
-  it('prioritizes a source proven to return aliases over a never-queried source', async () => {
+  it('prioritizes a source proven to add aliases over a never-queried source', async () => {
     await db.query(`INSERT INTO importer_sources(id) VALUES('source-rich'),('source-new')`);
     await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2)`, [ids.p1a,ids.p1b]);
     await db.query(`INSERT INTO importer_work_mappings
@@ -365,7 +365,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       (task_type,work_id,work_key,priority,base_priority,idempotency_key,state,payload,checkpoint)
       VALUES('CATALOG',$1::uuid,$2,3,3,'prior-alias-rich-source-history','DONE',
         '{"metadataSourceRefresh":true,"source":"source-rich","sourceWorkId":"prior-rich"}'::jsonb,
-        '{"aliases":2}'::jsonb)`, [ids.p1a,`work:${ids.p1a}`]);
+        '{"aliases":2,"aliasDelta":1}'::jsonb)`, [ids.p1a,`work:${ids.p1a}`]);
 
     expect(await repo.refillSourceMetadataEnrichment(1)).toBe(1);
     expect((await db.query(`SELECT payload->>'source' AS source FROM importer_lite_tasks
@@ -390,6 +390,25 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT payload->>'source' AS source,payload->>'sourceWorkId' AS source_work_id
       FROM importer_lite_tasks WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows)
       .toEqual([{ source:'source-new',source_work_id:'needs-aliases' }]);
+  });
+
+  it('does not prefer a provider whose fetched aliases were all duplicates over an untried source', async () => {
+    await db.query(`INSERT INTO importer_sources(id) VALUES('source-duplicate'),('source-untried')`);
+    await db.query(`UPDATE works SET published=true,aliases=ARRAY['Existing alias']::text[] WHERE id IN ($1,$2)`,[ids.p1a,ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000241','source-duplicate','same-aliases',$1::uuid,'p1-a','P1 A','SYNCED'),
+      ('00000000-0000-4000-8000-000000000242','source-untried','new-possibility',$2::uuid,'p1-b','P1 B','SYNCED')`,[ids.p1a,ids.p1b]);
+    await db.query(`INSERT INTO importer_lite_tasks
+      (task_type,work_id,work_key,priority,base_priority,idempotency_key,state,payload,checkpoint)
+      VALUES('CATALOG',$1::uuid,$2,3,3,'duplicate-alias-source-history','DONE',
+        '{"metadataSourceRefresh":true,"source":"source-duplicate","sourceWorkId":"prior-duplicate"}'::jsonb,
+        '{"aliases":3,"aliasDelta":0}'::jsonb)`,[ids.p1a,`work:${ids.p1a}`]);
+
+    expect(await repo.refillSourceMetadataEnrichment(1)).toBe(1);
+    expect((await db.query(`SELECT payload->>'source' AS source,payload->>'sourceWorkId' AS source_work_id
+      FROM importer_lite_tasks WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows)
+      .toEqual([{source:'source-untried',source_work_id:'new-possibility'}]);
   });
 
   it('resumes each metadata source after its last mapping and wraps without skipping earlier mappings', async () => {
