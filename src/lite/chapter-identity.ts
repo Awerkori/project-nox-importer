@@ -12,6 +12,19 @@ export interface ChapterIdentityInput {
   edition?: string | null;
 }
 
+/**
+ * A lossless, text-only view of the opaque canonical key.  This exists for
+ * durable-manifest recovery only: callers must not turn `displayNumber` into
+ * a number (in particular, `12.10` is not `12.1`).
+ */
+export interface ParsedCanonicalChapterKey {
+  language: string;
+  edition: string;
+  kind: string;
+  displayNumber: string;
+  title: string;
+}
+
 const clean = (value: string | number | null | undefined): string =>
   String(value ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim();
 
@@ -38,6 +51,24 @@ export function canonicalChapterKey(input: ChapterIdentityInput): string {
   // non-numbered and special identities where it is part of the identity.
   const identityTitle = !number || kind !== 'chapter' ? (title || '-') : '-';
   return [language, edition, kind, number || 'unnumbered', identityTitle].map(encodeURIComponent).join('|');
+}
+
+export function parseCanonicalChapterKey(value: string): ParsedCanonicalChapterKey | null {
+  const parts = String(value || '').split('|');
+  if (parts.length !== 5) return null;
+  try {
+    const [language, edition, kind, encodedNumber, encodedTitle] = parts.map((part) => decodeURIComponent(part));
+    if (!language || !edition || !kind || !encodedNumber) return null;
+    return {
+      language,
+      edition,
+      kind,
+      displayNumber: encodedNumber === 'unnumbered' ? '' : encodedNumber,
+      title: encodedTitle === '-' ? '' : encodedTitle,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**

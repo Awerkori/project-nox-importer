@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import { LITE_PRIORITY_RANK, type LitePriority, type LiteTask, type LiteTaskState, type LiteTaskType } from './types.js';
+import { parseCanonicalChapterKey } from './chapter-identity.js';
 
 type Db = Pick<Pool, 'query' | 'connect'>;
 type Row = QueryResultRow & Record<string, any>;
@@ -177,6 +178,110 @@ export class LiteRepository {
       await client.query('ROLLBACK').catch(() => {});
       throw error;
     } finally { client.release(); }
+  }
+
+  /**
+   * Materialise only chapters already positively confirmed by a durable source
+   * manifest.  Historical catalog tasks are useful for obtaining new
+   * manifests, but a completed old catalog task must not make its confirmed
+   * missing rows invisible forever.  This producer never infers a numeric
+   * gap, never contacts a source, and remains bounded by both work and source
+   * so one large title/provider cannot monopolise P1 admission.
+   */
+  async refillManifestProvenP1Imports(readyFloor = 64, batchLimit = 16): Promise<number> {
+    const floor = Math.max(1, Math.min(512, readyFloor));
+    const maximum = Math.max(1, Math.min(32, batchLimit));
+    const reserve = await this.db.query<{ count: string }>(`SELECT count(*)::int AS count FROM (
+      SELECT 1 FROM importer_lite_tasks t
+      WHERE t.state='READY' AND t.monitoring=false AND t.priority=2
+        AND t.task_type='IMPORT_CHAPTER' AND t.next_run_at<=now()
+        AND EXISTS (
+          SELECT 1 FROM importer_lite_chapter_sources cs
+          JOIN importer_sources s ON s.id=cs.source
+          LEFT JOIN importer_lite_source_health h ON h.source=cs.source
+          WHERE cs.work_id=t.work_id AND cs.canonical_chapter_key=t.chapter_key
+            AND cs.confirmed=true AND cs.has_chapter=true AND s.enabled=true
+            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+            AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
+                 (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+            AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+            AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+        )
+        LIMIT $1
+    ) AS bounded_ready`, [floor]);
+    const current = Number(reserve.rows[0]?.count || 0);
+    if (current >= floor) return 0;
+
+    const limit = Math.min(maximum, floor - current);
+    const candidates = await this.db.query<Row>(`WITH bounded AS (
+        SELECT cs.work_id::text,cs.canonical_chapter_key,cs.source,cs.language,cs.edition,cs.order_key,
+          cs.source_rank,cs.updated_at
+        FROM importer_lite_chapter_sources cs
+        JOIN works w ON w.id=cs.work_id
+        JOIN media cover ON cover.id=w.cover_id
+        JOIN importer_sources s ON s.id=cs.source
+        LEFT JOIN importer_lite_source_health h ON h.source=cs.source
+        WHERE w.published=true AND w.title IS NOT NULL AND w.slug IS NOT NULL
+          AND cover.storage_ready=true AND cover.bytes>=1500
+          AND cs.confirmed=true AND cs.has_chapter=true
+          AND s.enabled=true
+          AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+          AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
+               (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+          AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+          AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+          AND NOT EXISTS (
+            SELECT 1 FROM importer_lite_chapters chapter
+            WHERE chapter.work_id=cs.work_id AND chapter.canonical_chapter_key=cs.canonical_chapter_key
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM importer_lite_tasks task
+            WHERE task.idempotency_key='lite:chapter:' || cs.work_id::text || ':' || cs.canonical_chapter_key
+          )
+        ORDER BY cs.updated_at,cs.work_id,cs.canonical_chapter_key,cs.source_rank,cs.source
+        LIMIT 256
+      ), canonical_routes AS (
+        SELECT DISTINCT ON (work_id,canonical_chapter_key) *
+        FROM bounded
+        ORDER BY work_id,canonical_chapter_key,source_rank,source
+      ), fair AS (
+        SELECT *,
+          row_number() OVER (PARTITION BY source ORDER BY updated_at,work_id,canonical_chapter_key) AS source_position,
+          row_number() OVER (PARTITION BY work_id ORDER BY updated_at,order_key,canonical_chapter_key) AS work_position
+        FROM canonical_routes
+      )
+      SELECT * FROM fair
+      WHERE source_position<=2 AND work_position<=2
+      ORDER BY updated_at,source_position,work_position,source,work_id,order_key
+      LIMIT $1`, [limit]);
+
+    const tasks: EnqueueLiteTask[] = [];
+    for (const row of candidates.rows) {
+      const chapterKey = String(row.canonical_chapter_key);
+      const parsed = parseCanonicalChapterKey(chapterKey);
+      // A malformed historical key is not trusted as task input. It remains
+      // visible in the manifest for diagnosis instead of creating a task that
+      // could collapse identity or call a provider with an invented number.
+      if (!parsed) continue;
+      tasks.push({
+        taskType: 'IMPORT_CHAPTER',
+        workId: String(row.work_id),
+        workKey: `work:${row.work_id}`,
+        chapterKey,
+        priority: 'P1',
+        idempotencyKey: `lite:chapter:${row.work_id}:${chapterKey}`,
+        payload: {
+          displayNumber: parsed.displayNumber,
+          chapterTitle: parsed.title,
+          chapterKind: parsed.kind,
+          orderKey: String(row.order_key || ''),
+          language: String(row.language || parsed.language),
+          edition: String(row.edition || parsed.edition),
+          manifestP1Repair: true,
+        },
+      });
+    }
+    return (await this.enqueueMany(tasks)).inserted;
   }
 
   private async refreshReadyWork(client: Pick<PoolClient, 'query'>, workKey: string): Promise<void> {

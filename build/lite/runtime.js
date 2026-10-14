@@ -62,6 +62,7 @@ export class ImporterLiteRuntime {
     claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
     historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
     lastMetadataEnrichmentAt = 0;
+    lastManifestP1RepairAt = 0;
     // Observation is intentionally a one-slot lane. It may create P0 chapter
     // work, but an empty observation must never compete with chapter workers.
     monitorGate = new AsyncSemaphore(1, 'lite_p0_monitor');
@@ -133,6 +134,7 @@ export class ImporterLiteRuntime {
         await this.queue.recoverDuplicateCanonicalCatalogFailures();
         await this.refreshSourceFairness();
         await this.refillHistoricalP1Catalog();
+        await this.refillManifestProvenP1Imports();
         await this.refillStoredMetadataEnrichment();
         // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
         // Lite cutover.  The Lite-specific cap begins safely and can only rise
@@ -346,7 +348,22 @@ export class ImporterLiteRuntime {
         catch { /* bounded recovery retries next turn */ }
         await this.refreshSourceFairness();
         await this.refillHistoricalP1Catalog();
+        await this.refillManifestProvenP1Imports();
         await this.refillStoredMetadataEnrichment();
+    }
+    /** Existing positive manifests may outlive an older completed catalog task. */
+    async refillManifestProvenP1Imports() {
+        if (!this.isRuntimeLeader || Date.now() - this.lastManifestP1RepairAt < 5 * 60_000)
+            return;
+        this.lastManifestP1RepairAt = Date.now();
+        try {
+            const admitted = await this.queue.refillManifestProvenP1Imports();
+            if (admitted)
+                this.logger.info('Materialized manifest-proven historical P1 repairs', { admitted });
+        }
+        catch (error) {
+            this.logger.warn('Manifest-proven P1 refill failed', { error: error?.message });
+        }
     }
     /**
      * Historical aliases/tags already present in a source mapping are cheap,

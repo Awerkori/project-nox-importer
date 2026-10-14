@@ -83,6 +83,15 @@ export declare class LiteRepository {
      * manual fields and tag provenance rules.
      */
     refillStoredMetadataEnrichment(maxPending?: number): Promise<number>;
+    /**
+     * Materialise only chapters already positively confirmed by a durable source
+     * manifest.  Historical catalog tasks are useful for obtaining new
+     * manifests, but a completed old catalog task must not make its confirmed
+     * missing rows invisible forever.  This producer never infers a numeric
+     * gap, never contacts a source, and remains bounded by both work and source
+     * so one large title/provider cannot monopolise P1 admission.
+     */
+    refillManifestProvenP1Imports(readyFloor?: number, batchLimit?: number): Promise<number>;
     private refreshReadyWork;
     enqueue(input: EnqueueLiteTask): Promise<{
         inserted: boolean;

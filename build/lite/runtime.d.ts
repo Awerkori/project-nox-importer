@@ -23,6 +23,7 @@ export declare class ImporterLiteRuntime {
     private readonly claimGate;
     private readonly historicalP1BackfillGate;
     private lastMetadataEnrichmentAt;
+    private lastManifestP1RepairAt;
     private readonly monitorGate;
     private readonly runtimeInstanceId;
     private readonly runtimeBootedAt;
@@ -73,6 +74,8 @@ export declare class ImporterLiteRuntime {
      */
     private refillHistoricalP1Catalog;
     private runRecoveryTurn;
+    /** Existing positive manifests may outlive an older completed catalog task. */
+    private refillManifestProvenP1Imports;
     /**
      * Historical aliases/tags already present in a source mapping are cheap,
      * useful evidence. Feed a single P2 catalog task every five minutes; normal
