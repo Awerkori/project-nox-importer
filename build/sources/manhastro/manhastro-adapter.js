@@ -152,6 +152,8 @@ export class ManhastroAdapter {
         if (!item)
             throw new Error(`Work not found on Manhastro: ${sourceWorkId}`);
         const title = item.titulo_brasil?.trim() || item.titulo.trim();
+        const alternativeTitles = [item.titulo.trim(), item.titulo_brasil?.trim()]
+            .filter((candidate) => Boolean(candidate) && candidate !== title);
         const cover = item.imagem
             ? item.imagem.startsWith('http')
                 ? item.imagem
@@ -185,6 +187,7 @@ export class ManhastroAdapter {
             status,
             language: 'pt-BR',
             genres: item.generos || [],
+            alternativeTitles,
             raw: item,
         };
     }

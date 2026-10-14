@@ -25,7 +25,7 @@ describe('ManhastroAdapter', () => {
   });
 
   it('correctly fetches work details and chapters with regex number extraction', async () => {
-    const detailsJson = `{"success":true,"data":[{"manga_id":9901,"titulo":"Martial Peak","descricao_brasil":"Epic cultivation story","imagem":"https://cdn.manhastro.com/c.jpg","generos":["Cultivation","Action"],"categoria":"manhua","status":"on-going"}]}`;
+    const detailsJson = `{"success":true,"data":[{"manga_id":9901,"titulo":"Martial Peak","titulo_brasil":"Ápice Marcial","descricao_brasil":"Epic cultivation story","imagem":"https://cdn.manhastro.com/c.jpg","generos":["Cultivation","Action"],"categoria":"manhua","status":"on-going"}]}`;
     const chaptersJson = `{"success":true,"data":[{"capitulo_id":1234,"capitulo_nome":"Capitulo 105.5","capitulo_data":"2026-09-07 10:00:00"},{"capitulo_id":1235,"capitulo_nome":"Capitulo 106","capitulo_data":"2026-09-08 10:00:00"}]}`;
 
     const mockTransport = vi.fn().mockImplementation(async (url: string) => {
@@ -40,6 +40,8 @@ describe('ManhastroAdapter', () => {
 
     const details = await adapter.fetchWorkDetails('9901');
     expect(details.sourceWorkId).toBe('9901');
+    expect(details.title).toBe('Ápice Marcial');
+    expect(details.alternativeTitles).toEqual(['Martial Peak']);
     expect(details.kind).toBe('MANHUA');
     expect(details.status).toBe('ONGOING');
 
