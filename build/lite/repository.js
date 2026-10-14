@@ -111,7 +111,9 @@ export class LiteRepository {
             ON aliasless.source_work_id IS NULL
         )
         SELECT source,source_work_id,work_id FROM next_mapping WHERE source_work_id IS NOT NULL
-        ORDER BY last_admitted_at NULLS FIRST,alias_rich_source DESC,source LIMIT $1`, [ceiling - Number(pending.rows[0]?.count || 0)]);
+        -- Prefer providers that have actually yielded explicit aliases before
+        -- exploring never-seen sources. Recency rotates within each tier.
+        ORDER BY alias_rich_source DESC,last_admitted_at NULLS FIRST,source LIMIT $1`, [ceiling - Number(pending.rows[0]?.count || 0)]);
             for (const row of candidates.rows) {
                 const source = String(row.source);
                 const sourceWorkId = String(row.source_work_id);
