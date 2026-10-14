@@ -42,10 +42,12 @@ const RUNTIME_LEASE_RENEW_MS = 15_000;
 // bounds only *new page buffers*; uploads, receipts, publication and lease
 // renewal remain unblocked so the in-memory wave can drain.
 const SAFE_BUFFERED_PAGE_CAP = 24;
-// A stored metadata replay is local, bounded and no-network. One at a time,
-// capped to one per second, drains the historic catalog without taking a
-// chapter worker or letting timer ticks queue behind a slow YSQL operation.
+// Stored metadata replay is local and no-network. Keep replay admission
+// responsive, but poll the source-mapping producer less often: it uses the
+// same small YSQL pool as chapter work and only needs to refill a two-task
+// buffer, not rescan mappings every timer tick.
 const STORED_METADATA_REPLAY_INTERVAL_MS = 1_000;
+const STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS = 5_000;
 /** One process, one executor pool, one bounded reconciler. */
 export class ImporterLiteRuntime {
     pool;
@@ -390,7 +392,7 @@ export class ImporterLiteRuntime {
      * bounded replay lane; normal chapter claims retain strict priority.
      */
     async refillStoredMetadataEnrichment() {
-        if (!this.isRuntimeLeader || Date.now() - this.lastMetadataEnrichmentAt < STORED_METADATA_REPLAY_INTERVAL_MS)
+        if (!this.isRuntimeLeader || Date.now() - this.lastMetadataEnrichmentAt < STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS)
             return;
         this.lastMetadataEnrichmentAt = Date.now();
         try {

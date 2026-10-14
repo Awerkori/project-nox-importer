@@ -2352,6 +2352,30 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(claims).toBe(1);
   });
 
+  it('refills stored metadata less often than the replay worker polls', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    const refill = vi.fn(async () => 0);
+    (runtime as any).queue.refillStoredMetadataEnrichment = refill;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-14T00:00:00Z'));
+    try {
+      await (runtime as any).refillStoredMetadataEnrichment();
+      await vi.advanceTimersByTimeAsync(4_000);
+      await (runtime as any).refillStoredMetadataEnrichment();
+      expect(refill).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await (runtime as any).refillStoredMetadataEnrichment();
+      expect(refill).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps catalog metadata and source mappings while honoring chapter ingestion disablement', async () => {
     await db.exec(`ALTER TABLE importer_sources ADD COLUMN chapter_ingestion_enabled boolean NOT NULL DEFAULT true`);
     await db.query(`UPDATE importer_sources SET chapter_ingestion_enabled=false WHERE id='source-a'`);
