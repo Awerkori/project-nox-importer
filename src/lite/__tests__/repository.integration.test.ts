@@ -192,6 +192,57 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toBe(`lite:chapter:${workId}:pt-br|default|chapter|37|-`);
   });
 
+  it('claims an old confirmed gap before newer same-work chapters and does not rematerialize it after import', async () => {
+    const workId = ids.p1a;
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [workId]);
+    for (const number of [5, 7]) {
+      const key = `pt-br|default|chapter|${number}|-`;
+      const chapterId = `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`;
+      await db.query(`INSERT INTO chapters(id,work_id,number,display_number,canonical_chapter_key)
+        VALUES($1::uuid,$2::uuid,$3::numeric,$4,$5)`, [chapterId,workId,number,String(number),key]);
+      await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key)
+        VALUES($1::uuid,$2,$3::uuid,$4,$4)`, [workId,key,chapterId,String(number)]);
+    }
+    for (const number of [6,20,21]) {
+      const key = `pt-br|default|chapter|${number}|-`;
+      const order = `n|${String(number).padStart(12,'0')}|000000000000|||`;
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,confirmed,has_chapter)
+        VALUES($1::uuid,$2,'source-a','work-a',$3,'pt-BR','default',$4,true,true)`, [workId,key,`source-${number}`,order]);
+    }
+
+    // Model an older P1 backlog created before the rule existed, with newer
+    // tasks already waiting and a distinct decimal chapter present in source
+    // metadata. The normal missing chapter is still selected first.
+    for (const [number,priority,order] of [
+      [20,'P1','n|000000000020|000000000000|||'],
+      [21,'P0','n|000000000021|000000000000|||'],
+    ] as const) {
+      await repo.enqueue({ taskType:'IMPORT_CHAPTER',workId,workKey:`work:${workId}`,
+        chapterKey:`pt-br|default|chapter|${number}|-`,priority,
+        idempotencyKey:`lite:chapter:${workId}:pt-br|default|chapter|${number}|-`,
+        payload:{displayNumber:String(number),orderKey:order,manifestP1Repair:true} });
+    }
+    const inserted = await repo.materializeConfirmedMissingP1Tasks(20);
+    expect(inserted).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE work_id=$1::uuid AND chapter_key IN ('pt-br|default|chapter|5.2|-','pt-br|default|special|6|extra')`,[workId])).rows[0].count).toBe(0);
+    const first = await repo.claim('gap-before-continuation',120);
+    expect(first?.chapterKey).toBe('pt-br|default|chapter|6|-');
+
+    const chapterId = '00000000-0000-4000-8000-000000000099';
+    await db.query(`INSERT INTO chapters(id,work_id,number,display_number,canonical_chapter_key)
+      VALUES($1::uuid,$2::uuid,6,'6','pt-br|default|chapter|6|-')`, [chapterId,workId]);
+    await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key)
+      VALUES($1::uuid,'pt-br|default|chapter|6|-',$2::uuid,'6','6')`, [workId,chapterId]);
+    await repo.finish(first!, 'gap-before-continuation', {state:'DONE'});
+    expect(await repo.materializeConfirmedMissingP1Tasks(20)).toBe(0);
+    expect((await db.query(`SELECT count(*)::int AS count FROM chapters
+      WHERE work_id=$1::uuid AND canonical_chapter_key='pt-br|default|chapter|6|-'`,[workId])).rows[0].count).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE work_id=$1::uuid AND chapter_key='pt-br|default|chapter|6|-'`,[workId])).rows[0].count).toBe(1);
+  });
+
   it('lets a newer P0 proceed when older manifest evidence has no currently eligible source', async () => {
     const workId = ids.p1a;
     await db.query(`UPDATE works SET published=true WHERE id=$1`, [workId]);
