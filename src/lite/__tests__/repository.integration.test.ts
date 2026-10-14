@@ -330,6 +330,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
       WHERE payload ? 'manifestP1Repair' AND chapter_key LIKE '%|12.1|%'`)).rows[0].count).toBe(0);
     expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(0);
+
+    // A later source scan can reveal another legitimate gap. The recurring
+    // producer must notice that new positive manifest row without relying on
+    // a one-time catalog replay or inventing adjacent numbers.
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
+      VALUES($1,'pt-br|default|chapter|12.11|-','source-a','gap-a','gap-a-12-11','pt-BR','default','n|000000000012|110000000000|11|||',10,true,true)`, [ids.p1a]);
+    expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(1);
+    expect((await db.query(`SELECT priority,payload->>'displayNumber' AS display_number
+      FROM importer_lite_tasks WHERE idempotency_key='lite:chapter:' || $1 || ':pt-br|default|chapter|12.11|-'`, [ids.p1a])).rows[0])
+      .toEqual({ priority: 2, display_number: '12.11' });
   });
 
   it('keeps an executable P1 reserve dominant without hiding proven historical repairs forever', async () => {
