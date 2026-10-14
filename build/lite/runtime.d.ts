@@ -25,6 +25,7 @@ export declare class ImporterLiteRuntime {
     private readonly metadataReplayGate;
     private readonly sourceMetadataGate;
     private readonly sourceMetadataLaneGate;
+    private sourceMetadataPoolWaitStartedAt;
     private readonly sourceAdmissionGate;
     private lastMetadataEnrichmentAt;
     private lastMetadataReplayAt;
@@ -104,6 +105,7 @@ export declare class ImporterLiteRuntime {
     /** Dedicated bounded workers give source refetch continuous progress without
      * consuming chapter workers or competing with P0/P1 task selection. */
     private runSourceMetadataRefresh;
+    private hasSustainedSourceMetadataPoolPressure;
     /**
      * One local metadata merge at a time prevents P1's legitimate chapter
      * reserve from starving aliases/tags. It reads only a saved mapping and
