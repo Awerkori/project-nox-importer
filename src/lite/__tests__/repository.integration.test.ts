@@ -269,6 +269,26 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(0);
   });
 
+  it('keeps an executable P1 reserve dominant without hiding proven historical repairs forever', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
+    for (let index = 0; index < 8; index++) {
+      const key = `reserve-${index}`;
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
+        VALUES($1,$2,'source-a','reserve',$3,'pt-BR','default',$2,10,true,true)`, [ids.p1a, key, `reserve-source-${index}`]);
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+        chapterKey: key, priority: 'P1', idempotencyKey: `lite:chapter:${ids.p1a}:${key}` });
+    }
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
+      VALUES($1,'pt-br|default|chapter|99|-','source-b','repair','repair-99','pt-BR','default','n|000000000099|000000000000||||',10,true,true)`, [ids.p1b]);
+
+    expect(await repo.refillManifestProvenP1Imports(8, 16)).toBe(1);
+    expect((await db.query(`SELECT priority,payload->>'manifestP1Repair' AS repair
+      FROM importer_lite_tasks WHERE idempotency_key='lite:chapter:' || $1 || ':pt-br|default|chapter|99|-'`, [ids.p1b])).rows[0])
+      .toEqual({ priority: 2, repair: 'true' });
+  });
+
   it('lets an abundant materialized P1 import reserve suppress catalog maintenance completely', async () => {
     for (let index = 0; index < 64; index++) {
       await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,

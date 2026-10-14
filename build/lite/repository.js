@@ -141,9 +141,15 @@ export class LiteRepository {
         LIMIT $1
     ) AS bounded_ready`, [floor]);
         const current = Number(reserve.rows[0]?.count || 0);
-        if (current >= floor)
-            return 0;
-        const limit = Math.min(maximum, floor - current);
+        // A healthy executable P1 reserve must remain dominant, but it cannot
+        // permanently hide a confirmed historical manifest simply because an old
+        // catalog task has already completed. Admit only a tiny repair seat in
+        // that case; the normal claim projection still provides work/source
+        // fairness and the durable idempotency key makes the producer inert after
+        // each concrete row is represented.
+        const limit = current >= floor
+            ? Math.min(4, maximum)
+            : Math.min(maximum, floor - current);
         const candidates = await this.db.query(`WITH bounded AS (
         SELECT cs.work_id::text,cs.canonical_chapter_key,cs.source,cs.language,cs.edition,cs.order_key,
           cs.source_rank,cs.updated_at
