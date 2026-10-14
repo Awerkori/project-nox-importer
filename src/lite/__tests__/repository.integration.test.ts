@@ -161,18 +161,25 @@ describe('LiteRepository against the additive Lite migration', () => {
       VALUES ('00000000-0000-4000-8000-000000000119','source-b','metadata-b',$1::uuid,
         'p1-a','P1 A',$2::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({ alternativeTitles: ['P1 Alias B'] })]);
 
+    // A pre-v2 replay can be queued behind normal P1.  It must not consume
+    // the corrected parser's bounded seats or prevent the v2 task for the
+    // same explicit mapping from becoming durable.
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      priority: 'P2', idempotencyKey: 'lite:metadata:source-a:metadata-a',
+      payload: { source: 'source-a', sourceWorkId: 'metadata-a', metadataEnrichment: true } });
+
     expect(await repo.refillStoredMetadataEnrichment()).toBe(1);
-    const task = await db.query(`SELECT task_type,priority,base_priority,payload
-      FROM importer_lite_tasks WHERE idempotency_key='lite:metadata:v2:source-a:metadata-a'`);
-    expect(task.rows).toHaveLength(1);
-    expect(task.rows[0]).toMatchObject({ task_type: 'CATALOG', priority: 3, base_priority: 3 });
-    expect(task.rows[0].payload).toMatchObject({
-      source: 'source-a', sourceWorkId: 'metadata-a', metadataEnrichment: true, metadataEnrichmentVersion: 2,
-    });
+    const firstV2 = await db.query(`SELECT task_type,priority,base_priority,payload
+      FROM importer_lite_tasks WHERE idempotency_key LIKE 'lite:metadata:v2:%'`);
+    expect(firstV2.rows).toHaveLength(1);
+    expect(firstV2.rows[0]).toMatchObject({ task_type: 'CATALOG', priority: 3, base_priority: 3 });
+    expect(firstV2.rows[0].payload).toMatchObject({ metadataEnrichment: true, metadataEnrichmentVersion: 2 });
 
     // The second low-priority seat belongs to a different source rather than
     // another mapping from the large source.
     expect(await repo.refillStoredMetadataEnrichment()).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key='lite:metadata:v2:source-a:metadata-a'`)).rows[0].count).toBe(1);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
       WHERE idempotency_key='lite:metadata:v2:source-b:metadata-b'`)).rows[0].count).toBe(1);
     // Both bounded seats are durable; a future recovery turn cannot append a
