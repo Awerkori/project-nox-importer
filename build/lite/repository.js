@@ -59,34 +59,43 @@ export class LiteRepository {
                 return 0;
             }
             // Select one source seat per turn. A provider with hundreds of old
-            // mappings must not win every five-minute P2 slot, so choose one pending
+            // mappings must not win every bounded P2 turn, so choose one pending
             // mapping per source and rotate sources by their last enrichment turn.
             // This scans only explicit metadata mappings (currently a small indexed
             // subset), never chapter/page work and never the claim path.
             const candidate = await client.query(`WITH candidate_rows AS (
-        SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id
+        SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id,evidence.alias_evidence
         FROM importer_work_mappings m
         JOIN works w ON w.id=m.work_id
+        CROSS JOIN LATERAL (
+          SELECT
+            EXISTS (
+              SELECT 1 FROM jsonb_each(m.metadata) AS metadata_entry(key,value)
+              WHERE metadata_entry.key = ANY(ARRAY['alternativeTitles','alternative_titles','aliases','alternativeNames','alternative_names',
+                                                    'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
+                                                    'romanizedTitle','romanized_title','genres','tags','categories']::text[])
+                AND CASE jsonb_typeof(metadata_entry.value)
+                  WHEN 'array' THEN jsonb_array_length(metadata_entry.value)>0
+                  WHEN 'string' THEN COALESCE(NULLIF(lower(btrim(metadata_entry.value #>> '{}')),''),'') NOT IN ('[]','{}','null')
+                  WHEN 'object' THEN metadata_entry.value<>'{}'::jsonb
+                  ELSE false
+                END
+            ) AS metadata_evidence,
+            EXISTS (
+              SELECT 1 FROM jsonb_each(m.metadata) AS alias_entry(key,value)
+              WHERE alias_entry.key = ANY(ARRAY['alternativeTitles','alternative_titles','aliases','alternativeNames','alternative_names',
+                                                'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
+                                                'romanizedTitle','romanized_title']::text[])
+                AND CASE jsonb_typeof(alias_entry.value)
+                  WHEN 'array' THEN jsonb_array_length(alias_entry.value)>0
+                  WHEN 'string' THEN COALESCE(NULLIF(lower(btrim(alias_entry.value #>> '{}')),''),'') NOT IN ('[]','{}','null')
+                  ELSE false
+                END
+            ) AS alias_evidence
+        ) evidence
         WHERE m.work_id IS NOT NULL AND w.published=true
           AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-          AND m.metadata ?| ARRAY['alternativeTitles','alternative_titles','aliases','alternativeNames','alternative_names',
-                                   'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
-                                   'romanizedTitle','romanized_title','genres','tags','categories']
-          -- A legacy mapping can contain the field with an empty [] value.
-          -- It is not enrichment evidence and must not consume a source's
-          -- once-per-turn replay ahead of a later real alias/tag.
-          AND EXISTS (
-            SELECT 1 FROM jsonb_each(m.metadata) AS metadata_entry(key,value)
-            WHERE metadata_entry.key = ANY(ARRAY['alternativeTitles','alternative_titles','aliases','alternativeNames','alternative_names',
-                                                  'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
-                                                  'romanizedTitle','romanized_title','genres','tags','categories']::text[])
-              AND CASE jsonb_typeof(metadata_entry.value)
-                WHEN 'array' THEN jsonb_array_length(metadata_entry.value)>0
-                WHEN 'string' THEN COALESCE(NULLIF(lower(btrim(metadata_entry.value #>> '{}')),''),'') NOT IN ('[]','{}','null')
-                WHEN 'object' THEN metadata_entry.value<>'{}'::jsonb
-                ELSE false
-              END
-          )
+          AND evidence.metadata_evidence
           AND NOT EXISTS (
             -- v2 replays the bounded no-network pass because legacy adapters
             -- sometimes saved an explicit JSON array as a string. The older
@@ -103,7 +112,7 @@ export class LiteRepository {
           )
       ), candidates AS (
         SELECT DISTINCT ON (source) source,source_work_id,work_id,updated_at,id
-        FROM candidate_rows ORDER BY source,updated_at,id
+        FROM candidate_rows ORDER BY source,alias_evidence DESC,updated_at,id
       ), source_history AS (
         SELECT payload->>'source' AS source,max(updated_at) AS enriched_at
         FROM importer_lite_tasks

@@ -197,14 +197,15 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
   });
 
-  it('skips empty legacy metadata values so a real alias is not delayed behind them', async () => {
+  it('prioritizes a real alias over empty or tag-only legacy metadata from the same source', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
       VALUES
-        ('00000000-0000-4000-8000-000000000120','source-a','empty-metadata',$1::uuid,'p1-a','P1 A',$2::jsonb,'SYNCED'),
-        ('00000000-0000-4000-8000-000000000121','source-a','real-metadata',$1::uuid,'p1-a','P1 A',$3::jsonb,'SYNCED')`, [
-      ids.p1a, JSON.stringify({ alternative_titles: '[]' }),
+        ('00000000-0000-4000-8000-000000000119','source-a','tags-only',$1::uuid,'p1-a','P1 A',$2::jsonb,'SYNCED'),
+        ('00000000-0000-4000-8000-000000000120','source-a','empty-metadata',$1::uuid,'p1-a','P1 A',$3::jsonb,'SYNCED'),
+        ('00000000-0000-4000-8000-000000000121','source-a','real-metadata',$1::uuid,'p1-a','P1 A',$4::jsonb,'SYNCED')`, [
+      ids.p1a, JSON.stringify({ tags: ['MILF'] }), JSON.stringify({ alternative_titles: '[]' }),
       JSON.stringify({ alternative_titles: '["Stored Alias"]' }),
     ]);
     expect(await repo.refillStoredMetadataEnrichment()).toBe(1);

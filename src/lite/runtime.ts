@@ -46,6 +46,9 @@ const RUNTIME_LEASE_RENEW_MS = 15_000;
 // bounds only *new page buffers*; uploads, receipts, publication and lease
 // renewal remain unblocked so the in-memory wave can drain.
 const SAFE_BUFFERED_PAGE_CAP = 24;
+// A stored metadata replay is local, bounded and no-network. One per minute
+// keeps a large historic catalog progressing without competing with chapters.
+const STORED_METADATA_REPLAY_INTERVAL_MS = 60_000;
 
 type WorkerLiveness = {
   taskId: string | null;
@@ -380,11 +383,11 @@ export class ImporterLiteRuntime {
 
   /**
    * Historical aliases/tags already present in a source mapping are cheap,
-   * useful evidence. Feed a single P2 catalog task every five minutes; normal
+   * useful evidence. Feed a single P2 catalog task per minute; normal
    * strict admission still makes it yield completely to STAFF/P0/P1.
    */
   private async refillStoredMetadataEnrichment(): Promise<void> {
-    if (!this.isRuntimeLeader || Date.now() - this.lastMetadataEnrichmentAt < 5 * 60_000) return;
+    if (!this.isRuntimeLeader || Date.now() - this.lastMetadataEnrichmentAt < STORED_METADATA_REPLAY_INTERVAL_MS) return;
     this.lastMetadataEnrichmentAt = Date.now();
     try {
       const admitted = await this.queue.refillStoredMetadataEnrichment();
@@ -395,13 +398,13 @@ export class ImporterLiteRuntime {
   }
 
   /**
-   * A single local metadata merge per five minutes prevents P1's legitimate
+   * A single local metadata merge per minute prevents P1's legitimate
    * chapter reserve from starving aliases/tags forever. It reads only a saved
    * mapping and runs through the ordinary durable task/lease/finalize path;
    * no network, source slot, page buffer or chapter worker is admitted here.
    */
   private async runStoredMetadataReplay(): Promise<void> {
-    if (!this.isRuntimeLeader || Date.now() - this.lastMetadataReplayAt < 5 * 60_000) return;
+    if (!this.isRuntimeLeader || Date.now() - this.lastMetadataReplayAt < STORED_METADATA_REPLAY_INTERVAL_MS) return;
     await this.metadataReplayGate.acquire();
     try {
       this.lastMetadataReplayAt = Date.now();
