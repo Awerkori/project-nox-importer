@@ -64,7 +64,8 @@ export class LiteRepository {
             // This scans only explicit metadata mappings (currently a small indexed
             // subset), never chapter/page work and never the claim path.
             const candidate = await client.query(`WITH candidate_rows AS (
-        SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id,evidence.alias_evidence
+        SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id,evidence.alias_evidence,
+          (COALESCE(array_length(w.aliases,1),0)=0 AND evidence.alias_evidence) AS missing_alias_evidence
         FROM importer_work_mappings m
         JOIN works w ON w.id=m.work_id
         CROSS JOIN LATERAL (
@@ -111,8 +112,8 @@ export class LiteRepository {
               AND t.payload->>'metadataEnrichmentVersion'='2' AND t.payload->>'source'=m.source
           )
       ), candidates AS (
-        SELECT DISTINCT ON (source) source,source_work_id,work_id,updated_at,id
-        FROM candidate_rows ORDER BY source,alias_evidence DESC,updated_at,id
+        SELECT DISTINCT ON (source) source,source_work_id,work_id,updated_at,id,missing_alias_evidence
+        FROM candidate_rows ORDER BY source,missing_alias_evidence DESC,alias_evidence DESC,updated_at,id
       ), source_history AS (
         SELECT payload->>'source' AS source,max(updated_at) AS enriched_at
         FROM importer_lite_tasks
@@ -121,7 +122,11 @@ export class LiteRepository {
       )
       SELECT candidates.source,candidates.source_work_id,candidates.work_id
       FROM candidates LEFT JOIN source_history USING(source)
-      ORDER BY source_history.enriched_at NULLS FIRST,candidates.updated_at,candidates.source LIMIT 1`);
+      -- A mapping that can add a missing alias is more useful than replaying
+      -- metadata already represented on its work. Source rotation still
+      -- decides ties, so one provider cannot monopolize the bounded lane.
+      ORDER BY candidates.missing_alias_evidence DESC,
+        source_history.enriched_at NULLS FIRST,candidates.updated_at,candidates.source LIMIT 1`);
             const row = candidate.rows[0];
             if (!row) {
                 await client.query('COMMIT');
