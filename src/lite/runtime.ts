@@ -1289,12 +1289,16 @@ export class ImporterLiteRuntime {
       const rawAliasEvidence = hasUnparsedExplicitValue(/^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title)$/i);
       const rawTagEvidence = hasUnparsedExplicitValue(/^(genres?|tags?|categories)$/i);
       if ((rawAliasEvidence && extracted.aliases.length === 0) || (rawTagEvidence && extracted.genres.length === 0)) {
-        await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
+        await timePhase('metadataPersistCommitMs', () => this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
           aliasesState: rawAliasEvidence && extracted.aliases.length === 0 ? 'PARSER_ERROR' : (extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES'),
           tagsState: rawTagEvidence && extracted.genres.length === 0 ? 'PARSER_ERROR' : (extracted.genres.length ? 'ENRICHED' : 'NO_TAGS'),
-          error: 'EXPLICIT_SOURCE_METADATA_NOT_PARSED', rawMetadata: sourceMetadata });
+          error: 'EXPLICIT_SOURCE_METADATA_NOT_PARSED', rawMetadata: sourceMetadata }));
+        const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
+        const finalizeStartedAt = performance.now();
         await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_SOURCE_PARSER_ERROR',
-          checkpoint: { metadataSourceRefresh: true, parserError: true, metadataTiming: reportTiming('PARSER_ERROR') } });
+          checkpoint: { metadataSourceRefresh: true, parserError: true, metadataTiming: checkpointTiming } });
+        timings.finishCommitMs = Math.round(performance.now() - finalizeStartedAt);
+        reportTiming('PARSER_ERROR');
         return;
       }
       const resolved = await timePhase('mergePersistenceMs', () => this.dedupe.resolveWork({
@@ -1342,21 +1346,26 @@ export class ImporterLiteRuntime {
       // admission slots.
       const sourceExternalFailureCount = Math.max(0, Number(task.checkpoint.sourceExternalFailureCount) || 0) + 1;
       const retryDelay = Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(sourceExternalFailureCount, 8));
-      const retryTiming = reportTiming(parserFailure ? 'PARSER_ERROR' : persistenceFailure ? 'PERSISTENCE_FAILURE' : 'EXTERNAL_BLOCKED');
-      if (mappingWorkId && !persistenceFailure) await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
+      if (mappingWorkId && !persistenceFailure) await timePhase('metadataPersistCommitMs', () => this.queue.recordSourceMetadataEnrichment({
+        source, sourceWorkId, workId: mappingWorkId,
         aliasesState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED',
         tagsState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED', error: message,
-        nextRetryAt: parserFailure ? null : new Date(Date.now() + retryDelay) });
-      if (!parserFailure && !persistenceFailure) await this.queue.recordSourceFailure(source, error);
+        nextRetryAt: parserFailure ? null : new Date(Date.now() + retryDelay),
+      }));
+      if (!parserFailure && !persistenceFailure) await timePhase('sourceHealthPersistMs', () => this.queue.recordSourceFailure(source, error));
+      const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
+      const finalizeStartedAt = performance.now();
       await this.queue.finish(task, workerId, parserFailure
-        ? { state: 'BLOCKED', reason: message }
+        ? { state: 'BLOCKED', reason: message, checkpoint: { metadataTiming: checkpointTiming } }
         : persistenceFailure
           ? { state: 'RETRY_WAIT', reason: 'METADATA_ALIAS_PERSISTENCE_FAILED',
               nextRunAt: new Date(Date.now() + Math.min(5 * 60_000, retryDelay)), resetAttempts: true,
-              checkpoint: { metadataTiming: retryTiming } }
+              checkpoint: { metadataTiming: checkpointTiming } }
         : { state: 'RETRY_WAIT', reason: `METADATA_SOURCE_EXTERNAL:${message}`,
             nextRunAt: new Date(Date.now() + retryDelay),
-            checkpoint: { metadataSourceRefresh: true, sourceExternalFailureCount, metadataTiming: retryTiming }, resetAttempts: true });
+            checkpoint: { metadataSourceRefresh: true, sourceExternalFailureCount, metadataTiming: checkpointTiming }, resetAttempts: true });
+      timings.finishCommitMs = Math.round(performance.now() - finalizeStartedAt);
+      reportTiming(parserFailure ? 'PARSER_ERROR' : persistenceFailure ? 'PERSISTENCE_FAILURE' : 'EXTERNAL_BLOCKED');
     } finally {
       this.sourceMetadataGate.release();
     }
