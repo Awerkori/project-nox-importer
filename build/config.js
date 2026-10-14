@@ -49,11 +49,10 @@ const ConfigSchema = z.object({
     // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
     TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(16),
-    // Production telemetry at max=3 showed persistent pool contention (average
-    // 1.6 queued clients, p95 acquire 766ms, peak 6) while site routes remained
-    // healthy and total YSQL sessions were 8. Test one bounded increment only;
-    // revert if pool waits or public-site latency rise.
-    DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(4),
+    // Keep the previously measured pool=3 ceiling. A controlled max=4 window
+    // lowered acquisition wait but raised SQL p95 to 411ms, transaction p95 to
+    // 1.70s, RSS to 261MiB and CPU to 22.5%, without increasing publications.
+    DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(3),
     // At the measured 52.75 MiB median chapter size, the former 4 MiB/s global
     // ceiling could never reach the 8/min acceptance floor (4.55/min before
     // network and publication overhead). Eight MiB/s is the first reversible
