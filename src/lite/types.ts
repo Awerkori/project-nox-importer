@@ -39,6 +39,8 @@ export interface LiteTask {
   monitoring: boolean;
   payload: Record<string, unknown>;
   checkpoint: Record<string, unknown>;
+  /** Database creation time, used to measure durable queue dwell for background work. */
+  createdAt?: Date;
 }
 
 export type SourceHealth = 'HEALTHY' | 'DEGRADED' | 'RATE_LIMITED' | 'BROKEN' | 'DISABLED';

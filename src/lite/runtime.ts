@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import type { Pool } from 'pg';
 import { DeduplicationEngine } from '../core/deduplication.js';
 import type { Config } from '../config.js';
@@ -553,8 +554,12 @@ export class ImporterLiteRuntime {
     if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire()) return;
     try {
       const workerId = `${this.runtimeInstanceId}:source-metadata`;
+      const claimStartedAt = performance.now();
       const task = await this.queue.claimSourceMetadataRefresh(workerId, 90);
-      if (task) await this.catalog(task, workerId);
+      if (task) await this.catalog(task, workerId, {
+        claimSqlMs: Math.round(performance.now() - claimStartedAt),
+        queueDwellMs: task.createdAt ? Math.max(0, Date.now() - task.createdAt.getTime()) : null,
+      });
     } catch (error: any) {
       this.logger.warn('Source metadata lane failed', { error: error?.message });
     } finally {
@@ -849,6 +854,12 @@ export class ImporterLiteRuntime {
         chapterWorkers: this.chapterWorkerCapacity,
         snapshotDeferred: 'POOL_BUSY',
         ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+        ysqlTelemetry: pipelineTelemetry.database,
+        sourceMetadataLane: {
+          active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
+          capacity: this.sourceMetadataLaneGate.capacity,
+          waiters: this.sourceMetadataLaneGate.queued,
+        },
         // In-memory stage telemetry is safe to sample while the two YSQL
         // connections are busy.  Without it, the exact periods that need
         // diagnosis lose download/upload evidence to the protective snapshot
@@ -919,6 +930,12 @@ export class ImporterLiteRuntime {
         external: Math.round(memory.external / 1024 / 1024), arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024),
       },
       ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+      ysqlTelemetry: pipelineTelemetry.database,
+      sourceMetadataLane: {
+        active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
+        capacity: this.sourceMetadataLaneGate.capacity,
+        waiters: this.sourceMetadataLaneGate.queued,
+      },
       pipeline: {
         limits: {
           pageDownloads: this.downloads.capacity,
@@ -1001,10 +1018,10 @@ export class ImporterLiteRuntime {
     }
   }
 
-  private async catalog(task: LiteTask, workerId: string): Promise<void> {
+  private async catalog(task: LiteTask, workerId: string, metadataTimings?: Record<string, number | null>): Promise<void> {
     const source = String(task.payload.source || ''); const sourceWorkId = String(task.payload.sourceWorkId || '');
     if (task.payload.metadataEnrichment) return this.enrichStoredMappingMetadata(task, workerId, source, sourceWorkId);
-    if (task.payload.metadataSourceRefresh) return this.refreshMappingMetadataFromSource(task, workerId, source, sourceWorkId);
+    if (task.payload.metadataSourceRefresh) return this.refreshMappingMetadataFromSource(task, workerId, source, sourceWorkId, metadataTimings);
     const adapter = this.registry.get(source);
     if (!adapter || !sourceWorkId) return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CATALOG_INPUT_INVALID' });
     const policy = await this.queue.sourcePolicy(source);
@@ -1189,7 +1206,23 @@ export class ImporterLiteRuntime {
    * manifest/page discovery). A retryable provider failure is durably marked
    * EXTERNAL_BLOCKED and retried on a bounded exponential cooldown.
    */
-  private async refreshMappingMetadataFromSource(task: LiteTask, workerId: string, source: string, sourceWorkId: string): Promise<void> {
+  private async refreshMappingMetadataFromSource(task: LiteTask, workerId: string, source: string, sourceWorkId: string,
+    initialTimings: Record<string, number | null> = {}): Promise<void> {
+    const totalStartedAt = performance.now();
+    const timings: Record<string, number | null> = { ...initialTimings };
+    const timePhase = async <T>(name: string, operation: () => Promise<T>): Promise<T> => {
+      const startedAt = performance.now();
+      try { return await operation(); }
+      finally { timings[name] = Math.round(performance.now() - startedAt); }
+    };
+    const reportTiming = (state: string, finalizeMs?: number) => {
+      const totalMs = Math.round(performance.now() - totalStartedAt);
+      this.logger.info('Source metadata task timing', {
+        source, state, taskId: task.id, ...timings,
+        ...(finalizeMs === undefined ? {} : { finalizeMs }), totalMs,
+      });
+      return { ...timings, ...(finalizeMs === undefined ? {} : { finalizeMs }), totalMs };
+    };
     if (!source || !sourceWorkId) {
       await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_SOURCE_INPUT_INVALID' });
       return;
@@ -1213,18 +1246,18 @@ export class ImporterLiteRuntime {
     }
     let mappingWorkId = '';
     try {
-      const mapping = await this.pool.query<{ work_id: string; source_title: string; source_slug: string; title: string; aliases: string[] | null; tag_count: string }>(
+      const mapping = await timePhase('mappingQueryMs', () => this.pool.query<{ work_id: string; source_title: string; source_slug: string; title: string; aliases: string[] | null; tag_count: string }>(
         `SELECT m.work_id::text,m.source_title,m.source_slug,w.title,w.aliases,
           (SELECT count(*)::int FROM work_tags wt WHERE wt.work_id=w.id)::text AS tag_count
          FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
-         WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId]);
+         WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId]));
       const row = mapping.rows[0];
       if (!row) {
         await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_ENRICHMENT_MAPPING_MISSING' });
         return;
       }
       mappingWorkId = row.work_id;
-      const policy = await this.queue.sourcePolicy(source);
+      const policy = await timePhase('sourcePolicyQueryMs', () => this.queue.sourcePolicy(source));
       if (!policy?.runnable) {
         const nextRunAt = policy?.cooldownUntil && policy.cooldownUntil > new Date()
           ? policy.cooldownUntil : new Date(Date.now() + 6 * 60 * 60_000);
@@ -1236,15 +1269,16 @@ export class ImporterLiteRuntime {
         return;
       }
       const host = new URL(adapter.baseUrl).host;
-      await this.sourceRateLimiter.acquire(host, undefined, 60_000);
-      const details = await withTimeout(adapter.fetchWorkDetails(sourceWorkId), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'METADATA_SOURCE_TIMEOUT');
+      await timePhase('rateLimitWaitMs', () => this.sourceRateLimiter.acquire(host, undefined, 60_000));
+      const details = await timePhase('httpMs', () => withTimeout(adapter.fetchWorkDetails(sourceWorkId), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'METADATA_SOURCE_TIMEOUT'));
       const raw = details.raw && typeof details.raw === 'object' ? details.raw : {};
       const sourceMetadata: Record<string, unknown> = {
         ...raw,
         ...(details.alternativeTitles ? { alternativeTitles: details.alternativeTitles } : {}),
         ...(details.genres ? { genres: details.genres } : {}),
       };
-      const extracted = extractStoredMappingMetadata(sourceMetadata, details.title || row.title || row.source_title || '');
+      const extracted = await timePhase('parseNormalizeMs', async () =>
+        extractStoredMappingMetadata(sourceMetadata, details.title || row.title || row.source_title || ''));
       const hasUnparsedExplicitValue = (fieldPattern: RegExp): boolean => Object.entries(raw).some(([key,value]) => {
         if (!fieldPattern.test(key)) return false;
         if (Array.isArray(value)) return value.length > 0;
@@ -1255,37 +1289,47 @@ export class ImporterLiteRuntime {
       const rawAliasEvidence = hasUnparsedExplicitValue(/^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title)$/i);
       const rawTagEvidence = hasUnparsedExplicitValue(/^(genres?|tags?|categories)$/i);
       if ((rawAliasEvidence && extracted.aliases.length === 0) || (rawTagEvidence && extracted.genres.length === 0)) {
-        await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
+        await timePhase('metadataPersistCommitMs', () => this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
           aliasesState: rawAliasEvidence && extracted.aliases.length === 0 ? 'PARSER_ERROR' : (extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES'),
           tagsState: rawTagEvidence && extracted.genres.length === 0 ? 'PARSER_ERROR' : (extracted.genres.length ? 'ENRICHED' : 'NO_TAGS'),
-          error: 'EXPLICIT_SOURCE_METADATA_NOT_PARSED', rawMetadata: sourceMetadata });
+          error: 'EXPLICIT_SOURCE_METADATA_NOT_PARSED', rawMetadata: sourceMetadata }));
+        const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
+        const finalizeStartedAt = performance.now();
         await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_SOURCE_PARSER_ERROR',
-          checkpoint: { metadataSourceRefresh: true, parserError: true } });
+          checkpoint: { metadataSourceRefresh: true, parserError: true, metadataTiming: checkpointTiming } });
+        timings.finishCommitMs = Math.round(performance.now() - finalizeStartedAt);
+        reportTiming('PARSER_ERROR');
         return;
       }
-      const resolved = await this.dedupe.resolveWork({
+      const resolved = await timePhase('mergePersistenceMs', () => this.dedupe.resolveWork({
         source, sourceWorkId, title: details.title || row.source_title || row.title,
         slug: details.slug || row.source_slug || row.title,
         aliases: extracted.aliases, genres: extracted.genres,
         author: details.author, artist: details.artist, synopsis: details.synopsis,
         kind: details.kind, status: details.status, year: details.year, ageRating: details.ageRating,
         rawMetadata: sourceMetadata as Record<string, any>,
-      });
+      }));
       if (resolved.workId !== mappingWorkId || resolved.status === 'AMBIGUOUS' || resolved.status === 'FAILED') {
         throw new Error(`METADATA_SOURCE_MAPPING_CONFLICT:${resolved.reason || resolved.status}`);
       }
-      const after = await this.pool.query<{ aliases: string[] | null; tag_count: string }>(`SELECT w.aliases,
-        (SELECT count(*)::int FROM work_tags wt WHERE wt.work_id=w.id)::text AS tag_count FROM works w WHERE w.id=$1::uuid`, [mappingWorkId]);
+      const after = await timePhase('verifyDeltaQueryMs', () => this.pool.query<{ aliases: string[] | null; tag_count: string }>(`SELECT w.aliases,
+        (SELECT count(*)::int FROM work_tags wt WHERE wt.work_id=w.id)::text AS tag_count FROM works w WHERE w.id=$1::uuid`, [mappingWorkId]));
       const aliasDelta = Math.max(0,(after.rows[0]?.aliases?.length || 0)-(row.aliases?.length || 0));
       const tagDelta = Math.max(0,Number(after.rows[0]?.tag_count || 0)-Number(row.tag_count || 0));
-      await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
-        aliasesState: extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES',
-        tagsState: extracted.genres.length ? 'ENRICHED' : 'NO_TAGS',
-        aliasesAdded: aliasDelta, tagsAdded: tagDelta, rawMetadata: sourceMetadata });
-      await this.queue.recordSourceSuccess(source);
+      await timePhase('metadataPersistCommitMs', async () => {
+        await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
+          aliasesState: extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES',
+          tagsState: extracted.genres.length ? 'ENRICHED' : 'NO_TAGS',
+          aliasesAdded: aliasDelta, tagsAdded: tagDelta, rawMetadata: sourceMetadata });
+        await this.queue.recordSourceSuccess(source);
+      });
+      const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
+      const finalizeStartedAt = performance.now();
       await this.queue.finish(task, workerId, { state: 'DONE', workId: mappingWorkId,
         checkpoint: { metadataSourceRefresh: true, version: 2, aliases: extracted.aliases.length, aliasDelta,
-          tags: extracted.genres.length, tagDelta }, resetAttempts: true });
+          tags: extracted.genres.length, tagDelta, metadataTiming: checkpointTiming }, resetAttempts: true });
+      timings.finishCommitMs = Math.round(performance.now() - finalizeStartedAt);
+      reportTiming('DONE');
     } catch (error: any) {
       const message = String(error?.message || 'METADATA_SOURCE_FETCH_FAILED').slice(0,500);
       // Source anti-bot/login HTML can be parsed as a title by an adapter and
@@ -1302,19 +1346,26 @@ export class ImporterLiteRuntime {
       // admission slots.
       const sourceExternalFailureCount = Math.max(0, Number(task.checkpoint.sourceExternalFailureCount) || 0) + 1;
       const retryDelay = Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(sourceExternalFailureCount, 8));
-      if (mappingWorkId && !persistenceFailure) await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
+      if (mappingWorkId && !persistenceFailure) await timePhase('metadataPersistCommitMs', () => this.queue.recordSourceMetadataEnrichment({
+        source, sourceWorkId, workId: mappingWorkId,
         aliasesState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED',
         tagsState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED', error: message,
-        nextRetryAt: parserFailure ? null : new Date(Date.now() + retryDelay) });
-      if (!parserFailure && !persistenceFailure) await this.queue.recordSourceFailure(source, error);
+        nextRetryAt: parserFailure ? null : new Date(Date.now() + retryDelay),
+      }));
+      if (!parserFailure && !persistenceFailure) await timePhase('sourceHealthPersistMs', () => this.queue.recordSourceFailure(source, error));
+      const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
+      const finalizeStartedAt = performance.now();
       await this.queue.finish(task, workerId, parserFailure
-        ? { state: 'BLOCKED', reason: message }
+        ? { state: 'BLOCKED', reason: message, checkpoint: { metadataTiming: checkpointTiming } }
         : persistenceFailure
           ? { state: 'RETRY_WAIT', reason: 'METADATA_ALIAS_PERSISTENCE_FAILED',
-              nextRunAt: new Date(Date.now() + Math.min(5 * 60_000, retryDelay)), resetAttempts: true }
+              nextRunAt: new Date(Date.now() + Math.min(5 * 60_000, retryDelay)), resetAttempts: true,
+              checkpoint: { metadataTiming: checkpointTiming } }
         : { state: 'RETRY_WAIT', reason: `METADATA_SOURCE_EXTERNAL:${message}`,
             nextRunAt: new Date(Date.now() + retryDelay),
-            checkpoint: { metadataSourceRefresh: true, sourceExternalFailureCount }, resetAttempts: true });
+            checkpoint: { metadataSourceRefresh: true, sourceExternalFailureCount, metadataTiming: checkpointTiming }, resetAttempts: true });
+      timings.finishCommitMs = Math.round(performance.now() - finalizeStartedAt);
+      reportTiming(parserFailure ? 'PARSER_ERROR' : persistenceFailure ? 'PERSISTENCE_FAILURE' : 'EXTERNAL_BLOCKED');
     } finally {
       this.sourceMetadataGate.release();
     }

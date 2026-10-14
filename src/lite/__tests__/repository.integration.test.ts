@@ -464,6 +464,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     const claim = vi.fn(async () => ({ id: 'metadata-task' } as any));
     (runtime as any).queue = { claimSourceMetadataRefresh: claim };
     (runtime as any).isRuntimeLeader = true;
+    // Model a waiter that has persisted beyond the runtime's 15s grace window;
+    // one transient pool waiter is deliberately allowed a single background seat.
+    (runtime as any).sourceMetadataPoolWaitStartedAt = Date.now() - 16_000;
     let active = 0;
     let maximum = 0;
     let releaseFetches!: () => void;
@@ -2808,7 +2811,7 @@ describe('LiteRepository against the additive Lite migration', () => {
         BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
     );
     (runtime as any).dedupe = { resolveWork:async () => ({ workId:ids.p1a,status:'EXISTING_MAPPING' }) };
-    await (runtime as any).catalog(task,'metadata-source-worker');
+    await (runtime as any).catalog(task,'metadata-source-worker',{ claimSqlMs: 1, queueDwellMs: 0 });
 
     const mapping = await db.query(`SELECT metadata FROM importer_work_mappings WHERE source='source-a' AND source_work_id='source-refetch'`);
     const classification = await db.query(`SELECT aliases_state,tags_state,aliases_added,tags_added FROM importer_lite_metadata_enrichment
@@ -2816,7 +2819,14 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(fetched).toBe(1);
     expect(mapping.rows[0].metadata).toMatchObject({ provider_id:'source-refetch',alternativeTitles:['Título nativo'],genres:['MILF','Vanilla'] });
     expect(classification.rows[0]).toMatchObject({ aliases_state:'ENRICHED',tags_state:'ENRICHED' });
-    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`,[task!.id])).rows[0].state).toBe('DONE');
+    const completed = (await db.query(`SELECT state,checkpoint FROM importer_lite_tasks WHERE id=$1`,[task!.id])).rows[0];
+    expect(completed.state).toBe('DONE');
+    expect(completed.checkpoint.metadataTiming).toMatchObject({
+      claimSqlMs: expect.any(Number), mappingQueryMs: expect.any(Number), sourcePolicyQueryMs: expect.any(Number),
+      rateLimitWaitMs: expect.any(Number), httpMs: expect.any(Number), parseNormalizeMs: expect.any(Number),
+      mergePersistenceMs: expect.any(Number), verifyDeltaQueryMs: expect.any(Number), metadataPersistCommitMs: expect.any(Number),
+      totalBeforeFinalizeMs: expect.any(Number),
+    });
   });
 
   it('classifies source login/challenge pages as external blocks instead of parser errors', async () => {

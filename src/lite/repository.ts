@@ -42,6 +42,7 @@ const asTask = (row: Row): LiteTask => ({
   leaseUntil: row.lease_until ? new Date(row.lease_until) : null, reason: row.reason,
   monitoring: Boolean(row.monitoring),
   payload: row.payload || {}, checkpoint: row.checkpoint || {},
+  createdAt: row.created_at ? new Date(row.created_at) : undefined,
 });
 
 export interface EnqueueLiteTask {
