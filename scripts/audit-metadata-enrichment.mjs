@@ -17,9 +17,11 @@ const pool = new pg.Pool({
   ssl: { rejectUnauthorized: true, ca: fs.readFileSync(env.YUGABYTE_SSL_CERT) },
   max: 1,
   connectionTimeoutMillis: 5000,
-  query_timeout: 7000,
+  query_timeout: 22000,
   application_name: 'nox-metadata-enrichment-audit',
-  options: '-c statement_timeout=6000 -c default_transaction_read_only=on',
+  // One bounded, read-only scan of the confirmed manifest may be larger than
+  // the cheap coverage/task counters. Keep a single connection and a hard cap.
+  options: '-c statement_timeout=20000 -c default_transaction_read_only=on',
 });
 
 const metadataEvidence = `
