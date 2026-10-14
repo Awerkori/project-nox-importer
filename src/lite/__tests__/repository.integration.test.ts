@@ -202,6 +202,30 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
   });
 
+  it('replays legacy Portuguese tag objects with a bounded v3 task after v2 completed', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000124','mangotoons','legacy-pt-tags',$1::uuid,
+        'p1-a','P1 A',$2::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({
+      tags: [{ id: 11, nome: 'Ação' }, { id: 12, nome: 'Fantasia' }],
+    })]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      priority: 'P2', idempotencyKey: 'lite:metadata:v2:mangotoons:legacy-pt-tags',
+      payload: { source: 'mangotoons', sourceWorkId: 'legacy-pt-tags', metadataEnrichment: true, metadataEnrichmentVersion: 2 } });
+    const priorReplay = await repo.claim('metadata-v2', 60);
+    expect(priorReplay).toBeTruthy();
+    await repo.finish(priorReplay!, 'metadata-v2', { state: 'DONE' });
+
+    expect(await repo.refillStoredMetadataEnrichment()).toBe(1);
+    const replay = await db.query(`SELECT idempotency_key,payload FROM importer_lite_tasks
+      WHERE idempotency_key='lite:metadata:v3:mangotoons:legacy-pt-tags'`);
+    expect(replay.rows[0]).toMatchObject({
+      idempotency_key: 'lite:metadata:v3:mangotoons:legacy-pt-tags',
+      payload: expect.objectContaining({ metadataEnrichment: true, metadataEnrichmentVersion: 3 }),
+    });
+  });
+
   it('prioritizes a real alias over empty or tag-only legacy metadata from the same source', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings

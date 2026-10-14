@@ -33,4 +33,12 @@ describe('stored mapping metadata enrichment', () => {
     expect(metadata.aliases).toEqual(['Nome em português', '한국어 제목']);
     expect(metadata.genres).toEqual(['MILF', 'Vanilla']);
   });
+
+  it('preserves Portuguese tag names in legacy source mappings', () => {
+    const metadata = extractStoredMappingMetadata({
+      tags: [{ id: 1, nome: 'Ação' }, { id: 2, nome: 'Fantasia' }],
+    }, 'Example');
+
+    expect(metadata.genres).toEqual(['Ação', 'Fantasia']);
+  });
 });

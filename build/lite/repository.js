@@ -61,7 +61,7 @@ export class LiteRepository {
             const pending = await client.query(`SELECT count(*)::int AS count
         FROM importer_lite_tasks
         WHERE task_type='CATALOG' AND state IN ('READY','RUNNING','RETRY_WAIT')
-          AND payload->>'metadataEnrichmentVersion'='2'`);
+          AND payload->>'metadataEnrichmentVersion' IN ('2','3')`);
             if (Number(pending.rows[0]?.count || 0) >= ceiling) {
                 await client.query('COMMIT');
                 return 0;
@@ -73,6 +73,7 @@ export class LiteRepository {
             // subset), never chapter/page work and never the claim path.
             const candidate = await client.query(`WITH candidate_rows AS (
         SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id,evidence.alias_evidence,
+          CASE WHEN evidence.legacy_pt_tags THEN 3 ELSE 2 END AS metadata_version,
           (COALESCE(array_length(w.aliases,1),0)=0 AND evidence.alias_evidence) AS missing_alias_evidence
         FROM importer_work_mappings m
         JOIN works w ON w.id=m.work_id
@@ -100,7 +101,17 @@ export class LiteRepository {
                   WHEN 'string' THEN COALESCE(NULLIF(lower(btrim(alias_entry.value #>> '{}')),''),'') NOT IN ('[]','{}','null')
                   ELSE false
                 END
-            ) AS alias_evidence
+            ) AS alias_evidence,
+            EXISTS (
+              SELECT 1
+              FROM jsonb_each(m.metadata) AS tag_field(key,value)
+              CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(tag_field.value)='array' THEN tag_field.value ELSE '[]'::jsonb END
+              ) AS tag_entry(value)
+              WHERE tag_field.key=ANY(ARRAY['genres','tags','categories']::text[])
+                AND jsonb_typeof(tag_entry.value)='object'
+                AND NULLIF(btrim(tag_entry.value->>'nome'),'') IS NOT NULL
+            ) AS legacy_pt_tags
         ) evidence
         WHERE m.work_id IS NOT NULL AND w.published=true
           AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
@@ -112,15 +123,17 @@ export class LiteRepository {
             -- alias; a versioned key lets the corrected parser enrich it once
             -- without reopening chapters or overwriting editorial fields.
             SELECT 1 FROM importer_lite_tasks t
-            WHERE t.idempotency_key='lite:metadata:v2:' || m.source || ':' || m.source_work_id
+            WHERE t.idempotency_key='lite:metadata:v' || CASE WHEN evidence.legacy_pt_tags THEN '3' ELSE '2' END
+              || ':' || m.source || ':' || m.source_work_id
           )
           AND NOT EXISTS (
             SELECT 1 FROM importer_lite_tasks t
             WHERE t.task_type='CATALOG' AND t.state IN ('READY','RUNNING','RETRY_WAIT')
-              AND t.payload->>'metadataEnrichmentVersion'='2' AND t.payload->>'source'=m.source
+              AND t.payload->>'metadataEnrichmentVersion' IN ('2','3')
+              AND t.payload->>'source'=m.source
           )
       ), candidates AS (
-        SELECT DISTINCT ON (source) source,source_work_id,work_id,updated_at,id,missing_alias_evidence
+        SELECT DISTINCT ON (source) source,source_work_id,work_id,updated_at,id,missing_alias_evidence,metadata_version
         FROM candidate_rows ORDER BY source,missing_alias_evidence DESC,alias_evidence DESC,updated_at,id
       ), source_history AS (
         SELECT payload->>'source' AS source,max(updated_at) AS enriched_at
@@ -128,7 +141,7 @@ export class LiteRepository {
         WHERE payload ? 'metadataEnrichment'
         GROUP BY payload->>'source'
       )
-      SELECT candidates.source,candidates.source_work_id,candidates.work_id
+      SELECT candidates.source,candidates.source_work_id,candidates.work_id,candidates.metadata_version
       FROM candidates LEFT JOIN source_history USING(source)
       -- A mapping that can add a missing alias is more useful than replaying
       -- metadata already represented on its work. Source rotation still
@@ -140,13 +153,13 @@ export class LiteRepository {
                 await client.query('COMMIT');
                 return 0;
             }
-            const idempotencyKey = `lite:metadata:v2:${row.source}:${row.source_work_id}`;
+            const idempotencyKey = `lite:metadata:v${row.metadata_version}:${row.source}:${row.source_work_id}`;
             const inserted = await client.query(`INSERT INTO importer_lite_tasks
         (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
         VALUES ('CATALOG',$1::uuid,$2,$3,$3,$4,now(),4,$5::jsonb,'{}'::jsonb,false)
         ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
                 row.work_id, `work:${row.work_id}`, LITE_PRIORITY_RANK.P2, idempotencyKey,
-                JSON.stringify({ source: row.source, sourceWorkId: row.source_work_id, metadataEnrichment: true, metadataEnrichmentVersion: 2 }),
+                JSON.stringify({ source: row.source, sourceWorkId: row.source_work_id, metadataEnrichment: true, metadataEnrichmentVersion: row.metadata_version }),
             ]);
             if (inserted.rowCount)
                 await this.refreshReadyWork(client, inserted.rows[0].work_key);

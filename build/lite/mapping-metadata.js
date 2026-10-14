@@ -47,7 +47,10 @@ function asTextList(value, objectKeys = [], depth = 0) {
 export function extractStoredMappingMetadata(raw, primaryTitle) {
     const metadata = raw && typeof raw === 'object' ? raw : {};
     const aliases = aliasesFields.flatMap((field) => asTextList(metadata[field], ['title', 'name', 'value']));
-    const genres = tagFields.flatMap((field) => asTextList(metadata[field], ['name', 'title', 'label']));
+    // Legacy Portuguese adapters persisted tag records with `nome`; accept it
+    // alongside the common English keys so the no-network replay can recover
+    // metadata already stored in YSQL.
+    const genres = tagFields.flatMap((field) => asTextList(metadata[field], ['name', 'nome', 'title', 'label']));
     return {
         aliases: mergeAlternativeTitles([], aliases, primaryTitle),
         genres: [...new Set(genres.map((value) => value.normalize('NFKC').replace(/\s+/g, ' ').trim()).filter(Boolean))],
