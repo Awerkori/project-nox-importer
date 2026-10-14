@@ -139,8 +139,28 @@ export class LiteRepository {
         await client.query('COMMIT');
         return 0;
       }
+      const eligibleMappingQuery = (workPredicate: string): string => `
+        SELECT m.source_work_id,m.work_id
+        FROM importer_work_mappings m
+        JOIN works w ON w.id=m.work_id AND w.published=true
+        LEFT JOIN importer_lite_metadata_enrichment status
+          ON status.source=m.source AND status.source_work_id=m.source_work_id
+        WHERE m.source=turn.source AND m.work_id IS NOT NULL
+          AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+          AND (${workPredicate})
+          AND (status.source IS NULL OR status.aliases_state='PENDING' OR status.tags_state='PENDING'
+            OR (status.version<3 AND (status.aliases_state='PARSER_ERROR' OR status.tags_state='PARSER_ERROR'))
+            OR ((status.aliases_state='EXTERNAL_BLOCKED' OR status.tags_state='EXTERNAL_BLOCKED')
+              AND COALESCE(status.next_retry_at,'-infinity'::timestamptz)<=now()))
+          AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
+            WHERE task.idempotency_key='lite:metadata:source:v3:' || m.source || ':' || m.source_work_id)
+        ORDER BY m.source_work_id LIMIT 1`;
       const candidates = await client.query<Row>(`WITH source_turns AS (
-          SELECT s.id AS source,history.last_admitted_at
+          SELECT s.id AS source,history.last_admitted_at,
+            EXISTS (SELECT 1 FROM importer_lite_tasks rich
+              WHERE rich.task_type='CATALOG' AND rich.state='DONE'
+                AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=s.id
+                AND rich.checkpoint->>'aliases' ~ '^[1-9][0-9]*$') AS alias_rich_source
           FROM importer_sources s
           LEFT JOIN importer_lite_source_health health ON health.source=s.id
           LEFT JOIN LATERAL (
@@ -152,32 +172,20 @@ export class LiteRepository {
             AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
             AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
         ), next_mapping AS (
-          SELECT turn.source,turn.last_admitted_at,mapping.source_work_id,mapping.work_id
+          SELECT turn.source,turn.last_admitted_at,turn.alias_rich_source,
+            COALESCE(aliasless.source_work_id,fallback.source_work_id) AS source_work_id,
+            COALESCE(aliasless.work_id,fallback.work_id) AS work_id
           FROM source_turns turn
-          CROSS JOIN LATERAL (
-            -- source_work_id is the second column of the mapping's unique
-            -- (source,source_work_id) index. Advance by selecting the first
-            -- still-unclassified key; completed or externally parked mappings
-            -- fall out of this small index walk without a catalog-wide sort.
-            SELECT m.source_work_id,m.work_id
-            FROM importer_work_mappings m
-            JOIN works w ON w.id=m.work_id AND w.published=true
-            LEFT JOIN importer_lite_metadata_enrichment status
-              ON status.source=m.source AND status.source_work_id=m.source_work_id
-            WHERE m.source=turn.source AND m.work_id IS NOT NULL
-              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-              AND (status.source IS NULL OR status.aliases_state='PENDING' OR status.tags_state='PENDING'
-                OR (status.version<3 AND (status.aliases_state='PARSER_ERROR' OR status.tags_state='PARSER_ERROR'))
-                OR ((status.aliases_state='EXTERNAL_BLOCKED' OR status.tags_state='EXTERNAL_BLOCKED')
-                  AND COALESCE(status.next_retry_at,'-infinity'::timestamptz)<=now()))
-              AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
-                WHERE task.idempotency_key='lite:metadata:source:v3:' || m.source || ':' || m.source_work_id)
-            ORDER BY m.source_work_id
-            LIMIT 1
-          ) mapping
+          -- First walk the source/work mapping index looking for a published
+          -- work that still has no aliases. Fall back to any unclassified work
+          -- only when this source has no such candidate. This avoids sorting
+          -- the entire historical catalog on every refill tick.
+          LEFT JOIN LATERAL (${eligibleMappingQuery('COALESCE(cardinality(w.aliases),0)=0')}) aliasless ON true
+          LEFT JOIN LATERAL (${eligibleMappingQuery('true')}) fallback
+            ON aliasless.source_work_id IS NULL
         )
-        SELECT source,source_work_id,work_id FROM next_mapping
-        ORDER BY last_admitted_at NULLS FIRST,source LIMIT $1`,
+        SELECT source,source_work_id,work_id FROM next_mapping WHERE source_work_id IS NOT NULL
+        ORDER BY last_admitted_at NULLS FIRST,alias_rich_source DESC,source LIMIT $1`,
         [ceiling - Number(pending.rows[0]?.count || 0)]);
 
       for (const row of candidates.rows) {
