@@ -303,6 +303,24 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillSourceMetadataEnrichment(2)).toBe(0);
   });
 
+  it('prioritizes a source proven to return aliases over a never-queried source', async () => {
+    await db.query(`INSERT INTO importer_sources(id) VALUES('source-rich'),('source-new')`);
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2)`, [ids.p1a,ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000221','source-rich','aliasless-rich',$1::uuid,'p1-a','P1 A','SYNCED'),
+      ('00000000-0000-4000-8000-000000000222','source-new','aliasless-new',$2::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1a,ids.p1b]);
+    await db.query(`INSERT INTO importer_lite_tasks
+      (task_type,work_id,work_key,priority,base_priority,idempotency_key,state,payload,checkpoint)
+      VALUES('CATALOG',$1::uuid,$2,3,3,'prior-alias-rich-source-history','DONE',
+        '{"metadataSourceRefresh":true,"source":"source-rich","sourceWorkId":"prior-rich"}'::jsonb,
+        '{"aliases":2}'::jsonb)`, [ids.p1a,`work:${ids.p1a}`]);
+
+    expect(await repo.refillSourceMetadataEnrichment(1)).toBe(1);
+    expect((await db.query(`SELECT payload->>'source' AS source FROM importer_lite_tasks
+      WHERE idempotency_key='lite:metadata:source:v3:source-rich:aliasless-rich'`)).rows).toEqual([{ source:'source-rich' }]);
+  });
+
   it('claims source metadata from its dedicated lane while chapter claims remain available', async () => {
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
       idempotencyKey:'source-metadata-dedicated',payload:{source:'source-a',sourceWorkId:'old-work',metadataSourceRefresh:true} });
