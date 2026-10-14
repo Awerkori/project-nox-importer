@@ -450,7 +450,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
   });
 
-  it('runs at most three source metadata fetches and pauses admission under YSQL pool wait', async () => {
+  it('runs at most two source metadata fetches and pauses admission under YSQL pool wait', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const lanePool = poolFor(db) as any;
     lanePool.waitingCount = 1;
@@ -470,13 +470,13 @@ describe('LiteRepository against the additive Lite migration', () => {
     let active = 0;
     let maximum = 0;
     let releaseFetches!: () => void;
-    let notifyThreeStarted!: () => void;
-    const threeStarted = new Promise<void>((resolve) => { notifyThreeStarted = resolve; });
+    let notifyTwoStarted!: () => void;
+    const bothStarted = new Promise<void>((resolve) => { notifyTwoStarted = resolve; });
     const holdFetches = new Promise<void>((resolve) => { releaseFetches = resolve; });
     (runtime as any).catalog = async () => {
       active++;
       maximum = Math.max(maximum, active);
-      if (active === 3) notifyThreeStarted();
+      if (active === 2) notifyTwoStarted();
       await holdFetches;
       active--;
     };
@@ -488,12 +488,11 @@ describe('LiteRepository against the additive Lite migration', () => {
       (runtime as any).runSourceMetadataRefresh(),
       (runtime as any).runSourceMetadataRefresh(),
       (runtime as any).runSourceMetadataRefresh(),
-      (runtime as any).runSourceMetadataRefresh(),
     ];
-    await threeStarted;
-    expect(claim).toHaveBeenCalledTimes(3);
-    expect(maximum).toBe(3);
-    expect((runtime as any).sourceMetadataGate.capacity).toBe(3);
+    await bothStarted;
+    expect(claim).toHaveBeenCalledTimes(2);
+    expect(maximum).toBe(2);
+    expect((runtime as any).sourceMetadataGate.capacity).toBe(2);
     releaseFetches();
     await Promise.all(runs);
     memorySpy.mockRestore();
