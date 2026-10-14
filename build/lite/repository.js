@@ -58,12 +58,13 @@ export class LiteRepository {
                 await client.query('COMMIT');
                 return 0;
             }
-            // Select a single source seat per turn. The bounded candidate window
-            // avoids a global scheduler scan and the pending-source exclusion keeps
-            // one historically large provider from monopolising enrichment.
-            const candidate = await client.query(`WITH candidates AS (
-        SELECT m.source,m.source_work_id,m.work_id,m.updated_at,
-          row_number() OVER (PARTITION BY m.source ORDER BY m.updated_at,m.id) AS source_position
+            // Select one source seat per turn. A provider with hundreds of old
+            // mappings must not win every five-minute P2 slot, so choose one pending
+            // mapping per source and rotate sources by their last enrichment turn.
+            // This scans only explicit metadata mappings (currently a small indexed
+            // subset), never chapter/page work and never the claim path.
+            const candidate = await client.query(`WITH candidate_rows AS (
+        SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id
         FROM importer_work_mappings m
         JOIN works w ON w.id=m.work_id
         WHERE m.work_id IS NOT NULL AND w.published=true
@@ -72,31 +73,43 @@ export class LiteRepository {
                                    'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
                                    'romanizedTitle','romanized_title','genres','tags','categories']
           AND NOT EXISTS (
+            -- v2 replays the bounded no-network pass because legacy adapters
+            -- sometimes saved an explicit JSON array as a string. The older
+            -- task may already be DONE after treating that string as one
+            -- alias; a versioned key lets the corrected parser enrich it once
+            -- without reopening chapters or overwriting editorial fields.
             SELECT 1 FROM importer_lite_tasks t
-            WHERE t.idempotency_key='lite:metadata:' || m.source || ':' || m.source_work_id
+            WHERE t.idempotency_key='lite:metadata:v2:' || m.source || ':' || m.source_work_id
           )
           AND NOT EXISTS (
             SELECT 1 FROM importer_lite_tasks t
             WHERE t.task_type='CATALOG' AND t.state IN ('READY','RUNNING','RETRY_WAIT')
               AND t.payload ? 'metadataEnrichment' AND t.payload->>'source'=m.source
           )
-        ORDER BY m.updated_at,m.id
-        LIMIT 64
+      ), candidates AS (
+        SELECT DISTINCT ON (source) source,source_work_id,work_id,updated_at,id
+        FROM candidate_rows ORDER BY source,updated_at,id
+      ), source_history AS (
+        SELECT payload->>'source' AS source,max(updated_at) AS enriched_at
+        FROM importer_lite_tasks
+        WHERE payload ? 'metadataEnrichment'
+        GROUP BY payload->>'source'
       )
-      SELECT source,source_work_id,work_id FROM candidates
-      WHERE source_position=1 ORDER BY updated_at,source LIMIT 1`);
+      SELECT candidates.source,candidates.source_work_id,candidates.work_id
+      FROM candidates LEFT JOIN source_history USING(source)
+      ORDER BY source_history.enriched_at NULLS FIRST,candidates.updated_at,candidates.source LIMIT 1`);
             const row = candidate.rows[0];
             if (!row) {
                 await client.query('COMMIT');
                 return 0;
             }
-            const idempotencyKey = `lite:metadata:${row.source}:${row.source_work_id}`;
+            const idempotencyKey = `lite:metadata:v2:${row.source}:${row.source_work_id}`;
             const inserted = await client.query(`INSERT INTO importer_lite_tasks
         (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
         VALUES ('CATALOG',$1::uuid,$2,$3,$3,$4,now(),4,$5::jsonb,'{}'::jsonb,false)
         ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
                 row.work_id, `work:${row.work_id}`, LITE_PRIORITY_RANK.P2, idempotencyKey,
-                JSON.stringify({ source: row.source, sourceWorkId: row.source_work_id, metadataEnrichment: true }),
+                JSON.stringify({ source: row.source, sourceWorkId: row.source_work_id, metadataEnrichment: true, metadataEnrichmentVersion: 2 }),
             ]);
             if (inserted.rowCount)
                 await this.refreshReadyWork(client, inserted.rows[0].work_key);
