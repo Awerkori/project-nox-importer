@@ -80,15 +80,15 @@ export declare class ImporterLiteRuntime {
     private refillManifestProvenP1Imports;
     /**
      * Historical aliases/tags already present in a source mapping are cheap,
-     * useful evidence. Feed a single P2 catalog task per minute; normal
-     * strict admission still makes it yield completely to STAFF/P0/P1.
+     * useful evidence. Feed at most one P2 catalog task per second into the
+     * bounded replay lane; normal chapter claims retain strict priority.
      */
     private refillStoredMetadataEnrichment;
     /**
-     * A single local metadata merge per minute prevents P1's legitimate
-     * chapter reserve from starving aliases/tags forever. It reads only a saved
-     * mapping and runs through the ordinary durable task/lease/finalize path;
-     * no network, source slot, page buffer or chapter worker is admitted here.
+     * One local metadata merge at a time prevents P1's legitimate chapter
+     * reserve from starving aliases/tags. It reads only a saved mapping and
+     * runs through the ordinary durable task/lease/finalize path; no network,
+     * source slot, page buffer or chapter worker is admitted here.
      */
     private runStoredMetadataReplay;
     /** A bounded source view refreshes only outside claims and only once per recovery turn. */
