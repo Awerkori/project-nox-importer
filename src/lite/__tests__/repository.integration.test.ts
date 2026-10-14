@@ -214,6 +214,23 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toBe('lite:metadata:v2:source-a:real-metadata');
   });
 
+  it('prioritizes a mapping that can add a missing alias over an already represented alias', async () => {
+    await db.query(`UPDATE works SET published=true,aliases=ARRAY['Existing Alias'] WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES
+        ('00000000-0000-4000-8000-000000000122','source-a','represented',$1::uuid,'p1-a','P1 A',$3::jsonb,'SYNCED'),
+        ('00000000-0000-4000-8000-000000000123','source-b','missing',$2::uuid,'p1-b','P1 B',$4::jsonb,'SYNCED')`, [
+      ids.p1a, ids.p1b, JSON.stringify({ alternative_titles: '["Existing Alias"]' }),
+      JSON.stringify({ alternative_titles: '["New Missing Alias"]' }),
+    ]);
+    expect(await repo.refillStoredMetadataEnrichment()).toBe(1);
+    expect((await db.query(`SELECT idempotency_key FROM importer_lite_tasks
+      WHERE idempotency_key LIKE 'lite:metadata:v2:%'`)).rows[0].idempotency_key)
+      .toBe('lite:metadata:v2:source-b:missing');
+  });
+
   it('refills a low P1 reserve from durable historical mappings without inventing numeric gaps or letting one source monopolize', async () => {
     await db.query(`INSERT INTO importer_sources(id) VALUES('source-c')`);
     const mappings = [
