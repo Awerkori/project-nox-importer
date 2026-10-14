@@ -1272,7 +1272,13 @@ export class ImporterLiteRuntime {
       // classifying the mapping as PARSER_ERROR.
       const externalChallengePage = /INVALID_EDITORIAL_TITLE:.*(?:authentication|login) prompt|TURNSTILE|CLOUDFLARE|HTTP[_ ]?(?:403|429)|RATE[_ ]?LIMIT/i.test(message);
       const parserFailure = message.startsWith('METADATA_SOURCE_MAPPING_CONFLICT:') && !externalChallengePage;
-      const retryDelay = Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(Math.max(task.attempts, 1), 8));
+      // External failures reset the generic task attempt counter so a healthy
+      // source observation can start cleanly. Keep a separate durable counter
+      // in the task checkpoint; otherwise a 404/challenge retries every two
+      // minutes forever and repeatedly occupies one of the tiny metadata
+      // admission slots.
+      const sourceExternalFailureCount = Math.max(0, Number(task.checkpoint.sourceExternalFailureCount) || 0) + 1;
+      const retryDelay = Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(sourceExternalFailureCount, 8));
       if (mappingWorkId) await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
         aliasesState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED',
         tagsState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED', error: message,
@@ -1281,7 +1287,8 @@ export class ImporterLiteRuntime {
       await this.queue.finish(task, workerId, parserFailure
         ? { state: 'BLOCKED', reason: message }
         : { state: 'RETRY_WAIT', reason: `METADATA_SOURCE_EXTERNAL:${message}`,
-            nextRunAt: new Date(Date.now() + retryDelay), resetAttempts: true });
+            nextRunAt: new Date(Date.now() + retryDelay),
+            checkpoint: { metadataSourceRefresh: true, sourceExternalFailureCount }, resetAttempts: true });
     } finally {
       this.sourceMetadataGate.release();
     }
