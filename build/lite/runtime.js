@@ -9,6 +9,7 @@ import { processAndStoreMedia } from '../storage/media.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
+import { SourceAdmissionGate } from '../core/source-admission-gate.js';
 import { sanitizeSynopsis } from './metadata.js';
 import { extractStoredMappingMetadata } from './mapping-metadata.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
@@ -53,6 +54,7 @@ const SAFE_BUFFERED_PAGE_CAP = 24;
 const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
 const STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS = 15_000;
 const SOURCE_METADATA_REFILL_INTERVAL_MS = 15_000;
+const SOURCE_RECOVERY_PROBE_INTERVAL_MS = 30_000;
 /** One process, one executor pool, one bounded reconciler. */
 export class ImporterLiteRuntime {
     pool;
@@ -74,9 +76,11 @@ export class ImporterLiteRuntime {
     historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
     metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
     sourceMetadataGate = new AsyncSemaphore(1, 'lite_source_metadata_refetch');
+    sourceAdmissionGate = new SourceAdmissionGate(10_000);
     lastMetadataEnrichmentAt = 0;
     lastMetadataReplayAt = 0;
     lastSourceMetadataRefillAt = 0;
+    lastSourceRecoveryProbeAt = 0;
     lastManifestP1RepairAt = 0;
     // Observation is intentionally a one-slot lane. It may create P0 chapter
     // work, but an empty observation must never compete with chapter workers.
@@ -369,6 +373,12 @@ export class ImporterLiteRuntime {
         }
         catch { /* bounded recovery retries next turn */ }
         try {
+            await this.probeDueSourceRecovery();
+        }
+        catch (error) {
+            this.logger.warn('Source cooldown recovery probe failed', { error: error?.message });
+        }
+        try {
             await this.queue.recoverDuplicateCanonicalCatalogFailures();
         }
         catch { /* bounded recovery retries next turn */ }
@@ -380,6 +390,82 @@ export class ImporterLiteRuntime {
         // task is insufficient while P1 remains busy: execute one saved-mapping
         // merge on each eligible recovery turn as well.
         await this.runStoredMetadataReplay();
+    }
+    /**
+     * Probe one expired source cooldown per recovery turn using the same
+     * six-stage production admission gate as the legacy runtime. It never
+     * bypasses a challenge or rate limit: failures remain parked with a new
+     * durable cooldown, while a full PASS explicitly releases the source.
+     */
+    async probeDueSourceRecovery() {
+        if (!this.isRuntimeLeader || Date.now() - this.lastSourceRecoveryProbeAt < SOURCE_RECOVERY_PROBE_INTERVAL_MS)
+            return;
+        this.lastSourceRecoveryProbeAt = Date.now();
+        const selected = await this.pool.query(`SELECT s.id,s.name,s.status,s.base_url
+       FROM importer_sources s
+       LEFT JOIN importer_lite_source_health health ON health.source=s.id
+       WHERE s.enabled=true AND s.status IN ('ACTIVE','COOLDOWN','DEGRADED','PROBING')
+         AND ((s.status='ACTIVE' AND s.blocked_reason IS NOT NULL)
+           OR (s.status IN ('COOLDOWN','DEGRADED','PROBING')
+             AND (s.cooldown_until IS NULL OR s.cooldown_until<=now())))
+         AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+         AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+         AND (s.last_health_check_at IS NULL OR s.last_health_check_at<=now()-interval '5 minutes')
+       ORDER BY s.last_health_check_at NULLS FIRST,s.id LIMIT 1`);
+        const source = selected.rows[0];
+        if (!source)
+            return;
+        const adapter = this.registry.get(source.id);
+        if (!adapter) {
+            await this.pool.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()+interval '6 hours',
+        blocked_reason='SOURCE_ADAPTER_MISSING',last_health_check_at=now(),updated_at=now() WHERE id=$1`, [source.id]);
+            return;
+        }
+        const claimed = await this.pool.query(`UPDATE importer_sources
+      SET status='PROBING',last_health_check_at=now(),updated_at=now()
+      WHERE id=$1 AND enabled=true AND status IN ('ACTIVE','COOLDOWN','DEGRADED','PROBING')
+        AND (cooldown_until IS NULL OR cooldown_until<=now())
+        AND (last_health_check_at IS NULL OR last_health_check_at<=now()-interval '5 minutes')
+      RETURNING id`, [source.id]);
+        if (claimed.rowCount !== 1)
+            return;
+        try {
+            const report = await this.sourceAdmissionGate.executeProdProbe(adapter);
+            const checkedAt = new Date().toISOString();
+            const stages = report.stages.map((stage) => ({ stage: stage.stage, status: stage.status,
+                httpStatus: stage.httpStatus ?? null, durationMs: stage.durationMs,
+                classification: stage.classification ?? null }));
+            if (report.overallStatus === 'PASS') {
+                await this.pool.query(`UPDATE importer_sources SET status='ACTIVE',cooldown_until=NULL,
+          blocked_reason=NULL,blocked_details=$2::jsonb,last_health_check_at=$3,updated_at=now() WHERE id=$1`, [source.id, JSON.stringify({ recovered_at: checkedAt, probe_success: true, stages }), checkedAt]);
+                await this.queue.recordSourceSuccess(source.id);
+                this.logger.info('Source passed bounded recovery admission probe', { source: source.id });
+                return;
+            }
+            const classification = report.classification || 'UNKNOWN_CLOUDFLARE';
+            const longBlock = ['TURNSTILE', 'JS_CHALLENGE', 'DATACENTER_ASN_BLOCK', 'CLOUDFLARE_DATACENTER_BLOCK'].includes(classification);
+            const limited = ['RATE_LIMITED', 'BURST_LIMITED'].includes(classification);
+            const cooldownMs = longBlock ? 6 * 60 * 60_000 : limited ? 60 * 60_000 : 30 * 60_000;
+            const nextProbe = new Date(Date.now() + cooldownMs).toISOString();
+            const health = limited ? 'RATE_LIMITED' : 'DEGRADED';
+            await this.pool.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=$2,
+        blocked_reason=$3,blocked_details=$4::jsonb,last_health_check_at=$5,updated_at=now() WHERE id=$1`, [source.id, nextProbe, classification, JSON.stringify({ stages, cf_ray: report.cfRay, last_checked_at: checkedAt }), checkedAt]);
+            await this.pool.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+        VALUES($1,$2,$3,1,$4) ON CONFLICT(source) DO UPDATE SET health=excluded.health,
+        cooldown_until=excluded.cooldown_until,consecutive_failures=importer_lite_source_health.consecutive_failures+1,
+        last_error=excluded.last_error,updated_at=now()`, [source.id, health, nextProbe, classification]);
+            this.logger.info('Source remains parked after bounded recovery probe', { source: source.id, classification, cooldownMs });
+        }
+        catch (error) {
+            const checkedAt = new Date().toISOString();
+            const nextProbe = new Date(Date.now() + 30 * 60_000).toISOString();
+            await this.pool.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=$2,
+        blocked_reason='SOURCE_RECOVERY_PROBE_ERROR',blocked_details=$3::jsonb,last_health_check_at=$4,updated_at=now() WHERE id=$1`, [source.id, nextProbe, JSON.stringify({ last_checked_at: checkedAt }), checkedAt]);
+            await this.pool.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+        VALUES($1,'DEGRADED',$2,1,$3) ON CONFLICT(source) DO UPDATE SET health='DEGRADED',
+        cooldown_until=excluded.cooldown_until,consecutive_failures=importer_lite_source_health.consecutive_failures+1,
+        last_error=excluded.last_error,updated_at=now()`, [source.id, nextProbe, String(error?.message || 'SOURCE_RECOVERY_PROBE_ERROR').slice(0, 300)]);
+        }
     }
     /** Existing positive manifests may outlive an older completed catalog task. */
     async refillManifestProvenP1Imports() {

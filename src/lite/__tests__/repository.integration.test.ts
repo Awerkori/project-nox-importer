@@ -2504,6 +2504,68 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`,[task!.id])).rows[0].state).toBe('DONE');
   });
 
+  it('probes one expired Turnstile cooldown and keeps it parked when the provider still challenges', async () => {
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN name text NOT NULL DEFAULT '';
+      ALTER TABLE importer_sources ADD COLUMN base_url text NOT NULL DEFAULT 'https://source-a.example';
+      ALTER TABLE importer_sources ADD COLUMN last_health_check_at timestamptz;
+      ALTER TABLE importer_sources ADD COLUMN blocked_reason text;
+      ALTER TABLE importer_sources ADD COLUMN blocked_details jsonb;
+      ALTER TABLE importer_sources ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now()`);
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()-interval '1 hour',
+      blocked_reason='TURNSTILE',blocked_details='{}'::jsonb,last_health_check_at=now()-interval '6 hours'
+      WHERE id='source-a'`);
+    const adapter = { id:'source-a',name:'Source A',baseUrl:'https://source-a.example' };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-0000-0000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
+    );
+    const admission = { executeProdProbe:vi.fn(async () => ({ overallStatus:'FAIL',classification:'TURNSTILE',cfRay:'ray-test',
+      stages:[{ stage:'BASE_URL',status:'FAIL',httpStatus:403,durationMs:20,classification:'TURNSTILE' }] })) };
+    (runtime as any).sourceAdmissionGate = admission;
+    (runtime as any).isRuntimeLeader = true;
+
+    await (runtime as any).probeDueSourceRecovery();
+
+    const source = (await db.query(`SELECT status,blocked_reason,cooldown_until FROM importer_sources WHERE id='source-a'`)).rows[0];
+    expect(admission.executeProdProbe).toHaveBeenCalledTimes(1);
+    expect(source.status).toBe('COOLDOWN');
+    expect(source.blocked_reason).toBe('TURNSTILE');
+    expect(new Date(source.cooldown_until).getTime()).toBeGreaterThan(Date.now()+5*60*60_000);
+  });
+
+  it('releases an expired source only after every admission probe stage passes', async () => {
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN name text NOT NULL DEFAULT '';
+      ALTER TABLE importer_sources ADD COLUMN base_url text NOT NULL DEFAULT 'https://source-a.example';
+      ALTER TABLE importer_sources ADD COLUMN last_health_check_at timestamptz;
+      ALTER TABLE importer_sources ADD COLUMN blocked_reason text;
+      ALTER TABLE importer_sources ADD COLUMN blocked_details jsonb;
+      ALTER TABLE importer_sources ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now()`);
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()-interval '1 hour',
+      blocked_reason='TEMPORARY_WAF',blocked_details='{}'::jsonb,last_health_check_at=now()-interval '6 hours'
+      WHERE id='source-a'`);
+    const adapter = { id:'source-a',name:'Source A',baseUrl:'https://source-a.example' };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-0000-0000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
+    );
+    const admission = { executeProdProbe:vi.fn(async () => ({ overallStatus:'PASS',classification:null,cfRay:null,
+      stages:[{ stage:'BASE_URL',status:'PASS',httpStatus:200,durationMs:20,classification:null }] })) };
+    (runtime as any).sourceAdmissionGate = admission;
+    (runtime as any).isRuntimeLeader = true;
+
+    await (runtime as any).probeDueSourceRecovery();
+
+    const source = (await db.query(`SELECT status,blocked_reason,blocked_details FROM importer_sources WHERE id='source-a'`)).rows[0];
+    expect(admission.executeProdProbe).toHaveBeenCalledTimes(1);
+    expect(source.status).toBe('ACTIVE');
+    expect(source.blocked_reason).toBeNull();
+    expect(source.blocked_details).toMatchObject({ probe_success:true });
+  });
+
   it('drains a legacy stored-metadata replay while P1 remains claimable', async () => {
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)

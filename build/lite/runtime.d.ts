@@ -24,9 +24,11 @@ export declare class ImporterLiteRuntime {
     private readonly historicalP1BackfillGate;
     private readonly metadataReplayGate;
     private readonly sourceMetadataGate;
+    private readonly sourceAdmissionGate;
     private lastMetadataEnrichmentAt;
     private lastMetadataReplayAt;
     private lastSourceMetadataRefillAt;
+    private lastSourceRecoveryProbeAt;
     private lastManifestP1RepairAt;
     private readonly monitorGate;
     private readonly runtimeInstanceId;
@@ -78,6 +80,13 @@ export declare class ImporterLiteRuntime {
      */
     private refillHistoricalP1Catalog;
     private runRecoveryTurn;
+    /**
+     * Probe one expired source cooldown per recovery turn using the same
+     * six-stage production admission gate as the legacy runtime. It never
+     * bypasses a challenge or rate limit: failures remain parked with a new
+     * durable cooldown, while a full PASS explicitly releases the source.
+     */
+    private probeDueSourceRecovery;
     /** Existing positive manifests may outlive an older completed catalog task. */
     private refillManifestProvenP1Imports;
     /**
