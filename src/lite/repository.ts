@@ -414,6 +414,40 @@ export class LiteRepository {
   }
 
   /**
+   * Claims one already-durable, no-network metadata replay.  This deliberately
+   * is not a second chapter-admission policy: it can only advance the bounded
+   * v2 enrichment rows created from metadata we already have, and is invoked
+   * at a much lower cadence than normal recovery.  Without this narrow drain,
+   * a permanently healthy P1 backlog would make historical aliases and tags
+   * wait forever despite requiring neither a source slot nor a chapter worker.
+   */
+  async claimStoredMetadataReplay(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<Row>(`WITH picked AS (
+          SELECT id
+          FROM importer_lite_tasks
+          WHERE task_type='CATALOG' AND state='READY' AND monitoring=false
+            AND priority=$1 AND next_run_at<=now()
+            AND payload->>'metadataEnrichmentVersion'='2'
+          ORDER BY next_run_at,created_at,id
+          LIMIT 1 FOR UPDATE SKIP LOCKED
+        )
+        UPDATE importer_lite_tasks task
+        SET state='RUNNING',lease_owner=$2,
+            lease_until=now()+$3::interval,attempts=attempts+1,updated_at=now()
+        FROM picked WHERE task.id=picked.id
+        RETURNING task.*`, [LITE_PRIORITY_RANK.P2, workerId, `${Math.max(30, leaseSeconds)} seconds`]);
+      await client.query('COMMIT');
+      return result.rows[0] ? asTask(result.rows[0]) : null;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+
+  /**
    * A bounded view of sources that can serve an actual next-priority chapter
    * import. One task is sampled per ready work, rather than the first N task
    * rows, so a single large work cannot hide other ready works. Historical P1
