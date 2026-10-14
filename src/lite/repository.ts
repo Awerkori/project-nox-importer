@@ -126,7 +126,7 @@ export class LiteRepository {
       const pending = await client.query<{ count: string }>(`SELECT count(*)::int AS count
         FROM importer_lite_tasks
         WHERE task_type='CATALOG' AND state IN ('READY','RUNNING','RETRY_WAIT')
-          AND payload ? 'metadataEnrichment'`);
+          AND payload->>'metadataEnrichmentVersion'='2'`);
       if (Number(pending.rows[0]?.count || 0) >= ceiling) {
         await client.query('COMMIT');
         return 0;
@@ -157,7 +157,7 @@ export class LiteRepository {
           AND NOT EXISTS (
             SELECT 1 FROM importer_lite_tasks t
             WHERE t.task_type='CATALOG' AND t.state IN ('READY','RUNNING','RETRY_WAIT')
-              AND t.payload ? 'metadataEnrichment' AND t.payload->>'source'=m.source
+              AND t.payload->>'metadataEnrichmentVersion'='2' AND t.payload->>'source'=m.source
           )
       ), candidates AS (
         SELECT DISTINCT ON (source) source,source_work_id,work_id,updated_at,id
