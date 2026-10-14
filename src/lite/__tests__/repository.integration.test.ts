@@ -18,6 +18,7 @@ const readerMigration = readFileSync(resolve(process.cwd(), 'migrations/20260914
 const fairHistoricalP1Migration = readFileSync(resolve(process.cwd(), 'migrations/20261012083000_lite_fair_historical_p1_catalog.sql'), 'utf8');
 const deferHealthyP1CatalogMigration = readFileSync(resolve(process.cwd(), 'migrations/20261013040000_lite_defer_healthy_p1_catalog.sql'), 'utf8');
 const manifestGapRepairIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014031500_lite_manifest_gap_repair_index.sql'), 'utf8');
+const orderedManifestClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014090000_lite_claim_manifest_chapters_in_order.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -113,6 +114,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(fairHistoricalP1Migration);
   await db.exec(deferHealthyP1CatalogMigration);
   await db.exec(manifestGapRepairIndexMigration);
+  await db.exec(orderedManifestClaimMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -949,6 +951,30 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(giant?.workId).toBe(ids.p1a);
     await repo.finish(giant!, 'worker-a', { state: 'DONE' });
     expect((await repo.claim('worker-b', 120))?.idempotencyKey).toBe('small-work');
+  });
+
+  it('claims same-work manifest repairs in canonical order when batch timestamps tie', async () => {
+    const entries = [
+      { number: '26', key: 'manifest-26', orderKey: 'n|000000000026|000000000000|||chapter%2026' },
+      { number: '1', key: 'manifest-1', orderKey: 'n|000000000001|000000000000|||chapter%201' },
+      { number: '20', key: 'manifest-20', orderKey: 'n|000000000020|000000000000|||chapter%2020' },
+    ];
+    for (const entry of entries) {
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+        chapterKey: entry.key, priority: 'P1', idempotencyKey: entry.key,
+        payload: { displayNumber: entry.number, orderKey: entry.orderKey, manifestP1Repair: true } });
+    }
+    await db.query(`UPDATE importer_lite_tasks SET created_at='2020-01-01T00:00:00Z',next_run_at=now()-interval '1 second'
+      WHERE work_id=$1::uuid AND idempotency_key LIKE 'manifest-%'`, [ids.p1a]);
+
+    const claimed: string[] = [];
+    for (let i = 0; i < entries.length; i += 1) {
+      const task = await repo.claim(`manifest-order-${i}`, 120);
+      expect(task).not.toBeNull();
+      claimed.push(task!.idempotencyKey);
+      await repo.finish(task!, `manifest-order-${i}`, { state: 'DONE' });
+    }
+    expect(claimed).toEqual(['manifest-1', 'manifest-20', 'manifest-26']);
   });
 
   it('materializes a 1,300-chapter catalog batch in bounded inserts and keeps its queue durable', async () => {
