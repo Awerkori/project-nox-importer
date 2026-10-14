@@ -19,6 +19,7 @@ const fairHistoricalP1Migration = readFileSync(resolve(process.cwd(), 'migration
 const deferHealthyP1CatalogMigration = readFileSync(resolve(process.cwd(), 'migrations/20261013040000_lite_defer_healthy_p1_catalog.sql'), 'utf8');
 const manifestGapRepairIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014031500_lite_manifest_gap_repair_index.sql'), 'utf8');
 const orderedManifestClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014090000_lite_claim_manifest_chapters_in_order.sql'), 'utf8');
+const manifestOrderBeforeRetryMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014091500_lite_claim_manifest_order_before_retry.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -115,6 +116,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(deferHealthyP1CatalogMigration);
   await db.exec(manifestGapRepairIndexMigration);
   await db.exec(orderedManifestClaimMigration);
+  await db.exec(manifestOrderBeforeRetryMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -953,7 +955,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('worker-b', 120))?.idempotencyKey).toBe('small-work');
   });
 
-  it('claims same-work manifest repairs in canonical order when batch timestamps tie', async () => {
+  it('claims same-work manifest repairs in canonical order before retry time when all are due', async () => {
     const entries = [
       { number: '26', key: 'manifest-26', orderKey: 'n|000000000026|000000000000|||chapter%2026' },
       { number: '1', key: 'manifest-1', orderKey: 'n|000000000001|000000000000|||chapter%201' },
@@ -964,7 +966,10 @@ describe('LiteRepository against the additive Lite migration', () => {
         chapterKey: entry.key, priority: 'P1', idempotencyKey: entry.key,
         payload: { displayNumber: entry.number, orderKey: entry.orderKey, manifestP1Repair: true } });
     }
-    await db.query(`UPDATE importer_lite_tasks SET created_at='2020-01-01T00:00:00Z',next_run_at=now()-interval '1 second'
+    await db.query(`UPDATE importer_lite_tasks SET created_at='2020-01-01T00:00:00Z',next_run_at=CASE idempotency_key
+        WHEN 'manifest-26' THEN now()-interval '60 seconds'
+        WHEN 'manifest-20' THEN now()-interval '30 seconds'
+        ELSE now()-interval '1 second' END
       WHERE work_id=$1::uuid AND idempotency_key LIKE 'manifest-%'`, [ids.p1a]);
 
     const claimed: string[] = [];
