@@ -80,6 +80,7 @@ export class ImporterLiteRuntime {
     metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
     sourceMetadataGate = new AsyncSemaphore(2, 'lite_source_metadata_refetch');
     sourceMetadataLaneGate = new AsyncSemaphore(2, 'lite_source_metadata_lane');
+    sourceMetadataPoolWaitStartedAt = 0;
     sourceAdmissionGate = new SourceAdmissionGate(10_000);
     lastMetadataEnrichmentAt = 0;
     lastMetadataReplayAt = 0;
@@ -518,12 +519,16 @@ export class ImporterLiteRuntime {
     async refillSourceMetadataEnrichment() {
         if (!this.isRuntimeLeader || Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS)
             return;
-        if (this.pool.waitingCount > 0 || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
+        if (this.hasSustainedSourceMetadataPoolPressure() || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
             || process.memoryUsage().rss >= 384 * 1024 * 1024)
             return;
         this.lastSourceMetadataRefillAt = Date.now();
         try {
-            const admitted = await this.queue.refillSourceMetadataEnrichment(2);
+            // A single transient waiter allows one durable seat; a fully idle pool
+            // allows the tested two-seat stage. Persistent or heavier contention
+            // admits nothing until headroom returns.
+            const maxPending = this.pool.waitingCount === 1 ? 1 : 2;
+            const admitted = await this.queue.refillSourceMetadataEnrichment(maxPending);
             if (admitted)
                 this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
         }
@@ -535,9 +540,12 @@ export class ImporterLiteRuntime {
      * consuming chapter workers or competing with P0/P1 task selection. */
     async runSourceMetadataRefresh() {
         // Let in-flight requests finish, but do not start more background source
-        // fetches while YSQL has waiters, the site is paused, or RSS nears the
-        // container's 512 MiB boundary.
-        if (this.pool.waitingCount > 0 || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
+        // fetches under a sustained YSQL queue, while the site is paused, or when
+        // RSS nears the container's 512 MiB boundary. One transient waiter can use
+        // one of the two slots; it can never admit a second fetch concurrently.
+        const active = this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available;
+        if (this.hasSustainedSourceMetadataPoolPressure() || (this.pool.waitingCount === 1 && active >= 1)
+            || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
             || process.memoryUsage().rss >= 384 * 1024 * 1024)
             return;
         if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire())
@@ -554,6 +562,19 @@ export class ImporterLiteRuntime {
         finally {
             this.sourceMetadataLaneGate.release();
         }
+    }
+    hasSustainedSourceMetadataPoolPressure() {
+        const waiters = this.pool.waitingCount;
+        if (waiters <= 0) {
+            this.sourceMetadataPoolWaitStartedAt = 0;
+            return false;
+        }
+        if (waiters >= 2) {
+            this.sourceMetadataPoolWaitStartedAt ||= Date.now();
+            return true;
+        }
+        this.sourceMetadataPoolWaitStartedAt ||= Date.now();
+        return Date.now() - this.sourceMetadataPoolWaitStartedAt >= 15_000;
     }
     /**
      * One local metadata merge at a time prevents P1's legitimate chapter
