@@ -17,6 +17,7 @@ const migration = readFileSync(resolve(process.cwd(), 'migrations/20261010090000
 const readerMigration = readFileSync(resolve(process.cwd(), 'migrations/20260914171000_atomic_reader_repair.sql'), 'utf8');
 const fairHistoricalP1Migration = readFileSync(resolve(process.cwd(), 'migrations/20261012083000_lite_fair_historical_p1_catalog.sql'), 'utf8');
 const deferHealthyP1CatalogMigration = readFileSync(resolve(process.cwd(), 'migrations/20261013040000_lite_defer_healthy_p1_catalog.sql'), 'utf8');
+const manifestGapRepairIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014031500_lite_manifest_gap_repair_index.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -111,6 +112,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(migration);
   await db.exec(fairHistoricalP1Migration);
   await db.exec(deferHealthyP1CatalogMigration);
+  await db.exec(manifestGapRepairIndexMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
