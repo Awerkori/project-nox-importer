@@ -50,6 +50,8 @@ export declare class DeduplicationEngine {
     private tagCatalogFlight;
     private readonly tagCatalogTtlMs;
     constructor(supabase: SupabaseClient);
+    /** Merge a work whose exact source mapping and canonical work ID are already loaded. */
+    mergeKnownMappedWork(candidate: CandidateWork, workId: string, source: string): Promise<DeduplicationResult>;
     private resolveCandidateCover;
     /**
      * Resolve or register a work conservatively.

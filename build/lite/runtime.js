@@ -1299,14 +1299,14 @@ export class ImporterLiteRuntime {
                 reportTiming('PARSER_ERROR');
                 return;
             }
-            const resolved = await timePhase('mergePersistenceMs', () => this.dedupe.resolveWork({
+            const resolved = await timePhase('mergePersistenceMs', () => this.dedupe.mergeKnownMappedWork({
                 source, sourceWorkId, title: details.title || row.source_title || row.title,
                 slug: details.slug || row.source_slug || row.title,
                 aliases: extracted.aliases, genres: extracted.genres,
                 author: details.author, artist: details.artist, synopsis: details.synopsis,
                 kind: details.kind, status: details.status, year: details.year, ageRating: details.ageRating,
                 rawMetadata: sourceMetadata,
-            }));
+            }, mappingWorkId, source));
             if (resolved.workId !== mappingWorkId || resolved.status === 'AMBIGUOUS' || resolved.status === 'FAILED') {
                 throw new Error(`METADATA_SOURCE_MAPPING_CONFLICT:${resolved.reason || resolved.status}`);
             }

@@ -91,7 +91,8 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
       id uuid PRIMARY KEY, source text NOT NULL, source_work_id text NOT NULL, work_id uuid,
       source_slug text NOT NULL DEFAULT '', source_title text NOT NULL DEFAULT '',
       metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-      sync_status text NOT NULL DEFAULT 'WAITING_ADMISSION', updated_at timestamptz NOT NULL DEFAULT now(),
+      sync_status text NOT NULL DEFAULT 'WAITING_ADMISSION', last_synced_at timestamptz NULL,
+      updated_at timestamptz NOT NULL DEFAULT now(),
       UNIQUE(source,source_work_id)
     );
     CREATE TABLE work_tags (work_id uuid NOT NULL, tag_id uuid NOT NULL, system_generated boolean NOT NULL DEFAULT true, UNIQUE(work_id,tag_id));
@@ -2779,7 +2780,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
     );
     let candidate: any;
-    (runtime as any).dedupe = { resolveWork: async (value: any) => {
+    (runtime as any).dedupe = { mergeKnownMappedWork: async (value: any) => {
       candidate = value;
       return { workId: ids.p1a, status: 'EXISTING_MAPPING' };
     } };
@@ -2810,16 +2811,17 @@ describe('LiteRepository against the additive Lite migration', () => {
       { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
         BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
     );
-    (runtime as any).dedupe = { resolveWork:async () => ({ workId:ids.p1a,status:'EXISTING_MAPPING' }) };
+    (runtime as any).dedupe = { mergeKnownMappedWork:async () => ({ workId:ids.p1a,status:'EXISTING_MAPPING' }) };
     await (runtime as any).catalog(task,'metadata-source-worker',{ claimSqlMs: 1, queueDwellMs: 0 });
 
-    const mapping = await db.query(`SELECT metadata FROM importer_work_mappings WHERE source='source-a' AND source_work_id='source-refetch'`);
+    const mapping = await db.query(`SELECT metadata,last_synced_at FROM importer_work_mappings WHERE source='source-a' AND source_work_id='source-refetch'`);
     const classification = await db.query(`SELECT aliases_state,tags_state,aliases_added,tags_added FROM importer_lite_metadata_enrichment
       WHERE source='source-a' AND source_work_id='source-refetch'`);
+    const completed = (await db.query(`SELECT state,checkpoint FROM importer_lite_tasks WHERE id=$1`,[task!.id])).rows[0];
     expect(fetched).toBe(1);
     expect(mapping.rows[0].metadata).toMatchObject({ provider_id:'source-refetch',alternativeTitles:['Título nativo'],genres:['MILF','Vanilla'] });
+    expect(mapping.rows[0].last_synced_at).not.toBeNull();
     expect(classification.rows[0]).toMatchObject({ aliases_state:'ENRICHED',tags_state:'ENRICHED' });
-    const completed = (await db.query(`SELECT state,checkpoint FROM importer_lite_tasks WHERE id=$1`,[task!.id])).rows[0];
     expect(completed.state).toBe('DONE');
     expect(completed.checkpoint.metadataTiming).toMatchObject({
       claimSqlMs: expect.any(Number), mappingQueryMs: expect.any(Number), sourcePolicyQueryMs: expect.any(Number),
@@ -2848,7 +2850,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       {IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
         BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000} as any,
     );
-    (runtime as any).dedupe={resolveWork:async()=>({workId:ids.p1a,status:'EXISTING_MAPPING'})};
+    (runtime as any).dedupe={mergeKnownMappedWork:async()=>({workId:ids.p1a,status:'EXISTING_MAPPING'})};
     await (runtime as any).catalog(task,'metadata-same-title-worker',{claimSqlMs:1,queueDwellMs:0});
     const result=(await db.query(`SELECT aliases_state,tags_state FROM importer_lite_metadata_enrichment
       WHERE source='source-a' AND source_work_id='same-title-alias'`)).rows[0];
@@ -2873,7 +2875,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
         BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
     );
-    (runtime as any).dedupe = { resolveWork:async () => ({ workId:null,status:'FAILED',
+    (runtime as any).dedupe = { mergeKnownMappedWork:async () => ({ workId:null,status:'FAILED',
       reason:'INVALID_EDITORIAL_TITLE: Title is an authentication or login prompt' }) };
 
     await (runtime as any).catalog(task,'metadata-challenge-worker');

@@ -136,6 +136,23 @@ export class DeduplicationEngine {
 
   constructor(private supabase: SupabaseClient) {}
 
+  /** Merge a work whose exact source mapping and canonical work ID are already loaded. */
+  async mergeKnownMappedWork(candidate: CandidateWork, workId: string, source: string): Promise<DeduplicationResult> {
+    const validation = validateEditorialTitle(candidate.title);
+    if (!validation.valid) {
+      return {
+        workId: null,
+        mappingId: '',
+        status: 'FAILED',
+        slug: this.sanitizeSlug(candidate.slug || candidate.title || 'invalid-title'),
+        reason: `INVALID_EDITORIAL_TITLE: ${validation.reason}`,
+      };
+    }
+
+    await this.applyMetadataPrecedence(workId, candidate, source);
+    return { workId, mappingId: '', status: 'EXISTING_MAPPING', slug: this.sanitizeSlug(candidate.slug || candidate.title) };
+  }
+
   private async resolveCandidateCover(candidate: CandidateWork): Promise<string | null> {
     if (candidate.coverId) return candidate.coverId;
     if (!candidate.loadCoverId) return null;

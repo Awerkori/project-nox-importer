@@ -35,6 +35,28 @@ describe('Tag Normalization', () => {
     expect(engine['normalizeTagName']('Reincarnation')).toBe('Reencarnação');
   });
 
+  it('merges known mapped metadata without resolving the source mapping again', async () => {
+    const engine = new DeduplicationEngine({} as any);
+    const merge = vi.spyOn(engine, 'applyMetadataPrecedence').mockResolvedValue();
+    const candidate = { source: 'source-a', sourceWorkId: 'known-id', title: 'Título', slug: 'titulo' };
+
+    await expect(engine.mergeKnownMappedWork(candidate, 'work-id', 'source-a')).resolves.toMatchObject({
+      workId: 'work-id', status: 'EXISTING_MAPPING', slug: 'titulo',
+    });
+    expect(merge).toHaveBeenCalledTimes(1);
+    expect(merge).toHaveBeenCalledWith('work-id', candidate, 'source-a');
+  });
+
+  it('rejects challenge titles before merging known mapped metadata', async () => {
+    const engine = new DeduplicationEngine({} as any);
+    const merge = vi.spyOn(engine, 'applyMetadataPrecedence').mockResolvedValue();
+
+    await expect(engine.mergeKnownMappedWork({
+      source: 'source-a', sourceWorkId: 'known-id', title: 'Login', slug: 'login',
+    }, 'work-id', 'source-a')).resolves.toMatchObject({ status: 'FAILED', workId: null });
+    expect(merge).not.toHaveBeenCalled();
+  });
+
   it('keeps explicit detailed adult taxonomy distinct from the generic adult rating', () => {
     const engine = new DeduplicationEngine({} as any);
     expect(engine['normalizeTagName']('milf')).toBe('MILF');
