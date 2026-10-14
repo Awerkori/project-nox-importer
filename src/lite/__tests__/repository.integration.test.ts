@@ -337,6 +337,23 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(0);
   });
 
+  it('does not materialize a confirmed gap from a source with an unresolved provider block', async () => {
+    await db.query(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
+      VALUES($1,'pt-br|default|chapter|21|-','source-a','blocked-gap','blocked-gap-21','pt-BR','default','n|000021|000000|0',10,true,true)`, [ids.p1a]);
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',blocked_reason='TURNSTILE',
+      cooldown_until=now()-interval '1 second' WHERE id='source-a'`);
+
+    expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(0);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key LIKE 'lite:chapter:%:pt-br|default|chapter|21|-'`)).rows[0].count).toBe(0);
+
+    await db.query(`UPDATE importer_sources SET blocked_reason=NULL WHERE id='source-a'`);
+    expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(1);
+  });
+
   it('keeps an executable P1 reserve dominant without hiding proven historical repairs forever', async () => {
     await db.query(`UPDATE works SET published=true WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
     for (let index = 0; index < 8; index++) {
@@ -554,6 +571,7 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('samples multiple ready P1 source routes outside the claim path', async () => {
+    await db.query(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'source-fair-a', priority: 'P1', idempotencyKey: 'source-fair-a' });
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
@@ -563,6 +581,12 @@ describe('LiteRepository against the additive Lite migration', () => {
       VALUES($1::uuid,'source-fair-a','source-a','a','a-1','pt-BR','default','n|000001|000000|0',10,true),
             ($2::uuid,'source-fair-b','source-b','b','b-1','pt-BR','default','n|000001|000000|0',10,true)`, [ids.p1a, ids.p1b]);
 
+    expect(await repo.readyImportSources()).toEqual(['source-a', 'source-b']);
+
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',blocked_reason='TURNSTILE',
+      cooldown_until=now()-interval '1 second' WHERE id='source-b'`);
+    expect(await repo.readyImportSources()).toEqual(['source-a']);
+    await db.query(`UPDATE importer_sources SET blocked_details='{"probe_success":true}'::jsonb WHERE id='source-b'`);
     expect(await repo.readyImportSources()).toEqual(['source-a', 'source-b']);
   });
 
@@ -623,6 +647,7 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('reopens an expired source cooldown fairly across works and in canonical chapter order', async () => {
+    await db.query(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
     // Keep generic recovery occupied with an older unrelated retry. The
     // source-specific pass must then admit only its small bounded wave rather
     // than leaving a recovered rate-limited source to wait behind thousands
@@ -652,6 +677,18 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`UPDATE importer_lite_source_health SET cooldown_until=now()-interval '1 second' WHERE source='source-a'`);
     await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second',updated_at=now()-interval '1 minute'
       WHERE idempotency_key LIKE 'cooldown-recovery-%'`);
+
+    // An expired cooldown alone is not proof that an operator/provider block
+    // such as Turnstile has recovered. Recovery must wait for the explicit
+    // source-probe marker instead of repeatedly sending the blocked route.
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',blocked_reason='TURNSTILE',
+      cooldown_until=now()-interval '1 second' WHERE id='source-a'`);
+    const blocked = await repo.reconcile(1);
+    expect(blocked.sourceCooldownRecoveries).toBe(0);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key LIKE 'cooldown-recovery-%' AND state='RETRY_WAIT' AND reason='SOURCE_RATE_LIMITED'`)).rows[0].count).toBe(96);
+
+    await db.query(`UPDATE importer_sources SET blocked_reason=NULL WHERE id='source-a'`);
 
     const recovered = await repo.reconcile(1);
     expect(recovered.sourceCooldownRecoveries).toBe(8);
