@@ -7,7 +7,7 @@ import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { PageByteBudget } from './page-byte-budget.js';
 export declare const DURABLE_RESERVATION_BATCH_JOIN_MS = 60;
-export declare const DURABLE_RECEIPT_BATCH_JOIN_MS = 120;
+export declare const DURABLE_RECEIPT_BATCH_JOIN_MS = 240;
 export type UploadBatchSnapshot = {
     sampledFlushes: number;
     totalFlushes: number;
@@ -30,7 +30,7 @@ export type UploadBatchSnapshot = {
 /**
  * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
  * a per-page fence, so a crash can never make a successful send retryable.
- * A 60ms join is short relative to the measured durable write and source
+ * A bounded join is short relative to the measured durable write and source
  * latencies, while allowing staggered pages in one bounded wave to share a
  * write. It adds no queue, state, or retry path and a full batch still flushes
  * immediately.

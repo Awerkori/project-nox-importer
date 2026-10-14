@@ -13,7 +13,7 @@ import { PageByteBudget } from './page-byte-budget.js';
 // the next bounded page wave proceeds. This separates pool amortisation from
 // pre-upload latency without changing a full-batch flush or any concurrency.
 export const DURABLE_RESERVATION_BATCH_JOIN_MS = 60;
-export const DURABLE_RECEIPT_BATCH_JOIN_MS = 120;
+export const DURABLE_RECEIPT_BATCH_JOIN_MS = 240;
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
     let cursor = 0;
@@ -138,7 +138,7 @@ function numericDisplayValue(display) {
 /**
  * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
  * a per-page fence, so a crash can never make a successful send retryable.
- * A 60ms join is short relative to the measured durable write and source
+ * A bounded join is short relative to the measured durable write and source
  * latencies, while allowing staggered pages in one bounded wave to share a
  * write. It adds no queue, state, or retry path and a full batch still flushes
  * immediately.
