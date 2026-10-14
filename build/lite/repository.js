@@ -379,7 +379,7 @@ export class LiteRepository {
           FROM importer_lite_tasks
           WHERE task_type='CATALOG' AND state='READY' AND monitoring=false
             AND priority=$1 AND next_run_at<=now()
-            AND payload->>'metadataEnrichmentVersion'='2'
+            AND payload ? 'metadataEnrichment'
           ORDER BY next_run_at,created_at,id
           LIMIT 1 FOR UPDATE SKIP LOCKED
         )
