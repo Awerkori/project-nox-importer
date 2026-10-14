@@ -290,12 +290,10 @@ export class LiteRepository {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
-      if (Object.keys(input.rawMetadata).length) {
-        await client.query(`UPDATE importer_work_mappings
-          SET metadata=COALESCE(metadata,'{}'::jsonb) || $3::jsonb
-          WHERE source=$1 AND source_work_id=$2 AND work_id=$4::uuid`,
-          [input.source,input.sourceWorkId,JSON.stringify(input.rawMetadata),input.workId]);
-      }
+      await client.query(`UPDATE importer_work_mappings
+        SET metadata=COALESCE(metadata,'{}'::jsonb) || $3::jsonb,last_synced_at=now()
+        WHERE source=$1 AND source_work_id=$2 AND work_id=$4::uuid`,
+        [input.source,input.sourceWorkId,JSON.stringify(input.rawMetadata),input.workId]);
       await client.query(`INSERT INTO importer_lite_metadata_enrichment
         (source,source_work_id,work_id,aliases_state,tags_state,aliases_added,tags_added,attempt_count,
          last_checked_at,next_retry_at,last_error,version,updated_at)
