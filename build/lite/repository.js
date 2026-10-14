@@ -104,6 +104,7 @@ export class LiteRepository {
             AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
         ), next_mapping AS (
           SELECT turn.source,turn.last_admitted_at,turn.alias_rich_source,
+            (aliasless_after.source_work_id IS NOT NULL OR aliasless_wrap.source_work_id IS NOT NULL) AS selected_aliasless,
             COALESCE(aliasless_after.source_work_id,aliasless_wrap.source_work_id,
               fallback_after.source_work_id,fallback_wrap.source_work_id) AS source_work_id,
             COALESCE(aliasless_after.work_id,aliasless_wrap.work_id,
@@ -121,9 +122,11 @@ export class LiteRepository {
             AND aliasless_wrap.source_work_id IS NULL AND fallback_after.source_work_id IS NULL
         )
         SELECT source,source_work_id,work_id FROM next_mapping WHERE source_work_id IS NOT NULL
-        -- Prefer providers that have actually yielded explicit aliases before
-        -- exploring never-seen sources. Recency rotates within each tier.
-        ORDER BY alias_rich_source DESC,last_admitted_at NULLS FIRST,source LIMIT $1`, [ceiling - Number(pending.rows[0]?.count || 0)]);
+        -- A mapping for a work with no aliases has higher product value than
+        -- a complementary source mapping for a work that already has aliases.
+        -- Within each tier, prefer providers that have actually yielded
+        -- explicit aliases, then rotate by source recency.
+        ORDER BY selected_aliasless DESC,alias_rich_source DESC,last_admitted_at NULLS FIRST,source LIMIT $1`, [ceiling - Number(pending.rows[0]?.count || 0)]);
             for (const row of candidates.rows) {
                 const source = String(row.source);
                 const sourceWorkId = String(row.source_work_id);

@@ -321,6 +321,26 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE idempotency_key='lite:metadata:source:v3:source-rich:aliasless-rich'`)).rows).toEqual([{ source:'source-rich' }]);
   });
 
+  it('prioritizes a work with no aliases over a rich-source mapping that can only complement an aliasful work', async () => {
+    await db.query(`INSERT INTO importer_sources(id) VALUES('source-rich'),('source-new')`);
+    await db.query(`UPDATE works SET published=true WHERE id IN ($1,$2)`, [ids.p1a,ids.p1b]);
+    await db.query(`UPDATE works SET aliases=ARRAY['Already has an alias']::text[] WHERE id=$1`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000231','source-rich','complement-only',$1::uuid,'p1-a','P1 A','SYNCED'),
+      ('00000000-0000-4000-8000-000000000232','source-new','needs-aliases',$2::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1a,ids.p1b]);
+    await db.query(`INSERT INTO importer_lite_tasks
+      (task_type,work_id,work_key,priority,base_priority,idempotency_key,state,payload,checkpoint)
+      VALUES('CATALOG',$1::uuid,$2,3,3,'prior-alias-rich-source-history-fallback','DONE',
+        '{"metadataSourceRefresh":true,"source":"source-rich","sourceWorkId":"prior-rich"}'::jsonb,
+        '{"aliases":2}'::jsonb)`, [ids.p1a,`work:${ids.p1a}`]);
+
+    expect(await repo.refillSourceMetadataEnrichment(1)).toBe(1);
+    expect((await db.query(`SELECT payload->>'source' AS source,payload->>'sourceWorkId' AS source_work_id
+      FROM importer_lite_tasks WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows)
+      .toEqual([{ source:'source-new',source_work_id:'needs-aliases' }]);
+  });
+
   it('resumes each metadata source after its last mapping and wraps without skipping earlier mappings', async () => {
     await db.query(`INSERT INTO importer_sources(id) VALUES('cursor-after'),('cursor-wrap')`);
     await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2,$3)`, [ids.p1a,ids.p1b,ids.p0]);

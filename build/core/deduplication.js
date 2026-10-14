@@ -395,7 +395,11 @@ export class DeduplicationEngine {
                 const aliasesChanged = newAliases.length !== (matched.aliases || []).length
                     || newAliases.some((alias, index) => alias !== matched.aliases[index]);
                 if (aliasesChanged) {
-                    await this.supabase.from('works').update({ aliases: newAliases }).eq('id', matched.id);
+                    const { error: aliasUpdateError } = await this.supabase.from('works')
+                        .update({ aliases: newAliases }).eq('id', matched.id);
+                    if (aliasUpdateError) {
+                        throw new Error(`WORK_ALIAS_PERSIST_FAILED:${aliasUpdateError.message}`);
+                    }
                 }
                 const { data: insertedMapping } = await this.supabase
                     .from('importer_work_mappings')
