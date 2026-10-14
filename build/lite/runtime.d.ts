@@ -24,6 +24,7 @@ export declare class ImporterLiteRuntime {
     private readonly historicalP1BackfillGate;
     private readonly metadataReplayGate;
     private readonly sourceMetadataGate;
+    private readonly sourceMetadataLaneGate;
     private readonly sourceAdmissionGate;
     private lastMetadataEnrichmentAt;
     private lastMetadataReplayAt;
@@ -100,6 +101,9 @@ export declare class ImporterLiteRuntime {
      * STAFF/P0/P1 reserve. At most two tasks are durably admitted across sources.
      */
     private refillSourceMetadataEnrichment;
+    /** Dedicated one-slot worker gives source refetch continuous progress without
+     * consuming chapter workers or competing with P0/P1 task selection. */
+    private runSourceMetadataRefresh;
     /**
      * One local metadata merge at a time prevents P1's legitimate chapter
      * reserve from starving aliases/tags. It reads only a saved mapping and

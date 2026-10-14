@@ -54,6 +54,7 @@ const SAFE_BUFFERED_PAGE_CAP = 24;
 const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
 const STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS = 15_000;
 const SOURCE_METADATA_REFILL_INTERVAL_MS = 15_000;
+const SOURCE_METADATA_LANE_INTERVAL_MS = 15_000;
 const SOURCE_RECOVERY_PROBE_INTERVAL_MS = 30_000;
 /** One process, one executor pool, one bounded reconciler. */
 export class ImporterLiteRuntime {
@@ -76,6 +77,7 @@ export class ImporterLiteRuntime {
     historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
     metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
     sourceMetadataGate = new AsyncSemaphore(1, 'lite_source_metadata_refetch');
+    sourceMetadataLaneGate = new AsyncSemaphore(1, 'lite_source_metadata_lane');
     sourceAdmissionGate = new SourceAdmissionGate(10_000);
     lastMetadataEnrichmentAt = 0;
     lastMetadataReplayAt = 0;
@@ -156,6 +158,7 @@ export class ImporterLiteRuntime {
         await this.refillManifestProvenP1Imports();
         await this.refillStoredMetadataEnrichment();
         await this.refillSourceMetadataEnrichment();
+        await this.runSourceMetadataRefresh();
         await this.runStoredMetadataReplay();
         // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
         // Lite cutover.  The Lite-specific cap begins safely and can only rise
@@ -185,6 +188,13 @@ export class ImporterLiteRuntime {
         }, STORED_METADATA_REPLAY_INTERVAL_MS);
         metadataTimer.unref();
         this.timers.push(metadataTimer);
+        const sourceMetadataTimer = setInterval(() => {
+            if (!this.isRuntimeLeader)
+                return;
+            void this.runSourceMetadataRefresh();
+        }, SOURCE_METADATA_LANE_INTERVAL_MS);
+        sourceMetadataTimer.unref();
+        this.timers.push(sourceMetadataTimer);
         const healthTimer = setInterval(() => void this.probeSharedResources(), 30_000);
         healthTimer.unref();
         this.timers.push(healthTimer);
@@ -514,6 +524,24 @@ export class ImporterLiteRuntime {
         }
         catch (error) {
             this.logger.warn('Source metadata refill failed', { error: error?.message });
+        }
+    }
+    /** Dedicated one-slot worker gives source refetch continuous progress without
+     * consuming chapter workers or competing with P0/P1 task selection. */
+    async runSourceMetadataRefresh() {
+        if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire())
+            return;
+        try {
+            const workerId = `${this.runtimeInstanceId}:source-metadata`;
+            const task = await this.queue.claimSourceMetadataRefresh(workerId, 90);
+            if (task)
+                await this.catalog(task, workerId);
+        }
+        catch (error) {
+            this.logger.warn('Source metadata lane failed', { error: error?.message });
+        }
+        finally {
+            this.sourceMetadataLaneGate.release();
         }
     }
     /**
@@ -975,6 +1003,19 @@ export class ImporterLiteRuntime {
           FROM importer_lite_chapter_sources WHERE work_id=$1::uuid AND order_key LIKE 'n|%'`, [resolved.workId])
                 : { rows: [{ order_key: null }] };
             const knownNormalOrder = knownFrontier.rows[0]?.order_key || null;
+            // A manifest can reveal a long historical interval on the first pass
+            // or after the source repairs an incomplete listing. Only its newest
+            // normal chapter is a P0 release; earlier positively listed chapters
+            // enter P1 together so the importer cannot keep moving the gap forward.
+            const newestManifestNormalOrder = snapshot.chapters
+                .map((chapter) => chapterOrderKey({
+                displayNumber: chapter.displayNumber || String(chapter.number),
+                title: chapter.title || '',
+                kind: chapterKind({ displayNumber: chapter.displayNumber || String(chapter.number), title: chapter.title || '' }),
+            }))
+                .filter((orderKey) => orderKey.startsWith('n|'))
+                .sort()
+                .at(-1) || null;
             const manifestSourceIds = [...new Set(snapshot.chapters
                     .map((chapter) => String(chapter.sourceChapterId || ''))
                     .filter(Boolean))];
@@ -994,7 +1035,8 @@ export class ImporterLiteRuntime {
                 const chapterKey = canonicalChapterKey({ displayNumber, title: chapter.title, kind: chapterKindValue, language, edition });
                 const orderKey = chapterOrderKey({ displayNumber, title: chapter.title, kind: chapterKindValue });
                 const historicalRepair = p0Monitoring && orderKey.startsWith('n|') && Boolean(knownNormalOrder && orderKey <= knownNormalOrder);
-                const chapterPriority = p0Monitoring && !historicalRepair ? 'P0' : 'P1';
+                const isNewestManifestRelease = !orderKey.startsWith('n|') || orderKey === newestManifestNormalOrder;
+                const chapterPriority = p0Monitoring && !historicalRepair && isNewestManifestRelease ? 'P0' : 'P1';
                 sourceRows.push({ workId: resolved.workId, chapterKey, source, sourceWorkId, sourceChapterId: chapter.sourceChapterId,
                     language, edition, orderKey, sourceRank: rankForSource(source) });
                 const legacyChapterId = legacyPublished.get(String(chapter.sourceChapterId));
@@ -1013,7 +1055,9 @@ export class ImporterLiteRuntime {
                 else if (policy.chapterIngestionEnabled) {
                     const candidate = { taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
                         chapterKey, priority: chapterPriority, idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,
-                        payload: { displayNumber, chapterTitle: chapter.title || '', chapterKind: chapterKindValue, orderKey, language, edition } };
+                        payload: { displayNumber, chapterTitle: chapter.title || '', chapterKind: chapterKindValue, orderKey, language, edition,
+                            ...(p0Monitoring && orderKey.startsWith('n|') && orderKey < String(newestManifestNormalOrder || '')
+                                ? { historicalManifestRepair: true } : {}) } };
                     if (!chapterTaskByKey.has(candidate.idempotencyKey))
                         chapterTaskByKey.set(candidate.idempotencyKey, candidate);
                 }

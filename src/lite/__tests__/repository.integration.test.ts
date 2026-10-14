@@ -20,6 +20,7 @@ const deferHealthyP1CatalogMigration = readFileSync(resolve(process.cwd(), 'migr
 const manifestGapRepairIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014031500_lite_manifest_gap_repair_index.sql'), 'utf8');
 const orderedManifestClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014090000_lite_claim_manifest_chapters_in_order.sql'), 'utf8');
 const manifestOrderBeforeRetryMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014091500_lite_claim_manifest_order_before_retry.sql'), 'utf8');
+const sameWorkGapPriorityMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014190000_lite_prioritize_recoverable_same_work_gaps.sql'), 'utf8');
 const sourceMetadataRefetchMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014180000_metadata_source_refetch.sql'), 'utf8');
 const sourceMetadataRefetchIndexesMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014181500_metadata_source_refetch_indexes.sql'), 'utf8');
 
@@ -120,6 +121,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(manifestGapRepairIndexMigration);
   await db.exec(orderedManifestClaimMigration);
   await db.exec(manifestOrderBeforeRetryMigration);
+  await db.exec(sameWorkGapPriorityMigration);
   await db.exec(sourceMetadataRefetchMigration);
   await db.exec(sourceMetadataRefetchIndexesMigration);
 }
@@ -133,6 +135,80 @@ describe('LiteRepository against the additive Lite migration', () => {
     await createSchema(db);
     repo = new LiteRepository(poolFor(db));
   }, 20_000);
+
+  it.each([
+    { name: 'Case A: work 1, source 1–37', existing: [1], manifest: Array.from({ length: 37 }, (_, i) => i + 1) },
+    { name: 'Case B: work 1–5, source 1–18', existing: [1, 2, 3, 4, 5], manifest: Array.from({ length: 18 }, (_, i) => i + 1) },
+  ])('materializes old confirmed chapters and claims the earliest P1 before the new P0 ($name)', async ({ existing, manifest }) => {
+    const workId = ids.p1a;
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [workId]);
+    for (const number of existing) {
+      const key = `pt-br|default|chapter|${number}|-`;
+      const chapterId = `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`;
+      await db.query(`INSERT INTO chapters(id,work_id,number,display_number,canonical_chapter_key)
+        VALUES($1::uuid,$2::uuid,$3::numeric,$4,$5)`, [chapterId, workId, number, String(number), key]);
+      await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key)
+        VALUES($1::uuid,$2,$3::uuid,$4::text,$4::text)`, [workId, key, chapterId, number]);
+    }
+    for (const number of manifest) {
+      const key = `pt-br|default|chapter|${number}|-`;
+      const order = `n|${String(number).padStart(12, '0')}|000000000000|||`;
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,confirmed,has_chapter)
+        VALUES($1::uuid,$2,'source-a','work-a',$3,'pt-BR','default',$4,true,true)`, [workId, key, `source-${number}`, order]);
+    }
+    const newest = manifest.at(-1)!;
+    const newestKey = `pt-br|default|chapter|${newest}|-`;
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`, chapterKey: newestKey,
+      priority: 'P0', idempotencyKey: `lite:chapter:${workId}:${newestKey}`, payload: { orderKey: `n|${String(newest).padStart(12, '0')}|000000000000|||` } });
+
+    const expectedRepairs = manifest.length - existing.length - 1;
+    expect(await repo.materializeConfirmedMissingP1Tasks(100)).toBe(expectedRepairs);
+    const claimed = await repo.claim('same-work-gap-test', 120);
+    const firstMissing = existing.at(-1)! + 1;
+    expect(claimed?.chapterKey).toBe(`pt-br|default|chapter|${firstMissing}|-`);
+    expect(claimed?.priority).toBe('P1');
+  });
+
+  it('does not invent numeric gaps when the source confirms only chapters 1 and 37', async () => {
+    const workId = ids.p1a;
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [workId]);
+    for (const number of [1, 37]) {
+      const key = `pt-br|default|chapter|${number}|-`;
+      const chapterId = `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`;
+      await db.query(`INSERT INTO chapters(id,work_id,number,display_number,canonical_chapter_key)
+        VALUES($1::uuid,$2::uuid,$3::numeric,$4,$5)`, [chapterId, workId, number, String(number), key]);
+      await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key)
+        VALUES($1::uuid,$2,$3::uuid,$4::text,$4::text)`, [workId, key, chapterId, number]);
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,confirmed,has_chapter)
+      VALUES($1::uuid,$2,'source-a','work-a',$3,'pt-BR','default',$4,true,true)`, [workId,
+        key, `source-${number}`, `n|${String(number).padStart(12, '0')}|000000000000|||`]);
+    }
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`, chapterKey: 'pt-br|default|chapter|37|-',
+      priority: 'P0', idempotencyKey: `lite:chapter:${workId}:pt-br|default|chapter|37|-` });
+    expect(await repo.materializeConfirmedMissingP1Tasks(100)).toBe(0);
+    expect((await repo.claim('no-invention-test', 120))?.idempotencyKey)
+      .toBe(`lite:chapter:${workId}:pt-br|default|chapter|37|-`);
+  });
+
+  it('lets a newer P0 proceed when older manifest evidence has no currently eligible source', async () => {
+    const workId = ids.p1a;
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [workId]);
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
+    for (const number of [2, 37]) await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,confirmed,has_chapter)
+      VALUES($1::uuid,$2,'source-a','work-a',$3,'pt-BR','default',$4,true,true)`, [workId,
+      `pt-br|default|chapter|${number}|-`, `source-${number}`, `n|${String(number).padStart(12, '0')}|000000000000|||`]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`, chapterKey: 'pt-br|default|chapter|2|-',
+      priority: 'P1', idempotencyKey: 'external-gap', payload: { manifestP1Repair: true,
+        orderKey: 'n|000000000002|000000000000|||' } });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`, chapterKey: 'pt-br|default|chapter|37|-',
+      priority: 'P0', idempotencyKey: 'new-release-external-gap', payload: { orderKey: 'n|000000000037|000000000000|||' } });
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()+interval '1 hour',blocked_reason='TURNSTILE' WHERE id='source-a'`);
+
+    expect((await repo.claim('external-gap-test', 120))?.idempotencyKey).toBe('new-release-external-gap');
+  });
 
   afterEach(async () => { await db.close(); });
 
@@ -225,6 +301,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     ]);
     expect((await repo.claim('priority-check',60))?.idempotencyKey).toBe('p1-before-metadata-refetch');
     expect(await repo.refillSourceMetadataEnrichment(2)).toBe(0);
+  });
+
+  it('claims source metadata from its dedicated lane while chapter claims remain available', async () => {
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:'source-metadata-dedicated',payload:{source:'source-a',sourceWorkId:'old-work',metadataSourceRefresh:true} });
+    await repo.enqueue({ taskType:'IMPORT_CHAPTER',workId:ids.p1b,workKey:`work:${ids.p1b}`,chapterKey:'chapter-p1',priority:'P1',
+      idempotencyKey:'chapter-p1-remains-first' });
+
+    const sourceTask = await repo.claimSourceMetadataRefresh('metadata-lane',90);
+    expect(sourceTask).toMatchObject({ idempotencyKey:'source-metadata-dedicated',priority:'P2',state:'RUNNING' });
+    expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
   });
 
   it('replays legacy Portuguese tag objects with a bounded v3 task after v2 completed', async () => {
@@ -2406,6 +2493,44 @@ describe('LiteRepository against the additive Lite migration', () => {
       { display_number: '10', priority: 2, base_priority: 2 },
       { display_number: '101', priority: 1, base_priority: 1 },
     ]);
+  });
+
+  it('keeps a first full manifest from turning chapters 2–36 into moving P0 gaps', async () => {
+    await db.query(`INSERT INTO chapters(id,work_id,number,display_number,canonical_chapter_key)
+      VALUES('00000000-0000-4000-8000-000000000001',$1,1,'1','pt-br|default|chapter|1|-')`, [ids.p1a]);
+    await db.query(`UPDATE chapters SET published_at=now() WHERE id='00000000-0000-4000-8000-000000000001'`);
+    await db.query(`INSERT INTO importer_chapter_mappings(source,source_chapter_id,chapter_id)
+      VALUES('source-a','release-1','00000000-0000-4000-8000-000000000001')`);
+    await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key)
+      VALUES($1,'pt-br|default|chapter|1|-','00000000-0000-4000-8000-000000000001','1','n|000000000001|000000000000|||')`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P0',
+      idempotencyKey: 'full-manifest-p0', payload: { source: 'source-a', sourceWorkId: 'work-a' } });
+    const task = await repo.claim('manifest-frontier', 120);
+    const adapter = {
+      id: 'source-a',
+      fetchWorkSnapshot: async () => ({
+        details: { sourceWorkId: 'work-a', title: 'P1 A', slug: 'p1-a', status: 'ONGOING' as const, language: 'pt-BR' },
+        chapters: Array.from({ length: 37 }, (_, index) => ({
+          sourceChapterId: `release-${index + 1}`, number: index + 1,
+          displayNumber: String(index + 1), title: `Chapter ${index + 1}`,
+        })),
+      }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
+    await (runtime as any).catalog(task, 'manifest-frontier');
+
+    const p1 = await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE work_id=$1 AND task_type='IMPORT_CHAPTER' AND priority=2
+        AND payload ? 'historicalManifestRepair'`, [ids.p1a]);
+    expect(p1.rows[0].count).toBe(35);
+    expect((await db.query(`SELECT priority FROM importer_lite_tasks
+      WHERE idempotency_key='lite:chapter:' || $1 || ':pt-br|default|chapter|37|-'`, [ids.p1a])).rows[0].priority).toBe(1);
+    expect((await repo.claim('manifest-gap-worker', 120))?.chapterKey).toBe('pt-br|default|chapter|2|-');
   });
 
   it('passes complete, sanitized source metadata to the conservative catalog engine', async () => {

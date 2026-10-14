@@ -495,6 +495,11 @@ export class LiteRepository {
         const result = await this.db.query('SELECT * FROM public.importer_lite_claim_task($1,$2::interval)', [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
         return result.rows[0] ? asTask(result.rows[0]) : null;
     }
+    /** Source-backed metadata owns a single low-rate lane and never waits behind chapter claims. */
+    async claimSourceMetadataRefresh(workerId, leaseSeconds) {
+        const result = await this.db.query('SELECT * FROM public.importer_lite_claim_source_metadata_task($1,$2::interval)', [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
+        return result.rows[0] ? asTask(result.rows[0]) : null;
+    }
     /**
      * P0 observation has one durable, explicitly bounded lane.  It is never
      * selected by normal claims, so unchanged watches cannot starve P1/P2.
