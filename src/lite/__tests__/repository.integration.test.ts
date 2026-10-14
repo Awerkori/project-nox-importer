@@ -2472,7 +2472,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     vi.setSystemTime(new Date('2026-10-14T00:00:00Z'));
     try {
       await (runtime as any).refillStoredMetadataEnrichment();
-      await vi.advanceTimersByTimeAsync(4_000);
+      await vi.advanceTimersByTimeAsync(14_000);
       await (runtime as any).refillStoredMetadataEnrichment();
       expect(refill).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(1_000);
