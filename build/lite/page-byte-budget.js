@@ -11,12 +11,11 @@
  * always drain instead of forming a backpressure deadlock.
  */
 export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
-// With the 24-page fence stable for more than an hour, production still
-// showed all byte reservations occupied, queued upgrades, and download/
-// Telegram headroom while RSS remained about 400 MiB (below the prior
-// 500 MiB incident).  This is one 8 MiB admission increment only; the
-// page-count fence, workers, database pool, and upload limits stay fixed.
-export const LITE_PAGE_BUFFER_BUDGET_BYTES = 64 * 1024 * 1024;
+// Production snapshots showed 53.5/64 MiB reserved with four page producers
+// waiting, while RSS was 212 MiB and download/Telegram semaphores had headroom.
+// One bounded 16 MiB increment tests whether byte admission is limiting flow;
+// page-count fence, workers, database pool, and upload limits remain fixed.
+export const LITE_PAGE_BUFFER_BUDGET_BYTES = 80 * 1024 * 1024;
 export class PageByteReservation {
     budget;
     _reservedBytes;
