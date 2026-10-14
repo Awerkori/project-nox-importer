@@ -283,24 +283,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
   });
 
-  it('admits source-backed refetch tasks across mappings and keeps them at P2 behind P1', async () => {
+  it('admits three bounded source-backed refetch tasks and keeps them at P2 behind P1', async () => {
     await db.query(`UPDATE works SET published=true WHERE id IN ($1,$2)`, [ids.p1a,ids.p1b]);
+    await db.query(`INSERT INTO importer_sources (id) VALUES ('source-c')`);
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,sync_status) VALUES
       ('00000000-0000-4000-8000-000000000201','source-a','refetch-a',$1::uuid,'p1-a','P1 A','SYNCED'),
-      ('00000000-0000-4000-8000-000000000202','source-b','refetch-b',$2::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1a,ids.p1b]);
+      ('00000000-0000-4000-8000-000000000202','source-b','refetch-b',$2::uuid,'p1-b','P1 B','SYNCED'),
+      ('00000000-0000-4000-8000-000000000203','source-c','refetch-c',$2::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1a,ids.p1b]);
     await repo.enqueue({ taskType:'IMPORT_CHAPTER',workId:ids.p1a,workKey:`work:${ids.p1a}`,
       chapterKey:'pt-br|default|chapter|1|-',priority:'P1',idempotencyKey:'p1-before-metadata-refetch' });
 
-    expect(await repo.refillSourceMetadataEnrichment(2)).toBe(2);
+    expect(await repo.refillSourceMetadataEnrichment(3)).toBe(3);
     const tasks = await db.query(`SELECT priority,payload->>'source' AS source,payload->>'metadataSourceRefresh' AS refresh
       FROM importer_lite_tasks WHERE payload ? 'metadataSourceRefresh' ORDER BY source`);
     expect(tasks.rows).toEqual([
       { priority:3,source:'source-a',refresh:'true' },
       { priority:3,source:'source-b',refresh:'true' },
+      { priority:3,source:'source-c',refresh:'true' },
     ]);
     expect((await repo.claim('priority-check',60))?.idempotencyKey).toBe('p1-before-metadata-refetch');
-    expect(await repo.refillSourceMetadataEnrichment(2)).toBe(0);
+    expect(await repo.refillSourceMetadataEnrichment(3)).toBe(0);
   });
 
   it('claims source metadata from its dedicated lane while chapter claims remain available', async () => {
@@ -314,7 +317,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
   });
 
-  it('runs at most two source metadata fetches and pauses admission under YSQL pool wait', async () => {
+  it('runs at most three source metadata fetches and gates extra admission under YSQL pool wait', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const lanePool = poolFor(db) as any;
     lanePool.waitingCount = 1;
@@ -331,31 +334,33 @@ describe('LiteRepository against the additive Lite migration', () => {
     let active = 0;
     let maximum = 0;
     let releaseFetches!: () => void;
-    let notifyTwoStarted!: () => void;
-    const bothStarted = new Promise<void>((resolve) => { notifyTwoStarted = resolve; });
+    let notifyThreeStarted!: () => void;
+    const allStarted = new Promise<void>((resolve) => { notifyThreeStarted = resolve; });
     const holdFetches = new Promise<void>((resolve) => { releaseFetches = resolve; });
     (runtime as any).catalog = async () => {
       active++;
       maximum = Math.max(maximum, active);
-      if (active === 2) notifyTwoStarted();
+      if (active === 3) notifyThreeStarted();
       await holdFetches;
       active--;
     };
 
-    await (runtime as any).runSourceMetadataRefresh();
-    expect(claim).not.toHaveBeenCalled();
+    const first = (runtime as any).runSourceMetadataRefresh();
+    await vi.waitFor(() => expect(active).toBe(1));
+    const fencedByWaiter = await (runtime as any).runSourceMetadataRefresh();
+    expect(fencedByWaiter).toBeUndefined();
+    expect(claim).toHaveBeenCalledTimes(1);
     lanePool.waitingCount = 0;
     const runs = [
       (runtime as any).runSourceMetadataRefresh(),
       (runtime as any).runSourceMetadataRefresh(),
-      (runtime as any).runSourceMetadataRefresh(),
     ];
-    await bothStarted;
-    expect(claim).toHaveBeenCalledTimes(2);
-    expect(maximum).toBe(2);
-    expect((runtime as any).sourceMetadataGate.capacity).toBe(2);
+    await allStarted;
+    expect(claim).toHaveBeenCalledTimes(3);
+    expect(maximum).toBe(3);
+    expect((runtime as any).sourceMetadataGate.capacity).toBe(3);
     releaseFetches();
-    await Promise.all(runs);
+    await Promise.all([first, ...runs]);
     memorySpy.mockRestore();
   });
 

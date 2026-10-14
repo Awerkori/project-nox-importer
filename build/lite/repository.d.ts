@@ -76,7 +76,7 @@ export declare class LiteRepository {
     hasAbundantHistoricalP1Reserve(): boolean;
     constructor(db: Db);
     /**
-     * Admit at most two low-priority source-backed metadata reads at a time.
+     * Admit at most three low-priority source-backed metadata reads at a time.
      * Selection rotates across sources, honors source cooldown/eligibility, and
      * records PENDING durably before inserting an idempotent catalog task.
      */

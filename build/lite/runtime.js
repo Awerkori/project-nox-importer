@@ -54,8 +54,9 @@ const SAFE_BUFFERED_PAGE_CAP = 24;
 const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
 const STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS = 15_000;
 const SOURCE_METADATA_REFILL_INTERVAL_MS = 15_000;
-// Stage 2 metadata lane experiment: two dedicated slots, polled every five
-// seconds. Source adapter host limits and source cooldowns remain authoritative.
+// Stage 3 metadata lane experiment: three dedicated slots, polled every five
+// seconds. Pool pressure, public-site health, memory and source host limits
+// still gate each admission.
 const SOURCE_METADATA_LANE_INTERVAL_MS = 5_000;
 const SOURCE_RECOVERY_PROBE_INTERVAL_MS = 30_000;
 /** One process, one executor pool, one bounded reconciler. */
@@ -78,8 +79,8 @@ export class ImporterLiteRuntime {
     claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
     historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
     metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
-    sourceMetadataGate = new AsyncSemaphore(2, 'lite_source_metadata_refetch');
-    sourceMetadataLaneGate = new AsyncSemaphore(2, 'lite_source_metadata_lane');
+    sourceMetadataGate = new AsyncSemaphore(3, 'lite_source_metadata_refetch');
+    sourceMetadataLaneGate = new AsyncSemaphore(3, 'lite_source_metadata_lane');
     sourceMetadataPoolWaitStartedAt = 0;
     sourceAdmissionGate = new SourceAdmissionGate(10_000);
     lastMetadataEnrichmentAt = 0;
@@ -525,9 +526,9 @@ export class ImporterLiteRuntime {
         this.lastSourceMetadataRefillAt = Date.now();
         try {
             // A single transient waiter allows one durable seat; a fully idle pool
-            // allows the tested two-seat stage. Persistent or heavier contention
-            // admits nothing until headroom returns.
-            const maxPending = this.pool.waitingCount === 1 ? 1 : 2;
+            // allows the current three-seat experiment. Persistent or heavier
+            // contention admits nothing until headroom returns.
+            const maxPending = this.pool.waitingCount === 1 ? 1 : 3;
             const admitted = await this.queue.refillSourceMetadataEnrichment(maxPending);
             if (admitted)
                 this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
@@ -542,7 +543,7 @@ export class ImporterLiteRuntime {
         // Let in-flight requests finish, but do not start more background source
         // fetches under a sustained YSQL queue, while the site is paused, or when
         // RSS nears the container's 512 MiB boundary. One transient waiter can use
-        // one of the two slots; it can never admit a second fetch concurrently.
+        // one slot; it cannot expand concurrency while the pool is queued.
         const active = this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available;
         if (this.hasSustainedSourceMetadataPoolPressure() || (this.pool.waitingCount === 1 && active >= 1)
             || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
