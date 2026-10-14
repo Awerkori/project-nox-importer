@@ -154,17 +154,27 @@ describe('LiteRepository against the additive Lite migration', () => {
       alternativeTitles: ['P1 Alias'],
       tags: ['MILF'],
     })]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000119','source-b','metadata-b',$1::uuid,
+        'p1-a','P1 A',$2::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({ alternativeTitles: ['P1 Alias B'] })]);
 
     expect(await repo.refillStoredMetadataEnrichment()).toBe(1);
     const task = await db.query(`SELECT task_type,priority,base_priority,payload
-      FROM importer_lite_tasks WHERE idempotency_key='lite:metadata:source-a:metadata-a'`);
+      FROM importer_lite_tasks WHERE idempotency_key='lite:metadata:v2:source-a:metadata-a'`);
     expect(task.rows).toHaveLength(1);
     expect(task.rows[0]).toMatchObject({ task_type: 'CATALOG', priority: 3, base_priority: 3 });
     expect(task.rows[0].payload).toMatchObject({
-      source: 'source-a', sourceWorkId: 'metadata-a', metadataEnrichment: true,
+      source: 'source-a', sourceWorkId: 'metadata-a', metadataEnrichment: true, metadataEnrichmentVersion: 2,
     });
 
-    // The durable idempotency key makes future recovery turns harmless.
+    // The second low-priority seat belongs to a different source rather than
+    // another mapping from the large source.
+    expect(await repo.refillStoredMetadataEnrichment()).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key='lite:metadata:v2:source-b:metadata-b'`)).rows[0].count).toBe(1);
+    // Both bounded seats are durable; a future recovery turn cannot append a
+    // hidden metadata queue.
     expect(await repo.refillStoredMetadataEnrichment()).toBe(0);
   });
 
@@ -2194,8 +2204,10 @@ describe('LiteRepository against the additive Lite migration', () => {
       (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
       VALUES ('00000000-0000-4000-8000-000000000112','source-a','stored-metadata',$1::uuid,
         'p1-a','P1 A',$2::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({
-      alternative_titles: ['P1 Historical Alias', 'P1 A'],
-      categories: [{ name: 'MILF' }, { name: 'Vanilla' }],
+      // Hipercool historically stored the adapter's explicit arrays as JSON
+      // strings. Enrichment must recover them without source networking.
+      alternative_titles: '["P1 Historical Alias", "P1 A"]',
+      categories: '[{"name":"MILF"}, {"name":"Vanilla"}]',
     })]);
     await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
       idempotencyKey: 'stored-metadata-enrichment',

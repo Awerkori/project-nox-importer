@@ -9,15 +9,33 @@ const aliasesFields = [
 ];
 const tagFields = ['genres', 'tags', 'categories'];
 
-function asTextList(value: unknown, objectKeys: string[] = []): string[] {
-  const values = Array.isArray(value) ? value : value == null ? [] : [value];
+function explicitJsonArray(value: string): unknown[] | null {
+  const text = value.trim();
+  // Some legacy mappings retained an adapter's explicit JSON array as a JSON
+  // string. Decode only a bounded, syntactically valid array; prose and JSON
+  // objects remain ineligible for historical enrichment.
+  if (text.length < 2 || text.length > 32_000 || !text.startsWith('[') || !text.endsWith(']')) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function asTextList(value: unknown, objectKeys: string[] = [], depth = 0): string[] {
+  const encodedArray = typeof value === 'string' && depth < 2 ? explicitJsonArray(value) : null;
+  const values = Array.isArray(value) ? value : (encodedArray ?? (value == null ? [] : [value]));
   return values.flatMap((entry) => {
-    if (typeof entry === 'string') return [entry];
+    if (typeof entry === 'string') {
+      const nested = depth < 2 ? explicitJsonArray(entry) : null;
+      return nested ? asTextList(nested, objectKeys, depth + 1) : [entry];
+    }
     if (!entry || typeof entry !== 'object') return [];
     const record = entry as RawRecord;
     for (const key of objectKeys) {
       const nested = record[key];
-      if (typeof nested === 'string') return [nested];
+      if (nested !== undefined) return asTextList(nested, objectKeys, depth + 1);
     }
     return [];
   });

@@ -22,4 +22,15 @@ describe('stored mapping metadata enrichment', () => {
 
     expect(metadata.genres).toEqual(['MILF', 'Romance', 'Hentai', 'Vanilla', 'Adulto']);
   });
+
+  it('decodes a legacy JSON-array string only from an explicit metadata field', () => {
+    const metadata = extractStoredMappingMetadata({
+      alternativeTitles: '["Nome em português", "한국어 제목", "Primary"]',
+      genres: '["MILF", {"name":"Vanilla"}]',
+      synopsis: '["This looks like JSON but is prose and must not be used"]',
+    }, 'Primary');
+
+    expect(metadata.aliases).toEqual(['Nome em português', '한국어 제목']);
+    expect(metadata.genres).toEqual(['MILF', 'Vanilla']);
+  });
 });
