@@ -121,6 +121,126 @@ export class LiteRepository {
   constructor(private readonly db: Db) {}
 
   /**
+   * Admit at most two low-priority source-backed metadata reads at a time.
+   * Selection rotates across sources, honors source cooldown/eligibility, and
+   * records PENDING durably before inserting an idempotent catalog task.
+   */
+  async refillSourceMetadataEnrichment(maxPending = 2): Promise<number> {
+    const ceiling = Math.max(1, Math.min(2, maxPending));
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const pending = await client.query<{ count: string }>(`SELECT count(*)::int AS count
+        FROM importer_lite_tasks
+        WHERE task_type='CATALOG' AND (state IN ('READY','RUNNING')
+          OR (state='RETRY_WAIT' AND next_run_at<=now()+interval '30 seconds'))
+          AND payload ? 'metadataSourceRefresh'`);
+      if (Number(pending.rows[0]?.count || 0) >= ceiling) {
+        await client.query('COMMIT');
+        return 0;
+      }
+      const candidates = await client.query<Row>(`WITH source_turns AS (
+          SELECT s.id AS source,history.last_admitted_at
+          FROM importer_sources s
+          LEFT JOIN importer_lite_source_health health ON health.source=s.id
+          LEFT JOIN LATERAL (
+            SELECT max(task.created_at) AS last_admitted_at FROM importer_lite_tasks task
+            WHERE task.task_type='CATALOG' AND task.payload ? 'metadataSourceRefresh'
+              AND task.payload->>'source'=s.id
+          ) history ON true
+          WHERE s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
+            AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+            AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+        ), next_mapping AS (
+          SELECT turn.source,turn.last_admitted_at,mapping.source_work_id,mapping.work_id
+          FROM source_turns turn
+          CROSS JOIN LATERAL (
+            -- source_work_id is the second column of the mapping's unique
+            -- (source,source_work_id) index. Advance by selecting the first
+            -- still-unclassified key; completed or externally parked mappings
+            -- fall out of this small index walk without a catalog-wide sort.
+            SELECT m.source_work_id,m.work_id
+            FROM importer_work_mappings m
+            JOIN works w ON w.id=m.work_id AND w.published=true
+            LEFT JOIN importer_lite_metadata_enrichment status
+              ON status.source=m.source AND status.source_work_id=m.source_work_id
+            WHERE m.source=turn.source AND m.work_id IS NOT NULL
+              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+              AND (status.source IS NULL OR status.aliases_state='PENDING' OR status.tags_state='PENDING'
+                OR (status.version<3 AND (status.aliases_state='PARSER_ERROR' OR status.tags_state='PARSER_ERROR'))
+                OR ((status.aliases_state='EXTERNAL_BLOCKED' OR status.tags_state='EXTERNAL_BLOCKED')
+                  AND COALESCE(status.next_retry_at,'-infinity'::timestamptz)<=now()))
+              AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
+                WHERE task.idempotency_key='lite:metadata:source:v3:' || m.source || ':' || m.source_work_id)
+            ORDER BY m.source_work_id
+            LIMIT 1
+          ) mapping
+        )
+        SELECT source,source_work_id,work_id FROM next_mapping
+        ORDER BY last_admitted_at NULLS FIRST,source LIMIT $1`,
+        [ceiling - Number(pending.rows[0]?.count || 0)]);
+
+      for (const row of candidates.rows) {
+        const source = String(row.source);
+        const sourceWorkId = String(row.source_work_id);
+        const workId = String(row.work_id);
+        await client.query(`INSERT INTO importer_lite_metadata_enrichment(source,source_work_id,work_id)
+          VALUES($1,$2,$3::uuid) ON CONFLICT(source,source_work_id) DO UPDATE SET
+            work_id=excluded.work_id,updated_at=now()`, [source, sourceWorkId, workId]);
+        const workKey = `work:${workId}`;
+        const inserted = await client.query<Row>(`INSERT INTO importer_lite_tasks
+          (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
+          VALUES('CATALOG',$1::uuid,$2,3,3,$3,now(),32,$4::jsonb,'{}'::jsonb,false)
+          ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
+          workId, workKey, `lite:metadata:source:v3:${source}:${sourceWorkId}`,
+          JSON.stringify({ source, sourceWorkId, metadataSourceRefresh: true, metadataEnrichmentVersion: 3 }),
+        ]);
+        for (const task of inserted.rows) await this.refreshReadyWork(client, String(task.work_key));
+      }
+      await client.query('COMMIT');
+      return candidates.rowCount || 0;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async recordSourceMetadataEnrichment(input: {
+    source: string; sourceWorkId: string; workId: string;
+    aliasesState: 'ENRICHED' | 'NO_ALIASES' | 'EXTERNAL_BLOCKED' | 'PARSER_ERROR';
+    tagsState: 'ENRICHED' | 'NO_TAGS' | 'EXTERNAL_BLOCKED' | 'PARSER_ERROR';
+    aliasesAdded?: number; tagsAdded?: number; error?: string | null; nextRetryAt?: Date | null;
+    rawMetadata?: Record<string, unknown>;
+  }): Promise<void> {
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      if (input.rawMetadata && Object.keys(input.rawMetadata).length) {
+        await client.query(`UPDATE importer_work_mappings
+          SET metadata=COALESCE(metadata,'{}'::jsonb) || $3::jsonb
+          WHERE source=$1 AND source_work_id=$2 AND work_id=$4::uuid`,
+          [input.source,input.sourceWorkId,JSON.stringify(input.rawMetadata),input.workId]);
+      }
+      await client.query(`INSERT INTO importer_lite_metadata_enrichment
+        (source,source_work_id,work_id,aliases_state,tags_state,aliases_added,tags_added,attempt_count,
+         last_checked_at,next_retry_at,last_error,version,updated_at)
+        VALUES($1,$2,$3::uuid,$4,$5,$6,$7,1,now(),$8,$9,1,now())
+        ON CONFLICT(source,source_work_id) DO UPDATE SET work_id=excluded.work_id,
+          aliases_state=excluded.aliases_state,tags_state=excluded.tags_state,
+          aliases_added=importer_lite_metadata_enrichment.aliases_added+excluded.aliases_added,
+          tags_added=importer_lite_metadata_enrichment.tags_added+excluded.tags_added,
+          attempt_count=importer_lite_metadata_enrichment.attempt_count+1,
+          last_checked_at=now(),next_retry_at=excluded.next_retry_at,last_error=excluded.last_error,
+        version=3,updated_at=now()`, [input.source,input.sourceWorkId,input.workId,input.aliasesState,input.tagsState,
+        Math.max(0,input.aliasesAdded || 0),Math.max(0,input.tagsAdded || 0),input.nextRetryAt || null,input.error || null]);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+
+  /**
    * Incrementally replays explicit aliases/genres already stored on legacy
    * mappings.  It is deliberately a tiny P2 producer: no chapter is claimed,
    * no source is contacted, and at most two catalog tasks may be outstanding.
@@ -252,9 +372,9 @@ export class LiteRepository {
    * gap, never contacts a source, and remains bounded by both work and source
    * so one large title/provider cannot monopolise P1 admission.
    */
-  async refillManifestProvenP1Imports(readyFloor = 64, batchLimit = 16): Promise<number> {
+  async refillManifestProvenP1Imports(readyFloor = 64, batchLimit = 16, forceRepair = false): Promise<number> {
     const floor = Math.max(1, Math.min(512, readyFloor));
-    const maximum = Math.max(1, Math.min(32, batchLimit));
+    const maximum = Math.max(1, Math.min(forceRepair ? 600 : 32, batchLimit));
     const reserve = await this.db.query<{ count: string }>(`SELECT count(*)::int AS count FROM (
       SELECT 1 FROM importer_lite_tasks t
       WHERE t.state='READY' AND t.monitoring=false AND t.priority=2
@@ -279,7 +399,7 @@ export class LiteRepository {
     // that case; the normal claim projection still provides work/source
     // fairness and the durable idempotency key makes the producer inert after
     // each concrete row is represented.
-    const limit = current >= floor
+    const limit = forceRepair ? maximum : current >= floor
       ? Math.min(4, maximum)
       : Math.min(maximum, floor - current);
     const candidates = await this.db.query<Row>(`WITH bounded AS (
@@ -287,17 +407,7 @@ export class LiteRepository {
           cs.source_rank,cs.updated_at
         FROM importer_lite_chapter_sources cs
         JOIN works w ON w.id=cs.work_id
-        JOIN media cover ON cover.id=w.cover_id
-        JOIN importer_sources s ON s.id=cs.source
-        LEFT JOIN importer_lite_source_health h ON h.source=cs.source
-        WHERE w.published=true AND w.title IS NOT NULL AND w.slug IS NOT NULL
-          AND cover.storage_ready=true AND cover.bytes>=1500
-          AND cs.confirmed=true AND cs.has_chapter=true
-          AND s.enabled=true
-          AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-          AND ${sourceExecutionEligibilitySql('s')}
-          AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-          AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+        WHERE cs.confirmed=true AND cs.has_chapter=true
           AND NOT EXISTS (
             SELECT 1 FROM importer_lite_chapters chapter
             WHERE chapter.work_id=cs.work_id AND chapter.canonical_chapter_key=cs.canonical_chapter_key
@@ -307,7 +417,7 @@ export class LiteRepository {
             WHERE task.idempotency_key='lite:chapter:' || cs.work_id::text || ':' || cs.canonical_chapter_key
           )
         ORDER BY cs.updated_at,cs.work_id,cs.canonical_chapter_key,cs.source_rank,cs.source
-        LIMIT 256
+        LIMIT GREATEST(256,$1)
       ), canonical_routes AS (
         SELECT DISTINCT ON (work_id,canonical_chapter_key) *
         FROM bounded
@@ -320,10 +430,9 @@ export class LiteRepository {
         SELECT *,
           row_number() OVER (PARTITION BY work_id ORDER BY updated_at,order_key,canonical_chapter_key) AS work_position
         FROM source_fair
-        WHERE source_position<=2
       )
       SELECT * FROM fair
-      WHERE work_position<=2
+      WHERE ${forceRepair ? 'true' : 'source_position<=2 AND work_position<=2'}
       ORDER BY updated_at,source_position,work_position,source,work_id,order_key
       LIMIT $1`, [limit]);
 
@@ -354,6 +463,21 @@ export class LiteRepository {
       });
     }
     return (await this.enqueueMany(tasks)).inserted;
+  }
+
+  /** One-shot resumable repair for a known confirmed-manifest backlog. It
+   * bypasses only the ordinary reserve quota, never evidence checks or task
+   * idempotency, and still inserts in bounded 128-row transactions.
+   */
+  async materializeConfirmedMissingP1Tasks(maximum = 600): Promise<number> {
+    const limit = Math.max(1, Math.min(10_000, maximum));
+    let inserted = 0;
+    for (let turn = 0; turn < Math.ceil(limit / 128); turn++) {
+      const count = await this.refillManifestProvenP1Imports(1, Math.min(128, limit - inserted), true);
+      inserted += count;
+      if (count === 0 || inserted >= limit) break;
+    }
+    return inserted;
   }
 
   private async refreshReadyWork(client: Pick<PoolClient, 'query'>, workKey: string): Promise<void> {
@@ -445,6 +569,15 @@ export class LiteRepository {
   async claim(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
     const result = await this.db.query<Row>(
       'SELECT * FROM public.importer_lite_claim_task($1,$2::interval)',
+      [workerId, `${Math.max(30, leaseSeconds)} seconds`],
+    );
+    return result.rows[0] ? asTask(result.rows[0]) : null;
+  }
+
+  /** Source-backed metadata owns a single low-rate lane and never waits behind chapter claims. */
+  async claimSourceMetadataRefresh(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
+    const result = await this.db.query<Row>(
+      'SELECT * FROM public.importer_lite_claim_source_metadata_task($1,$2::interval)',
       [workerId, `${Math.max(30, leaseSeconds)} seconds`],
     );
     return result.rows[0] ? asTask(result.rows[0]) : null;
@@ -1220,7 +1353,7 @@ export class LiteRepository {
   }
 
   /** One bounded recovery turn; it cannot consume the claim path or scan works. */
-  async reconcile(limit = 50): Promise<{ leases: number; retries: number; exhausted: number; uploads: number; publishable: number; publishRepairs: number; sourceCooldownRecoveries: number }> {
+  async reconcile(limit = 50): Promise<{ leases: number; retries: number; exhausted: number; uploads: number; uploadReceiptRecoveries: number; publishable: number; publishRepairs: number; sourceCooldownRecoveries: number }> {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
@@ -1341,6 +1474,34 @@ export class LiteRepository {
         [SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS, SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN,
           SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE, SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK],
       );
+      // Recover only a receipt that is independently proven by a durable
+      // Telegram media row with the same reserved id and content hash. Since
+      // the receipt/media write is normally atomic, this is rare, but it makes
+      // a manually restored or legacy receipt safe to reuse after a crash.
+      const provenUploadReceipts = await client.query<Row>(`WITH picked AS (
+          SELECT u.task_id,u.page_position,u.media_id,m.provider_key,m.bot_reference,
+            m.storage_shard_id,m.bytes,m.mime,m.sha256
+          FROM importer_lite_uploads u JOIN media m ON m.id=u.media_id
+          WHERE u.state='UNKNOWN' AND m.provider='telegram' AND m.storage_ready=true
+            AND m.sha256=u.sha256 AND m.bytes>0 AND m.mime LIKE 'image/%'
+            AND NULLIF(m.provider_key,'') IS NOT NULL
+          ORDER BY u.updated_at LIMIT $1 FOR UPDATE OF u SKIP LOCKED
+        ) UPDATE importer_lite_uploads u SET state='PERSISTED',provider_key=picked.provider_key,
+          bot_reference=COALESCE(u.bot_reference,picked.bot_reference),
+          storage_shard_id=COALESCE(u.storage_shard_id,picked.storage_shard_id::text),
+          bytes=picked.bytes,mime=picked.mime,updated_at=now()
+        FROM picked WHERE u.task_id=picked.task_id AND u.page_position=picked.page_position
+          AND u.media_id=picked.media_id RETURNING u.task_id` , [limit]);
+      const reopenedUnknownTasks = await client.query<Row>(`WITH picked AS (
+          SELECT task.id,task.work_key FROM importer_lite_tasks task
+          WHERE task.task_type='IMPORT_CHAPTER' AND task.state='BLOCKED'
+            AND task.reason LIKE 'UPLOAD_OUTCOME_UNKNOWN%'
+            AND NOT EXISTS (SELECT 1 FROM importer_lite_uploads u WHERE u.task_id=task.id
+              AND u.state IN ('UNKNOWN','INTENT','UPLOADED'))
+          ORDER BY task.updated_at LIMIT $1 FOR UPDATE SKIP LOCKED
+        ) UPDATE importer_lite_tasks task SET state='READY',attempts=0,lease_owner=NULL,lease_until=NULL,
+          reason=NULL,next_run_at=now(),updated_at=now()
+        FROM picked WHERE task.id=picked.id RETURNING picked.work_key`, [limit]);
       // A Telegram request with an unknown outcome must never be replayed.
       // Likewise, an old intent left by a crashed process has no proof that
       // Telegram did not accept it.  Mark only the owning task BLOCKED;
@@ -1417,7 +1578,7 @@ export class LiteRepository {
               checkpoint=p.checkpoint || '{"publishIntegrityRepairV1":true}'::jsonb,updated_at=now()
           FROM picked WHERE p.id=picked.id RETURNING picked.work_key`, [limit],
       );
-      for (const key of new Set([...leases.rows, ...retries.rows, ...uploads.rows, ...ready.rows, ...repairedPublishes.rows].map((row) => row.work_key))) {
+      for (const key of new Set([...leases.rows, ...retries.rows, ...uploads.rows, ...reopenedUnknownTasks.rows, ...ready.rows, ...repairedPublishes.rows].map((row) => row.work_key))) {
         await this.refreshReadyWork(client, key);
       }
       await client.query('COMMIT');
@@ -1425,6 +1586,7 @@ export class LiteRepository {
       const readyRetries = retries.rows.filter((row) => row.state === 'READY').length;
       const exhausted = [...leases.rows, ...retries.rows].filter((row) => row.state === 'BLOCKED').length;
       return { leases: leaseRetries, retries: readyRetries, exhausted, uploads: uploads.rowCount || 0,
+        uploadReceiptRecoveries: provenUploadReceipts.rowCount || 0,
         publishable: ready.rowCount || 0, publishRepairs: repairedPublishes.rowCount || 0,
         sourceCooldownRecoveries: Number(sourceCooldownRecovery.rows[0]?.count || 0) };
     } catch (error) {

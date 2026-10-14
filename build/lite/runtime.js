@@ -9,6 +9,7 @@ import { processAndStoreMedia } from '../storage/media.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
+import { SourceAdmissionGate } from '../core/source-admission-gate.js';
 import { sanitizeSynopsis } from './metadata.js';
 import { extractStoredMappingMetadata } from './mapping-metadata.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
@@ -52,6 +53,9 @@ const SAFE_BUFFERED_PAGE_CAP = 24;
 // retaining a two-task reserve and leaving chapter workers unchanged.
 const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
 const STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS = 15_000;
+const SOURCE_METADATA_REFILL_INTERVAL_MS = 15_000;
+const SOURCE_METADATA_LANE_INTERVAL_MS = 15_000;
+const SOURCE_RECOVERY_PROBE_INTERVAL_MS = 30_000;
 /** One process, one executor pool, one bounded reconciler. */
 export class ImporterLiteRuntime {
     pool;
@@ -72,8 +76,13 @@ export class ImporterLiteRuntime {
     claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
     historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
     metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
+    sourceMetadataGate = new AsyncSemaphore(1, 'lite_source_metadata_refetch');
+    sourceMetadataLaneGate = new AsyncSemaphore(1, 'lite_source_metadata_lane');
+    sourceAdmissionGate = new SourceAdmissionGate(10_000);
     lastMetadataEnrichmentAt = 0;
     lastMetadataReplayAt = 0;
+    lastSourceMetadataRefillAt = 0;
+    lastSourceRecoveryProbeAt = 0;
     lastManifestP1RepairAt = 0;
     // Observation is intentionally a one-slot lane. It may create P0 chapter
     // work, but an empty observation must never compete with chapter workers.
@@ -148,6 +157,8 @@ export class ImporterLiteRuntime {
         await this.refillHistoricalP1Catalog();
         await this.refillManifestProvenP1Imports();
         await this.refillStoredMetadataEnrichment();
+        await this.refillSourceMetadataEnrichment();
+        await this.runSourceMetadataRefresh();
         await this.runStoredMetadataReplay();
         // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
         // Lite cutover.  The Lite-specific cap begins safely and can only rise
@@ -173,9 +184,17 @@ export class ImporterLiteRuntime {
                 return;
             void this.refillStoredMetadataEnrichment();
             void this.runStoredMetadataReplay();
+            void this.refillSourceMetadataEnrichment();
         }, STORED_METADATA_REPLAY_INTERVAL_MS);
         metadataTimer.unref();
         this.timers.push(metadataTimer);
+        const sourceMetadataTimer = setInterval(() => {
+            if (!this.isRuntimeLeader)
+                return;
+            void this.runSourceMetadataRefresh();
+        }, SOURCE_METADATA_LANE_INTERVAL_MS);
+        sourceMetadataTimer.unref();
+        this.timers.push(sourceMetadataTimer);
         const healthTimer = setInterval(() => void this.probeSharedResources(), 30_000);
         healthTimer.unref();
         this.timers.push(healthTimer);
@@ -364,6 +383,12 @@ export class ImporterLiteRuntime {
         }
         catch { /* bounded recovery retries next turn */ }
         try {
+            await this.probeDueSourceRecovery();
+        }
+        catch (error) {
+            this.logger.warn('Source cooldown recovery probe failed', { error: error?.message });
+        }
+        try {
             await this.queue.recoverDuplicateCanonicalCatalogFailures();
         }
         catch { /* bounded recovery retries next turn */ }
@@ -375,6 +400,82 @@ export class ImporterLiteRuntime {
         // task is insufficient while P1 remains busy: execute one saved-mapping
         // merge on each eligible recovery turn as well.
         await this.runStoredMetadataReplay();
+    }
+    /**
+     * Probe one expired source cooldown per recovery turn using the same
+     * six-stage production admission gate as the legacy runtime. It never
+     * bypasses a challenge or rate limit: failures remain parked with a new
+     * durable cooldown, while a full PASS explicitly releases the source.
+     */
+    async probeDueSourceRecovery() {
+        if (!this.isRuntimeLeader || Date.now() - this.lastSourceRecoveryProbeAt < SOURCE_RECOVERY_PROBE_INTERVAL_MS)
+            return;
+        this.lastSourceRecoveryProbeAt = Date.now();
+        const selected = await this.pool.query(`SELECT s.id,s.name,s.status,s.base_url
+       FROM importer_sources s
+       LEFT JOIN importer_lite_source_health health ON health.source=s.id
+       WHERE s.enabled=true AND s.status IN ('ACTIVE','COOLDOWN','DEGRADED','PROBING')
+         AND ((s.status='ACTIVE' AND s.blocked_reason IS NOT NULL)
+           OR (s.status IN ('COOLDOWN','DEGRADED','PROBING')
+             AND (s.cooldown_until IS NULL OR s.cooldown_until<=now())))
+         AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+         AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+         AND (s.last_health_check_at IS NULL OR s.last_health_check_at<=now()-interval '5 minutes')
+       ORDER BY s.last_health_check_at NULLS FIRST,s.id LIMIT 1`);
+        const source = selected.rows[0];
+        if (!source)
+            return;
+        const adapter = this.registry.get(source.id);
+        if (!adapter) {
+            await this.pool.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()+interval '6 hours',
+        blocked_reason='SOURCE_ADAPTER_MISSING',last_health_check_at=now(),updated_at=now() WHERE id=$1`, [source.id]);
+            return;
+        }
+        const claimed = await this.pool.query(`UPDATE importer_sources
+      SET status='PROBING',last_health_check_at=now(),updated_at=now()
+      WHERE id=$1 AND enabled=true AND status IN ('ACTIVE','COOLDOWN','DEGRADED','PROBING')
+        AND (cooldown_until IS NULL OR cooldown_until<=now())
+        AND (last_health_check_at IS NULL OR last_health_check_at<=now()-interval '5 minutes')
+      RETURNING id`, [source.id]);
+        if (claimed.rowCount !== 1)
+            return;
+        try {
+            const report = await this.sourceAdmissionGate.executeProdProbe(adapter);
+            const checkedAt = new Date().toISOString();
+            const stages = report.stages.map((stage) => ({ stage: stage.stage, status: stage.status,
+                httpStatus: stage.httpStatus ?? null, durationMs: stage.durationMs,
+                classification: stage.classification ?? null }));
+            if (report.overallStatus === 'PASS') {
+                await this.pool.query(`UPDATE importer_sources SET status='ACTIVE',cooldown_until=NULL,
+          blocked_reason=NULL,blocked_details=$2::jsonb,last_health_check_at=$3,updated_at=now() WHERE id=$1`, [source.id, JSON.stringify({ recovered_at: checkedAt, probe_success: true, stages }), checkedAt]);
+                await this.queue.recordSourceSuccess(source.id);
+                this.logger.info('Source passed bounded recovery admission probe', { source: source.id });
+                return;
+            }
+            const classification = report.classification || 'UNKNOWN_CLOUDFLARE';
+            const longBlock = ['TURNSTILE', 'JS_CHALLENGE', 'DATACENTER_ASN_BLOCK', 'CLOUDFLARE_DATACENTER_BLOCK'].includes(classification);
+            const limited = ['RATE_LIMITED', 'BURST_LIMITED'].includes(classification);
+            const cooldownMs = longBlock ? 6 * 60 * 60_000 : limited ? 60 * 60_000 : 30 * 60_000;
+            const nextProbe = new Date(Date.now() + cooldownMs).toISOString();
+            const health = limited ? 'RATE_LIMITED' : 'DEGRADED';
+            await this.pool.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=$2,
+        blocked_reason=$3,blocked_details=$4::jsonb,last_health_check_at=$5,updated_at=now() WHERE id=$1`, [source.id, nextProbe, classification, JSON.stringify({ stages, cf_ray: report.cfRay, last_checked_at: checkedAt }), checkedAt]);
+            await this.pool.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+        VALUES($1,$2,$3,1,$4) ON CONFLICT(source) DO UPDATE SET health=excluded.health,
+        cooldown_until=excluded.cooldown_until,consecutive_failures=importer_lite_source_health.consecutive_failures+1,
+        last_error=excluded.last_error,updated_at=now()`, [source.id, health, nextProbe, classification]);
+            this.logger.info('Source remains parked after bounded recovery probe', { source: source.id, classification, cooldownMs });
+        }
+        catch (error) {
+            const checkedAt = new Date().toISOString();
+            const nextProbe = new Date(Date.now() + 30 * 60_000).toISOString();
+            await this.pool.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=$2,
+        blocked_reason='SOURCE_RECOVERY_PROBE_ERROR',blocked_details=$3::jsonb,last_health_check_at=$4,updated_at=now() WHERE id=$1`, [source.id, nextProbe, JSON.stringify({ last_checked_at: checkedAt }), checkedAt]);
+            await this.pool.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+        VALUES($1,'DEGRADED',$2,1,$3) ON CONFLICT(source) DO UPDATE SET health='DEGRADED',
+        cooldown_until=excluded.cooldown_until,consecutive_failures=importer_lite_source_health.consecutive_failures+1,
+        last_error=excluded.last_error,updated_at=now()`, [source.id, nextProbe, String(error?.message || 'SOURCE_RECOVERY_PROBE_ERROR').slice(0, 300)]);
+        }
     }
     /** Existing positive manifests may outlive an older completed catalog task. */
     async refillManifestProvenP1Imports() {
@@ -406,6 +507,41 @@ export class ImporterLiteRuntime {
         }
         catch (error) {
             this.logger.warn('Stored metadata enrichment refill failed', { error: error?.message });
+        }
+    }
+    /** Source-backed historical metadata remains a P2 catalog task and shares
+     * normal priority claims; it never steals a chapter worker or bypasses a
+     * STAFF/P0/P1 reserve. At most two tasks are durably admitted across sources.
+     */
+    async refillSourceMetadataEnrichment() {
+        if (!this.isRuntimeLeader || Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS)
+            return;
+        this.lastSourceMetadataRefillAt = Date.now();
+        try {
+            const admitted = await this.queue.refillSourceMetadataEnrichment(2);
+            if (admitted)
+                this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
+        }
+        catch (error) {
+            this.logger.warn('Source metadata refill failed', { error: error?.message });
+        }
+    }
+    /** Dedicated one-slot worker gives source refetch continuous progress without
+     * consuming chapter workers or competing with P0/P1 task selection. */
+    async runSourceMetadataRefresh() {
+        if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire())
+            return;
+        try {
+            const workerId = `${this.runtimeInstanceId}:source-metadata`;
+            const task = await this.queue.claimSourceMetadataRefresh(workerId, 90);
+            if (task)
+                await this.catalog(task, workerId);
+        }
+        catch (error) {
+            this.logger.warn('Source metadata lane failed', { error: error?.message });
+        }
+        finally {
+            this.sourceMetadataLaneGate.release();
         }
     }
     /**
@@ -820,6 +956,8 @@ export class ImporterLiteRuntime {
         const sourceWorkId = String(task.payload.sourceWorkId || '');
         if (task.payload.metadataEnrichment)
             return this.enrichStoredMappingMetadata(task, workerId, source, sourceWorkId);
+        if (task.payload.metadataSourceRefresh)
+            return this.refreshMappingMetadataFromSource(task, workerId, source, sourceWorkId);
         const adapter = this.registry.get(source);
         if (!adapter || !sourceWorkId)
             return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CATALOG_INPUT_INVALID' });
@@ -865,6 +1003,19 @@ export class ImporterLiteRuntime {
           FROM importer_lite_chapter_sources WHERE work_id=$1::uuid AND order_key LIKE 'n|%'`, [resolved.workId])
                 : { rows: [{ order_key: null }] };
             const knownNormalOrder = knownFrontier.rows[0]?.order_key || null;
+            // A manifest can reveal a long historical interval on the first pass
+            // or after the source repairs an incomplete listing. Only its newest
+            // normal chapter is a P0 release; earlier positively listed chapters
+            // enter P1 together so the importer cannot keep moving the gap forward.
+            const newestManifestNormalOrder = snapshot.chapters
+                .map((chapter) => chapterOrderKey({
+                displayNumber: chapter.displayNumber || String(chapter.number),
+                title: chapter.title || '',
+                kind: chapterKind({ displayNumber: chapter.displayNumber || String(chapter.number), title: chapter.title || '' }),
+            }))
+                .filter((orderKey) => orderKey.startsWith('n|'))
+                .sort()
+                .at(-1) || null;
             const manifestSourceIds = [...new Set(snapshot.chapters
                     .map((chapter) => String(chapter.sourceChapterId || ''))
                     .filter(Boolean))];
@@ -884,7 +1035,8 @@ export class ImporterLiteRuntime {
                 const chapterKey = canonicalChapterKey({ displayNumber, title: chapter.title, kind: chapterKindValue, language, edition });
                 const orderKey = chapterOrderKey({ displayNumber, title: chapter.title, kind: chapterKindValue });
                 const historicalRepair = p0Monitoring && orderKey.startsWith('n|') && Boolean(knownNormalOrder && orderKey <= knownNormalOrder);
-                const chapterPriority = p0Monitoring && !historicalRepair ? 'P0' : 'P1';
+                const isNewestManifestRelease = !orderKey.startsWith('n|') || orderKey === newestManifestNormalOrder;
+                const chapterPriority = p0Monitoring && !historicalRepair && isNewestManifestRelease ? 'P0' : 'P1';
                 sourceRows.push({ workId: resolved.workId, chapterKey, source, sourceWorkId, sourceChapterId: chapter.sourceChapterId,
                     language, edition, orderKey, sourceRank: rankForSource(source) });
                 const legacyChapterId = legacyPublished.get(String(chapter.sourceChapterId));
@@ -903,7 +1055,9 @@ export class ImporterLiteRuntime {
                 else if (policy.chapterIngestionEnabled) {
                     const candidate = { taskType: 'IMPORT_CHAPTER', workId: resolved.workId, workKey: `work:${resolved.workId}`,
                         chapterKey, priority: chapterPriority, idempotencyKey: `lite:chapter:${resolved.workId}:${chapterKey}`,
-                        payload: { displayNumber, chapterTitle: chapter.title || '', chapterKind: chapterKindValue, orderKey, language, edition } };
+                        payload: { displayNumber, chapterTitle: chapter.title || '', chapterKind: chapterKindValue, orderKey, language, edition,
+                            ...(p0Monitoring && orderKey.startsWith('n|') && orderKey < String(newestManifestNormalOrder || '')
+                                ? { historicalManifestRepair: true } : {}) } };
                     if (!chapterTaskByKey.has(candidate.idempotencyKey))
                         chapterTaskByKey.set(candidate.idempotencyKey, candidate);
                 }
@@ -978,6 +1132,133 @@ export class ImporterLiteRuntime {
                 reason: String(error?.message || 'CATALOG_FAILED').slice(0, 500), nextRunAt: new Date(Date.now() + retryDelay),
                 priority: monitorRetry ? 'P2' : undefined, monitoring: monitorRetry || undefined,
                 checkpoint: monitorRetry ? { monitorFailures: Number(task.checkpoint.monitorFailures || 0) + 1 } : undefined });
+        }
+    }
+    /** Re-fetch explicit provider metadata for one existing mapping. The task is
+     * P2, single-flight, host rate limited, and only calls fetchWorkDetails (no
+     * manifest/page discovery). A retryable provider failure is durably marked
+     * EXTERNAL_BLOCKED and retried on a bounded exponential cooldown.
+     */
+    async refreshMappingMetadataFromSource(task, workerId, source, sourceWorkId) {
+        if (!source || !sourceWorkId) {
+            await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_SOURCE_INPUT_INVALID' });
+            return;
+        }
+        const adapter = this.registry.get(source);
+        if (!adapter) {
+            const mapping = await this.pool.query(`SELECT work_id::text FROM importer_work_mappings
+        WHERE source=$1 AND source_work_id=$2 AND work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId]);
+            if (mapping.rows[0])
+                await this.queue.recordSourceMetadataEnrichment({
+                    source, sourceWorkId, workId: String(mapping.rows[0].work_id), aliasesState: 'EXTERNAL_BLOCKED',
+                    tagsState: 'EXTERNAL_BLOCKED', error: 'SOURCE_ADAPTER_MISSING', nextRetryAt: new Date(Date.now() + 6 * 60 * 60_000),
+                });
+            await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: 'SOURCE_ADAPTER_MISSING',
+                nextRunAt: new Date(Date.now() + 6 * 60 * 60_000), resetAttempts: true });
+            return;
+        }
+        if (!this.sourceMetadataGate.tryAcquire()) {
+            await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: 'METADATA_LANE_BUSY',
+                nextRunAt: new Date(Date.now() + 30_000), resetAttempts: true });
+            return;
+        }
+        let mappingWorkId = '';
+        try {
+            const mapping = await this.pool.query(`SELECT m.work_id::text,m.source_title,m.source_slug,w.title,w.aliases,
+          (SELECT count(*)::int FROM work_tags wt WHERE wt.work_id=w.id)::text AS tag_count
+         FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
+         WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId]);
+            const row = mapping.rows[0];
+            if (!row) {
+                await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_ENRICHMENT_MAPPING_MISSING' });
+                return;
+            }
+            mappingWorkId = row.work_id;
+            const policy = await this.queue.sourcePolicy(source);
+            if (!policy?.runnable) {
+                const nextRunAt = policy?.cooldownUntil && policy.cooldownUntil > new Date()
+                    ? policy.cooldownUntil : new Date(Date.now() + 6 * 60 * 60_000);
+                await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
+                    aliasesState: 'EXTERNAL_BLOCKED', tagsState: 'EXTERNAL_BLOCKED',
+                    error: `SOURCE_NOT_READY:${policy?.status || 'MISSING'}`, nextRetryAt: nextRunAt });
+                await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: `SOURCE_NOT_READY:${policy?.status || 'MISSING'}`,
+                    nextRunAt, resetAttempts: true });
+                return;
+            }
+            const host = new URL(adapter.baseUrl).host;
+            await this.sourceRateLimiter.acquire(host, undefined, 60_000);
+            const details = await withTimeout(adapter.fetchWorkDetails(sourceWorkId), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'METADATA_SOURCE_TIMEOUT');
+            const raw = details.raw && typeof details.raw === 'object' ? details.raw : {};
+            const sourceMetadata = {
+                ...raw,
+                ...(details.alternativeTitles ? { alternativeTitles: details.alternativeTitles } : {}),
+                ...(details.genres ? { genres: details.genres } : {}),
+            };
+            const extracted = extractStoredMappingMetadata(sourceMetadata, details.title || row.title || row.source_title || '');
+            const hasUnparsedExplicitValue = (fieldPattern) => Object.entries(raw).some(([key, value]) => {
+                if (!fieldPattern.test(key))
+                    return false;
+                if (Array.isArray(value))
+                    return value.length > 0;
+                if (typeof value === 'string')
+                    return value.trim().length > 0 && !['[]', '{}', 'null'].includes(value.trim().toLowerCase());
+                if (value && typeof value === 'object')
+                    return Object.keys(value).length > 0;
+                return value !== null && value !== undefined;
+            });
+            const rawAliasEvidence = hasUnparsedExplicitValue(/^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title)$/i);
+            const rawTagEvidence = hasUnparsedExplicitValue(/^(genres?|tags?|categories)$/i);
+            if ((rawAliasEvidence && extracted.aliases.length === 0) || (rawTagEvidence && extracted.genres.length === 0)) {
+                await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
+                    aliasesState: rawAliasEvidence && extracted.aliases.length === 0 ? 'PARSER_ERROR' : (extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES'),
+                    tagsState: rawTagEvidence && extracted.genres.length === 0 ? 'PARSER_ERROR' : (extracted.genres.length ? 'ENRICHED' : 'NO_TAGS'),
+                    error: 'EXPLICIT_SOURCE_METADATA_NOT_PARSED', rawMetadata: sourceMetadata });
+                await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_SOURCE_PARSER_ERROR',
+                    checkpoint: { metadataSourceRefresh: true, parserError: true } });
+                return;
+            }
+            const resolved = await this.dedupe.resolveWork({
+                source, sourceWorkId, title: details.title || row.source_title || row.title,
+                slug: details.slug || row.source_slug || row.title,
+                aliases: extracted.aliases, genres: extracted.genres,
+                author: details.author, artist: details.artist, synopsis: details.synopsis,
+                kind: details.kind, status: details.status, year: details.year, ageRating: details.ageRating,
+                rawMetadata: sourceMetadata,
+            });
+            if (resolved.workId !== mappingWorkId || resolved.status === 'AMBIGUOUS' || resolved.status === 'FAILED') {
+                throw new Error(`METADATA_SOURCE_MAPPING_CONFLICT:${resolved.reason || resolved.status}`);
+            }
+            const after = await this.pool.query(`SELECT w.aliases,
+        (SELECT count(*)::int FROM work_tags wt WHERE wt.work_id=w.id)::text AS tag_count FROM works w WHERE w.id=$1::uuid`, [mappingWorkId]);
+            const aliasDelta = Math.max(0, (after.rows[0]?.aliases?.length || 0) - (row.aliases?.length || 0));
+            const tagDelta = Math.max(0, Number(after.rows[0]?.tag_count || 0) - Number(row.tag_count || 0));
+            await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
+                aliasesState: extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES',
+                tagsState: extracted.genres.length ? 'ENRICHED' : 'NO_TAGS',
+                aliasesAdded: aliasDelta, tagsAdded: tagDelta, rawMetadata: sourceMetadata });
+            await this.queue.recordSourceSuccess(source);
+            await this.queue.finish(task, workerId, { state: 'DONE', workId: mappingWorkId,
+                checkpoint: { metadataSourceRefresh: true, version: 2, aliases: extracted.aliases.length, aliasDelta,
+                    tags: extracted.genres.length, tagDelta }, resetAttempts: true });
+        }
+        catch (error) {
+            const message = String(error?.message || 'METADATA_SOURCE_FETCH_FAILED').slice(0, 500);
+            const parserFailure = message.startsWith('METADATA_SOURCE_MAPPING_CONFLICT:');
+            const retryDelay = Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(Math.max(task.attempts, 1), 8));
+            if (mappingWorkId)
+                await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
+                    aliasesState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED',
+                    tagsState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED', error: message,
+                    nextRetryAt: parserFailure ? null : new Date(Date.now() + retryDelay) });
+            if (!parserFailure)
+                await this.queue.recordSourceFailure(source, error);
+            await this.queue.finish(task, workerId, parserFailure
+                ? { state: 'BLOCKED', reason: message }
+                : { state: 'RETRY_WAIT', reason: `METADATA_SOURCE_EXTERNAL:${message}`,
+                    nextRunAt: new Date(Date.now() + retryDelay), resetAttempts: true });
+        }
+        finally {
+            this.sourceMetadataGate.release();
         }
     }
     /** A no-network P2 pass over explicit metadata saved with a known mapping. */

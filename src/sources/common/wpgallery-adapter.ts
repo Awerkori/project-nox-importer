@@ -212,11 +212,10 @@ export class WpGalleryAdapter implements SourceAdapter {
       };
     } catch (err: any) {
       this.logger.error(`fetchWorkDetails failed for ${sourceWorkId}: ${err.message}`);
-      return {
-        sourceWorkId,
-        title: sourceWorkId,
-        slug: slugify(sourceWorkId),
-      };
+      // Returning a placeholder made an inaccessible source look like a
+      // successful metadata audit with no aliases or genres. Let the durable
+      // catalog task classify and retry the real provider failure instead.
+      throw err;
     }
   }
 

@@ -3,11 +3,12 @@ import { mergeAlternativeTitles } from '../core/alternative-titles.js';
 type RawRecord = Record<string, unknown>;
 
 const aliasesFields = [
-  'alternativeTitles', 'alternative_titles', 'aliases', 'alternativeNames', 'alternative_names',
-  'originalTitle', 'original_title', 'nativeTitle', 'native_title', 'englishTitle', 'english_title',
-  'romanizedTitle', 'romanized_title',
+  'alternativeTitles', 'alternative_titles', 'alternativeTitle', 'alternative_title',
+  'aliases', 'alternativeNames', 'alternative_names', 'otherNames', 'other_names', 'alsoKnownAs', 'also_known_as',
+  'originalTitle', 'original_title', 'nativeTitle', 'native_title', 'nativeName', 'native_name',
+  'englishTitle', 'english_title', 'romanizedTitle', 'romanized_title', 'romajiTitle', 'romaji_title',
 ];
-const tagFields = ['genres', 'tags', 'categories'];
+const tagFields = ['genres', 'genre', 'tags', 'tag', 'categories'];
 
 function explicitJsonArray(value: string): unknown[] | null {
   const text = value.trim();
@@ -51,7 +52,10 @@ export function extractStoredMappingMetadata(raw: unknown, primaryTitle: string)
   genres: string[];
 } {
   const metadata = raw && typeof raw === 'object' ? raw as RawRecord : {};
-  const aliases = aliasesFields.flatMap((field) => asTextList(metadata[field], ['title', 'name', 'value']));
+  const aliases = aliasesFields.flatMap((field) => asTextList(metadata[field], [
+    'title', 'name', 'value', 'alternativeTitle', 'alternative_title', 'nativeTitle', 'native_title',
+    'englishTitle', 'english_title', 'romanizedTitle', 'romanized_title',
+  ]));
   // Legacy Portuguese adapters persisted tag records with `nome`; accept it
   // alongside the common English keys so the no-network replay can recover
   // metadata already stored in YSQL.

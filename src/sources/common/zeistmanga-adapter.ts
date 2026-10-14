@@ -225,11 +225,10 @@ export class ZeistMangaAdapter implements SourceAdapter {
       };
     } catch (err: any) {
       this.logger.warn(`fetchWorkDetails fallback for ${sourceWorkId}: ${err.message}`);
-      return {
-        sourceWorkId,
-        title: sourceWorkId,
-        slug: slugify(sourceWorkId),
-      };
+      // A placeholder is not source evidence for a legitimate empty tag or
+      // alias list. Preserve the distinction between parser output and a
+      // failed upstream read.
+      throw err;
     }
   }
 

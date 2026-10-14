@@ -76,6 +76,24 @@ export declare class LiteRepository {
     hasAbundantHistoricalP1Reserve(): boolean;
     constructor(db: Db);
     /**
+     * Admit at most two low-priority source-backed metadata reads at a time.
+     * Selection rotates across sources, honors source cooldown/eligibility, and
+     * records PENDING durably before inserting an idempotent catalog task.
+     */
+    refillSourceMetadataEnrichment(maxPending?: number): Promise<number>;
+    recordSourceMetadataEnrichment(input: {
+        source: string;
+        sourceWorkId: string;
+        workId: string;
+        aliasesState: 'ENRICHED' | 'NO_ALIASES' | 'EXTERNAL_BLOCKED' | 'PARSER_ERROR';
+        tagsState: 'ENRICHED' | 'NO_TAGS' | 'EXTERNAL_BLOCKED' | 'PARSER_ERROR';
+        aliasesAdded?: number;
+        tagsAdded?: number;
+        error?: string | null;
+        nextRetryAt?: Date | null;
+        rawMetadata?: Record<string, unknown>;
+    }): Promise<void>;
+    /**
      * Incrementally replays explicit aliases/genres already stored on legacy
      * mappings.  It is deliberately a tiny P2 producer: no chapter is claimed,
      * no source is contacted, and at most two catalog tasks may be outstanding.
@@ -91,7 +109,12 @@ export declare class LiteRepository {
      * gap, never contacts a source, and remains bounded by both work and source
      * so one large title/provider cannot monopolise P1 admission.
      */
-    refillManifestProvenP1Imports(readyFloor?: number, batchLimit?: number): Promise<number>;
+    refillManifestProvenP1Imports(readyFloor?: number, batchLimit?: number, forceRepair?: boolean): Promise<number>;
+    /** One-shot resumable repair for a known confirmed-manifest backlog. It
+     * bypasses only the ordinary reserve quota, never evidence checks or task
+     * idempotency, and still inserts in bounded 128-row transactions.
+     */
+    materializeConfirmedMissingP1Tasks(maximum?: number): Promise<number>;
     private refreshReadyWork;
     enqueue(input: EnqueueLiteTask): Promise<{
         inserted: boolean;
@@ -107,6 +130,8 @@ export declare class LiteRepository {
         insertedKeys: Set<string>;
     }>;
     claim(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    /** Source-backed metadata owns a single low-rate lane and never waits behind chapter claims. */
+    claimSourceMetadataRefresh(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /**
      * P0 observation has one durable, explicitly bounded lane.  It is never
      * selected by normal claims, so unchanged watches cannot starve P1/P2.
@@ -242,6 +267,7 @@ export declare class LiteRepository {
         retries: number;
         exhausted: number;
         uploads: number;
+        uploadReceiptRecoveries: number;
         publishable: number;
         publishRepairs: number;
         sourceCooldownRecoveries: number;

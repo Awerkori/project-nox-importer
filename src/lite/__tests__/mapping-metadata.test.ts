@@ -41,4 +41,15 @@ describe('stored mapping metadata enrichment', () => {
 
     expect(metadata.genres).toEqual(['Ação', 'Fantasia']);
   });
+
+  it('recognizes singular upstream title fields and nested localized titles', () => {
+    const metadata = extractStoredMappingMetadata({
+      alternative_title: [{ language: 'ko', title: '한국 제목' }],
+      native_name: '日本語タイトル',
+      genre: [{ nome: 'Yuri' }],
+    }, 'Example');
+
+    expect(metadata.aliases).toEqual(['한국 제목','日本語タイトル']);
+    expect(metadata.genres).toEqual(['Yuri']);
+  });
 });

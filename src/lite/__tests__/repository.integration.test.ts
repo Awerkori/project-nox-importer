@@ -20,6 +20,9 @@ const deferHealthyP1CatalogMigration = readFileSync(resolve(process.cwd(), 'migr
 const manifestGapRepairIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014031500_lite_manifest_gap_repair_index.sql'), 'utf8');
 const orderedManifestClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014090000_lite_claim_manifest_chapters_in_order.sql'), 'utf8');
 const manifestOrderBeforeRetryMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014091500_lite_claim_manifest_order_before_retry.sql'), 'utf8');
+const sameWorkGapPriorityMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014190000_lite_prioritize_recoverable_same_work_gaps.sql'), 'utf8');
+const sourceMetadataRefetchMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014180000_metadata_source_refetch.sql'), 'utf8');
+const sourceMetadataRefetchIndexesMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014181500_metadata_source_refetch_indexes.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -91,6 +94,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
       sync_status text NOT NULL DEFAULT 'WAITING_ADMISSION', updated_at timestamptz NOT NULL DEFAULT now(),
       UNIQUE(source,source_work_id)
     );
+    CREATE TABLE work_tags (work_id uuid NOT NULL, tag_id uuid NOT NULL, system_generated boolean NOT NULL DEFAULT true, UNIQUE(work_id,tag_id));
     CREATE TABLE settings (key text PRIMARY KEY, value text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE importer_publication_events (
       chapter_id uuid PRIMARY KEY, transition_at timestamptz NOT NULL, recorded_at timestamptz NOT NULL,
@@ -117,6 +121,9 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(manifestGapRepairIndexMigration);
   await db.exec(orderedManifestClaimMigration);
   await db.exec(manifestOrderBeforeRetryMigration);
+  await db.exec(sameWorkGapPriorityMigration);
+  await db.exec(sourceMetadataRefetchMigration);
+  await db.exec(sourceMetadataRefetchIndexesMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -128,6 +135,80 @@ describe('LiteRepository against the additive Lite migration', () => {
     await createSchema(db);
     repo = new LiteRepository(poolFor(db));
   }, 20_000);
+
+  it.each([
+    { name: 'Case A: work 1, source 1–37', existing: [1], manifest: Array.from({ length: 37 }, (_, i) => i + 1) },
+    { name: 'Case B: work 1–5, source 1–18', existing: [1, 2, 3, 4, 5], manifest: Array.from({ length: 18 }, (_, i) => i + 1) },
+  ])('materializes old confirmed chapters and claims the earliest P1 before the new P0 ($name)', async ({ existing, manifest }) => {
+    const workId = ids.p1a;
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [workId]);
+    for (const number of existing) {
+      const key = `pt-br|default|chapter|${number}|-`;
+      const chapterId = `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`;
+      await db.query(`INSERT INTO chapters(id,work_id,number,display_number,canonical_chapter_key)
+        VALUES($1::uuid,$2::uuid,$3::numeric,$4,$5)`, [chapterId, workId, number, String(number), key]);
+      await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key)
+        VALUES($1::uuid,$2,$3::uuid,$4::text,$4::text)`, [workId, key, chapterId, number]);
+    }
+    for (const number of manifest) {
+      const key = `pt-br|default|chapter|${number}|-`;
+      const order = `n|${String(number).padStart(12, '0')}|000000000000|||`;
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,confirmed,has_chapter)
+        VALUES($1::uuid,$2,'source-a','work-a',$3,'pt-BR','default',$4,true,true)`, [workId, key, `source-${number}`, order]);
+    }
+    const newest = manifest.at(-1)!;
+    const newestKey = `pt-br|default|chapter|${newest}|-`;
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`, chapterKey: newestKey,
+      priority: 'P0', idempotencyKey: `lite:chapter:${workId}:${newestKey}`, payload: { orderKey: `n|${String(newest).padStart(12, '0')}|000000000000|||` } });
+
+    const expectedRepairs = manifest.length - existing.length - 1;
+    expect(await repo.materializeConfirmedMissingP1Tasks(100)).toBe(expectedRepairs);
+    const claimed = await repo.claim('same-work-gap-test', 120);
+    const firstMissing = existing.at(-1)! + 1;
+    expect(claimed?.chapterKey).toBe(`pt-br|default|chapter|${firstMissing}|-`);
+    expect(claimed?.priority).toBe('P1');
+  });
+
+  it('does not invent numeric gaps when the source confirms only chapters 1 and 37', async () => {
+    const workId = ids.p1a;
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [workId]);
+    for (const number of [1, 37]) {
+      const key = `pt-br|default|chapter|${number}|-`;
+      const chapterId = `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`;
+      await db.query(`INSERT INTO chapters(id,work_id,number,display_number,canonical_chapter_key)
+        VALUES($1::uuid,$2::uuid,$3::numeric,$4,$5)`, [chapterId, workId, number, String(number), key]);
+      await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key)
+        VALUES($1::uuid,$2,$3::uuid,$4::text,$4::text)`, [workId, key, chapterId, number]);
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,confirmed,has_chapter)
+      VALUES($1::uuid,$2,'source-a','work-a',$3,'pt-BR','default',$4,true,true)`, [workId,
+        key, `source-${number}`, `n|${String(number).padStart(12, '0')}|000000000000|||`]);
+    }
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`, chapterKey: 'pt-br|default|chapter|37|-',
+      priority: 'P0', idempotencyKey: `lite:chapter:${workId}:pt-br|default|chapter|37|-` });
+    expect(await repo.materializeConfirmedMissingP1Tasks(100)).toBe(0);
+    expect((await repo.claim('no-invention-test', 120))?.idempotencyKey)
+      .toBe(`lite:chapter:${workId}:pt-br|default|chapter|37|-`);
+  });
+
+  it('lets a newer P0 proceed when older manifest evidence has no currently eligible source', async () => {
+    const workId = ids.p1a;
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [workId]);
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
+    for (const number of [2, 37]) await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,confirmed,has_chapter)
+      VALUES($1::uuid,$2,'source-a','work-a',$3,'pt-BR','default',$4,true,true)`, [workId,
+      `pt-br|default|chapter|${number}|-`, `source-${number}`, `n|${String(number).padStart(12, '0')}|000000000000|||`]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`, chapterKey: 'pt-br|default|chapter|2|-',
+      priority: 'P1', idempotencyKey: 'external-gap', payload: { manifestP1Repair: true,
+        orderKey: 'n|000000000002|000000000000|||' } });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`, chapterKey: 'pt-br|default|chapter|37|-',
+      priority: 'P0', idempotencyKey: 'new-release-external-gap', payload: { orderKey: 'n|000000000037|000000000000|||' } });
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()+interval '1 hour',blocked_reason='TURNSTILE' WHERE id='source-a'`);
+
+    expect((await repo.claim('external-gap-test', 120))?.idempotencyKey).toBe('new-release-external-gap');
+  });
 
   afterEach(async () => { await db.close(); });
 
@@ -200,6 +281,37 @@ describe('LiteRepository against the additive Lite migration', () => {
         metadataEnrichment: true, source: 'source-a', sourceWorkId: 'metadata-a',
       }),
     });
+  });
+
+  it('admits source-backed refetch tasks across mappings and keeps them at P2 behind P1', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id IN ($1,$2)`, [ids.p1a,ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000201','source-a','refetch-a',$1::uuid,'p1-a','P1 A','SYNCED'),
+      ('00000000-0000-4000-8000-000000000202','source-b','refetch-b',$2::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1a,ids.p1b]);
+    await repo.enqueue({ taskType:'IMPORT_CHAPTER',workId:ids.p1a,workKey:`work:${ids.p1a}`,
+      chapterKey:'pt-br|default|chapter|1|-',priority:'P1',idempotencyKey:'p1-before-metadata-refetch' });
+
+    expect(await repo.refillSourceMetadataEnrichment(2)).toBe(2);
+    const tasks = await db.query(`SELECT priority,payload->>'source' AS source,payload->>'metadataSourceRefresh' AS refresh
+      FROM importer_lite_tasks WHERE payload ? 'metadataSourceRefresh' ORDER BY source`);
+    expect(tasks.rows).toEqual([
+      { priority:3,source:'source-a',refresh:'true' },
+      { priority:3,source:'source-b',refresh:'true' },
+    ]);
+    expect((await repo.claim('priority-check',60))?.idempotencyKey).toBe('p1-before-metadata-refetch');
+    expect(await repo.refillSourceMetadataEnrichment(2)).toBe(0);
+  });
+
+  it('claims source metadata from its dedicated lane while chapter claims remain available', async () => {
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:'source-metadata-dedicated',payload:{source:'source-a',sourceWorkId:'old-work',metadataSourceRefresh:true} });
+    await repo.enqueue({ taskType:'IMPORT_CHAPTER',workId:ids.p1b,workKey:`work:${ids.p1b}`,chapterKey:'chapter-p1',priority:'P1',
+      idempotencyKey:'chapter-p1-remains-first' });
+
+    const sourceTask = await repo.claimSourceMetadataRefresh('metadata-lane',90);
+    expect(sourceTask).toMatchObject({ idempotencyKey:'source-metadata-dedicated',priority:'P2',state:'RUNNING' });
+    expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
   });
 
   it('replays legacy Portuguese tag objects with a bounded v3 task after v2 completed', async () => {
@@ -361,7 +473,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(0);
   });
 
-  it('does not materialize a confirmed gap from a source with an unresolved provider block', async () => {
+  it('materializes confirmed gaps even when their only source is externally blocked', async () => {
     await db.query(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
     await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1a]);
     await db.query(`INSERT INTO importer_lite_chapter_sources
@@ -370,12 +482,26 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`UPDATE importer_sources SET status='COOLDOWN',blocked_reason='TURNSTILE',
       cooldown_until=now()-interval '1 second' WHERE id='source-a'`);
 
-    expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(0);
-    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
-      WHERE idempotency_key LIKE 'lite:chapter:%:pt-br|default|chapter|21|-'`)).rows[0].count).toBe(0);
-
-    await db.query(`UPDATE importer_sources SET blocked_reason=NULL WHERE id='source-a'`);
     expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(1);
+    expect((await db.query(`SELECT priority FROM importer_lite_tasks
+      WHERE idempotency_key LIKE 'lite:chapter:%:pt-br|default|chapter|21|-'`)).rows[0].priority).toBe(2);
+  });
+
+  it('one-shot materialization fills a confirmed-missing backlog idempotently despite an abundant P1 reserve', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1`,[ids.p1a]);
+    for (const chapterKey of ['pt-br|default|chapter|31|-','pt-br|default|chapter|32.10|-','pt-br|default|special|32|extra']) {
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
+        VALUES($1,$2,'source-a','gap-backfill',$3,'pt-BR','default',$2,10,true,true)`,
+        [ids.p1a,chapterKey,`source-chapter-${chapterKey}`]);
+    }
+    for (let index=0;index<20;index++) await repo.enqueue({
+      taskType:'IMPORT_CHAPTER',workId:ids.p1b,workKey:`work:${ids.p1b}`,chapterKey:`reserve-${index}`,
+      priority:'P1',idempotencyKey:`reserve-before-manifest-repair-${index}`,
+    });
+    expect(await repo.materializeConfirmedMissingP1Tasks(20)).toBe(3);
+    expect(await repo.materializeConfirmedMissingP1Tasks(20)).toBe(0);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks WHERE payload ? 'manifestP1Repair'`)).rows[0].count).toBe(3);
   });
 
   it('keeps an executable P1 reserve dominant without hiding proven historical repairs forever', async () => {
@@ -1444,6 +1570,24 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('worker-a', 30))?.idempotencyKey).toBe('healthy-neighbour');
   });
 
+  it('reopens an unknown upload only when a matching durable Telegram media receipt exists', async () => {
+    await repo.enqueue({ taskType:'IMPORT_CHAPTER',workId:ids.p1a,workKey:`work:${ids.p1a}`,
+      chapterKey:'chapter:receipt-proof',priority:'P1',idempotencyKey:'unknown-with-receipt' });
+    const task = await db.query<{id:string}>(`SELECT id FROM importer_lite_tasks WHERE idempotency_key='unknown-with-receipt'`);
+    const intent = await repo.reserveUpload(task.rows[0].id,1,'verified-sha');
+    await db.query(`INSERT INTO media(id,provider,provider_key,bot_reference,mime,bytes,sha256,storage_ready,purpose)
+      VALUES($1::uuid,'telegram','telegram-file-id','bot-1','image/jpeg',4096,'verified-sha',true,'chapter')`,[intent.mediaId]);
+    await repo.markUploadUnknown(task.rows[0].id,1);
+    await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED',reason='UPLOAD_OUTCOME_UNKNOWN:1' WHERE id=$1::uuid`,[task.rows[0].id]);
+
+    const result = await repo.reconcile(10);
+    expect(result.uploadReceiptRecoveries).toBe(1);
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`,[task.rows[0].id])).rows[0])
+      .toMatchObject({state:'READY',reason:null});
+    expect((await db.query(`SELECT state FROM importer_lite_uploads WHERE task_id=$1`,[task.rows[0].id])).rows[0].state)
+      .toBe('PERSISTED');
+  });
+
   it('repairs only an invalid persisted page receipt and preserves its historical media row', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:repair-page', priority: 'P1', idempotencyKey: 'repair-page' });
     const task = await db.query<{ id: string }>(`SELECT id FROM importer_lite_tasks WHERE idempotency_key='repair-page'`);
@@ -2351,6 +2495,44 @@ describe('LiteRepository against the additive Lite migration', () => {
     ]);
   });
 
+  it('keeps a first full manifest from turning chapters 2–36 into moving P0 gaps', async () => {
+    await db.query(`INSERT INTO chapters(id,work_id,number,display_number,canonical_chapter_key)
+      VALUES('00000000-0000-4000-8000-000000000001',$1,1,'1','pt-br|default|chapter|1|-')`, [ids.p1a]);
+    await db.query(`UPDATE chapters SET published_at=now() WHERE id='00000000-0000-4000-8000-000000000001'`);
+    await db.query(`INSERT INTO importer_chapter_mappings(source,source_chapter_id,chapter_id)
+      VALUES('source-a','release-1','00000000-0000-4000-8000-000000000001')`);
+    await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key)
+      VALUES($1,'pt-br|default|chapter|1|-','00000000-0000-4000-8000-000000000001','1','n|000000000001|000000000000|||')`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P0',
+      idempotencyKey: 'full-manifest-p0', payload: { source: 'source-a', sourceWorkId: 'work-a' } });
+    const task = await repo.claim('manifest-frontier', 120);
+    const adapter = {
+      id: 'source-a',
+      fetchWorkSnapshot: async () => ({
+        details: { sourceWorkId: 'work-a', title: 'P1 A', slug: 'p1-a', status: 'ONGOING' as const, language: 'pt-BR' },
+        chapters: Array.from({ length: 37 }, (_, index) => ({
+          sourceChapterId: `release-${index + 1}`, number: index + 1,
+          displayNumber: String(index + 1), title: `Chapter ${index + 1}`,
+        })),
+      }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
+    await (runtime as any).catalog(task, 'manifest-frontier');
+
+    const p1 = await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE work_id=$1 AND task_type='IMPORT_CHAPTER' AND priority=2
+        AND payload ? 'historicalManifestRepair'`, [ids.p1a]);
+    expect(p1.rows[0].count).toBe(35);
+    expect((await db.query(`SELECT priority FROM importer_lite_tasks
+      WHERE idempotency_key='lite:chapter:' || $1 || ':pt-br|default|chapter|37|-'`, [ids.p1a])).rows[0].priority).toBe(1);
+    expect((await repo.claim('manifest-gap-worker', 120))?.chapterKey).toBe('pt-br|default|chapter|2|-');
+  });
+
   it('passes complete, sanitized source metadata to the conservative catalog engine', async () => {
     await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:metadata', priority: 'P2', idempotencyKey: 'metadata-catalog', payload: { source: 'source-a', sourceWorkId: 'metadata-work' } });
     const task = await repo.claim('catalog', 120);
@@ -2412,6 +2594,101 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).catalog(task, 'metadata-worker');
     expect(candidate).toMatchObject({ aliases: ['P1 Historical Alias'], genres: ['MILF', 'Vanilla'] });
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
+  });
+
+  it('re-fetches source metadata, persists raw provider fields, and classifies empty fields per mapping', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000211','source-a','source-refetch',$1::uuid,
+        'p1-a','P1 A','{}'::jsonb,'SYNCED')`, [ids.p1a]);
+    expect(await repo.refillSourceMetadataEnrichment(2)).toBe(1);
+    const task = await repo.claim('metadata-source-worker',60);
+    expect(task?.payload).toMatchObject({ metadataSourceRefresh:true,source:'source-a',sourceWorkId:'source-refetch' });
+    let fetched = 0;
+    const adapter = { id:'source-a',baseUrl:'https://source-a.example',fetchWorkDetails:async () => {
+      fetched++;
+      return { sourceWorkId:'source-refetch',title:'P1 A',slug:'p1-a',alternativeTitles:['Título nativo'],
+        genres:['MILF','Vanilla'],raw:{provider_id:'source-refetch',genres:['MILF','Vanilla']} };
+    } };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork:async () => ({ workId:ids.p1a,status:'EXISTING_MAPPING' }) };
+    await (runtime as any).catalog(task,'metadata-source-worker');
+
+    const mapping = await db.query(`SELECT metadata FROM importer_work_mappings WHERE source='source-a' AND source_work_id='source-refetch'`);
+    const classification = await db.query(`SELECT aliases_state,tags_state,aliases_added,tags_added FROM importer_lite_metadata_enrichment
+      WHERE source='source-a' AND source_work_id='source-refetch'`);
+    expect(fetched).toBe(1);
+    expect(mapping.rows[0].metadata).toMatchObject({ provider_id:'source-refetch',alternativeTitles:['Título nativo'],genres:['MILF','Vanilla'] });
+    expect(classification.rows[0]).toMatchObject({ aliases_state:'ENRICHED',tags_state:'ENRICHED' });
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`,[task!.id])).rows[0].state).toBe('DONE');
+  });
+
+  it('probes one expired Turnstile cooldown and keeps it parked when the provider still challenges', async () => {
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN name text NOT NULL DEFAULT '';
+      ALTER TABLE importer_sources ADD COLUMN base_url text NOT NULL DEFAULT 'https://source-a.example';
+      ALTER TABLE importer_sources ADD COLUMN last_health_check_at timestamptz;
+      ALTER TABLE importer_sources ADD COLUMN blocked_reason text;
+      ALTER TABLE importer_sources ADD COLUMN blocked_details jsonb;
+      ALTER TABLE importer_sources ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now()`);
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()-interval '1 hour',
+      blocked_reason='TURNSTILE',blocked_details='{}'::jsonb,last_health_check_at=now()-interval '6 hours'
+      WHERE id='source-a'`);
+    const adapter = { id:'source-a',name:'Source A',baseUrl:'https://source-a.example' };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-0000-0000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
+    );
+    const admission = { executeProdProbe:vi.fn(async () => ({ overallStatus:'FAIL',classification:'TURNSTILE',cfRay:'ray-test',
+      stages:[{ stage:'BASE_URL',status:'FAIL',httpStatus:403,durationMs:20,classification:'TURNSTILE' }] })) };
+    (runtime as any).sourceAdmissionGate = admission;
+    (runtime as any).isRuntimeLeader = true;
+
+    await (runtime as any).probeDueSourceRecovery();
+
+    const source = (await db.query(`SELECT status,blocked_reason,cooldown_until FROM importer_sources WHERE id='source-a'`)).rows[0];
+    expect(admission.executeProdProbe).toHaveBeenCalledTimes(1);
+    expect(source.status).toBe('COOLDOWN');
+    expect(source.blocked_reason).toBe('TURNSTILE');
+    expect(new Date(source.cooldown_until).getTime()).toBeGreaterThan(Date.now()+5*60*60_000);
+  });
+
+  it('releases an expired source only after every admission probe stage passes', async () => {
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN name text NOT NULL DEFAULT '';
+      ALTER TABLE importer_sources ADD COLUMN base_url text NOT NULL DEFAULT 'https://source-a.example';
+      ALTER TABLE importer_sources ADD COLUMN last_health_check_at timestamptz;
+      ALTER TABLE importer_sources ADD COLUMN blocked_reason text;
+      ALTER TABLE importer_sources ADD COLUMN blocked_details jsonb;
+      ALTER TABLE importer_sources ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now()`);
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()-interval '1 hour',
+      blocked_reason='TEMPORARY_WAF',blocked_details='{}'::jsonb,last_health_check_at=now()-interval '6 hours'
+      WHERE id='source-a'`);
+    const adapter = { id:'source-a',name:'Source A',baseUrl:'https://source-a.example' };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-0000-0000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
+    );
+    const admission = { executeProdProbe:vi.fn(async () => ({ overallStatus:'PASS',classification:null,cfRay:null,
+      stages:[{ stage:'BASE_URL',status:'PASS',httpStatus:200,durationMs:20,classification:null }] })) };
+    (runtime as any).sourceAdmissionGate = admission;
+    (runtime as any).isRuntimeLeader = true;
+
+    await (runtime as any).probeDueSourceRecovery();
+
+    const source = (await db.query(`SELECT status,blocked_reason,blocked_details FROM importer_sources WHERE id='source-a'`)).rows[0];
+    expect(admission.executeProdProbe).toHaveBeenCalledTimes(1);
+    expect(source.status).toBe('ACTIVE');
+    expect(source.blocked_reason).toBeNull();
+    expect(source.blocked_details).toMatchObject({ probe_success:true });
   });
 
   it('drains a legacy stored-metadata replay while P1 remains claimable', async () => {
