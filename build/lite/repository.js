@@ -34,6 +34,7 @@ const asTask = (row) => ({
     leaseUntil: row.lease_until ? new Date(row.lease_until) : null, reason: row.reason,
     monitoring: Boolean(row.monitoring),
     payload: row.payload || {}, checkpoint: row.checkpoint || {},
+    createdAt: row.created_at ? new Date(row.created_at) : undefined,
 });
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export class LiteRepository {
