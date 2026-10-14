@@ -2325,7 +2325,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     (runtime as any).isRuntimeLeader = true;
     (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'EXISTING_MAPPING' }) };
-    await (runtime as any).runStoredMetadataReplay();
+    // Recovery is the periodic production path.  A continuously healthy P1
+    // reserve must not leave this durable enrichment task READY forever.
+    await (runtime as any).runRecoveryTurn();
     expect((await db.query(`SELECT state FROM importer_lite_tasks
       WHERE idempotency_key='lite:metadata:v2:source-a:replay-metadata'`)).rows[0].state).toBe('DONE');
     expect((await repo.claim('chapter-worker', 120))?.idempotencyKey).toBe('p1-keeps-priority');
