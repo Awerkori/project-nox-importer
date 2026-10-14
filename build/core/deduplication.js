@@ -150,7 +150,13 @@ export class DeduplicationEngine {
                 // Update last_synced_at
                 await this.supabase
                     .from('importer_work_mappings')
-                    .update({ last_synced_at: new Date().toISOString() })
+                    .update({
+                    last_synced_at: new Date().toISOString(),
+                    // Keep source-refetch metadata durable as well as applying the
+                    // non-destructive canonical merge below. A shallow JSON merge
+                    // preserves unrelated historical provenance and mapping fields.
+                    metadata: { ...(existingMapping.metadata || {}), ...(candidate.rawMetadata || {}) },
+                })
                     .eq('id', existingMapping.id);
                 // Apply metadata precedence on re-sync
                 await this.applyMetadataPrecedence(existingMapping.work_id, candidate, source);

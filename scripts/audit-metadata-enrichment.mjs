@@ -1,4 +1,4 @@
-// Read-only production audit for the bounded v2 aliases/tags replay.
+// Read-only production audit for the bounded aliases/tags metadata replays.
 // Usage: NOX_AUDIT_ENV_FILE=/path/to/.env node scripts/audit-metadata-enrichment.mjs
 // It deliberately never contacts upstream sources or mutates task state.
 import fs from 'node:fs';
@@ -69,7 +69,16 @@ try {
   const mappings = await one(`
     WITH evidence AS (
       SELECT m.source,m.source_work_id,m.work_id, ${metadataEvidence} AS metadata_evidence,
-        ${aliasEvidence} AS alias_evidence
+        ${aliasEvidence} AS alias_evidence,
+        EXISTS (
+          SELECT 1 FROM jsonb_each(m.metadata) f(key,value)
+          CROSS JOIN LATERAL jsonb_array_elements(
+            CASE WHEN jsonb_typeof(f.value)='array' THEN f.value ELSE '[]'::jsonb END
+          ) tag(value)
+          WHERE f.key=ANY(ARRAY['genres','tags','categories']::text[])
+            AND jsonb_typeof(tag.value)='object'
+            AND NULLIF(btrim(tag.value->>'nome'),'') IS NOT NULL
+        ) AS legacy_pt_tags
       FROM importer_work_mappings m
       JOIN works w ON w.id=m.work_id
       WHERE w.published=true AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
@@ -77,13 +86,16 @@ try {
     SELECT count(*) FILTER (WHERE metadata_evidence)::int AS metadata_eligible,
       count(*) FILTER (WHERE alias_evidence)::int AS alias_evidence_mappings,
       count(*) FILTER (WHERE alias_evidence AND COALESCE(array_length(w.aliases,1),0)=0)::int AS alias_evidence_missing_on_work,
+      count(*) FILTER (WHERE legacy_pt_tags)::int AS legacy_portuguese_tag_mappings,
       count(*) FILTER (WHERE metadata_evidence AND NOT EXISTS (
         SELECT 1 FROM importer_lite_tasks t
-        WHERE t.idempotency_key='lite:metadata:v2:' || evidence.source || ':' || evidence.source_work_id
+        WHERE t.idempotency_key='lite:metadata:v' || CASE WHEN evidence.legacy_pt_tags THEN '3' ELSE '2' END
+          || ':' || evidence.source || ':' || evidence.source_work_id
       ))::int AS eligible_not_materialized,
       count(*) FILTER (WHERE metadata_evidence AND EXISTS (
         SELECT 1 FROM importer_lite_tasks t
-        WHERE t.idempotency_key='lite:metadata:v2:' || evidence.source || ':' || evidence.source_work_id
+        WHERE t.idempotency_key='lite:metadata:v' || CASE WHEN evidence.legacy_pt_tags THEN '3' ELSE '2' END
+          || ':' || evidence.source || ':' || evidence.source_work_id
           AND t.state IN ('READY','RUNNING','RETRY_WAIT')
       ))::int AS eligible_in_flight
     FROM evidence JOIN works w ON w.id=evidence.work_id`);
@@ -91,8 +103,9 @@ try {
   const replay = await pool.query(`
     SELECT state,count(*)::int AS count,min(created_at) AS oldest
     FROM importer_lite_tasks
-    WHERE task_type='CATALOG' AND payload->>'metadataEnrichmentVersion'='2'
-    GROUP BY state ORDER BY state`);
+    WHERE task_type='CATALOG' AND payload->>'metadataEnrichmentVersion' IN ('2','3')
+    GROUP BY payload->>'metadataEnrichmentVersion',state
+    ORDER BY payload->>'metadataEnrichmentVersion',state`);
 
   const tags = await one(`
     SELECT count(DISTINCT w.id)::int AS published_works,
@@ -106,11 +119,40 @@ try {
     WHERE w.published=true`);
 
   const gaps = await pool.query(`
-    SELECT state,COALESCE(reason,'') AS reason,count(*)::int AS count
+    SELECT state,CASE
+      WHEN reason LIKE 'UPLOAD_OUTCOME_UNKNOWN%' THEN 'UPLOAD_OUTCOME_UNKNOWN'
+      WHEN reason='SOURCE_RATE_LIMITED' THEN 'SOURCE_RATE_LIMITED'
+      WHEN reason LIKE 'SOURCE_NOT_READY:%' THEN 'SOURCE_NOT_READY'
+      WHEN reason LIKE 'MANIFEST%' OR reason LIKE '%MANIFEST%' THEN 'MANIFEST'
+      WHEN reason='WORK_PRESENTATION_INCOMPLETE' THEN 'WORK_PRESENTATION_INCOMPLETE'
+      ELSE COALESCE(NULLIF(split_part(reason,':',1),''),'(empty)') END AS reason_class,count(*)::int AS count
     FROM importer_lite_tasks
-    WHERE task_type='IMPORT_CHAPTER'
-      AND (reason LIKE 'UPLOAD_OUTCOME_UNKNOWN%' OR reason='SOURCE_RATE_LIMITED')
-    GROUP BY state,reason ORDER BY state,reason`);
+    WHERE task_type='IMPORT_CHAPTER' AND state IN ('RETRY_WAIT','BLOCKED')
+    GROUP BY state,reason_class ORDER BY state,reason_class`);
+
+  const sourceMetadata = await one(`WITH eligible AS (
+      SELECT m.source,m.source_work_id,m.work_id,status.aliases_state,status.tags_state
+      FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
+      LEFT JOIN importer_lite_metadata_enrichment status
+        ON status.source=m.source AND status.source_work_id=m.source_work_id
+      WHERE w.published=true AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+    ) SELECT count(*)::int AS mappings,
+      count(DISTINCT work_id)::int AS works,
+      count(*) FILTER (WHERE aliases_state='ENRICHED')::int AS aliases_enriched,
+      count(*) FILTER (WHERE aliases_state='NO_ALIASES')::int AS no_aliases,
+      count(*) FILTER (WHERE aliases_state='EXTERNAL_BLOCKED')::int AS aliases_external_blocked,
+      count(*) FILTER (WHERE aliases_state='PARSER_ERROR')::int AS aliases_parser_error,
+      count(*) FILTER (WHERE aliases_state IS NULL OR aliases_state='PENDING')::int AS aliases_pending,
+      count(*) FILTER (WHERE tags_state='ENRICHED')::int AS tags_enriched,
+      count(*) FILTER (WHERE tags_state='NO_TAGS')::int AS no_tags,
+      count(*) FILTER (WHERE tags_state='EXTERNAL_BLOCKED')::int AS tags_external_blocked,
+      count(*) FILTER (WHERE tags_state='PARSER_ERROR')::int AS tags_parser_error,
+      count(*) FILTER (WHERE tags_state IS NULL OR tags_state='PENDING')::int AS tags_pending
+    FROM eligible`);
+
+  const sourceMetadataTasks = await pool.query(`SELECT state,count(*)::int AS count
+    FROM importer_lite_tasks WHERE task_type='CATALOG' AND payload ? 'metadataSourceRefresh'
+    GROUP BY state ORDER BY state`);
 
   const manifestGaps = await one(`
     WITH confirmed AS (
@@ -149,6 +191,8 @@ try {
     mappings,
     replay: replay.rows,
     tags,
+    sourceMetadata,
+    sourceMetadataTasks: sourceMetadataTasks.rows,
     manifestGaps,
     gapRecovery: gaps.rows,
   }, null, 2));

@@ -166,14 +166,11 @@ export class GreenShitAdapter implements SourceAdapter {
         synopsis,
         genres: genres.length > 0 ? genres : undefined,
         status: obra.obr_status === 12 ? 'COMPLETED' : 'UNKNOWN',
+        raw: obra,
       };
     } catch (err: any) {
       this.logger.error(`fetchWorkDetails failed for ${sourceWorkId}: ${err.message}`);
-      return {
-        sourceWorkId,
-        title: sourceWorkId,
-        slug: slugify(sourceWorkId),
-      };
+      throw err;
     }
   }
 

@@ -23,8 +23,10 @@ export declare class ImporterLiteRuntime {
     private readonly claimGate;
     private readonly historicalP1BackfillGate;
     private readonly metadataReplayGate;
+    private readonly sourceMetadataGate;
     private lastMetadataEnrichmentAt;
     private lastMetadataReplayAt;
+    private lastSourceMetadataRefillAt;
     private lastManifestP1RepairAt;
     private readonly monitorGate;
     private readonly runtimeInstanceId;
@@ -84,6 +86,11 @@ export declare class ImporterLiteRuntime {
      * bounded replay lane; normal chapter claims retain strict priority.
      */
     private refillStoredMetadataEnrichment;
+    /** Source-backed historical metadata remains a P2 catalog task and shares
+     * normal priority claims; it never steals a chapter worker or bypasses a
+     * STAFF/P0/P1 reserve. At most two tasks are durably admitted across sources.
+     */
+    private refillSourceMetadataEnrichment;
     /**
      * One local metadata merge at a time prevents P1's legitimate chapter
      * reserve from starving aliases/tags. It reads only a saved mapping and
@@ -125,6 +132,12 @@ export declare class ImporterLiteRuntime {
     private handle;
     private discover;
     private catalog;
+    /** Re-fetch explicit provider metadata for one existing mapping. The task is
+     * P2, single-flight, host rate limited, and only calls fetchWorkDetails (no
+     * manifest/page discovery). A retryable provider failure is durably marked
+     * EXTERNAL_BLOCKED and retried on a bounded exponential cooldown.
+     */
+    private refreshMappingMetadataFromSource;
     /** A no-network P2 pass over explicit metadata saved with a known mapping. */
     private enrichStoredMappingMetadata;
     /** Release bursts get a quick recheck; quiet works exponentially back off. */
