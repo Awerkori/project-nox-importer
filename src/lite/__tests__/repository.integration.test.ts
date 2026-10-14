@@ -2603,7 +2603,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       VALUES ('00000000-0000-4000-8000-000000000211','source-a','source-refetch',$1::uuid,
         'p1-a','P1 A','{}'::jsonb,'SYNCED')`, [ids.p1a]);
     expect(await repo.refillSourceMetadataEnrichment(2)).toBe(1);
-    const task = await repo.claim('metadata-source-worker',60);
+    const task = await repo.claimSourceMetadataRefresh('metadata-source-worker',60);
     expect(task?.payload).toMatchObject({ metadataSourceRefresh:true,source:'source-a',sourceWorkId:'source-refetch' });
     let fetched = 0;
     const adapter = { id:'source-a',baseUrl:'https://source-a.example',fetchWorkDetails:async () => {
@@ -2627,6 +2627,37 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(mapping.rows[0].metadata).toMatchObject({ provider_id:'source-refetch',alternativeTitles:['Título nativo'],genres:['MILF','Vanilla'] });
     expect(classification.rows[0]).toMatchObject({ aliases_state:'ENRICHED',tags_state:'ENRICHED' });
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`,[task!.id])).rows[0].state).toBe('DONE');
+  });
+
+  it('classifies source login/challenge pages as external blocks instead of parser errors', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000212','source-a','challenge-page',$1::uuid,
+        'p1-a','P1 A','{}'::jsonb,'SYNCED')`, [ids.p1a]);
+    expect(await repo.refillSourceMetadataEnrichment(1)).toBe(1);
+    const task = await repo.claimSourceMetadataRefresh('metadata-challenge-worker',60);
+    const adapter = { id:'source-a',baseUrl:'https://source-a.example',fetchWorkDetails:async () => ({
+      sourceWorkId:'challenge-page',title:'Please login',slug:'login',raw:{},
+    }) };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork:async () => ({ workId:null,status:'FAILED',
+      reason:'INVALID_EDITORIAL_TITLE: Title is an authentication or login prompt' }) };
+
+    await (runtime as any).catalog(task,'metadata-challenge-worker');
+
+    const status = await db.query(`SELECT aliases_state,tags_state,next_retry_at FROM importer_lite_metadata_enrichment
+      WHERE source='source-a' AND source_work_id='challenge-page'`);
+    expect(status.rows[0].aliases_state).toBe('EXTERNAL_BLOCKED');
+    expect(status.rows[0].tags_state).toBe('EXTERNAL_BLOCKED');
+    expect(status.rows[0].next_retry_at).not.toBeNull();
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`,[task!.id])).rows[0])
+      .toMatchObject({ state:'RETRY_WAIT',reason:'METADATA_SOURCE_EXTERNAL:METADATA_SOURCE_MAPPING_CONFLICT:INVALID_EDITORIAL_TITLE: Title is an authentication or login prompt' });
   });
 
   it('probes one expired Turnstile cooldown and keeps it parked when the provider still challenges', async () => {
