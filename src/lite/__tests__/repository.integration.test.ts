@@ -48,6 +48,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
     CREATE TABLE works (
       id uuid PRIMARY KEY, title text, slug text, cover_id uuid,
       published boolean NOT NULL DEFAULT false, latest_chapter_published_at timestamptz,
+      aliases text[] NOT NULL DEFAULT ARRAY[]::text[],
       updated_at timestamptz
     );
     CREATE TABLE chapters (
@@ -82,6 +83,8 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
     );
     CREATE TABLE importer_work_mappings (
       id uuid PRIMARY KEY, source text NOT NULL, source_work_id text NOT NULL, work_id uuid,
+      source_slug text NOT NULL DEFAULT '', source_title text NOT NULL DEFAULT '',
+      metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
       sync_status text NOT NULL DEFAULT 'WAITING_ADMISSION', updated_at timestamptz NOT NULL DEFAULT now(),
       UNIQUE(source,source_work_id)
     );
@@ -140,6 +143,29 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.staggerReadyDiscoveries(60_000)).toBe(2);
     const claimed = await repo.claim('stagger-worker', 600);
     expect(claimed?.taskType).toBe('CATALOG');
+  });
+
+  it('admits one low-priority no-network metadata task from explicit stored mapping fields', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000111','source-a','metadata-a',$1::uuid,
+        'p1-a','P1 A',$2::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({
+      alternativeTitles: ['P1 Alias'],
+      tags: ['MILF'],
+    })]);
+
+    expect(await repo.refillStoredMetadataEnrichment()).toBe(1);
+    const task = await db.query(`SELECT task_type,priority,base_priority,payload
+      FROM importer_lite_tasks WHERE idempotency_key='lite:metadata:source-a:metadata-a'`);
+    expect(task.rows).toHaveLength(1);
+    expect(task.rows[0]).toMatchObject({ task_type: 'CATALOG', priority: 3, base_priority: 3 });
+    expect(task.rows[0].payload).toMatchObject({
+      source: 'source-a', sourceWorkId: 'metadata-a', metadataEnrichment: true,
+    });
+
+    // The durable idempotency key makes future recovery turns harmless.
+    expect(await repo.refillStoredMetadataEnrichment()).toBe(0);
   });
 
   it('refills a low P1 reserve from durable historical mappings without inventing numeric gaps or letting one source monopolize', async () => {
@@ -2114,6 +2140,36 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
     expect(candidate.synopsis).toContain('Primeiro parágrafo seguro.');
     expect(candidate.synopsis).toContain('\n');
+  });
+
+  it('enriches explicit historical mapping aliases and tags without calling the source adapter', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000112','source-a','stored-metadata',$1::uuid,
+        'p1-a','P1 A',$2::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({
+      alternative_titles: ['P1 Historical Alias', 'P1 A'],
+      categories: [{ name: 'MILF' }, { name: 'Vanilla' }],
+    })]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
+      idempotencyKey: 'stored-metadata-enrichment',
+      payload: { source: 'source-a', sourceWorkId: 'stored-metadata', metadataEnrichment: true } });
+    const task = await repo.claim('metadata-worker', 120);
+    const registry = { get: () => { throw new Error('metadata enrichment must not call an adapter'); } } as unknown as SourceRegistry;
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, registry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    let candidate: any;
+    (runtime as any).dedupe = { resolveWork: async (value: any) => {
+      candidate = value;
+      return { workId: ids.p1a, status: 'EXISTING_MAPPING' };
+    } };
+
+    await (runtime as any).catalog(task, 'metadata-worker');
+    expect(candidate).toMatchObject({ aliases: ['P1 Historical Alias'], genres: ['MILF', 'Vanilla'] });
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
   });
 
   it('keeps catalog metadata and source mappings while honoring chapter ingestion disablement', async () => {

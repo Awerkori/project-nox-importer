@@ -22,6 +22,7 @@ export declare class ImporterLiteRuntime {
     private readonly bufferedPageBytes;
     private readonly claimGate;
     private readonly historicalP1BackfillGate;
+    private lastMetadataEnrichmentAt;
     private readonly monitorGate;
     private readonly runtimeInstanceId;
     private readonly runtimeBootedAt;
@@ -72,6 +73,12 @@ export declare class ImporterLiteRuntime {
      */
     private refillHistoricalP1Catalog;
     private runRecoveryTurn;
+    /**
+     * Historical aliases/tags already present in a source mapping are cheap,
+     * useful evidence. Feed a single P2 catalog task every five minutes; normal
+     * strict admission still makes it yield completely to STAFF/P0/P1.
+     */
+    private refillStoredMetadataEnrichment;
     /** A bounded source view refreshes only outside claims and only once per recovery turn. */
     private refreshSourceFairness;
     private upsertChapterSources;
@@ -106,6 +113,8 @@ export declare class ImporterLiteRuntime {
     private handle;
     private discover;
     private catalog;
+    /** A no-network P2 pass over explicit metadata saved with a known mapping. */
+    private enrichStoredMappingMetadata;
     /** Release bursts get a quick recheck; quiet works exponentially back off. */
     private monitorIntervalMs;
     /** Bounded health recovery for the two recurring observation task types. */

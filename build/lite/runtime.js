@@ -10,6 +10,7 @@ import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
 import { sanitizeSynopsis } from './metadata.js';
+import { extractStoredMappingMetadata } from './mapping-metadata.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const withTimeout = async (operation, timeoutMs, code) => {
@@ -60,6 +61,7 @@ export class ImporterLiteRuntime {
     bufferedPageBytes;
     claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
     historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
+    lastMetadataEnrichmentAt = 0;
     // Observation is intentionally a one-slot lane. It may create P0 chapter
     // work, but an empty observation must never compete with chapter workers.
     monitorGate = new AsyncSemaphore(1, 'lite_p0_monitor');
@@ -131,6 +133,7 @@ export class ImporterLiteRuntime {
         await this.queue.recoverDuplicateCanonicalCatalogFailures();
         await this.refreshSourceFairness();
         await this.refillHistoricalP1Catalog();
+        await this.refillStoredMetadataEnrichment();
         // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
         // Lite cutover.  The Lite-specific cap begins safely and can only rise
         // through an explicit, benchmarked staging configuration.
@@ -343,6 +346,25 @@ export class ImporterLiteRuntime {
         catch { /* bounded recovery retries next turn */ }
         await this.refreshSourceFairness();
         await this.refillHistoricalP1Catalog();
+        await this.refillStoredMetadataEnrichment();
+    }
+    /**
+     * Historical aliases/tags already present in a source mapping are cheap,
+     * useful evidence. Feed a single P2 catalog task every five minutes; normal
+     * strict admission still makes it yield completely to STAFF/P0/P1.
+     */
+    async refillStoredMetadataEnrichment() {
+        if (!this.isRuntimeLeader || Date.now() - this.lastMetadataEnrichmentAt < 5 * 60_000)
+            return;
+        this.lastMetadataEnrichmentAt = Date.now();
+        try {
+            const admitted = await this.queue.refillStoredMetadataEnrichment();
+            if (admitted)
+                this.logger.info('Admitted bounded stored metadata enrichment', { admitted });
+        }
+        catch (error) {
+            this.logger.warn('Stored metadata enrichment refill failed', { error: error?.message });
+        }
     }
     /** A bounded source view refreshes only outside claims and only once per recovery turn. */
     async refreshSourceFairness() {
@@ -729,6 +751,8 @@ export class ImporterLiteRuntime {
     async catalog(task, workerId) {
         const source = String(task.payload.source || '');
         const sourceWorkId = String(task.payload.sourceWorkId || '');
+        if (task.payload.metadataEnrichment)
+            return this.enrichStoredMappingMetadata(task, workerId, source, sourceWorkId);
         const adapter = this.registry.get(source);
         if (!adapter || !sourceWorkId)
             return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CATALOG_INPUT_INVALID' });
@@ -887,6 +911,51 @@ export class ImporterLiteRuntime {
                 reason: String(error?.message || 'CATALOG_FAILED').slice(0, 500), nextRunAt: new Date(Date.now() + retryDelay),
                 priority: monitorRetry ? 'P2' : undefined, monitoring: monitorRetry || undefined,
                 checkpoint: monitorRetry ? { monitorFailures: Number(task.checkpoint.monitorFailures || 0) + 1 } : undefined });
+        }
+    }
+    /** A no-network P2 pass over explicit metadata saved with a known mapping. */
+    async enrichStoredMappingMetadata(task, workerId, source, sourceWorkId) {
+        if (!source || !sourceWorkId) {
+            await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_ENRICHMENT_INPUT_INVALID' });
+            return;
+        }
+        try {
+            const mapping = await this.pool.query(`SELECT m.work_id::text,m.source_title,m.source_slug,w.title AS work_title,m.metadata
+         FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
+         WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId]);
+            const row = mapping.rows[0];
+            if (!row) {
+                await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_ENRICHMENT_MAPPING_MISSING' });
+                return;
+            }
+            const extracted = extractStoredMappingMetadata(row.metadata, row.work_title || row.source_title || '');
+            if (!extracted.aliases.length && !extracted.genres.length) {
+                await this.queue.finish(task, workerId, { state: 'DONE', checkpoint: { metadataEnrichment: true, empty: true }, resetAttempts: true });
+                return;
+            }
+            const resolved = await this.dedupe.resolveWork({
+                source, sourceWorkId,
+                title: row.source_title || row.work_title,
+                slug: row.source_slug || row.work_title,
+                aliases: extracted.aliases,
+                genres: extracted.genres,
+            });
+            if (!resolved.workId || resolved.status === 'AMBIGUOUS') {
+                await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: resolved.reason || 'METADATA_ENRICHMENT_AMBIGUOUS' });
+                return;
+            }
+            await this.queue.finish(task, workerId, {
+                state: 'DONE', workId: resolved.workId,
+                checkpoint: { metadataEnrichment: true, aliases: extracted.aliases.length, tags: extracted.genres.length },
+                resetAttempts: true,
+            });
+        }
+        catch (error) {
+            await this.queue.finish(task, workerId, {
+                state: task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
+                reason: String(error?.message || 'METADATA_ENRICHMENT_FAILED').slice(0, 500),
+                nextRunAt: new Date(Date.now() + this.recurringRetryDelayMs(task.attempts)),
+            });
         }
     }
     /** Release bursts get a quick recheck; quiet works exponentially back off. */
