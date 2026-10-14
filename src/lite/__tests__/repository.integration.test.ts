@@ -186,14 +186,15 @@ describe('LiteRepository against the additive Lite migration', () => {
     // hidden metadata queue.
     expect(await repo.refillStoredMetadataEnrichment()).toBe(0);
 
-    // A normal chapter worker still admits P1 first.  The bounded replay has
-    // its own no-network maintenance turn, so a permanently replenished P1
-    // reserve cannot starve aliases/tags indefinitely.
+    // A normal chapter worker still admits P1 first. The bounded replay lane
+    // also drains pre-v2 metadata tasks instead of leaving them orphaned.
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'pt-br|default|chapter|99|-', priority: 'P1', idempotencyKey: 'p1-remains-first' });
     expect((await repo.claim('chapter-worker', 120))?.idempotencyKey).toBe('p1-remains-first');
     expect(await repo.claimStoredMetadataReplay('metadata-replay', 45)).toMatchObject({
-      taskType: 'CATALOG', priority: 'P2', payload: expect.objectContaining({ metadataEnrichmentVersion: 2 }),
+      taskType: 'CATALOG', priority: 'P2', payload: expect.objectContaining({
+        metadataEnrichment: true, source: 'source-a', sourceWorkId: 'metadata-a',
+      }),
     });
   });
 
@@ -2306,7 +2307,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
   });
 
-  it('drains one v2 stored-metadata replay while P1 remains claimable', async () => {
+  it('drains a legacy stored-metadata replay while P1 remains claimable', async () => {
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
       VALUES ('00000000-0000-4000-8000-000000000113','source-a','replay-metadata',$1::uuid,
@@ -2316,8 +2317,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'pt-br|default|chapter|98|-', priority: 'P1', idempotencyKey: 'p1-keeps-priority' });
     await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
-      idempotencyKey: 'lite:metadata:v2:source-a:replay-metadata',
-      payload: { source: 'source-a', sourceWorkId: 'replay-metadata', metadataEnrichment: true, metadataEnrichmentVersion: 2 } });
+      idempotencyKey: 'lite:metadata:source-a:replay-metadata',
+      payload: { source: 'source-a', sourceWorkId: 'replay-metadata', metadataEnrichment: true } });
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => { throw new Error('stored replay must not call an adapter'); } } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
@@ -2329,7 +2330,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     // reserve must not leave this durable enrichment task READY forever.
     await (runtime as any).runRecoveryTurn();
     expect((await db.query(`SELECT state FROM importer_lite_tasks
-      WHERE idempotency_key='lite:metadata:v2:source-a:replay-metadata'`)).rows[0].state).toBe('DONE');
+      WHERE idempotency_key='lite:metadata:source-a:replay-metadata'`)).rows[0].state).toBe('DONE');
     expect((await repo.claim('chapter-worker', 120))?.idempotencyKey).toBe('p1-keeps-priority');
   });
 
