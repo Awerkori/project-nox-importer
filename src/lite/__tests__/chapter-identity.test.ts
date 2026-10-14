@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalChapterKey, chapterKind, chapterOrderKey } from '../chapter-identity.js';
+import { canonicalChapterKey, chapterKind, chapterOrderKey, parseCanonicalChapterKey } from '../chapter-identity.js';
 
 describe('Lite chapter identity', () => {
   it('never collapses decimal text, special chapters, or editions into a float identity', () => {
@@ -14,5 +14,13 @@ describe('Lite chapter identity', () => {
     expect(chapterKind({ displayNumber: 'Prólogo', title: 'Prólogo' })).toBe('special');
     expect(canonicalChapterKey({ displayNumber: 'Prólogo', title: 'Prólogo', language: 'pt-BR' }))
       .toBe('pt-br|default|special|pr%C3%B3logo|pr%C3%B3logo');
+  });
+
+  it('recovers canonical text without ever converting decimal identities to floats', () => {
+    const decimal = canonicalChapterKey({ displayNumber: '12.10', language: 'pt-BR', edition: 'official' });
+    const special = canonicalChapterKey({ displayNumber: '12', title: 'Extra', kind: 'special', language: 'pt-BR' });
+    expect(parseCanonicalChapterKey(decimal)).toMatchObject({ displayNumber: '12.10', language: 'pt-br', edition: 'official', kind: 'chapter' });
+    expect(parseCanonicalChapterKey(special)).toMatchObject({ displayNumber: '12', title: 'extra', kind: 'special' });
+    expect(parseCanonicalChapterKey('not|a|canonical|key')).toBeNull();
   });
 });

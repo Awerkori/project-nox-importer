@@ -243,6 +243,32 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(0);
   });
 
+  it('materializes only manifest-proven historical gaps with textual chapter identities', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
+      VALUES
+        ($1,'pt-br|default|chapter|12.10|-','source-a','gap-a','gap-a-12-10','pt-BR','default','n|000000000012|100000000000|10|||',10,true,true),
+        ($2,'pt-br|default|special|12|extra','source-b','gap-b','gap-b-extra','pt-BR','default','n|000000000012|000000000000||||extra',10,true,true)`, [ids.p1a, ids.p1b]);
+
+    expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(2);
+    const repairs = await db.query(`SELECT work_id::text AS work_id,chapter_key,priority,base_priority,
+      payload->>'displayNumber' AS display_number,payload->>'chapterTitle' AS chapter_title,
+      payload->>'chapterKind' AS chapter_kind,payload->>'manifestP1Repair' AS repair
+      FROM importer_lite_tasks WHERE payload ? 'manifestP1Repair' ORDER BY work_id,chapter_key`);
+    expect(repairs.rows).toEqual([
+      { work_id: ids.p1a, chapter_key: 'pt-br|default|chapter|12.10|-', priority: 2, base_priority: 2,
+        display_number: '12.10', chapter_title: '', chapter_kind: 'chapter', repair: 'true' },
+      { work_id: ids.p1b, chapter_key: 'pt-br|default|special|12|extra', priority: 2, base_priority: 2,
+        display_number: '12', chapter_title: 'extra', chapter_kind: 'special', repair: 'true' },
+    ]);
+    // The producer reads concrete manifest rows only: it must never fill an
+    // imagined numeric interval between two known chapter identities.
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE payload ? 'manifestP1Repair' AND chapter_key LIKE '%|12.1|%'`)).rows[0].count).toBe(0);
+    expect(await repo.refillManifestProvenP1Imports(8, 4)).toBe(0);
+  });
+
   it('lets an abundant materialized P1 import reserve suppress catalog maintenance completely', async () => {
     for (let index = 0; index < 64; index++) {
       await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,

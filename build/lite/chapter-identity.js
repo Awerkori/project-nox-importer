@@ -22,6 +22,26 @@ export function canonicalChapterKey(input) {
     const identityTitle = !number || kind !== 'chapter' ? (title || '-') : '-';
     return [language, edition, kind, number || 'unnumbered', identityTitle].map(encodeURIComponent).join('|');
 }
+export function parseCanonicalChapterKey(value) {
+    const parts = String(value || '').split('|');
+    if (parts.length !== 5)
+        return null;
+    try {
+        const [language, edition, kind, encodedNumber, encodedTitle] = parts.map((part) => decodeURIComponent(part));
+        if (!language || !edition || !kind || !encodedNumber)
+            return null;
+        return {
+            language,
+            edition,
+            kind,
+            displayNumber: encodedNumber === 'unnumbered' ? '' : encodedNumber,
+            title: encodedTitle === '-' ? '' : encodedTitle,
+        };
+    }
+    catch {
+        return null;
+    }
+}
 /**
  * A display-only sortable tuple. Decimal text is intentionally retained as a
  * tie breaker: 12.1 and 12.10 may sort together but can never become equal.

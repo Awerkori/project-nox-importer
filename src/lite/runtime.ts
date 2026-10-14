@@ -68,6 +68,7 @@ export class ImporterLiteRuntime {
   private readonly claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
   private readonly historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
   private lastMetadataEnrichmentAt = 0;
+  private lastManifestP1RepairAt = 0;
   // Observation is intentionally a one-slot lane. It may create P0 chapter
   // work, but an empty observation must never compete with chapter workers.
   private readonly monitorGate = new AsyncSemaphore(1, 'lite_p0_monitor');
@@ -144,6 +145,7 @@ export class ImporterLiteRuntime {
     await this.queue.recoverDuplicateCanonicalCatalogFailures();
     await this.refreshSourceFairness();
     await this.refillHistoricalP1Catalog();
+    await this.refillManifestProvenP1Imports();
     await this.refillStoredMetadataEnrichment();
     // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
     // Lite cutover.  The Lite-specific cap begins safely and can only rise
@@ -357,7 +359,20 @@ export class ImporterLiteRuntime {
     try { await this.queue.recoverDuplicateCanonicalCatalogFailures(); } catch { /* bounded recovery retries next turn */ }
     await this.refreshSourceFairness();
     await this.refillHistoricalP1Catalog();
+    await this.refillManifestProvenP1Imports();
     await this.refillStoredMetadataEnrichment();
+  }
+
+  /** Existing positive manifests may outlive an older completed catalog task. */
+  private async refillManifestProvenP1Imports(): Promise<void> {
+    if (!this.isRuntimeLeader || Date.now() - this.lastManifestP1RepairAt < 5 * 60_000) return;
+    this.lastManifestP1RepairAt = Date.now();
+    try {
+      const admitted = await this.queue.refillManifestProvenP1Imports();
+      if (admitted) this.logger.info('Materialized manifest-proven historical P1 repairs', { admitted });
+    } catch (error: any) {
+      this.logger.warn('Manifest-proven P1 refill failed', { error: error?.message });
+    }
   }
 
   /**
