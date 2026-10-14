@@ -622,7 +622,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('cooldown-skips-ineligible', 120))?.idempotencyKey).toBe('still-executable');
   });
 
-  it('reopens an expired source cooldown in bounded per-source waves', async () => {
+  it('reopens an expired source cooldown fairly across works and in canonical chapter order', async () => {
     // Keep generic recovery occupied with an older unrelated retry. The
     // source-specific pass must then admit only its small bounded wave rather
     // than leaving a recovered rate-limited source to wait behind thousands
@@ -631,29 +631,42 @@ describe('LiteRepository against the additive Lite migration', () => {
       idempotencyKey: 'older-retry', nextRunAt: new Date(Date.now() - 60_000) });
     await db.query(`UPDATE importer_lite_tasks SET state='RETRY_WAIT',reason='TRANSIENT',next_run_at=now()-interval '1 minute'
       WHERE idempotency_key='older-retry'`);
-    for (let index = 0; index < 9; index++) {
-      const chapterKey = `cooldown-recovery-${index}`;
-      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
-        chapterKey, priority: 'P1', idempotencyKey: chapterKey,
-        payload: { language: 'pt-BR', edition: 'default' } });
-      await db.query(`INSERT INTO importer_lite_chapter_sources
-        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
-        VALUES($1::uuid,$2,'source-a','a',$2,'pt-BR','default','n|000001|000000|0',10,true)`, [ids.p1a, chapterKey]);
+    const workIds = [ids.p1a, ids.p1b, ids.publish, ids.staff, ids.p0];
+    for (const [workIndex, workId] of workIds.entries()) {
+      // One giant work puts more than the old global 48-task head ahead of
+      // every other work. The recovery turn must still admit small per-work
+      // waves and start each work at its earliest canonical chapter.
+      const chapterCount = workIndex === 0 ? 60 : 9;
+      for (let chapterIndex = 1; chapterIndex <= chapterCount; chapterIndex++) {
+        const chapterKey = `cooldown-recovery-${workIndex}-${chapterIndex}`;
+        await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`,
+          chapterKey, priority: 'P1', idempotencyKey: chapterKey,
+          payload: { language: 'pt-BR', edition: 'default', orderKey: `n|${String(chapterIndex).padStart(6, '0')}` } });
+        await db.query(`INSERT INTO importer_lite_chapter_sources
+          (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+          VALUES($1::uuid,$2,'source-a','a',$2,'pt-BR','default',$3,10,true)`,
+        [workId, chapterKey, `n|${String(chapterIndex).padStart(6, '0')}`]);
+      }
     }
     await repo.recordSourceFailure('source-a', { retryAfter: 30, message: 'PAGE_HTTP_429' });
     await db.query(`UPDATE importer_lite_source_health SET cooldown_until=now()-interval '1 second' WHERE source='source-a'`);
-    await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second'
+    await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second',updated_at=now()-interval '1 minute'
       WHERE idempotency_key LIKE 'cooldown-recovery-%'`);
 
     const recovered = await repo.reconcile(1);
     expect(recovered.sourceCooldownRecoveries).toBe(8);
-    const rows = await db.query(`SELECT state,reason,count(*)::int AS count
-      FROM importer_lite_tasks WHERE idempotency_key LIKE 'cooldown-recovery-%'
-      GROUP BY state,reason ORDER BY state,reason`);
-    expect(rows.rows).toEqual([
-      { state: 'READY', reason: null, count: 8 },
-      { state: 'RETRY_WAIT', reason: 'SOURCE_RATE_LIMITED', count: 1 },
-    ]);
+    const ready = await db.query(`SELECT work_id,count(*)::int AS count,
+        array_agg(payload->>'orderKey' ORDER BY payload->>'orderKey') AS order_keys
+      FROM importer_lite_tasks WHERE idempotency_key LIKE 'cooldown-recovery-%' AND state='READY'
+      GROUP BY work_id ORDER BY work_id`);
+    expect(ready.rows).toHaveLength(4);
+    expect(ready.rows.map((row) => Number(row.count))).toEqual([2, 2, 2, 2]);
+    for (const row of ready.rows) {
+      expect(row.order_keys).toEqual(['n|000001', 'n|000002']);
+    }
+    const remaining = await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key LIKE 'cooldown-recovery-%' AND state='RETRY_WAIT' AND reason='SOURCE_RATE_LIMITED'`);
+    expect(remaining.rows[0].count).toBe(88);
   });
 
   it('keeps an import ready when a confirmed healthy alternative can satisfy the same chapter', async () => {
