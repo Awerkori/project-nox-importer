@@ -1279,6 +1279,11 @@ export class ImporterLiteRuntime {
       };
       const extracted = await timePhase('parseNormalizeMs', async () =>
         extractStoredMappingMetadata(sourceMetadata, details.title || row.title || row.source_title || ''));
+      // Compare parser evidence before primary-title deduplication. A source
+      // may explicitly return only its canonical title in an alias field; that
+      // is a valid NO_ALIASES result, not a parser failure.
+      const parsedAliasEvidence = extracted.aliases.length > 0 ? extracted.aliases
+        : extractStoredMappingMetadata(sourceMetadata, '').aliases;
       const hasUnparsedExplicitValue = (fieldPattern: RegExp): boolean => Object.entries(raw).some(([key,value]) => {
         if (!fieldPattern.test(key)) return false;
         if (Array.isArray(value)) return value.length > 0;
@@ -1288,9 +1293,9 @@ export class ImporterLiteRuntime {
       });
       const rawAliasEvidence = hasUnparsedExplicitValue(/^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title)$/i);
       const rawTagEvidence = hasUnparsedExplicitValue(/^(genres?|tags?|categories)$/i);
-      if ((rawAliasEvidence && extracted.aliases.length === 0) || (rawTagEvidence && extracted.genres.length === 0)) {
+      if ((rawAliasEvidence && parsedAliasEvidence.length === 0) || (rawTagEvidence && extracted.genres.length === 0)) {
         await timePhase('metadataPersistCommitMs', () => this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
-          aliasesState: rawAliasEvidence && extracted.aliases.length === 0 ? 'PARSER_ERROR' : (extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES'),
+          aliasesState: rawAliasEvidence && parsedAliasEvidence.length === 0 ? 'PARSER_ERROR' : (extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES'),
           tagsState: rawTagEvidence && extracted.genres.length === 0 ? 'PARSER_ERROR' : (extracted.genres.length ? 'ENRICHED' : 'NO_TAGS'),
           error: 'EXPLICIT_SOURCE_METADATA_NOT_PARSED', rawMetadata: sourceMetadata }));
         const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
@@ -1316,19 +1321,14 @@ export class ImporterLiteRuntime {
         (SELECT count(*)::int FROM work_tags wt WHERE wt.work_id=w.id)::text AS tag_count FROM works w WHERE w.id=$1::uuid`, [mappingWorkId]));
       const aliasDelta = Math.max(0,(after.rows[0]?.aliases?.length || 0)-(row.aliases?.length || 0));
       const tagDelta = Math.max(0,Number(after.rows[0]?.tag_count || 0)-Number(row.tag_count || 0));
-      await timePhase('metadataPersistCommitMs', async () => {
-        await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
-          aliasesState: extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES',
-          tagsState: extracted.genres.length ? 'ENRICHED' : 'NO_TAGS',
-          aliasesAdded: aliasDelta, tagsAdded: tagDelta, rawMetadata: sourceMetadata });
-        await this.queue.recordSourceSuccess(source);
-      });
-      const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
-      const finalizeStartedAt = performance.now();
-      await this.queue.finish(task, workerId, { state: 'DONE', workId: mappingWorkId,
-        checkpoint: { metadataSourceRefresh: true, version: 2, aliases: extracted.aliases.length, aliasDelta,
-          tags: extracted.genres.length, tagDelta, metadataTiming: checkpointTiming }, resetAttempts: true });
-      timings.finishCommitMs = Math.round(performance.now() - finalizeStartedAt);
+      await timePhase('metadataFinalizeCommitMs', () => this.queue.completeSourceMetadataRefresh(task, workerId, {
+        source, sourceWorkId, workId: mappingWorkId,
+        aliasesState: extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES',
+        tagsState: extracted.genres.length ? 'ENRICHED' : 'NO_TAGS',
+        aliasesAdded: aliasDelta, tagsAdded: tagDelta, rawMetadata: sourceMetadata,
+      }, { metadataSourceRefresh: true, version: 2, aliases: extracted.aliases.length, aliasDelta,
+        tags: extracted.genres.length, tagDelta,
+        metadataTiming: { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) } }));
       reportTiming('DONE');
     } catch (error: any) {
       const message = String(error?.message || 'METADATA_SOURCE_FETCH_FAILED').slice(0,500);
