@@ -356,6 +356,10 @@ export class ImporterLiteRuntime {
         await this.refillHistoricalP1Catalog();
         await this.refillManifestProvenP1Imports();
         await this.refillStoredMetadataEnrichment();
+        // Metadata replay has its own bounded, local lane.  Feeding its durable
+        // task is insufficient while P1 remains busy: execute one saved-mapping
+        // merge on each eligible recovery turn as well.
+        await this.runStoredMetadataReplay();
     }
     /** Existing positive manifests may outlive an older completed catalog task. */
     async refillManifestProvenP1Imports() {
