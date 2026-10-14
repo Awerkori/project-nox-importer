@@ -113,6 +113,15 @@ export declare class LiteRepository {
      */
     claimMonitor(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /**
+     * Claims one already-durable, no-network metadata replay.  This deliberately
+     * is not a second chapter-admission policy: it can only advance the bounded
+     * v2 enrichment rows created from metadata we already have, and is invoked
+     * at a much lower cadence than normal recovery.  Without this narrow drain,
+     * a permanently healthy P1 backlog would make historical aliases and tags
+     * wait forever despite requiring neither a source slot nor a chapter worker.
+     */
+    claimStoredMetadataReplay(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    /**
      * A bounded view of sources that can serve an actual next-priority chapter
      * import. One task is sampled per ready work, rather than the first N task
      * rows, so a single large work cannot hide other ready works. Historical P1

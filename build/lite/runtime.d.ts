@@ -22,7 +22,9 @@ export declare class ImporterLiteRuntime {
     private readonly bufferedPageBytes;
     private readonly claimGate;
     private readonly historicalP1BackfillGate;
+    private readonly metadataReplayGate;
     private lastMetadataEnrichmentAt;
+    private lastMetadataReplayAt;
     private lastManifestP1RepairAt;
     private readonly monitorGate;
     private readonly runtimeInstanceId;
@@ -82,6 +84,13 @@ export declare class ImporterLiteRuntime {
      * strict admission still makes it yield completely to STAFF/P0/P1.
      */
     private refillStoredMetadataEnrichment;
+    /**
+     * A single local metadata merge per five minutes prevents P1's legitimate
+     * chapter reserve from starving aliases/tags forever. It reads only a saved
+     * mapping and runs through the ordinary durable task/lease/finalize path;
+     * no network, source slot, page buffer or chapter worker is admitted here.
+     */
+    private runStoredMetadataReplay;
     /** A bounded source view refreshes only outside claims and only once per recovery turn. */
     private refreshSourceFairness;
     private upsertChapterSources;

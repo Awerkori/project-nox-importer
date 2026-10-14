@@ -61,7 +61,9 @@ export class ImporterLiteRuntime {
     bufferedPageBytes;
     claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
     historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
+    metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
     lastMetadataEnrichmentAt = 0;
+    lastMetadataReplayAt = 0;
     lastManifestP1RepairAt = 0;
     // Observation is intentionally a one-slot lane. It may create P0 chapter
     // work, but an empty observation must never compete with chapter workers.
@@ -136,6 +138,7 @@ export class ImporterLiteRuntime {
         await this.refillHistoricalP1Catalog();
         await this.refillManifestProvenP1Imports();
         await this.refillStoredMetadataEnrichment();
+        await this.runStoredMetadataReplay();
         // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
         // Lite cutover.  The Lite-specific cap begins safely and can only rise
         // through an explicit, benchmarked staging configuration.
@@ -381,6 +384,30 @@ export class ImporterLiteRuntime {
         }
         catch (error) {
             this.logger.warn('Stored metadata enrichment refill failed', { error: error?.message });
+        }
+    }
+    /**
+     * A single local metadata merge per five minutes prevents P1's legitimate
+     * chapter reserve from starving aliases/tags forever. It reads only a saved
+     * mapping and runs through the ordinary durable task/lease/finalize path;
+     * no network, source slot, page buffer or chapter worker is admitted here.
+     */
+    async runStoredMetadataReplay() {
+        if (!this.isRuntimeLeader || Date.now() - this.lastMetadataReplayAt < 5 * 60_000)
+            return;
+        await this.metadataReplayGate.acquire();
+        try {
+            this.lastMetadataReplayAt = Date.now();
+            const workerId = `${this.runtimeInstanceId}:metadata-replay`;
+            const task = await this.queue.claimStoredMetadataReplay(workerId, 45);
+            if (task)
+                await this.catalog(task, workerId);
+        }
+        catch (error) {
+            this.logger.warn('Stored metadata replay failed', { error: error?.message });
+        }
+        finally {
+            this.metadataReplayGate.release();
         }
     }
     /** A bounded source view refreshes only outside claims and only once per recovery turn. */
