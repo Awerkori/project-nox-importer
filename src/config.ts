@@ -52,11 +52,11 @@ const ConfigSchema = z.object({
   // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
   BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(16),
-  // Aeon exposes only 13 YSQL connections in production and warns at 60%.
-  // Three importer connections plus the site/Hyperdrive reaches that threshold;
-  // two leave a real reader and operational headroom. Media/network latency
-  // does not benefit from a larger direct pool.
-  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(2),
+  // Measured ramp: pool=2 produced sustained waiters (p95 acquire ~1.5s,
+  // claim-wait ~522s/window) while site, source, Telegram and CPU had headroom.
+  // Increase only one connection to 3; keep below the 13-connection YSQL
+  // service ceiling and re-evaluate from production telemetry before raising again.
+  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(3),
   // At the measured 52.75 MiB median chapter size, the former 4 MiB/s global
   // ceiling could never reach the 8/min acceptance floor (4.55/min before
   // network and publication overhead). Eight MiB/s is the first reversible
