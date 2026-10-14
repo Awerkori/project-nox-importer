@@ -139,7 +139,7 @@ export class LiteRepository {
         await client.query('COMMIT');
         return 0;
       }
-      const eligibleMappingQuery = (workPredicate: string): string => `
+      const eligibleMappingQuery = (workPredicate: string, cursorPredicate: string): string => `
         SELECT m.source_work_id,m.work_id
         FROM importer_work_mappings m
         JOIN works w ON w.id=m.work_id AND w.published=true
@@ -148,6 +148,7 @@ export class LiteRepository {
         WHERE m.source=turn.source AND m.work_id IS NOT NULL
           AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
           AND (${workPredicate})
+          AND (${cursorPredicate})
           AND (status.source IS NULL OR status.aliases_state='PENDING' OR status.tags_state='PENDING'
             OR (status.version<3 AND (status.aliases_state='PARSER_ERROR' OR status.tags_state='PARSER_ERROR'))
             OR ((status.aliases_state='EXTERNAL_BLOCKED' OR status.tags_state='EXTERNAL_BLOCKED')
@@ -156,7 +157,7 @@ export class LiteRepository {
             WHERE task.idempotency_key='lite:metadata:source:v3:' || m.source || ':' || m.source_work_id)
         ORDER BY m.source_work_id LIMIT 1`;
       const candidates = await client.query<Row>(`WITH source_turns AS (
-          SELECT s.id AS source,history.last_admitted_at,
+          SELECT s.id AS source,history.last_admitted_at,history.last_source_work_id,
             EXISTS (SELECT 1 FROM importer_lite_tasks rich
               WHERE rich.task_type='CATALOG' AND rich.state='DONE'
                 AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=s.id
@@ -164,25 +165,46 @@ export class LiteRepository {
           FROM importer_sources s
           LEFT JOIN importer_lite_source_health health ON health.source=s.id
           LEFT JOIN LATERAL (
-            SELECT max(task.created_at) AS last_admitted_at FROM importer_lite_tasks task
+            SELECT task.created_at AS last_admitted_at,
+              task.payload->>'sourceWorkId' AS last_source_work_id
+            FROM importer_lite_tasks task
             WHERE task.task_type='CATALOG' AND task.payload ? 'metadataSourceRefresh'
               AND task.payload->>'source'=s.id
+            ORDER BY task.created_at DESC
+            LIMIT 1
           ) history ON true
           WHERE s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
             AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
             AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
         ), next_mapping AS (
           SELECT turn.source,turn.last_admitted_at,turn.alias_rich_source,
-            COALESCE(aliasless.source_work_id,fallback.source_work_id) AS source_work_id,
-            COALESCE(aliasless.work_id,fallback.work_id) AS work_id
+            COALESCE(aliasless_after.source_work_id,aliasless_wrap.source_work_id,
+              fallback_after.source_work_id,fallback_wrap.source_work_id) AS source_work_id,
+            COALESCE(aliasless_after.work_id,aliasless_wrap.work_id,
+              fallback_after.work_id,fallback_wrap.work_id) AS work_id
           FROM source_turns turn
-          -- First walk the source/work mapping index looking for a published
-          -- work that still has no aliases. Fall back to any unclassified work
-          -- only when this source has no such candidate. This avoids sorting
-          -- the entire historical catalog on every refill tick.
-          LEFT JOIN LATERAL (${eligibleMappingQuery('COALESCE(cardinality(w.aliases),0)=0')}) aliasless ON true
-          LEFT JOIN LATERAL (${eligibleMappingQuery('true')}) fallback
-            ON aliasless.source_work_id IS NULL
+          -- Resume from the last admitted source-work key and wrap only when
+          -- that segment has no candidate. Keep aliasless works ahead of the
+          -- fallback pass so old mappings are not rescanned from the start on
+          -- every refill tick.
+          LEFT JOIN LATERAL (${eligibleMappingQuery(
+            'COALESCE(cardinality(w.aliases),0)=0',
+            "(turn.last_source_work_id IS NULL OR m.source_work_id>turn.last_source_work_id)",
+          )}) aliasless_after ON true
+          LEFT JOIN LATERAL (${eligibleMappingQuery(
+            'COALESCE(cardinality(w.aliases),0)=0',
+            'turn.last_source_work_id IS NOT NULL AND m.source_work_id<=turn.last_source_work_id',
+          )}) aliasless_wrap ON aliasless_after.source_work_id IS NULL
+          LEFT JOIN LATERAL (${eligibleMappingQuery(
+            'true',
+            "(turn.last_source_work_id IS NULL OR m.source_work_id>turn.last_source_work_id)",
+          )}) fallback_after ON aliasless_after.source_work_id IS NULL
+            AND aliasless_wrap.source_work_id IS NULL
+          LEFT JOIN LATERAL (${eligibleMappingQuery(
+            'true',
+            'turn.last_source_work_id IS NOT NULL AND m.source_work_id<=turn.last_source_work_id',
+          )}) fallback_wrap ON aliasless_after.source_work_id IS NULL
+            AND aliasless_wrap.source_work_id IS NULL AND fallback_after.source_work_id IS NULL
         )
         SELECT source,source_work_id,work_id FROM next_mapping WHERE source_work_id IS NOT NULL
         -- Prefer providers that have actually yielded explicit aliases before
