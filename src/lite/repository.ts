@@ -25,6 +25,14 @@ const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE = 8;
 const SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS = 48;
 const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK = 2;
 
+const sourceExecutionEligibilitySql = (alias: string): string => `(
+  (COALESCE(${alias}.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
+   (${alias}.status='COOLDOWN' AND ${alias}.cooldown_until IS NOT NULL AND ${alias}.cooldown_until<=now()))
+  AND (to_jsonb(${alias})->>'blocked_reason' IS NULL
+    OR to_jsonb(${alias})->'blocked_details'->>'probe_success'='true'
+    OR to_jsonb(${alias})->'blocked_details'->>'recovered_at' IS NOT NULL)
+)`;
+
 const priorityName = (value: number): LitePriority => (['STAFF', 'P0', 'P1', 'P2'] as LitePriority[])[value] || 'P2';
 const asTask = (row: Row): LiteTask => ({
   id: row.id, taskType: row.task_type, workId: row.work_id, workKey: row.work_key,
@@ -245,8 +253,7 @@ export class LiteRepository {
           WHERE cs.work_id=t.work_id AND cs.canonical_chapter_key=t.chapter_key
             AND cs.confirmed=true AND cs.has_chapter=true AND s.enabled=true
             AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-            AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
-                 (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+            AND ${sourceExecutionEligibilitySql('s')}
             AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
             AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
         )
@@ -275,8 +282,7 @@ export class LiteRepository {
           AND cs.confirmed=true AND cs.has_chapter=true
           AND s.enabled=true
           AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-          AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
-               (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+          AND ${sourceExecutionEligibilitySql('s')}
           AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
           AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
           AND NOT EXISTS (
@@ -519,8 +525,7 @@ export class LiteRepository {
         WHERE cs.confirmed=true AND cs.has_chapter=true
           AND s.enabled=true
           AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-          AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
-               (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+          AND ${sourceExecutionEligibilitySql('s')}
           AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
           AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
       )
@@ -670,8 +675,7 @@ export class LiteRepository {
               AND cs.confirmed=true AND cs.has_chapter=true
               AND s.enabled=true
               AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-              AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
-                   (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+              AND ${sourceExecutionEligibilitySql('s')}
               AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
               AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
           )
@@ -734,8 +738,7 @@ export class LiteRepository {
           WHERE m.work_id IS NOT NULL
             AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
             AND s.enabled=true
-            AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
-                 (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+            AND ${sourceExecutionEligibilitySql('s')}
             -- This is P1 repair for an existing canonical mapping, not P2
             -- discovery.  An operator may disable new-work discovery while
             -- still allowing an already-mapped work to fill its chapters.
@@ -1170,9 +1173,7 @@ export class LiteRepository {
                   AND alternative.edition=COALESCE(NULLIF(t.payload->>'edition',''),'default')
                   AND source_policy.enabled=true
                   AND COALESCE((to_jsonb(source_policy)->>'chapter_ingestion_enabled')::boolean,true)
-                  AND (COALESCE(source_policy.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
-                       (source_policy.status='COOLDOWN' AND source_policy.cooldown_until IS NOT NULL
-                         AND source_policy.cooldown_until<=now()))
+                  AND ${sourceExecutionEligibilitySql('source_policy')}
                   AND COALESCE(alternative_health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
                   AND (alternative_health.cooldown_until IS NULL OR alternative_health.cooldown_until<=now())
               )
@@ -1297,8 +1298,7 @@ export class LiteRepository {
              AND route.edition=COALESCE(NULLIF(due.payload->>'edition',''),'default')
              AND s.enabled=true
              AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-             AND (COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
-                  (s.status='COOLDOWN' AND s.cooldown_until IS NOT NULL AND s.cooldown_until<=now()))
+             AND ${sourceExecutionEligibilitySql('s')}
              AND COALESCE(h.health,'HEALTHY') IN ('HEALTHY','DEGRADED','RATE_LIMITED')
              AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
            ORDER BY due.id,route.source_rank,route.source
