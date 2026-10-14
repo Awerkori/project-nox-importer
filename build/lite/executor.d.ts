@@ -6,7 +6,7 @@ import type { LiteTask } from './types.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { PageByteBudget } from './page-byte-budget.js';
-export declare const DURABLE_RESERVATION_BATCH_JOIN_MS = 240;
+export declare const DURABLE_RESERVATION_BATCH_JOIN_MS = 120;
 export declare const DURABLE_RECEIPT_BATCH_JOIN_MS = 360;
 export type UploadBatchSnapshot = {
     sampledFlushes: number;
