@@ -34,8 +34,11 @@ if (apply && process.env.LITE_VALIDATION_CONFIRM !== 'APPLY_LITE_TO_NON_PRODUCTI
 
 const caPath = process.env.LITE_VALIDATION_YSQL_CA || path.resolve('certs/yugabyte-root.crt');
 if (!fs.existsSync(caPath)) throw new Error(`YSQL CA certificate not found: ${caPath}`);
-const migrationPath = path.resolve('migrations/20261010090000_importer_lite_v2.sql');
-const migration = fs.readFileSync(migrationPath, 'utf8');
+const migrationPaths = [
+  'migrations/20261010090000_importer_lite_v2.sql',
+  'migrations/20261014031500_lite_manifest_gap_repair_index.sql',
+];
+const migration = migrationPaths.map((migrationPath) => fs.readFileSync(path.resolve(migrationPath), 'utf8')).join('\n');
 const migrationSha256 = crypto.createHash('sha256').update(migration).digest('hex');
 const options = apply
   ? '-c statement_timeout=15000 -c idle_in_transaction_session_timeout=15000'
@@ -60,6 +63,7 @@ const expectedIndexes = [
   'importer_lite_tasks_ready_work_idx', 'importer_lite_tasks_monitor_ready_idx', 'importer_lite_tasks_recovery_idx',
   'importer_lite_tasks_work_chapter_idx', 'importer_lite_tasks_blocked_work_idx', 'importer_lite_tasks_publish_recovery_idx',
   'importer_lite_ready_works_claim_idx', 'importer_lite_chapter_sources_select_idx', 'importer_lite_chapter_sources_order_idx',
+  'importer_lite_chapter_sources_manifest_repair_idx',
   'importer_lite_chapters_order_idx', 'importer_lite_uploads_recovery_idx',
 ];
 
