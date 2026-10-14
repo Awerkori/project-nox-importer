@@ -314,6 +314,51 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
   });
 
+  it('runs at most two source metadata fetches and pauses admission under YSQL pool wait', async () => {
+    const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
+    const lanePool = poolFor(db) as any;
+    lanePool.waitingCount = 1;
+    const runtime = new ImporterLiteRuntime(
+      lanePool, {}, { get: () => null } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', WORKER_ID: 'metadata-lane-test',
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
+        LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
+    );
+    const claim = vi.fn(async () => ({ id: 'metadata-task' } as any));
+    (runtime as any).queue = { claimSourceMetadataRefresh: claim };
+    (runtime as any).isRuntimeLeader = true;
+    let active = 0;
+    let maximum = 0;
+    let releaseFetches!: () => void;
+    let notifyTwoStarted!: () => void;
+    const bothStarted = new Promise<void>((resolve) => { notifyTwoStarted = resolve; });
+    const holdFetches = new Promise<void>((resolve) => { releaseFetches = resolve; });
+    (runtime as any).catalog = async () => {
+      active++;
+      maximum = Math.max(maximum, active);
+      if (active === 2) notifyTwoStarted();
+      await holdFetches;
+      active--;
+    };
+
+    await (runtime as any).runSourceMetadataRefresh();
+    expect(claim).not.toHaveBeenCalled();
+    lanePool.waitingCount = 0;
+    const runs = [
+      (runtime as any).runSourceMetadataRefresh(),
+      (runtime as any).runSourceMetadataRefresh(),
+      (runtime as any).runSourceMetadataRefresh(),
+    ];
+    await bothStarted;
+    expect(claim).toHaveBeenCalledTimes(2);
+    expect(maximum).toBe(2);
+    expect((runtime as any).sourceMetadataGate.capacity).toBe(2);
+    releaseFetches();
+    await Promise.all(runs);
+    memorySpy.mockRestore();
+  });
+
   it('replays legacy Portuguese tag objects with a bounded v3 task after v2 completed', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings
@@ -2345,6 +2390,15 @@ describe('LiteRepository against the additive Lite migration', () => {
       'pt-br|default|chapter|1|-',
       'pt-br|default|chapter|200|-',
     ]);
+    const orphanedConfirmed = await db.query(`SELECT count(*)::int AS count
+      FROM importer_lite_chapter_sources source
+      LEFT JOIN importer_lite_chapters chapter
+        ON chapter.work_id=source.work_id AND chapter.canonical_chapter_key=source.canonical_chapter_key
+      LEFT JOIN importer_lite_tasks task
+        ON task.idempotency_key='lite:chapter:' || source.work_id::text || ':' || source.canonical_chapter_key
+       AND task.task_type='IMPORT_CHAPTER'
+      WHERE source.confirmed AND source.has_chapter AND chapter.work_id IS NULL AND task.id IS NULL`);
+    expect(orphanedConfirmed.rows[0].count).toBe(0);
     // A numerical span from 1 to 200 is not evidence for chapters 2–199.
     expect(materialized.rows.some((row: any) => row.chapter_key.includes('|2|-'))).toBe(false);
   });
