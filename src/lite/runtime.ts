@@ -58,7 +58,9 @@ const SAFE_BUFFERED_PAGE_CAP = 24;
 const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
 const STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS = 15_000;
 const SOURCE_METADATA_REFILL_INTERVAL_MS = 15_000;
-const SOURCE_METADATA_LANE_INTERVAL_MS = 15_000;
+// Stage 2 metadata lane experiment: two dedicated slots, polled every five
+// seconds. Source adapter host limits and source cooldowns remain authoritative.
+const SOURCE_METADATA_LANE_INTERVAL_MS = 5_000;
 const SOURCE_RECOVERY_PROBE_INTERVAL_MS = 30_000;
 
 type WorkerLiveness = {
@@ -82,8 +84,8 @@ export class ImporterLiteRuntime {
   private readonly claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
   private readonly historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
   private readonly metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
-  private readonly sourceMetadataGate = new AsyncSemaphore(1, 'lite_source_metadata_refetch');
-  private readonly sourceMetadataLaneGate = new AsyncSemaphore(1, 'lite_source_metadata_lane');
+  private readonly sourceMetadataGate = new AsyncSemaphore(2, 'lite_source_metadata_refetch');
+  private readonly sourceMetadataLaneGate = new AsyncSemaphore(2, 'lite_source_metadata_lane');
   private readonly sourceAdmissionGate = new SourceAdmissionGate(10_000);
   private lastMetadataEnrichmentAt = 0;
   private lastMetadataReplayAt = 0;
@@ -521,6 +523,8 @@ export class ImporterLiteRuntime {
    */
   private async refillSourceMetadataEnrichment(): Promise<void> {
     if (!this.isRuntimeLeader || Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS) return;
+    if (this.pool.waitingCount > 0 || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
+      || process.memoryUsage().rss >= 384 * 1024 * 1024) return;
     this.lastSourceMetadataRefillAt = Date.now();
     try {
       const admitted = await this.queue.refillSourceMetadataEnrichment(2);
@@ -530,9 +534,14 @@ export class ImporterLiteRuntime {
     }
   }
 
-  /** Dedicated one-slot worker gives source refetch continuous progress without
+  /** Dedicated bounded workers give source refetch continuous progress without
    * consuming chapter workers or competing with P0/P1 task selection. */
   private async runSourceMetadataRefresh(): Promise<void> {
+    // Let in-flight requests finish, but do not start more background source
+    // fetches while YSQL has waiters, the site is paused, or RSS nears the
+    // container's 512 MiB boundary.
+    if (this.pool.waitingCount > 0 || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
+      || process.memoryUsage().rss >= 384 * 1024 * 1024) return;
     if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire()) return;
     try {
       const workerId = `${this.runtimeInstanceId}:source-metadata`;
@@ -703,6 +712,11 @@ export class ImporterLiteRuntime {
         heapTotal: Math.round(memory.heapTotal / 1024 / 1024), external: Math.round(memory.external / 1024 / 1024),
         arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024) },
       ysqlPool: { total: this.pool.totalCount, idle: this.pool.idleCount, waiting: this.pool.waitingCount },
+      sourceMetadataLane: {
+        active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
+        capacity: this.sourceMetadataLaneGate.capacity,
+        waiters: this.sourceMetadataLaneGate.queued,
+      },
       pageByteBudget: this.bufferedPageBytes.snapshot(),
       heartbeat: { startedAt: this.heartbeatStartedAt, completedAt: this.heartbeatCompletedAt },
       lease: { startedAt: this.leaseRenewStartedAt, completedAt: this.leaseRenewCompletedAt, error: this.leaseRenewError },
