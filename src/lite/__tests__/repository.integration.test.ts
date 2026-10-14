@@ -321,6 +321,34 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE idempotency_key='lite:metadata:source:v3:source-rich:aliasless-rich'`)).rows).toEqual([{ source:'source-rich' }]);
   });
 
+  it('resumes each metadata source after its last mapping and wraps without skipping earlier mappings', async () => {
+    await db.query(`INSERT INTO importer_sources(id) VALUES('cursor-after'),('cursor-wrap')`);
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2,$3)`, [ids.p1a,ids.p1b,ids.p0]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000223','cursor-after','a-before',$1::uuid,'p1-a','P1 A','SYNCED'),
+      ('00000000-0000-4000-8000-000000000224','cursor-after','c-after',$2::uuid,'p1-b','P1 B','SYNCED'),
+      ('00000000-0000-4000-8000-000000000225','cursor-wrap','a-wrap',$3::uuid,'p0','P0','SYNCED')`, [ids.p1a,ids.p1b,ids.p0]);
+    for (const [source,sourceWorkId,workId,key] of [
+      ['cursor-after','b-cursor',ids.p1a,'cursor-after-history'],
+      ['cursor-wrap','z-cursor',ids.p0,'cursor-wrap-history'],
+    ] as const) {
+      await db.query(`INSERT INTO importer_lite_tasks
+        (task_type,work_id,work_key,priority,base_priority,idempotency_key,state,payload,checkpoint)
+        VALUES('CATALOG',$1::uuid,$2,3,3,$3,'DONE',$4::jsonb,'{"aliases":0}'::jsonb)`, [
+        workId,`work:${workId}`,key,JSON.stringify({metadataSourceRefresh:true,source,sourceWorkId}),
+      ]);
+    }
+
+    expect(await repo.refillSourceMetadataEnrichment(2)).toBe(2);
+    const admitted = await db.query(`SELECT payload->>'source' AS source,payload->>'sourceWorkId' AS source_work_id
+      FROM importer_lite_tasks WHERE payload ? 'metadataSourceRefresh' AND state='READY' ORDER BY source`);
+    expect(admitted.rows).toEqual([
+      { source:'cursor-after',source_work_id:'c-after' },
+      { source:'cursor-wrap',source_work_id:'a-wrap' },
+    ]);
+  });
+
   it('claims source metadata from its dedicated lane while chapter claims remain available', async () => {
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
       idempotencyKey:'source-metadata-dedicated',payload:{source:'source-a',sourceWorkId:'old-work',metadataSourceRefresh:true} });
