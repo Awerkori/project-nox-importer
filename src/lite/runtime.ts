@@ -1252,7 +1252,12 @@ export class ImporterLiteRuntime {
           tags: extracted.genres.length, tagDelta }, resetAttempts: true });
     } catch (error: any) {
       const message = String(error?.message || 'METADATA_SOURCE_FETCH_FAILED').slice(0,500);
-      const parserFailure = message.startsWith('METADATA_SOURCE_MAPPING_CONFLICT:');
+      // Source anti-bot/login HTML can be parsed as a title by an adapter and
+      // then rejected by the editorial guard. That is an external block, not
+      // a parser defect; retain it with bounded retry instead of terminally
+      // classifying the mapping as PARSER_ERROR.
+      const externalChallengePage = /INVALID_EDITORIAL_TITLE:.*(?:authentication|login) prompt|TURNSTILE|CLOUDFLARE|HTTP[_ ]?(?:403|429)|RATE[_ ]?LIMIT/i.test(message);
+      const parserFailure = message.startsWith('METADATA_SOURCE_MAPPING_CONFLICT:') && !externalChallengePage;
       const retryDelay = Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(Math.max(task.attempts, 1), 8));
       if (mappingWorkId) await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
         aliasesState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED',
