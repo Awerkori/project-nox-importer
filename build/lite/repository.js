@@ -72,6 +72,21 @@ export class LiteRepository {
           AND m.metadata ?| ARRAY['alternativeTitles','alternative_titles','aliases','alternativeNames','alternative_names',
                                    'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
                                    'romanizedTitle','romanized_title','genres','tags','categories']
+          -- A legacy mapping can contain the field with an empty [] value.
+          -- It is not enrichment evidence and must not consume a source's
+          -- once-per-turn replay ahead of a later real alias/tag.
+          AND EXISTS (
+            SELECT 1 FROM jsonb_each(m.metadata) AS metadata_entry(key,value)
+            WHERE metadata_entry.key = ANY(ARRAY['alternativeTitles','alternative_titles','aliases','alternativeNames','alternative_names',
+                                                  'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
+                                                  'romanizedTitle','romanized_title','genres','tags','categories']::text[])
+              AND CASE jsonb_typeof(metadata_entry.value)
+                WHEN 'array' THEN jsonb_array_length(metadata_entry.value)>0
+                WHEN 'string' THEN COALESCE(NULLIF(lower(btrim(metadata_entry.value #>> '{}')),''),'') NOT IN ('[]','{}','null')
+                WHEN 'object' THEN metadata_entry.value<>'{}'::jsonb
+                ELSE false
+              END
+          )
           AND NOT EXISTS (
             -- v2 replays the bounded no-network pass because legacy adapters
             -- sometimes saved an explicit JSON array as a string. The older
