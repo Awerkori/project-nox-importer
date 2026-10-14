@@ -37,6 +37,79 @@ export class LiteRepository {
     constructor(db) {
         this.db = db;
     }
+    /**
+     * Incrementally replays explicit aliases/genres already stored on legacy
+     * mappings.  It is deliberately a tiny P2 producer: no chapter is claimed,
+     * no source is contacted, and at most two catalog tasks may be outstanding.
+     * The task itself performs the normal protected metadata merge, preserving
+     * manual fields and tag provenance rules.
+     */
+    async refillStoredMetadataEnrichment(maxPending = 2) {
+        const ceiling = Math.max(1, Math.min(4, maxPending));
+        const client = await this.db.connect();
+        try {
+            await client.query('BEGIN');
+            const pending = await client.query(`SELECT count(*)::int AS count
+        FROM importer_lite_tasks
+        WHERE task_type='CATALOG' AND state IN ('READY','RUNNING','RETRY_WAIT')
+          AND payload ? 'metadataEnrichment'`);
+            if (Number(pending.rows[0]?.count || 0) >= ceiling) {
+                await client.query('COMMIT');
+                return 0;
+            }
+            // Select a single source seat per turn. The bounded candidate window
+            // avoids a global scheduler scan and the pending-source exclusion keeps
+            // one historically large provider from monopolising enrichment.
+            const candidate = await client.query(`WITH candidates AS (
+        SELECT m.source,m.source_work_id,m.work_id,m.updated_at,
+          row_number() OVER (PARTITION BY m.source ORDER BY m.updated_at,m.id) AS source_position
+        FROM importer_work_mappings m
+        JOIN works w ON w.id=m.work_id
+        WHERE m.work_id IS NOT NULL AND w.published=true
+          AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+          AND m.metadata ?| ARRAY['alternativeTitles','alternative_titles','aliases','alternativeNames','alternative_names',
+                                   'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
+                                   'romanizedTitle','romanized_title','genres','tags','categories']
+          AND NOT EXISTS (
+            SELECT 1 FROM importer_lite_tasks t
+            WHERE t.idempotency_key='lite:metadata:' || m.source || ':' || m.source_work_id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM importer_lite_tasks t
+            WHERE t.task_type='CATALOG' AND t.state IN ('READY','RUNNING','RETRY_WAIT')
+              AND t.payload ? 'metadataEnrichment' AND t.payload->>'source'=m.source
+          )
+        ORDER BY m.updated_at,m.id
+        LIMIT 64
+      )
+      SELECT source,source_work_id,work_id FROM candidates
+      WHERE source_position=1 ORDER BY updated_at,source LIMIT 1`);
+            const row = candidate.rows[0];
+            if (!row) {
+                await client.query('COMMIT');
+                return 0;
+            }
+            const idempotencyKey = `lite:metadata:${row.source}:${row.source_work_id}`;
+            const inserted = await client.query(`INSERT INTO importer_lite_tasks
+        (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
+        VALUES ('CATALOG',$1::uuid,$2,$3,$3,$4,now(),4,$5::jsonb,'{}'::jsonb,false)
+        ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
+                row.work_id, `work:${row.work_id}`, LITE_PRIORITY_RANK.P2, idempotencyKey,
+                JSON.stringify({ source: row.source, sourceWorkId: row.source_work_id, metadataEnrichment: true }),
+            ]);
+            if (inserted.rowCount)
+                await this.refreshReadyWork(client, inserted.rows[0].work_key);
+            await client.query('COMMIT');
+            return inserted.rowCount || 0;
+        }
+        catch (error) {
+            await client.query('ROLLBACK').catch(() => { });
+            throw error;
+        }
+        finally {
+            client.release();
+        }
+    }
     async refreshReadyWork(client, workKey) {
         await client.query('SELECT public.importer_lite_refresh_ready_work($1)', [workKey]);
     }

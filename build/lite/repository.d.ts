@@ -75,6 +75,14 @@ export declare class LiteRepository {
     private historicalP1ReserveAbundant;
     hasAbundantHistoricalP1Reserve(): boolean;
     constructor(db: Db);
+    /**
+     * Incrementally replays explicit aliases/genres already stored on legacy
+     * mappings.  It is deliberately a tiny P2 producer: no chapter is claimed,
+     * no source is contacted, and at most two catalog tasks may be outstanding.
+     * The task itself performs the normal protected metadata merge, preserving
+     * manual fields and tag provenance rules.
+     */
+    refillStoredMetadataEnrichment(maxPending?: number): Promise<number>;
     private refreshReadyWork;
     enqueue(input: EnqueueLiteTask): Promise<{
         inserted: boolean;
