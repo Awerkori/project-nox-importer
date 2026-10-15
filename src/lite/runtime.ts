@@ -544,7 +544,14 @@ export class ImporterLiteRuntime {
       // source fetch idle for it collapses the tested two-fetch lane to one.
       // The persistence gate below still permits just one YSQL merge/commit.
       const admitted = await this.queue.refillSourceMetadataEnrichment(2);
-      if (admitted) this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
+      if (admitted) {
+        this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
+        // A producer tick that creates executable work must wake the dedicated
+        // lane itself. Waiting for its 5 s safety timer needlessly leaves a
+        // durable P2 task READY while no source request is in flight. The
+        // runner still applies the same site/pool checks and two-seat cap.
+        void this.runSourceMetadataRefresh();
+      }
     } catch (error: any) {
       this.logger.warn('Source metadata refill failed', { error: error?.message });
     } finally {

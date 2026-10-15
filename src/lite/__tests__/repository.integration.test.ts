@@ -601,6 +601,25 @@ describe('LiteRepository against the additive Lite migration', () => {
     memorySpy.mockRestore();
   });
 
+  it('wakes the protected source lane immediately after the producer admits metadata work', async () => {
+    const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db), {}, { get: () => null } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', WORKER_ID: 'metadata-admit-wakeup-test',
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
+        LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    (runtime as any).queue = { refillSourceMetadataEnrichment: vi.fn().mockResolvedValue(2) };
+    const wake = vi.spyOn(runtime as any, 'runSourceMetadataRefresh').mockResolvedValue(undefined);
+
+    await (runtime as any).refillSourceMetadataEnrichment(true);
+
+    expect(wake).toHaveBeenCalledTimes(1);
+    memorySpy.mockRestore();
+  });
+
   it('replays legacy Portuguese tag objects with a bounded v3 task after v2 completed', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings
