@@ -677,7 +677,7 @@ export class LiteExecutor {
                             // retained media rather than merely page promises.
                             const pageSignal = AbortSignal.timeout(45_000);
                             // A response header is not available until after fetch begins.
-                            // Reserve 4 MiB initially and retain only the remaining 16 MiB as
+                            // Reserve 2 MiB initially and retain only the remaining 18 MiB as
                             // an admission predicate for one terminal upgrade. This permits a
                             // useful wave of lengthless images without risking the historic
                             // all-readers-waiting-on-growth deadlock.

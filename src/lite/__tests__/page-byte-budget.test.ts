@@ -43,9 +43,9 @@ describe('PageByteBudget', () => {
 
   it('admits a useful lengthless wave while retaining terminal-upgrade headroom', async () => {
     const budget = new PageByteBudget(20);
-    const first = await budget.reserve(4, undefined, { completionHeadroomBytes: 16 });
+    const first = await budget.reserve(2, undefined, { completionHeadroomBytes: 18 });
     let secondAdmitted = false;
-    const second = budget.reserve(4, undefined, { completionHeadroomBytes: 16 }).then((reservation) => {
+    const second = budget.reserve(2, undefined, { completionHeadroomBytes: 18 }).then((reservation) => {
       secondAdmitted = true;
       return reservation;
     });
