@@ -71,6 +71,10 @@ const SOURCE_METADATA_LANE_INTERVAL_MS = 5_000;
 // metadata work while the public site and YSQL are otherwise healthy.
 const SOURCE_METADATA_POOL_PRESSURE_SUSTAIN_MS = 15_000;
 const SOURCE_RECOVERY_PROBE_INTERVAL_MS = 30_000;
+// UNKNOWN Telegram recovery is exceptional and requires a historical
+// uploads/media proof query. Keep it durable, but do not place that cold path
+// in every 30-second chapter recovery turn.
+const UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS = 5 * 60_000;
 // Confirmed manifest rows are the durable evidence for a historical chapter.
 // At boot, repair any rows that older releases left without their idempotent
 // import task quickly, but only in small database-only batches.  Once the
@@ -123,6 +127,7 @@ export class ImporterLiteRuntime {
   private lastMetadataReplayAt = 0;
   private lastSourceMetadataRefillAt = 0;
   private lastSourceRecoveryProbeAt = 0;
+  private lastUploadOutcomeRecoveryAt = 0;
   private lastManifestP1RepairAt = 0;
   private manifestP1CatchupActive = true;
   // Observation is intentionally a one-slot lane. It may create P0 chapter
@@ -458,7 +463,10 @@ export class ImporterLiteRuntime {
   }
 
   private async runRecoveryTurn(): Promise<void> {
-    try { await this.queue.reconcile(50); } catch { /* bounded recovery retries next turn */ }
+    const now = Date.now();
+    const recoverUploadOutcomes = now - this.lastUploadOutcomeRecoveryAt >= UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS;
+    if (recoverUploadOutcomes) this.lastUploadOutcomeRecoveryAt = now;
+    try { await this.queue.reconcile(50, { recoverUploadOutcomes }); } catch { /* bounded recovery retries next turn */ }
     try { await this.probeDueSourceRecovery(); } catch (error: any) {
       this.logger.warn('Source cooldown recovery probe failed', { error: error?.message });
     }

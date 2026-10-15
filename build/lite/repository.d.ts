@@ -280,7 +280,9 @@ export declare class LiteRepository {
     recordSourceFailure(source: string, error: unknown): Promise<void>;
     recordSourceSuccess(source: string): Promise<void>;
     /** One bounded recovery turn; it cannot consume the claim path or scan works. */
-    reconcile(limit?: number): Promise<{
+    reconcile(limit?: number, options?: {
+        recoverUploadOutcomes?: boolean;
+    }): Promise<{
         leases: number;
         retries: number;
         exhausted: number;
