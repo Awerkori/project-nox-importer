@@ -144,6 +144,9 @@ describe('LiteRepository against the additive Lite migration', () => {
   it.each([
     { name: 'Case A: work 1, source 1–37', existing: [1], manifest: Array.from({ length: 37 }, (_, i) => i + 1) },
     { name: 'Case B: work 1–5, source 1–18', existing: [1, 2, 3, 4, 5], manifest: Array.from({ length: 18 }, (_, i) => i + 1) },
+    // Case E: a first catalog pass must retain the whole observed manifest;
+    // it may not jump from the first chapter directly to its newest release.
+    { name: 'Case E: new work, source manifest 1–100', existing: [1], manifest: Array.from({ length: 100 }, (_, i) => i + 1) },
   ])('materializes old confirmed chapters and claims the earliest P1 before the new P0 ($name)', async ({ existing, manifest }) => {
     const workId = ids.p1a;
     await db.query(`UPDATE works SET published=true WHERE id=$1`, [workId]);
