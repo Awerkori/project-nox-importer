@@ -66,12 +66,21 @@ describe('Tag Normalization', () => {
     expect(engine['normalizeTagName']('Adulto')).toBe(CANONICAL_ADULT_TAG_NAME);
   });
   
-  it('provides default tags for specialized sources', () => {
-     const engine = new DeduplicationEngine({} as any);
-     expect(engine['getProviderDefaultTags']('yaoifanclub')).toContain('Yaoi');
-     expect(engine['getProviderDefaultTags']('megahentai')).toContain('Hentai');
-     expect(engine['getProviderDefaultTags']('megahentai')).toContain(CANONICAL_ADULT_TAG_NAME);
-     expect(engine['getProviderDefaultTags']('randomscan')).toHaveLength(0);
+  it('never invents tags from an adult or specialized source name', async () => {
+    const workTagUpsert = vi.fn().mockResolvedValue({ data: [], error: null });
+    const engine = new DeduplicationEngine({
+      from: (table: string) => {
+        if (table === 'tags') return { select: async () => ({ data: [], error: null }) };
+        if (table === 'work_tags') return { upsert: workTagUpsert };
+        throw new Error(`unexpected table ${table}`);
+      },
+    } as any);
+
+    await engine.syncWorkTags('adult-work', {
+      source: 'megahentai', sourceWorkId: 'adult-1', title: 'Explicitly untagged work', slug: 'untagged', genres: [],
+    }, true, 'PORNHWA', 'megahentai');
+
+    expect(workTagUpsert).not.toHaveBeenCalled();
   });
 
   it('adds normalized source genres without removing manual tags or reloading the catalog per sync', async () => {
@@ -83,10 +92,12 @@ describe('Tag Normalization', () => {
     ];
     const tagSelect = vi.fn().mockResolvedValue({ data: catalog, error: null });
     const existingWorkTags = new Set(['manual-curated-tag']);
-    const upsertWorkTags = vi.fn().mockImplementation(async (rows: Array<{ tag_id: string }>) => {
-      for (const row of rows) existingWorkTags.add(row.tag_id);
-      return { error: null };
-    });
+    const upsertWorkTags = vi.fn().mockImplementation((rows: Array<{ tag_id: string }>) => ({
+      select: async () => {
+        for (const row of rows) existingWorkTags.add(row.tag_id);
+        return { data: rows, error: null };
+      },
+    }));
     const client = {
       from: vi.fn((table: string) => {
         if (table === 'tags') return { select: tagSelect };
@@ -109,14 +120,16 @@ describe('Tag Normalization', () => {
     ]));
     expect(upsertWorkTags).toHaveBeenCalledWith(expect.arrayContaining([
       expect.objectContaining({ work_id: 'work-1', tag_id: 'action', system_generated: true }),
-    ]), { onConflict: 'work_id,tag_id' });
+    ]), { onConflict: 'work_id,tag_id', ignoreDuplicates: true });
   });
 
   it('creates a genuinely new source genre as a GENRE', async () => {
     const createTag = vi.fn().mockReturnValue({
-      select: () => ({ maybeSingle: async () => ({ data: { id: 'new-genre' }, error: null }) }),
+      select: async () => ({ data: [{ id: 'new-genre', name: 'Original genre', slug: 'original-genre' }], error: null }),
     });
-    const upsertWorkTags = vi.fn().mockResolvedValue({ error: null });
+    const upsertWorkTags = vi.fn().mockReturnValue({
+      select: async () => ({ data: [{ tag_id: 'new-genre' }], error: null }),
+    });
     const client = {
       from: vi.fn((table: string) => {
         if (table === 'tags') return {
@@ -133,12 +146,12 @@ describe('Tag Normalization', () => {
       source: 'source', sourceWorkId: 'source-2', title: 'New Genre', slug: 'new-genre', genres: ['Original Genre'],
     }, false, 'MANGA', 'source');
 
-    expect(createTag).toHaveBeenCalledWith({
+    expect(createTag).toHaveBeenCalledWith([{
       name: 'Original genre', slug: 'original-genre', kind: 'GENRE',
-    }, { onConflict: 'slug' });
+    }], { onConflict: 'slug' });
     expect(upsertWorkTags).toHaveBeenCalledWith([
       { work_id: 'work-2', tag_id: 'new-genre', system_generated: true },
-    ], { onConflict: 'work_id,tag_id' });
+    ], { onConflict: 'work_id,tag_id', ignoreDuplicates: true });
   });
 
   it('removes only legacy system-generated type tags during reconciliation', async () => {

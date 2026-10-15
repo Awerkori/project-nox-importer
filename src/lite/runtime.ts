@@ -51,7 +51,9 @@ const SAFE_BUFFERED_PAGE_CAP = 24;
 // Stored metadata replay is local and no-network. Keep replay admission
 // responsive, but poll the source-mapping producer less often: it uses the
 // same small YSQL pool as chapter work and only needs to refill a two-task
-// buffer, not rescan mappings every timer tick.
+// buffer, not rescan mappings every timer tick. A completed source refresh
+// explicitly asks for its replacement, so this cadence is an idle probe, not
+// an artificial 15-second gap between productive refetches.
 // The metadata replay remains a single, worker-independent lane, but each
 // no-network merge still performs YSQL reads/writes. Production query stats
 // showed a costly mapping scan; pace its refill to once per 15 seconds while
@@ -85,8 +87,13 @@ export class ImporterLiteRuntime {
   private readonly claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
   private readonly historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
   private readonly metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
+  private readonly sourceMetadataRefillGate = new AsyncSemaphore(1, 'lite_source_metadata_refill');
+  // Two external requests have been production-tested.  Their database merge
+  // is deliberately narrower: source network latency must not reserve a YSQL
+  // turn, and two slow providers must not commit metadata concurrently.
   private readonly sourceMetadataGate = new AsyncSemaphore(2, 'lite_source_metadata_refetch');
   private readonly sourceMetadataLaneGate = new AsyncSemaphore(2, 'lite_source_metadata_lane');
+  private readonly sourceMetadataPersistenceGate = new AsyncSemaphore(1, 'lite_source_metadata_persistence');
   private sourceMetadataPoolWaitStartedAt = 0;
   private readonly sourceAdmissionGate = new SourceAdmissionGate(10_000);
   private lastMetadataEnrichmentAt = 0;
@@ -173,7 +180,9 @@ export class ImporterLiteRuntime {
     await this.refillManifestProvenP1Imports();
     await this.refillStoredMetadataEnrichment();
     await this.refillSourceMetadataEnrichment();
-    await this.runSourceMetadataRefresh();
+    // Fill both already-approved external seats at boot.  This is not a
+    // third worker: each call is fenced by the two-slot lane below.
+    await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
     await this.runStoredMetadataReplay();
     // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
     // Lite cutover.  The Lite-specific cap begins safely and can only rise
@@ -523,20 +532,23 @@ export class ImporterLiteRuntime {
    * normal priority claims; it never steals a chapter worker or bypasses a
    * STAFF/P0/P1 reserve. At most two tasks are durably admitted across sources.
    */
-  private async refillSourceMetadataEnrichment(): Promise<void> {
-    if (!this.isRuntimeLeader || Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS) return;
+  private async refillSourceMetadataEnrichment(replaceCompletedTask = false): Promise<void> {
+    if (!this.isRuntimeLeader || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS)) return;
     if (this.hasSustainedSourceMetadataPoolPressure() || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
       || process.memoryUsage().rss >= 384 * 1024 * 1024) return;
+    if (!this.sourceMetadataRefillGate.tryAcquire()) return;
     this.lastSourceMetadataRefillAt = Date.now();
     try {
-      // A single transient waiter allows one durable seat; a fully idle pool
-      // allows the tested two-seat stage. Persistent or heavier contention
-      // admits nothing until headroom returns.
-      const maxPending = this.pool.waitingCount === 1 ? 1 : 2;
-      const admitted = await this.queue.refillSourceMetadataEnrichment(maxPending);
+      // A single local pool waiter is normal while chapter receipts drain. It
+      // is not evidence that the public site is under pressure, and holding a
+      // source fetch idle for it collapses the tested two-fetch lane to one.
+      // The persistence gate below still permits just one YSQL merge/commit.
+      const admitted = await this.queue.refillSourceMetadataEnrichment(2);
       if (admitted) this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
     } catch (error: any) {
       this.logger.warn('Source metadata refill failed', { error: error?.message });
+    } finally {
+      this.sourceMetadataRefillGate.release();
     }
   }
 
@@ -545,25 +557,41 @@ export class ImporterLiteRuntime {
   private async runSourceMetadataRefresh(): Promise<void> {
     // Let in-flight requests finish, but do not start more background source
     // fetches under a sustained YSQL queue, while the site is paused, or when
-    // RSS nears the container's 512 MiB boundary. One transient waiter can use
-    // one of the two slots; it can never admit a second fetch concurrently.
-    const active = this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available;
-    if (this.hasSustainedSourceMetadataPoolPressure() || (this.pool.waitingCount === 1 && active >= 1)
+    // RSS nears the container's 512 MiB boundary. A single importer-pool
+    // waiter is normal under chapter load; the one-seat persistence gate
+    // below, rather than an idle network slot, protects YSQL in that case.
+    if (this.hasSustainedSourceMetadataPoolPressure()
       || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
       || process.memoryUsage().rss >= 384 * 1024 * 1024) return;
     if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire()) return;
+    let claimed = false;
     try {
       const workerId = `${this.runtimeInstanceId}:source-metadata`;
       const claimStartedAt = performance.now();
       const task = await this.queue.claimSourceMetadataRefresh(workerId, 90);
-      if (task) await this.catalog(task, workerId, {
+      if (task) {
+        claimed = true;
+        // Do not wait for this request's HTTP phase before filling the other
+        // approved seat. The lane and fetch gates make this a hard maximum of
+        // two; it only removes timer-created idle time.
+        void this.runSourceMetadataRefresh();
+        await this.catalog(task, workerId, {
         claimSqlMs: Math.round(performance.now() - claimStartedAt),
         queueDwellMs: task.createdAt ? Math.max(0, Date.now() - task.createdAt.getTime()) : null,
-      });
+        });
+      }
     } catch (error: any) {
       this.logger.warn('Source metadata lane failed', { error: error?.message });
     } finally {
       this.sourceMetadataLaneGate.release();
+      // Refill only after actual progress. This keeps an empty catalogue from
+      // polling its full candidate set, while a completed task immediately
+      // frees its durable replacement instead of waiting for the 15 s timer.
+      if (claimed && this.isRuntimeLeader) {
+        void this.refillSourceMetadataEnrichment(true)
+          .then(() => this.runSourceMetadataRefresh())
+          .catch((error: any) => this.logger.warn('Source metadata replacement failed', { error: error?.message }));
+      }
     }
   }
 
@@ -577,8 +605,11 @@ export class ImporterLiteRuntime {
       this.sourceMetadataPoolWaitStartedAt ||= Date.now();
       return true;
     }
-    this.sourceMetadataPoolWaitStartedAt ||= Date.now();
-    return Date.now() - this.sourceMetadataPoolWaitStartedAt >= 15_000;
+    // A lone direct-pool waiter is expected with five active chapter slots.
+    // It is neither a site signal nor enough reason to discard half of the
+    // already-tested metadata fetch capacity.
+    this.sourceMetadataPoolWaitStartedAt = 0;
+    return false;
   }
 
   /**
@@ -744,6 +775,11 @@ export class ImporterLiteRuntime {
         capacity: this.sourceMetadataLaneGate.capacity,
         waiters: this.sourceMetadataLaneGate.queued,
       },
+      sourceMetadataPersistence: {
+        active: this.sourceMetadataPersistenceGate.active,
+        capacity: this.sourceMetadataPersistenceGate.capacity,
+        waiters: this.sourceMetadataPersistenceGate.queued,
+      },
       pageByteBudget: this.bufferedPageBytes.snapshot(),
       heartbeat: { startedAt: this.heartbeatStartedAt, completedAt: this.heartbeatCompletedAt },
       lease: { startedAt: this.leaseRenewStartedAt, completedAt: this.leaseRenewCompletedAt, error: this.leaseRenewError },
@@ -860,6 +896,11 @@ export class ImporterLiteRuntime {
           capacity: this.sourceMetadataLaneGate.capacity,
           waiters: this.sourceMetadataLaneGate.queued,
         },
+        sourceMetadataPersistence: {
+          active: this.sourceMetadataPersistenceGate.active,
+          capacity: this.sourceMetadataPersistenceGate.capacity,
+          waiters: this.sourceMetadataPersistenceGate.queued,
+        },
         // In-memory stage telemetry is safe to sample while the two YSQL
         // connections are busy.  Without it, the exact periods that need
         // diagnosis lose download/upload evidence to the protective snapshot
@@ -895,9 +936,9 @@ export class ImporterLiteRuntime {
       );
       return;
     }
-    const [tasks, progress, blocked, sourceHealth] = await Promise.all([
+    const [tasks, progress, blocked, sourceHealth, metadataProduct] = await Promise.all([
       this.queue.operationalSnapshot(), this.queue.progressSnapshot(),
-      this.queue.blockedReasonSnapshot(), this.queue.sourceHealthSnapshot(),
+      this.queue.blockedReasonSnapshot(), this.queue.sourceHealthSnapshot(), this.queue.metadataProductSnapshot(),
     ]);
     // The importer intentionally keeps a small YSQL pool shared with the
     // site. Optional diversity telemetry must not add another concurrent
@@ -924,7 +965,7 @@ export class ImporterLiteRuntime {
       oldestReadyAt: progress.oldestReadyAt?.toISOString() || null,
       oldestStoredUnpublishedAt: progress.oldestStoredUnpublishedAt?.toISOString() || null,
       nextP0MonitorAt: progress.nextMonitorAt?.toISOString() || null,
-      tasks, blocked, sourceHealth, slots: telemetryCollector.getSlotProductivitySnapshot(),
+      tasks, blocked, sourceHealth, metadataProduct, slots: telemetryCollector.getSlotProductivitySnapshot(),
       memoryMiB: {
         rss: Math.round(memory.rss / 1024 / 1024), heapUsed: Math.round(memory.heapUsed / 1024 / 1024),
         external: Math.round(memory.external / 1024 / 1024), arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024),
@@ -935,6 +976,11 @@ export class ImporterLiteRuntime {
         active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
         capacity: this.sourceMetadataLaneGate.capacity,
         waiters: this.sourceMetadataLaneGate.queued,
+      },
+      sourceMetadataPersistence: {
+        active: this.sourceMetadataPersistenceGate.active,
+        capacity: this.sourceMetadataPersistenceGate.capacity,
+        waiters: this.sourceMetadataPersistenceGate.queued,
       },
       pipeline: {
         limits: {
@@ -1328,30 +1374,34 @@ export class ImporterLiteRuntime {
         reportTiming('PARSER_ERROR');
         return;
       }
-      const resolved = await timePhase('mergePersistenceMs', () => this.dedupe.mergeKnownMappedWork({
-        source, sourceWorkId, title: details.title || row.source_title || row.title,
-        slug: details.slug || row.source_slug || row.title,
-        aliases: extracted.aliases, genres: extracted.genres,
-        author: details.author, artist: details.artist, synopsis: details.synopsis,
-        kind: details.kind, status: details.status, year: details.year, ageRating: details.ageRating,
-        rawMetadata: sourceMetadata as Record<string, any>,
-      }, mappingWorkId, source));
-      if (resolved.workId !== mappingWorkId || resolved.status === 'AMBIGUOUS' || resolved.status === 'FAILED') {
-        throw new Error(`METADATA_SOURCE_MAPPING_CONFLICT:${resolved.reason || resolved.status}`);
-      }
-      // The merge already knows the exact newly-added aliases and tag links.
-      // Avoid a second post-merge SELECT (including a work_tags count scan)
-      // just to reconstruct deltas for the enrichment checkpoint.
-      const aliasDelta = Math.max(0, Number(resolved.metadataDelta?.aliasesAdded || 0));
-      const tagDelta = Math.max(0, Number(resolved.metadataDelta?.tagsAdded || 0));
-      await timePhase('metadataFinalizeCommitMs', () => this.queue.completeSourceMetadataRefresh(task, workerId, {
-        source, sourceWorkId, workId: mappingWorkId,
-        aliasesState: extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES',
-        tagsState: extracted.genres.length ? 'ENRICHED' : 'NO_TAGS',
-        aliasesAdded: aliasDelta, tagsAdded: tagDelta, rawMetadata: sourceMetadata,
-      }, { metadataSourceRefresh: true, version: 2, aliases: extracted.aliases.length, aliasDelta,
-        tags: extracted.genres.length, tagDelta,
-        metadataTiming: { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) } }));
+      const persistenceQueuedAt = performance.now();
+      await this.sourceMetadataPersistenceGate.runExclusive(async () => {
+        timings.metadataPersistenceWaitMs = Math.round(performance.now() - persistenceQueuedAt);
+        const resolved = await timePhase('mergePersistenceMs', () => this.dedupe.mergeKnownMappedWork({
+          source, sourceWorkId, title: details.title || row.source_title || row.title,
+          slug: details.slug || row.source_slug || row.title,
+          aliases: extracted.aliases, genres: extracted.genres,
+          author: details.author, artist: details.artist, synopsis: details.synopsis,
+          kind: details.kind, status: details.status, year: details.year, ageRating: details.ageRating,
+          rawMetadata: sourceMetadata as Record<string, any>,
+        }, mappingWorkId, source));
+        if (resolved.workId !== mappingWorkId || resolved.status === 'AMBIGUOUS' || resolved.status === 'FAILED') {
+          throw new Error(`METADATA_SOURCE_MAPPING_CONFLICT:${resolved.reason || resolved.status}`);
+        }
+        // The merge already knows the exact newly-added aliases and tag links.
+        // Avoid a second post-merge SELECT (including a work_tags count scan)
+        // just to reconstruct deltas for the enrichment checkpoint.
+        const aliasDelta = Math.max(0, Number(resolved.metadataDelta?.aliasesAdded || 0));
+        const tagDelta = Math.max(0, Number(resolved.metadataDelta?.tagsAdded || 0));
+        await timePhase('metadataFinalizeCommitMs', () => this.queue.completeSourceMetadataRefresh(task, workerId, {
+          source, sourceWorkId, workId: mappingWorkId,
+          aliasesState: extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES',
+          tagsState: extracted.genres.length ? 'ENRICHED' : 'NO_TAGS',
+          aliasesAdded: aliasDelta, tagsAdded: tagDelta, rawMetadata: sourceMetadata,
+        }, { metadataSourceRefresh: true, version: 2, aliases: extracted.aliases.length, aliasDelta,
+          tags: extracted.genres.length, tagDelta,
+          metadataTiming: { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) } }));
+      });
       reportTiming('DONE');
     } catch (error: any) {
       const message = String(error?.message || 'METADATA_SOURCE_FETCH_FAILED').slice(0,500);

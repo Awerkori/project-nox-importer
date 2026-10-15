@@ -333,4 +333,27 @@ describe('Metadata Precedence & Field-Level Provenance', () => {
     // year should NOT be marked as manual because member is not an editor
     expect(prov.year?.source).not.toBe('manual');
   });
+
+  it('unions source-provided aliases with an editor-curated alias list', async () => {
+    const workRes = await db.query('select id from public.works where slug = $1', ['original-nexus-title']);
+    const workId = (workRes.rows[0] as any).id;
+
+    // A manual alias remains preserved, but it must not prevent a later
+    // confirmed mapping from adding its real native/romanized title.
+    await db.exec(`set "request.jwt.claim.sub" = '${adminUserId}';`);
+    await db.query(`update public.works set aliases = ARRAY['Título editorial'] where id = $1`, [workId]);
+    await db.exec(`reset "request.jwt.claim.sub";`);
+
+    await deduplication.applyMetadataPrecedence(workId, {
+      source: 'source-with-native-title',
+      sourceWorkId: 'native-1',
+      title: 'Admin Definitive Title',
+      slug: 'original-nexus-title',
+      aliases: ['나 혼자만 레벨업', 'Título editorial'],
+    }, 'source-with-native-title');
+
+    const result = (await db.query('select aliases, metadata_provenance from public.works where id = $1', [workId])).rows[0] as any;
+    expect(result.aliases).toEqual(['Título editorial', '나 혼자만 레벨업']);
+    expect(result.metadata_provenance.aliases.source).toBe('source-with-native-title');
+  });
 });

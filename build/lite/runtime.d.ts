@@ -23,8 +23,10 @@ export declare class ImporterLiteRuntime {
     private readonly claimGate;
     private readonly historicalP1BackfillGate;
     private readonly metadataReplayGate;
+    private readonly sourceMetadataRefillGate;
     private readonly sourceMetadataGate;
     private readonly sourceMetadataLaneGate;
+    private readonly sourceMetadataPersistenceGate;
     private sourceMetadataPoolWaitStartedAt;
     private readonly sourceAdmissionGate;
     private lastMetadataEnrichmentAt;

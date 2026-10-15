@@ -23,6 +23,7 @@ const manifestOrderBeforeRetryMigration = readFileSync(resolve(process.cwd(), 'm
 const sameWorkGapPriorityMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014190000_lite_prioritize_recoverable_same_work_gaps.sql'), 'utf8');
 const sourceMetadataRefetchMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014180000_metadata_source_refetch.sql'), 'utf8');
 const sourceMetadataRefetchIndexesMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014181500_metadata_source_refetch_indexes.sql'), 'utf8');
+const metadataProductMetricsMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015043000_metadata_product_activation_metrics.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -125,6 +126,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(sameWorkGapPriorityMigration);
   await db.exec(sourceMetadataRefetchMigration);
   await db.exec(sourceMetadataRefetchIndexesMigration);
+  await db.exec(metadataProductMetricsMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -393,6 +395,29 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual([{ source:'source-new',source_work_id:'needs-aliases' }]);
   });
 
+  it('prioritizes a published work with no explicit tags after alias-first work', async () => {
+    await db.query(`INSERT INTO importer_sources(id) VALUES('source-tag-rich'),('source-tagged')`);
+    await db.query(`UPDATE works SET published=true,aliases=ARRAY['Existing alias']::text[] WHERE id IN ($1,$2)`,
+      [ids.p1a,ids.p1b]);
+    await db.query(`INSERT INTO work_tags(work_id,tag_id,system_generated)
+      VALUES($1::uuid,'00000000-0000-4000-8000-00000000b001'::uuid,true)`, [ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000233','source-tag-rich','needs-tags',$1::uuid,'p1-a','P1 A','SYNCED'),
+      ('00000000-0000-4000-8000-000000000234','source-tagged','already-tagged',$2::uuid,'p1-b','P1 B','SYNCED')`,
+      [ids.p1a,ids.p1b]);
+    await db.query(`INSERT INTO importer_lite_tasks
+      (task_type,work_id,work_key,priority,base_priority,idempotency_key,state,payload,checkpoint)
+      VALUES('CATALOG',$1::uuid,$2,3,3,'prior-tag-rich-source-history','DONE',
+        '{"metadataSourceRefresh":true,"source":"source-tag-rich","sourceWorkId":"prior-rich"}'::jsonb,
+        '{"tags":3,"tagDelta":2}'::jsonb)`, [ids.p1a,`work:${ids.p1a}`]);
+
+    expect(await repo.refillSourceMetadataEnrichment(1)).toBe(1);
+    expect((await db.query(`SELECT payload->>'source' AS source,payload->>'sourceWorkId' AS source_work_id
+      FROM importer_lite_tasks WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows)
+      .toEqual([{ source:'source-tag-rich',source_work_id:'needs-tags' }]);
+  });
+
   it('does not prefer a provider whose fetched aliases were all duplicates over an untried source', async () => {
     await db.query(`INSERT INTO importer_sources(id) VALUES('source-duplicate'),('source-untried')`);
     await db.query(`UPDATE works SET published=true,aliases=ARRAY['Existing alias']::text[] WHERE id IN ($1,$2)`,[ids.p1a,ids.p1b]);
@@ -451,10 +476,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
   });
 
-  it('runs at most two source metadata fetches and pauses admission under YSQL pool wait', async () => {
+  it('counts alias and explicit-tag activation once per work', async () => {
+    await db.query(`UPDATE works SET aliases=ARRAY['Título nativo'] WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`UPDATE works SET aliases=ARRAY['Título nativo','Romanized title'] WHERE id=$1::uuid`, [ids.p1a]);
+    // The importer submits associations in batches. PostgreSQL/YSQL executes
+    // each row trigger in order; separate statements keep this PGlite
+    // contract test independent from its multi-row trigger visibility.
+    await db.query(`INSERT INTO work_tags(work_id,tag_id,system_generated)
+      VALUES($1::uuid,'00000000-0000-4000-8000-00000000a001'::uuid,true)`, [ids.p1a]);
+    await db.query(`INSERT INTO work_tags(work_id,tag_id,system_generated)
+      VALUES($1::uuid,'00000000-0000-4000-8000-00000000a002'::uuid,true)`, [ids.p1a]);
+
+    await expect(repo.metadataProductSnapshot()).resolves.toEqual({
+      aliasesActivatedWorks: 1,
+      tagsActivatedWorks: 1,
+    });
+  });
+
+  it('runs at most two source metadata fetches, tolerates one local waiter, and pauses under sustained YSQL pressure', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const lanePool = poolFor(db) as any;
-    lanePool.waitingCount = 1;
+    lanePool.waitingCount = 2;
     const runtime = new ImporterLiteRuntime(
       lanePool, {}, { get: () => null } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
@@ -463,11 +505,11 @@ describe('LiteRepository against the additive Lite migration', () => {
         LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
     );
     const claim = vi.fn(async () => ({ id: 'metadata-task' } as any));
-    (runtime as any).queue = { claimSourceMetadataRefresh: claim };
+    (runtime as any).queue = {
+      claimSourceMetadataRefresh: claim,
+      refillSourceMetadataEnrichment: vi.fn().mockResolvedValue(0),
+    };
     (runtime as any).isRuntimeLeader = true;
-    // Model a waiter that has persisted beyond the runtime's 15s grace window;
-    // one transient pool waiter is deliberately allowed a single background seat.
-    (runtime as any).sourceMetadataPoolWaitStartedAt = Date.now() - 16_000;
     let active = 0;
     let maximum = 0;
     let releaseFetches!: () => void;
@@ -484,17 +526,44 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     await (runtime as any).runSourceMetadataRefresh();
     expect(claim).not.toHaveBeenCalled();
+    // One queued importer checkout is normal while chapter receipts use the
+    // small direct pool; it must not strand the second external fetch seat.
+    lanePool.waitingCount = 1;
+    const toleratedWaiterRun = (runtime as any).runSourceMetadataRefresh();
+    await bothStarted;
+    expect(claim).toHaveBeenCalledTimes(2);
+    expect(maximum).toBe(2);
+    releaseFetches();
+    await toleratedWaiterRun;
+
+    // Reset the promises for a clean second call group. The first pair proves
+    // immediate seat filling; the explicit calls below keep the old hard cap
+    // regression covered as well.
+    active = 0;
+    maximum = 0;
+    let releaseSecondFetches!: () => void;
+    let notifySecondTwoStarted!: () => void;
+    const secondBothStarted = new Promise<void>((resolve) => { notifySecondTwoStarted = resolve; });
+    const secondHoldFetches = new Promise<void>((resolve) => { releaseSecondFetches = resolve; });
+    (runtime as any).catalog = async () => {
+      active++;
+      maximum = Math.max(maximum, active);
+      if (active === 2) notifySecondTwoStarted();
+      await secondHoldFetches;
+      active--;
+    };
     lanePool.waitingCount = 0;
     const runs = [
       (runtime as any).runSourceMetadataRefresh(),
       (runtime as any).runSourceMetadataRefresh(),
       (runtime as any).runSourceMetadataRefresh(),
     ];
-    await bothStarted;
-    expect(claim).toHaveBeenCalledTimes(2);
+    await secondBothStarted;
+    expect(claim.mock.calls.length).toBeGreaterThanOrEqual(4);
     expect(maximum).toBe(2);
     expect((runtime as any).sourceMetadataGate.capacity).toBe(2);
-    releaseFetches();
+    expect((runtime as any).sourceMetadataPersistenceGate.capacity).toBe(1);
+    releaseSecondFetches();
     await Promise.all(runs);
     memorySpy.mockRestore();
   });
@@ -2780,7 +2849,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
     );
     let candidate: any;
-    (runtime as any).dedupe = { mergeKnownMappedWork: async (value: any) => {
+    (runtime as any).dedupe = { resolveWork: async (value: any) => {
       candidate = value;
       return { workId: ids.p1a, status: 'EXISTING_MAPPING' };
     } };
@@ -2824,9 +2893,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(classification.rows[0]).toMatchObject({ aliases_state:'ENRICHED',tags_state:'ENRICHED' });
     expect(completed.state).toBe('DONE');
     expect(completed.checkpoint.metadataTiming).toMatchObject({
-      claimSqlMs: expect.any(Number), mappingQueryMs: expect.any(Number), sourcePolicyQueryMs: expect.any(Number),
+      claimSqlMs: expect.any(Number), mappingAndPolicyQueryMs: expect.any(Number),
       rateLimitWaitMs: expect.any(Number), httpMs: expect.any(Number), parseNormalizeMs: expect.any(Number),
-      mergePersistenceMs: expect.any(Number), verifyDeltaQueryMs: expect.any(Number), metadataFinalizeBeforeCommitMs: expect.any(Number),
+      metadataPersistenceWaitMs: expect.any(Number), mergePersistenceMs: expect.any(Number),
       totalBeforeFinalizeMs: expect.any(Number),
     });
   });

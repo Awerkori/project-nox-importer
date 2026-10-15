@@ -145,6 +145,11 @@ export declare class LiteRepository {
     claim(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /** Source-backed metadata owns a single low-rate lane and never waits behind chapter claims. */
     claimSourceMetadataRefresh(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    /** Product-level transitions, counted once per work rather than per mapping. */
+    metadataProductSnapshot(): Promise<{
+        aliasesActivatedWorks: number;
+        tagsActivatedWorks: number;
+    }>;
     /**
      * P0 observation has one durable, explicitly bounded lane.  It is never
      * selected by normal claims, so unchanged watches cannot starve P1/P2.
