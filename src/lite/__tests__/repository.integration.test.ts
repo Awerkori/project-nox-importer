@@ -526,7 +526,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
   });
 
-  it('runs at most two source metadata fetches, tolerates one local waiter, and pauses under sustained YSQL pressure', async () => {
+  it('runs at most two source metadata fetches, tolerates one local waiter, and degrades to one under sustained YSQL pressure', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const lanePool = poolFor(db) as any;
     lanePool.waitingCount = 2;
@@ -546,32 +546,52 @@ describe('LiteRepository against the additive Lite migration', () => {
     let active = 0;
     let maximum = 0;
     let releaseFetches!: () => void;
-    let notifyTwoStarted!: () => void;
-    const bothStarted = new Promise<void>((resolve) => { notifyTwoStarted = resolve; });
+    let notifyOneStarted!: () => void;
+    const oneStarted = new Promise<void>((resolve) => { notifyOneStarted = resolve; });
     const holdFetches = new Promise<void>((resolve) => { releaseFetches = resolve; });
     (runtime as any).catalog = async () => {
       active++;
       maximum = Math.max(maximum, active);
-      if (active === 2) notifyTwoStarted();
+      if (active === 1) notifyOneStarted();
       await holdFetches;
       active--;
     };
 
     // A short two-checkout burst occurs while chapter receipts commit. It is
     // not enough evidence to strand a network-only metadata seat; only the
-    // same signal persisting for the configured guard window pauses claims.
+    // same signal persisting for the configured guard window reduces claims
+    // to one protected source task rather than dropping the lane to zero.
     expect((runtime as any).hasSustainedSourceMetadataPoolPressure()).toBe(false);
     (runtime as any).sourceMetadataPoolWaitStartedAt = Date.now() - 15_000;
+    const pressuredRun = (runtime as any).runSourceMetadataRefresh();
+    await oneStarted;
+    expect(claim).toHaveBeenCalledTimes(1);
     await (runtime as any).runSourceMetadataRefresh();
-    expect(claim).not.toHaveBeenCalled();
+    expect(claim).toHaveBeenCalledTimes(1);
+    releaseFetches();
+    await pressuredRun;
+
     // One queued importer checkout is normal while chapter receipts use the
     // small direct pool; it must not strand the second external fetch seat.
     lanePool.waitingCount = 1;
+    active = 0;
+    maximum = 0;
+    let releaseToleratedFetches!: () => void;
+    let notifyToleratedTwoStarted!: () => void;
+    const toleratedBothStarted = new Promise<void>((resolve) => { notifyToleratedTwoStarted = resolve; });
+    const toleratedHoldFetches = new Promise<void>((resolve) => { releaseToleratedFetches = resolve; });
+    (runtime as any).catalog = async () => {
+      active++;
+      maximum = Math.max(maximum, active);
+      if (active === 2) notifyToleratedTwoStarted();
+      await toleratedHoldFetches;
+      active--;
+    };
     const toleratedWaiterRun = (runtime as any).runSourceMetadataRefresh();
-    await bothStarted;
-    expect(claim).toHaveBeenCalledTimes(2);
+    await toleratedBothStarted;
+    expect(claim).toHaveBeenCalledTimes(3);
     expect(maximum).toBe(2);
-    releaseFetches();
+    releaseToleratedFetches();
     await toleratedWaiterRun;
 
     // Reset the promises for a clean second call group. The first pair proves
@@ -597,7 +617,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       (runtime as any).runSourceMetadataRefresh(),
     ];
     await secondBothStarted;
-    expect(claim.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(claim.mock.calls.length).toBeGreaterThanOrEqual(5);
     expect(maximum).toBe(2);
     expect((runtime as any).sourceMetadataGate.capacity).toBe(2);
     expect((runtime as any).sourceMetadataPersistenceGate.capacity).toBe(1);

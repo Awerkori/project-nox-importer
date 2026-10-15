@@ -534,7 +534,8 @@ export class ImporterLiteRuntime {
     async refillSourceMetadataEnrichment(replaceCompletedTask = false) {
         if (!this.isRuntimeLeader || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS))
             return;
-        if (this.hasSustainedSourceMetadataPoolPressure() || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
+        const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
+        if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
             || process.memoryUsage().rss >= 384 * 1024 * 1024)
             return;
         if (!this.sourceMetadataRefillGate.tryAcquire())
@@ -545,7 +546,12 @@ export class ImporterLiteRuntime {
             // is not evidence that the public site is under pressure, and holding a
             // source fetch idle for it collapses the tested two-fetch lane to one.
             // The persistence gate below still permits just one YSQL merge/commit.
-            const admitted = await this.queue.refillSourceMetadataEnrichment(2);
+            // Under a real local queue, keep one small source request progressing
+            // instead of dropping the lane to zero. It has no YSQL connection while
+            // fetching, its merge is still serialised below, and this avoids a
+            // feedback loop where a paused metadata lane repeatedly builds READY
+            // work that only wakes on the next timer tick.
+            const admitted = await this.queue.refillSourceMetadataEnrichment(sustainedPoolPressure ? 1 : 2);
             if (admitted) {
                 this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
                 // A producer tick that creates executable work must wake the dedicated
@@ -570,9 +576,14 @@ export class ImporterLiteRuntime {
         // RSS nears the container's 512 MiB boundary. A single importer-pool
         // waiter is normal under chapter load; the one-seat persistence gate
         // below, rather than an idle network slot, protects YSQL in that case.
-        if (this.hasSustainedSourceMetadataPoolPressure()
-            || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
+        const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
+        if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
             || process.memoryUsage().rss >= 384 * 1024 * 1024)
+            return;
+        // Backpressure reduces the dedicated lane from its tested two external
+        // seats to one. Do not turn it fully off: that caused READY dwell and
+        // made the very pause intended to protect YSQL hold durable work idle.
+        if (sustainedPoolPressure && this.sourceMetadataLaneGate.active >= 1)
             return;
         if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire())
             return;
