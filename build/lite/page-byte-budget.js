@@ -4,17 +4,21 @@
  * protect a small container when a few source images are much larger than
  * the usual page.
  *
- * This intentionally has no RSS feedback loop or background timer: admission
- * is controlled by bytes actually reserved by active page pipelines, and
- * releases immediately wake blocked producers.  Completion upgrades get
- * precedence over new initial reservations so an already-started body can
- * always drain instead of forming a backpressure deadlock.
+ * Admission is controlled by bytes actually reserved by active page
+ * pipelines, and releases immediately wake blocked producers.  The Lite
+ * runtime may lower the effective cap when the container reports memory
+ * pressure; that only holds *new* producers back. Completion upgrades keep
+ * precedence so an already-started body can always drain rather than forming
+ * a backpressure deadlock.
  */
 export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
-// After the 64→80 MiB ramp, snapshots still showed 69–75/80 MiB reserved
-// with 2–3 producers waiting; RSS stayed below 160 MiB. One further bounded
-// 16 MiB increment tests remaining byte-admission pressure. Other limits stay.
-export const LITE_PAGE_BUFFER_BUDGET_BYTES = 96 * 1024 * 1024;
+// `readImageBody` retains streamed chunks and then allocates a contiguous
+// Uint8Array before releasing those chunks. A 96 MiB logical body budget can
+// therefore transiently occupy about twice that amount, before HTTP/TLS and
+// multipart upload buffers. In a 512 MiB container that was enough to drive
+// RSS into the OOM limit despite a small JS heap. Keep the normal live-body
+// ceiling at 48 MiB; the runtime reduces it further under RSS pressure.
+export const LITE_PAGE_BUFFER_BUDGET_BYTES = 48 * 1024 * 1024;
 export class PageByteReservation {
     budget;
     _reservedBytes;
@@ -43,14 +47,29 @@ export class PageByteReservation {
     }
 }
 export class PageByteBudget {
-    capacityBytes;
     reservedBytes = 0;
     waiters = [];
+    _capacityBytes;
     constructor(capacityBytes = LITE_PAGE_BUFFER_BUDGET_BYTES) {
-        this.capacityBytes = capacityBytes;
         if (!Number.isSafeInteger(capacityBytes) || capacityBytes < 1) {
             throw new Error('LITE_PAGE_BUFFER_BUDGET_INVALID');
         }
+        this._capacityBytes = capacityBytes;
+    }
+    get capacityBytes() {
+        return this._capacityBytes;
+    }
+    /**
+     * Lowering capacity never revokes an in-flight reservation. Existing page
+     * work drains normally; new body starts wait until the remaining live bytes
+     * fit under the new cap. Raising capacity wakes eligible waiters at once.
+     */
+    setCapacityBytes(capacityBytes) {
+        if (!Number.isSafeInteger(capacityBytes) || capacityBytes < 1) {
+            throw new Error('LITE_PAGE_BUFFER_BUDGET_INVALID');
+        }
+        this._capacityBytes = capacityBytes;
+        this.drain();
     }
     snapshot() {
         return { capacityBytes: this.capacityBytes, reservedBytes: this.reservedBytes, waiting: this.waiters.length };

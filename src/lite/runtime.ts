@@ -19,6 +19,7 @@ import { SourceAdmissionGate } from '../core/source-admission-gate.js';
 import { sanitizeSynopsis } from './metadata.js';
 import { classifyExplicitSourceMetadata, extractStoredMappingMetadata } from './mapping-metadata.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
+import { LiteMemoryPressureGuard, type LiteMemoryPressureSnapshot } from './memory-pressure.js';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const withTimeout = async <T>(operation: Promise<T>, timeoutMs: number, code: string): Promise<T> => {
@@ -42,12 +43,11 @@ const rankForSource = (source: string) => source === 'mangaflix' ? 10 : source =
 const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
 const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
-// Five chapter workers can otherwise retain up to thirty decoded/downloaded
-// pages while Telegram receipts drain.  Production repeatedly reached the
-// 512 MiB container boundary before control-plane timers could run.  This
-// bounds only *new page buffers*; uploads, receipts, publication and lease
-// renewal remain unblocked so the in-memory wave can drain.
-const SAFE_BUFFERED_PAGE_CAP = 24;
+// Page bodies transiently exist both as streamed chunks and as their final
+// contiguous Uint8Array. Sixteen page permits plus the 48 MiB byte ceiling
+// bound that real peak while preserving enough independent work for five
+// chapter workers. RSS pressure can reduce this further at runtime.
+const SAFE_BUFFERED_PAGE_CAP = 16;
 // Stored metadata replay is local and no-network. Keep replay admission
 // responsive, but poll the source-mapping producer less often: it uses the
 // same small YSQL pool as chapter work and only needs to refill a two-task
@@ -98,6 +98,12 @@ export class ImporterLiteRuntime {
   private readonly downloads: AsyncSemaphore;
   private readonly bufferedPages: AsyncSemaphore;
   private readonly bufferedPageBytes: PageByteBudget;
+  private readonly memoryPressureGuard: LiteMemoryPressureGuard;
+  // Vitest shares one Node process across many integration fixtures, so its
+  // host RSS is not the Lite runtime's container RSS. The guard itself is
+  // exercised with deterministic memory snapshots; production always enables
+  // it against the real process.
+  private readonly memoryPressureEnabled = process.env.NODE_ENV !== 'test';
   private readonly claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
   private readonly historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
   private readonly metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
@@ -155,6 +161,26 @@ export class ImporterLiteRuntime {
     return Date.now() < this.sitePausedUntil;
   }
 
+  /**
+   * Metadata is optional P2 work. Yield it before taking away an in-flight
+   * chapter's page/upload permits; page-level backpressure itself makes any
+   * already-started chapter drain safely.
+   */
+  private shouldPauseLowPriorityMetadata(): boolean {
+    return this.refreshMemoryPressure().pauseLowPriorityMetadata;
+  }
+
+  private refreshMemoryPressure(): LiteMemoryPressureSnapshot {
+    if (!this.memoryPressureEnabled) return this.memoryPressureGuard.snapshot();
+    const before = this.memoryPressureGuard.snapshot().state;
+    const snapshot = this.memoryPressureGuard.sample();
+    if (snapshot.state !== before) {
+      const log = snapshot.state === 'NORMAL' ? this.logger.info.bind(this.logger) : this.logger.warn.bind(this.logger);
+      log('Adjusted Lite page admission for memory pressure', snapshot);
+    }
+    return snapshot;
+  }
+
   constructor(
     private readonly pool: Pool,
     private readonly catalogClient: any,
@@ -169,6 +195,7 @@ export class ImporterLiteRuntime {
     this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
     this.bufferedPages = new AsyncSemaphore(Math.min(config.BUFFERED_PAGE_CONCURRENCY, SAFE_BUFFERED_PAGE_CAP), 'lite_global_page_buffers');
     this.bufferedPageBytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
+    this.memoryPressureGuard = new LiteMemoryPressureGuard(this.bufferedPages, this.bufferedPageBytes, this.bufferedPages.capacity);
     this.chapterWorkerCapacity = Math.max(1, Math.min(config.LITE_CHAPTER_WORKERS ?? 1,
       config.MAX_CONCURRENT_CHAPTERS, config.TESTED_CONCURRENCY_CEILING));
     // Five independent MangaFlix chapter waves can fill the measured 24-page
@@ -216,6 +243,11 @@ export class ImporterLiteRuntime {
     timer.unref(); this.timers.push(timer);
     const monitorTimer = setInterval(() => void this.runMonitorTurn().catch(() => {}), 1_000);
     monitorTimer.unref(); this.timers.push(monitorTimer);
+    // Sample RSS independently from the 60-second diagnostic heartbeat. The
+    // fixed byte ceiling makes overshoot bounded; this one-second brake then
+    // prevents the next page wave from rebuilding pressure.
+    const memoryTimer = setInterval(() => this.refreshMemoryPressure(), 1_000);
+    memoryTimer.unref(); this.timers.push(memoryTimer);
     const metadataTimer = setInterval(() => {
       if (!this.isRuntimeLeader) return;
       void this.refillStoredMetadataEnrichment();
@@ -551,7 +583,8 @@ export class ImporterLiteRuntime {
    * bounded replay lane; normal chapter claims retain strict priority.
    */
   private async refillStoredMetadataEnrichment(): Promise<void> {
-    if (!this.isRuntimeLeader || Date.now() - this.lastMetadataEnrichmentAt < STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS) return;
+    if (!this.isRuntimeLeader || this.shouldPauseLowPriorityMetadata()
+      || Date.now() - this.lastMetadataEnrichmentAt < STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS) return;
     this.lastMetadataEnrichmentAt = Date.now();
     try {
       const admitted = await this.queue.refillStoredMetadataEnrichment();
@@ -570,7 +603,7 @@ export class ImporterLiteRuntime {
     if (!this.isRuntimeLeader || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS)) return;
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
     if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
-      || process.memoryUsage().rss >= 384 * 1024 * 1024) return;
+      || this.shouldPauseLowPriorityMetadata()) return;
     if (!this.sourceMetadataRefillGate.tryAcquire()) return;
     this.lastSourceMetadataRefillAt = Date.now();
     try {
@@ -609,7 +642,7 @@ export class ImporterLiteRuntime {
     // below, rather than an idle network slot, protects YSQL in that case.
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
     if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
-      || process.memoryUsage().rss >= 384 * 1024 * 1024) return;
+      || this.shouldPauseLowPriorityMetadata()) return;
     // Backpressure reduces the dedicated lane from its tested two external
     // seats to one. Do not turn it fully off: that caused READY dwell and
     // made the very pause intended to protect YSQL hold durable work idle.
@@ -670,7 +703,8 @@ export class ImporterLiteRuntime {
    * source slot, page buffer or chapter worker is admitted here.
    */
   private async runStoredMetadataReplay(): Promise<void> {
-    if (!this.isRuntimeLeader || Date.now() - this.lastMetadataReplayAt < STORED_METADATA_REPLAY_INTERVAL_MS) return;
+    if (!this.isRuntimeLeader || this.shouldPauseLowPriorityMetadata()
+      || Date.now() - this.lastMetadataReplayAt < STORED_METADATA_REPLAY_INTERVAL_MS) return;
     if (!this.metadataReplayGate.tryAcquire()) return;
     try {
       this.lastMetadataReplayAt = Date.now();
@@ -815,11 +849,15 @@ export class ImporterLiteRuntime {
 
   private livenessSnapshot() {
     const memory = process.memoryUsage();
+    const memoryPressure = this.memoryPressureEnabled
+      ? this.memoryPressureGuard.sample(memory)
+      : this.memoryPressureGuard.snapshot();
     return {
       at: new Date().toISOString(),
       memoryMiB: { rss: Math.round(memory.rss / 1024 / 1024), heapUsed: Math.round(memory.heapUsed / 1024 / 1024),
         heapTotal: Math.round(memory.heapTotal / 1024 / 1024), external: Math.round(memory.external / 1024 / 1024),
         arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024) },
+      memoryPressure,
       ysqlPool: { total: this.pool.totalCount, idle: this.pool.idleCount, waiting: this.pool.waitingCount },
       sourceMetadataLane: {
         active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
@@ -952,6 +990,7 @@ export class ImporterLiteRuntime {
           capacity: this.sourceMetadataPersistenceGate.capacity,
           waiters: this.sourceMetadataPersistenceGate.queued,
         },
+        memoryPressure: liveness.memoryPressure,
         // In-memory stage telemetry is safe to sample while the two YSQL
         // connections are busy.  Without it, the exact periods that need
         // diagnosis lose download/upload evidence to the protective snapshot
@@ -1033,6 +1072,7 @@ export class ImporterLiteRuntime {
         capacity: this.sourceMetadataPersistenceGate.capacity,
         waiters: this.sourceMetadataPersistenceGate.queued,
       },
+      memoryPressure: liveness.memoryPressure,
       pipeline: {
         limits: {
           pageDownloads: this.downloads.capacity,

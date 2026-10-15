@@ -40,4 +40,25 @@ describe('PageByteBudget', () => {
     held.release();
     expect(budget.snapshot()).toEqual({ capacityBytes: 2, reservedBytes: 0, waiting: 0 });
   });
+
+  it('lets existing pages drain when memory pressure lowers capacity', async () => {
+    const budget = new PageByteBudget(6);
+    const first = await budget.reserve(3);
+    const second = await budget.reserve(3);
+
+    budget.setCapacityBytes(2);
+    let admitted = false;
+    const waiting = budget.reserve(1).then((reservation) => {
+      admitted = true;
+      return reservation;
+    });
+    expect(budget.snapshot()).toEqual({ capacityBytes: 2, reservedBytes: 6, waiting: 1 });
+
+    first.release();
+    expect(admitted).toBe(false);
+    second.release();
+    const third = await waiting;
+    expect(admitted).toBe(true);
+    third.release();
+  });
 });
