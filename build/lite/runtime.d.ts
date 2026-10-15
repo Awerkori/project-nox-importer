@@ -25,6 +25,7 @@ export declare class ImporterLiteRuntime {
     private readonly metadataReplayGate;
     private readonly sourceMetadataRefillGate;
     private readonly sourceMetadataGate;
+    private readonly sourceMetadataPreparationGate;
     private readonly sourceMetadataLaneGate;
     private readonly sourceMetadataPersistenceGate;
     private sourceMetadataPoolWaitStartedAt;
@@ -101,7 +102,8 @@ export declare class ImporterLiteRuntime {
     private refillStoredMetadataEnrichment;
     /** Source-backed historical metadata remains a P2 catalog task and shares
      * normal priority claims; it never steals a chapter worker or bypasses a
-     * STAFF/P0/P1 reserve. At most two tasks are durably admitted across sources.
+     * STAFF/P0/P1 reserve. At most four network-only tasks are admitted across
+     * sources; YSQL preparation and persistence remain gated below.
      */
     private refillSourceMetadataEnrichment;
     /** Dedicated bounded workers give source refetch continuous progress without
