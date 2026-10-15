@@ -18,8 +18,14 @@ import { LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES, PageByteBudget } from './page-b
 // confirmed receipt is deferred and can safely coalesce a little longer while
 // the next bounded page wave proceeds. This separates pool amortisation from
 // pre-upload latency without changing a full-batch flush or any concurrency.
-export const DURABLE_RESERVATION_BATCH_JOIN_MS = 120;
-export const DURABLE_RECEIPT_BATCH_JOIN_MS = 360;
+// Yugabyte's write latency is material relative to an individual page.  At
+// the approved six chapter workers the former 120 ms/360 ms joins produced
+// mostly 3--4 page writes, which serialized the page pipeline on the small
+// shared YSQL pool.  These remain bounded, sub-second joins; the pre-upload
+// intent is still committed before Telegram is called and receipts remain
+// scalar-only after Telegram has confirmed the page.
+export const DURABLE_RESERVATION_BATCH_JOIN_MS = 300;
+export const DURABLE_RECEIPT_BATCH_JOIN_MS = 600;
 
 async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const result = new Array<R>(items.length);

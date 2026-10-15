@@ -3661,7 +3661,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     const third = batcher.persist({ ...input, pagePosition: 3 });
     const result = await Promise.race([
       Promise.all([first, second, third]).then(() => 'completed'),
-      new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 500)),
+      new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), DURABLE_RECEIPT_BATCH_JOIN_MS + 500)),
     ]);
     expect(result).toBe('completed');
     expect(calls).toEqual([1, 2]);
@@ -3669,8 +3669,8 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('uses a longer join only for deferred receipts, not pre-upload intents', () => {
-    expect(DURABLE_RESERVATION_BATCH_JOIN_MS).toBe(120);
-    expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBe(360);
+    expect(DURABLE_RESERVATION_BATCH_JOIN_MS).toBe(300);
+    expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBe(600);
     expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBeGreaterThan(DURABLE_RESERVATION_BATCH_JOIN_MS);
   });
 
@@ -3699,7 +3699,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     const third = batcher.reserve({ taskId: ids.p1a, pagePosition: 3, sha256: 'reservation-race-three' });
     const result = await Promise.race([
       Promise.all([first, second, third]).then(() => 'completed'),
-      new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+      new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), DURABLE_RESERVATION_BATCH_JOIN_MS + 500)),
     ]);
     expect(result).toBe('completed');
     expect(calls).toEqual([1, 2]);
