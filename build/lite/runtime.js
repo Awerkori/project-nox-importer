@@ -1237,8 +1237,7 @@ export class ImporterLiteRuntime {
         }
         let mappingWorkId = '';
         try {
-            const mapping = await timePhase('mappingQueryMs', () => this.pool.query(`SELECT m.work_id::text,m.source_title,m.source_slug,w.title,w.aliases,
-          (SELECT count(*)::int FROM work_tags wt WHERE wt.work_id=w.id)::text AS tag_count
+            const mapping = await timePhase('mappingQueryMs', () => this.pool.query(`SELECT m.work_id::text,m.source_title,m.source_slug,w.title
          FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
          WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId]));
             const row = mapping.rows[0];
@@ -1310,10 +1309,11 @@ export class ImporterLiteRuntime {
             if (resolved.workId !== mappingWorkId || resolved.status === 'AMBIGUOUS' || resolved.status === 'FAILED') {
                 throw new Error(`METADATA_SOURCE_MAPPING_CONFLICT:${resolved.reason || resolved.status}`);
             }
-            const after = await timePhase('verifyDeltaQueryMs', () => this.pool.query(`SELECT w.aliases,
-        (SELECT count(*)::int FROM work_tags wt WHERE wt.work_id=w.id)::text AS tag_count FROM works w WHERE w.id=$1::uuid`, [mappingWorkId]));
-            const aliasDelta = Math.max(0, (after.rows[0]?.aliases?.length || 0) - (row.aliases?.length || 0));
-            const tagDelta = Math.max(0, Number(after.rows[0]?.tag_count || 0) - Number(row.tag_count || 0));
+            // The merge already knows the exact newly-added aliases and tag links.
+            // Avoid a second post-merge SELECT (including a work_tags count scan)
+            // just to reconstruct deltas for the enrichment checkpoint.
+            const aliasDelta = Math.max(0, Number(resolved.metadataDelta?.aliasesAdded || 0));
+            const tagDelta = Math.max(0, Number(resolved.metadataDelta?.tagsAdded || 0));
             await timePhase('metadataFinalizeCommitMs', () => this.queue.completeSourceMetadataRefresh(task, workerId, {
                 source, sourceWorkId, workId: mappingWorkId,
                 aliasesState: extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES',
