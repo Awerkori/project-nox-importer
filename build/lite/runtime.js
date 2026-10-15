@@ -40,10 +40,11 @@ const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
 const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
 // Declared-size page bodies are filled directly into their final Uint8Array.
-// Twenty permits and a 64 MiB live-body ceiling keep five chapter workers fed
-// without restoring the historic unbounded page burst. RSS pressure can cut
-// this further before the container approaches its 512 MiB limit.
-const SAFE_BUFFERED_PAGE_CAP = 20;
+// Match the measured 24-download fence so five six-page chapter waves do not
+// idle behind a smaller count-only gate. The independent 64 MiB live-body
+// budget remains authoritative, and RSS pressure can cut both admissions
+// before the container approaches its 512 MiB limit.
+const SAFE_BUFFERED_PAGE_CAP = 24;
 // Stored metadata replay is local and no-network. Keep replay admission
 // responsive, but poll the source-mapping producer less often: it uses the
 // same small YSQL pool as chapter work and only needs to refill a two-task
