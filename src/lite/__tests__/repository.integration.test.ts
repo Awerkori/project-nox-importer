@@ -557,6 +557,11 @@ describe('LiteRepository against the additive Lite migration', () => {
       active--;
     };
 
+    // A short two-checkout burst occurs while chapter receipts commit. It is
+    // not enough evidence to strand a network-only metadata seat; only the
+    // same signal persisting for the configured guard window pauses claims.
+    expect((runtime as any).hasSustainedSourceMetadataPoolPressure()).toBe(false);
+    (runtime as any).sourceMetadataPoolWaitStartedAt = Date.now() - 15_000;
     await (runtime as any).runSourceMetadataRefresh();
     expect(claim).not.toHaveBeenCalled();
     // One queued importer checkout is normal while chapter receipts use the
