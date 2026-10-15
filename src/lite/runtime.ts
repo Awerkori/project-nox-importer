@@ -93,11 +93,13 @@ export class ImporterLiteRuntime {
   private readonly historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
   private readonly metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
   private readonly sourceMetadataRefillGate = new AsyncSemaphore(1, 'lite_source_metadata_refill');
-  // Two external requests have been production-tested.  Their database merge
-  // is deliberately narrower: source network latency must not reserve a YSQL
-  // turn, and two slow providers must not commit metadata concurrently.
-  private readonly sourceMetadataGate = new AsyncSemaphore(2, 'lite_source_metadata_refetch');
-  private readonly sourceMetadataLaneGate = new AsyncSemaphore(2, 'lite_source_metadata_lane');
+  // Network waits are independent from YSQL work. Four source requests may
+  // wait on distinct providers, while preparing a mapping and committing its
+  // merge remain deliberately narrow. No transaction or pool checkout spans
+  // the HTTP phase.
+  private readonly sourceMetadataGate = new AsyncSemaphore(4, 'lite_source_metadata_refetch');
+  private readonly sourceMetadataPreparationGate = new AsyncSemaphore(1, 'lite_source_metadata_prepare');
+  private readonly sourceMetadataLaneGate = new AsyncSemaphore(4, 'lite_source_metadata_lane');
   private readonly sourceMetadataPersistenceGate = new AsyncSemaphore(1, 'lite_source_metadata_persistence');
   private sourceMetadataPoolWaitStartedAt = 0;
   private readonly sourceAdmissionGate = new SourceAdmissionGate(10_000);
@@ -535,7 +537,8 @@ export class ImporterLiteRuntime {
 
   /** Source-backed historical metadata remains a P2 catalog task and shares
    * normal priority claims; it never steals a chapter worker or bypasses a
-   * STAFF/P0/P1 reserve. At most two tasks are durably admitted across sources.
+   * STAFF/P0/P1 reserve. At most four network-only tasks are admitted across
+   * sources; YSQL preparation and persistence remain gated below.
    */
   private async refillSourceMetadataEnrichment(replaceCompletedTask = false): Promise<void> {
     if (!this.isRuntimeLeader || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS)) return;
@@ -554,13 +557,13 @@ export class ImporterLiteRuntime {
       // fetching, its merge is still serialised below, and this avoids a
       // feedback loop where a paused metadata lane repeatedly builds READY
       // work that only wakes on the next timer tick.
-      const admitted = await this.queue.refillSourceMetadataEnrichment(sustainedPoolPressure ? 1 : 2);
+      const admitted = await this.queue.refillSourceMetadataEnrichment(sustainedPoolPressure ? 1 : 4);
       if (admitted) {
         this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
         // A producer tick that creates executable work must wake the dedicated
         // lane itself. Waiting for its 5 s safety timer needlessly leaves a
         // durable P2 task READY while no source request is in flight. The
-        // runner still applies the same site/pool checks and two-seat cap.
+        // runner still applies the same site/pool checks and bounded cap.
         void this.runSourceMetadataRefresh();
       }
     } catch (error: any) {
@@ -595,7 +598,7 @@ export class ImporterLiteRuntime {
         claimed = true;
         // Do not wait for this request's HTTP phase before filling the other
         // approved seat. The lane and fetch gates make this a hard maximum of
-        // two; it only removes timer-created idle time.
+        // four network-only operations; it only removes timer-created idle time.
         void this.runSourceMetadataRefresh();
         await this.catalog(task, workerId, {
         claimSqlMs: Math.round(performance.now() - claimStartedAt),
@@ -1338,26 +1341,24 @@ export class ImporterLiteRuntime {
         nextRunAt: new Date(Date.now() + 6 * 60 * 60_000), resetAttempts: true });
       return;
     }
-    if (!this.sourceMetadataGate.tryAcquire()) {
-      await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: 'METADATA_LANE_BUSY',
-        nextRunAt: new Date(Date.now() + 30_000), resetAttempts: true });
-      return;
-    }
     let mappingWorkId = '';
     try {
-      const mapping = await timePhase('mappingAndPolicyQueryMs', () => this.pool.query<{
-        work_id: string; source_title: string; source_slug: string; title: string;
-        source_enabled: boolean; source_status: string; source_cooldown: Date | null;
-        source_health: string | null; health_cooldown: Date | null;
-      }>(
-        `SELECT m.work_id::text,m.source_title,m.source_slug,w.title,
-          source_policy.enabled AS source_enabled,source_policy.status AS source_status,
-          source_policy.cooldown_until AS source_cooldown,health.health AS source_health,
-          health.cooldown_until AS health_cooldown
-         FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
-         JOIN importer_sources source_policy ON source_policy.id=m.source
-         LEFT JOIN importer_lite_source_health health ON health.source=m.source
-         WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId]));
+      const mapping = await this.sourceMetadataPreparationGate.runExclusive(() =>
+        timePhase('mappingAndPolicyQueryMs', () => this.pool.query<{
+          work_id: string; source_title: string; source_slug: string; title: string;
+          source_enabled: boolean; source_status: string; source_cooldown: Date | null;
+          source_health: string | null; health_cooldown: Date | null;
+        }>(
+          `SELECT m.work_id::text,m.source_title,m.source_slug,w.title,
+            source_policy.enabled AS source_enabled,source_policy.status AS source_status,
+            source_policy.cooldown_until AS source_cooldown,health.health AS source_health,
+            health.cooldown_until AS health_cooldown
+           FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
+           JOIN importer_sources source_policy ON source_policy.id=m.source
+           LEFT JOIN importer_lite_source_health health ON health.source=m.source
+           WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId],
+        )),
+      );
       const row = mapping.rows[0];
       if (!row) {
         await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_ENRICHMENT_MAPPING_MISSING' });
@@ -1382,16 +1383,18 @@ export class ImporterLiteRuntime {
       if (!runnable) {
         const nextRunAt = cooldownUntil && cooldownUntil > new Date()
           ? cooldownUntil : new Date(Date.now() + 6 * 60 * 60_000);
-        await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
+        await this.sourceMetadataPersistenceGate.runExclusive(() => this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
           aliasesState: 'EXTERNAL_BLOCKED', tagsState: 'EXTERNAL_BLOCKED',
-          error: `SOURCE_NOT_READY:${status || 'MISSING'}`, nextRetryAt: nextRunAt });
+          error: `SOURCE_NOT_READY:${status || 'MISSING'}`, nextRetryAt: nextRunAt }));
         await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: `SOURCE_NOT_READY:${status || 'MISSING'}`,
           nextRunAt, resetAttempts: true });
         return;
       }
       const host = new URL(adapter.baseUrl).host;
-      await timePhase('rateLimitWaitMs', () => this.sourceRateLimiter.acquire(host, undefined, 60_000));
-      const details = await timePhase('httpMs', () => withTimeout(adapter.fetchWorkDetails(sourceWorkId), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'METADATA_SOURCE_TIMEOUT'));
+      const details = await this.sourceMetadataGate.runExclusive(async () => {
+        await timePhase('rateLimitWaitMs', () => this.sourceRateLimiter.acquire(host, undefined, 60_000));
+        return timePhase('httpMs', () => withTimeout(adapter.fetchWorkDetails(sourceWorkId), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'METADATA_SOURCE_TIMEOUT'));
+      });
       const raw = details.raw && typeof details.raw === 'object' ? details.raw : {};
       const sourceMetadata: Record<string, unknown> = {
         ...raw,
@@ -1401,10 +1404,10 @@ export class ImporterLiteRuntime {
       const extracted = await timePhase('parseNormalizeMs', async () =>
         classifyExplicitSourceMetadata(sourceMetadata, details.title || row.title || row.source_title || ''));
       if (extracted.parserError) {
-        await timePhase('metadataPersistCommitMs', () => this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
+        await timePhase('metadataPersistCommitMs', () => this.sourceMetadataPersistenceGate.runExclusive(() => this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
           aliasesState: extracted.aliasesState,
           tagsState: extracted.tagsState,
-          error: 'EXPLICIT_SOURCE_METADATA_NOT_PARSED', rawMetadata: sourceMetadata }));
+          error: 'EXPLICIT_SOURCE_METADATA_NOT_PARSED', rawMetadata: sourceMetadata })));
         const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
         const finalizeStartedAt = performance.now();
         await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_SOURCE_PARSER_ERROR',
@@ -1458,12 +1461,12 @@ export class ImporterLiteRuntime {
       // admission slots.
       const sourceExternalFailureCount = Math.max(0, Number(task.checkpoint.sourceExternalFailureCount) || 0) + 1;
       const retryDelay = Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(sourceExternalFailureCount, 8));
-      if (mappingWorkId && !persistenceFailure) await timePhase('metadataPersistCommitMs', () => this.queue.recordSourceMetadataEnrichment({
+      if (mappingWorkId && !persistenceFailure) await timePhase('metadataPersistCommitMs', () => this.sourceMetadataPersistenceGate.runExclusive(() => this.queue.recordSourceMetadataEnrichment({
         source, sourceWorkId, workId: mappingWorkId,
         aliasesState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED',
         tagsState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED', error: message,
         nextRetryAt: parserFailure ? null : new Date(Date.now() + retryDelay),
-      }));
+      })));
       if (!parserFailure && !persistenceFailure) await timePhase('sourceHealthPersistMs', () => this.queue.recordSourceFailure(source, error));
       const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
       const finalizeStartedAt = performance.now();
@@ -1478,9 +1481,7 @@ export class ImporterLiteRuntime {
             checkpoint: { metadataSourceRefresh: true, sourceExternalFailureCount, metadataTiming: checkpointTiming }, resetAttempts: true });
       timings.finishCommitMs = Math.round(performance.now() - finalizeStartedAt);
       reportTiming(parserFailure ? 'PARSER_ERROR' : persistenceFailure ? 'PERSISTENCE_FAILURE' : 'EXTERNAL_BLOCKED');
-    } finally {
-      this.sourceMetadataGate.release();
-    }
+    } finally {}
   }
 
   /** A no-network P2 pass over explicit metadata saved with a known mapping. */

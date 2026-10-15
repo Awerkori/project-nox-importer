@@ -526,7 +526,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
   });
 
-  it('runs at most two source metadata fetches, tolerates one local waiter, and degrades to one under sustained YSQL pressure', async () => {
+  it('runs four network-only metadata fetches while keeping YSQL gates narrow, and degrades to one under sustained pressure', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const lanePool = poolFor(db) as any;
     lanePool.waitingCount = 2;
@@ -572,41 +572,41 @@ describe('LiteRepository against the additive Lite migration', () => {
     await pressuredRun;
 
     // One queued importer checkout is normal while chapter receipts use the
-    // small direct pool; it must not strand the second external fetch seat.
+    // small direct pool; it must not strand the four external fetch seats.
     lanePool.waitingCount = 1;
     active = 0;
     maximum = 0;
     let releaseToleratedFetches!: () => void;
-    let notifyToleratedTwoStarted!: () => void;
-    const toleratedBothStarted = new Promise<void>((resolve) => { notifyToleratedTwoStarted = resolve; });
+    let notifyToleratedFourStarted!: () => void;
+    const toleratedFourStarted = new Promise<void>((resolve) => { notifyToleratedFourStarted = resolve; });
     const toleratedHoldFetches = new Promise<void>((resolve) => { releaseToleratedFetches = resolve; });
     (runtime as any).catalog = async () => {
       active++;
       maximum = Math.max(maximum, active);
-      if (active === 2) notifyToleratedTwoStarted();
+      if (active === 4) notifyToleratedFourStarted();
       await toleratedHoldFetches;
       active--;
     };
     const toleratedWaiterRun = (runtime as any).runSourceMetadataRefresh();
-    await toleratedBothStarted;
-    expect(claim).toHaveBeenCalledTimes(3);
-    expect(maximum).toBe(2);
+    await toleratedFourStarted;
+    expect(claim).toHaveBeenCalledTimes(5);
+    expect(maximum).toBe(4);
     releaseToleratedFetches();
     await toleratedWaiterRun;
 
-    // Reset the promises for a clean second call group. The first pair proves
+    // Reset the promises for a clean second call group. The first group proves
     // immediate seat filling; the explicit calls below keep the old hard cap
     // regression covered as well.
     active = 0;
     maximum = 0;
     let releaseSecondFetches!: () => void;
-    let notifySecondTwoStarted!: () => void;
-    const secondBothStarted = new Promise<void>((resolve) => { notifySecondTwoStarted = resolve; });
+    let notifySecondFourStarted!: () => void;
+    const secondFourStarted = new Promise<void>((resolve) => { notifySecondFourStarted = resolve; });
     const secondHoldFetches = new Promise<void>((resolve) => { releaseSecondFetches = resolve; });
     (runtime as any).catalog = async () => {
       active++;
       maximum = Math.max(maximum, active);
-      if (active === 2) notifySecondTwoStarted();
+      if (active === 4) notifySecondFourStarted();
       await secondHoldFetches;
       active--;
     };
@@ -616,10 +616,11 @@ describe('LiteRepository against the additive Lite migration', () => {
       (runtime as any).runSourceMetadataRefresh(),
       (runtime as any).runSourceMetadataRefresh(),
     ];
-    await secondBothStarted;
-    expect(claim.mock.calls.length).toBeGreaterThanOrEqual(5);
-    expect(maximum).toBe(2);
-    expect((runtime as any).sourceMetadataGate.capacity).toBe(2);
+    await secondFourStarted;
+    expect(claim.mock.calls.length).toBeGreaterThanOrEqual(9);
+    expect(maximum).toBe(4);
+    expect((runtime as any).sourceMetadataGate.capacity).toBe(4);
+    expect((runtime as any).sourceMetadataPreparationGate.capacity).toBe(1);
     expect((runtime as any).sourceMetadataPersistenceGate.capacity).toBe(1);
     releaseSecondFetches();
     await Promise.all(runs);
