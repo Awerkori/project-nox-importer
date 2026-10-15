@@ -5,6 +5,14 @@ export interface DeduplicationResult {
     status: 'EXISTING_MAPPING' | 'NEW_WORK' | 'AMBIGUOUS' | 'FAILED';
     slug: string;
     reason?: string;
+    metadataDelta?: {
+        aliasesAdded: number;
+        tagsAdded: number;
+    };
+}
+interface MetadataMergeDelta {
+    aliasesAdded: number;
+    tagsAdded: number;
 }
 export declare const ADULT_SOURCES: Set<string>;
 export interface CandidateWork {
@@ -67,7 +75,7 @@ export declare class DeduplicationEngine {
      * 3. Other sources only fill empty/null fields.
      * 4. Never overwrite valid data with empty/null.
      */
-    applyMetadataPrecedence(workId: string, candidate: CandidateWork, source: string): Promise<void>;
+    applyMetadataPrecedence(workId: string, candidate: CandidateWork, source: string): Promise<MetadataMergeDelta>;
     /**
      * Synchronize canonical adult tags and upstream genres to public.work_tags
      */
@@ -85,6 +93,7 @@ export declare class DeduplicationEngine {
      * associations are deliberately untouched.
      */
     removeLegacySystemGeneratedNonGenreTags(workId: string): Promise<void>;
-    syncWorkTags(workId: string, candidate: CandidateWork, isAdult: boolean, kind?: string, source?: string): Promise<void>;
+    syncWorkTags(workId: string, candidate: CandidateWork, isAdult: boolean, kind?: string, source?: string): Promise<number>;
     private sanitizeSlug;
 }
+export {};

@@ -92,8 +92,8 @@ export class DeduplicationEngine {
                 reason: `INVALID_EDITORIAL_TITLE: ${validation.reason}`,
             };
         }
-        await this.applyMetadataPrecedence(workId, candidate, source);
-        return { workId, mappingId: '', status: 'EXISTING_MAPPING', slug: this.sanitizeSlug(candidate.slug || candidate.title) };
+        const metadataDelta = await this.applyMetadataPrecedence(workId, candidate, source);
+        return { workId, mappingId: '', status: 'EXISTING_MAPPING', slug: this.sanitizeSlug(candidate.slug || candidate.title), metadataDelta };
     }
     async resolveCandidateCover(candidate) {
         if (candidate.coverId)
@@ -619,7 +619,7 @@ export class DeduplicationEngine {
             .maybeSingle();
         if (error || !work) {
             this.logger.warn('Could not load work for metadata precedence', { workId, error: error?.message });
-            return;
+            return { aliasesAdded: 0, tagsAdded: 0 };
         }
         const prov = {
             ...(work.metadata_provenance || {}),
@@ -673,11 +673,14 @@ export class DeduplicationEngine {
             updates.title = candidate.title.trim().slice(0, 200);
             prov.title = { source, updated_at: now };
         }
+        let aliasesAdded = 0;
         // Aliases: merge non-destructively
         if (candidate.aliases && Array.isArray(candidate.aliases) && candidate.aliases.length > 0) {
             if (prov.aliases?.source !== 'manual') {
                 const existingAliases = Array.isArray(work.aliases) ? work.aliases : [];
                 const mergedAliases = mergeAlternativeTitles(existingAliases, candidate.aliases.map((a) => decodeHtmlEntities(a)), updates.title || work.title);
+                const existingAliasKeys = new Set(existingAliases.map((alias) => this.tagLookupKey(alias)));
+                aliasesAdded = mergedAliases.filter((alias) => !existingAliasKeys.has(this.tagLookupKey(alias))).length;
                 const aliasesChanged = mergedAliases.length !== existingAliases.length
                     || mergedAliases.some((alias, index) => alias !== existingAliases[index]);
                 if (aliasesChanged || (source === 'kuro' && existingAliases.length === 0)) {
@@ -809,7 +812,8 @@ export class DeduplicationEngine {
             }
         }
         // Always sync canonical tags and upstream genres safely
-        await this.syncWorkTags(workId, candidate, isCurrentlyAdult || isAdultCandidate, updates.kind || work.kind, source);
+        const tagsAdded = await this.syncWorkTags(workId, candidate, isCurrentlyAdult || isAdultCandidate, updates.kind || work.kind, source);
+        return { aliasesAdded, tagsAdded };
     }
     /**
      * Synchronize canonical adult tags and upstream genres to public.work_tags
@@ -996,6 +1000,7 @@ export class DeduplicationEngine {
         let normalizedCount = 0;
         let persistedCount = 0;
         let createdCount = 0;
+        let addedAssociations = 0;
         try {
             const tagLookup = await this.getTagCatalog();
             const targetTagIds = new Set();
@@ -1021,7 +1026,10 @@ export class DeduplicationEngine {
                 }
             }
             normalizedCount = desiredTags.size;
-            // Auto-create missing tags safely
+            // Create unknown labels in one request. A single metadata response can
+            // contain several genres, so serial upserts needlessly multiply the
+            // REST/YSQL round-trips on the enrichment hot path.
+            const missingTagsBySlug = new Map();
             for (const tName of desiredTags) {
                 const lower = this.tagLookupKey(tName);
                 const tSlug = tName === CANONICAL_ADULT_TAG_NAME
@@ -1029,29 +1037,29 @@ export class DeduplicationEngine {
                     : this.sanitizeSlug(lower);
                 let tagId = tagLookup.get(lower) || tagLookup.get(tSlug);
                 if (!tagId) {
-                    // Attempt to create it safely (idempotent due to unique constraint on slug/name)
-                    const { data: newTag, error: createErr } = await this.supabase.from('tags').upsert({
-                        name: tName,
-                        slug: tSlug,
-                        kind: 'GENRE'
-                    }, { onConflict: 'slug' }).select('id').maybeSingle();
-                    if (createErr)
-                        throw createErr;
-                    if (!newTag?.id) {
-                        throw new Error(`Unable to resolve canonical tag ${tSlug}`);
-                    }
-                    if (newTag?.id) {
-                        tagId = newTag.id;
-                        createdCount += 1;
-                        // Add to lookup for same run
-                        if (tagId)
-                            tagLookup.set(lower, tagId);
-                        if (tagId)
-                            tagLookup.set(tSlug, tagId);
-                    }
+                    if (!missingTagsBySlug.has(tSlug))
+                        missingTagsBySlug.set(tSlug, { name: tName, slug: tSlug });
                 }
                 if (tagId) {
                     targetTagIds.add(tagId);
+                }
+            }
+            const missingTags = [...missingTagsBySlug.values()];
+            if (missingTags.length > 0) {
+                const { data: newTags, error: createErr } = await this.supabase.from('tags')
+                    .upsert(missingTags.map((tag) => ({ ...tag, kind: 'GENRE' })), { onConflict: 'slug' })
+                    .select('id,name,slug');
+                if (createErr)
+                    throw createErr;
+                const idsBySlug = new Map((newTags || []).map((tag) => [String(tag.slug), String(tag.id)]));
+                for (const tag of missingTags) {
+                    const tagId = idsBySlug.get(tag.slug);
+                    if (!tagId)
+                        throw new Error(`Unable to resolve canonical tag ${tag.slug}`);
+                    tagLookup.set(this.tagLookupKey(tag.name), tagId);
+                    tagLookup.set(tag.slug, tagId);
+                    targetTagIds.add(tagId);
+                    createdCount += 1;
                 }
             }
             if (targetTagIds.size > 0) {
@@ -1060,10 +1068,13 @@ export class DeduplicationEngine {
                     tag_id: tagId,
                     system_generated: true,
                 }));
-                const { error } = await this.supabase.from('work_tags').upsert(rows, { onConflict: 'work_id,tag_id' });
+                const { data, error } = await this.supabase.from('work_tags')
+                    .upsert(rows, { onConflict: 'work_id,tag_id', ignoreDuplicates: true })
+                    .select('tag_id');
                 if (error)
                     throw error;
                 persistedCount = targetTagIds.size;
+                addedAssociations = data?.length || 0;
             }
             this.logger.debug('WORK_METADATA_TAGS', {
                 source,
@@ -1092,6 +1103,7 @@ export class DeduplicationEngine {
                 error: err?.message || String(err),
             });
         }
+        return addedAssociations;
     }
     sanitizeSlug(raw) {
         const slug = raw

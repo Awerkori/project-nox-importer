@@ -141,23 +141,6 @@ export class LiteRepository {
         await client.query('COMMIT');
         return 0;
       }
-      const eligibleMappingQuery = (workPredicate: string, cursorPredicate: string): string => `
-        SELECT m.source_work_id,m.work_id
-        FROM importer_work_mappings m
-        JOIN works w ON w.id=m.work_id AND w.published=true
-        LEFT JOIN importer_lite_metadata_enrichment status
-          ON status.source=m.source AND status.source_work_id=m.source_work_id
-        WHERE m.source=turn.source AND m.work_id IS NOT NULL
-          AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-          AND (${workPredicate})
-          AND (${cursorPredicate})
-          AND (status.source IS NULL OR status.aliases_state='PENDING' OR status.tags_state='PENDING'
-            OR (status.version<3 AND (status.aliases_state='PARSER_ERROR' OR status.tags_state='PARSER_ERROR'))
-            OR ((status.aliases_state='EXTERNAL_BLOCKED' OR status.tags_state='EXTERNAL_BLOCKED')
-              AND COALESCE(status.next_retry_at,'-infinity'::timestamptz)<=now()))
-          AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
-            WHERE task.idempotency_key='lite:metadata:source:v3:' || m.source || ':' || m.source_work_id)
-        ORDER BY m.source_work_id LIMIT 1`;
       const candidates = await client.query<Row>(`WITH source_turns AS (
           SELECT s.id AS source,history.last_admitted_at,history.last_source_work_id,
             EXISTS (SELECT 1 FROM importer_lite_tasks rich
@@ -180,34 +163,32 @@ export class LiteRepository {
             AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
         ), next_mapping AS (
           SELECT turn.source,turn.last_admitted_at,turn.alias_productive_source,
-            (aliasless_after.source_work_id IS NOT NULL OR aliasless_wrap.source_work_id IS NOT NULL) AS selected_aliasless,
-            COALESCE(aliasless_after.source_work_id,aliasless_wrap.source_work_id,
-              fallback_after.source_work_id,fallback_wrap.source_work_id) AS source_work_id,
-            COALESCE(aliasless_after.work_id,aliasless_wrap.work_id,
-              fallback_after.work_id,fallback_wrap.work_id) AS work_id
+            next.source_work_id,next.work_id,next.selected_aliasless
           FROM source_turns turn
-          -- Resume from the last admitted source-work key and wrap only when
-          -- that segment has no candidate. Keep aliasless works ahead of the
-          -- fallback pass so old mappings are not rescanned from the start on
-          -- every refill tick.
-          LEFT JOIN LATERAL (${eligibleMappingQuery(
-            'COALESCE(cardinality(w.aliases),0)=0',
-            "(turn.last_source_work_id IS NULL OR m.source_work_id>turn.last_source_work_id)",
-          )}) aliasless_after ON true
-          LEFT JOIN LATERAL (${eligibleMappingQuery(
-            'COALESCE(cardinality(w.aliases),0)=0',
-            'turn.last_source_work_id IS NOT NULL AND m.source_work_id<=turn.last_source_work_id',
-          )}) aliasless_wrap ON aliasless_after.source_work_id IS NULL
-          LEFT JOIN LATERAL (${eligibleMappingQuery(
-            'true',
-            "(turn.last_source_work_id IS NULL OR m.source_work_id>turn.last_source_work_id)",
-          )}) fallback_after ON aliasless_after.source_work_id IS NULL
-            AND aliasless_wrap.source_work_id IS NULL
-          LEFT JOIN LATERAL (${eligibleMappingQuery(
-            'true',
-            'turn.last_source_work_id IS NOT NULL AND m.source_work_id<=turn.last_source_work_id',
-          )}) fallback_wrap ON aliasless_after.source_work_id IS NULL
-            AND aliasless_wrap.source_work_id IS NULL AND fallback_after.source_work_id IS NULL
+          -- One bounded candidate scan per source replaces four repeated
+          -- LATERAL probes (aliasless/fallback x cursor/wrap). Order tiers
+          -- before cursor position so aliasless mappings still win, while
+          -- each tier rotates from the last admitted source-work key.
+          LEFT JOIN LATERAL (
+            SELECT m.source_work_id,m.work_id,
+              (COALESCE(cardinality(w.aliases),0)=0) AS selected_aliasless
+            FROM importer_work_mappings m
+            JOIN works w ON w.id=m.work_id AND w.published=true
+            LEFT JOIN importer_lite_metadata_enrichment status
+              ON status.source=m.source AND status.source_work_id=m.source_work_id
+            WHERE m.source=turn.source AND m.work_id IS NOT NULL
+              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+              AND (status.source IS NULL OR status.aliases_state='PENDING' OR status.tags_state='PENDING'
+                OR (status.version<3 AND (status.aliases_state='PARSER_ERROR' OR status.tags_state='PARSER_ERROR'))
+                OR ((status.aliases_state='EXTERNAL_BLOCKED' OR status.tags_state='EXTERNAL_BLOCKED')
+                  AND COALESCE(status.next_retry_at,'-infinity'::timestamptz)<=now()))
+              AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
+                WHERE task.idempotency_key='lite:metadata:source:v3:' || m.source || ':' || m.source_work_id)
+            ORDER BY (COALESCE(cardinality(w.aliases),0)=0) DESC,
+              CASE WHEN turn.last_source_work_id IS NULL OR m.source_work_id>turn.last_source_work_id THEN 0 ELSE 1 END,
+              m.source_work_id
+            LIMIT 1
+          ) next ON true
         )
         SELECT source,source_work_id,work_id FROM next_mapping WHERE source_work_id IS NOT NULL
         -- A mapping for a work with no aliases has higher product value than
