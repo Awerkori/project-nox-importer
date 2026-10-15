@@ -27,6 +27,7 @@ const metadataProductMetricsMigration = readFileSync(resolve(process.cwd(), 'mig
 const sourceMetadataProbeCursorMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015060000_metadata_source_probe_cursor.sql'), 'utf8');
 const publicPresentationAdmissionMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015194000_lite_public_presentation_admission.sql'), 'utf8');
 const zeroDecimalChapterIdentityMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015223000_canonical_zero_decimal_chapters.sql'), 'utf8');
+const presentableUnpublishedAdmissionMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015230000_lite_admit_presentable_unpublished_work.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -133,6 +134,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(sourceMetadataProbeCursorMigration);
   await db.exec(publicPresentationAdmissionMigration);
   await db.exec(zeroDecimalChapterIdentityMigration);
+  await db.exec(presentableUnpublishedAdmissionMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -2766,20 +2768,15 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual({ state: 'BLOCKED', reason: 'WORK_PRESENTATION_INCOMPLETE', previous_reason: null });
   });
 
-  it('lets a presentable public catalog task pass stale unpublishable P1 imports', async () => {
-    await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1b]);
+  it('admits a presentable unpublished work while leaving stale unpresentable P1 imports parked', async () => {
     await db.query(`UPDATE works SET published=false,cover_id=NULL WHERE id=$1`, [ids.p1a]);
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'stale-unpublishable', priority: 'P1', idempotencyKey: 'stale-unpublishable' });
-    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1b, workKey: `work:${ids.p1b}`,
-      priority: 'P1', idempotencyKey: 'public-catalog', payload: { source: 'source-a', sourceWorkId: 'public-catalog' } });
-    // Simulate the durable projection left by the older admission function.
-    await db.query(`INSERT INTO importer_lite_ready_works(work_key,priority,operation_rank,next_run_at,updated_at)
-      VALUES ($1,2,1,now(),now())`, [`work:${ids.p1a}`]);
-    await db.exec(publicPresentationAdmissionMigration);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      chapterKey: 'presentable-unpublished', priority: 'P1', idempotencyKey: 'presentable-unpublished' });
 
-    const claimed = await repo.claim('public-catalog-worker', 120);
-    expect(claimed).toMatchObject({ taskType: 'CATALOG', workId: ids.p1b, idempotencyKey: 'public-catalog' });
+    const claimed = await repo.claim('presentable-unpublished-worker', 120);
+    expect(claimed).toMatchObject({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, idempotencyKey: 'presentable-unpublished' });
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE idempotency_key='stale-unpublishable'`)).rows[0])
       .toEqual({ state: 'READY' });
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_ready_works WHERE work_key=$1`, [`work:${ids.p1a}`])).rows[0])
