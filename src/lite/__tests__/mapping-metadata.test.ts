@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractStoredMappingMetadata } from '../mapping-metadata.js';
+import { classifyExplicitSourceMetadata, extractStoredMappingMetadata } from '../mapping-metadata.js';
 
 describe('stored mapping metadata enrichment', () => {
   it('uses only explicit aliases and preserves original Unicode display text', () => {
@@ -51,5 +51,14 @@ describe('stored mapping metadata enrichment', () => {
 
     expect(metadata.aliases).toEqual(['한국 제목','日本語タイトル']);
     expect(metadata.genres).toEqual(['Yuri']);
+  });
+
+  it('classifies explicit metadata without mistaking a primary-title echo for a parser error', () => {
+    expect(classifyExplicitSourceMetadata({ aliases: ['Primary'], genres: ['Vanilla'] }, 'Primary')).toMatchObject({
+      aliasesState: 'NO_ALIASES', tagsState: 'ENRICHED', parserError: false,
+    });
+    expect(classifyExplicitSourceMetadata({ aliases: { unsupported: 'Native title' } }, 'Primary')).toMatchObject({
+      aliasesState: 'PARSER_ERROR', tagsState: 'NO_TAGS', parserError: true,
+    });
   });
 });

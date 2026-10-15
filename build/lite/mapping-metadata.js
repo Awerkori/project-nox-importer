@@ -40,6 +40,19 @@ function asTextList(value, objectKeys = [], depth = 0) {
         return [];
     });
 }
+function hasExplicitValue(metadata, fieldPattern) {
+    return Object.entries(metadata).some(([key, value]) => {
+        if (!fieldPattern.test(key))
+            return false;
+        if (Array.isArray(value))
+            return value.length > 0;
+        if (typeof value === 'string')
+            return value.trim().length > 0 && !['[]', '{}', 'null'].includes(value.trim().toLowerCase());
+        if (value && typeof value === 'object')
+            return Object.keys(value).length > 0;
+        return value !== null && value !== undefined;
+    });
+}
 /**
  * Only explicitly named upstream metadata fields are eligible for the
  * no-network historical enrichment pass. It must never mine prose, URLs, or
@@ -58,5 +71,29 @@ export function extractStoredMappingMetadata(raw, primaryTitle) {
     return {
         aliases: mergeAlternativeTitles([], aliases, primaryTitle),
         genres: [...new Set(genres.map((value) => value.normalize('NFKC').replace(/\s+/g, ' ').trim()).filter(Boolean))],
+    };
+}
+/**
+ * Classify metadata that was explicitly returned by a provider.  This is
+ * shared by a normal catalog pass and a retroactive source refetch so a new
+ * mapping cannot be silently left PENDING after its first successful fetch.
+ */
+export function classifyExplicitSourceMetadata(raw, primaryTitle) {
+    const metadata = raw && typeof raw === 'object' ? raw : {};
+    const extracted = extractStoredMappingMetadata(metadata, primaryTitle);
+    // An upstream alias field containing only the primary title is an explicit
+    // and valid NO_ALIASES result, not evidence of a parser defect.
+    const parsedAliasEvidence = extracted.aliases.length > 0
+        ? extracted.aliases
+        : extractStoredMappingMetadata(metadata, '').aliases;
+    const rawAliasEvidence = hasExplicitValue(metadata, /^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title)$/i);
+    const rawTagEvidence = hasExplicitValue(metadata, /^(genres?|tags?|categories)$/i);
+    const aliasesParserError = rawAliasEvidence && parsedAliasEvidence.length === 0;
+    const tagsParserError = rawTagEvidence && extracted.genres.length === 0;
+    return {
+        ...extracted,
+        aliasesState: aliasesParserError ? 'PARSER_ERROR' : (extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES'),
+        tagsState: tagsParserError ? 'PARSER_ERROR' : (extracted.genres.length ? 'ENRICHED' : 'NO_TAGS'),
+        parserError: aliasesParserError || tagsParserError,
     };
 }

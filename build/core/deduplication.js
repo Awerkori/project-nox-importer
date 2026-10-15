@@ -174,12 +174,13 @@ export class DeduplicationEngine {
                 })
                     .eq('id', existingMapping.id);
                 // Apply metadata precedence on re-sync
-                await this.applyMetadataPrecedence(existingMapping.work_id, candidate, source);
+                const metadataDelta = await this.applyMetadataPrecedence(existingMapping.work_id, candidate, source);
                 return {
                     workId: existingMapping.work_id,
                     mappingId: existingMapping.id,
                     status: 'EXISTING_MAPPING',
                     slug: existingMapping.source_slug,
+                    metadataDelta,
                 };
             }
         }
@@ -406,7 +407,15 @@ export class DeduplicationEngine {
                 // High-confidence single match: Link this source to the canonical work_id
                 const matched = bestMatch;
                 // Non-destructively merge missing incoming aliases into canonical work
-                const newAliases = mergeAlternativeTitles(matched.aliases, incomingTitles, matched.title);
+                // Matching may use curated synonyms as lookup hints, but persistence
+                // must contain only names actually supplied by this source.  Never
+                // turn an internal translation synonym into a public alias.
+                const suppliedTitles = [title, ...(candidate.aliases || [])]
+                    .map((value) => decodeHtmlEntities(value || '').trim())
+                    .filter(Boolean);
+                const newAliases = mergeAlternativeTitles(matched.aliases, suppliedTitles, matched.title);
+                const existingAliasKeys = new Set((matched.aliases || []).map((alias) => this.tagLookupKey(alias)));
+                const directAliasesAdded = newAliases.filter((alias) => !existingAliasKeys.has(this.tagLookupKey(alias))).length;
                 const aliasesChanged = newAliases.length !== (matched.aliases || []).length
                     || newAliases.some((alias, index) => alias !== matched.aliases[index]);
                 if (aliasesChanged) {
@@ -431,12 +440,16 @@ export class DeduplicationEngine {
                     .select()
                     .single();
                 // Apply per-field metadata precedence (ADMIN > KURO > OTHER)
-                await this.applyMetadataPrecedence(matched.id, candidate, source);
+                const metadataDelta = await this.applyMetadataPrecedence(matched.id, candidate, source);
                 return {
                     workId: matched.id,
                     mappingId: insertedMapping?.id ?? '',
                     status: 'EXISTING_MAPPING',
                     slug: matched.slug,
+                    metadataDelta: {
+                        aliasesAdded: directAliasesAdded + metadataDelta.aliasesAdded,
+                        tagsAdded: metadataDelta.tagsAdded,
+                    },
                 };
             }
         }
@@ -493,11 +506,13 @@ export class DeduplicationEngine {
                 }, { onConflict: 'source,source_work_id' })
                     .select()
                     .single();
+                const metadataDelta = await this.applyMetadataPrecedence(recheck.id, candidate, source);
                 return {
                     workId: recheck.id,
                     mappingId: insertedMapping?.id ?? '',
                     status: 'EXISTING_MAPPING',
                     slug: recheck.slug,
+                    metadataDelta,
                 };
             }
             const now = new Date().toISOString();
@@ -533,11 +548,12 @@ export class DeduplicationEngine {
             if (candidate.aliases && candidate.aliases.length > 0)
                 initialProv.aliases = { source, updated_at: now };
             const newWorkId = crypto.randomUUID();
+            const initialAliases = mergeAlternativeTitles([], (candidate.aliases || []).map((a) => decodeHtmlEntities(a)), title);
             const { error: insertWorkErr } = await this.supabase.from('works').insert({
                 id: newWorkId,
                 slug: uniqueSlug,
                 title: decodeHtmlEntities(title).slice(0, 200),
-                aliases: mergeAlternativeTitles([], (candidate.aliases || []).map((a) => decodeHtmlEntities(a)), title),
+                aliases: initialAliases,
                 synopsis: decodeHtmlEntities(candidate.synopsis || '').slice(0, 5000),
                 description: decodeHtmlEntities(candidate.synopsis || '').slice(0, 10000),
                 author: candidate.author?.slice(0, 100) || '',
@@ -578,7 +594,7 @@ export class DeduplicationEngine {
             if (mapInsertErr)
                 throw mapInsertErr;
             // Attach canonical adult tags and upstream genres safely
-            await this.syncWorkTags(newWorkId, candidate, isAdultSource, safeKind, source);
+            const tagsAdded = await this.syncWorkTags(newWorkId, candidate, isAdultSource, safeKind, source);
             this.logger.info('Created new work & mapping', {
                 workId: newWorkId,
                 slug: uniqueSlug,
@@ -591,6 +607,7 @@ export class DeduplicationEngine {
                 mappingId: insertedMapping.id,
                 status: 'NEW_WORK',
                 slug: uniqueSlug,
+                metadataDelta: { aliasesAdded: initialAliases.length, tagsAdded },
             };
         }
         finally {
@@ -678,9 +695,11 @@ export class DeduplicationEngine {
         // may protect the display title, but their existing aliases must not turn
         // into a wall that discards a native/romanized/English name supplied by a
         // later confirmed mapping.
-        if (candidate.aliases && Array.isArray(candidate.aliases) && candidate.aliases.length > 0) {
+        const sourceSuppliedTitles = [candidate.title, ...(candidate.aliases || [])]
+            .filter((value) => typeof value === 'string' && value.trim().length > 0);
+        if (sourceSuppliedTitles.length > 0) {
             const existingAliases = Array.isArray(work.aliases) ? work.aliases : [];
-            const mergedAliases = mergeAlternativeTitles(existingAliases, candidate.aliases.map((a) => decodeHtmlEntities(a)), updates.title || work.title);
+            const mergedAliases = mergeAlternativeTitles(existingAliases, sourceSuppliedTitles.map((alias) => decodeHtmlEntities(alias)), updates.title || work.title);
             const existingAliasKeys = new Set(existingAliases.map((alias) => this.tagLookupKey(alias)));
             aliasesAdded = mergedAliases.filter((alias) => !existingAliasKeys.has(this.tagLookupKey(alias))).length;
             const aliasesChanged = mergedAliases.length !== existingAliases.length
