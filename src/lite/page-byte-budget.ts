@@ -14,7 +14,12 @@ import type { BufferReservationRequestOptions } from '../core/concurrency.js';
  * a backpressure deadlock.
  */
 export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
-export const LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES = 4 * 1024 * 1024;
+// Production page bodies in the public throughput window were predominantly
+// sub-2 MiB. Start a lengthless body at that measured size and reserve only
+// admission headroom for one 20 MiB terminal promotion; this lets normal and
+// reduced profiles use their bounded page slots without increasing either
+// profile's total byte ceiling.
+export const LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES = 2 * 1024 * 1024;
 // `readImageBody` fills a declared-length response directly into its final
 // Uint8Array, so the former streamed-chunks-plus-final-body duplication no
 // longer determines the normal high-water mark. Keep a deliberately bounded
