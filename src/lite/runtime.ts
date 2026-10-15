@@ -776,6 +776,51 @@ export class ImporterLiteRuntime {
     return mapped;
   }
 
+  /**
+   * Pre-Lite Reader rows have `legacy:*` keys and `und` language because the
+   * old importer did not persist an edition/language identity.  That missing
+   * value is not an explicit alternate language.  For the narrow, objective
+   * case below, bind it to the modern canonical key before an alternative
+   * source can materialize a second public chapter:
+   *
+   *   pt-BR/default regular whole chapter 28 == legacy 28.0 == legacy 28.00
+   *
+   * Fractions, specials, non-default editions and explicitly labelled
+   * languages are deliberately excluded.  This is one batched indexed lookup
+   * per catalog snapshot, never a per-chapter similarity probe.
+   */
+  private async legacyPublishedWholeNumberMap(workId: string, chapterKeys: string[]): Promise<Map<string, string>> {
+    const requested = [...new Set(chapterKeys)].filter((chapterKey) => {
+      const parts = chapterKey.split('|');
+      return parts.length === 5
+        && parts[0] === 'pt-br'
+        && parts[1] === 'default'
+        && parts[2] === 'chapter'
+        && /^\d+$/.test(parts[3] || '')
+        && parts[4] === '-';
+    });
+    const mapped = new Map<string, string>();
+    for (let offset = 0; offset < requested.length; offset += 500) {
+      const result = await this.pool.query<{ chapter_key: string; chapter_id: string }>(`WITH requested AS (
+          SELECT chapter_key,split_part(chapter_key,'|',4) AS whole_number
+          FROM unnest($2::text[]) AS item(chapter_key)
+        )
+        SELECT DISTINCT ON (requested.chapter_key) requested.chapter_key,c.id AS chapter_id
+        FROM requested
+        JOIN chapters c ON c.work_id=$1::uuid
+          AND c.published_at IS NOT NULL
+          AND c.canonical_chapter_key LIKE 'legacy:%'
+          AND c.chapter_kind='chapter'
+          AND c.edition='default'
+          AND c.language='und'
+          AND c.display_number ~ '^\\d+(\\.0+)?$'
+          AND regexp_replace(lower(c.display_number),'\\.0+$','')=requested.whole_number
+        ORDER BY requested.chapter_key,c.published_at,c.id`, [workId, requested.slice(offset, offset + 500)]);
+      for (const row of result.rows) mapped.set(String(row.chapter_key), String(row.chapter_id));
+    }
+    return mapped;
+  }
+
   /** Persist the exact legacy identity without rewriting any Reader chapter. */
   private async upsertLegacyChapterMappings(rows: Array<{
     workId: string; chapterKey: string; chapterId: string; displayNumber: string;
@@ -1256,6 +1301,11 @@ export class ImporterLiteRuntime {
         .map((chapter) => String(chapter.sourceChapterId || ''))
         .filter(Boolean))];
       const legacyPublished = await this.legacyPublishedChapterMap(source, resolved.workId, manifestSourceIds);
+      const legacyPublishedWholeNumbers = await this.legacyPublishedWholeNumberMap(resolved.workId, snapshot.chapters.map((chapter) => {
+        const displayNumber = chapter.displayNumber || String(chapter.number);
+        const kind = chapterKind({ displayNumber, title: chapter.title });
+        return canonicalChapterKey({ displayNumber, title: chapter.title, kind, language, edition });
+      }));
       const sourceRows: Array<{
         workId: string; chapterKey: string; source: string; sourceWorkId: string; sourceChapterId: string;
         language: string; edition: string; orderKey: string; sourceRank: number;
@@ -1280,7 +1330,8 @@ export class ImporterLiteRuntime {
         const chapterPriority = p0Monitoring && !historicalRepair && isNewestManifestRelease ? 'P0' : 'P1';
         sourceRows.push({ workId: resolved.workId, chapterKey, source, sourceWorkId, sourceChapterId: chapter.sourceChapterId,
           language, edition, orderKey, sourceRank: rankForSource(source) });
-        const legacyChapterId = legacyPublished.get(String(chapter.sourceChapterId));
+        const legacyChapterId = legacyPublished.get(String(chapter.sourceChapterId))
+          || legacyPublishedWholeNumbers.get(chapterKey);
         if (legacyChapterId) {
           // The existing Reader publication remains authoritative.  This only
           // gives Lite its canonical identity, so a future catalog pass cannot

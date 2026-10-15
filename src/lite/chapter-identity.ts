@@ -31,6 +31,16 @@ const clean = (value: string | number | null | undefined): string =>
 const folded = (value: string | number | null | undefined): string =>
   clean(value).toLocaleLowerCase('und');
 
+/**
+ * Only a decimal suffix made entirely of zeroes is a cosmetic rendering of a
+ * whole numbered chapter.  Do not parse this as a number: `12.10` can be a
+ * distinct provider identifier from `12.1`, whereas `12.00` is unambiguously
+ * the same numeric chapter as `12`.
+ */
+function canonicalRegularNumber(value: string): string {
+  return value.replace(/^(\d+)\.0+$/, '$1');
+}
+
 export function chapterKind(input: ChapterIdentityInput): string {
   const explicit = folded(input.kind);
   if (explicit) return explicit;
@@ -40,9 +50,13 @@ export function chapterKind(input: ChapterIdentityInput): string {
 
 /** A stable opaque key; callers must never parse it back into a float. */
 export function canonicalChapterKey(input: ChapterIdentityInput): string {
-  const number = folded(input.displayNumber);
   const title = folded(input.title);
   const kind = chapterKind(input);
+  const rawNumber = folded(input.displayNumber);
+  // A special/extra keeps its exact provider identifier.  The equivalence is
+  // deliberately limited to regular numeric chapters, where `28`, `28.0`
+  // and `28.00` are the same chapter rather than separate source variants.
+  const number = kind === 'chapter' ? canonicalRegularNumber(rawNumber) : rawNumber;
   const language = folded(input.language || 'und');
   const edition = folded(input.edition || 'default');
   if (!number && !title) throw new Error('A chapter needs a source number or title');
