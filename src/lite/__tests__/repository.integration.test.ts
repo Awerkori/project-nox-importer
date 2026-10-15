@@ -3493,6 +3493,21 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).executor.perChapterPageConcurrency).toBe(6);
   });
 
+  it('lets a sixth chapter worker fill page-wave gaps without widening global media limits', () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', LITE_CHAPTER_WORKERS: 6,
+        MAX_CONCURRENT_CHAPTERS: 32, TESTED_CONCURRENCY_CEILING: 32,
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 24, BUFFERED_PAGE_CONCURRENCY: 48,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY: 16, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    expect((runtime as any).chapterWorkerCapacity).toBe(6);
+    expect((runtime as any).downloads.capacity).toBe(24);
+    expect((runtime as any).bufferedPages.capacity).toBe(24);
+    expect((runtime as any).executor.perChapterPageConcurrency).toBe(6);
+  });
+
   it('reports an anonymous bounded source-rate summary for production diagnosis', () => {
     const limiter = new HostRateLimiter(5);
     limiter.setHostRate('one.test', 5);
