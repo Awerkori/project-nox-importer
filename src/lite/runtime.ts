@@ -174,6 +174,10 @@ export class ImporterLiteRuntime {
     if (!this.memoryPressureEnabled) return this.memoryPressureGuard.snapshot();
     const before = this.memoryPressureGuard.snapshot().state;
     const snapshot = this.memoryPressureGuard.sample();
+    // Source metadata is P2 and yields first, but a retained native RSS high
+    // watermark must not freeze aliases/tags forever. Reduced mode keeps one
+    // fetch/merge lane; critical mode accepts no new metadata work.
+    this.sourceMetadataLaneGate.setCapacity(snapshot.state === 'NORMAL' ? 4 : 1);
     if (snapshot.state !== before) {
       const log = snapshot.state === 'NORMAL' ? this.logger.info.bind(this.logger) : this.logger.warn.bind(this.logger);
       log('Adjusted Lite page admission for memory pressure', snapshot);

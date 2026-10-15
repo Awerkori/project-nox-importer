@@ -99,7 +99,10 @@ export class LiteMemoryPressureGuard {
       arrayBuffersMiB: Math.round((memory.arrayBuffers || 0) / MIB),
       pageBufferCapacity: this.pageBuffers.capacity,
       pageByteCapacity: this.pageBytes.capacityBytes,
-      pauseLowPriorityMetadata: this.state !== 'NORMAL',
+      // Reduced mode limits source metadata to one lane in the runtime. It
+      // only pauses it completely at CRITICAL so allocator-retained RSS cannot
+      // turn a short media burst into a permanent metadata freeze.
+      pauseLowPriorityMetadata: this.state === 'CRITICAL',
     };
   }
 }
