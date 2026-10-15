@@ -3492,6 +3492,7 @@ describe('LiteRepository against the additive Lite migration', () => {
         BUFFERED_PAGE_CONCURRENCY: 48, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 16, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
     expect((runtime as any).downloads.capacity).toBe(24);
+    expect((runtime as any).bufferedPages.capacity).toBe(24);
     expect((runtime as any).executor.perChapterPageConcurrency).toBe(6);
   });
 
