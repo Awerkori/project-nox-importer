@@ -19,6 +19,11 @@ const SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN = 4;
 const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE = 8;
 const SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS = 48;
 const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK = 2;
+// Source-backed metadata is deliberately a two-seat P2 lane.  Looking at
+// every enabled source to fill those two seats made the producer itself a
+// multi-second YSQL workload.  A durable source cursor lets a tiny horizon
+// progress through every provider without repeatedly scanning the catalogue.
+const SOURCE_METADATA_SOURCE_PROBE_LIMIT = 8;
 const sourceExecutionEligibilitySql = (alias) => `(
   (COALESCE(${alias}.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
    (${alias}.status='COOLDOWN' AND ${alias}.cooldown_until IS NOT NULL AND ${alias}.cooldown_until<=now()))
@@ -67,6 +72,39 @@ export class LiteRepository {
                 await client.query('COMMIT');
                 return 0;
             }
+            // Advance the source frontier even if every mapping in this small
+            // horizon was already classified.  Otherwise an exhausted provider at
+            // the front would be revisited forever and hide healthy providers that
+            // still have pending mappings.  The row lock makes this crash-safe and
+            // keeps a replacement refill from racing the regular producer tick.
+            const cursor = await client.query(`
+        SELECT last_source FROM importer_lite_metadata_source_cursor
+        WHERE cursor_name='source_refetch' FOR UPDATE`);
+            const lastSource = cursor.rows[0]?.last_source || null;
+            const sourceProbe = await client.query(`
+        WITH eligible_sources AS (
+          SELECT s.id AS source,
+            CASE WHEN $1::text IS NULL OR s.id>$1 THEN 0 ELSE 1 END AS cursor_turn
+          FROM importer_sources s
+          LEFT JOIN importer_lite_source_health health ON health.source=s.id
+          WHERE s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
+            AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+            AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+            -- This is a cheap indexed existence check. It avoids spending a
+            -- probe slot on configured sources which have no mapped work.
+            AND EXISTS (SELECT 1 FROM importer_work_mappings m
+              WHERE m.source=s.id AND m.work_id IS NOT NULL
+                AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE'))
+        )
+        SELECT source FROM eligible_sources
+        ORDER BY cursor_turn,source LIMIT $2`, [lastSource, SOURCE_METADATA_SOURCE_PROBE_LIMIT]);
+            const probeSources = sourceProbe.rows.map((row) => String(row.source));
+            if (!probeSources.length) {
+                await client.query('COMMIT');
+                return 0;
+            }
+            await client.query(`UPDATE importer_lite_metadata_source_cursor
+        SET last_source=$2,updated_at=now() WHERE cursor_name=$1`, ['source_refetch', probeSources.at(-1)]);
             const eligibleMappingQuery = (workPredicate, cursorPredicate) => `
         SELECT m.source_work_id,m.work_id
         FROM importer_work_mappings m
@@ -85,29 +123,25 @@ export class LiteRepository {
             WHERE task.idempotency_key='lite:metadata:source:v3:' || m.source || ':' || m.source_work_id)
         ORDER BY m.source_work_id LIMIT 1`;
             const candidates = await client.query(`WITH source_turns AS (
-          SELECT s.id AS source,history.last_admitted_at,history.last_source_work_id,
+          SELECT probe.source,history.last_admitted_at,history.last_source_work_id,
             EXISTS (SELECT 1 FROM importer_lite_tasks rich
               WHERE rich.task_type='CATALOG' AND rich.state='DONE'
-                AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=s.id
+                AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=probe.source
                 AND rich.checkpoint->>'aliasDelta' ~ '^[1-9][0-9]*$') AS alias_productive_source,
             EXISTS (SELECT 1 FROM importer_lite_tasks rich
               WHERE rich.task_type='CATALOG' AND rich.state='DONE'
-                AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=s.id
+                AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=probe.source
                 AND rich.checkpoint->>'tagDelta' ~ '^[1-9][0-9]*$') AS tag_productive_source
-          FROM importer_sources s
-          LEFT JOIN importer_lite_source_health health ON health.source=s.id
+          FROM unnest($1::text[]) AS probe(source)
           LEFT JOIN LATERAL (
             SELECT task.created_at AS last_admitted_at,
               task.payload->>'sourceWorkId' AS last_source_work_id
             FROM importer_lite_tasks task
             WHERE task.task_type='CATALOG' AND task.payload ? 'metadataSourceRefresh'
-              AND task.payload->>'source'=s.id
+              AND task.payload->>'source'=probe.source
             ORDER BY task.created_at DESC
             LIMIT 1
           ) history ON true
-          WHERE s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
-            AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-            AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
         ), next_mapping AS (
           SELECT turn.source,turn.last_admitted_at,turn.alias_productive_source,turn.tag_productive_source,
             (aliasless_after.source_work_id IS NOT NULL OR aliasless_wrap.source_work_id IS NOT NULL) AS selected_aliasless,
@@ -146,7 +180,7 @@ export class LiteRepository {
         -- alias to a work. Merely returning aliases is insufficient: many
         -- mappings already contain every title the source supplies.
         ORDER BY selected_aliasless DESC,alias_productive_source DESC,
-          selected_tagless DESC,tag_productive_source DESC,last_admitted_at NULLS FIRST,source LIMIT $1`, [ceiling - Number(pending.rows[0]?.count || 0)]);
+          selected_tagless DESC,tag_productive_source DESC,last_admitted_at NULLS FIRST,source LIMIT $2`, [probeSources, ceiling - Number(pending.rows[0]?.count || 0)]);
             for (const row of candidates.rows) {
                 const source = String(row.source);
                 const sourceWorkId = String(row.source_work_id);

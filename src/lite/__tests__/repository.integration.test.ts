@@ -24,6 +24,7 @@ const sameWorkGapPriorityMigration = readFileSync(resolve(process.cwd(), 'migrat
 const sourceMetadataRefetchMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014180000_metadata_source_refetch.sql'), 'utf8');
 const sourceMetadataRefetchIndexesMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014181500_metadata_source_refetch_indexes.sql'), 'utf8');
 const metadataProductMetricsMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015043000_metadata_product_activation_metrics.sql'), 'utf8');
+const sourceMetadataProbeCursorMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015060000_metadata_source_probe_cursor.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -127,6 +128,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(sourceMetadataRefetchMigration);
   await db.exec(sourceMetadataRefetchIndexesMigration);
   await db.exec(metadataProductMetricsMigration);
+  await db.exec(sourceMetadataProbeCursorMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -463,6 +465,37 @@ describe('LiteRepository against the additive Lite migration', () => {
       { source:'cursor-after',source_work_id:'c-after' },
       { source:'cursor-wrap',source_work_id:'a-wrap' },
     ]);
+  });
+
+  it('advances the durable source probe past an exhausted horizon before selecting a later pending mapping', async () => {
+    const exhausted = Array.from({ length: 8 }, (_, index) => `a-stalled-${String(index + 1).padStart(2, '0')}`);
+    await db.exec(`INSERT INTO importer_sources(id) VALUES ${[...exhausted, 'z-live'].map((source) => `('${source}')`).join(',')}`);
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
+    for (const [index, source] of exhausted.entries()) {
+      const mappingId = `00000000-0000-4000-8000-${String(301 + index).padStart(12, '0')}`;
+      const sourceWorkId = `already-classified-${index + 1}`;
+      await db.query(`INSERT INTO importer_work_mappings
+        (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
+        VALUES($1::uuid,$2,$3,$4::uuid,'p1-a','P1 A','SYNCED')`, [mappingId,source,sourceWorkId,ids.p1a]);
+      await db.query(`INSERT INTO importer_lite_metadata_enrichment
+        (source,source_work_id,work_id,aliases_state,tags_state,version)
+        VALUES($1,$2,$3::uuid,'ENRICHED','ENRICHED',3)`, [source,sourceWorkId,ids.p1a]);
+    }
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000309','z-live','needs-refetch',$1::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1b]);
+
+    // The first bounded horizon contains only mappings that are already
+    // classified. It must still advance rather than probing those eight
+    // sources forever.
+    expect(await repo.refillSourceMetadataEnrichment(1)).toBe(0);
+    expect((await db.query(`SELECT last_source FROM importer_lite_metadata_source_cursor
+      WHERE cursor_name='source_refetch'`)).rows).toEqual([{ last_source:'a-stalled-08' }]);
+
+    expect(await repo.refillSourceMetadataEnrichment(1)).toBe(1);
+    expect((await db.query(`SELECT payload->>'source' AS source,payload->>'sourceWorkId' AS source_work_id
+      FROM importer_lite_tasks WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows)
+      .toEqual([{ source:'z-live',source_work_id:'needs-refetch' }]);
   });
 
   it('claims source metadata from its dedicated lane while chapter claims remain available', async () => {
