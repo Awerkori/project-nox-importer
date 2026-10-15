@@ -20,6 +20,8 @@ export declare class ImporterLiteRuntime {
     private readonly downloads;
     private readonly bufferedPages;
     private readonly bufferedPageBytes;
+    private readonly memoryPressureGuard;
+    private readonly memoryPressureEnabled;
     private readonly claimGate;
     private readonly historicalP1BackfillGate;
     private readonly metadataReplayGate;
@@ -62,6 +64,13 @@ export declare class ImporterLiteRuntime {
      * idle time.  Only the independent site-health gate pauses new work.
      */
     private shouldPauseChapterAdmission;
+    /**
+     * Metadata is optional P2 work. Yield it before taking away an in-flight
+     * chapter's page/upload permits; page-level backpressure itself makes any
+     * already-started chapter drain safely.
+     */
+    private shouldPauseLowPriorityMetadata;
+    private refreshMemoryPressure;
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter);
     start(): Promise<void>;
     private assertReaderCanonicalIdentitySchema;

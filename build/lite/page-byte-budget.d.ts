@@ -5,11 +5,12 @@ import type { BufferReservationRequestOptions } from '../core/concurrency.js';
  * protect a small container when a few source images are much larger than
  * the usual page.
  *
- * This intentionally has no RSS feedback loop or background timer: admission
- * is controlled by bytes actually reserved by active page pipelines, and
- * releases immediately wake blocked producers.  Completion upgrades get
- * precedence over new initial reservations so an already-started body can
- * always drain instead of forming a backpressure deadlock.
+ * Admission is controlled by bytes actually reserved by active page
+ * pipelines, and releases immediately wake blocked producers.  The Lite
+ * runtime may lower the effective cap when the container reports memory
+ * pressure; that only holds *new* producers back. Completion upgrades keep
+ * precedence so an already-started body can always drain rather than forming
+ * a backpressure deadlock.
  */
 export declare const LITE_PAGE_BUFFER_INITIAL_BYTES: number;
 export declare const LITE_PAGE_BUFFER_BUDGET_BYTES: number;
@@ -30,10 +31,17 @@ export declare class PageByteReservation {
     release(): void;
 }
 export declare class PageByteBudget {
-    readonly capacityBytes: number;
     private reservedBytes;
     private readonly waiters;
+    private _capacityBytes;
     constructor(capacityBytes?: number);
+    get capacityBytes(): number;
+    /**
+     * Lowering capacity never revokes an in-flight reservation. Existing page
+     * work drains normally; new body starts wait until the remaining live bytes
+     * fit under the new cap. Raising capacity wakes eligible waiters at once.
+     */
+    setCapacityBytes(capacityBytes: number): void;
     snapshot(): PageByteBudgetSnapshot;
     reserve(bytes?: number, signal?: AbortSignal): Promise<PageByteReservation>;
     grow(_reservation: PageByteReservation, bytes: number, signal?: AbortSignal): Promise<void>;
