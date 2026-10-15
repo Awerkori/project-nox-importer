@@ -64,6 +64,11 @@ const SOURCE_METADATA_REFILL_INTERVAL_MS = 15_000;
 // Stage 2 metadata lane experiment: two dedicated slots, polled every five
 // seconds. Source adapter host limits and source cooldowns remain authoritative.
 const SOURCE_METADATA_LANE_INTERVAL_MS = 5_000;
+// The direct importer pool is intentionally tiny and short chapter commits
+// can produce two queued checkouts momentarily.  Treat only a persistent
+// queue as pressure; an instantaneous sample must not strand network-only
+// metadata work while the public site and YSQL are otherwise healthy.
+const SOURCE_METADATA_POOL_PRESSURE_SUSTAIN_MS = 15_000;
 const SOURCE_RECOVERY_PROBE_INTERVAL_MS = 30_000;
 
 type WorkerLiveness = {
@@ -610,7 +615,7 @@ export class ImporterLiteRuntime {
     }
     if (waiters >= 2) {
       this.sourceMetadataPoolWaitStartedAt ||= Date.now();
-      return true;
+      return Date.now() - this.sourceMetadataPoolWaitStartedAt >= SOURCE_METADATA_POOL_PRESSURE_SUSTAIN_MS;
     }
     // A lone direct-pool waiter is expected with five active chapter slots.
     // It is neither a site signal nor enough reason to discard half of the
