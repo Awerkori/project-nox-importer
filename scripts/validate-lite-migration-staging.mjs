@@ -39,6 +39,7 @@ const migrationPaths = [
   'migrations/20261014031500_lite_manifest_gap_repair_index.sql',
   'migrations/20261014090000_lite_claim_manifest_chapters_in_order.sql',
   'migrations/20261014091500_lite_claim_manifest_order_before_retry.sql',
+  'migrations/20261015194000_lite_public_presentation_admission.sql',
 ];
 const migration = migrationPaths.map((migrationPath) => fs.readFileSync(path.resolve(migrationPath), 'utf8')).join('\n');
 const migrationSha256 = crypto.createHash('sha256').update(migration).digest('hex');

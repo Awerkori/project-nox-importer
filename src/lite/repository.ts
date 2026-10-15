@@ -825,11 +825,17 @@ export class LiteRepository {
       ), import_routes AS (
         SELECT DISTINCT ON (c.id) c.id,cs.source
         FROM candidates c
+        JOIN works w ON w.id=c.work_id
+        JOIN media cover ON cover.id=w.cover_id
         JOIN importer_lite_chapter_sources cs
           ON cs.work_id=c.work_id AND cs.canonical_chapter_key=c.chapter_key
         JOIN importer_sources s ON s.id=cs.source
         LEFT JOIN importer_lite_source_health h ON h.source=cs.source
-        WHERE cs.confirmed=true AND cs.has_chapter=true
+        WHERE w.published=true
+          AND NULLIF(btrim(w.title),'') IS NOT NULL
+          AND NULLIF(btrim(w.slug),'') IS NOT NULL
+          AND cover.storage_ready=true AND cover.bytes>=1500
+          AND cs.confirmed=true AND cs.has_chapter=true
           AND s.enabled=true
           AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
           AND ${sourceExecutionEligibilitySql('s')}

@@ -25,6 +25,7 @@ const sourceMetadataRefetchMigration = readFileSync(resolve(process.cwd(), 'migr
 const sourceMetadataRefetchIndexesMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014181500_metadata_source_refetch_indexes.sql'), 'utf8');
 const metadataProductMetricsMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015043000_metadata_product_activation_metrics.sql'), 'utf8');
 const sourceMetadataProbeCursorMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015060000_metadata_source_probe_cursor.sql'), 'utf8');
+const publicPresentationAdmissionMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015194000_lite_public_presentation_admission.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -129,6 +130,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(sourceMetadataRefetchIndexesMigration);
   await db.exec(metadataProductMetricsMigration);
   await db.exec(sourceMetadataProbeCursorMigration);
+  await db.exec(publicPresentationAdmissionMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -2760,6 +2762,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT state,reason,checkpoint->>'presentationPreviousReason' AS previous_reason
       FROM importer_lite_tasks WHERE idempotency_key='presentation-already-queued'`)).rows[0])
       .toEqual({ state: 'BLOCKED', reason: 'WORK_PRESENTATION_INCOMPLETE', previous_reason: null });
+  });
+
+  it('lets a presentable public catalog task pass stale unpublishable P1 imports', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1b]);
+    await db.query(`UPDATE works SET published=false,cover_id=NULL WHERE id=$1`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'stale-unpublishable', priority: 'P1', idempotencyKey: 'stale-unpublishable' });
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      priority: 'P1', idempotencyKey: 'public-catalog', payload: { source: 'source-a', sourceWorkId: 'public-catalog' } });
+
+    const claimed = await repo.claim('public-catalog-worker', 120);
+    expect(claimed).toMatchObject({ taskType: 'CATALOG', workId: ids.p1b, idempotencyKey: 'public-catalog' });
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE idempotency_key='stale-unpublishable'`)).rows[0])
+      .toEqual({ state: 'READY' });
   });
 
   it('coalesces duplicate canonical legacy mappings without collapsing distinct decimal chapters', async () => {
