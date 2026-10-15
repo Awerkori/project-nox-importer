@@ -1193,6 +1193,40 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(remaining.rows[0].count).toBe(88);
   });
 
+  it('does not let an unrouteable cooldown head hide a later healthy gap', async () => {
+    await db.query(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
+    // More than the bounded recovery horizon are older on source-a, but that
+    // provider is still externally blocked. They must not prevent a due
+    // source-b chapter with a healthy route from returning to READY.
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',blocked_reason='TURNSTILE',
+      cooldown_until=now()+interval '1 hour' WHERE id='source-a'`);
+    for (let index=0; index<50; index++) {
+      const chapterKey = `unrouteable-cooldown-${index}`;
+      await repo.enqueue({ taskType:'IMPORT_CHAPTER',workId:ids.p1a,workKey:`cold-head:${index}`,
+        chapterKey,priority:'P1',idempotencyKey:chapterKey,
+        payload:{language:'pt-BR',edition:'default',orderKey:`n|${String(index).padStart(6,'0')}`} });
+      await db.query(`INSERT INTO importer_lite_chapter_sources
+        (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
+        VALUES($1::uuid,$2,'source-a','blocked-head',$2,'pt-BR','default',$3,10,true,true)`,
+      [ids.p1a,chapterKey,`n|${String(index).padStart(6,'0')}`]);
+    }
+    await repo.enqueue({ taskType:'IMPORT_CHAPTER',workId:ids.p1b,workKey:`work:${ids.p1b}`,
+      chapterKey:'healthy-cooldown-gap',priority:'P1',idempotencyKey:'healthy-cooldown-gap',
+      payload:{language:'pt-BR',edition:'default',orderKey:'n|999999'} });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
+      VALUES($1::uuid,'healthy-cooldown-gap','source-b','healthy-head','healthy-cooldown-gap','pt-BR','default','n|999999',10,true,true)`, [ids.p1b]);
+    await db.query(`UPDATE importer_lite_tasks
+      SET state='RETRY_WAIT',reason='SOURCE_RATE_LIMITED',next_run_at=now()-interval '1 minute'
+      WHERE idempotency_key LIKE 'unrouteable-cooldown-%' OR idempotency_key='healthy-cooldown-gap'`);
+
+    expect((await repo.reconcile(1)).sourceCooldownRecoveries).toBe(1);
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks
+      WHERE idempotency_key='healthy-cooldown-gap'`)).rows[0]).toEqual({ state:'READY', reason:null });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key LIKE 'unrouteable-cooldown-%' AND state='RETRY_WAIT'`)).rows[0].count).toBe(50);
+  });
+
   it('keeps an import ready when a confirmed healthy alternative can satisfy the same chapter', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'fallback-survives-cooldown', priority: 'P1', idempotencyKey: 'fallback-survives-cooldown',
