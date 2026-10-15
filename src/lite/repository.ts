@@ -1519,7 +1519,8 @@ export class LiteRepository {
   }
 
   /** One bounded recovery turn; it cannot consume the claim path or scan works. */
-  async reconcile(limit = 50): Promise<{ leases: number; retries: number; exhausted: number; uploads: number; uploadReceiptRecoveries: number; publishable: number; publishRepairs: number; sourceCooldownRecoveries: number }> {
+  async reconcile(limit = 50, options: { recoverUploadOutcomes?: boolean } = {}): Promise<{ leases: number; retries: number; exhausted: number; uploads: number; uploadReceiptRecoveries: number; publishable: number; publishRepairs: number; sourceCooldownRecoveries: number }> {
+    const recoverUploadOutcomes = options.recoverUploadOutcomes !== false;
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
@@ -1666,7 +1667,10 @@ export class LiteRepository {
       // Telegram media row with the same reserved id and content hash. Since
       // the receipt/media write is normally atomic, this is rare, but it makes
       // a manually restored or legacy receipt safe to reuse after a crash.
-      const provenUploadReceipts = await client.query<Row>(`WITH picked AS (
+      // These proofs are exceptional crash recovery. The caller schedules
+      // them separately so ordinary lease/retry recovery stays hot-path cheap.
+      const noUploadOutcomeRecovery = { rows: [] as Row[], rowCount: 0 };
+      const provenUploadReceipts = recoverUploadOutcomes ? await client.query<Row>(`WITH picked AS (
           SELECT u.task_id,u.page_position,u.media_id,m.provider_key,m.bot_reference,
             m.storage_shard_id,m.bytes,m.mime,m.sha256
           FROM importer_lite_uploads u JOIN media m ON m.id=u.media_id
@@ -1679,8 +1683,8 @@ export class LiteRepository {
           storage_shard_id=COALESCE(u.storage_shard_id,picked.storage_shard_id::text),
           bytes=picked.bytes,mime=picked.mime,updated_at=now()
         FROM picked WHERE u.task_id=picked.task_id AND u.page_position=picked.page_position
-          AND u.media_id=picked.media_id RETURNING u.task_id` , [limit]);
-      const reopenedUnknownTasks = await client.query<Row>(`WITH picked AS (
+          AND u.media_id=picked.media_id RETURNING u.task_id` , [limit]) : noUploadOutcomeRecovery;
+      const reopenedUnknownTasks = recoverUploadOutcomes ? await client.query<Row>(`WITH picked AS (
           SELECT task.id,task.work_key FROM importer_lite_tasks task
           WHERE task.task_type='IMPORT_CHAPTER' AND task.state='BLOCKED'
             AND task.reason LIKE 'UPLOAD_OUTCOME_UNKNOWN%'
@@ -1689,12 +1693,12 @@ export class LiteRepository {
           ORDER BY task.updated_at LIMIT $1 FOR UPDATE SKIP LOCKED
         ) UPDATE importer_lite_tasks task SET state='READY',attempts=0,lease_owner=NULL,lease_until=NULL,
           reason=NULL,next_run_at=now(),updated_at=now()
-        FROM picked WHERE task.id=picked.id RETURNING picked.work_key`, [limit]);
+        FROM picked WHERE task.id=picked.id RETURNING picked.work_key`, [limit]) : noUploadOutcomeRecovery;
       // A Telegram request with an unknown outcome must never be replayed.
       // Likewise, an old intent left by a crashed process has no proof that
       // Telegram did not accept it.  Mark only the owning task BLOCKED;
       // this bounded, indexed pass never holds up unrelated work.
-      const uploads = await client.query<Row>(
+      const uploads = recoverUploadOutcomes ? await client.query<Row>(
         `WITH picked AS (
            SELECT u.task_id,t.work_key,u.page_position
            FROM importer_lite_uploads u
@@ -1708,7 +1712,7 @@ export class LiteRepository {
            SET state='BLOCKED',lease_owner=NULL,lease_until=NULL,
                reason='UPLOAD_OUTCOME_UNKNOWN:' || picked.page_position::text,updated_at=now()
          FROM picked WHERE t.id=picked.task_id RETURNING picked.work_key`, [limit],
-      );
+      ) : noUploadOutcomeRecovery;
       // A completed media checkpoint never waits for a global sweep: it gains
       // one durable PUBLISH task. The unique key makes this idempotent.
       const ready = await client.query<Row>(

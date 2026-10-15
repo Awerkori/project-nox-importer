@@ -1955,6 +1955,11 @@ describe('LiteRepository against the additive Lite migration', () => {
     await repo.markUploadUnknown(task.rows[0].id,1);
     await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED',reason='UPLOAD_OUTCOME_UNKNOWN:1' WHERE id=$1::uuid`,[task.rows[0].id]);
 
+    const deferred = await repo.reconcile(10, { recoverUploadOutcomes: false });
+    expect(deferred.uploadReceiptRecoveries).toBe(0);
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1::uuid`, [task.rows[0].id])).rows[0].state)
+      .toBe('BLOCKED');
+
     const result = await repo.reconcile(10);
     expect(result.uploadReceiptRecoveries).toBe(1);
     expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`,[task.rows[0].id])).rows[0])
