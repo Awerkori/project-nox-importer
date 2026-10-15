@@ -66,7 +66,7 @@ export class LiteMemoryPressureGuard {
         }
         return {
             pageBufferCapacity: this.normalPageBufferCapacity,
-            pageByteCapacity: 48 * MIB,
+            pageByteCapacity: 64 * MIB,
         };
     }
     buildSnapshot(memory) {

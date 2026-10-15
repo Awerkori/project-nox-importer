@@ -159,8 +159,16 @@ export async function readImageBody(response, optionsOrMaxBytes) {
         }));
     }
     const reader = response.body.getReader();
+    // Most chapter-image CDNs give us a trustworthy content length.  In that
+    // case fill the final body as bytes arrive instead of retaining every stream
+    // chunk and allocating a second contiguous body at completion.  The page
+    // reservation has already been upgraded to this exact size above, so this
+    // does not weaken the memory accounting; it removes the transient second
+    // live copy which was the previous RSS high-water source.
+    let directBody = contentLengthBytes === null ? null : new Uint8Array(contentLengthBytes);
     const chunks = [];
     let length = 0;
+    let chunkCount = 0;
     let firstChunkSeen = false;
     const bodyStartedAt = performance.now();
     let waitingOnReservationUpgrade = false;
@@ -171,6 +179,7 @@ export async function readImageBody(response, optionsOrMaxBytes) {
             const { value, done } = await readChunk(reader, signal);
             if (done)
                 break;
+            chunkCount++;
             if (!firstChunkSeen) {
                 firstChunkSeen = true;
                 emitTrace(() => options.trace?.onFirstChunk?.({
@@ -206,10 +215,44 @@ export async function readImageBody(response, optionsOrMaxBytes) {
                     elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
                 }));
             }
+            if (directBody) {
+                // A misreported Content-Length must retain the existing safe behavior:
+                // reserve completion headroom first, then continue into a bounded
+                // maximum-size body.  This is exceptional; correct declarations keep
+                // the one-buffer fast path above.
+                if (newLength > directBody.byteLength) {
+                    const expanded = new Uint8Array(maxBytes);
+                    expanded.set(directBody.subarray(0, length));
+                    directBody = expanded;
+                }
+                directBody.set(value, length);
+            }
+            else {
+                chunks.push(value);
+            }
             length = newLength;
-            chunks.push(value);
         }
-        bodyMemoryProbe = maybeStartBodyMemoryProbe(contentLengthBytes, chunks.length, length);
+        if (directBody) {
+            // A short body after a declared length is malformed but historically
+            // accepted. Return an exact-size copy only for that exceptional case so
+            // the normal path never retains a too-large backing buffer.
+            if (length === directBody.byteLength) {
+                emitTrace(() => options.trace?.onComplete?.({
+                    bytes: length,
+                    chunks: chunkCount,
+                    elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
+                }));
+                return directBody;
+            }
+            const result = directBody.slice(0, length);
+            emitTrace(() => options.trace?.onComplete?.({
+                bytes: length,
+                chunks: chunkCount,
+                elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
+            }));
+            return result;
+        }
+        bodyMemoryProbe = maybeStartBodyMemoryProbe(contentLengthBytes, chunkCount, length);
         const concatStartedAt = bodyMemoryProbe ? performance.now() : 0;
         const result = new Uint8Array(length);
         if (bodyMemoryProbe)
@@ -225,7 +268,7 @@ export async function readImageBody(response, optionsOrMaxBytes) {
         }
         emitTrace(() => options.trace?.onComplete?.({
             bytes: length,
-            chunks: chunks.length,
+            chunks: chunkCount,
             elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
         }));
         return result;
@@ -233,7 +276,7 @@ export async function readImageBody(response, optionsOrMaxBytes) {
     catch (error) {
         emitTrace(() => options.trace?.onError?.({
             bytes: length,
-            chunks: chunks.length,
+            chunks: chunkCount,
             elapsedMs: Math.round((performance.now() - bodyStartedAt) * 1000) / 1000,
             waitingOn: waitingOnReservationUpgrade ? 'RESERVATION_UPGRADE' : null,
             error,

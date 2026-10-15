@@ -13,6 +13,16 @@ describe('bounded image pipeline', () => {
     const body = new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1,2])); c.enqueue(new Uint8Array([3])); c.close(); } });
     expect(await readImageBody(new Response(body), 10)).toEqual(new Uint8Array([1,2,3]));
   });
+  it('fills the final body directly when content length is known', async () => {
+    const events: Array<{ bytes: number; chunks: number }> = [];
+    const body = new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1, 2])); c.enqueue(new Uint8Array([3, 4])); c.close(); } });
+
+    await expect(readImageBody(new Response(body, { headers: { 'content-length': '4' } }), {
+      trace: { onComplete: (metrics) => events.push({ bytes: metrics.bytes, chunks: metrics.chunks }) },
+    })).resolves.toEqual(new Uint8Array([1, 2, 3, 4]));
+
+    expect(events).toEqual([{ bytes: 4, chunks: 2 }]);
+  });
   it('reports first body chunk and completion counters without retaining media', async () => {
     const events: Array<{ type: string; bytes: number; chunks?: number }> = [];
     const body = new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1, 2])); c.enqueue(new Uint8Array([3])); c.close(); } });

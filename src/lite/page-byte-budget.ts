@@ -14,13 +14,13 @@ import type { BufferReservationRequestOptions } from '../core/concurrency.js';
  * a backpressure deadlock.
  */
 export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
-// `readImageBody` retains streamed chunks and then allocates a contiguous
-// Uint8Array before releasing those chunks. A 96 MiB logical body budget can
-// therefore transiently occupy about twice that amount, before HTTP/TLS and
-// multipart upload buffers. In a 512 MiB container that was enough to drive
-// RSS into the OOM limit despite a small JS heap. Keep the normal live-body
-// ceiling at 48 MiB; the runtime reduces it further under RSS pressure.
-export const LITE_PAGE_BUFFER_BUDGET_BYTES = 48 * 1024 * 1024;
+// `readImageBody` fills a declared-length response directly into its final
+// Uint8Array, so the former streamed-chunks-plus-final-body duplication no
+// longer determines the normal high-water mark. Keep a deliberately bounded
+// 64 MiB ceiling nevertheless: uploads, HTTP/TLS and malformed responses
+// still need room inside the 512 MiB container, and the runtime cuts this
+// budget well before memory pressure becomes critical.
+export const LITE_PAGE_BUFFER_BUDGET_BYTES = 64 * 1024 * 1024;
 
 type Waiter = {
   bytes: number;
