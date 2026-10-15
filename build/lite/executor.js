@@ -7,7 +7,7 @@ import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
 import { BoundedSamples } from '../core/bounded-samples.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
-import { PageByteBudget } from './page-byte-budget.js';
+import { LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES, PageByteBudget } from './page-byte-budget.js';
 // A pre-upload intent gates Telegram, so keep its join window short. A
 // confirmed receipt is deferred and can safely coalesce a little longer while
 // the next bounded page wave proceeds. This separates pool amortisation from
@@ -676,7 +676,12 @@ export class LiteExecutor {
                             // captures scalar metadata, so releasing here still bounds actual
                             // retained media rather than merely page promises.
                             const pageSignal = AbortSignal.timeout(45_000);
-                            const byteReservation = await this.pageBytes.reserve(undefined, pageSignal);
+                            // A response header is not available until after fetch begins.
+                            // Reserve 4 MiB initially and retain only the remaining 16 MiB as
+                            // an admission predicate for one terminal upgrade. This permits a
+                            // useful wave of lengthless images without risking the historic
+                            // all-readers-waiting-on-growth deadlock.
+                            const byteReservation = await this.pageBytes.reserve(LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES, pageSignal, { completionHeadroomBytes: 20 * 1024 * 1024 - LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES });
                             try {
                                 let downloaded;
                                 try {
