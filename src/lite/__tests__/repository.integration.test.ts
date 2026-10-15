@@ -26,6 +26,7 @@ const sourceMetadataRefetchIndexesMigration = readFileSync(resolve(process.cwd()
 const metadataProductMetricsMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015043000_metadata_product_activation_metrics.sql'), 'utf8');
 const sourceMetadataProbeCursorMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015060000_metadata_source_probe_cursor.sql'), 'utf8');
 const publicPresentationAdmissionMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015194000_lite_public_presentation_admission.sql'), 'utf8');
+const zeroDecimalChapterIdentityMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015223000_canonical_zero_decimal_chapters.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -131,6 +132,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(metadataProductMetricsMigration);
   await db.exec(sourceMetadataProbeCursorMigration);
   await db.exec(publicPresentationAdmissionMigration);
+  await db.exec(zeroDecimalChapterIdentityMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -2818,6 +2820,64 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toBe('00000000-0000-4000-8000-000000000011');
     expect(new Set((await db.query(`SELECT chapter_key FROM importer_lite_tasks WHERE work_id=$1 AND task_type='IMPORT_CHAPTER'`, [ids.p1a])).rows.map((row: any) => row.chapter_key)))
       .toEqual(new Set(['pt-br|default|chapter|12.1|-']));
+  });
+
+  it('binds a zero-decimal legacy Reader chapter before another source can publish a duplicate', async () => {
+    await db.query(`INSERT INTO chapters
+      (id,work_id,number,display_number,canonical_chapter_key,chapter_order_key,chapter_kind,edition,language,title,published_at)
+      VALUES ($1::uuid,$2::uuid,28,'28.00','legacy:whole-28','n|000000000028|000000000000|00||-','chapter','default','und','Capítulo 28',now())`,
+    [ids.legacy, ids.p1a]);
+    await db.query(`INSERT INTO importer_chapter_mappings(source,source_chapter_id,chapter_id)
+      VALUES('source-a','legacy-whole-28',$1::uuid)`, [ids.legacy]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      priority: 'P1', idempotencyKey: 'zero-decimal-alternative-source',
+      payload: { source: 'source-b', sourceWorkId: 'alternative-work' } });
+    const task = await repo.claim('catalog-worker', 120);
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => ({ id: 'source-b', fetchWorkSnapshot: async () => ({
+        details: { sourceWorkId: 'alternative-work', title: 'P1 A', slug: 'p1-a', status: 'COMPLETED' as const, language: 'pt-BR' },
+        chapters: [{ sourceChapterId: 'alternative-whole-28', number: 28, displayNumber: '28', title: 'A different provider label' }],
+      }) }) } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 2, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
+    await (runtime as any).catalog(task, 'catalog-worker');
+
+    expect((await db.query(`SELECT chapter_id FROM importer_lite_chapters
+      WHERE work_id=$1::uuid AND canonical_chapter_key='pt-br|default|chapter|28|-'`, [ids.p1a])).rows[0].chapter_id)
+      .toBe(ids.legacy);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE work_id=$1::uuid AND task_type='IMPORT_CHAPTER'`, [ids.p1a])).rows[0].count).toBe(0);
+  });
+
+  it('retires only a corroborated published X.00 duplicate without deleting either page manifest', async () => {
+    const canonical = '00000000-0000-4000-8000-000000000028';
+    const retired = '00000000-0000-4000-8000-000000000029';
+    const canonicalMedia = '00000000-0000-4000-8000-000000000030';
+    const retiredMedia = '00000000-0000-4000-8000-000000000031';
+    await db.query(`INSERT INTO chapters
+      (id,work_id,number,display_number,canonical_chapter_key,chapter_order_key,chapter_kind,edition,language,title,published_at)
+      VALUES
+      ($1::uuid,$3::uuid,28,'28','pt-br|default|chapter|28|-','n|000000000028|000000000000||||-','chapter','default','pt-BR','Capítulo 28',now()),
+      ($2::uuid,$3::uuid,28,'28.00','legacy:whole-28','n|000000000028|000000000000|00||-','chapter','default','und','Capítulo 28',now())`, [canonical,retired,ids.p1a]);
+    await db.query(`INSERT INTO media(id,mime,width,height,bytes,sha256,storage_ready,status) VALUES
+      ($1::uuid,'image/jpeg',800,1200,3000,'canonical',true,'ACTIVE'),
+      ($2::uuid,'image/jpeg',800,1200,3000,'retired',true,'ACTIVE')`, [canonicalMedia,retiredMedia]);
+    await db.query(`INSERT INTO pages(chapter_id,position,media_id,width,height) VALUES
+      ($1::uuid,1,$3::uuid,800,1200),($2::uuid,1,$4::uuid,800,1200)`, [canonical,retired,canonicalMedia,retiredMedia]);
+    await db.query(`INSERT INTO importer_chapter_mappings(source,source_chapter_id,chapter_id)
+      VALUES('source-a','legacy-zero-28',$1::uuid)`, [retired]);
+
+    await db.exec(zeroDecimalChapterIdentityMigration);
+
+    expect((await db.query(`SELECT published_at IS NOT NULL AS published FROM chapters WHERE id=$1::uuid`, [canonical])).rows[0].published).toBe(true);
+    expect((await db.query(`SELECT published_at IS NULL AS retired FROM chapters WHERE id=$1::uuid`, [retired])).rows[0].retired).toBe(true);
+    expect((await db.query(`SELECT count(*)::int AS count FROM pages WHERE chapter_id IN ($1::uuid,$2::uuid)`, [canonical,retired])).rows[0].count).toBe(2);
+    expect((await db.query(`SELECT chapter_id FROM importer_chapter_mappings WHERE source='source-a' AND source_chapter_id='legacy-zero-28'`)).rows[0].chapter_id)
+      .toBe(canonical);
+    expect((await db.query(`SELECT canonical_page_count,retired_page_count FROM importer_chapter_identity_merges WHERE retired_chapter_id=$1::uuid`, [retired])).rows[0])
+      .toEqual({ canonical_page_count: 1, retired_page_count: 1 });
   });
 
   it('turns only a genuinely new monitor observation into P0 and returns the watch to its bounded lane', async () => {

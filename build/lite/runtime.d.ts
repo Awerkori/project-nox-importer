@@ -138,6 +138,20 @@ export declare class ImporterLiteRuntime {
      * keeps hundreds of no-op IMPORT_CHAPTER claims out of the P1 lane.
      */
     private legacyPublishedChapterMap;
+    /**
+     * Pre-Lite Reader rows have `legacy:*` keys and `und` language because the
+     * old importer did not persist an edition/language identity.  That missing
+     * value is not an explicit alternate language.  For the narrow, objective
+     * case below, bind it to the modern canonical key before an alternative
+     * source can materialize a second public chapter:
+     *
+     *   pt-BR/default regular whole chapter 28 == legacy 28.0 == legacy 28.00
+     *
+     * Fractions, specials, non-default editions and explicitly labelled
+     * languages are deliberately excluded.  This is one batched indexed lookup
+     * per catalog snapshot, never a per-chapter similarity probe.
+     */
+    private legacyPublishedWholeNumberMap;
     /** Persist the exact legacy identity without rewriting any Reader chapter. */
     private upsertLegacyChapterMappings;
     private worker;

@@ -2,6 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { canonicalChapterKey, chapterKind, chapterOrderKey, parseCanonicalChapterKey } from '../chapter-identity.js';
 
 describe('Lite chapter identity', () => {
+  it('coalesces only zero-padded whole numbers', () => {
+    const whole = canonicalChapterKey({ displayNumber: '28', language: 'pt-BR' });
+    expect(canonicalChapterKey({ displayNumber: '28.0', language: 'pt-BR' })).toBe(whole);
+    expect(canonicalChapterKey({ displayNumber: '28.00', language: 'pt-BR' })).toBe(whole);
+    expect(canonicalChapterKey({ displayNumber: '28.1', language: 'pt-BR' })).not.toBe(whole);
+    // The provider text is an identity tie-breaker for non-zero fractions.
+    expect(canonicalChapterKey({ displayNumber: '28.10', language: 'pt-BR' }))
+      .not.toBe(canonicalChapterKey({ displayNumber: '28.1', language: 'pt-BR' }));
+    expect(canonicalChapterKey({ displayNumber: '28', language: 'en', edition: 'official' }))
+      .not.toBe(whole);
+    expect(canonicalChapterKey({ displayNumber: '28.00', title: 'Extra', kind: 'special', language: 'pt-BR' }))
+      .not.toBe(whole);
+  });
+
   it('never collapses decimal text, special chapters, or editions into a float identity', () => {
     const decimalOne = canonicalChapterKey({ displayNumber: '12.1', language: 'pt-BR' });
     const decimalTen = canonicalChapterKey({ displayNumber: '12.10', language: 'pt-BR' });
