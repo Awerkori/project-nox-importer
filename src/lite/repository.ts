@@ -831,8 +831,7 @@ export class LiteRepository {
           ON cs.work_id=c.work_id AND cs.canonical_chapter_key=c.chapter_key
         JOIN importer_sources s ON s.id=cs.source
         LEFT JOIN importer_lite_source_health h ON h.source=cs.source
-        WHERE w.published=true
-          AND NULLIF(btrim(w.title),'') IS NOT NULL
+        WHERE NULLIF(btrim(w.title),'') IS NOT NULL
           AND NULLIF(btrim(w.slug),'') IS NOT NULL
           AND cover.storage_ready=true AND cover.bytes>=1500
           AND cs.confirmed=true AND cs.has_chapter=true
