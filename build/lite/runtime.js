@@ -39,11 +39,11 @@ const rankForSource = (source) => source === 'mangaflix' ? 10 : source === 'manh
 const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
 const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
-// Page bodies transiently exist both as streamed chunks and as their final
-// contiguous Uint8Array. Sixteen page permits plus the 48 MiB byte ceiling
-// bound that real peak while preserving enough independent work for five
-// chapter workers. RSS pressure can reduce this further at runtime.
-const SAFE_BUFFERED_PAGE_CAP = 16;
+// Declared-size page bodies are filled directly into their final Uint8Array.
+// Twenty permits and a 64 MiB live-body ceiling keep five chapter workers fed
+// without restoring the historic unbounded page burst. RSS pressure can cut
+// this further before the container approaches its 512 MiB limit.
+const SAFE_BUFFERED_PAGE_CAP = 20;
 // Stored metadata replay is local and no-network. Keep replay admission
 // responsive, but poll the source-mapping producer less often: it uses the
 // same small YSQL pool as chapter work and only needs to refill a two-task
