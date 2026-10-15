@@ -128,4 +128,16 @@ BEGIN
 END;
 $$;
 
+-- Existing ready-work rows were derived by the prior admission rule. Rebuild
+-- this small projection once so deployed queues immediately use the new rule;
+-- tasks themselves remain untouched and therefore fully recoverable.
+DO $$
+DECLARE v_work_key text;
+BEGIN
+  FOR v_work_key IN SELECT work_key FROM public.importer_lite_ready_works LOOP
+    PERFORM public.importer_lite_refresh_ready_work(v_work_key);
+  END LOOP;
+END;
+$$;
+
 COMMIT;

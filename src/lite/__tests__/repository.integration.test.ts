@@ -2771,11 +2771,17 @@ describe('LiteRepository against the additive Lite migration', () => {
       chapterKey: 'stale-unpublishable', priority: 'P1', idempotencyKey: 'stale-unpublishable' });
     await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1b, workKey: `work:${ids.p1b}`,
       priority: 'P1', idempotencyKey: 'public-catalog', payload: { source: 'source-a', sourceWorkId: 'public-catalog' } });
+    // Simulate the durable projection left by the older admission function.
+    await db.query(`INSERT INTO importer_lite_ready_works(work_key,priority,operation_rank,next_run_at,updated_at)
+      VALUES ($1,2,1,now(),now())`, [`work:${ids.p1a}`]);
+    await db.exec(publicPresentationAdmissionMigration);
 
     const claimed = await repo.claim('public-catalog-worker', 120);
     expect(claimed).toMatchObject({ taskType: 'CATALOG', workId: ids.p1b, idempotencyKey: 'public-catalog' });
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE idempotency_key='stale-unpublishable'`)).rows[0])
       .toEqual({ state: 'READY' });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_ready_works WHERE work_key=$1`, [`work:${ids.p1a}`])).rows[0])
+      .toEqual({ count: 0 });
   });
 
   it('coalesces duplicate canonical legacy mappings without collapsing distinct decimal chapters', async () => {
