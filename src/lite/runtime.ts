@@ -1246,9 +1246,18 @@ export class ImporterLiteRuntime {
     }
     let mappingWorkId = '';
     try {
-      const mapping = await timePhase('mappingQueryMs', () => this.pool.query<{ work_id: string; source_title: string; source_slug: string; title: string }>(
-        `SELECT m.work_id::text,m.source_title,m.source_slug,w.title
+      const mapping = await timePhase('mappingAndPolicyQueryMs', () => this.pool.query<{
+        work_id: string; source_title: string; source_slug: string; title: string;
+        source_enabled: boolean; source_status: string; source_cooldown: Date | null;
+        source_health: string | null; health_cooldown: Date | null;
+      }>(
+        `SELECT m.work_id::text,m.source_title,m.source_slug,w.title,
+          source_policy.enabled AS source_enabled,source_policy.status AS source_status,
+          source_policy.cooldown_until AS source_cooldown,health.health AS source_health,
+          health.cooldown_until AS health_cooldown
          FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
+         JOIN importer_sources source_policy ON source_policy.id=m.source
+         LEFT JOIN importer_lite_source_health health ON health.source=m.source
          WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId]));
       const row = mapping.rows[0];
       if (!row) {
@@ -1256,14 +1265,28 @@ export class ImporterLiteRuntime {
         return;
       }
       mappingWorkId = row.work_id;
-      const policy = await timePhase('sourcePolicyQueryMs', () => this.queue.sourcePolicy(source));
-      if (!policy?.runnable) {
-        const nextRunAt = policy?.cooldownUntil && policy.cooldownUntil > new Date()
-          ? policy.cooldownUntil : new Date(Date.now() + 6 * 60 * 60_000);
+      // The mapping query already joins the source and health rows. Reuse that
+      // snapshot instead of issuing a second YSQL round-trip for the same
+      // source policy immediately before the provider request.
+      const sourceCooldown = row.source_cooldown ? new Date(row.source_cooldown) : null;
+      const healthCooldown = row.health_cooldown ? new Date(row.health_cooldown) : null;
+      const cooldownUntil = [sourceCooldown, healthCooldown]
+        .filter((value): value is Date => Boolean(value && Number.isFinite(value.getTime())))
+        .sort((left, right) => right.getTime() - left.getTime())[0] || null;
+      const status = String(row.source_status || 'ACTIVE').toUpperCase();
+      const health = String(row.source_health || 'HEALTHY').toUpperCase();
+      const expiredAdministrativeCooldown = status === 'COOLDOWN' && Boolean(sourceCooldown && sourceCooldown <= new Date());
+      const administrativelyActive = row.source_enabled === true &&
+        (['ACTIVE', 'DEGRADED', 'RECOVERING'].includes(status) || expiredAdministrativeCooldown);
+      const healthAllowed = !['BROKEN', 'DISABLED'].includes(health);
+      const runnable = administrativelyActive && healthAllowed && (!cooldownUntil || cooldownUntil <= new Date());
+      if (!runnable) {
+        const nextRunAt = cooldownUntil && cooldownUntil > new Date()
+          ? cooldownUntil : new Date(Date.now() + 6 * 60 * 60_000);
         await this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
           aliasesState: 'EXTERNAL_BLOCKED', tagsState: 'EXTERNAL_BLOCKED',
-          error: `SOURCE_NOT_READY:${policy?.status || 'MISSING'}`, nextRetryAt: nextRunAt });
-        await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: `SOURCE_NOT_READY:${policy?.status || 'MISSING'}`,
+          error: `SOURCE_NOT_READY:${status || 'MISSING'}`, nextRetryAt: nextRunAt });
+        await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: `SOURCE_NOT_READY:${status || 'MISSING'}`,
           nextRunAt, resetAttempts: true });
         return;
       }
