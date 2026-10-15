@@ -66,6 +66,15 @@ const SOURCE_METADATA_LANE_INTERVAL_MS = 5_000;
 // metadata work while the public site and YSQL are otherwise healthy.
 const SOURCE_METADATA_POOL_PRESSURE_SUSTAIN_MS = 15_000;
 const SOURCE_RECOVERY_PROBE_INTERVAL_MS = 30_000;
+// Confirmed manifest rows are the durable evidence for a historical chapter.
+// At boot, repair any rows that older releases left without their idempotent
+// import task quickly, but only in small database-only batches.  Once the
+// orphan reserve is empty, retain the five-minute low-cost safety sweep for
+// exceptional crash windows; normal catalog ingestion creates its tasks in
+// the same flow as the manifest observation.
+const MANIFEST_P1_CATCHUP_INTERVAL_MS = 30_000;
+const MANIFEST_P1_STEADY_INTERVAL_MS = 5 * 60_000;
+const MANIFEST_P1_CATCHUP_BATCH = 256;
 /** One process, one executor pool, one bounded reconciler. */
 export class ImporterLiteRuntime {
     pool;
@@ -102,6 +111,7 @@ export class ImporterLiteRuntime {
     lastSourceMetadataRefillAt = 0;
     lastSourceRecoveryProbeAt = 0;
     lastManifestP1RepairAt = 0;
+    manifestP1CatchupActive = true;
     // Observation is intentionally a one-slot lane. It may create P0 chapter
     // work, but an empty observation must never compete with chapter workers.
     monitorGate = new AsyncSemaphore(1, 'lite_p0_monitor');
@@ -499,13 +509,30 @@ export class ImporterLiteRuntime {
     }
     /** Existing positive manifests may outlive an older completed catalog task. */
     async refillManifestProvenP1Imports() {
-        if (!this.isRuntimeLeader || Date.now() - this.lastManifestP1RepairAt < 5 * 60_000)
+        const interval = this.manifestP1CatchupActive
+            ? MANIFEST_P1_CATCHUP_INTERVAL_MS
+            : MANIFEST_P1_STEADY_INTERVAL_MS;
+        if (!this.isRuntimeLeader || Date.now() - this.lastManifestP1RepairAt < interval)
             return;
         this.lastManifestP1RepairAt = Date.now();
         try {
-            const admitted = await this.queue.refillManifestProvenP1Imports();
+            // This producer does not fetch a source or hold a transaction across
+            // I/O. `materialize…` inserts at most two 128-row transactions here;
+            // its task key is idempotent and it only reads positive manifest rows.
+            // A full batch keeps catch-up active for another bounded turn.  The
+            // first short batch below the cap proves the orphan reserve is empty and
+            // returns us to the inexpensive steady-state sweep.
+            const catchingUp = this.manifestP1CatchupActive;
+            const admitted = catchingUp
+                ? await this.queue.materializeConfirmedMissingP1Tasks(MANIFEST_P1_CATCHUP_BATCH)
+                : await this.queue.refillManifestProvenP1Imports();
+            if (catchingUp && admitted < MANIFEST_P1_CATCHUP_BATCH)
+                this.manifestP1CatchupActive = false;
             if (admitted)
-                this.logger.info('Materialized manifest-proven historical P1 repairs', { admitted });
+                this.logger.info('Materialized manifest-proven historical P1 repairs', {
+                    admitted,
+                    mode: catchingUp ? 'catchup' : 'steady',
+                });
         }
         catch (error) {
             this.logger.warn('Manifest-proven P1 refill failed', { error: error?.message });

@@ -35,6 +35,7 @@ export declare class ImporterLiteRuntime {
     private lastSourceMetadataRefillAt;
     private lastSourceRecoveryProbeAt;
     private lastManifestP1RepairAt;
+    private manifestP1CatchupActive;
     private readonly monitorGate;
     private readonly runtimeInstanceId;
     private readonly runtimeBootedAt;
