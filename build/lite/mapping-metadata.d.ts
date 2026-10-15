@@ -7,3 +7,15 @@ export declare function extractStoredMappingMetadata(raw: unknown, primaryTitle:
     aliases: string[];
     genres: string[];
 };
+/**
+ * Classify metadata that was explicitly returned by a provider.  This is
+ * shared by a normal catalog pass and a retroactive source refetch so a new
+ * mapping cannot be silently left PENDING after its first successful fetch.
+ */
+export declare function classifyExplicitSourceMetadata(raw: unknown, primaryTitle: string): {
+    aliases: string[];
+    genres: string[];
+    aliasesState: 'ENRICHED' | 'NO_ALIASES' | 'PARSER_ERROR';
+    tagsState: 'ENRICHED' | 'NO_TAGS' | 'PARSER_ERROR';
+    parserError: boolean;
+};

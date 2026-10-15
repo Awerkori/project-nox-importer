@@ -12,7 +12,7 @@ import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
 import { SourceAdmissionGate } from '../core/source-admission-gate.js';
 import { sanitizeSynopsis } from './metadata.js';
-import { extractStoredMappingMetadata } from './mapping-metadata.js';
+import { classifyExplicitSourceMetadata, extractStoredMappingMetadata } from './mapping-metadata.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const withTimeout = async (operation, timeoutMs, code) => {
@@ -1102,16 +1102,47 @@ export class ImporterLiteRuntime {
                 : Promise.all([adapter.fetchWorkDetails(sourceWorkId), adapter.fetchChapters(sourceWorkId)])
                     .then(([details, chapters]) => ({ details, chapters })), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'CATALOG_SOURCE_TIMEOUT');
             fetchedSnapshot = true;
-            const rawContentRating = String(snapshot.details.raw?.contentRating || snapshot.details.raw?.content_rating || '').toUpperCase();
+            const rawDetails = snapshot.details.raw && typeof snapshot.details.raw === 'object' ? snapshot.details.raw : {};
+            // Persist precisely the provider-declared fields alongside its raw
+            // payload.  Some adapters expose these normalized arrays without
+            // duplicating them in `raw`; losing them here used to make a successful
+            // normal onboarding look unclassified to the retroactive producer.
+            const sourceMetadata = {
+                ...rawDetails,
+                ...(snapshot.details.alternativeTitles !== undefined ? { alternativeTitles: snapshot.details.alternativeTitles } : {}),
+                ...(snapshot.details.genres !== undefined ? { genres: snapshot.details.genres } : {}),
+            };
+            const sourceMetadataClassification = classifyExplicitSourceMetadata(sourceMetadata, snapshot.details.title);
+            const rawContentRating = String(rawDetails.contentRating || rawDetails.content_rating || '').toUpperCase();
             const resolved = await this.dedupe.resolveWork({ source, sourceWorkId, title: snapshot.details.title, slug: snapshot.details.slug,
-                aliases: snapshot.details.alternativeTitles, genres: snapshot.details.genres, author: snapshot.details.author,
+                aliases: sourceMetadataClassification.aliases, genres: sourceMetadataClassification.genres, author: snapshot.details.author,
                 artist: snapshot.details.artist, synopsis: sanitizeSynopsis(snapshot.details.synopsis) || undefined, kind: snapshot.details.kind,
                 status: snapshot.details.status, year: snapshot.details.year, ageRating: snapshot.details.ageRating,
                 contentRating: rawContentRating === 'ADULT_18' || Number(snapshot.details.ageRating || 0) >= 18 ? 'ADULT_18' : undefined,
-                rawMetadata: snapshot.details.raw,
+                rawMetadata: sourceMetadata,
                 loadCoverId: snapshot.details.coverUrl ? () => this.loadCover(adapter, snapshot.details.coverUrl) : undefined });
             if (!resolved.workId || resolved.status === 'AMBIGUOUS') {
                 await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: resolved.reason || 'AMBIGUOUS_CATALOG_MATCH' });
+                return;
+            }
+            // Metadata is part of normal onboarding, not a later backfill.  The
+            // durable v3 classification makes this exact mapping ineligible for a
+            // redundant source refetch, while preserving source-provided raw fields
+            // and product deltas for observability.
+            await this.queue.recordSourceMetadataEnrichment({
+                source, sourceWorkId, workId: resolved.workId,
+                aliasesState: sourceMetadataClassification.aliasesState,
+                tagsState: sourceMetadataClassification.tagsState,
+                aliasesAdded: Math.max(0, Number(resolved.metadataDelta?.aliasesAdded || 0)),
+                tagsAdded: Math.max(0, Number(resolved.metadataDelta?.tagsAdded || 0)),
+                error: sourceMetadataClassification.parserError ? 'EXPLICIT_SOURCE_METADATA_NOT_PARSED' : null,
+                rawMetadata: sourceMetadata,
+            });
+            if (sourceMetadataClassification.parserError) {
+                await this.queue.finish(task, workerId, {
+                    state: 'BLOCKED', reason: 'CATALOG_METADATA_PARSER_ERROR', workId: resolved.workId,
+                    checkpoint: { workId: resolved.workId, metadataParserError: true },
+                });
                 return;
             }
             const language = String(snapshot.details.language || snapshot.details.raw?.language || 'pt-BR');
@@ -1354,29 +1385,11 @@ export class ImporterLiteRuntime {
                 ...(details.alternativeTitles ? { alternativeTitles: details.alternativeTitles } : {}),
                 ...(details.genres ? { genres: details.genres } : {}),
             };
-            const extracted = await timePhase('parseNormalizeMs', async () => extractStoredMappingMetadata(sourceMetadata, details.title || row.title || row.source_title || ''));
-            // Compare parser evidence before primary-title deduplication. A source
-            // may explicitly return only its canonical title in an alias field; that
-            // is a valid NO_ALIASES result, not a parser failure.
-            const parsedAliasEvidence = extracted.aliases.length > 0 ? extracted.aliases
-                : extractStoredMappingMetadata(sourceMetadata, '').aliases;
-            const hasUnparsedExplicitValue = (fieldPattern) => Object.entries(raw).some(([key, value]) => {
-                if (!fieldPattern.test(key))
-                    return false;
-                if (Array.isArray(value))
-                    return value.length > 0;
-                if (typeof value === 'string')
-                    return value.trim().length > 0 && !['[]', '{}', 'null'].includes(value.trim().toLowerCase());
-                if (value && typeof value === 'object')
-                    return Object.keys(value).length > 0;
-                return value !== null && value !== undefined;
-            });
-            const rawAliasEvidence = hasUnparsedExplicitValue(/^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title)$/i);
-            const rawTagEvidence = hasUnparsedExplicitValue(/^(genres?|tags?|categories)$/i);
-            if ((rawAliasEvidence && parsedAliasEvidence.length === 0) || (rawTagEvidence && extracted.genres.length === 0)) {
+            const extracted = await timePhase('parseNormalizeMs', async () => classifyExplicitSourceMetadata(sourceMetadata, details.title || row.title || row.source_title || ''));
+            if (extracted.parserError) {
                 await timePhase('metadataPersistCommitMs', () => this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
-                    aliasesState: rawAliasEvidence && parsedAliasEvidence.length === 0 ? 'PARSER_ERROR' : (extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES'),
-                    tagsState: rawTagEvidence && extracted.genres.length === 0 ? 'PARSER_ERROR' : (extracted.genres.length ? 'ENRICHED' : 'NO_TAGS'),
+                    aliasesState: extracted.aliasesState,
+                    tagsState: extracted.tagsState,
                     error: 'EXPLICIT_SOURCE_METADATA_NOT_PARSED', rawMetadata: sourceMetadata }));
                 const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
                 const finalizeStartedAt = performance.now();

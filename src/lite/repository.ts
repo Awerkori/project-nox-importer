@@ -319,8 +319,8 @@ export class LiteRepository {
       }
       await client.query(`INSERT INTO importer_lite_metadata_enrichment
         (source,source_work_id,work_id,aliases_state,tags_state,aliases_added,tags_added,attempt_count,
-         last_checked_at,next_retry_at,last_error,version,updated_at)
-        VALUES($1,$2,$3::uuid,$4,$5,$6,$7,1,now(),$8,$9,1,now())
+        last_checked_at,next_retry_at,last_error,version,updated_at)
+        VALUES($1,$2,$3::uuid,$4,$5,$6,$7,1,now(),$8,$9,3,now())
         ON CONFLICT(source,source_work_id) DO UPDATE SET work_id=excluded.work_id,
           aliases_state=excluded.aliases_state,tags_state=excluded.tags_state,
           aliases_added=importer_lite_metadata_enrichment.aliases_added+excluded.aliases_added,
@@ -354,8 +354,8 @@ export class LiteRepository {
         [input.source,input.sourceWorkId,JSON.stringify(input.rawMetadata),input.workId]);
       await client.query(`INSERT INTO importer_lite_metadata_enrichment
         (source,source_work_id,work_id,aliases_state,tags_state,aliases_added,tags_added,attempt_count,
-         last_checked_at,next_retry_at,last_error,version,updated_at)
-        VALUES($1,$2,$3::uuid,$4,$5,$6,$7,1,now(),NULL,NULL,1,now())
+        last_checked_at,next_retry_at,last_error,version,updated_at)
+        VALUES($1,$2,$3::uuid,$4,$5,$6,$7,1,now(),NULL,NULL,3,now())
         ON CONFLICT(source,source_work_id) DO UPDATE SET work_id=excluded.work_id,
           aliases_state=excluded.aliases_state,tags_state=excluded.tags_state,
           aliases_added=importer_lite_metadata_enrichment.aliases_added+excluded.aliases_added,

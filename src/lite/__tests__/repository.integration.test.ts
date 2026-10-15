@@ -2961,13 +2961,13 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).catalog(task,'metadata-source-worker',{ claimSqlMs: 1, queueDwellMs: 0 });
 
     const mapping = await db.query(`SELECT metadata,last_synced_at FROM importer_work_mappings WHERE source='source-a' AND source_work_id='source-refetch'`);
-    const classification = await db.query(`SELECT aliases_state,tags_state,aliases_added,tags_added FROM importer_lite_metadata_enrichment
+    const classification = await db.query(`SELECT aliases_state,tags_state,aliases_added,tags_added,version FROM importer_lite_metadata_enrichment
       WHERE source='source-a' AND source_work_id='source-refetch'`);
     const completed = (await db.query(`SELECT state,checkpoint FROM importer_lite_tasks WHERE id=$1`,[task!.id])).rows[0];
     expect(fetched).toBe(1);
     expect(mapping.rows[0].metadata).toMatchObject({ provider_id:'source-refetch',alternativeTitles:['Título nativo'],genres:['MILF','Vanilla'] });
     expect(mapping.rows[0].last_synced_at).not.toBeNull();
-    expect(classification.rows[0]).toMatchObject({ aliases_state:'ENRICHED',tags_state:'ENRICHED' });
+    expect(classification.rows[0]).toMatchObject({ aliases_state:'ENRICHED',tags_state:'ENRICHED',version:3 });
     expect(completed.state).toBe('DONE');
     expect(completed.checkpoint.metadataTiming).toMatchObject({
       claimSqlMs: expect.any(Number), mappingAndPolicyQueryMs: expect.any(Number),
@@ -3166,7 +3166,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     }
   });
 
-  it('keeps catalog metadata and source mappings while honoring chapter ingestion disablement', async () => {
+  it('classifies normal catalog metadata immediately while honoring chapter ingestion disablement', async () => {
     await db.exec(`ALTER TABLE importer_sources ADD COLUMN chapter_ingestion_enabled boolean NOT NULL DEFAULT true`);
     await db.query(`UPDATE importer_sources SET chapter_ingestion_enabled=false WHERE id='source-a'`);
     await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:metadata-only', priority: 'P2',
@@ -3192,6 +3192,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapter_sources
       WHERE source='source-a' AND source_chapter_id='not-admitted'`)).rows[0].count).toBe(1);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks WHERE task_type='IMPORT_CHAPTER'`)).rows[0].count).toBe(0);
+    expect((await db.query(`SELECT aliases_state,tags_state,version FROM importer_lite_metadata_enrichment
+      WHERE source='source-a' AND source_work_id='metadata-only'`)).rows[0])
+      .toMatchObject({ aliases_state:'ENRICHED',tags_state:'ENRICHED',version:3 });
   });
 
   it('maps an exactly matched published legacy chapter during catalog without admitting a no-op P1 import', async () => {
