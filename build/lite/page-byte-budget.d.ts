@@ -13,6 +13,7 @@ import type { BufferReservationRequestOptions } from '../core/concurrency.js';
  * a backpressure deadlock.
  */
 export declare const LITE_PAGE_BUFFER_INITIAL_BYTES: number;
+export declare const LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES: number;
 export declare const LITE_PAGE_BUFFER_BUDGET_BYTES: number;
 export type PageByteBudgetSnapshot = {
     capacityBytes: number;
@@ -43,7 +44,9 @@ export declare class PageByteBudget {
      */
     setCapacityBytes(capacityBytes: number): void;
     snapshot(): PageByteBudgetSnapshot;
-    reserve(bytes?: number, signal?: AbortSignal): Promise<PageByteReservation>;
+    reserve(bytes?: number, signal?: AbortSignal, options?: {
+        completionHeadroomBytes?: number;
+    }): Promise<PageByteReservation>;
     grow(_reservation: PageByteReservation, bytes: number, signal?: AbortSignal): Promise<void>;
     release(bytes: number): void;
     private acquire;

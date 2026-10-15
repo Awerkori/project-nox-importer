@@ -14,6 +14,7 @@ import type { BufferReservationRequestOptions } from '../core/concurrency.js';
  * a backpressure deadlock.
  */
 export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
+export const LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES = 4 * 1024 * 1024;
 // `readImageBody` fills a declared-length response directly into its final
 // Uint8Array, so the former streamed-chunks-plus-final-body duplication no
 // longer determines the normal high-water mark. Keep a deliberately bounded
@@ -25,6 +26,10 @@ export const LITE_PAGE_BUFFER_BUDGET_BYTES = 64 * 1024 * 1024;
 type Waiter = {
   bytes: number;
   kind: 'INITIAL' | 'UPGRADE';
+  // Initial admission can leave bounded room for one already-started,
+  // lengthless response to make terminal progress. This is a predicate only:
+  // it is never double-counted as retained media.
+  completionHeadroomBytes: number;
   resolve: () => void;
   reject: (error: unknown) => void;
   signal?: AbortSignal;
@@ -98,8 +103,12 @@ export class PageByteBudget {
     return { capacityBytes: this.capacityBytes, reservedBytes: this.reservedBytes, waiting: this.waiters.length };
   }
 
-  async reserve(bytes = LITE_PAGE_BUFFER_INITIAL_BYTES, signal?: AbortSignal): Promise<PageByteReservation> {
-    await this.acquire(bytes, 'INITIAL', signal);
+  async reserve(
+    bytes = LITE_PAGE_BUFFER_INITIAL_BYTES,
+    signal?: AbortSignal,
+    options?: { completionHeadroomBytes?: number },
+  ): Promise<PageByteReservation> {
+    await this.acquire(bytes, 'INITIAL', signal, Math.max(0, options?.completionHeadroomBytes || 0));
     return new PageByteReservation(this, bytes);
   }
 
@@ -112,17 +121,24 @@ export class PageByteBudget {
     this.drain();
   }
 
-  private async acquire(bytes: number, kind: Waiter['kind'], signal?: AbortSignal): Promise<void> {
-    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > this.capacityBytes) {
+  private async acquire(
+    bytes: number,
+    kind: Waiter['kind'],
+    signal?: AbortSignal,
+    completionHeadroomBytes = 0,
+  ): Promise<void> {
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > this.capacityBytes ||
+        !Number.isSafeInteger(completionHeadroomBytes) || completionHeadroomBytes < 0 ||
+        bytes + completionHeadroomBytes > this.capacityBytes) {
       throw new Error('LITE_PAGE_BUFFER_RESERVATION_INVALID');
     }
     signal?.throwIfAborted();
-    if (!this.waiters.length && this.canReserve(bytes)) {
+    if (!this.waiters.length && this.canReserve(bytes, completionHeadroomBytes)) {
       this.reservedBytes += bytes;
       return;
     }
     await new Promise<void>((resolve, reject) => {
-      const waiter: Waiter = { bytes, kind, resolve: () => {
+      const waiter: Waiter = { bytes, kind, completionHeadroomBytes, resolve: () => {
         cleanup();
         resolve();
       }, reject: (error) => {
@@ -141,8 +157,8 @@ export class PageByteBudget {
     });
   }
 
-  private canReserve(bytes: number): boolean {
-    return this.reservedBytes + bytes <= this.capacityBytes;
+  private canReserve(bytes: number, completionHeadroomBytes = 0): boolean {
+    return this.reservedBytes + bytes + completionHeadroomBytes <= this.capacityBytes;
   }
 
   private drain(): void {
@@ -150,7 +166,7 @@ export class PageByteBudget {
       // Complete in-flight page bodies before admitting a new producer. This
       // is the only priority rule here and prevents byte-budget deadlock.
       const upgradeIndex = this.waiters.findIndex((waiter) => waiter.kind === 'UPGRADE' && this.canReserve(waiter.bytes));
-      const initialIndex = this.waiters.findIndex((waiter) => waiter.kind === 'INITIAL' && this.canReserve(waiter.bytes));
+      const initialIndex = this.waiters.findIndex((waiter) => waiter.kind === 'INITIAL' && this.canReserve(waiter.bytes, waiter.completionHeadroomBytes));
       const index = upgradeIndex >= 0 ? upgradeIndex : initialIndex;
       if (index < 0) return;
       const [waiter] = this.waiters.splice(index, 1);

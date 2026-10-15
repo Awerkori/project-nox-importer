@@ -135,29 +135,6 @@ export async function readImageBody(response, optionsOrMaxBytes) {
     }
     if (!response.body)
         throw new Error('Image response has no body');
-    // With no usable final length, incremental growth can let several readers
-    // fill the entire byte budget and then wait on one another forever. Promote
-    // one reader to a bounded completion reservation before its body advances.
-    // The autotuner accounts this in reservedBufferedBytes; it never borrows
-    // beyond maxBufferedBytes.
-    if (reservation && contentLengthBytes === null && maxBytes > reservation.reservedBytes) {
-        const fromBytes = reservation.reservedBytes;
-        emitTrace(() => options.trace?.onReservationUpgrade?.({
-            phase: 'COMPLETION', state: 'STARTED', fromBytes, toBytes: maxBytes, elapsedMs: 0,
-        }));
-        try {
-            await reservation.upgrade(maxBytes, signal, { intent: 'COMPLETION' });
-        }
-        catch (error) {
-            await response.body.cancel().catch(() => { });
-            if (!reservation.isCommitted && !reservation.isReleased)
-                reservation.release();
-            throw error;
-        }
-        emitTrace(() => options.trace?.onReservationUpgrade?.({
-            phase: 'COMPLETION', state: 'COMPLETED', fromBytes, toBytes: reservation.reservedBytes, elapsedMs: 0,
-        }));
-    }
     const reader = response.body.getReader();
     // Most chapter-image CDNs give us a trustworthy content length.  In that
     // case fill the final body as bytes arrive instead of retaining every stream
