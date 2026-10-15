@@ -163,7 +163,11 @@ export class LiteRepository {
             EXISTS (SELECT 1 FROM importer_lite_tasks rich
               WHERE rich.task_type='CATALOG' AND rich.state='DONE'
                 AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=s.id
-                AND rich.checkpoint->>'aliasDelta' ~ '^[1-9][0-9]*$') AS alias_productive_source
+                AND rich.checkpoint->>'aliasDelta' ~ '^[1-9][0-9]*$') AS alias_productive_source,
+            EXISTS (SELECT 1 FROM importer_lite_tasks rich
+              WHERE rich.task_type='CATALOG' AND rich.state='DONE'
+                AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=s.id
+                AND rich.checkpoint->>'tagDelta' ~ '^[1-9][0-9]*$') AS tag_productive_source
           FROM importer_sources s
           LEFT JOIN importer_lite_source_health health ON health.source=s.id
           LEFT JOIN LATERAL (
@@ -179,11 +183,14 @@ export class LiteRepository {
             AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
             AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
         ), next_mapping AS (
-          SELECT turn.source,turn.last_admitted_at,turn.alias_productive_source,
+          SELECT turn.source,turn.last_admitted_at,turn.alias_productive_source,turn.tag_productive_source,
             (aliasless_after.source_work_id IS NOT NULL OR aliasless_wrap.source_work_id IS NOT NULL) AS selected_aliasless,
+            (tagless_after.source_work_id IS NOT NULL OR tagless_wrap.source_work_id IS NOT NULL) AS selected_tagless,
             COALESCE(aliasless_after.source_work_id,aliasless_wrap.source_work_id,
+              tagless_after.source_work_id,tagless_wrap.source_work_id,
               fallback_after.source_work_id,fallback_wrap.source_work_id) AS source_work_id,
             COALESCE(aliasless_after.work_id,aliasless_wrap.work_id,
+              tagless_after.work_id,tagless_wrap.work_id,
               fallback_after.work_id,fallback_wrap.work_id) AS work_id
           FROM source_turns turn
           -- Each probe can use the (source, source_work_id) mapping index and
@@ -197,16 +204,32 @@ export class LiteRepository {
             'COALESCE(cardinality(w.aliases),0)=0',
             'turn.last_source_work_id IS NOT NULL AND m.source_work_id<=turn.last_source_work_id',
           )}) aliasless_wrap ON aliasless_after.source_work_id IS NULL
+          -- Sources differ substantially in taxonomy quality. After the
+          -- alias-first tiers, give an equally explicit opportunity to works
+          -- with no upstream tag/category link before spending a seat on a
+          -- fully enriched complementary mapping.
+          LEFT JOIN LATERAL (${eligibleMappingQuery(
+            'NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=w.id)',
+            "(turn.last_source_work_id IS NULL OR m.source_work_id>turn.last_source_work_id)",
+          )}) tagless_after ON aliasless_after.source_work_id IS NULL
+            AND aliasless_wrap.source_work_id IS NULL
+          LEFT JOIN LATERAL (${eligibleMappingQuery(
+            'NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=w.id)',
+            'turn.last_source_work_id IS NOT NULL AND m.source_work_id<=turn.last_source_work_id',
+          )}) tagless_wrap ON aliasless_after.source_work_id IS NULL
+            AND aliasless_wrap.source_work_id IS NULL AND tagless_after.source_work_id IS NULL
           LEFT JOIN LATERAL (${eligibleMappingQuery(
             'true',
             "(turn.last_source_work_id IS NULL OR m.source_work_id>turn.last_source_work_id)",
           )}) fallback_after ON aliasless_after.source_work_id IS NULL
-            AND aliasless_wrap.source_work_id IS NULL
+            AND aliasless_wrap.source_work_id IS NULL AND tagless_after.source_work_id IS NULL
+            AND tagless_wrap.source_work_id IS NULL
           LEFT JOIN LATERAL (${eligibleMappingQuery(
             'true',
             'turn.last_source_work_id IS NOT NULL AND m.source_work_id<=turn.last_source_work_id',
           )}) fallback_wrap ON aliasless_after.source_work_id IS NULL
-            AND aliasless_wrap.source_work_id IS NULL AND fallback_after.source_work_id IS NULL
+            AND aliasless_wrap.source_work_id IS NULL AND tagless_after.source_work_id IS NULL
+            AND tagless_wrap.source_work_id IS NULL AND fallback_after.source_work_id IS NULL
         )
         SELECT source,source_work_id,work_id FROM next_mapping WHERE source_work_id IS NOT NULL
         -- A mapping for a work with no aliases has higher product value than
@@ -214,7 +237,8 @@ export class LiteRepository {
         -- Within each tier, prefer providers that have actually added an
         -- alias to a work. Merely returning aliases is insufficient: many
         -- mappings already contain every title the source supplies.
-        ORDER BY selected_aliasless DESC,alias_productive_source DESC,last_admitted_at NULLS FIRST,source LIMIT $1`,
+        ORDER BY selected_aliasless DESC,alias_productive_source DESC,
+          selected_tagless DESC,tag_productive_source DESC,last_admitted_at NULLS FIRST,source LIMIT $1`,
         [ceiling - Number(pending.rows[0]?.count || 0)]);
 
       for (const row of candidates.rows) {
@@ -671,6 +695,18 @@ export class LiteRepository {
       [workerId, `${Math.max(30, leaseSeconds)} seconds`],
     );
     return result.rows[0] ? asTask(result.rows[0]) : null;
+  }
+
+  /** Product-level transitions, counted once per work rather than per mapping. */
+  async metadataProductSnapshot(): Promise<{ aliasesActivatedWorks: number; tagsActivatedWorks: number }> {
+    const result = await this.db.query<{ aliases_activated_works: string; tags_activated_works: string }>(`
+      SELECT count(*) FILTER (WHERE aliases_activated_at IS NOT NULL)::int AS aliases_activated_works,
+        count(*) FILTER (WHERE tags_activated_at IS NOT NULL)::int AS tags_activated_works
+      FROM importer_lite_metadata_product_metrics`);
+    return {
+      aliasesActivatedWorks: Number(result.rows[0]?.aliases_activated_works || 0),
+      tagsActivatedWorks: Number(result.rows[0]?.tags_activated_works || 0),
+    };
   }
 
   /**

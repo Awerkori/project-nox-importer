@@ -793,24 +793,27 @@ export class DeduplicationEngine {
     }
 
     let aliasesAdded = 0;
-    // Aliases: merge non-destructively
+    // Aliases are an append-only union of real source titles. A manual editor
+    // may protect the display title, but their existing aliases must not turn
+    // into a wall that discards a native/romanized/English name supplied by a
+    // later confirmed mapping.
     if (candidate.aliases && Array.isArray(candidate.aliases) && candidate.aliases.length > 0) {
-      if (prov.aliases?.source !== 'manual') {
-        const existingAliases = Array.isArray(work.aliases) ? work.aliases : [];
-        const mergedAliases = mergeAlternativeTitles(
-          existingAliases,
-          candidate.aliases.map((a) => decodeHtmlEntities(a)),
-          updates.title || work.title
-        );
-        const existingAliasKeys = new Set(existingAliases.map((alias: string) => this.tagLookupKey(alias)));
-        aliasesAdded = mergedAliases.filter((alias) => !existingAliasKeys.has(this.tagLookupKey(alias))).length;
+      const existingAliases = Array.isArray(work.aliases) ? work.aliases : [];
+      const mergedAliases = mergeAlternativeTitles(
+        existingAliases,
+        candidate.aliases.map((a) => decodeHtmlEntities(a)),
+        updates.title || work.title
+      );
+      const existingAliasKeys = new Set(existingAliases.map((alias: string) => this.tagLookupKey(alias)));
+      aliasesAdded = mergedAliases.filter((alias) => !existingAliasKeys.has(this.tagLookupKey(alias))).length;
 
-        const aliasesChanged = mergedAliases.length !== existingAliases.length
-          || mergedAliases.some((alias, index) => alias !== existingAliases[index]);
-        if (aliasesChanged || (source === 'kuro' && existingAliases.length === 0)) {
-          updates.aliases = mergedAliases;
-          prov.aliases = { source, updated_at: now };
-        }
+      const aliasesChanged = mergedAliases.length !== existingAliases.length
+        || mergedAliases.some((alias, index) => alias !== existingAliases[index]);
+      if (aliasesChanged || (source === 'kuro' && existingAliases.length === 0)) {
+        updates.aliases = mergedAliases;
+        // Preserve the audit signal that an editor curated this field while
+        // retaining every editor-entered value in the union above.
+        if (prov.aliases?.source !== 'manual') prov.aliases = { source, updated_at: now };
       }
     }
 
@@ -1083,37 +1086,6 @@ export class DeduplicationEngine {
     }
   }
 
-  private getProviderDefaultTags(source: string): string[] {
-    const special: Record<string, string[]> = {
-      'yaoifanclub': ['Yaoi'],
-      'cafecomyaoi': ['Yaoi'],
-      'fleurblanche': ['Yaoi'],
-      'amuy': ['Yaoi'],
-      'apenasumafa': ['Yaoi'],
-      'pinkrosa': ['Yaoi'],
-      'covenscan': ['Yaoi'],
-      'borutoexplorer': ['Yaoi'],
-      'megahentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'universohentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'hentaifusion': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'hentaihome': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'hentaiseason': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'hentaitokyo': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'tankouhentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'mundohentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'nhentaibr': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'instahentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'hotcabaretscan': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'acervohentai': ['Hentai', CANONICAL_ADULT_TAG_NAME],
-      'nocturnesummer': ['Pornhwa', CANONICAL_ADULT_TAG_NAME],
-      'tiamanhwa': ['Pornhwa', CANONICAL_ADULT_TAG_NAME],
-      'inkapk': ['Pornhwa', CANONICAL_ADULT_TAG_NAME],
-      'littletyrant': ['Pornhwa', CANONICAL_ADULT_TAG_NAME],
-      'yuriverso': ['Yuri']
-    };
-    return special[source] || [];
-  }
-
   /**
    * Legacy importer versions wrote type/status vocabulary as automatic tags.
    * This removes only those machine-generated associations; staff-curated
@@ -1144,8 +1116,8 @@ export class DeduplicationEngine {
   async syncWorkTags(
     workId: string,
     candidate: CandidateWork,
-    isAdult: boolean,
-    kind?: string,
+    _isAdult: boolean,
+    _kind?: string,
     source?: string
   ): Promise<number> {
     const sourceCount = (candidate.genres || []).filter((tag): tag is string =>
@@ -1161,21 +1133,9 @@ export class DeduplicationEngine {
       const targetTagIds = new Set<string>();
       const desiredTags = new Set<string>();
 
-      if (isAdult) {
-        desiredTags.add(CANONICAL_ADULT_TAG_NAME);
-
-        const effectiveKind = (kind || candidate.kind || '').toUpperCase();
-        const hasManhwaGenre = (candidate.genres || []).some((g) => /manhwa|pornhwa/i.test(g));
-        if (effectiveKind === 'MANHWA' || hasManhwaGenre) {
-          desiredTags.add('Pornhwa');
-        }
-      }
-      
-      if (source) {
-         const def = this.getProviderDefaultTags(source);
-         for (const d of def) desiredTags.add(d);
-      }
-
+      // Age/content classification is persisted separately on `works`. Tags
+      // are only labels explicitly returned by the provider, never guesses
+      // based on a source name, cover, synopsis, title, kind or rating.
       if (Array.isArray(candidate.genres)) {
         for (const genre of candidate.genres) {
            if (!genre || this.isGarbageTag(genre)) continue;
