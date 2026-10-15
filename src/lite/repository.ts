@@ -1577,8 +1577,30 @@ export class LiteRepository {
            WHERE task.state='RETRY_WAIT' AND task.monitoring=false AND task.task_type='IMPORT_CHAPTER'
              AND task.reason='SOURCE_RATE_LIMITED' AND task.next_run_at<=now()
          ), candidate_works AS (
-           SELECT DISTINCT work_key,work_turn_at,oldest_due FROM due_candidates
-           ORDER BY work_turn_at NULLS FIRST,oldest_due,work_key
+           -- Pick the bounded work horizon only after proving that the task
+           -- still has a route the executor may use.  Selecting the oldest
+           -- rows first could otherwise fill this horizon with providers
+           -- which remain externally unavailable; the later route join then
+           -- reopened nothing and a healthy, due historical gap behind it
+           -- could wait forever.
+           SELECT DISTINCT candidate.work_key,candidate.work_turn_at,candidate.oldest_due
+           FROM due_candidates candidate
+           WHERE EXISTS (
+             SELECT 1
+             FROM importer_lite_chapter_sources route
+             JOIN importer_sources s ON s.id=route.source
+             LEFT JOIN importer_lite_source_health h ON h.source=route.source
+             WHERE route.work_id=candidate.work_id AND route.canonical_chapter_key=candidate.chapter_key
+               AND route.confirmed=true AND route.has_chapter=true
+               AND route.language=COALESCE(NULLIF(candidate.payload->>'language',''),'und')
+               AND route.edition=COALESCE(NULLIF(candidate.payload->>'edition',''),'default')
+               AND s.enabled=true
+               AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+               AND ${sourceExecutionEligibilitySql('s')}
+               AND COALESCE(h.health,'HEALTHY') IN ('HEALTHY','DEGRADED','RATE_LIMITED')
+               AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+           )
+           ORDER BY candidate.work_turn_at NULLS FIRST,candidate.oldest_due,candidate.work_key
            LIMIT $1
          ), due AS (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,
