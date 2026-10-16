@@ -123,6 +123,14 @@ export declare class ImporterLiteRuntime {
      * consuming chapter workers or competing with P0/P1 task selection. */
     private runSourceMetadataRefresh;
     /**
+     * Catalog HTTP intentionally happens outside YSQL transactions.  A first
+     * catalog pass can outlive its initial lease while it checks bounded,
+     * complementary sources, so retain the normal owner fence with a small
+     * periodic lease renewal.  If ownership has already been lost, finalizers
+     * remain fenced by the repository and the reconciler owns recovery.
+     */
+    private withCatalogLeaseHeartbeat;
+    /**
      * This is intentionally a one-seat onboarding lane, not a second chapter
      * scheduler.  It only claims unmapped CATALOG rows produced by discovery;
      * once a work exists, every manifest chapter returns to the ordinary
