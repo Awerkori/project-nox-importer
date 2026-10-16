@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PageByteBudget } from '../page-byte-budget.js';
+import { LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES, PageByteBudget } from '../page-byte-budget.js';
 
 describe('PageByteBudget', () => {
   it('bounds retained page bytes and lets an in-flight body upgrade before a new page starts', async () => {
@@ -61,6 +61,45 @@ describe('PageByteBudget', () => {
     expect(secondAdmitted).toBe(true);
     admitted.release();
     expect(budget.snapshot()).toEqual({ capacityBytes: 20, reservedBytes: 0, waiting: 0 });
+  });
+
+  it('admits the 24-request lengthless wave inside the reduced byte ceiling', async () => {
+    const mib = 1024 * 1024;
+    const budget = new PageByteBudget(48 * mib);
+    const reservations = [];
+
+    for (let index = 0; index < 24; index++) {
+      reservations.push(await budget.reserve(
+        LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES,
+        undefined,
+        { completionHeadroomBytes: 20 * mib - LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES },
+      ));
+    }
+
+    expect(budget.snapshot()).toEqual({ capacityBytes: 48 * mib, reservedBytes: 24 * mib, waiting: 0 });
+
+    await reservations[0].upgrade(20 * mib);
+    // Once one active body takes its terminal promotion, a subsequent
+    // speculative request is correctly held back. The 24-page admission is
+    // therefore compatible with the single-body completion guarantee.
+    let admitted = false;
+    const waiting = budget.reserve(
+      LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES,
+      undefined,
+      { completionHeadroomBytes: 20 * mib - LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES },
+    ).then((reservation) => {
+      admitted = true;
+      return reservation;
+    });
+    expect(admitted).toBe(false);
+    expect(budget.snapshot()).toEqual({ capacityBytes: 48 * mib, reservedBytes: 43 * mib, waiting: 1 });
+
+    reservations[0].release();
+    const next = await waiting;
+    expect(admitted).toBe(true);
+    next.release();
+    for (const reservation of reservations.slice(1)) reservation.release();
+    expect(budget.snapshot()).toEqual({ capacityBytes: 48 * mib, reservedBytes: 0, waiting: 0 });
   });
 
   it('lets existing pages drain when memory pressure lowers capacity', async () => {

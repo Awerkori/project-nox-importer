@@ -82,13 +82,12 @@ export class LiteMemoryPressureGuard {
             return {
                 // RSS can retain allocator arenas after a completed media wave even
                 // when the live page payload is well below the reduced byte fence.
-                // Keeping only eight *count* permits in that state turned the
-                // allocator high-water mark into a permanent throughput collapse:
-                // small pages queued behind the count semaphore while the 32 MiB
-                // authoritative payload budget was mostly unused.  Raise only the
-                // count fence here.  Page bodies remain byte-bounded and CRITICAL
-                // remains the one-page emergency profile.
-                pageBufferCapacity: Math.min(this.normalPageBufferCapacity, 16),
+                // This permit now owns only active HTTP body/validation (it is
+                // released before the Telegram upload), so cutting it below the
+                // measured 24-request fence made REDUCED a permanent source-download
+                // bottleneck without reducing retained media. Keep the same 48 MiB
+                // authoritative byte ceiling; CRITICAL remains the one-page brake.
+                pageBufferCapacity: Math.min(this.normalPageBufferCapacity, 24),
                 // Production showed the 32 MiB reduced budget itself saturated with
                 // many small pages while RSS was stable around 310 MiB.  It left
                 // capacity unused in the 512 MiB container and turned REDUCED into a
