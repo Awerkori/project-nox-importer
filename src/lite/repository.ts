@@ -163,23 +163,35 @@ export class LiteRepository {
         SELECT last_source FROM importer_lite_metadata_source_cursor
         WHERE cursor_name='source_refetch' FOR UPDATE`);
       const lastSource = cursor.rows[0]?.last_source || null;
+      // Do not ORDER BY a cursor CASE across every source. On YSQL that made
+      // the EXISTS below run once for every provider (32 in production) just
+      // to choose two. The two ordered index walks preserve the same circular
+      // cursor semantics: take sources after the cursor, then wrap only when
+      // the first walk did not fill this bounded horizon.
+      const eligibleSourceSelect = (cursorPredicate: string): string => `
+        SELECT s.id AS source
+        FROM importer_sources s
+        LEFT JOIN importer_lite_source_health health ON health.source=s.id
+        WHERE s.enabled=true AND ${cursorPredicate} AND ${sourceExecutionEligibilitySql('s')}
+          AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+          AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+          -- This remains an indexed existence check, but the ordered scan now
+          -- stops after the small probe horizon instead of checking all
+          -- configured providers.
+          AND EXISTS (SELECT 1 FROM importer_work_mappings m
+            WHERE m.source=s.id AND m.work_id IS NOT NULL
+              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE'))
+        ORDER BY s.id LIMIT $2`;
       const sourceProbe = await client.query<{ source: string }>(`
-        WITH eligible_sources AS (
-          SELECT s.id AS source,
-            CASE WHEN $1::text IS NULL OR s.id>$1 THEN 0 ELSE 1 END AS cursor_turn
-          FROM importer_sources s
-          LEFT JOIN importer_lite_source_health health ON health.source=s.id
-          WHERE s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
-            AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-            AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
-            -- This is a cheap indexed existence check. It avoids spending a
-            -- probe slot on configured sources which have no mapped work.
-            AND EXISTS (SELECT 1 FROM importer_work_mappings m
-              WHERE m.source=s.id AND m.work_id IS NOT NULL
-                AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE'))
+        WITH after_cursor AS (
+          ${eligibleSourceSelect(lastSource ? 's.id>$1::text' : '$1::text IS NULL')}
+        ), wrapped AS (
+          ${eligibleSourceSelect(lastSource ? 's.id<=$1::text' : '$1::text IS NOT NULL')}
         )
-        SELECT source FROM eligible_sources
-        ORDER BY cursor_turn,source LIMIT $2`, [lastSource, probeLimit]);
+        SELECT source FROM after_cursor
+        UNION ALL
+        SELECT source FROM wrapped
+        LIMIT $2`, [lastSource, probeLimit]);
       const probeSources = sourceProbe.rows.map((row) => String(row.source));
       if (!probeSources.length) {
         await client.query('COMMIT');
