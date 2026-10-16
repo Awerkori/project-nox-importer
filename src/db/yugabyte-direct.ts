@@ -106,7 +106,7 @@ o1DZJoSu3+Cu5ZEv1xOCWs0bOoinIt45bqT0jrEXQDDhwGWR3gC64VMqffla1g==
 -----END CERTIFICATE-----`;
 
 function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, applicationName: string,
-  connectionTimeoutMillis: number, queryTimeoutMillis: number): pg.PoolConfig {
+  connectionTimeoutMillis: number, queryTimeoutMillis: number, sessionOptions = ''): pg.PoolConfig {
   if (!cfg.YUGABYTE_HOST || !cfg.YUGABYTE_USER || !cfg.YUGABYTE_PASSWORD) {
     throw new Error('Yugabyte direct connection requires YUGABYTE_HOST, YUGABYTE_USER, and YUGABYTE_PASSWORD');
   }
@@ -153,7 +153,7 @@ function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, app
     keepAliveInitialDelayMillis: 10000,
     ssl: sslConfig,
     application_name: applicationName,
-    options: `-c max_parallel_workers_per_gather=0 -c statement_timeout=${queryTimeoutMillis} -c idle_in_transaction_session_timeout=15000`,
+    options: `-c max_parallel_workers_per_gather=0 -c statement_timeout=${queryTimeoutMillis} -c idle_in_transaction_session_timeout=15000 ${sessionOptions}`.trim(),
   };
 }
 
@@ -164,8 +164,13 @@ function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, app
  * main pool's high-frequency chapter claims.
  */
 export function createYugabyteMetadataPool(): pg.Pool {
+  // This one protected P2 connection performs bounded cross-table probes.
+  // Yugabyte's default nested-loop plan issued one remote read per mapping;
+  // prefer its batched variant only here, never on the chapter pool.
+  const metadataSessionOptions = '-c enable_nestloop=off';
   const metadataPool = new pg.Pool(yugabytePoolOptions(
     getConfig(), 1, 'project-nox-importer-metadata', 4_000, 12_000,
+    metadataSessionOptions,
   ));
   metadataPool.on('error', (err) => {
     logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });
