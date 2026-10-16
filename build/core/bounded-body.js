@@ -131,6 +131,13 @@ export async function readImageBody(response, optionsOrMaxBytes) {
                     throw error;
                 }
             }
+            else if (reservation && declared < reservation.reservedBytes) {
+                // Lite admits lengthless sources before taking a global request slot.
+                // Once a trustworthy header arrives, return the unused conservative
+                // prefix immediately; a dishonest short declaration still follows the
+                // existing bounded promotion path below.
+                reservation.shrink?.(declared);
+            }
         }
     }
     if (!response.body)

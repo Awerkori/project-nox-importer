@@ -47,6 +47,18 @@ export class PageByteReservation {
         await this.budget.grow(this, newBytes - this._reservedBytes, signal);
         this._reservedBytes = newBytes;
     }
+    /**
+     * Headers can refine the conservative lengthless admission downward before
+     * the body is read. Unlike upgrade this is synchronous: it only returns
+     * already-reserved budget and immediately wakes another producer.
+     */
+    shrink(newBytes) {
+        if (this._released || !Number.isSafeInteger(newBytes) || newBytes <= 0 || newBytes >= this._reservedBytes)
+            return;
+        const releasedBytes = this._reservedBytes - newBytes;
+        this._reservedBytes = newBytes;
+        this.budget.release(releasedBytes);
+    }
     release() {
         if (this._released)
             return;

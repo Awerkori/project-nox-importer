@@ -37,6 +37,8 @@ export interface BufferReservationLike {
   readonly isCommitted: boolean;
   readonly isReleased: boolean;
   upgrade(newBytes: number, signal?: AbortSignal, options?: BufferReservationRequestOptions): Promise<void>;
+  /** Optional refinement for a trusted small Content-Length after provisional admission. */
+  shrink?(newBytes: number): void;
   release(): void;
 }
 
@@ -211,6 +213,12 @@ export async function readImageBody(
           if (!reservation.isCommitted && !reservation.isReleased) reservation.release();
           throw error;
         }
+      } else if (reservation && declared < reservation.reservedBytes) {
+        // Lite admits lengthless sources before taking a global request slot.
+        // Once a trustworthy header arrives, return the unused conservative
+        // prefix immediately; a dishonest short declaration still follows the
+        // existing bounded promotion path below.
+        reservation.shrink?.(declared);
       }
     }
   }

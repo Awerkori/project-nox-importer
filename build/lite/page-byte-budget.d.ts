@@ -29,6 +29,12 @@ export declare class PageByteReservation {
     get isCommitted(): boolean;
     get isReleased(): boolean;
     upgrade(newBytes: number, signal?: AbortSignal, _options?: BufferReservationRequestOptions): Promise<void>;
+    /**
+     * Headers can refine the conservative lengthless admission downward before
+     * the body is read. Unlike upgrade this is synchronous: it only returns
+     * already-reserved budget and immediately wakes another producer.
+     */
+    shrink(newBytes: number): void;
     release(): void;
 }
 export declare class PageByteBudget {
