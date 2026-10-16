@@ -511,6 +511,25 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual([{ source:'z-live',source_work_id:'needs-refetch' }]);
   });
 
+  it('uses a two-source constrained refetch horizon without revisiting an exhausted source', async () => {
+    await db.exec(`INSERT INTO importer_sources(id) VALUES('000-metadata-stalled'),('001-metadata-live')`);
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000310','000-metadata-stalled','old-classified',$1::uuid,'p1-a','P1 A','SYNCED'),
+      ('00000000-0000-4000-8000-000000000311','001-metadata-live','needs-refetch',$2::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1a, ids.p1b]);
+    await db.query(`INSERT INTO importer_lite_metadata_enrichment
+      (source,source_work_id,work_id,aliases_state,tags_state,version)
+      VALUES('000-metadata-stalled','old-classified',$1::uuid,'ENRICHED','ENRICHED',3)`, [ids.p1a]);
+
+    expect(await repo.refillSourceMetadataEnrichment(1, 1)).toBe(0);
+    expect((await db.query(`SELECT last_source FROM importer_lite_metadata_source_cursor
+      WHERE cursor_name='source_refetch'`)).rows).toEqual([{ last_source:'000-metadata-stalled' }]);
+    expect(await repo.refillSourceMetadataEnrichment(1, 1)).toBe(1);
+    expect((await db.query(`SELECT payload->>'source' AS source FROM importer_lite_tasks
+      WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows).toEqual([{ source:'001-metadata-live' }]);
+  });
+
   it('claims source metadata from its dedicated lane while chapter claims remain available', async () => {
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
       idempotencyKey:'source-metadata-dedicated',payload:{source:'source-a',sourceWorkId:'old-work',metadataSourceRefresh:true} });
@@ -688,12 +707,12 @@ describe('LiteRepository against the additive Lite migration', () => {
     (runtime as any).isRuntimeLeader = true;
 
     await (runtime as any).refillSourceMetadataEnrichment(true);
-    expect(refill).toHaveBeenLastCalledWith(4);
+    expect(refill).toHaveBeenLastCalledWith(4, undefined);
 
     refill.mockClear();
     lanePool.waitingCount = 2;
     await (runtime as any).refillSourceMetadataEnrichment(true);
-    expect(refill).toHaveBeenLastCalledWith(1);
+    expect(refill).toHaveBeenLastCalledWith(1, 2);
     memorySpy.mockRestore();
   });
 
