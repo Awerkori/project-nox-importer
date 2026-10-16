@@ -743,7 +743,7 @@ describe('LiteRepository against the additive Lite migration', () => {
         DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
         LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
     );
-    const refill = vi.fn().mockResolvedValue(0);
+    const refill = vi.fn().mockResolvedValue(1);
     (runtime as any).queue = { refillSourceMetadataEnrichment: refill };
     (runtime as any).isRuntimeLeader = true;
 
@@ -754,6 +754,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     lanePool.waitingCount = 2;
     await (runtime as any).refillSourceMetadataEnrichment(true);
     expect(refill).toHaveBeenLastCalledWith(1, 2);
+    memorySpy.mockRestore();
+  });
+
+  it('advances only a bounded number of empty historical source horizons', async () => {
+    const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db), {}, { get: () => null } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', WORKER_ID: 'metadata-empty-horizon-test',
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
+        LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
+    );
+    const refill = vi.fn().mockResolvedValue(0);
+    (runtime as any).queue = { refillSourceMetadataEnrichment: refill };
+    (runtime as any).isRuntimeLeader = true;
+
+    await (runtime as any).refillSourceMetadataEnrichment(true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(refill).toHaveBeenCalledTimes(4);
+    expect(refill).toHaveBeenCalledWith(4, undefined);
     memorySpy.mockRestore();
   });
 

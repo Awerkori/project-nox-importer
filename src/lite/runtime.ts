@@ -64,6 +64,11 @@ const SAFE_BUFFERED_PAGE_CAP = 24;
 const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
 const STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS = 15_000;
 const SOURCE_METADATA_REFILL_INTERVAL_MS = 15_000;
+// A two-source probe is intentionally cheap, but many providers can be
+// exhausted while a later healthy provider still has historical debt. Advance
+// through a few empty turns immediately; then return to the normal cadence so
+// an entirely exhausted catalog cannot poll YSQL continuously.
+const SOURCE_METADATA_EMPTY_PROBE_TURNS = 3;
 // Stage 2 metadata lane experiment: two dedicated slots, polled every five
 // seconds. Source adapter host limits and source cooldowns remain authoritative.
 const SOURCE_METADATA_LANE_INTERVAL_MS = 5_000;
@@ -662,7 +667,7 @@ export class ImporterLiteRuntime {
    * STAFF/P0/P1 reserve. At most four network-only tasks are admitted across
    * sources; YSQL preparation and persistence remain gated below.
    */
-  private async refillSourceMetadataEnrichment(replaceCompletedTask = false): Promise<void> {
+  private async refillSourceMetadataEnrichment(replaceCompletedTask = false, emptyProbeTurn = 0): Promise<void> {
     if (!this.isRuntimeLeader || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS)) return;
     // P2 metadata must yield before chapter receipts/finalization queue on
     // the deliberately small importer pool. Existing source requests drain
@@ -688,6 +693,7 @@ export class ImporterLiteRuntime {
       return;
     }
     this.lastSourceMetadataRefillAt = Date.now();
+    let advanceEmptyHorizon = false;
     try {
       // A single local pool waiter is normal while chapter receipts drain. It
       // is not evidence that the public site is under pressure, and holding a
@@ -703,6 +709,11 @@ export class ImporterLiteRuntime {
         constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : undefined,
       );
       this.noteSourceMetadataProducer(admitted ? 'ADMITTED' : 'NO_CANDIDATE', admitted);
+      // Do not leave a healthy P2 seat idle for 15s merely because this
+      // bounded two-source horizon was exhausted. The durable source cursor
+      // advances transactionally in the producer; this continuation only
+      // examines the next small horizon and never raises concurrency.
+      advanceEmptyHorizon = admitted === 0 && emptyProbeTurn < SOURCE_METADATA_EMPTY_PROBE_TURNS;
       if (admitted) {
         this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
         // A producer tick that creates executable work must wake the dedicated
@@ -716,6 +727,9 @@ export class ImporterLiteRuntime {
       this.logger.warn('Source metadata refill failed', { error: error?.message });
     } finally {
       this.sourceMetadataRefillGate.release();
+      if (advanceEmptyHorizon && this.isRuntimeLeader) {
+        void Promise.resolve().then(() => this.refillSourceMetadataEnrichment(true, emptyProbeTurn + 1));
+      }
     }
   }
 
