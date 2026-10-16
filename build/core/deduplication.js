@@ -164,14 +164,22 @@ export class DeduplicationEngine {
       ), inserted_tags AS (
         INSERT INTO tags(name,slug,kind)
         SELECT name,slug,'GENRE' FROM input_tags
-        ON CONFLICT (slug) DO NOTHING
+        -- The catalog also enforces canonical display-name uniqueness. A
+        -- legacy row can legitimately have the same normalized name under an
+        -- older slug, so conflict on slug alone misclassified this entirely
+        -- local idempotency case as an external source failure.
+        ON CONFLICT DO NOTHING
         RETURNING id,slug
       ), tag_ids AS (
         SELECT id FROM inserted_tags
         UNION ALL
         SELECT existing_tag.id
         FROM tags existing_tag
-        JOIN input_tags supplied ON supplied.slug=existing_tag.slug
+        JOIN input_tags supplied ON (
+          supplied.slug=existing_tag.slug
+          OR lower(regexp_replace(btrim(supplied.name),'\\s+',' ','g'))
+             =lower(regexp_replace(btrim(existing_tag.name),'\\s+',' ','g'))
+        )
         WHERE NOT EXISTS (SELECT 1 FROM inserted_tags inserted WHERE inserted.slug=supplied.slug)
       ), alias_update AS (
         UPDATE works SET aliases=$2::text[],updated_at=now()

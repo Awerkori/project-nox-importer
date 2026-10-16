@@ -102,7 +102,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
       updated_at timestamptz NOT NULL DEFAULT now(),
       UNIQUE(source,source_work_id)
     );
-    CREATE TABLE tags (id uuid PRIMARY KEY DEFAULT '00000000-0000-4000-8000-000000000399', name text NOT NULL, slug text NOT NULL UNIQUE, kind text NOT NULL DEFAULT 'GENRE');
+    CREATE TABLE tags (id uuid PRIMARY KEY DEFAULT '00000000-0000-4000-8000-000000000399', name text NOT NULL UNIQUE, slug text NOT NULL UNIQUE, kind text NOT NULL DEFAULT 'GENRE');
     CREATE TABLE work_tags (work_id uuid NOT NULL, tag_id uuid NOT NULL, system_generated boolean NOT NULL DEFAULT true, UNIQUE(work_id,tag_id));
     CREATE TABLE settings (key text PRIMARY KEY, value text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE importer_publication_events (
@@ -3263,7 +3263,10 @@ describe('LiteRepository against the additive Lite migration', () => {
         genres:['MILF','Vanilla'],raw:{provider_id:'source-refetch',genres:['MILF','Vanilla']} };
     } };
     await db.query(`INSERT INTO tags(id,name,slug) VALUES
-      ('00000000-0000-4000-8000-000000000301','MILF','milf'),
+      -- Existing production taxonomies can carry an older slug for the same
+      -- normalized display name. Historical refetch must attach it instead
+      -- of treating that local uniqueness collision as a source failure.
+      ('00000000-0000-4000-8000-000000000301','MILF','legacy-milf'),
       ('00000000-0000-4000-8000-000000000302','Vanilla','vanilla')`);
     const directCatalogClient = { sql: (text: string, values?: unknown[]) => db.query(text, values) };
     const runtime = new ImporterLiteRuntime(
