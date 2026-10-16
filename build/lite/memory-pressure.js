@@ -21,8 +21,21 @@ export class LiteMemoryPressureGuard {
         this.normalPageBufferCapacity = normalPageBufferCapacity;
         this.snapshotValue = this.buildSnapshot(process.memoryUsage());
     }
-    sample(memory = process.memoryUsage()) {
-        const rssMiB = memory.rss / MIB;
+    sample(memory) {
+        let observed = memory || process.memoryUsage();
+        // V8's heap can remain small while completed image ArrayBuffers are ready
+        // for collection. Before cutting page admission on RSS alone, give that
+        // exact transition one opportunity to release dead backing stores. This
+        // runs only in production (tests pass an explicit snapshot) and never
+        // relaxes REDUCED/CRITICAL protection for genuinely live buffers.
+        if (!memory && this.state === 'NORMAL' && observed.rss / MIB >= NORMAL_RSS_MIB) {
+            const gc = globalThis.gc;
+            if (typeof gc === 'function') {
+                gc();
+                observed = process.memoryUsage();
+            }
+        }
+        const rssMiB = observed.rss / MIB;
         const next = this.nextState(rssMiB);
         if (next !== this.state) {
             this.state = next;
@@ -30,7 +43,7 @@ export class LiteMemoryPressureGuard {
             this.pageBuffers.setCapacity(profile.pageBufferCapacity);
             this.pageBytes.setCapacityBytes(profile.pageByteCapacity);
         }
-        this.snapshotValue = this.buildSnapshot(memory);
+        this.snapshotValue = this.buildSnapshot(observed);
         return this.snapshotValue;
     }
     snapshot() {
