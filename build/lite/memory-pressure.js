@@ -79,10 +79,15 @@ export class LiteMemoryPressureGuard {
                 // allocator high-water mark into a permanent throughput collapse:
                 // small pages queued behind the count semaphore while the 32 MiB
                 // authoritative payload budget was mostly unused.  Raise only the
-                // count fence here.  Page bodies are still bounded by the same 32 MiB
-                // budget, and CRITICAL remains the one-page emergency profile.
+                // count fence here.  Page bodies remain byte-bounded and CRITICAL
+                // remains the one-page emergency profile.
                 pageBufferCapacity: Math.min(this.normalPageBufferCapacity, 16),
-                pageByteCapacity: 32 * MIB,
+                // Production showed the 32 MiB reduced budget itself saturated with
+                // many small pages while RSS was stable around 310 MiB.  It left
+                // capacity unused in the 512 MiB container and turned REDUCED into a
+                // permanent 3--6 chapter/minute state.  48 MiB is still below the
+                // normal 64 MiB fence and leaves the CRITICAL 20 MiB brake intact.
+                pageByteCapacity: 48 * MIB,
             };
         }
         return {
