@@ -148,6 +148,15 @@ export class ImporterLiteRuntime {
     lastMetadataEnrichmentAt = 0;
     lastMetadataReplayAt = 0;
     lastSourceMetadataRefillAt = 0;
+    // The historical producer is intentionally low-rate. Persist its last
+    // admission decision in the heartbeat so a guarded skip cannot look like a
+    // silently stalled backlog after a native deploy.
+    sourceMetadataProducer = {
+        observedAt: null,
+        outcome: 'NEVER',
+        admitted: 0,
+        error: null,
+    };
     lastSourceRecoveryProbeAt = 0;
     lastUploadOutcomeRecoveryAt = 0;
     lastManifestP1RepairAt = 0;
@@ -667,11 +676,18 @@ export class ImporterLiteRuntime {
         // it when normal P1 writes made the count oscillate. Under any real
         // queue, retain exactly one bounded P2 seat instead of zero or four.
         const constrainedPool = sustainedPoolPressure || this.pool.waitingCount >= 2;
-        if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
-            || this.shouldPauseLowPriorityMetadata())
+        if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED') {
+            this.noteSourceMetadataProducer('SITE_PAUSED');
             return;
-        if (!this.sourceMetadataRefillGate.tryAcquire())
+        }
+        if (this.shouldPauseLowPriorityMetadata()) {
+            this.noteSourceMetadataProducer('MEMORY_PAUSED');
             return;
+        }
+        if (!this.sourceMetadataRefillGate.tryAcquire()) {
+            this.noteSourceMetadataProducer('REFILL_IN_FLIGHT');
+            return;
+        }
         this.lastSourceMetadataRefillAt = Date.now();
         try {
             // A single local pool waiter is normal while chapter receipts drain. It
@@ -684,6 +700,7 @@ export class ImporterLiteRuntime {
             // feedback loop where a paused metadata lane repeatedly builds READY
             // work that only wakes on the next timer tick.
             const admitted = await this.queue.refillSourceMetadataEnrichment(constrainedPool ? 1 : 4, constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : undefined);
+            this.noteSourceMetadataProducer(admitted ? 'ADMITTED' : 'NO_CANDIDATE', admitted);
             if (admitted) {
                 this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
                 // A producer tick that creates executable work must wake the dedicated
@@ -694,11 +711,18 @@ export class ImporterLiteRuntime {
             }
         }
         catch (error) {
+            this.noteSourceMetadataProducer('ERROR', 0, error?.message);
             this.logger.warn('Source metadata refill failed', { error: error?.message });
         }
         finally {
             this.sourceMetadataRefillGate.release();
         }
+    }
+    noteSourceMetadataProducer(outcome, admitted = 0, error = null) {
+        this.sourceMetadataProducer = {
+            observedAt: new Date().toISOString(), outcome, admitted: Math.max(0, admitted),
+            error: error ? String(error).slice(0, 240) : null,
+        };
     }
     /** Dedicated bounded workers give source refetch continuous progress without
      * consuming chapter workers or competing with P0/P1 task selection. */
@@ -1281,6 +1305,7 @@ export class ImporterLiteRuntime {
                     capacity: this.sourceMetadataPersistenceGate.capacity,
                     waiters: this.sourceMetadataPersistenceGate.queued,
                 },
+                sourceMetadataProducer: this.sourceMetadataProducer,
                 memoryPressure: liveness.memoryPressure,
                 // In-memory stage telemetry is safe to sample while the two YSQL
                 // connections are busy.  Without it, the exact periods that need
@@ -1366,6 +1391,7 @@ export class ImporterLiteRuntime {
                 capacity: this.sourceMetadataPersistenceGate.capacity,
                 waiters: this.sourceMetadataPersistenceGate.queued,
             },
+            sourceMetadataProducer: this.sourceMetadataProducer,
             memoryPressure: liveness.memoryPressure,
             pipeline: {
                 limits: {

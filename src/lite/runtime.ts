@@ -153,6 +153,15 @@ export class ImporterLiteRuntime {
   private lastMetadataEnrichmentAt = 0;
   private lastMetadataReplayAt = 0;
   private lastSourceMetadataRefillAt = 0;
+  // The historical producer is intentionally low-rate. Persist its last
+  // admission decision in the heartbeat so a guarded skip cannot look like a
+  // silently stalled backlog after a native deploy.
+  private sourceMetadataProducer = {
+    observedAt: null as string | null,
+    outcome: 'NEVER' as string,
+    admitted: 0,
+    error: null as string | null,
+  };
   private lastSourceRecoveryProbeAt = 0;
   private lastUploadOutcomeRecoveryAt = 0;
   private lastManifestP1RepairAt = 0;
@@ -666,9 +675,18 @@ export class ImporterLiteRuntime {
     // it when normal P1 writes made the count oscillate. Under any real
     // queue, retain exactly one bounded P2 seat instead of zero or four.
     const constrainedPool = sustainedPoolPressure || this.pool.waitingCount >= 2;
-    if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
-      || this.shouldPauseLowPriorityMetadata()) return;
-    if (!this.sourceMetadataRefillGate.tryAcquire()) return;
+    if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED') {
+      this.noteSourceMetadataProducer('SITE_PAUSED');
+      return;
+    }
+    if (this.shouldPauseLowPriorityMetadata()) {
+      this.noteSourceMetadataProducer('MEMORY_PAUSED');
+      return;
+    }
+    if (!this.sourceMetadataRefillGate.tryAcquire()) {
+      this.noteSourceMetadataProducer('REFILL_IN_FLIGHT');
+      return;
+    }
     this.lastSourceMetadataRefillAt = Date.now();
     try {
       // A single local pool waiter is normal while chapter receipts drain. It
@@ -684,6 +702,7 @@ export class ImporterLiteRuntime {
         constrainedPool ? 1 : 4,
         constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : undefined,
       );
+      this.noteSourceMetadataProducer(admitted ? 'ADMITTED' : 'NO_CANDIDATE', admitted);
       if (admitted) {
         this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
         // A producer tick that creates executable work must wake the dedicated
@@ -693,10 +712,18 @@ export class ImporterLiteRuntime {
         void this.runSourceMetadataRefresh();
       }
     } catch (error: any) {
+      this.noteSourceMetadataProducer('ERROR', 0, error?.message);
       this.logger.warn('Source metadata refill failed', { error: error?.message });
     } finally {
       this.sourceMetadataRefillGate.release();
     }
+  }
+
+  private noteSourceMetadataProducer(outcome: string, admitted = 0, error: unknown = null): void {
+    this.sourceMetadataProducer = {
+      observedAt: new Date().toISOString(), outcome, admitted: Math.max(0, admitted),
+      error: error ? String(error).slice(0, 240) : null,
+    };
   }
 
   /** Dedicated bounded workers give source refetch continuous progress without
@@ -1286,6 +1313,7 @@ export class ImporterLiteRuntime {
           capacity: this.sourceMetadataPersistenceGate.capacity,
           waiters: this.sourceMetadataPersistenceGate.queued,
         },
+        sourceMetadataProducer: this.sourceMetadataProducer,
         memoryPressure: liveness.memoryPressure,
         // In-memory stage telemetry is safe to sample while the two YSQL
         // connections are busy.  Without it, the exact periods that need
@@ -1374,6 +1402,7 @@ export class ImporterLiteRuntime {
         capacity: this.sourceMetadataPersistenceGate.capacity,
         waiters: this.sourceMetadataPersistenceGate.queued,
       },
+      sourceMetadataProducer: this.sourceMetadataProducer,
       memoryPressure: liveness.memoryPressure,
       pipeline: {
         limits: {
