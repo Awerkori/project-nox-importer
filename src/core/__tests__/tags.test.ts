@@ -78,6 +78,22 @@ describe('Tag Normalization', () => {
     expect(params[3]).toEqual(['acao', 'terror']);
   });
 
+  it('handles a legacy tag with the same canonical display name under another slug idempotently', async () => {
+    const sql = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ title: 'Canonical title', aliases: [] }] })
+      .mockResolvedValueOnce({ rows: [{ aliases_changed: 0, tags_added: 1 }] });
+    const engine = new DeduplicationEngine({ sql } as any);
+
+    await engine.mergeKnownMappedHistoricalMetadata({
+      source: 'source-a', sourceWorkId: 'known-id', title: 'Canonical title', slug: 'canonical-title',
+      genres: ['Action'],
+    }, '00000000-0000-4000-8000-000000000001', 'source-a');
+
+    const [statement] = sql.mock.calls[1];
+    expect(statement).toContain('ON CONFLICT DO NOTHING');
+    expect(statement).toContain("lower(regexp_replace(btrim(supplied.name),'\\s+',' ','g'))");
+  });
+
   it('keeps explicit detailed adult taxonomy distinct from the generic adult rating', () => {
     const engine = new DeduplicationEngine({} as any);
     expect(engine['normalizeTagName']('milf')).toBe('MILF');
