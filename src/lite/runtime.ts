@@ -596,7 +596,7 @@ export class ImporterLiteRuntime {
    * bounded replay lane; normal chapter claims retain strict priority.
    */
   private async refillStoredMetadataEnrichment(): Promise<void> {
-    if (!this.isRuntimeLeader || this.shouldPauseLowPriorityMetadata()
+    if (!this.isRuntimeLeader || this.pool.waitingCount > 0 || this.shouldPauseLowPriorityMetadata()
       || Date.now() - this.lastMetadataEnrichmentAt < STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS) return;
     this.lastMetadataEnrichmentAt = Date.now();
     try {
@@ -614,6 +614,11 @@ export class ImporterLiteRuntime {
    */
   private async refillSourceMetadataEnrichment(replaceCompletedTask = false): Promise<void> {
     if (!this.isRuntimeLeader || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS)) return;
+    // P2 metadata must yield before chapter receipts/finalization queue on
+    // the deliberately small importer pool. Existing source requests drain
+    // safely; this only prevents a new producer query or HTTP task from
+    // creating another persistence contender under live P1 pressure.
+    if (this.pool.waitingCount > 0) return;
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
     if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
       || this.shouldPauseLowPriorityMetadata()) return;
@@ -653,6 +658,7 @@ export class ImporterLiteRuntime {
     // RSS nears the container's 512 MiB boundary. A single importer-pool
     // waiter is normal under chapter load; the one-seat persistence gate
     // below, rather than an idle network slot, protects YSQL in that case.
+    if (this.pool.waitingCount > 0) return;
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
     if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
       || this.shouldPauseLowPriorityMetadata()) return;
@@ -716,7 +722,7 @@ export class ImporterLiteRuntime {
    * source slot, page buffer or chapter worker is admitted here.
    */
   private async runStoredMetadataReplay(): Promise<void> {
-    if (!this.isRuntimeLeader || this.shouldPauseLowPriorityMetadata()
+    if (!this.isRuntimeLeader || this.pool.waitingCount > 0 || this.shouldPauseLowPriorityMetadata()
       || Date.now() - this.lastMetadataReplayAt < STORED_METADATA_REPLAY_INTERVAL_MS) return;
     if (!this.metadataReplayGate.tryAcquire()) return;
     try {
