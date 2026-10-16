@@ -145,6 +145,13 @@ export declare class LiteRepository {
     claim(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /** Source-backed metadata owns a single low-rate lane and never waits behind chapter claims. */
     claimSourceMetadataRefresh(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    /**
+     * One first-pass catalog claim is kept independent from the chapter queue.
+     * It is limited by the runtime to a single slot and only applies before a
+     * canonical work exists, so a sustained P1 repair reserve cannot make new
+     * work onboarding wait forever.
+     */
+    claimNewWorkCatalog(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /** Product-level transitions, counted once per work rather than per mapping. */
     metadataProductSnapshot(): Promise<{
         aliasesActivatedWorks: number;

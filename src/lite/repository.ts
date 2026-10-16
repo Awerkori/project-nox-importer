@@ -732,6 +732,20 @@ export class LiteRepository {
     return result.rows[0] ? asTask(result.rows[0]) : null;
   }
 
+  /**
+   * One first-pass catalog claim is kept independent from the chapter queue.
+   * It is limited by the runtime to a single slot and only applies before a
+   * canonical work exists, so a sustained P1 repair reserve cannot make new
+   * work onboarding wait forever.
+   */
+  async claimNewWorkCatalog(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
+    const result = await this.db.query<Row>(
+      'SELECT * FROM public.importer_lite_claim_new_work_catalog($1,$2::interval)',
+      [workerId, `${Math.max(30, leaseSeconds)} seconds`],
+    );
+    return result.rows[0] ? asTask(result.rows[0]) : null;
+  }
+
   /** Product-level transitions, counted once per work rather than per mapping. */
   async metadataProductSnapshot(): Promise<{ aliasesActivatedWorks: number; tagsActivatedWorks: number }> {
     const result = await this.db.query<{ aliases_activated_works: string; tags_activated_works: string }>(`
