@@ -29,6 +29,7 @@ const publicPresentationAdmissionMigration = readFileSync(resolve(process.cwd(),
 const zeroDecimalChapterIdentityMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015223000_canonical_zero_decimal_chapters.sql'), 'utf8');
 const presentableUnpublishedAdmissionMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015230000_lite_admit_presentable_unpublished_work.sql'), 'utf8');
 const newWorkCatalogLaneMigration = readFileSync(resolve(process.cwd(), 'migrations/20261016070000_lite_new_work_catalog_lane.sql'), 'utf8');
+const runnableNewWorkCatalogLaneMigration = readFileSync(resolve(process.cwd(), 'migrations/20261016074500_lite_new_work_catalog_runnable_source.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -137,6 +138,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(zeroDecimalChapterIdentityMigration);
   await db.exec(presentableUnpublishedAdmissionMigration);
   await db.exec(newWorkCatalogLaneMigration);
+  await db.exec(runnableNewWorkCatalogLaneMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -529,6 +531,19 @@ describe('LiteRepository against the additive Lite migration', () => {
     const onboarding = await repo.claimNewWorkCatalog('new-work-catalog',90);
     expect(onboarding).toMatchObject({ idempotencyKey:'fresh-work-catalog',priority:'P2',state:'RUNNING',workId:null });
     expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
+  });
+
+  it('skips a cooled legacy source so a healthy new work is not stranded in the serial onboarding lane', async () => {
+    await repo.enqueue({ taskType:'CATALOG', workKey:'source:source-a:old-cooled', priority:'P2',
+      idempotencyKey:'old-cooled-catalog', payload:{ source:'source-a', sourceWorkId:'old-cooled' } });
+    await repo.enqueue({ taskType:'CATALOG', workKey:'source:source-b:healthy-new', priority:'P2',
+      idempotencyKey:'healthy-new-catalog', payload:{ source:'source-b', sourceWorkId:'healthy-new' } });
+    await db.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()+interval '30 minutes' WHERE id='source-a'`);
+
+    const onboarding = await repo.claimNewWorkCatalog('new-work-catalog',90);
+    expect(onboarding).toMatchObject({ idempotencyKey:'healthy-new-catalog',workId:null,state:'RUNNING' });
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE idempotency_key='old-cooled-catalog'`)).rows[0])
+      .toMatchObject({ state:'READY' });
   });
 
   it('keeps the serial onboarding lane live through a transient chapter pool waiter', async () => {
