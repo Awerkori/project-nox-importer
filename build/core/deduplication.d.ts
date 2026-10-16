@@ -60,6 +60,14 @@ export declare class DeduplicationEngine {
     constructor(supabase: SupabaseClient);
     /** Merge a work whose exact source mapping and canonical work ID are already loaded. */
     mergeKnownMappedWork(candidate: CandidateWork, workId: string, source: string): Promise<DeduplicationResult>;
+    /**
+     * Persist a mapping only after its caller has independently established a
+     * high-confidence cross-provider identity match.  This is deliberately
+     * narrower than resolveWork(): a complementary-source probe must never
+     * create a second canonical work merely because a remote search result
+     * changed between its summary and detail responses.
+     */
+    attachVerifiedMapping(candidate: CandidateWork, workId: string, source: string): Promise<DeduplicationResult>;
     private resolveCandidateCover;
     /**
      * Resolve or register a work conservatively.

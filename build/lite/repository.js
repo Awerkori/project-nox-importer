@@ -1139,6 +1139,30 @@ export class LiteRepository {
         };
     }
     /**
+     * Sources that can safely be queried while a newly-created work is still in
+     * its initial catalog pass.  This is intentionally one indexed set query:
+     * onboarding must not turn a complementary-alias lookup into an N+1 policy
+     * read, and mappings already attached to the work are not searched again.
+     */
+    async complementaryCatalogSources(workId, originSource) {
+        const result = await this.db.query(`
+      SELECT s.id AS source
+      FROM importer_sources s
+      LEFT JOIN importer_lite_source_health health ON health.source=s.id
+      WHERE s.id<>$2
+        AND s.enabled=true
+        AND ${sourceExecutionEligibilitySql('s')}
+        AND COALESCE((to_jsonb(s)->>'catalog_discovery_enabled')::boolean,true)
+        AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+        AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+        AND NOT EXISTS (
+          SELECT 1 FROM importer_work_mappings mapping
+          WHERE mapping.work_id=$1::uuid AND mapping.source=s.id
+        )
+      ORDER BY s.id`, [workId, originSource]);
+        return result.rows.map((row) => String(row.source));
+    }
+    /**
      * Chapter media is expensive and a Reader chapter cannot be exposed without
      * a minimally valid work presentation.  Catalog checks this once per work
      * snapshot, never on the page or chapter hot path, so a missing cover does
