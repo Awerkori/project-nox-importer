@@ -13,8 +13,16 @@ import type { BufferReservationRequestOptions } from '../core/concurrency.js';
  * a backpressure deadlock.
  */
 export declare const LITE_PAGE_BUFFER_INITIAL_BYTES: number;
-export declare const LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES: number;
+export declare const LITE_PAGE_BUFFER_UNKNOWN_REDUCED_INITIAL_BYTES: number;
+export declare const LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES: number;
 export declare const LITE_PAGE_BUFFER_BUDGET_BYTES: number;
+/**
+ * Keep REDUCED able to use the full 24-page request fence, while NORMAL uses
+ * the measured 2 MiB p95-sized provisional body to avoid needless terminal
+ * promotions. The selected value is an admission estimate; every response is
+ * still validated and upgraded before an overflowing chunk is retained.
+ */
+export declare function unknownPageInitialReservationBytes(capacityBytes: number): number;
 export type PageByteBudgetSnapshot = {
     capacityBytes: number;
     reservedBytes: number;
