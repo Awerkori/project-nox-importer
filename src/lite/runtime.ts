@@ -647,11 +647,11 @@ export class ImporterLiteRuntime {
     // creating another persistence contender under live P1 pressure.
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
     // A waiter is expected while ordinary chapter receipts use the shared
-    // three-client pool.  Returning on every non-zero sample meant this
-    // producer never reached its sustained-pressure branch: a busy importer
-    // could leave all historical mappings unmaterialised forever.  Yield for
-    // a short real burst, then keep the P2 refetch lane at one durable seat.
-    if (this.pool.waitingCount >= 2 && !sustainedPoolPressure) return;
+    // three-client pool. Returning on every non-zero sample starved the
+    // history producer; yielding for a 15s "sustained" window still starved
+    // it when normal P1 writes made the count oscillate. Under any real
+    // queue, retain exactly one bounded P2 seat instead of zero or four.
+    const constrainedPool = sustainedPoolPressure || this.pool.waitingCount >= 2;
     if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
       || this.shouldPauseLowPriorityMetadata()) return;
     if (!this.sourceMetadataRefillGate.tryAcquire()) return;
@@ -666,7 +666,7 @@ export class ImporterLiteRuntime {
       // fetching, its merge is still serialised below, and this avoids a
       // feedback loop where a paused metadata lane repeatedly builds READY
       // work that only wakes on the next timer tick.
-      const admitted = await this.queue.refillSourceMetadataEnrichment(sustainedPoolPressure ? 1 : 4);
+      const admitted = await this.queue.refillSourceMetadataEnrichment(constrainedPool ? 1 : 4);
       if (admitted) {
         this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
         // A producer tick that creates executable work must wake the dedicated
@@ -691,15 +691,15 @@ export class ImporterLiteRuntime {
     // waiter is normal under chapter load; the one-seat persistence gate
     // below, rather than an idle network slot, protects YSQL in that case.
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
-    // See refillSourceMetadataEnrichment: a persistent pool queue reduces
-    // this optional lane, but cannot turn it into permanent starvation.
-    if (this.pool.waitingCount >= 2 && !sustainedPoolPressure) return;
+    // See refillSourceMetadataEnrichment: an intermittent P1 queue still
+    // constrains this optional lane to one external request, not zero.
+    const constrainedPool = sustainedPoolPressure || this.pool.waitingCount >= 2;
     if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
       || this.shouldPauseLowPriorityMetadata()) return;
     // Backpressure reduces the dedicated lane from its tested two external
     // seats to one. Do not turn it fully off: that caused READY dwell and
     // made the very pause intended to protect YSQL hold durable work idle.
-    if (sustainedPoolPressure && this.sourceMetadataLaneGate.active >= 1) return;
+    if (constrainedPool && this.sourceMetadataLaneGate.active >= 1) return;
     if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire()) return;
     let claimed = false;
     try {
