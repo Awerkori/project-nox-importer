@@ -92,7 +92,15 @@ export class LiteMemoryPressureGuard {
     }
     if (state === 'REDUCED') {
       return {
-        pageBufferCapacity: Math.min(this.normalPageBufferCapacity, 8),
+        // RSS can retain allocator arenas after a completed media wave even
+        // when the live page payload is well below the reduced byte fence.
+        // Keeping only eight *count* permits in that state turned the
+        // allocator high-water mark into a permanent throughput collapse:
+        // small pages queued behind the count semaphore while the 32 MiB
+        // authoritative payload budget was mostly unused.  Raise only the
+        // count fence here.  Page bodies are still bounded by the same 32 MiB
+        // budget, and CRITICAL remains the one-page emergency profile.
+        pageBufferCapacity: Math.min(this.normalPageBufferCapacity, 16),
         pageByteCapacity: 32 * MIB,
       };
     }

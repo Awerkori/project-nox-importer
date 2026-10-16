@@ -19,7 +19,7 @@ describe('LiteMemoryPressureGuard', () => {
     const guard = new LiteMemoryPressureGuard(pages, bytes, 20);
 
     expect(guard.sample(memory(280))).toMatchObject({ state: 'NORMAL', pageBufferCapacity: 20, pageByteCapacity: 64 * mib, pauseLowPriorityMetadata: false });
-    expect(guard.sample(memory(310))).toMatchObject({ state: 'REDUCED', pageBufferCapacity: 8, pageByteCapacity: 32 * mib, pauseLowPriorityMetadata: false });
+    expect(guard.sample(memory(310))).toMatchObject({ state: 'REDUCED', pageBufferCapacity: 16, pageByteCapacity: 32 * mib, pauseLowPriorityMetadata: false });
     expect(guard.sample(memory(365))).toMatchObject({ state: 'CRITICAL', pageBufferCapacity: 1, pageByteCapacity: 20 * mib, pauseLowPriorityMetadata: true });
   });
 
