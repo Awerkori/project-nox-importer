@@ -1,8 +1,15 @@
 const MIB = 1024 * 1024;
-const NORMAL_RSS_MIB = 300;
-const CRITICAL_RSS_MIB = 360;
-const REDUCED_RECOVERY_RSS_MIB = 260;
-const CRITICAL_RECOVERY_RSS_MIB = 320;
+// With the bounded 64 MiB page budget, production establishes an allocator
+// RSS plateau around 330 MiB after a sustained media wave while only roughly
+// 30 MiB remains live in ArrayBuffers.  The former 300/360 thresholds treated
+// that retained native arena as ongoing growth and held the importer at a
+// permanently throttled 16/48 profile.  Leave a full 112 MiB below the 512
+// MiB container ceiling for the hard brake, but let the normal bounded media
+// pipeline use its measured steady-state headroom first.
+const NORMAL_RSS_MIB = 350;
+const CRITICAL_RSS_MIB = 400;
+const REDUCED_RECOVERY_RSS_MIB = 330;
+const CRITICAL_RECOVERY_RSS_MIB = 370;
 /**
  * Small runtime-local memory brake for the Lite media path. It controls only
  * future page admission: an in-flight image/upload keeps its permits and can
