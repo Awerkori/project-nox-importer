@@ -171,17 +171,11 @@ export function resolveChapterUploadConcurrency(chapterConcurrency, mediaCapacit
     return Math.min(Math.max(1, mediaCapacity), Math.max(3, Math.max(1, chapterConcurrency)));
 }
 export const SOURCE_CONCURRENCY_LIMITS = {
-    // Production ramp 2026-10-11: MangaFlix is the only selected healthy P1
-    // route. Four six-page chapter waves left the global 24-request fence
-    // below sustained occupancy while Telegram remained unused.  A fifth
-    // producer may fill those gaps; page downloads stay globally bounded at
-    // 24, with six per chapter and the same 48-page buffer ceiling.  The
-    // current Lite runtime has six already-bounded chapter workers, but this
-    // source cap left one idle while all healthy ready work was MangaFlix and
-    // global page downloads averaged only 7.6/24 with no 429.  Admit that
-    // existing sixth worker; this does not widen a page, byte, Telegram, or
-    // YSQL limit.
-    mangaflix: { maxChapters: 6, maxPagesPerChapter: 6 },
+    // Production throughput evidence: MangaFlix is the only selected healthy
+    // P1 route, while the 24-request/page-body fences retain spare capacity.
+    // Eight six-page chapter waves can fill gaps between DB/upload phases, but
+    // still cannot widen the global page, byte, Telegram, or YSQL limits.
+    mangaflix: { maxChapters: 8, maxPagesPerChapter: 6 },
     manhastro: { maxChapters: 3, maxPagesPerChapter: 6 },
     mangotoons: { maxChapters: 2, maxPagesPerChapter: 4 },
     megahentai: { maxChapters: 2, maxPagesPerChapter: 4 },

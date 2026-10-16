@@ -41,13 +41,13 @@ const ConfigSchema = z.object({
   QUEUE_LEASE_DURATION_SECONDS: z.coerce.number().int().min(30).default(600),
   QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
   MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(128).default(10),
-  // Lite does not inherit the legacy chapter-worker setting. The measured
-  // sixth-slot ramp remains inside the 24-request/page-buffer fences: it
+  // Lite does not inherit the legacy chapter-worker setting. The controlled
+  // eighth-slot ramp remains inside the 24-request/page-buffer fences: it
   // fills gaps between bounded six-page waves rather than multiplying
   // download, buffer, Telegram or DB concurrency. An explicit protected
   // value still wins immediately (including a one-worker rollback) without
   // reviving legacy behavior.
-  LITE_CHAPTER_WORKERS: z.coerce.number().int().min(1).max(32).default(6),
+  LITE_CHAPTER_WORKERS: z.coerce.number().int().min(1).max(32).default(8),
   ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(3),
   // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
