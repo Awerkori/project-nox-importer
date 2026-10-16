@@ -21,18 +21,17 @@ export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
 // so this is an admission estimate only: it never weakens the authoritative
 // byte cap.
 export const LITE_PAGE_BUFFER_UNKNOWN_REDUCED_INITIAL_BYTES = 1 * 1024 * 1024;
-// At the 64 MiB normal ceiling, 23 conservative 2 MiB reservations still
-// leave the 18 MiB terminal promotion for one active body. Production page
-// p95 is below 2 MiB, so using this normal-profile value avoids turning each
-// ordinary 1--2 MiB lengthless image into a 20 MiB reservation.
+// Production page p95 is below 2 MiB, so using this normal-profile value
+// avoids turning each ordinary 1--2 MiB lengthless image into a 20 MiB
+// reservation.
 export const LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES = 2 * 1024 * 1024;
 // `readImageBody` fills a declared-length response directly into its final
 // Uint8Array, so the former streamed-chunks-plus-final-body duplication no
-// longer determines the normal high-water mark. Keep a deliberately bounded
-// 64 MiB ceiling nevertheless: uploads, HTTP/TLS and malformed responses
-// still need room inside the 512 MiB container, and the runtime cuts this
-// budget well before memory pressure becomes critical.
-export const LITE_PAGE_BUFFER_BUDGET_BYTES = 64 * 1024 * 1024;
+// longer determines the normal high-water mark. Production now reaches the
+// former 64 MiB fence with real promoted bodies while RSS is about 267 MiB;
+// allow one additional bounded terminal body at 80 MiB. The runtime still
+// cuts new admission to 48 MiB at 350 MiB RSS, well below the 512 MiB limit.
+export const LITE_PAGE_BUFFER_BUDGET_BYTES = 80 * 1024 * 1024;
 /**
  * Keep REDUCED able to use the full 24-page request fence, while NORMAL uses
  * the measured 2 MiB p95-sized provisional body to avoid needless terminal

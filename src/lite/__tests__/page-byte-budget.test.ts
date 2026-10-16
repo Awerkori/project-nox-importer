@@ -127,20 +127,20 @@ describe('PageByteBudget', () => {
   it('uses the p95-sized provisional reservation only in the normal profile', async () => {
     const mib = 1024 * 1024;
     expect(unknownPageInitialReservationBytes(48 * mib)).toBe(LITE_PAGE_BUFFER_UNKNOWN_REDUCED_INITIAL_BYTES);
-    expect(unknownPageInitialReservationBytes(64 * mib)).toBe(LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES);
+    expect(unknownPageInitialReservationBytes(80 * mib)).toBe(LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES);
 
-    const budget = new PageByteBudget(64 * mib);
+    const budget = new PageByteBudget(80 * mib);
     const reservations = [];
-    for (let index = 0; index < 23; index++) {
+    for (let index = 0; index < 24; index++) {
       reservations.push(await budget.reserve(
         LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES,
         undefined,
         { completionHeadroomBytes: 20 * mib - LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES },
       ));
     }
-    expect(budget.snapshot()).toEqual({ capacityBytes: 64 * mib, reservedBytes: 46 * mib, waiting: 0 });
+    expect(budget.snapshot()).toEqual({ capacityBytes: 80 * mib, reservedBytes: 48 * mib, waiting: 0 });
     await reservations[0].upgrade(20 * mib, undefined, { intent: 'COMPLETION' });
-    expect(budget.snapshot()).toEqual({ capacityBytes: 64 * mib, reservedBytes: 64 * mib, waiting: 0 });
+    expect(budget.snapshot()).toEqual({ capacityBytes: 80 * mib, reservedBytes: 66 * mib, waiting: 0 });
     for (const reservation of reservations) reservation.release();
   });
 

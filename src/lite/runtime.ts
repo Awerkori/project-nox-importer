@@ -45,7 +45,7 @@ const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
 // Declared-size page bodies are filled directly into their final Uint8Array.
 // Match the measured 24-download fence so five six-page chapter waves do not
-// idle behind a smaller count-only gate. The independent 64 MiB live-body
+// idle behind a smaller count-only gate. The independent live-body
 // budget remains authoritative, and RSS pressure can cut both admissions
 // before the container approaches its 512 MiB limit.
 const SAFE_BUFFERED_PAGE_CAP = 24;
