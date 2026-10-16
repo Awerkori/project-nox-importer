@@ -80,7 +80,7 @@ export declare class LiteRepository {
      * Selection rotates across sources, honors source cooldown/eligibility, and
      * records PENDING durably before inserting an idempotent catalog task.
      */
-    refillSourceMetadataEnrichment(maxPending?: number): Promise<number>;
+    refillSourceMetadataEnrichment(maxPending?: number, sourceProbeLimit?: number): Promise<number>;
     recordSourceMetadataEnrichment(input: {
         source: string;
         sourceWorkId: string;

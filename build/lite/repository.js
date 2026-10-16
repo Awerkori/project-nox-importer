@@ -58,8 +58,9 @@ export class LiteRepository {
      * Selection rotates across sources, honors source cooldown/eligibility, and
      * records PENDING durably before inserting an idempotent catalog task.
      */
-    async refillSourceMetadataEnrichment(maxPending = 2) {
+    async refillSourceMetadataEnrichment(maxPending = 2, sourceProbeLimit = SOURCE_METADATA_SOURCE_PROBE_LIMIT) {
         const ceiling = Math.max(1, Math.min(2, maxPending));
+        const probeLimit = Math.max(1, Math.min(SOURCE_METADATA_SOURCE_PROBE_LIMIT, sourceProbeLimit));
         const client = await this.db.connect();
         try {
             await client.query('BEGIN');
@@ -97,7 +98,7 @@ export class LiteRepository {
                 AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE'))
         )
         SELECT source FROM eligible_sources
-        ORDER BY cursor_turn,source LIMIT $2`, [lastSource, SOURCE_METADATA_SOURCE_PROBE_LIMIT]);
+        ORDER BY cursor_turn,source LIMIT $2`, [lastSource, probeLimit]);
             const probeSources = sourceProbe.rows.map((row) => String(row.source));
             if (!probeSources.length) {
                 await client.query('COMMIT');

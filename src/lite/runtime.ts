@@ -89,6 +89,10 @@ const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // queue as pressure; an instantaneous sample must not strand network-only
 // metadata work while the public site and YSQL are otherwise healthy.
 const SOURCE_METADATA_POOL_PRESSURE_SUSTAIN_MS = 15_000;
+// Under a real pool queue the producer needs one task, not an eight-source
+// ranking horizon. Keeping this bounded avoids a distributed TableRead from
+// monopolising the one background checkout while P1 persists chapter work.
+const SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT = 2;
 const SOURCE_RECOVERY_PROBE_INTERVAL_MS = 30_000;
 // UNKNOWN Telegram recovery is exceptional and requires a historical
 // uploads/media proof query. Keep it durable, but do not place that cold path
@@ -666,7 +670,10 @@ export class ImporterLiteRuntime {
       // fetching, its merge is still serialised below, and this avoids a
       // feedback loop where a paused metadata lane repeatedly builds READY
       // work that only wakes on the next timer tick.
-      const admitted = await this.queue.refillSourceMetadataEnrichment(constrainedPool ? 1 : 4);
+      const admitted = await this.queue.refillSourceMetadataEnrichment(
+        constrainedPool ? 1 : 4,
+        constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : undefined,
+      );
       if (admitted) {
         this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
         // A producer tick that creates executable work must wake the dedicated
