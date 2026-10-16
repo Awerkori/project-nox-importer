@@ -238,6 +238,13 @@ export declare class LiteRepository {
      */
     sourcePolicy(source: string): Promise<LiteSourcePolicy | null>;
     /**
+     * Sources that can safely be queried while a newly-created work is still in
+     * its initial catalog pass.  This is intentionally one indexed set query:
+     * onboarding must not turn a complementary-alias lookup into an N+1 policy
+     * read, and mappings already attached to the work are not searched again.
+     */
+    complementaryCatalogSources(workId: string, originSource: string): Promise<string[]>;
+    /**
      * Chapter media is expensive and a Reader chapter cannot be exposed without
      * a minimally valid work presentation.  Catalog checks this once per work
      * snapshot, never on the page or chapter hot path, so a missing cover does

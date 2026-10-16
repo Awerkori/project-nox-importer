@@ -3009,6 +3009,60 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(candidate.synopsis).toContain('\n');
   });
 
+  it('complements a new work from a second healthy source during onboarding without a retroactive task', async () => {
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:solo', priority: 'P2',
+      idempotencyKey: 'new-work-cross-source', payload: { source: 'source-a', sourceWorkId: 'solo' } });
+    const task = await repo.claim('cross-source-catalog', 120);
+    const searched: string[] = [];
+    let attached: any;
+    const sourceA = {
+      id: 'source-a',
+      fetchWorkSnapshot: async () => ({
+        details: {
+          sourceWorkId: 'solo', title: 'Nivelamento Solo', slug: 'nivelamento-solo',
+          alternativeTitles: ['Solo Leveling'], genres: ['Ação'], status: 'ONGOING' as const,
+        }, chapters: [],
+      }),
+    };
+    const sourceB = {
+      id: 'source-b',
+      searchWorks: async (query: string) => {
+        searched.push(query);
+        return query === 'Nivelamento Solo' ? [{ sourceWorkId: 'only-i-level-up', title: 'Solo Leveling', slug: 'solo-leveling' }] : [];
+      },
+      fetchWorkDetails: async () => ({
+        sourceWorkId: 'only-i-level-up', title: 'Solo Leveling', slug: 'solo-leveling',
+        alternativeTitles: ['Solo Leveling', 'Only I Level Up'], genres: ['Ação', 'Fantasia'], status: 'ONGOING' as const,
+      }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: (id: string) => id === 'source-a' ? sourceA : id === 'source-b' ? sourceB : undefined,
+        getAll: () => [sourceA, sourceB] } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = {
+      resolveWork: async () => ({ workId: ids.p1a, status: 'NEW_WORK', metadataDelta: { aliasesAdded: 1, tagsAdded: 1 } }),
+      attachVerifiedMapping: async (candidate: any, workId: string, source: string) => {
+        attached = { candidate, workId, source };
+        return { workId, status: 'EXISTING_MAPPING', metadataDelta: { aliasesAdded: 1, tagsAdded: 1 } };
+      },
+    };
+
+    await (runtime as any).catalog(task, 'cross-source-catalog');
+
+    expect(searched).toContain('Nivelamento Solo');
+    expect(attached).toMatchObject({
+      workId: ids.p1a, source: 'source-b',
+      candidate: { sourceWorkId: 'only-i-level-up', aliases: ['Only I Level Up'], genres: ['Ação', 'Fantasia'] },
+    });
+    const complementary = await db.query(`SELECT aliases_state,tags_state,aliases_added,tags_added
+      FROM importer_lite_metadata_enrichment WHERE source='source-b' AND source_work_id='only-i-level-up'`);
+    expect(complementary.rows[0]).toMatchObject({ aliases_state: 'ENRICHED', tags_state: 'ENRICHED', aliases_added: 1, tags_added: 1 });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE payload ? 'metadataSourceRefresh' AND payload->>'source'='source-b'`)).rows[0].count).toBe(0);
+  });
+
   it('enriches explicit historical mapping aliases and tags without calling the source adapter', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings

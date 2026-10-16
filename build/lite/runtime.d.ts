@@ -31,6 +31,7 @@ export declare class ImporterLiteRuntime {
     private readonly sourceMetadataLaneGate;
     private readonly sourceMetadataPersistenceGate;
     private readonly newWorkCatalogGate;
+    private readonly crossSourceMetadataGate;
     private sourceMetadataPoolWaitStartedAt;
     private readonly sourceAdmissionGate;
     private lastMetadataEnrichmentAt;
@@ -130,6 +131,15 @@ export declare class ImporterLiteRuntime {
      * low-priority metadata lanes.
      */
     private runNewWorkCatalog;
+    /**
+     * A new work is not limited to the aliases exposed by its first source.
+     * Search only operational providers, require an exact/known-alias identity
+     * match twice (summary and detail), then serialize the short YSQL attach
+     * phase.  Failed/slow providers are deliberately non-blocking: their
+     * ordinary discovery can still attach them later, and no synthetic
+     * metadata-backfill task is created here.
+     */
+    private enrichNewWorkFromComplementarySources;
     private hasSustainedSourceMetadataPoolPressure;
     /**
      * One local metadata merge at a time prevents P1's legitimate chapter

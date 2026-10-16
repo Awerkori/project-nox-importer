@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { DeduplicationEngine } from '../core/deduplication.js';
+import { matchWorkCandidate } from '../core/matching.js';
 import { canonicalChapterKey, chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { LiteExecutor } from './executor.js';
 import { LiteRepository } from './repository.js';
@@ -66,6 +67,13 @@ const SOURCE_METADATA_LANE_INTERVAL_MS = 5_000;
 // chapter reserve, but one serial task is sufficient and remains below the
 // page/chapter admission path.
 const NEW_WORK_CATALOG_LANE_INTERVAL_MS = 5_000;
+// A new work gets one bounded, network-only complement pass.  It runs outside
+// YSQL transactions and never creates a retroactive task: unavailable sources
+// are simply left to their normal future discovery instead of blocking the
+// work's first publication indefinitely.
+const CROSS_SOURCE_METADATA_CONCURRENCY = 4;
+const CROSS_SOURCE_METADATA_TIMEOUT_MS = 8_000;
+const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // The direct importer pool is intentionally tiny and short chapter commits
 // can produce two queued checkouts momentarily.  Treat only a persistent
 // queue as pressure; an instantaneous sample must not strand network-only
@@ -121,6 +129,7 @@ export class ImporterLiteRuntime {
     sourceMetadataLaneGate = new AsyncSemaphore(4, 'lite_source_metadata_lane');
     sourceMetadataPersistenceGate = new AsyncSemaphore(1, 'lite_source_metadata_persistence');
     newWorkCatalogGate = new AsyncSemaphore(1, 'lite_new_work_catalog_lane');
+    crossSourceMetadataGate = new AsyncSemaphore(1, 'lite_cross_source_metadata');
     sourceMetadataPoolWaitStartedAt = 0;
     sourceAdmissionGate = new SourceAdmissionGate(10_000);
     lastMetadataEnrichmentAt = 0;
@@ -748,6 +757,111 @@ export class ImporterLiteRuntime {
             this.newWorkCatalogGate.release();
         }
     }
+    /**
+     * A new work is not limited to the aliases exposed by its first source.
+     * Search only operational providers, require an exact/known-alias identity
+     * match twice (summary and detail), then serialize the short YSQL attach
+     * phase.  Failed/slow providers are deliberately non-blocking: their
+     * ordinary discovery can still attach them later, and no synthetic
+     * metadata-backfill task is created here.
+     */
+    async enrichNewWorkFromComplementarySources(input) {
+        if (!this.crossSourceMetadataGate.tryAcquire())
+            return;
+        try {
+            const sourceIds = await this.queue.complementaryCatalogSources(input.workId, input.originSource);
+            if (!sourceIds.length)
+                return;
+            const target = {
+                title: input.title, slug: input.slug, aliases: input.aliases,
+                author: input.author, artist: input.artist, synopsis: input.synopsis,
+                kind: input.kind, year: input.year,
+            };
+            let cursor = 0;
+            const probe = async () => {
+                while (true) {
+                    const source = sourceIds[cursor++];
+                    if (!source)
+                        return;
+                    const adapter = this.registry.get(source);
+                    if (!adapter)
+                        continue;
+                    try {
+                        const queryCandidates = [input.title, ...input.aliases.slice(0, 3)]
+                            .map((value) => value.trim()).filter((value, index, values) => value.length >= 2 && values.indexOf(value) === index);
+                        let selected = null;
+                        for (const query of queryCandidates) {
+                            const summaries = await withTimeout(adapter.searchWorks(query), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_SEARCH_TIMEOUT');
+                            selected = summaries.find((summary) => {
+                                const match = matchWorkCandidate(target, { title: summary.title, slug: summary.slug });
+                                return match.matched && match.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE;
+                            }) || null;
+                            if (selected)
+                                break;
+                        }
+                        if (!selected)
+                            continue;
+                        const details = await withTimeout(adapter.fetchWorkDetails(selected.sourceWorkId), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_DETAILS_TIMEOUT');
+                        const rawDetails = details.raw && typeof details.raw === 'object' ? details.raw : {};
+                        const sourceMetadata = {
+                            ...rawDetails,
+                            ...(details.alternativeTitles !== undefined ? { alternativeTitles: details.alternativeTitles } : {}),
+                            ...(details.genres !== undefined ? { genres: details.genres } : {}),
+                        };
+                        const extracted = classifyExplicitSourceMetadata(sourceMetadata, details.title);
+                        const detailMatch = matchWorkCandidate(target, {
+                            title: details.title, slug: details.slug, aliases: extracted.aliases,
+                            author: details.author, artist: details.artist, synopsis: sanitizeSynopsis(details.synopsis) || undefined,
+                            kind: details.kind, year: details.year,
+                        });
+                        if (!detailMatch.matched || detailMatch.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE) {
+                            this.logger.info('Rejected complementary metadata candidate after detail verification', {
+                                workId: input.workId, source, sourceWorkId: selected.sourceWorkId,
+                                confidence: detailMatch.confidenceScore, method: detailMatch.matchMethod,
+                            });
+                            continue;
+                        }
+                        await this.sourceMetadataPersistenceGate.runExclusive(async () => {
+                            const rawContentRating = String(rawDetails.contentRating || rawDetails.content_rating || '').toUpperCase();
+                            const attached = await this.dedupe.attachVerifiedMapping({
+                                source, sourceWorkId: details.sourceWorkId, title: details.title, slug: details.slug,
+                                aliases: extracted.aliases, genres: extracted.genres, author: details.author, artist: details.artist,
+                                synopsis: sanitizeSynopsis(details.synopsis) || undefined, kind: details.kind, status: details.status,
+                                year: details.year, ageRating: details.ageRating,
+                                contentRating: rawContentRating === 'ADULT_18' || Number(details.ageRating || 0) >= 18 ? 'ADULT_18' : undefined,
+                                rawMetadata: sourceMetadata,
+                            }, input.workId, source);
+                            if (attached.workId !== input.workId)
+                                return;
+                            await this.queue.recordSourceMetadataEnrichment({
+                                source, sourceWorkId: details.sourceWorkId, workId: input.workId,
+                                aliasesState: extracted.aliasesState, tagsState: extracted.tagsState,
+                                aliasesAdded: Math.max(0, Number(attached.metadataDelta?.aliasesAdded || 0)),
+                                tagsAdded: Math.max(0, Number(attached.metadataDelta?.tagsAdded || 0)),
+                                error: extracted.parserError ? 'EXPLICIT_SOURCE_METADATA_NOT_PARSED' : null,
+                                rawMetadata: sourceMetadata,
+                            });
+                        });
+                        this.logger.info('Attached complementary source metadata during new-work onboarding', {
+                            workId: input.workId, source, sourceWorkId: details.sourceWorkId,
+                            aliases: extracted.aliases.length, tags: extracted.genres.length,
+                        });
+                    }
+                    catch (error) {
+                        // Provider failures are external and must never turn an otherwise
+                        // complete new work into a permanently blocked onboarding task.
+                        this.logger.debug('Complementary source metadata probe skipped', {
+                            workId: input.workId, source, error: error?.message,
+                        });
+                    }
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(CROSS_SOURCE_METADATA_CONCURRENCY, sourceIds.length) }, () => probe()));
+        }
+        finally {
+            this.crossSourceMetadataGate.release();
+        }
+    }
     hasSustainedSourceMetadataPoolPressure() {
         const waiters = this.pool.waitingCount;
         if (waiters <= 0) {
@@ -1325,6 +1439,18 @@ export class ImporterLiteRuntime {
                     checkpoint: { workId: resolved.workId, metadataParserError: true },
                 });
                 return;
+            }
+            // A first source is only the beginning of a new work's metadata.  Run
+            // the bounded cross-source pass before this catalog task materializes
+            // chapters/publication, so aliases and explicit tags do not wait for a
+            // future retroactive sweep.  Existing mappings already take the normal
+            // append-only merge path above when they arrive later.
+            if (resolved.status === 'NEW_WORK') {
+                await this.enrichNewWorkFromComplementarySources({
+                    workId: resolved.workId, originSource: source, title: snapshot.details.title, slug: snapshot.details.slug,
+                    aliases: sourceMetadataClassification.aliases, author: snapshot.details.author, artist: snapshot.details.artist,
+                    synopsis: sanitizeSynopsis(snapshot.details.synopsis) || undefined, kind: snapshot.details.kind, year: snapshot.details.year,
+                });
             }
             const language = String(snapshot.details.language || snapshot.details.raw?.language || 'pt-BR');
             const edition = String(snapshot.details.edition || snapshot.details.raw?.edition || 'default');

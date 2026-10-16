@@ -159,6 +159,69 @@ export class DeduplicationEngine {
     return { workId, mappingId: '', status: 'EXISTING_MAPPING', slug: this.sanitizeSlug(candidate.slug || candidate.title), metadataDelta };
   }
 
+  /**
+   * Persist a mapping only after its caller has independently established a
+   * high-confidence cross-provider identity match.  This is deliberately
+   * narrower than resolveWork(): a complementary-source probe must never
+   * create a second canonical work merely because a remote search result
+   * changed between its summary and detail responses.
+   */
+  async attachVerifiedMapping(candidate: CandidateWork, workId: string, source: string): Promise<DeduplicationResult> {
+    const validation = validateEditorialTitle(candidate.title);
+    if (!validation.valid) {
+      return {
+        workId: null,
+        mappingId: '',
+        status: 'FAILED',
+        slug: this.sanitizeSlug(candidate.slug || candidate.title || 'invalid-title'),
+        reason: `INVALID_EDITORIAL_TITLE: ${validation.reason}`,
+      };
+    }
+
+    const { data: existingMapping, error: existingError } = await this.supabase
+      .from('importer_work_mappings')
+      .select('id, work_id')
+      .eq('source', source)
+      .eq('source_work_id', candidate.sourceWorkId)
+      .maybeSingle();
+    if (existingError) throw new Error(`MAPPING_LOOKUP_FAILED:${existingError.message}`);
+    if (existingMapping?.work_id && existingMapping.work_id !== workId) {
+      return {
+        workId: null,
+        mappingId: String(existingMapping.id || ''),
+        status: 'AMBIGUOUS',
+        slug: this.sanitizeSlug(candidate.slug || candidate.title),
+        reason: 'CROSS_SOURCE_MAPPING_OWNED_BY_ANOTHER_WORK',
+      };
+    }
+
+    const now = new Date().toISOString();
+    const { data: mapping, error: mappingError } = await this.supabase
+      .from('importer_work_mappings')
+      .upsert({
+        source,
+        source_work_id: candidate.sourceWorkId,
+        work_id: workId,
+        source_slug: this.sanitizeSlug(candidate.slug || candidate.title),
+        source_title: candidate.title,
+        sync_status: 'SYNCED',
+        metadata: candidate.rawMetadata || {},
+        last_synced_at: now,
+      }, { onConflict: 'source,source_work_id' })
+      .select()
+      .single();
+    if (mappingError) throw new Error(`MAPPING_ATTACH_FAILED:${mappingError.message}`);
+
+    const metadataDelta = await this.applyMetadataPrecedence(workId, candidate, source);
+    return {
+      workId,
+      mappingId: String(mapping?.id || existingMapping?.id || ''),
+      status: 'EXISTING_MAPPING',
+      slug: this.sanitizeSlug(candidate.slug || candidate.title),
+      metadataDelta,
+    };
+  }
+
   private async resolveCandidateCover(candidate: CandidateWork): Promise<string | null> {
     if (candidate.coverId) return candidate.coverId;
     if (!candidate.loadCoverId) return null;
