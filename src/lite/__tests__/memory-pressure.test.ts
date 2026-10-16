@@ -4,12 +4,12 @@ import { LITE_PAGE_BUFFER_BUDGET_BYTES, PageByteBudget } from '../page-byte-budg
 import { LiteMemoryPressureGuard } from '../memory-pressure.js';
 
 const mib = 1024 * 1024;
-const memory = (rssMiB: number) => ({
+const memory = (rssMiB: number, externalMiB = 12, arrayBuffersMiB = 8) => ({
   rss: rssMiB * mib,
   heapUsed: 24 * mib,
   heapTotal: 32 * mib,
-  external: 12 * mib,
-  arrayBuffers: 8 * mib,
+  external: externalMiB * mib,
+  arrayBuffers: arrayBuffersMiB * mib,
 }) as NodeJS.MemoryUsage;
 
 afterEach(() => {
@@ -56,5 +56,39 @@ describe('LiteMemoryPressureGuard', () => {
 
     expect(guard.sample()).toMatchObject({ state: 'REDUCED', pageBufferCapacity: 20, pageByteCapacity: 48 * mib });
     expect(gc).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases only the single metadata lane after a stable, low-live-native RSS plateau', () => {
+    const pages = new AsyncSemaphore(20, 'test_lite_retained_rss_resume');
+    const bytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
+    const guard = new LiteMemoryPressureGuard(pages, bytes, 20);
+    const clock = vi.spyOn(Date, 'now');
+
+    clock.mockReturnValue(1_000);
+    expect(guard.sample(memory(418))).toMatchObject({
+      state: 'CRITICAL', pageBufferCapacity: 1, pauseLowPriorityMetadata: true,
+      retainedRssMetadataResume: false,
+    });
+    clock.mockReturnValue(60_999);
+    expect(guard.sample(memory(419))).toMatchObject({ pauseLowPriorityMetadata: true });
+    clock.mockReturnValue(61_000);
+    expect(guard.sample(memory(419))).toMatchObject({
+      state: 'CRITICAL', pageBufferCapacity: 1, pageByteCapacity: 20 * mib,
+      pauseLowPriorityMetadata: false, retainedRssMetadataResume: true,
+    });
+  });
+
+  it('keeps metadata paused when critical RSS is actively growing or live memory is high', () => {
+    const pages = new AsyncSemaphore(20, 'test_lite_retained_rss_circuit');
+    const bytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
+    const guard = new LiteMemoryPressureGuard(pages, bytes, 20);
+    const clock = vi.spyOn(Date, 'now');
+
+    clock.mockReturnValue(1_000);
+    expect(guard.sample(memory(418))).toMatchObject({ pauseLowPriorityMetadata: true });
+    clock.mockReturnValue(61_000);
+    expect(guard.sample(memory(424))).toMatchObject({ pauseLowPriorityMetadata: true, retainedRssMetadataResume: false });
+    clock.mockReturnValue(122_000);
+    expect(guard.sample(memory(424, 40, 20))).toMatchObject({ pauseLowPriorityMetadata: true, retainedRssMetadataResume: false });
   });
 });
