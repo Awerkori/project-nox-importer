@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { Pool } from 'pg';
 import { DeduplicationEngine } from '../core/deduplication.js';
+import { DirectSupabaseClient } from '../db/direct-supabase-client.js';
 import { matchWorkCandidate, type MatchCandidate } from '../core/matching.js';
 import type { Config } from '../config.js';
 import type { SourceRegistry } from '../sources/registry.js';
@@ -122,6 +123,7 @@ export class ImporterLiteRuntime {
   private readonly queue: LiteRepository;
   private readonly executor: LiteExecutor;
   private readonly dedupe: DeduplicationEngine;
+  private readonly historicalMetadataDedupe: DeduplicationEngine;
   private readonly logger = new Logger('ImporterLite');
   private readonly downloads: AsyncSemaphore;
   private readonly bufferedPages: AsyncSemaphore;
@@ -223,10 +225,11 @@ export class ImporterLiteRuntime {
     private readonly storage: StorageProvider,
     private readonly config: Config,
     private readonly sourceRateLimiter: HostRateLimiter = new HostRateLimiter(2),
+    private readonly sourceMetadataPool: Pool = pool,
   ) {
     if (!config.IMPORTER_USER_ID) throw new Error('IMPORTER_USER_ID is required when IMPORTER_RUNTIME_MODE=lite');
     this.runtimeInstanceId = `${config.WORKER_ID}@${process.pid}-${randomUUID().slice(0, 8)}`;
-    this.queue = new LiteRepository(pool);
+    this.queue = new LiteRepository(pool, sourceMetadataPool);
     this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
     this.bufferedPages = new AsyncSemaphore(Math.min(config.BUFFERED_PAGE_CONCURRENCY, SAFE_BUFFERED_PAGE_CAP), 'lite_global_page_buffers');
     this.bufferedPageBytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
@@ -240,6 +243,12 @@ export class ImporterLiteRuntime {
       Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter,
       this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes);
     this.dedupe = new DeduplicationEngine(catalogClient);
+    this.historicalMetadataDedupe = sourceMetadataPool === pool
+      ? this.dedupe
+      // DirectSupabaseClient implements the query surface used by the narrow
+      // historical merge. The main catalog client remains the typed client
+      // used for onboarding/full-work deduplication.
+      : new DeduplicationEngine(new DirectSupabaseClient(sourceMetadataPool) as any);
   }
 
   async start(): Promise<void> {
@@ -350,6 +359,7 @@ export class ImporterLiteRuntime {
     for (const timer of this.timers) clearInterval(timer);
     this.timers = [];
     void this.releaseRuntimeLeadership();
+    if (this.sourceMetadataPool !== this.pool) void this.sourceMetadataPool.end().catch(() => {});
   }
 
   /**
@@ -1259,6 +1269,12 @@ export class ImporterLiteRuntime {
         chapterWorkers: this.chapterWorkerCapacity,
         snapshotDeferred: 'POOL_BUSY',
         ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+        sourceMetadataYsql: {
+          isolated: this.sourceMetadataPool !== this.pool,
+          poolTotal: this.sourceMetadataPool.totalCount,
+          poolIdle: this.sourceMetadataPool.idleCount,
+          poolWaiting: this.sourceMetadataPool.waitingCount,
+        },
         ysqlTelemetry: pipelineTelemetry.database,
         sourceMetadataLane: {
           active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
@@ -1341,6 +1357,12 @@ export class ImporterLiteRuntime {
         external: Math.round(memory.external / 1024 / 1024), arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024),
       },
       ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+      sourceMetadataYsql: {
+        isolated: this.sourceMetadataPool !== this.pool,
+        poolTotal: this.sourceMetadataPool.totalCount,
+        poolIdle: this.sourceMetadataPool.idleCount,
+        poolWaiting: this.sourceMetadataPool.waitingCount,
+      },
       ysqlTelemetry: pipelineTelemetry.database,
       sourceMetadataLane: {
         active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
@@ -1708,7 +1730,7 @@ export class ImporterLiteRuntime {
     let mappingWorkId = '';
     try {
       const mapping = await this.sourceMetadataPreparationGate.runExclusive(() =>
-        timePhase('mappingAndPolicyQueryMs', () => this.pool.query<{
+        timePhase('mappingAndPolicyQueryMs', () => this.sourceMetadataPool.query<{
           work_id: string; source_title: string; source_slug: string; title: string;
           source_enabled: boolean; source_status: string; source_cooldown: Date | null;
           source_health: string | null; health_cooldown: Date | null;
@@ -1786,9 +1808,9 @@ export class ImporterLiteRuntime {
         // Runtime tests deliberately substitute a tiny dedupe double. Retain
         // its older method shape while production takes the narrow historical
         // SQL merge implemented by DeduplicationEngine.
-        const historicalMerge = ((this.dedupe as any).mergeKnownMappedHistoricalMetadata
-          || (this.dedupe as any).mergeKnownMappedWork) as typeof this.dedupe.mergeKnownMappedHistoricalMetadata;
-        const resolved = await timePhase('mergePersistenceMs', () => historicalMerge.call(this.dedupe, {
+        const historicalMerge = ((this.historicalMetadataDedupe as any).mergeKnownMappedHistoricalMetadata
+          || (this.historicalMetadataDedupe as any).mergeKnownMappedWork) as typeof this.dedupe.mergeKnownMappedHistoricalMetadata;
+        const resolved = await timePhase('mergePersistenceMs', () => historicalMerge.call(this.historicalMetadataDedupe, {
           source, sourceWorkId, title: details.title || row.source_title || row.title,
           slug: details.slug || row.source_slug || row.title,
           aliases: extracted.aliases, genres: extracted.genres,

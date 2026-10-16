@@ -125,7 +125,13 @@ export class LiteRepository {
 
   hasAbundantHistoricalP1Reserve(): boolean { return this.historicalP1ReserveAbundant; }
 
-  constructor(private readonly db: Db) {}
+  /**
+   * Source-backed historical metadata is deliberately allowed one tiny,
+   * isolated database seat.  It cannot borrow the chapter claim pool during a
+   * busy wave, while its own producer/claim/finish operations remain strictly
+   * serial through the runtime's lane gates.
+   */
+  constructor(private readonly db: Db, private readonly sourceMetadataDb: Db = db) {}
 
   /**
    * Admit at most two low-priority source-backed metadata reads at a time.
@@ -135,7 +141,7 @@ export class LiteRepository {
   async refillSourceMetadataEnrichment(maxPending = 2, sourceProbeLimit = SOURCE_METADATA_SOURCE_PROBE_LIMIT): Promise<number> {
     const ceiling = Math.max(1, Math.min(2, maxPending));
     const probeLimit = Math.max(1, Math.min(SOURCE_METADATA_SOURCE_PROBE_LIMIT, sourceProbeLimit));
-    const client = await this.db.connect();
+    const client = await this.sourceMetadataDb.connect();
     try {
       await client.query('BEGIN');
       const pending = await client.query<{ count: string }>(`SELECT count(*)::int AS count
@@ -309,7 +315,7 @@ export class LiteRepository {
     aliasesAdded?: number; tagsAdded?: number; error?: string | null; nextRetryAt?: Date | null;
     rawMetadata?: Record<string, unknown>;
   }): Promise<void> {
-    const client = await this.db.connect();
+    const client = await this.sourceMetadataDb.connect();
     try {
       await client.query('BEGIN');
       if (input.rawMetadata && Object.keys(input.rawMetadata).length) {
@@ -346,7 +352,7 @@ export class LiteRepository {
     aliasesAdded: number; tagsAdded: number; rawMetadata: Record<string, unknown>;
   }, checkpoint: Record<string, unknown>): Promise<boolean> {
     const transactionStartedAt = performance.now();
-    const client = await this.db.connect();
+    const client = await this.sourceMetadataDb.connect();
     try {
       await client.query('BEGIN');
       await client.query(`UPDATE importer_work_mappings
@@ -726,7 +732,7 @@ export class LiteRepository {
 
   /** Source-backed metadata owns a single low-rate lane and never waits behind chapter claims. */
   async claimSourceMetadataRefresh(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
-    const result = await this.db.query<Row>(
+    const result = await this.sourceMetadataDb.query<Row>(
       'SELECT * FROM public.importer_lite_claim_source_metadata_task($1,$2::interval)',
       [workerId, `${Math.max(30, leaseSeconds)} seconds`],
     );

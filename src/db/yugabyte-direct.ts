@@ -105,10 +105,8 @@ uHYiQRE3S9hMRqpUOUMmWRRpqHTxYl/FUrqOR8k4g1mN34ZqOpJZOwNnVMOsa+fh
 o1DZJoSu3+Cu5ZEv1xOCWs0bOoinIt45bqT0jrEXQDDhwGWR3gC64VMqffla1g==
 -----END CERTIFICATE-----`;
 
-export function getYugabytePool(): pg.Pool {
-  if (pool) return pool;
-
-  const cfg = getConfig();
+function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, applicationName: string,
+  connectionTimeoutMillis: number, queryTimeoutMillis: number): pg.PoolConfig {
   if (!cfg.YUGABYTE_HOST || !cfg.YUGABYTE_USER || !cfg.YUGABYTE_PASSWORD) {
     throw new Error('Yugabyte direct connection requires YUGABYTE_HOST, YUGABYTE_USER, and YUGABYTE_PASSWORD');
   }
@@ -141,22 +139,51 @@ export function getYugabytePool(): pg.Pool {
     }
   }
 
-  pool = new pg.Pool({
+  return {
     host: cfg.YUGABYTE_HOST,
     port: cfg.YUGABYTE_PORT,
     user: cfg.YUGABYTE_USER,
     password: cfg.YUGABYTE_PASSWORD,
     database: cfg.YUGABYTE_DATABASE,
-    max: cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '4', 10),
-    connectionTimeoutMillis: 25000,
+    max,
+    connectionTimeoutMillis,
     idleTimeoutMillis: 30000,
-    query_timeout: 25000,
+    query_timeout: queryTimeoutMillis,
     keepAlive: true,
     keepAliveInitialDelayMillis: 10000,
     ssl: sslConfig,
-    application_name: 'project-nox-importer-direct',
-    options: '-c max_parallel_workers_per_gather=0 -c statement_timeout=25000 -c idle_in_transaction_session_timeout=15000',
+    application_name: applicationName,
+    options: `-c max_parallel_workers_per_gather=0 -c statement_timeout=${queryTimeoutMillis} -c idle_in_transaction_session_timeout=15000`,
+  };
+}
+
+/**
+ * Exactly one connection for low-priority historical metadata bookkeeping.
+ * It is not a chapter worker pool: it only prevents the P2 source producer
+ * and its already-single-flight task from sitting indefinitely behind the
+ * main pool's high-frequency chapter claims.
+ */
+export function createYugabyteMetadataPool(): pg.Pool {
+  const metadataPool = new pg.Pool(yugabytePoolOptions(
+    getConfig(), 1, 'project-nox-importer-metadata', 4_000, 12_000,
+  ));
+  metadataPool.on('error', (err) => {
+    logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });
   });
+  return metadataPool;
+}
+
+export function getYugabytePool(): pg.Pool {
+  if (pool) return pool;
+
+  const cfg = getConfig();
+  pool = new pg.Pool(yugabytePoolOptions(
+    cfg,
+    cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '4', 10),
+    'project-nox-importer-direct',
+    25_000,
+    25_000,
+  ));
 
   pool.on('error', (err) => {
     logger.error('Unexpected error on idle direct Yugabyte client', { error: err.message });

@@ -11,11 +11,13 @@ export declare class ImporterLiteRuntime {
     private readonly storage;
     private readonly config;
     private readonly sourceRateLimiter;
+    private readonly sourceMetadataPool;
     private stopped;
     private timers;
     private readonly queue;
     private readonly executor;
     private readonly dedupe;
+    private readonly historicalMetadataDedupe;
     private readonly logger;
     private readonly downloads;
     private readonly bufferedPages;
@@ -74,7 +76,7 @@ export declare class ImporterLiteRuntime {
      */
     private shouldPauseLowPriorityMetadata;
     private refreshMemoryPressure;
-    constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter);
+    constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter, sourceMetadataPool?: Pool);
     start(): Promise<void>;
     private assertReaderCanonicalIdentitySchema;
     stop(): void;

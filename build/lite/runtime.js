@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { DeduplicationEngine } from '../core/deduplication.js';
+import { DirectSupabaseClient } from '../db/direct-supabase-client.js';
 import { matchWorkCandidate } from '../core/matching.js';
 import { canonicalChapterKey, chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { LiteExecutor } from './executor.js';
@@ -111,11 +112,13 @@ export class ImporterLiteRuntime {
     storage;
     config;
     sourceRateLimiter;
+    sourceMetadataPool;
     stopped = false;
     timers = [];
     queue;
     executor;
     dedupe;
+    historicalMetadataDedupe;
     logger = new Logger('ImporterLite');
     downloads;
     bufferedPages;
@@ -207,17 +210,18 @@ export class ImporterLiteRuntime {
         }
         return snapshot;
     }
-    constructor(pool, catalogClient, registry, storage, config, sourceRateLimiter = new HostRateLimiter(2)) {
+    constructor(pool, catalogClient, registry, storage, config, sourceRateLimiter = new HostRateLimiter(2), sourceMetadataPool = pool) {
         this.pool = pool;
         this.catalogClient = catalogClient;
         this.registry = registry;
         this.storage = storage;
         this.config = config;
         this.sourceRateLimiter = sourceRateLimiter;
+        this.sourceMetadataPool = sourceMetadataPool;
         if (!config.IMPORTER_USER_ID)
             throw new Error('IMPORTER_USER_ID is required when IMPORTER_RUNTIME_MODE=lite');
         this.runtimeInstanceId = `${config.WORKER_ID}@${process.pid}-${randomUUID().slice(0, 8)}`;
-        this.queue = new LiteRepository(pool);
+        this.queue = new LiteRepository(pool, sourceMetadataPool);
         this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
         this.bufferedPages = new AsyncSemaphore(Math.min(config.BUFFERED_PAGE_CONCURRENCY, SAFE_BUFFERED_PAGE_CAP), 'lite_global_page_buffers');
         this.bufferedPageBytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
@@ -228,6 +232,12 @@ export class ImporterLiteRuntime {
         // widened the global fence itself; this controlled ramp does not.
         this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter, this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes);
         this.dedupe = new DeduplicationEngine(catalogClient);
+        this.historicalMetadataDedupe = sourceMetadataPool === pool
+            ? this.dedupe
+            // DirectSupabaseClient implements the query surface used by the narrow
+            // historical merge. The main catalog client remains the typed client
+            // used for onboarding/full-work deduplication.
+            : new DeduplicationEngine(new DirectSupabaseClient(sourceMetadataPool));
     }
     async start() {
         // Do this before taking the shared producer lease or creating a task. A
@@ -344,6 +354,8 @@ export class ImporterLiteRuntime {
             clearInterval(timer);
         this.timers = [];
         void this.releaseRuntimeLeadership();
+        if (this.sourceMetadataPool !== this.pool)
+            void this.sourceMetadataPool.end().catch(() => { });
     }
     /**
      * The shared settings lease is the only cross-runtime coordination point.
@@ -1252,6 +1264,12 @@ export class ImporterLiteRuntime {
                 chapterWorkers: this.chapterWorkerCapacity,
                 snapshotDeferred: 'POOL_BUSY',
                 ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+                sourceMetadataYsql: {
+                    isolated: this.sourceMetadataPool !== this.pool,
+                    poolTotal: this.sourceMetadataPool.totalCount,
+                    poolIdle: this.sourceMetadataPool.idleCount,
+                    poolWaiting: this.sourceMetadataPool.waitingCount,
+                },
                 ysqlTelemetry: pipelineTelemetry.database,
                 sourceMetadataLane: {
                     active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
@@ -1331,6 +1349,12 @@ export class ImporterLiteRuntime {
                 external: Math.round(memory.external / 1024 / 1024), arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024),
             },
             ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
+            sourceMetadataYsql: {
+                isolated: this.sourceMetadataPool !== this.pool,
+                poolTotal: this.sourceMetadataPool.totalCount,
+                poolIdle: this.sourceMetadataPool.idleCount,
+                poolWaiting: this.sourceMetadataPool.waitingCount,
+            },
             ysqlTelemetry: pipelineTelemetry.database,
             sourceMetadataLane: {
                 active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
@@ -1698,7 +1722,7 @@ export class ImporterLiteRuntime {
         }
         let mappingWorkId = '';
         try {
-            const mapping = await this.sourceMetadataPreparationGate.runExclusive(() => timePhase('mappingAndPolicyQueryMs', () => this.pool.query(`SELECT m.work_id::text,m.source_title,m.source_slug,w.title,
+            const mapping = await this.sourceMetadataPreparationGate.runExclusive(() => timePhase('mappingAndPolicyQueryMs', () => this.sourceMetadataPool.query(`SELECT m.work_id::text,m.source_title,m.source_slug,w.title,
             source_policy.enabled AS source_enabled,source_policy.status AS source_status,
             source_policy.cooldown_until AS source_cooldown,health.health AS source_health,
             health.cooldown_until AS health_cooldown
@@ -1768,9 +1792,9 @@ export class ImporterLiteRuntime {
                 // Runtime tests deliberately substitute a tiny dedupe double. Retain
                 // its older method shape while production takes the narrow historical
                 // SQL merge implemented by DeduplicationEngine.
-                const historicalMerge = (this.dedupe.mergeKnownMappedHistoricalMetadata
-                    || this.dedupe.mergeKnownMappedWork);
-                const resolved = await timePhase('mergePersistenceMs', () => historicalMerge.call(this.dedupe, {
+                const historicalMerge = (this.historicalMetadataDedupe.mergeKnownMappedHistoricalMetadata
+                    || this.historicalMetadataDedupe.mergeKnownMappedWork);
+                const resolved = await timePhase('mergePersistenceMs', () => historicalMerge.call(this.historicalMetadataDedupe, {
                     source, sourceWorkId, title: details.title || row.source_title || row.title,
                     slug: details.slug || row.source_slug || row.title,
                     aliases: extracted.aliases, genres: extracted.genres,

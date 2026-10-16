@@ -6,6 +6,7 @@ import WebSocket from 'ws';
 import { ImporterGatewayClient } from './core/gateway-client.js';
 import { GatewaySupabaseClient } from './core/gateway-supabase.js';
 import { DirectSupabaseClient } from './db/direct-supabase-client.js';
+import { createYugabyteMetadataPool } from './db/yugabyte-direct.js';
 import { getConfig } from './config.js';
 
 // Polyfill native WebSocket for Node environments (e.g. Node 20 on DIScloud) where native WebSocket is missing
@@ -113,8 +114,13 @@ async function main() {
     liteChapterWorkers: config.LITE_CHAPTER_WORKERS,
     directDb: config.IMPORTER_DB_MODE === 'direct',
   });
+  // This is one P2-only connection, not an expansion of chapter-worker
+  // concurrency. It guarantees that the already single-flight historical
+  // metadata producer can make progress during a busy chapter claim wave.
+  const sourceMetadataPool = config.IMPORTER_RUNTIME_MODE === 'lite'
+    ? createYugabyteMetadataPool() : undefined;
   const engine = config.IMPORTER_RUNTIME_MODE === 'lite'
-    ? new ImporterLiteRuntime((supabase as DirectSupabaseClient).getPool(), supabase, registry, storage, config, rateLimiter)
+    ? new ImporterLiteRuntime((supabase as DirectSupabaseClient).getPool(), supabase, registry, storage, config, rateLimiter, sourceMetadataPool)
     : new ImporterEngine(supabase, storage, registry, rateLimiter, config);
 
   // 6. Graceful Shutdown & Forensics Handlers

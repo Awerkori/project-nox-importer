@@ -5,6 +5,13 @@ import type { GatewayJob, PublishBatchParams } from '../core/gateway-client.js';
  * raw SQL: values and unbounded query text do not belong in diagnostics.
  */
 export declare function getSqlFingerprint(queryArg: unknown): string;
+/**
+ * Exactly one connection for low-priority historical metadata bookkeeping.
+ * It is not a chapter worker pool: it only prevents the P2 source producer
+ * and its already-single-flight task from sitting indefinitely behind the
+ * main pool's high-frequency chapter claims.
+ */
+export declare function createYugabyteMetadataPool(): pg.Pool;
 export declare function getYugabytePool(): pg.Pool;
 export declare function closeYugabytePool(): Promise<void>;
 /** Test-only injection for disposable SQL contract tests. */

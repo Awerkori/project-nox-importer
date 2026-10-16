@@ -72,9 +72,16 @@ export interface CompleteImportInput {
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export declare class LiteRepository {
     private readonly db;
+    private readonly sourceMetadataDb;
     private historicalP1ReserveAbundant;
     hasAbundantHistoricalP1Reserve(): boolean;
-    constructor(db: Db);
+    /**
+     * Source-backed historical metadata is deliberately allowed one tiny,
+     * isolated database seat.  It cannot borrow the chapter claim pool during a
+     * busy wave, while its own producer/claim/finish operations remain strictly
+     * serial through the runtime's lane gates.
+     */
+    constructor(db: Db, sourceMetadataDb?: Db);
     /**
      * Admit at most two low-priority source-backed metadata reads at a time.
      * Selection rotates across sources, honors source cooldown/eligibility, and
