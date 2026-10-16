@@ -672,7 +672,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     memorySpy.mockRestore();
   });
 
-  it('materialises one historical source refresh after sustained shared-pool pressure', async () => {
+  it('materialises one historical source refresh immediately under shared-pool pressure', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const lanePool = poolFor(db) as any;
     lanePool.waitingCount = 1;
@@ -692,18 +692,40 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     refill.mockClear();
     lanePool.waitingCount = 2;
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date('2026-10-16T00:00:00.000Z'));
-      await (runtime as any).refillSourceMetadataEnrichment(true);
-      expect(refill).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(15_000);
-      await (runtime as any).refillSourceMetadataEnrichment(true);
-      expect(refill).toHaveBeenLastCalledWith(1);
-    } finally {
-      vi.useRealTimers();
-      memorySpy.mockRestore();
-    }
+    await (runtime as any).refillSourceMetadataEnrichment(true);
+    expect(refill).toHaveBeenLastCalledWith(1);
+    memorySpy.mockRestore();
+  });
+
+  it('keeps only one historical source fetch active while the shared pool is queued', async () => {
+    const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
+    const lanePool = poolFor(db) as any;
+    lanePool.waitingCount = 2;
+    const runtime = new ImporterLiteRuntime(
+      lanePool, {}, { get: () => null } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', WORKER_ID: 'metadata-lane-pressure-test',
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
+        LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
+    );
+    let remainingClaims = 1;
+    const claim = vi.fn(async () => remainingClaims-- > 0 ? ({ id: 'metadata-pressure-task' } as any) : null);
+    (runtime as any).queue = { claimSourceMetadataRefresh: claim, refillSourceMetadataEnrichment: vi.fn().mockResolvedValue(0) };
+    (runtime as any).isRuntimeLeader = true;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const startedFetch = new Promise<void>((resolve) => { started = resolve; });
+    (runtime as any).catalog = async () => { started(); await held; };
+
+    const running = (runtime as any).runSourceMetadataRefresh();
+    await startedFetch;
+    await Promise.resolve();
+    expect(claim).toHaveBeenCalledTimes(1);
+    expect((runtime as any).sourceMetadataLaneGate.active).toBe(1);
+    release();
+    await running;
+    memorySpy.mockRestore();
   });
 
   it('wakes the protected source lane immediately after the producer admits metadata work', async () => {
