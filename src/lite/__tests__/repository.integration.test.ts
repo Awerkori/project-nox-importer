@@ -102,6 +102,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
       updated_at timestamptz NOT NULL DEFAULT now(),
       UNIQUE(source,source_work_id)
     );
+    CREATE TABLE tags (id uuid PRIMARY KEY DEFAULT '00000000-0000-4000-8000-000000000399', name text NOT NULL, slug text NOT NULL UNIQUE, kind text NOT NULL DEFAULT 'GENRE');
     CREATE TABLE work_tags (work_id uuid NOT NULL, tag_id uuid NOT NULL, system_generated boolean NOT NULL DEFAULT true, UNIQUE(work_id,tag_id));
     CREATE TABLE settings (key text PRIMARY KEY, value text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE importer_publication_events (
@@ -3238,13 +3239,16 @@ describe('LiteRepository against the additive Lite migration', () => {
       return { sourceWorkId:'source-refetch',title:'P1 A',slug:'p1-a',alternativeTitles:['Título nativo'],
         genres:['MILF','Vanilla'],raw:{provider_id:'source-refetch',genres:['MILF','Vanilla']} };
     } };
+    await db.query(`INSERT INTO tags(id,name,slug) VALUES
+      ('00000000-0000-4000-8000-000000000301','MILF','milf'),
+      ('00000000-0000-4000-8000-000000000302','Vanilla','vanilla')`);
+    const directCatalogClient = { sql: (text: string, values?: unknown[]) => db.query(text, values) };
     const runtime = new ImporterLiteRuntime(
-      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      poolFor(db) as Pool, directCatalogClient, { get: () => adapter } as unknown as SourceRegistry,
       { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
       { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
         BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
     );
-    (runtime as any).dedupe = { mergeKnownMappedWork:async () => ({ workId:ids.p1a,status:'EXISTING_MAPPING' }) };
     await (runtime as any).catalog(task,'metadata-source-worker',{ claimSqlMs: 1, queueDwellMs: 0 });
 
     const mapping = await db.query(`SELECT metadata,last_synced_at FROM importer_work_mappings WHERE source='source-a' AND source_work_id='source-refetch'`);
@@ -3262,6 +3266,10 @@ describe('LiteRepository against the additive Lite migration', () => {
       metadataPersistenceWaitMs: expect.any(Number), mergePersistenceMs: expect.any(Number),
       totalBeforeFinalizeMs: expect.any(Number),
     });
+    expect((await db.query(`SELECT aliases FROM works WHERE id=$1::uuid`,[ids.p1a])).rows[0].aliases)
+      .toContain('Título nativo');
+    expect((await db.query(`SELECT count(*)::int AS count FROM work_tags WHERE work_id=$1::uuid`,[ids.p1a])).rows[0].count)
+      .toBe(2);
   });
 
   it('classifies a source alias equal to the primary title as NO_ALIASES, not PARSER_ERROR', async () => {

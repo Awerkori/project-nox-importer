@@ -61,6 +61,19 @@ export declare class DeduplicationEngine {
     /** Merge a work whose exact source mapping and canonical work ID are already loaded. */
     mergeKnownMappedWork(candidate: CandidateWork, workId: string, source: string): Promise<DeduplicationResult>;
     /**
+     * A narrow merge for the historical source-refetch lane.  Its contract is
+     * deliberately smaller than applyMetadataPrecedence: that lane is repairing
+     * explicit aliases and tags already attached to a known mapping, not
+     * rediscovering editorial fields.  Keeping it to two short SQL round trips
+     * avoids making P2 wait behind the chapter lane once for every individual
+     * work/tag operation.
+     *
+     * New-work onboarding and normal mapping reconciliation continue to use the
+     * full precedence merge above.  The fallback retains that behaviour for
+     * non-direct clients used by legacy callers and tests.
+     */
+    mergeKnownMappedHistoricalMetadata(candidate: CandidateWork, workId: string, source: string): Promise<DeduplicationResult>;
+    /**
      * Persist a mapping only after its caller has independently established a
      * high-confidence cross-provider identity match.  This is deliberately
      * narrower than resolveWork(): a complementary-source probe must never
