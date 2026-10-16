@@ -25,11 +25,12 @@ const SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN = 4;
 const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE = 8;
 const SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS = 48;
 const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK = 2;
-// Source-backed metadata is deliberately a two-seat P2 lane.  Looking at
-// every enabled source to fill those two seats made the producer itself a
-// multi-second YSQL workload.  A durable source cursor lets a tiny horizon
-// progress through every provider without repeatedly scanning the catalogue.
-const SOURCE_METADATA_SOURCE_PROBE_LIMIT = 8;
+// Historical refetch owns one P2 seat while the importer is serving chapter
+// work. Looking across eight providers merely to fill that one seat made the
+// producer's six-tier candidate CTE the dominant YSQL workload. A durable
+// source cursor lets a two-source horizon cover every provider without
+// repeatedly scanning the catalogue.
+const SOURCE_METADATA_SOURCE_PROBE_LIMIT = 2;
 
 const sourceExecutionEligibilitySql = (alias: string): string => `(
   (COALESCE(${alias}.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR

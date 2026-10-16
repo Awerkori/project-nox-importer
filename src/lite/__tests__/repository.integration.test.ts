@@ -502,7 +502,10 @@ describe('LiteRepository against the additive Lite migration', () => {
     // The first bounded horizon contains only mappings that are already
     // classified. It must still advance rather than probing those eight
     // sources forever.
-    expect(await repo.refillSourceMetadataEnrichment(1)).toBe(0);
+    // The production horizon is two sources. Four short turns must advance
+    // through all eight exhausted providers rather than rechecking the first
+    // pair forever.
+    for (let turn = 0; turn < 4; turn++) expect(await repo.refillSourceMetadataEnrichment(1)).toBe(0);
     expect((await db.query(`SELECT last_source FROM importer_lite_metadata_source_cursor
       WHERE cursor_name='source_refetch'`)).rows).toEqual([{ last_source:'a-stalled-08' }]);
 
