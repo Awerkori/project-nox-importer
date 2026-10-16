@@ -644,9 +644,14 @@ export class ImporterLiteRuntime {
         // the deliberately small importer pool. Existing source requests drain
         // safely; this only prevents a new producer query or HTTP task from
         // creating another persistence contender under live P1 pressure.
-        if (this.pool.waitingCount > 0)
-            return;
         const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
+        // A waiter is expected while ordinary chapter receipts use the shared
+        // three-client pool.  Returning on every non-zero sample meant this
+        // producer never reached its sustained-pressure branch: a busy importer
+        // could leave all historical mappings unmaterialised forever.  Yield for
+        // a short real burst, then keep the P2 refetch lane at one durable seat.
+        if (this.pool.waitingCount >= 2 && !sustainedPoolPressure)
+            return;
         if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
             || this.shouldPauseLowPriorityMetadata())
             return;
@@ -688,9 +693,11 @@ export class ImporterLiteRuntime {
         // RSS nears the container's 512 MiB boundary. A single importer-pool
         // waiter is normal under chapter load; the one-seat persistence gate
         // below, rather than an idle network slot, protects YSQL in that case.
-        if (this.pool.waitingCount > 0)
-            return;
         const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
+        // See refillSourceMetadataEnrichment: a persistent pool queue reduces
+        // this optional lane, but cannot turn it into permanent starvation.
+        if (this.pool.waitingCount >= 2 && !sustainedPoolPressure)
+            return;
         if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
             || this.shouldPauseLowPriorityMetadata())
             return;
