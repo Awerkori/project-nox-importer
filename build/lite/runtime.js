@@ -100,6 +100,11 @@ const SOURCE_METADATA_POOL_PRESSURE_SUSTAIN_MS = 15_000;
 // ranking horizon. Keeping this bounded avoids a distributed TableRead from
 // monopolising the one background checkout while P1 persists chapter work.
 const SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT = 2;
+// Under YSQL pressure the source lane still executes exactly one request and
+// one merge at a time. Keep one additional durable P2 task READY so its next
+// fetch does not wait for a multi-second cursor/materialisation transaction
+// after every completion. This is prefetch depth, not execution concurrency.
+const SOURCE_METADATA_CONSTRAINED_PREFETCH_DEPTH = 2;
 const SOURCE_RECOVERY_PROBE_INTERVAL_MS = 30_000;
 // UNKNOWN Telegram recovery is exceptional and requires a historical
 // uploads/media proof query. Keep it durable, but do not place that cold path
@@ -712,7 +717,12 @@ export class ImporterLiteRuntime {
             // fetching, its merge is still serialised below, and this avoids a
             // feedback loop where a paused metadata lane repeatedly builds READY
             // work that only wakes on the next timer tick.
-            const capacity = constrainedPool ? 1 : 4;
+            // Preserve the one active background fetch under pressure, but let the
+            // isolated producer commit a bounded successor in the same transaction.
+            // A YSQL cursor turn can take seconds while the public lane is busy;
+            // without this one-item buffer, the worker sits idle between every
+            // historical task even though no additional HTTP or merge is allowed.
+            const capacity = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PREFETCH_DEPTH : 4;
             const probeLimit = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : undefined;
             // Preserve the ordinary two-argument call shape when no source was
             // recently productive. Besides keeping the path minimal, this makes
