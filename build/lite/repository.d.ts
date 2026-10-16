@@ -312,6 +312,7 @@ export declare class LiteRepository {
     /** One bounded recovery turn; it cannot consume the claim path or scan works. */
     reconcile(limit?: number, options?: {
         recoverUploadOutcomes?: boolean;
+        recoverSourceCooldowns?: boolean;
     }): Promise<{
         leases: number;
         retries: number;
