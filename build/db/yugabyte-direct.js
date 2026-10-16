@@ -100,7 +100,7 @@ jx6IbjAj2tCrnaE1XPsWR3B3nL6aFtfIYtLMu4vb6HXQ8aYSbocyBO788o7g4vBm
 uHYiQRE3S9hMRqpUOUMmWRRpqHTxYl/FUrqOR8k4g1mN34ZqOpJZOwNnVMOsa+fh
 o1DZJoSu3+Cu5ZEv1xOCWs0bOoinIt45bqT0jrEXQDDhwGWR3gC64VMqffla1g==
 -----END CERTIFICATE-----`;
-function yugabytePoolOptions(cfg, max, applicationName, connectionTimeoutMillis, queryTimeoutMillis, sessionOptions = '') {
+function yugabytePoolOptions(cfg, max, applicationName, connectionTimeoutMillis, queryTimeoutMillis, sessionOptions = '', disableParallelWorkers = true) {
     if (!cfg.YUGABYTE_HOST || !cfg.YUGABYTE_USER || !cfg.YUGABYTE_PASSWORD) {
         throw new Error('Yugabyte direct connection requires YUGABYTE_HOST, YUGABYTE_USER, and YUGABYTE_PASSWORD');
     }
@@ -143,7 +143,10 @@ function yugabytePoolOptions(cfg, max, applicationName, connectionTimeoutMillis,
         keepAliveInitialDelayMillis: 10000,
         ssl: sslConfig,
         application_name: applicationName,
-        options: `-c max_parallel_workers_per_gather=0 -c statement_timeout=${queryTimeoutMillis} -c idle_in_transaction_session_timeout=15000 ${sessionOptions}`.trim(),
+        // Yugabyte rejects this deployment's startup packet when four -c flags
+        // are present. The isolated P2 pool needs the batched-loop setting more
+        // than the parallel-worker hint; retain all safeguards in the main pool.
+        options: `${disableParallelWorkers ? '-c max_parallel_workers_per_gather=0 ' : ''}-c statement_timeout=${queryTimeoutMillis} -c idle_in_transaction_session_timeout=15000 ${sessionOptions}`.trim(),
     };
 }
 /**
@@ -157,7 +160,7 @@ export function createYugabyteMetadataPool() {
     // Yugabyte's default nested-loop plan issued one remote read per mapping;
     // prefer its batched variant only here, never on the chapter pool.
     const metadataSessionOptions = '-c enable_nestloop=off';
-    const metadataPool = new pg.Pool(yugabytePoolOptions(getConfig(), 1, 'project-nox-importer-metadata', 4_000, 12_000, metadataSessionOptions));
+    const metadataPool = new pg.Pool(yugabytePoolOptions(getConfig(), 1, 'project-nox-importer-metadata', 4_000, 12_000, metadataSessionOptions, false));
     metadataPool.on('error', (err) => {
         logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });
     });
