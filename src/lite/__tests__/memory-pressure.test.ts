@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AsyncSemaphore } from '../../core/concurrency.js';
 import { LITE_PAGE_BUFFER_BUDGET_BYTES, PageByteBudget } from '../page-byte-budget.js';
 import { LiteMemoryPressureGuard } from '../memory-pressure.js';
@@ -11,6 +11,11 @@ const memory = (rssMiB: number) => ({
   external: 12 * mib,
   arrayBuffers: 8 * mib,
 }) as NodeJS.MemoryUsage;
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe('LiteMemoryPressureGuard', () => {
   it('cuts future page admission and yields metadata before the container limit', () => {
@@ -33,5 +38,23 @@ describe('LiteMemoryPressureGuard', () => {
     expect(guard.sample(memory(360)).state).toBe('REDUCED');
     expect(guard.sample(memory(340)).state).toBe('REDUCED');
     expect(guard.sample(memory(320)).state).toBe('NORMAL');
+  });
+
+  it('collects once more before retained RSS escalates REDUCED into CRITICAL', () => {
+    const pages = new AsyncSemaphore(20, 'test_lite_memory_second_gc');
+    const bytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
+    const guard = new LiteMemoryPressureGuard(pages, bytes, 20);
+    // Explicit samples keep the first transition deterministic and avoid the
+    // test process's RSS.  The next production-style sample crosses the
+    // critical fence, then the bounded GC reveals that its ArrayBuffers were
+    // already dead; admission remains REDUCED rather than collapsing to one.
+    expect(guard.sample(memory(355)).state).toBe('REDUCED');
+    const processMemory = vi.spyOn(process, 'memoryUsage');
+    processMemory.mockReturnValueOnce(memory(405)).mockReturnValueOnce(memory(360));
+    const gc = vi.fn();
+    vi.stubGlobal('gc', gc);
+
+    expect(guard.sample()).toMatchObject({ state: 'REDUCED', pageBufferCapacity: 20, pageByteCapacity: 48 * mib });
+    expect(gc).toHaveBeenCalledTimes(1);
   });
 });
