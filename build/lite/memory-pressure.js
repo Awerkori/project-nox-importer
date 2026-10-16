@@ -1,5 +1,6 @@
+import { LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
 const MIB = 1024 * 1024;
-// With the bounded 64 MiB page budget, production establishes an allocator
+// With the bounded normal page budget, production establishes an allocator
 // RSS plateau around 330 MiB after a sustained media wave while only roughly
 // 30 MiB remains live in ArrayBuffers.  The former 300/360 thresholds treated
 // that retained native arena as ongoing growth and held the importer at a
@@ -92,13 +93,13 @@ export class LiteMemoryPressureGuard {
                 // many small pages while RSS was stable around 310 MiB.  It left
                 // capacity unused in the 512 MiB container and turned REDUCED into a
                 // permanent 3--6 chapter/minute state.  48 MiB is still below the
-                // normal 64 MiB fence and leaves the CRITICAL 20 MiB brake intact.
+                // normal 80 MiB fence and leaves the CRITICAL 20 MiB brake intact.
                 pageByteCapacity: 48 * MIB,
             };
         }
         return {
             pageBufferCapacity: this.normalPageBufferCapacity,
-            pageByteCapacity: 64 * MIB,
+            pageByteCapacity: LITE_PAGE_BUFFER_BUDGET_BYTES,
         };
     }
     buildSnapshot(memory) {
