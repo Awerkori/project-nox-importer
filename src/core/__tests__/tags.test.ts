@@ -57,6 +57,27 @@ describe('Tag Normalization', () => {
     expect(merge).not.toHaveBeenCalled();
   });
 
+  it('uses two bounded SQL operations for a historical known-mapping aliases/tags merge', async () => {
+    const sql = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ title: 'Canonical title', aliases: ['Native title'] }] })
+      .mockResolvedValueOnce({ rows: [{ aliases_changed: 1, tags_added: 2 }] });
+    const engine = new DeduplicationEngine({ sql } as any);
+
+    await expect(engine.mergeKnownMappedHistoricalMetadata({
+      source: 'source-a', sourceWorkId: 'known-id', title: 'English title', slug: 'english-title',
+      aliases: ['Native title', 'Romanized title'], genres: ['Action', 'Horror', 'Manhua'],
+    }, '00000000-0000-4000-8000-000000000001', 'source-a')).resolves.toMatchObject({
+      workId: '00000000-0000-4000-8000-000000000001',
+      status: 'EXISTING_MAPPING',
+      metadataDelta: { aliasesAdded: 2, tagsAdded: 2 },
+    });
+
+    expect(sql).toHaveBeenCalledTimes(2);
+    const [, params] = sql.mock.calls[1];
+    expect(params[2]).toEqual(['Ação', 'Terror']);
+    expect(params[3]).toEqual(['acao', 'terror']);
+  });
+
   it('keeps explicit detailed adult taxonomy distinct from the generic adult rating', () => {
     const engine = new DeduplicationEngine({} as any);
     expect(engine['normalizeTagName']('milf')).toBe('MILF');

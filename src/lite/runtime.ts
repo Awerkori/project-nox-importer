@@ -1783,7 +1783,12 @@ export class ImporterLiteRuntime {
       const persistenceQueuedAt = performance.now();
       await this.sourceMetadataPersistenceGate.runExclusive(async () => {
         timings.metadataPersistenceWaitMs = Math.round(performance.now() - persistenceQueuedAt);
-        const resolved = await timePhase('mergePersistenceMs', () => this.dedupe.mergeKnownMappedWork({
+        // Runtime tests deliberately substitute a tiny dedupe double. Retain
+        // its older method shape while production takes the narrow historical
+        // SQL merge implemented by DeduplicationEngine.
+        const historicalMerge = ((this.dedupe as any).mergeKnownMappedHistoricalMetadata
+          || (this.dedupe as any).mergeKnownMappedWork) as typeof this.dedupe.mergeKnownMappedHistoricalMetadata;
+        const resolved = await timePhase('mergePersistenceMs', () => historicalMerge.call(this.dedupe, {
           source, sourceWorkId, title: details.title || row.source_title || row.title,
           slug: details.slug || row.source_slug || row.title,
           aliases: extracted.aliases, genres: extracted.genres,

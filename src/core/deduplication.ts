@@ -160,6 +160,119 @@ export class DeduplicationEngine {
   }
 
   /**
+   * A narrow merge for the historical source-refetch lane.  Its contract is
+   * deliberately smaller than applyMetadataPrecedence: that lane is repairing
+   * explicit aliases and tags already attached to a known mapping, not
+   * rediscovering editorial fields.  Keeping it to two short SQL round trips
+   * avoids making P2 wait behind the chapter lane once for every individual
+   * work/tag operation.
+   *
+   * New-work onboarding and normal mapping reconciliation continue to use the
+   * full precedence merge above.  The fallback retains that behaviour for
+   * non-direct clients used by legacy callers and tests.
+   */
+  async mergeKnownMappedHistoricalMetadata(candidate: CandidateWork, workId: string, source: string): Promise<DeduplicationResult> {
+    const validation = validateEditorialTitle(candidate.title);
+    if (!validation.valid) {
+      return {
+        workId: null,
+        mappingId: '',
+        status: 'FAILED',
+        slug: this.sanitizeSlug(candidate.slug || candidate.title || 'invalid-title'),
+        reason: `INVALID_EDITORIAL_TITLE: ${validation.reason}`,
+      };
+    }
+
+    const directSql = typeof (this.supabase as any).sql === 'function'
+      ? ((this.supabase as any).sql.bind(this.supabase) as <T>(query: string, params?: unknown[]) => Promise<{ rows: T[] }>)
+      : null;
+    if (!directSql) return this.mergeKnownMappedWork(candidate, workId, source);
+
+    const existing = await directSql<{ title: string; aliases: string[] | null }>(
+      `SELECT title,aliases FROM works WHERE id=$1::uuid LIMIT 1`, [workId],
+    );
+    const work = existing.rows?.[0];
+    if (!work) {
+      throw new Error('HISTORICAL_METADATA_WORK_MISSING');
+    }
+
+    const existingAliases: string[] = Array.isArray(work.aliases) ? work.aliases : [];
+    const sourceSuppliedTitles = [candidate.title, ...(candidate.aliases || [])]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .map((value) => decodeHtmlEntities(value));
+    const mergedAliases = mergeAlternativeTitles(existingAliases, sourceSuppliedTitles, work.title);
+    const aliasesChanged = mergedAliases.length !== existingAliases.length
+      || mergedAliases.some((alias, index) => alias !== existingAliases[index]);
+    const existingAliasKeys = new Set(existingAliases.map((alias) => this.tagLookupKey(alias)));
+    const aliasesAdded = mergedAliases.filter((alias) => !existingAliasKeys.has(this.tagLookupKey(alias))).length;
+
+    // Preserve the exact normalization and garbage filtering used by the full
+    // metadata merge.  These are provider-declared labels only; no tag is
+    // inferred from a source, title, cover or synopsis.
+    const explicitTags = new Map<string, { name: string; slug: string }>();
+    for (const raw of candidate.genres || []) {
+      if (!raw || this.isGarbageTag(raw)) continue;
+      const name = this.normalizeTagName(raw);
+      const slug = name === CANONICAL_ADULT_TAG_NAME
+        ? CANONICAL_ADULT_TAG_SLUG
+        : this.sanitizeSlug(this.tagLookupKey(name));
+      if (!explicitTags.has(slug)) explicitTags.set(slug, { name, slug });
+    }
+    const tags = [...explicitTags.values()];
+
+    // The second round trip atomically creates missing canonical tags,
+    // associates all declared tags, and writes the append-only alias union.
+    // It returns only newly-created work/tag links, which is the product delta
+    // metric used by the historical backfill.
+    const merged = await directSql<{ aliases_changed: number; tags_added: number }>(`
+      WITH input_tags AS (
+        SELECT DISTINCT ON (slug) name,slug
+        FROM unnest($3::text[],$4::text[]) AS supplied(name,slug)
+        ORDER BY slug,name
+      ), inserted_tags AS (
+        INSERT INTO tags(name,slug,kind)
+        SELECT name,slug,'GENRE' FROM input_tags
+        ON CONFLICT (slug) DO NOTHING
+        RETURNING id,slug
+      ), tag_ids AS (
+        SELECT id FROM inserted_tags
+        UNION ALL
+        SELECT existing_tag.id
+        FROM tags existing_tag
+        JOIN input_tags supplied ON supplied.slug=existing_tag.slug
+        WHERE NOT EXISTS (SELECT 1 FROM inserted_tags inserted WHERE inserted.slug=supplied.slug)
+      ), alias_update AS (
+        UPDATE works SET aliases=$2::text[],updated_at=now()
+        WHERE id=$1::uuid AND $5::boolean
+        RETURNING id
+      ), added_links AS (
+        INSERT INTO work_tags(work_id,tag_id,system_generated)
+        SELECT $1::uuid,id,true FROM tag_ids
+        ON CONFLICT (work_id,tag_id) DO NOTHING
+        RETURNING tag_id
+      )
+      SELECT (SELECT count(*)::int FROM alias_update) AS aliases_changed,
+        (SELECT count(*)::int FROM added_links) AS tags_added`, [
+      workId,
+      mergedAliases,
+      tags.map((tag) => tag.name),
+      tags.map((tag) => tag.slug),
+      aliasesChanged,
+    ]);
+    const delta = merged.rows?.[0];
+    return {
+      workId,
+      mappingId: '',
+      status: 'EXISTING_MAPPING',
+      slug: this.sanitizeSlug(candidate.slug || candidate.title),
+      metadataDelta: {
+        aliasesAdded: aliasesChanged ? aliasesAdded : 0,
+        tagsAdded: Math.max(0, Number(delta?.tags_added || 0)),
+      },
+    };
+  }
+
+  /**
    * Persist a mapping only after its caller has independently established a
    * high-confidence cross-provider identity match.  This is deliberately
    * narrower than resolveWork(): a complementary-source probe must never
