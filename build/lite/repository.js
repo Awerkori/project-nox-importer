@@ -1586,23 +1586,23 @@ export class LiteRepository {
             // `recordSourceFailure` moves only sole-route work to a durable
             // SOURCE_RATE_LIMITED cooldown. The normal retry pass above is kept
             // deliberately small for crash recovery, so it must not be the only
-            // mechanism that reopens a large healthy source backlog. Reduce the
-            // historical rows to one fair work *before* probing chapter routes: the
-            // previous per-task window evaluated every due rate-limited chapter on
-            // each 30-second turn. The narrow partial index makes the later
-            // selected-work ranking bounded (least recently refreshed work first,
-            // earliest canonical chapter within that work), then a few routes per
-            // source. This runs only in the reconciler and refreshes the normal
-            // ready-work projection.
-            const sourceCooldownRecovery = await client.query(`WITH due_work_keys AS MATERIALIZED (
-           SELECT task.work_key,
-             COALESCE(ready.updated_at,max(task.updated_at)) AS work_turn_at,
-             min(task.next_run_at) AS oldest_due
+            // mechanism that reopens a large healthy source backlog. It selects a
+            // bounded, work-fair retry head in one indexed pass (least recently
+            // refreshed work first, earliest canonical chapter within each work),
+            // then a few routes per source. This runs only in the 30-second
+            // reconciler and refreshes the normal ready-work projection.
+            const sourceCooldownRecovery = await client.query(`WITH due_candidates AS (
+           SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
+             task.created_at,
+             row_number() OVER (PARTITION BY task.work_key
+               ORDER BY NULLIF(task.payload->>'orderKey','') NULLS LAST,
+                 task.next_run_at,task.created_at,task.id) AS work_position,
+             COALESCE(ready.updated_at,max(task.updated_at) OVER (PARTITION BY task.work_key)) AS work_turn_at,
+             min(task.next_run_at) OVER (PARTITION BY task.work_key) AS oldest_due
            FROM importer_lite_tasks task
            LEFT JOIN importer_lite_ready_works ready ON ready.work_key=task.work_key
            WHERE task.state='RETRY_WAIT' AND task.monitoring=false AND task.task_type='IMPORT_CHAPTER'
              AND task.reason='SOURCE_RATE_LIMITED' AND task.next_run_at<=now()
-           GROUP BY task.work_key,ready.updated_at
          ), candidate_works AS (
            -- Pick the bounded work horizon only after proving that the task
            -- still has a route the executor may use.  Selecting the oldest
@@ -1610,21 +1610,17 @@ export class LiteRepository {
            -- which remain externally unavailable; the later route join then
            -- reopened nothing and a healthy, due historical gap behind it
            -- could wait forever.
-           SELECT candidate.work_key,candidate.work_turn_at,candidate.oldest_due
-           FROM due_work_keys candidate
+           SELECT DISTINCT candidate.work_key,candidate.work_turn_at,candidate.oldest_due
+           FROM due_candidates candidate
            WHERE EXISTS (
              SELECT 1
-             FROM importer_lite_tasks task
-             JOIN importer_lite_chapter_sources route
-               ON route.work_id=task.work_id AND route.canonical_chapter_key=task.chapter_key
+             FROM importer_lite_chapter_sources route
              JOIN importer_sources s ON s.id=route.source
              LEFT JOIN importer_lite_source_health h ON h.source=route.source
-             WHERE task.work_key=candidate.work_key AND task.state='RETRY_WAIT'
-               AND task.monitoring=false AND task.task_type='IMPORT_CHAPTER'
-               AND task.reason='SOURCE_RATE_LIMITED' AND task.next_run_at<=now()
+             WHERE route.work_id=candidate.work_id AND route.canonical_chapter_key=candidate.chapter_key
                AND route.confirmed=true AND route.has_chapter=true
-               AND route.language=COALESCE(NULLIF(task.payload->>'language',''),'und')
-               AND route.edition=COALESCE(NULLIF(task.payload->>'edition',''),'default')
+               AND route.language=COALESCE(NULLIF(candidate.payload->>'language',''),'und')
+               AND route.edition=COALESCE(NULLIF(candidate.payload->>'edition',''),'default')
                AND s.enabled=true
                AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
                AND ${sourceExecutionEligibilitySql('s')}
@@ -1635,27 +1631,20 @@ export class LiteRepository {
            LIMIT $1
          ), due AS (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,
-             task.next_run_at,task.created_at,
-             row_number() OVER (PARTITION BY task.work_key
-               ORDER BY NULLIF(task.payload->>'orderKey','') NULLS LAST,
-                 task.next_run_at,task.created_at,task.id) AS work_position
-           FROM importer_lite_tasks task
-           JOIN candidate_works work ON work.work_key=task.work_key
-           WHERE task.state='RETRY_WAIT'
+             task.next_run_at,task.created_at,candidate.work_position
+           FROM due_candidates candidate
+           JOIN candidate_works work USING(work_key)
+           JOIN importer_lite_tasks task ON task.id=candidate.id
+           WHERE candidate.work_position<=$4 AND task.state='RETRY_WAIT'
              AND task.monitoring=false AND task.task_type='IMPORT_CHAPTER'
              AND task.reason='SOURCE_RATE_LIMITED' AND task.next_run_at<=now()
-         ), bounded_due AS (
-           SELECT due.id,due.work_key,due.work_id,due.chapter_key,due.payload,
-             due.next_run_at,due.created_at,due.work_position
-           FROM due
-           JOIN importer_lite_tasks task ON task.id=due.id
-           WHERE due.work_position<=$4
-           ORDER BY work_position
+           ORDER BY candidate.work_turn_at NULLS FIRST,candidate.oldest_due,
+             candidate.work_key,candidate.work_position
            FOR UPDATE OF task SKIP LOCKED
          ), routes AS (
            SELECT DISTINCT ON (due.id) due.id,due.work_key,due.next_run_at,due.created_at,
              due.work_position,route.source
-           FROM bounded_due due
+           FROM due
            JOIN importer_lite_chapter_sources route
              ON route.work_id=due.work_id AND route.canonical_chapter_key=due.chapter_key
            JOIN importer_sources s ON s.id=route.source

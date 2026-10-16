@@ -24,7 +24,6 @@ const sameWorkGapPriorityMigration = readFileSync(resolve(process.cwd(), 'migrat
 const sourceMetadataRefetchMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014180000_metadata_source_refetch.sql'), 'utf8');
 const sourceMetadataRefetchIndexesMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014181500_metadata_source_refetch_indexes.sql'), 'utf8');
 const sourceMetadataRefetchClaimIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261016221500_metadata_refetch_claim_idx.sql'), 'utf8');
-const sourceCooldownRecoveryWorkIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261016224500_source_cooldown_recovery_work_idx.sql'), 'utf8');
 const metadataProductMetricsMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015043000_metadata_product_activation_metrics.sql'), 'utf8');
 const sourceMetadataProbeCursorMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015060000_metadata_source_probe_cursor.sql'), 'utf8');
 const publicPresentationAdmissionMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015194000_lite_public_presentation_admission.sql'), 'utf8');
@@ -136,7 +135,6 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(sourceMetadataRefetchMigration);
   await db.exec(sourceMetadataRefetchIndexesMigration);
   await db.exec(sourceMetadataRefetchClaimIndexMigration);
-  await db.exec(sourceCooldownRecoveryWorkIndexMigration);
   await db.exec(metadataProductMetricsMigration);
   await db.exec(sourceMetadataProbeCursorMigration);
   await db.exec(publicPresentationAdmissionMigration);
