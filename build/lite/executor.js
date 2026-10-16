@@ -7,7 +7,7 @@ import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
 import { BoundedSamples } from '../core/bounded-samples.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
-import { LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES, PageByteBudget } from './page-byte-budget.js';
+import { PageByteBudget, unknownPageInitialReservationBytes } from './page-byte-budget.js';
 // A pre-upload intent gates Telegram, so keep its join window short. A
 // confirmed receipt is deferred and can safely coalesce a little longer while
 // the next bounded page wave proceeds. This separates pool amortisation from
@@ -697,7 +697,8 @@ export class LiteExecutor {
                             try {
                                 if (host)
                                     await this.sourceRateLimiter.acquire(host, pageSignal);
-                                const reservation = await this.pageBytes.reserve(LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES, pageSignal, { completionHeadroomBytes: MAX_IMAGE_BODY_BYTES - LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES });
+                                const initialReservationBytes = unknownPageInitialReservationBytes(this.pageBytes.capacityBytes);
+                                const reservation = await this.pageBytes.reserve(initialReservationBytes, pageSignal, { completionHeadroomBytes: MAX_IMAGE_BODY_BYTES - initialReservationBytes });
                                 byteReservation.value = reservation;
                                 // A task awaiting page bytes owns neither a global HTTP slot
                                 // nor a page-body count permit. Once admitted, the count gate

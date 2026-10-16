@@ -17,11 +17,17 @@ export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
 // A source that omits Content-Length cannot receive exact admission before
 // its response headers arrive.  Production bodies are usually small, but the
 // former 2 MiB placeholder filled the 48 MiB REDUCED profile at 15--16
-// in-flight pages even though the global download fence is 24. Start at 1 MiB
-// and retain terminal-promotion headroom through the 20 MiB hard bound. Any
-// larger stream upgrades before accepting the overflowing chunk, so this is
-// an admission estimate only: it never weakens the authoritative byte cap.
-export const LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES = 1 * 1024 * 1024;
+// in-flight pages even though the global download fence is 24. REDUCED starts
+// at 1 MiB and retains terminal-promotion headroom through the 20 MiB hard
+// bound. Any larger stream upgrades before accepting the overflowing chunk,
+// so this is an admission estimate only: it never weakens the authoritative
+// byte cap.
+export const LITE_PAGE_BUFFER_UNKNOWN_REDUCED_INITIAL_BYTES = 1 * 1024 * 1024;
+// At the 64 MiB normal ceiling, 23 conservative 2 MiB reservations still
+// leave the 18 MiB terminal promotion for one active body. Production page
+// p95 is below 2 MiB, so using this normal-profile value avoids turning each
+// ordinary 1--2 MiB lengthless image into a 20 MiB reservation.
+export const LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES = 2 * 1024 * 1024;
 // `readImageBody` fills a declared-length response directly into its final
 // Uint8Array, so the former streamed-chunks-plus-final-body duplication no
 // longer determines the normal high-water mark. Keep a deliberately bounded
@@ -29,6 +35,18 @@ export const LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES = 1 * 1024 * 1024;
 // still need room inside the 512 MiB container, and the runtime cuts this
 // budget well before memory pressure becomes critical.
 export const LITE_PAGE_BUFFER_BUDGET_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Keep REDUCED able to use the full 24-page request fence, while NORMAL uses
+ * the measured 2 MiB p95-sized provisional body to avoid needless terminal
+ * promotions. The selected value is an admission estimate; every response is
+ * still validated and upgraded before an overflowing chunk is retained.
+ */
+export function unknownPageInitialReservationBytes(capacityBytes: number): number {
+  return capacityBytes >= LITE_PAGE_BUFFER_BUDGET_BYTES
+    ? LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES
+    : LITE_PAGE_BUFFER_UNKNOWN_REDUCED_INITIAL_BYTES;
+}
 
 type Waiter = {
   bytes: number;
