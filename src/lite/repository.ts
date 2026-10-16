@@ -147,7 +147,11 @@ export class LiteRepository {
       await client.query('BEGIN');
       const pending = await client.query<{ count: string }>(`SELECT count(*)::int AS count
         FROM importer_lite_tasks
-        WHERE task_type='CATALOG' AND (state IN ('READY','RUNNING')
+        WHERE task_type='CATALOG' AND (state='READY'
+          -- A rolling deploy can leave the old owner in RUNNING until the
+          -- generic reconciler receives a main-pool turn. That expired lease
+          -- cannot execute and must not consume the one protected P2 seat.
+          OR (state='RUNNING' AND lease_until>now())
           OR (state='RETRY_WAIT' AND next_run_at<=now()+interval '30 seconds'))
           AND payload ? 'metadataSourceRefresh'`);
       if (Number(pending.rows[0]?.count || 0) >= ceiling) {

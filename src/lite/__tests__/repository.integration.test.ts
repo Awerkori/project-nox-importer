@@ -373,6 +373,23 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillSourceMetadataEnrichment(2)).toBe(0);
   });
 
+  it('does not let an expired historical metadata lease consume the protected P2 seat', async () => {
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000212','source-a','expired-metadata',$1::uuid,'p1-a','P1 A','SYNCED'),
+      ('00000000-0000-4000-8000-000000000213','source-b','fresh-metadata',$2::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1a,ids.p1b]);
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:'lite:metadata:source:v3:source-a:expired-metadata',
+      payload:{ source:'source-a',sourceWorkId:'expired-metadata',metadataSourceRefresh:true } });
+    await db.query(`UPDATE importer_lite_tasks SET state='RUNNING',lease_owner='old-runtime',
+      lease_until=now()-interval '1 second' WHERE idempotency_key='lite:metadata:source:v3:source-a:expired-metadata'`);
+
+    expect(await repo.refillSourceMetadataEnrichment(1, 2)).toBe(1);
+    expect((await db.query(`SELECT state FROM importer_lite_tasks
+      WHERE idempotency_key='lite:metadata:source:v3:source-b:fresh-metadata'`)).rows[0]).toEqual({ state:'READY' });
+  });
+
   it('prioritizes a source proven to add aliases over a never-queried source', async () => {
     await db.query(`INSERT INTO importer_sources(id) VALUES('source-rich'),('source-new')`);
     await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2)`, [ids.p1a,ids.p1b]);
