@@ -756,7 +756,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     memorySpy.mockRestore();
   });
 
-  it('materialises one historical source refresh immediately under shared-pool pressure', async () => {
+  it('prefetches one durable successor without widening the historical fetch lane under shared-pool pressure', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const lanePool = poolFor(db) as any;
     lanePool.waitingCount = 1;
@@ -777,7 +777,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     refill.mockClear();
     lanePool.waitingCount = 2;
     await (runtime as any).refillSourceMetadataEnrichment(true);
-    expect(refill).toHaveBeenLastCalledWith(1, 2);
+    expect(refill).toHaveBeenLastCalledWith(2, 2);
     memorySpy.mockRestore();
   });
 
