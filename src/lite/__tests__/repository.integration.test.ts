@@ -542,6 +542,26 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
   });
 
+  it('uses the isolated P2 database seat for the historical source claim', async () => {
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:'source-metadata-isolated-seat',payload:{source:'source-a',sourceWorkId:'isolated-work',metadataSourceRefresh:true} });
+    const mainPool = poolFor(db) as any;
+    const isolatedPool = poolFor(db) as any;
+    mainPool.query = vi.fn(mainPool.query);
+    isolatedPool.query = vi.fn(isolatedPool.query);
+    const isolatedRepository = new LiteRepository(mainPool, isolatedPool);
+
+    await expect(isolatedRepository.claimSourceMetadataRefresh('metadata-isolated',90))
+      .resolves.toMatchObject({ idempotencyKey:'source-metadata-isolated-seat', state:'RUNNING' });
+
+    expect(isolatedPool.query).toHaveBeenCalledWith(
+      expect.stringContaining('importer_lite_claim_source_metadata_task'), expect.any(Array),
+    );
+    expect(mainPool.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('importer_lite_claim_source_metadata_task'), expect.any(Array),
+    );
+  });
+
   it('claims one unmapped onboarding catalog task without stealing a P1 chapter worker claim', async () => {
     await repo.enqueue({ taskType:'CATALOG', workKey:'source:source-a:fresh-work', priority:'P2',
       idempotencyKey:'fresh-work-catalog', payload:{ source:'source-a', sourceWorkId:'fresh-work' } });

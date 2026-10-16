@@ -45,13 +45,21 @@ const asTask = (row) => ({
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export class LiteRepository {
     db;
+    sourceMetadataDb;
     // This is only a local maintenance hint. Durable task state remains the
     // authority; the runtime uses the hint to avoid a second catalog turn when
     // the materialised P1 import reserve is already abundant.
     historicalP1ReserveAbundant = false;
     hasAbundantHistoricalP1Reserve() { return this.historicalP1ReserveAbundant; }
-    constructor(db) {
+    /**
+     * Source-backed historical metadata is deliberately allowed one tiny,
+     * isolated database seat.  It cannot borrow the chapter claim pool during a
+     * busy wave, while its own producer/claim/finish operations remain strictly
+     * serial through the runtime's lane gates.
+     */
+    constructor(db, sourceMetadataDb = db) {
         this.db = db;
+        this.sourceMetadataDb = sourceMetadataDb;
     }
     /**
      * Admit at most two low-priority source-backed metadata reads at a time.
@@ -61,7 +69,7 @@ export class LiteRepository {
     async refillSourceMetadataEnrichment(maxPending = 2, sourceProbeLimit = SOURCE_METADATA_SOURCE_PROBE_LIMIT) {
         const ceiling = Math.max(1, Math.min(2, maxPending));
         const probeLimit = Math.max(1, Math.min(SOURCE_METADATA_SOURCE_PROBE_LIMIT, sourceProbeLimit));
-        const client = await this.db.connect();
+        const client = await this.sourceMetadataDb.connect();
         try {
             await client.query('BEGIN');
             const pending = await client.query(`SELECT count(*)::int AS count
@@ -212,7 +220,7 @@ export class LiteRepository {
         }
     }
     async recordSourceMetadataEnrichment(input) {
-        const client = await this.db.connect();
+        const client = await this.sourceMetadataDb.connect();
         try {
             await client.query('BEGIN');
             if (input.rawMetadata && Object.keys(input.rawMetadata).length) {
@@ -247,7 +255,7 @@ export class LiteRepository {
      * between one external metadata fetch and the next available task. */
     async completeSourceMetadataRefresh(task, workerId, input, checkpoint) {
         const transactionStartedAt = performance.now();
-        const client = await this.db.connect();
+        const client = await this.sourceMetadataDb.connect();
         try {
             await client.query('BEGIN');
             await client.query(`UPDATE importer_work_mappings
@@ -626,7 +634,7 @@ export class LiteRepository {
     }
     /** Source-backed metadata owns a single low-rate lane and never waits behind chapter claims. */
     async claimSourceMetadataRefresh(workerId, leaseSeconds) {
-        const result = await this.db.query('SELECT * FROM public.importer_lite_claim_source_metadata_task($1,$2::interval)', [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
+        const result = await this.sourceMetadataDb.query('SELECT * FROM public.importer_lite_claim_source_metadata_task($1,$2::interval)', [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
         return result.rows[0] ? asTask(result.rows[0]) : null;
     }
     /**
