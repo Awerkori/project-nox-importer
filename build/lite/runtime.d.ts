@@ -30,6 +30,7 @@ export declare class ImporterLiteRuntime {
     private readonly sourceMetadataPreparationGate;
     private readonly sourceMetadataLaneGate;
     private readonly sourceMetadataPersistenceGate;
+    private readonly newWorkCatalogGate;
     private sourceMetadataPoolWaitStartedAt;
     private readonly sourceAdmissionGate;
     private lastMetadataEnrichmentAt;
@@ -120,6 +121,15 @@ export declare class ImporterLiteRuntime {
     /** Dedicated bounded workers give source refetch continuous progress without
      * consuming chapter workers or competing with P0/P1 task selection. */
     private runSourceMetadataRefresh;
+    /**
+     * This is intentionally a one-seat onboarding lane, not a second chapter
+     * scheduler.  It only claims unmapped CATALOG rows produced by discovery;
+     * once a work exists, every manifest chapter returns to the ordinary
+     * STAFF/P0/P1/P2 queue.  The catalog path itself holds no transaction while
+     * fetching the source, and memory/site/pool guardrails are shared with the
+     * low-priority metadata lanes.
+     */
+    private runNewWorkCatalog;
     private hasSustainedSourceMetadataPoolPressure;
     /**
      * One local metadata merge at a time prevents P1's legitimate chapter

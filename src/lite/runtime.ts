@@ -65,6 +65,11 @@ const SOURCE_METADATA_REFILL_INTERVAL_MS = 15_000;
 // Stage 2 metadata lane experiment: two dedicated slots, polled every five
 // seconds. Source adapter host limits and source cooldowns remain authoritative.
 const SOURCE_METADATA_LANE_INTERVAL_MS = 5_000;
+// A first catalog pass creates the canonical work, cover and its explicit
+// metadata.  It must not be stranded behind an indefinitely non-empty P1
+// chapter reserve, but one serial task is sufficient and remains below the
+// page/chapter admission path.
+const NEW_WORK_CATALOG_LANE_INTERVAL_MS = 5_000;
 // The direct importer pool is intentionally tiny and short chapter commits
 // can produce two queued checkouts momentarily.  Treat only a persistent
 // queue as pressure; an instantaneous sample must not strand network-only
@@ -121,6 +126,7 @@ export class ImporterLiteRuntime {
   private readonly sourceMetadataPreparationGate = new AsyncSemaphore(1, 'lite_source_metadata_prepare');
   private readonly sourceMetadataLaneGate = new AsyncSemaphore(4, 'lite_source_metadata_lane');
   private readonly sourceMetadataPersistenceGate = new AsyncSemaphore(1, 'lite_source_metadata_persistence');
+  private readonly newWorkCatalogGate = new AsyncSemaphore(1, 'lite_new_work_catalog_lane');
   private sourceMetadataPoolWaitStartedAt = 0;
   private readonly sourceAdmissionGate = new SourceAdmissionGate(10_000);
   private lastMetadataEnrichmentAt = 0;
@@ -237,6 +243,7 @@ export class ImporterLiteRuntime {
     // Fill both already-approved external seats at boot.  This is not a
     // third worker: each call is fenced by the two-slot lane below.
     await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
+    await this.runNewWorkCatalog();
     await this.runStoredMetadataReplay();
     // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
     // Lite cutover.  The Lite-specific cap begins safely and can only rise
@@ -270,6 +277,11 @@ export class ImporterLiteRuntime {
       void this.runSourceMetadataRefresh();
     }, SOURCE_METADATA_LANE_INTERVAL_MS);
     sourceMetadataTimer.unref(); this.timers.push(sourceMetadataTimer);
+    const newWorkCatalogTimer = setInterval(() => {
+      if (!this.isRuntimeLeader) return;
+      void this.runNewWorkCatalog();
+    }, NEW_WORK_CATALOG_LANE_INTERVAL_MS);
+    newWorkCatalogTimer.unref(); this.timers.push(newWorkCatalogTimer);
     const healthTimer = setInterval(() => void this.probeSharedResources(), 30_000);
     healthTimer.unref(); this.timers.push(healthTimer);
     const metricsTimer = setInterval(() => void this.emitOperationalSnapshot().catch(() => {}), 60_000);
@@ -695,6 +707,28 @@ export class ImporterLiteRuntime {
           .then(() => this.runSourceMetadataRefresh())
           .catch((error: any) => this.logger.warn('Source metadata replacement failed', { error: error?.message }));
       }
+    }
+  }
+
+  /**
+   * This is intentionally a one-seat onboarding lane, not a second chapter
+   * scheduler.  It only claims unmapped CATALOG rows produced by discovery;
+   * once a work exists, every manifest chapter returns to the ordinary
+   * STAFF/P0/P1/P2 queue.  The catalog path itself holds no transaction while
+   * fetching the source, and memory/site/pool guardrails are shared with the
+   * low-priority metadata lanes.
+   */
+  private async runNewWorkCatalog(): Promise<void> {
+    if (!this.isRuntimeLeader || this.pool.waitingCount > 0
+      || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
+      || !this.newWorkCatalogGate.tryAcquire()) return;
+    try {
+      const task = await this.queue.claimNewWorkCatalog(`${this.runtimeInstanceId}:new-work-catalog`, 90);
+      if (task) await this.catalog(task, `${this.runtimeInstanceId}:new-work-catalog`);
+    } catch (error: any) {
+      this.logger.warn('New-work catalog lane failed', { error: error?.message });
+    } finally {
+      this.newWorkCatalogGate.release();
     }
   }
 

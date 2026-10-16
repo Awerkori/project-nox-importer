@@ -28,6 +28,7 @@ const sourceMetadataProbeCursorMigration = readFileSync(resolve(process.cwd(), '
 const publicPresentationAdmissionMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015194000_lite_public_presentation_admission.sql'), 'utf8');
 const zeroDecimalChapterIdentityMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015223000_canonical_zero_decimal_chapters.sql'), 'utf8');
 const presentableUnpublishedAdmissionMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015230000_lite_admit_presentable_unpublished_work.sql'), 'utf8');
+const newWorkCatalogLaneMigration = readFileSync(resolve(process.cwd(), 'migrations/20261016070000_lite_new_work_catalog_lane.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -135,6 +136,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(publicPresentationAdmissionMigration);
   await db.exec(zeroDecimalChapterIdentityMigration);
   await db.exec(presentableUnpublishedAdmissionMigration);
+  await db.exec(newWorkCatalogLaneMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -515,6 +517,17 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     const sourceTask = await repo.claimSourceMetadataRefresh('metadata-lane',90);
     expect(sourceTask).toMatchObject({ idempotencyKey:'source-metadata-dedicated',priority:'P2',state:'RUNNING' });
+    expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
+  });
+
+  it('claims one unmapped onboarding catalog task without stealing a P1 chapter worker claim', async () => {
+    await repo.enqueue({ taskType:'CATALOG', workKey:'source:source-a:fresh-work', priority:'P2',
+      idempotencyKey:'fresh-work-catalog', payload:{ source:'source-a', sourceWorkId:'fresh-work' } });
+    await repo.enqueue({ taskType:'IMPORT_CHAPTER',workId:ids.p1a,workKey:`work:${ids.p1a}`,
+      chapterKey:'chapter-p1',priority:'P1',idempotencyKey:'chapter-p1-remains-first' });
+
+    const onboarding = await repo.claimNewWorkCatalog('new-work-catalog',90);
+    expect(onboarding).toMatchObject({ idempotencyKey:'fresh-work-catalog',priority:'P2',state:'RUNNING',workId:null });
     expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
   });
 
