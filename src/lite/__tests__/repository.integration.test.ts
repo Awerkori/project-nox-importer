@@ -3550,10 +3550,13 @@ describe('LiteRepository against the additive Lite migration', () => {
     const registry = { get: () => ({ id: 'source-a', fetchChapterPages: async () => ['https://source-a.test/one.png', 'https://source-a.test/two.png'] }) } as unknown as SourceRegistry;
     let activeUploads = 0;
     let maxActiveUploads = 0;
+    let byteBudget: PageByteBudget | null = null;
+    let reservedBytesAtUploadOverlap = 0;
     const storage: StorageProvider = {
       upload: async () => {
         activeUploads++;
         maxActiveUploads = Math.max(maxActiveUploads, activeUploads);
+        if (activeUploads === 2) reservedBytesAtUploadOverlap = byteBudget?.snapshot().reservedBytes || 0;
         // The durable pre-upload batch may join for up to 300 ms. Keep the
         // first upload live beyond that point so the test observes whether a
         // freed count permit admits the second download and upload.
@@ -3577,7 +3580,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       // 2 MiB live body plus 18 MiB terminal-upgrade headroom per page.
       // Twenty-two MiB admits this two-page test wave without weakening the
       // production rule that every admitted body can still finish.
-      const byteBudget = new PageByteBudget(22 * 1024 * 1024);
+      byteBudget = new PageByteBudget(22 * 1024 * 1024);
       const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
         '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 2,
         new AsyncSemaphore(1, 'test-buffered-pages'), new HostRateLimiter(100), 1, undefined, byteBudget);
@@ -3588,6 +3591,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     // body is byte-reserved and its pre-upload intent is durable, the next
     // page may download while Telegram drains the first one.
     expect(maxActiveUploads).toBe(2);
+    // Declared tiny images retain their exact bodies rather than the former
+    // 2 MiB floor for each page while both Telegram sends overlap.
+    expect(reservedBytesAtUploadOverlap).toBeLessThan(1 * 1024 * 1024);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);
   });
 

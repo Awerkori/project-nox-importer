@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import { readImageBody } from '../core/bounded-body.js';
+import { MAX_IMAGE_BODY_BYTES, readImageBody } from '../core/bounded-body.js';
 import { calculateSha256, inspectImage } from '../storage/media.js';
 import { selectableChapterSources } from './source-selector.js';
 import { AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
@@ -673,137 +673,144 @@ export class LiteExecutor {
                         if (receipt?.state === 'UNKNOWN')
                             throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
                         const host = hostFor(url);
-                        if (host)
-                            await this.sourceRateLimiter.acquire(host);
-                        // Reserve the authoritative payload budget *before* consuming a
-                        // page-count slot.  A byte waiter holds no media at all; admitting
-                        // it through `bufferedPages` first used to fill all 24 count slots
-                        // with producers waiting for bytes, leaving only a fraction able to
-                        // fetch.  The byte budget has the terminal-upgrade priority needed
-                        // to make this ordering deadlock-free.
+                        // A count permit owns only the active HTTP body/validation phase.
+                        // The authoritative byte reservation begins after response headers
+                        // arrive: most providers give a trusted small Content-Length, so
+                        // reserving the old universal 2 MiB floor for every page needlessly
+                        // consumed the 64 MiB ceiling while uploads were draining.  A
+                        // lengthless or invalid header retains that conservative floor.
                         const pageSignal = AbortSignal.timeout(45_000);
-                        const byteReservation = await this.pageBytes.reserve(LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES, pageSignal, { completionHeadroomBytes: 20 * 1024 * 1024 - LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES });
+                        let pageBufferHeld = false;
+                        const releasePageBuffer = () => {
+                            if (!pageBufferHeld)
+                                return;
+                            pageBufferHeld = false;
+                            this.bufferedPages.release();
+                        };
+                        // A holder keeps the reservation visible to the outer cleanup even
+                        // though it is assigned inside the bounded async download closure.
+                        const byteReservation = { value: null };
                         try {
-                            // The count permit protects only the download/validation stage.
-                            // Once the pre-upload intent is durable, the exact page body stays
-                            // byte-reserved through storage and receipt persistence, so the
-                            // next source request need not wait for Telegram/YSQL.
-                            await this.bufferedPages.acquire(pageSignal);
-                            let pageBufferHeld = true;
-                            const releasePageBuffer = () => {
-                                if (!pageBufferHeld)
-                                    return;
-                                pageBufferHeld = false;
-                                this.bufferedPages.release();
-                            };
+                            let downloaded;
                             try {
-                                let downloaded;
+                                const startedAt = performance.now();
+                                telemetryCollector.trackActiveDownload(1);
                                 try {
-                                    const startedAt = performance.now();
-                                    telemetryCollector.trackActiveDownload(1);
-                                    try {
-                                        downloaded = await this.downloads.runExclusive(async () => {
-                                            const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: pageSignal });
-                                            if (!response.ok) {
-                                                if (response.status === 429 && host)
-                                                    this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));
-                                                const error = sourceFailure(new Error(`PAGE_HTTP_${response.status}`));
-                                                error.retryAfter = Number(response.headers.get('retry-after') || 0);
-                                                throw error;
-                                            }
-                                            const bytes = await readImageBody(response, { signal: pageSignal, reservation: byteReservation });
-                                            const image = inspectImage(bytes);
-                                            if (host)
-                                                this.sourceRateLimiter.recordSuccess(host);
-                                            return { bytes, image };
-                                        });
-                                        telemetryCollector.recordImageDownload(route.source, performance.now() - startedAt, downloaded.bytes.length);
-                                    }
-                                    finally {
-                                        telemetryCollector.trackActiveDownload(-1);
-                                    }
-                                }
-                                catch (error) {
-                                    throw sourceFailure(error);
-                                }
-                                const { bytes, image } = downloaded;
-                                const sha256 = calculateSha256(bytes);
-                                const reserved = await this.reservationBatcher.reserve({ taskId: task.id, pagePosition: position, sha256 });
-                                if (reserved.state === 'PERSISTED')
-                                    return reserved.mediaId;
-                                if (reserved.state === 'UNKNOWN')
-                                    throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
-                                // The body remains byte-reserved through storage and receipt
-                                // persistence, so this only frees the count gate for another
-                                // download; it cannot increase retained media beyond the
-                                // bounded PageByteBudget.
-                                releasePageBuffer();
-                                try {
-                                    const uploadStartedAt = performance.now();
-                                    telemetryCollector.trackActiveTelegramUpload(1);
-                                    let providerKey;
-                                    try {
-                                        providerKey = await this.storage.upload(bytes, image.mime, reserved.mediaId, chapterId);
-                                        telemetryCollector.recordTelegramUpload(performance.now() - uploadStartedAt, bytes.length);
-                                    }
-                                    finally {
-                                        telemetryCollector.trackActiveTelegramUpload(-1);
-                                    }
-                                    const receipt = this.receiptBatcher.persist({
-                                        taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256,
-                                        bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
-                                        botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,
-                                        shardId: this.storage.getLastShardId?.(reserved.mediaId) || null,
-                                        channelId: this.storage.getLastChannelId?.(reserved.mediaId) || null, createdBy: this.importerUserId,
-                                        messageId: this.storage.getLastMessageId?.(reserved.mediaId) || null,
-                                    }).catch(async (error) => {
-                                        await this.queue.checkpoint(task, workerId, {
-                                            lastUploadFailure: {
-                                                position, phase: 'RECEIPT_PERSISTENCE', class: uploadFailureClass(error), at: new Date().toISOString(),
-                                            },
-                                        });
-                                        await this.queue.markUploadUnknown(task.id, position);
-                                        throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+                                    downloaded = await this.downloads.runExclusive(async () => {
+                                        if (host)
+                                            await this.sourceRateLimiter.acquire(host, pageSignal);
+                                        const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: pageSignal });
+                                        if (!response.ok) {
+                                            if (response.status === 429 && host)
+                                                this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));
+                                            const error = sourceFailure(new Error(`PAGE_HTTP_${response.status}`));
+                                            error.retryAfter = Number(response.headers.get('retry-after') || 0);
+                                            throw error;
+                                        }
+                                        const declaredValue = Number(response.headers.get('content-length') || '');
+                                        const declaredBytes = Number.isSafeInteger(declaredValue) && declaredValue > 0 && declaredValue <= MAX_IMAGE_BODY_BYTES
+                                            ? declaredValue : null;
+                                        const reservationBytes = declaredBytes || LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES;
+                                        // Keep one full terminal promotion possible. A dishonest
+                                        // short header therefore remains bounded and can drain;
+                                        // normal declared pages retain only their actual bytes.
+                                        const reservation = await this.pageBytes.reserve(reservationBytes, pageSignal, { completionHeadroomBytes: MAX_IMAGE_BODY_BYTES - reservationBytes });
+                                        byteReservation.value = reservation;
+                                        // Header-only responses that are waiting for bytes own no
+                                        // image body. They stay outside this count gate, so byte
+                                        // pressure cannot turn all page slots into idle waiters.
+                                        await this.bufferedPages.acquire(pageSignal);
+                                        pageBufferHeld = true;
+                                        const bytes = await readImageBody(response, { signal: pageSignal, reservation });
+                                        const image = inspectImage(bytes);
+                                        if (host)
+                                            this.sourceRateLimiter.recordSuccess(host);
+                                        return { bytes, image };
                                     });
-                                    // A rejected promise can happen while sibling page work is
-                                    // still running. Attach a no-op handler now; the durable
-                                    // drain below remains the authority that propagates it.
-                                    void receipt.catch(() => { });
-                                    deferredReceipts.push(receipt);
-                                    return reserved.mediaId;
+                                    telemetryCollector.recordImageDownload(route.source, performance.now() - startedAt, downloaded.bytes.length);
                                 }
-                                catch (error) {
-                                    // A confirmed Telegram success followed by a DB failure is
-                                    // ambiguous. Network failures without an explicit Telegram HTTP
-                                    // rejection are ambiguous too: a response can be lost after the
-                                    // server accepted the upload. Only known HTTP rejections (notably
-                                    // 429) may retry with the reserved media ID.
-                                    if (!error?.statusCode) {
-                                        // UNKNOWN is intentionally terminal for this page: retain a
-                                        // redacted, durable stage/class so production can distinguish
-                                        // Telegram transport from post-upload receipt persistence
-                                        // without logging provider responses or credentials.
-                                        await this.queue.checkpoint(task, workerId, {
-                                            lastUploadFailure: {
-                                                position,
-                                                phase: 'TELEGRAM_TRANSPORT',
-                                                class: uploadFailureClass(error),
-                                                at: new Date().toISOString(),
-                                            },
-                                        });
-                                        await this.queue.markUploadUnknown(task.id, position);
-                                        throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
-                                    }
-                                    await this.queue.markUploadRetryable(task.id, position);
-                                    throw error;
+                                finally {
+                                    telemetryCollector.trackActiveDownload(-1);
                                 }
                             }
-                            finally {
-                                releasePageBuffer();
+                            catch (error) {
+                                throw sourceFailure(error);
+                            }
+                            const { bytes, image } = downloaded;
+                            const sha256 = calculateSha256(bytes);
+                            const reserved = await this.reservationBatcher.reserve({ taskId: task.id, pagePosition: position, sha256 });
+                            if (reserved.state === 'PERSISTED')
+                                return reserved.mediaId;
+                            if (reserved.state === 'UNKNOWN')
+                                throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+                            // The body remains byte-reserved through storage and receipt
+                            // persistence, so this only frees the count gate for another
+                            // download; it cannot increase retained media beyond the
+                            // bounded PageByteBudget.
+                            releasePageBuffer();
+                            try {
+                                const uploadStartedAt = performance.now();
+                                telemetryCollector.trackActiveTelegramUpload(1);
+                                let providerKey;
+                                try {
+                                    providerKey = await this.storage.upload(bytes, image.mime, reserved.mediaId, chapterId);
+                                    telemetryCollector.recordTelegramUpload(performance.now() - uploadStartedAt, bytes.length);
+                                }
+                                finally {
+                                    telemetryCollector.trackActiveTelegramUpload(-1);
+                                }
+                                const receipt = this.receiptBatcher.persist({
+                                    taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256,
+                                    bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
+                                    botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,
+                                    shardId: this.storage.getLastShardId?.(reserved.mediaId) || null,
+                                    channelId: this.storage.getLastChannelId?.(reserved.mediaId) || null, createdBy: this.importerUserId,
+                                    messageId: this.storage.getLastMessageId?.(reserved.mediaId) || null,
+                                }).catch(async (error) => {
+                                    await this.queue.checkpoint(task, workerId, {
+                                        lastUploadFailure: {
+                                            position, phase: 'RECEIPT_PERSISTENCE', class: uploadFailureClass(error), at: new Date().toISOString(),
+                                        },
+                                    });
+                                    await this.queue.markUploadUnknown(task.id, position);
+                                    throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+                                });
+                                // A rejected promise can happen while sibling page work is
+                                // still running. Attach a no-op handler now; the durable
+                                // drain below remains the authority that propagates it.
+                                void receipt.catch(() => { });
+                                deferredReceipts.push(receipt);
+                                return reserved.mediaId;
+                            }
+                            catch (error) {
+                                // A confirmed Telegram success followed by a DB failure is
+                                // ambiguous. Network failures without an explicit Telegram HTTP
+                                // rejection are ambiguous too: a response can be lost after the
+                                // server accepted the upload. Only known HTTP rejections (notably
+                                // 429) may retry with the reserved media ID.
+                                if (!error?.statusCode) {
+                                    // UNKNOWN is intentionally terminal for this page: retain a
+                                    // redacted, durable stage/class so production can distinguish
+                                    // Telegram transport from post-upload receipt persistence
+                                    // without logging provider responses or credentials.
+                                    await this.queue.checkpoint(task, workerId, {
+                                        lastUploadFailure: {
+                                            position,
+                                            phase: 'TELEGRAM_TRANSPORT',
+                                            class: uploadFailureClass(error),
+                                            at: new Date().toISOString(),
+                                        },
+                                    });
+                                    await this.queue.markUploadUnknown(task.id, position);
+                                    throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+                                }
+                                await this.queue.markUploadRetryable(task.id, position);
+                                throw error;
                             }
                         }
                         finally {
-                            byteReservation.release();
+                            byteReservation.value?.release();
+                            releasePageBuffer();
                         }
                     });
                 }
