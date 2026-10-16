@@ -533,6 +533,21 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
   });
 
+  it('renews a live onboarding lease without allowing a stale owner to revive it', async () => {
+    await repo.enqueue({ taskType:'CATALOG', workKey:'source:source-a:long-first-pass', priority:'P2',
+      idempotencyKey:'long-first-pass-catalog', payload:{ source:'source-a', sourceWorkId:'long-first-pass' } });
+    const onboarding = await repo.claimNewWorkCatalog('new-work-catalog',30);
+    expect(onboarding).not.toBeNull();
+
+    expect(await repo.renewLease(onboarding!, 'new-work-catalog',90)).toBe(true);
+    expect((await db.query(`SELECT lease_until > now()+interval '80 seconds' AS renewed
+      FROM importer_lite_tasks WHERE id=$1`, [onboarding!.id])).rows[0]).toEqual({ renewed:true });
+    expect(await repo.renewLease(onboarding!, 'stale-worker',90)).toBe(false);
+
+    await db.query(`UPDATE importer_lite_tasks SET lease_until=now()-interval '1 second' WHERE id=$1`, [onboarding!.id]);
+    expect(await repo.renewLease(onboarding!, 'new-work-catalog',90)).toBe(false);
+  });
+
   it('skips a cooled legacy source so a healthy new work is not stranded in the serial onboarding lane', async () => {
     await repo.enqueue({ taskType:'CATALOG', workKey:'source:source-a:old-cooled', priority:'P2',
       idempotencyKey:'old-cooled-catalog', payload:{ source:'source-a', sourceWorkId:'old-cooled' } });
@@ -565,6 +580,30 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(catalog).toHaveBeenCalledTimes(1);
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE idempotency_key='pool-wait-fresh-catalog'`)).rows[0])
       .toMatchObject({ state:'RUNNING' });
+  });
+
+  it('keeps the new-work catalog lease alive while its bounded metadata pass is still running', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1 } as any,
+    );
+    const renewLease = vi.spyOn((runtime as any).queue, 'renewLease').mockResolvedValue(true);
+    let release!: () => void;
+    const catalogPass = new Promise<void>((resolve) => { release = resolve; });
+    const task = { id:'00000000-0000-4000-8000-000000000011' } as any;
+
+    vi.useFakeTimers();
+    try {
+      const running = (runtime as any).withCatalogLeaseHeartbeat(task, 'new-work-catalog', () => catalogPass);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(renewLease).toHaveBeenCalledWith(task, 'new-work-catalog', 90);
+      release();
+      await running;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('counts alias and explicit-tag activation once per work', async () => {

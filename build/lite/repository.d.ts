@@ -152,6 +152,15 @@ export declare class LiteRepository {
      * work onboarding wait forever.
      */
     claimNewWorkCatalog(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    /**
+     * Extend a live task lease without changing its owner or state.  Catalog
+     * work deliberately performs provider HTTP outside a transaction and a new
+     * work can also make a bounded complementary-source pass, so its wall time
+     * can legitimately exceed the initial 90-second claim window.  The owner
+     * and unexpired-lease predicates retain the normal fencing guarantees: a
+     * stale runtime can never revive a task reclaimed by another worker.
+     */
+    renewLease(task: LiteTask, workerId: string, leaseSeconds: number): Promise<boolean>;
     /** Product-level transitions, counted once per work rather than per mapping. */
     metadataProductSnapshot(): Promise<{
         aliasesActivatedWorks: number;

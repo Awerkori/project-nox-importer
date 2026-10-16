@@ -671,6 +671,20 @@ export class LiteRepository {
       RETURNING task.*`, [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
         return result.rows[0] ? asTask(result.rows[0]) : null;
     }
+    /**
+     * Extend a live task lease without changing its owner or state.  Catalog
+     * work deliberately performs provider HTTP outside a transaction and a new
+     * work can also make a bounded complementary-source pass, so its wall time
+     * can legitimately exceed the initial 90-second claim window.  The owner
+     * and unexpired-lease predicates retain the normal fencing guarantees: a
+     * stale runtime can never revive a task reclaimed by another worker.
+     */
+    async renewLease(task, workerId, leaseSeconds) {
+        const result = await this.db.query(`UPDATE importer_lite_tasks
+       SET lease_until=now()+$3::interval,updated_at=now()
+       WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`, [task.id, workerId, `${Math.max(30, leaseSeconds)} seconds`]);
+        return result.rowCount === 1;
+    }
     /** Product-level transitions, counted once per work rather than per mapping. */
     async metadataProductSnapshot() {
         const result = await this.db.query(`

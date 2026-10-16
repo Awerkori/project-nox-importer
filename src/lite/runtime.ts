@@ -71,6 +71,12 @@ const SOURCE_METADATA_LANE_INTERVAL_MS = 5_000;
 // chapter reserve, but one serial task is sufficient and remains below the
 // page/chapter admission path.
 const NEW_WORK_CATALOG_LANE_INTERVAL_MS = 5_000;
+// The first new-work catalog pass may include bounded cross-source metadata
+// collection. Keep its initial claim short for crash recovery, but renew it
+// while that legitimate external I/O is in flight rather than letting the
+// reconciler reclaim a healthy onboarding task mid-pass.
+const CATALOG_TASK_LEASE_SECONDS = 90;
+const CATALOG_TASK_LEASE_HEARTBEAT_MS = 30_000;
 // A new work gets one bounded, network-only complement pass.  It runs outside
 // YSQL transactions and never creates a retroactive task: unavailable sources
 // are simply left to their normal future discovery instead of blocking the
@@ -720,6 +726,41 @@ export class ImporterLiteRuntime {
   }
 
   /**
+   * Catalog HTTP intentionally happens outside YSQL transactions.  A first
+   * catalog pass can outlive its initial lease while it checks bounded,
+   * complementary sources, so retain the normal owner fence with a small
+   * periodic lease renewal.  If ownership has already been lost, finalizers
+   * remain fenced by the repository and the reconciler owns recovery.
+   */
+  private async withCatalogLeaseHeartbeat<T>(task: LiteTask, workerId: string, operation: () => Promise<T>): Promise<T> {
+    let stopped = false;
+    let renewal: Promise<void> | undefined;
+    const renew = (): void => {
+      if (stopped || renewal) return;
+      renewal = this.queue.renewLease(task, workerId, CATALOG_TASK_LEASE_SECONDS)
+        .then((renewed) => {
+          if (!renewed) this.logger.warn('Catalog task lease renewal lost ownership', { taskId: task.id, workerId });
+        })
+        .catch((error: any) => {
+          // A transient YSQL error leaves the existing lease intact. The next
+          // heartbeat retries before that lease expires; no network runs in a
+          // transaction and final persistence remains owner-fenced.
+          this.logger.warn('Catalog task lease renewal failed', { taskId: task.id, error: error?.message });
+        })
+        .finally(() => { renewal = undefined; });
+    };
+    const timer = setInterval(renew, CATALOG_TASK_LEASE_HEARTBEAT_MS);
+    timer.unref();
+    try {
+      return await operation();
+    } finally {
+      stopped = true;
+      clearInterval(timer);
+      await renewal;
+    }
+  }
+
+  /**
    * This is intentionally a one-seat onboarding lane, not a second chapter
    * scheduler.  It only claims unmapped CATALOG rows produced by discovery;
    * once a work exists, every manifest chapter returns to the ordinary
@@ -737,8 +778,9 @@ export class ImporterLiteRuntime {
     if (!this.isRuntimeLeader || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
       || !this.newWorkCatalogGate.tryAcquire()) return;
     try {
-      const task = await this.queue.claimNewWorkCatalog(`${this.runtimeInstanceId}:new-work-catalog`, 90);
-      if (task) await this.catalog(task, `${this.runtimeInstanceId}:new-work-catalog`);
+      const workerId = `${this.runtimeInstanceId}:new-work-catalog`;
+      const task = await this.queue.claimNewWorkCatalog(workerId, CATALOG_TASK_LEASE_SECONDS);
+      if (task) await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
     } catch (error: any) {
       this.logger.warn('New-work catalog lane failed', { error: error?.message });
     } finally {
