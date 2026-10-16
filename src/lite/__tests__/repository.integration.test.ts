@@ -3540,7 +3540,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(normalClaim).not.toHaveBeenCalled();
   });
 
-  it('keeps retained page buffers globally bounded while uploads are slow', async () => {
+  it('releases the page-count permit after durable intent while bytes stay bounded during slow uploads', async () => {
     const key = 'pt-br|default|chapter|6|-';
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
       VALUES ($1,$2,'source-a','a-6','pt-BR','default',true)`, [ids.p1a, key]);
@@ -3554,28 +3554,40 @@ describe('LiteRepository against the additive Lite migration', () => {
       upload: async () => {
         activeUploads++;
         maxActiveUploads = Math.max(maxActiveUploads, activeUploads);
-        await new Promise<void>((resolve) => setTimeout(resolve, 15));
+        // The durable pre-upload batch may join for up to 300 ms. Keep the
+        // first upload live beyond that point so the test observes whether a
+        // freed count permit admits the second download and upload.
+        await new Promise<void>((resolve) => setTimeout(resolve, 750));
         activeUploads--;
         return `telegram-${maxActiveUploads}`;
       }, healthCheck: async () => true, getProviderKey: () => 'telegram',
     };
     const pngA = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    // Keep this media unique across the shared integration fixture so the
+    // durable media-hash reuse fast path cannot skip the slow storage call.
+    pngA[pngA.length - 13] ^= (Date.now() % 251) + 1;
     const pngB = Uint8Array.from(pngA);
-    pngB[pngB.length - 13] ^= 1; // different valid IDAT payload/hash; parser intentionally does not decode pixels
+    pngB[pngB.length - 14] ^= 1; // different valid PNG payload/hash; parser intentionally does not decode pixels
     const originalFetch = globalThis.fetch;
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       const body = url.includes('one') ? pngA : pngB;
       return new Response(body, { status: 200, headers: { 'content-length': String(body.byteLength) } });
     }));
     try {
-      const byteBudget = new PageByteBudget(2 * 1024 * 1024);
+      // 2 MiB live body plus 18 MiB terminal-upgrade headroom per page.
+      // Twenty-two MiB admits this two-page test wave without weakening the
+      // production rule that every admitted body can still finish.
+      const byteBudget = new PageByteBudget(22 * 1024 * 1024);
       const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
         '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 2,
         new AsyncSemaphore(1, 'test-buffered-pages'), new HostRateLimiter(100), 1, undefined, byteBudget);
       await executor.importChapter(task!, 'worker-a');
       expect(byteBudget.snapshot().reservedBytes).toBe(0);
     } finally { vi.stubGlobal('fetch', originalFetch); }
-    expect(maxActiveUploads).toBe(1);
+    // The one-slot count gate protects only download/validation. Once each
+    // body is byte-reserved and its pre-upload intent is durable, the next
+    // page may download while Telegram drains the first one.
+    expect(maxActiveUploads).toBe(2);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);
   });
 
