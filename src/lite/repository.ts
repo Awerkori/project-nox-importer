@@ -739,10 +739,40 @@ export class LiteRepository {
    * work onboarding wait forever.
    */
   async claimNewWorkCatalog(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
-    const result = await this.db.query<Row>(
-      'SELECT * FROM public.importer_lite_claim_new_work_catalog($1,$2::interval)',
-      [workerId, `${Math.max(30, leaseSeconds)} seconds`],
-    );
+    // Keep the runnable-source fence in this single atomic statement rather
+    // than depending solely on a stored function migration. The native app
+    // deploy does not execute migrations, and an old cooled source must not
+    // consume the only first-catalog seat before a healthy new discovery.
+    // This remains a short claim-only YSQL operation: no adapter or network
+    // work occurs until after the returned lease has committed.
+    const result = await this.db.query<Row>(`
+      WITH picked AS (
+        SELECT task.id
+        FROM importer_lite_tasks task
+        JOIN importer_sources source ON source.id=task.payload->>'source'
+        LEFT JOIN importer_lite_source_health health ON health.source=source.id
+        WHERE task.task_type='CATALOG'
+          AND task.work_id IS NULL
+          AND task.state='READY'
+          AND task.monitoring=false
+          AND task.next_run_at<=now()
+          AND source.enabled=true
+          AND (COALESCE(source.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+            OR (source.status='COOLDOWN' AND source.cooldown_until IS NOT NULL AND source.cooldown_until<=now()))
+          AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+          AND (source.cooldown_until IS NULL OR source.cooldown_until<=now())
+          AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+          AND NOT (task.payload ? 'metadataEnrichment')
+          AND NOT (task.payload ? 'metadataSourceRefresh')
+        ORDER BY task.created_at,task.id
+        LIMIT 1 FOR UPDATE OF task SKIP LOCKED
+      )
+      UPDATE importer_lite_tasks task
+      SET state='RUNNING',lease_owner=$1,lease_until=now()+$2::interval,
+        attempts=task.attempts+1,updated_at=now()
+      FROM picked
+      WHERE task.id=picked.id
+      RETURNING task.*`, [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
     return result.rows[0] ? asTask(result.rows[0]) : null;
   }
 
