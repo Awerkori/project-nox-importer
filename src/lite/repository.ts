@@ -1646,8 +1646,9 @@ export class LiteRepository {
   }
 
   /** One bounded recovery turn; it cannot consume the claim path or scan works. */
-  async reconcile(limit = 50, options: { recoverUploadOutcomes?: boolean } = {}): Promise<{ leases: number; retries: number; exhausted: number; uploads: number; uploadReceiptRecoveries: number; publishable: number; publishRepairs: number; sourceCooldownRecoveries: number }> {
+  async reconcile(limit = 50, options: { recoverUploadOutcomes?: boolean; recoverSourceCooldowns?: boolean } = {}): Promise<{ leases: number; retries: number; exhausted: number; uploads: number; uploadReceiptRecoveries: number; publishable: number; publishRepairs: number; sourceCooldownRecoveries: number }> {
     const recoverUploadOutcomes = options.recoverUploadOutcomes !== false;
+    const recoverSourceCooldowns = options.recoverSourceCooldowns !== false;
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
@@ -1696,7 +1697,7 @@ export class LiteRepository {
       // refreshed work first, earliest canonical chapter within each work),
       // then a few routes per source. This runs only in the 30-second
       // reconciler and refreshes the normal ready-work projection.
-      const sourceCooldownRecovery = await client.query<Row>(
+      const sourceCooldownRecovery = recoverSourceCooldowns ? await client.query<Row>(
         `WITH due_candidates AS (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,
@@ -1789,7 +1790,7 @@ export class LiteRepository {
          FROM refreshed`,
         [SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS, SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN,
           SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE, SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK],
-      );
+      ) : { rows: [] as Row[], rowCount: 0 };
       // Recover only a receipt that is independently proven by a durable
       // Telegram media row with the same reserved id and content hash. Since
       // the receipt/media write is normally atomic, this is rare, but it makes

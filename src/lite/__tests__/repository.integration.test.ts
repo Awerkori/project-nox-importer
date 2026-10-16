@@ -756,6 +756,29 @@ describe('LiteRepository against the additive Lite migration', () => {
     memorySpy.mockRestore();
   });
 
+  it('defers only the expensive source-cooldown sweep while the main YSQL pool is queued', async () => {
+    const lanePool = Object.assign(poolFor(db), { waitingCount: 2 });
+    const runtime = new ImporterLiteRuntime(
+      lanePool as Pool, {}, { get: () => null } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    const reconcile = vi.fn().mockResolvedValue({});
+    (runtime as any).queue = { reconcile, recoverDuplicateCanonicalCatalogFailures: vi.fn().mockResolvedValue(0) };
+    for (const method of ['probeDueSourceRecovery', 'refreshSourceFairness', 'refillHistoricalP1Catalog',
+      'refillManifestProvenP1Imports', 'refillStoredMetadataEnrichment', 'runStoredMetadataReplay']) {
+      vi.spyOn(runtime as any, method).mockResolvedValue(undefined);
+    }
+
+    await (runtime as any).runRecoveryTurn();
+
+    expect(reconcile).toHaveBeenCalledWith(50, {
+      recoverUploadOutcomes: true,
+      recoverSourceCooldowns: false,
+    });
+  });
+
   it('prefetches one durable successor without widening the historical fetch lane under shared-pool pressure', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const lanePool = poolFor(db) as any;
@@ -1444,6 +1467,17 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE idempotency_key='healthy-cooldown-gap'`)).rows[0]).toEqual({ state:'READY', reason:null });
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
       WHERE idempotency_key LIKE 'unrouteable-cooldown-%' AND state='RETRY_WAIT'`)).rows[0].count).toBe(50);
+  });
+
+  it('keeps generic recovery live while explicitly deferring only the large source-cooldown sweep', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'deferred-cooldown', priority: 'P1', idempotencyKey: 'deferred-cooldown' });
+    await db.query(`UPDATE importer_lite_tasks SET state='RETRY_WAIT',reason='SOURCE_RATE_LIMITED',next_run_at=now()-interval '1 minute'
+      WHERE idempotency_key='deferred-cooldown'`);
+    const deferred = await repo.reconcile(1, { recoverSourceCooldowns: false });
+    expect(deferred.sourceCooldownRecoveries).toBe(0);
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE idempotency_key='deferred-cooldown'`)).rows[0])
+      .toEqual({ state: 'RETRY_WAIT', reason: 'SOURCE_RATE_LIMITED' });
   });
 
   it('keeps an import ready when a confirmed healthy alternative can satisfy the same chapter', async () => {

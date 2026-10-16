@@ -525,8 +525,14 @@ export class ImporterLiteRuntime {
         const recoverUploadOutcomes = now - this.lastUploadOutcomeRecoveryAt >= UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS;
         if (recoverUploadOutcomes)
             this.lastUploadOutcomeRecoveryAt = now;
+        // Lease, publication and unknown-upload repair must remain live during a
+        // busy P1 wave. The SOURCE_RATE_LIMITED scan is different: it can inspect
+        // thousands of deferred chapter rows and is not needed to settle work
+        // already in flight. Yield only that optional re-admission pass while the
+        // tiny main pool is queued; the next idle recovery turn resumes it.
+        const recoverSourceCooldowns = this.pool.waitingCount === 0;
         try {
-            await this.queue.reconcile(50, { recoverUploadOutcomes });
+            await this.queue.reconcile(50, { recoverUploadOutcomes, recoverSourceCooldowns });
         }
         catch { /* bounded recovery retries next turn */ }
         try {
