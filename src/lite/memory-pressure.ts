@@ -13,6 +13,19 @@ const NORMAL_RSS_MIB = 350;
 const CRITICAL_RSS_MIB = 400;
 const REDUCED_RECOVERY_RSS_MIB = 330;
 const CRITICAL_RECOVERY_RSS_MIB = 370;
+// A process can retain libc/undici arenas after a media wave even after the
+// JS heap, ArrayBuffers and the authoritative page-byte budget have drained.
+// Keeping optional JSON-only metadata paused forever in that condition turns
+// a protective page brake into a permanent onboarding/backfill starvation.
+// This is deliberately not a relaxation of the page brake: it only allows the
+// already one-seat metadata path back after a quiet, low-live-memory window,
+// and immediately closes again if RSS grows.
+const RETAINED_RSS_METADATA_RESUME_AFTER_MS = 60_000;
+const RETAINED_RSS_METADATA_MAX_MIB = 440;
+const RETAINED_RSS_METADATA_MAX_GROWTH_MIB = 4;
+const RETAINED_RSS_METADATA_MAX_EXTERNAL_MIB = 32;
+const RETAINED_RSS_METADATA_MAX_ARRAY_BUFFER_MIB = 16;
+const RETAINED_RSS_METADATA_MAX_RESERVED_PAGE_BYTES = 4 * MIB;
 // Node is started with --expose-gc.  A bounded second collection is useful
 // when allocator-retained page backing stores lift RSS through the CRITICAL
 // fence after the first NORMAL->REDUCED collection.  Do not turn this into a
@@ -28,8 +41,12 @@ export type LiteMemoryPressureSnapshot = {
   heapTotalMiB: number;
   externalMiB: number;
   arrayBuffersMiB: number;
+  /** Approximate RSS not accounted for by V8 heap/external memory. */
+  unattributedNativeMiB: number;
   pageBufferCapacity: number;
   pageByteCapacity: number;
+  /** A high but stable native-RSS plateau may admit one metadata seat only. */
+  retainedRssMetadataResume: boolean;
   pauseLowPriorityMetadata: boolean;
 };
 
@@ -45,6 +62,9 @@ export class LiteMemoryPressureGuard {
   private state: LiteMemoryPressureState = 'NORMAL';
   private snapshotValue: LiteMemoryPressureSnapshot;
   private lastForcedGcAt = 0;
+  private retainedCriticalSince: number | null = null;
+  private retainedCriticalBaselineMiB = 0;
+  private retainedRssMetadataResume = false;
 
   constructor(
     private readonly pageBuffers: AsyncSemaphore,
@@ -84,6 +104,7 @@ export class LiteMemoryPressureGuard {
       this.pageBuffers.setCapacity(profile.pageBufferCapacity);
       this.pageBytes.setCapacityBytes(profile.pageByteCapacity);
     }
+    this.retainedRssMetadataResume = this.updateRetainedRssMetadataResume(observed);
     this.snapshotValue = this.buildSnapshot(observed);
     return this.snapshotValue;
   }
@@ -135,20 +156,65 @@ export class LiteMemoryPressureGuard {
     };
   }
 
+  /**
+   * Distinguish active media pressure from allocator-retained RSS. The latter
+   * is observable when V8/external memory and the page budget are all low for
+   * a full minute, while RSS is flat and still comfortably below the
+   * container ceiling. Keep CRITICAL page admission intact in both cases;
+   * this merely unblocks the existing single-seat metadata/onboarding lane.
+   */
+  private updateRetainedRssMetadataResume(memory: MemoryUsageLike): boolean {
+    if (this.state !== 'CRITICAL') {
+      this.resetRetainedCriticalWindow();
+      return false;
+    }
+    const rssMiB = memory.rss / MIB;
+    const externalMiB = (memory.external || 0) / MIB;
+    const arrayBuffersMiB = (memory.arrayBuffers || 0) / MIB;
+    const pageBytes = this.pageBytes.snapshot().reservedBytes;
+    const lowLiveMemory = externalMiB <= RETAINED_RSS_METADATA_MAX_EXTERNAL_MIB
+      && arrayBuffersMiB <= RETAINED_RSS_METADATA_MAX_ARRAY_BUFFER_MIB
+      && pageBytes <= RETAINED_RSS_METADATA_MAX_RESERVED_PAGE_BYTES;
+
+    if (!lowLiveMemory || rssMiB >= RETAINED_RSS_METADATA_MAX_MIB) {
+      this.resetRetainedCriticalWindow();
+      return false;
+    }
+
+    const now = Date.now();
+    if (this.retainedCriticalSince === null ||
+        rssMiB - this.retainedCriticalBaselineMiB > RETAINED_RSS_METADATA_MAX_GROWTH_MIB) {
+      this.retainedCriticalSince = now;
+      this.retainedCriticalBaselineMiB = rssMiB;
+      return false;
+    }
+    return now - this.retainedCriticalSince >= RETAINED_RSS_METADATA_RESUME_AFTER_MS;
+  }
+
+  private resetRetainedCriticalWindow(): void {
+    this.retainedCriticalSince = null;
+    this.retainedCriticalBaselineMiB = 0;
+  }
+
   private buildSnapshot(memory: MemoryUsageLike): LiteMemoryPressureSnapshot {
+    const heapTotalMiB = Math.round((memory.heapTotal || 0) / MIB);
+    const externalMiB = Math.round((memory.external || 0) / MIB);
+    const rssMiB = Math.round(memory.rss / MIB);
     return {
       state: this.state,
-      rssMiB: Math.round(memory.rss / MIB),
+      rssMiB,
       heapUsedMiB: Math.round((memory.heapUsed || 0) / MIB),
-      heapTotalMiB: Math.round((memory.heapTotal || 0) / MIB),
-      externalMiB: Math.round((memory.external || 0) / MIB),
+      heapTotalMiB,
+      externalMiB,
       arrayBuffersMiB: Math.round((memory.arrayBuffers || 0) / MIB),
+      unattributedNativeMiB: Math.max(0, rssMiB - heapTotalMiB - externalMiB),
       pageBufferCapacity: this.pageBuffers.capacity,
       pageByteCapacity: this.pageBytes.capacityBytes,
       // Reduced mode limits source metadata to one lane in the runtime. It
       // only pauses it completely at CRITICAL so allocator-retained RSS cannot
       // turn a short media burst into a permanent metadata freeze.
-      pauseLowPriorityMetadata: this.state === 'CRITICAL',
+      retainedRssMetadataResume: this.retainedRssMetadataResume,
+      pauseLowPriorityMetadata: this.state === 'CRITICAL' && !this.retainedRssMetadataResume,
     };
   }
 }
