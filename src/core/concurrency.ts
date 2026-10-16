@@ -192,8 +192,13 @@ export const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig> 
   // route. Four six-page chapter waves left the global 24-request fence
   // below sustained occupancy while Telegram remained unused.  A fifth
   // producer may fill those gaps; page downloads stay globally bounded at
-  // 24, with six per chapter and the same 48-page buffer ceiling.
-  mangaflix: { maxChapters: 5, maxPagesPerChapter: 6 },
+  // 24, with six per chapter and the same 48-page buffer ceiling.  The
+  // current Lite runtime has six already-bounded chapter workers, but this
+  // source cap left one idle while all healthy ready work was MangaFlix and
+  // global page downloads averaged only 7.6/24 with no 429.  Admit that
+  // existing sixth worker; this does not widen a page, byte, Telegram, or
+  // YSQL limit.
+  mangaflix: { maxChapters: 6, maxPagesPerChapter: 6 },
   manhastro: { maxChapters: 3, maxPagesPerChapter: 6 },
   mangotoons: { maxChapters: 2, maxPagesPerChapter: 4 },
   megahentai: { maxChapters: 2, maxPagesPerChapter: 4 },

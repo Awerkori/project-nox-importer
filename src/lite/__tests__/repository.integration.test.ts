@@ -1098,7 +1098,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
       new AsyncSemaphore(24, 'fair-downloads'), 4, new AsyncSemaphore(48, 'fair-buffers'), new HostRateLimiter(2), 5);
     const mangaFlix = (executor as any).sourceSlot('mangaflix') as AsyncSemaphore;
-    expect(mangaFlix.capacity).toBe(5);
+    expect(mangaFlix.capacity).toBe(6);
     executor.setFairSourceDemand(['mangaflix', 'source-b', 'source-c', 'source-d', 'source-e']);
     expect(mangaFlix.capacity).toBe(1);
     // A selected fallback is folded into the current bounded set rather than
@@ -3483,7 +3483,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
         BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
-    expect((runtime as any).executor.sourceSlot('mangaflix').capacity).toBe(5);
+    expect((runtime as any).executor.sourceSlot('mangaflix').capacity).toBe(6);
   });
 
   it('keeps six bounded page fetches per active chapter under the global fence', () => {
