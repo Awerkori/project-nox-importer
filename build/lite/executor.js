@@ -674,11 +674,13 @@ export class LiteExecutor {
                             throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
                         const host = hostFor(url);
                         // A count permit owns only the active HTTP body/validation phase.
-                        // The authoritative byte reservation begins after response headers
-                        // arrive: most providers give a trusted small Content-Length, so
-                        // reserving the old universal 2 MiB floor for every page needlessly
-                        // consumed the 64 MiB ceiling while uploads were draining.  A
-                        // lengthless or invalid header retains that conservative floor.
+                        // Reserve bounded room before taking the global request slot. A
+                        // provider can omit Content-Length (MangaFlix does in production),
+                        // and waiting for bytes after its headers had arrived previously
+                        // stranded global request permits on non-reading responses. The
+                        // one-MiB initial reservation is upgraded by readImageBody before
+                        // an oversized chunk is accepted, with the same 20-MiB terminal
+                        // headroom as the former header-first admission.
                         const pageSignal = AbortSignal.timeout(45_000);
                         let pageBufferHeld = false;
                         const releasePageBuffer = () => {
@@ -687,18 +689,25 @@ export class LiteExecutor {
                             pageBufferHeld = false;
                             this.bufferedPages.release();
                         };
-                        // A holder keeps the reservation visible to the outer cleanup even
-                        // though it is assigned inside the bounded async download closure.
+                        // A holder keeps the pre-admitted reservation visible to the outer
+                        // cleanup through download, upload, and receipt persistence.
                         const byteReservation = { value: null };
                         try {
                             let downloaded;
                             try {
-                                const startedAt = performance.now();
-                                telemetryCollector.trackActiveDownload(1);
-                                try {
-                                    downloaded = await this.downloads.runExclusive(async () => {
-                                        if (host)
-                                            await this.sourceRateLimiter.acquire(host, pageSignal);
+                                if (host)
+                                    await this.sourceRateLimiter.acquire(host, pageSignal);
+                                const reservation = await this.pageBytes.reserve(LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES, pageSignal, { completionHeadroomBytes: MAX_IMAGE_BODY_BYTES - LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES });
+                                byteReservation.value = reservation;
+                                // A task awaiting page bytes owns neither a global HTTP slot
+                                // nor a page-body count permit. Once admitted, the count gate
+                                // still bounds active response bodies independently of uploads.
+                                await this.bufferedPages.acquire(pageSignal);
+                                pageBufferHeld = true;
+                                downloaded = await this.downloads.runExclusive(async () => {
+                                    const startedAt = performance.now();
+                                    telemetryCollector.trackActiveDownload(1);
+                                    try {
                                         const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: pageSignal });
                                         if (!response.ok) {
                                             if (response.status === 429 && host)
@@ -707,31 +716,17 @@ export class LiteExecutor {
                                             error.retryAfter = Number(response.headers.get('retry-after') || 0);
                                             throw error;
                                         }
-                                        const declaredValue = Number(response.headers.get('content-length') || '');
-                                        const declaredBytes = Number.isSafeInteger(declaredValue) && declaredValue > 0 && declaredValue <= MAX_IMAGE_BODY_BYTES
-                                            ? declaredValue : null;
-                                        const reservationBytes = declaredBytes || LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES;
-                                        // Keep one full terminal promotion possible. A dishonest
-                                        // short header therefore remains bounded and can drain;
-                                        // normal declared pages retain only their actual bytes.
-                                        const reservation = await this.pageBytes.reserve(reservationBytes, pageSignal, { completionHeadroomBytes: MAX_IMAGE_BODY_BYTES - reservationBytes });
-                                        byteReservation.value = reservation;
-                                        // Header-only responses that are waiting for bytes own no
-                                        // image body. They stay outside this count gate, so byte
-                                        // pressure cannot turn all page slots into idle waiters.
-                                        await this.bufferedPages.acquire(pageSignal);
-                                        pageBufferHeld = true;
                                         const bytes = await readImageBody(response, { signal: pageSignal, reservation });
                                         const image = inspectImage(bytes);
                                         if (host)
                                             this.sourceRateLimiter.recordSuccess(host);
+                                        telemetryCollector.recordImageDownload(route.source, performance.now() - startedAt, bytes.length);
                                         return { bytes, image };
-                                    });
-                                    telemetryCollector.recordImageDownload(route.source, performance.now() - startedAt, downloaded.bytes.length);
-                                }
-                                finally {
-                                    telemetryCollector.trackActiveDownload(-1);
-                                }
+                                    }
+                                    finally {
+                                        telemetryCollector.trackActiveDownload(-1);
+                                    }
+                                });
                             }
                             catch (error) {
                                 throw sourceFailure(error);

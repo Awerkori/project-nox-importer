@@ -3629,12 +3629,14 @@ describe('LiteRepository against the additive Lite migration', () => {
       status: 200, headers: { 'content-length': String(pngA.byteLength) },
     })));
     const pageBuffers = new AsyncSemaphore(1, 'byte-admission-page-buffers');
-    // This capacity admits exactly one 2 MiB initial body plus its 18 MiB
-    // terminal-upgrade headroom. The second page must wait for bytes.
+    const downloads = new AsyncSemaphore(2, 'byte-admission-downloads');
+    // This capacity admits one 1 MiB provisional body plus its 19 MiB
+    // terminal-upgrade headroom. After its tiny declared body refines down,
+    // the second producer still must wait for a full terminal headroom.
     const byteBudget = new PageByteBudget(20 * 1024 * 1024);
     try {
       const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
-        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'byte-admission-downloads'), 2,
+        '00000000-0000-4000-8000-000000000009', downloads, 2,
         pageBuffers, new HostRateLimiter(100), 1, undefined, byteBudget);
       const importing = executor.importChapter(task!, 'worker-a');
       await firstUploadStarted;
@@ -3645,8 +3647,10 @@ describe('LiteRepository against the additive Lite migration', () => {
         new Promise<void>((_, reject) => setTimeout(() => reject(new Error('SECOND_PAGE_DID_NOT_WAIT_FOR_BYTES')), 500)),
       ])).resolves.toBeUndefined();
       // The first page released its count permit before upload; the second is
-      // blocked only on bytes and must not consume that now-free page slot.
+      // blocked only on bytes and must not consume a page slot or a global
+      // HTTP request slot while the first upload drains.
       expect(pageBuffers.active).toBe(0);
+      expect(downloads.active).toBe(0);
       releaseFirstUpload();
       await importing;
     } finally {

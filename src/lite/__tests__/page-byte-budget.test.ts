@@ -41,6 +41,16 @@ describe('PageByteBudget', () => {
     expect(budget.snapshot()).toEqual({ capacityBytes: 2, reservedBytes: 0, waiting: 0 });
   });
 
+  it('returns unused provisional bytes when a response declares a smaller body', async () => {
+    const budget = new PageByteBudget(10);
+    const reservation = await budget.reserve(8);
+    reservation.shrink(3);
+    expect(reservation.reservedBytes).toBe(3);
+    expect(budget.snapshot()).toEqual({ capacityBytes: 10, reservedBytes: 3, waiting: 0 });
+    reservation.release();
+    expect(budget.snapshot()).toEqual({ capacityBytes: 10, reservedBytes: 0, waiting: 0 });
+  });
+
   it('admits a useful lengthless wave while retaining terminal-upgrade headroom', async () => {
     const budget = new PageByteBudget(20);
     const first = await budget.reserve(2, undefined, { completionHeadroomBytes: 18 });

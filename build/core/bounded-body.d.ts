@@ -39,6 +39,8 @@ export interface BufferReservationLike {
     readonly isCommitted: boolean;
     readonly isReleased: boolean;
     upgrade(newBytes: number, signal?: AbortSignal, options?: BufferReservationRequestOptions): Promise<void>;
+    /** Optional refinement for a trusted small Content-Length after provisional admission. */
+    shrink?(newBytes: number): void;
     release(): void;
 }
 export declare const MAX_IMAGE_BODY_BYTES: number;
