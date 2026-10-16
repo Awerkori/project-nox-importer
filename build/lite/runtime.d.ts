@@ -39,6 +39,7 @@ export declare class ImporterLiteRuntime {
     private lastMetadataEnrichmentAt;
     private lastMetadataReplayAt;
     private lastSourceMetadataRefillAt;
+    private sourceMetadataProducer;
     private lastSourceRecoveryProbeAt;
     private lastUploadOutcomeRecoveryAt;
     private lastManifestP1RepairAt;
@@ -121,6 +122,7 @@ export declare class ImporterLiteRuntime {
      * sources; YSQL preparation and persistence remain gated below.
      */
     private refillSourceMetadataEnrichment;
+    private noteSourceMetadataProducer;
     /** Dedicated bounded workers give source refetch continuous progress without
      * consuming chapter workers or competing with P0/P1 task selection. */
     private runSourceMetadataRefresh;
