@@ -60,6 +60,11 @@ const SAFE_BUFFERED_PAGE_CAP = 24;
 const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
 const STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS = 15_000;
 const SOURCE_METADATA_REFILL_INTERVAL_MS = 15_000;
+// A recently productive source may own hundreds of still-unclassified
+// mappings while the durable cursor is walking providers that are already
+// exhausted. Reuse it for only a short burst, then fall back to the cursor so
+// fairness and alternative metadata remain intact.
+const SOURCE_METADATA_PREFERRED_SOURCE_BURST = 3;
 // A two-source probe is intentionally cheap, but many providers can be
 // exhausted while a later healthy provider still has historical debt. Advance
 // through a few empty turns immediately; then return to the normal cadence so
@@ -153,6 +158,8 @@ export class ImporterLiteRuntime {
     lastMetadataEnrichmentAt = 0;
     lastMetadataReplayAt = 0;
     lastSourceMetadataRefillAt = 0;
+    sourceMetadataPreferredSource = null;
+    sourceMetadataPreferredSourceBurst = 0;
     // The historical producer is intentionally low-rate. Persist its last
     // admission decision in the heartbeat so a guarded skip cannot look like a
     // silently stalled backlog after a native deploy.
@@ -667,7 +674,7 @@ export class ImporterLiteRuntime {
      * STAFF/P0/P1 reserve. At most four network-only tasks are admitted across
      * sources; YSQL preparation and persistence remain gated below.
      */
-    async refillSourceMetadataEnrichment(replaceCompletedTask = false, emptyProbeTurn = 0) {
+    async refillSourceMetadataEnrichment(replaceCompletedTask = false, emptyProbeTurn = 0, preferredSource) {
         if (!this.isRuntimeLeader || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS))
             return;
         // P2 metadata must yield before chapter receipts/finalization queue on
@@ -705,7 +712,14 @@ export class ImporterLiteRuntime {
             // fetching, its merge is still serialised below, and this avoids a
             // feedback loop where a paused metadata lane repeatedly builds READY
             // work that only wakes on the next timer tick.
-            const admitted = await this.queue.refillSourceMetadataEnrichment(constrainedPool ? 1 : 4, constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : undefined);
+            const capacity = constrainedPool ? 1 : 4;
+            const probeLimit = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : undefined;
+            // Preserve the ordinary two-argument call shape when no source was
+            // recently productive. Besides keeping the path minimal, this makes
+            // the preference opt-in rather than part of every producer tick.
+            const admitted = preferredSource
+                ? await this.queue.refillSourceMetadataEnrichment(capacity, probeLimit, preferredSource)
+                : await this.queue.refillSourceMetadataEnrichment(capacity, probeLimit);
             this.noteSourceMetadataProducer(admitted ? 'ADMITTED' : 'NO_CANDIDATE', admitted);
             // Do not leave a healthy P2 seat idle for 15s merely because this
             // bounded two-source horizon was exhausted. The durable source cursor
@@ -738,6 +752,30 @@ export class ImporterLiteRuntime {
             error: error ? String(error).slice(0, 240) : null,
         };
     }
+    /**
+     * Keep at most a few consecutive selections on a proven productive source.
+     * This is deliberately process-local: the durable cursor still guarantees
+     * recovery and fairness after a restart, while a live runtime avoids an
+     * expensive lap over exhausted providers between every useful refetch.
+     */
+    nextPreferredSourceMetadataSource(source) {
+        const normalized = typeof source === 'string' ? source.trim() : '';
+        if (!normalized)
+            return undefined;
+        if (this.sourceMetadataPreferredSource === normalized) {
+            this.sourceMetadataPreferredSourceBurst += 1;
+        }
+        else {
+            this.sourceMetadataPreferredSource = normalized;
+            this.sourceMetadataPreferredSourceBurst = 1;
+        }
+        if (this.sourceMetadataPreferredSourceBurst > SOURCE_METADATA_PREFERRED_SOURCE_BURST) {
+            this.sourceMetadataPreferredSource = null;
+            this.sourceMetadataPreferredSourceBurst = 0;
+            return undefined;
+        }
+        return normalized;
+    }
     /** Dedicated bounded workers give source refetch continuous progress without
      * consuming chapter workers or competing with P0/P1 task selection. */
     async runSourceMetadataRefresh() {
@@ -761,12 +799,14 @@ export class ImporterLiteRuntime {
         if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire())
             return;
         let claimed = false;
+        let completedSource;
         try {
             const workerId = `${this.runtimeInstanceId}:source-metadata`;
             const claimStartedAt = performance.now();
             const task = await this.queue.claimSourceMetadataRefresh(workerId, 90);
             if (task) {
                 claimed = true;
+                completedSource = typeof task.payload?.source === 'string' ? task.payload.source : undefined;
                 // Do not wait for this request's HTTP phase before filling the other
                 // approved seat. The lane and fetch gates make this a hard maximum of
                 // four network-only operations; it only removes timer-created idle time.
@@ -786,7 +826,8 @@ export class ImporterLiteRuntime {
             // polling its full candidate set, while a completed task immediately
             // frees its durable replacement instead of waiting for the 15 s timer.
             if (claimed && this.isRuntimeLeader) {
-                void this.refillSourceMetadataEnrichment(true)
+                const preferredSource = this.nextPreferredSourceMetadataSource(completedSource);
+                void this.refillSourceMetadataEnrichment(true, 0, preferredSource)
                     .then(() => this.runSourceMetadataRefresh())
                     .catch((error) => this.logger.warn('Source metadata replacement failed', { error: error?.message }));
             }

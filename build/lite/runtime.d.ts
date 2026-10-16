@@ -39,6 +39,8 @@ export declare class ImporterLiteRuntime {
     private lastMetadataEnrichmentAt;
     private lastMetadataReplayAt;
     private lastSourceMetadataRefillAt;
+    private sourceMetadataPreferredSource;
+    private sourceMetadataPreferredSourceBurst;
     private sourceMetadataProducer;
     private lastSourceRecoveryProbeAt;
     private lastUploadOutcomeRecoveryAt;
@@ -123,6 +125,13 @@ export declare class ImporterLiteRuntime {
      */
     private refillSourceMetadataEnrichment;
     private noteSourceMetadataProducer;
+    /**
+     * Keep at most a few consecutive selections on a proven productive source.
+     * This is deliberately process-local: the durable cursor still guarantees
+     * recovery and fairness after a restart, while a live runtime avoids an
+     * expensive lap over exhausted providers between every useful refetch.
+     */
+    private nextPreferredSourceMetadataSource;
     /** Dedicated bounded workers give source refetch continuous progress without
      * consuming chapter workers or competing with P0/P1 task selection. */
     private runSourceMetadataRefresh;

@@ -139,7 +139,11 @@ export class LiteRepository {
    * Selection rotates across sources, honors source cooldown/eligibility, and
    * records PENDING durably before inserting an idempotent catalog task.
    */
-  async refillSourceMetadataEnrichment(maxPending = 2, sourceProbeLimit = SOURCE_METADATA_SOURCE_PROBE_LIMIT): Promise<number> {
+  async refillSourceMetadataEnrichment(
+    maxPending = 2,
+    sourceProbeLimit = SOURCE_METADATA_SOURCE_PROBE_LIMIT,
+    preferredSource?: string,
+  ): Promise<number> {
     const ceiling = Math.max(1, Math.min(2, maxPending));
     const probeLimit = Math.max(1, Math.min(SOURCE_METADATA_SOURCE_PROBE_LIMIT, sourceProbeLimit));
     const client = await this.sourceMetadataDb.connect();
@@ -186,6 +190,26 @@ export class LiteRepository {
             WHERE m.source=s.id AND m.work_id IS NOT NULL
               AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE'))
         ORDER BY s.id LIMIT $2`;
+      // A source that just completed a healthy refetch is known to have paid
+      // the admission and adapter costs already. Keep it in this *single*
+      // next bounded selection so a deep, productive source is not revisited
+      // only after a full cursor lap through providers whose historical rows
+      // are already classified. The normal cursor probe remains alongside it:
+      // this is a small throughput hint, never a replacement for durable
+      // source fairness and it remains safe to lose on restart.
+      const preferred = typeof preferredSource === 'string' && preferredSource.trim()
+        ? await client.query<{ source: string }>(`
+            SELECT s.id AS source
+            FROM importer_sources s
+            LEFT JOIN importer_lite_source_health health ON health.source=s.id
+            WHERE s.id=$1 AND s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
+              AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+              AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+              AND EXISTS (SELECT 1 FROM importer_work_mappings m
+                WHERE m.source=s.id AND m.work_id IS NOT NULL
+                  AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE'))
+            LIMIT 1`, [preferredSource.trim()])
+        : { rows: [] as { source: string }[] };
       const sourceProbe = await client.query<{ source: string }>(`
         WITH after_cursor AS (
           ${eligibleSourceSelect(lastSource ? 's.id>$1::text' : '$1::text IS NULL')}
@@ -196,7 +220,10 @@ export class LiteRepository {
         UNION ALL
         SELECT source FROM wrapped
         LIMIT $2`, [lastSource, probeLimit]);
-      const probeSources = sourceProbe.rows.map((row) => String(row.source));
+      const probeSources = [...new Set([
+        ...preferred.rows.map((row) => String(row.source)),
+        ...sourceProbe.rows.map((row) => String(row.source)),
+      ])];
       if (!probeSources.length) {
         await client.query('COMMIT');
         return 0;
