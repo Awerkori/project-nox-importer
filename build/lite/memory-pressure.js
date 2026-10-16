@@ -11,6 +11,11 @@ const NORMAL_RSS_MIB = 350;
 const CRITICAL_RSS_MIB = 400;
 const REDUCED_RECOVERY_RSS_MIB = 330;
 const CRITICAL_RECOVERY_RSS_MIB = 370;
+// Node is started with --expose-gc.  A bounded second collection is useful
+// when allocator-retained page backing stores lift RSS through the CRITICAL
+// fence after the first NORMAL->REDUCED collection.  Do not turn this into a
+// continuous stop-the-world loop under genuine live-media pressure.
+const FORCED_GC_COOLDOWN_MS = 10_000;
 /**
  * Small runtime-local memory brake for the Lite media path. It controls only
  * future page admission: an in-flight image/upload keeps its permits and can
@@ -23,6 +28,7 @@ export class LiteMemoryPressureGuard {
     normalPageBufferCapacity;
     state = 'NORMAL';
     snapshotValue;
+    lastForcedGcAt = 0;
     constructor(pageBuffers, pageBytes, normalPageBufferCapacity) {
         this.pageBuffers = pageBuffers;
         this.pageBytes = pageBytes;
@@ -31,14 +37,22 @@ export class LiteMemoryPressureGuard {
     }
     sample(memory) {
         let observed = memory || process.memoryUsage();
+        const rssMiBBeforeGc = observed.rss / MIB;
         // V8's heap can remain small while completed image ArrayBuffers are ready
-        // for collection. Before cutting page admission on RSS alone, give that
-        // exact transition one opportunity to release dead backing stores. This
-        // runs only in production (tests pass an explicit snapshot) and never
-        // relaxes REDUCED/CRITICAL protection for genuinely live buffers.
-        if (!memory && this.state === 'NORMAL' && observed.rss / MIB >= NORMAL_RSS_MIB) {
+        // for collection.  A first collection happens before NORMAL yields.  A
+        // second, cooldown-bounded collection happens only if retained RSS would
+        // otherwise move REDUCED into CRITICAL.  That distinction matters for the
+        // lengthless-page pipeline: its durable byte budget can already be empty
+        // while the previous wave's dead backing stores still occupy RSS.
+        const shouldCollect = this.state === 'NORMAL'
+            ? rssMiBBeforeGc >= NORMAL_RSS_MIB
+            : this.state === 'REDUCED'
+                ? rssMiBBeforeGc >= CRITICAL_RSS_MIB
+                : false;
+        if (!memory && shouldCollect && Date.now() - this.lastForcedGcAt >= FORCED_GC_COOLDOWN_MS) {
             const gc = globalThis.gc;
             if (typeof gc === 'function') {
+                this.lastForcedGcAt = Date.now();
                 gc();
                 observed = process.memoryUsage();
             }

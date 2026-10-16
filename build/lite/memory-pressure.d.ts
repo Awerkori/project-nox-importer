@@ -25,6 +25,7 @@ export declare class LiteMemoryPressureGuard {
     private readonly normalPageBufferCapacity;
     private state;
     private snapshotValue;
+    private lastForcedGcAt;
     constructor(pageBuffers: AsyncSemaphore, pageBytes: PageByteBudget, normalPageBufferCapacity: number);
     sample(memory?: MemoryUsageLike): LiteMemoryPressureSnapshot;
     snapshot(): LiteMemoryPressureSnapshot;
