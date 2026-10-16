@@ -3591,6 +3591,65 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);
   });
 
+  it('does not occupy a page-count slot while waiting for bounded byte admission', async () => {
+    const key = 'pt-br|default|chapter|6-byte-admission|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
+      VALUES ($1,$2,'source-a','a-6-byte-admission','pt-BR','default',true)`, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key, priority: 'P1', idempotencyKey: 'byte-admission-order',
+      payload: { displayNumber: '6.2', chapterTitle: 'Six Point Two', language: 'pt-BR', edition: 'default', orderKey: '6.2' } });
+    const task = await repo.claim('worker-a', 120);
+    const registry = { get: () => ({ id: 'source-a', fetchChapterPages: async () => ['https://source-a.test/one.png', 'https://source-a.test/two.png'] }) } as unknown as SourceRegistry;
+    let startFirstUpload!: () => void;
+    let releaseFirstUpload!: () => void;
+    const firstUploadStarted = new Promise<void>((resolve) => { startFirstUpload = resolve; });
+    const firstUploadGate = new Promise<void>((resolve) => { releaseFirstUpload = resolve; });
+    let uploadCount = 0;
+    const storage: StorageProvider = {
+      upload: async () => {
+        uploadCount++;
+        if (uploadCount === 1) {
+          startFirstUpload();
+          await firstUploadGate;
+        }
+        return `telegram-byte-admission-${uploadCount}`;
+      }, healthCheck: async () => true, getProviderKey: () => 'telegram',
+    };
+    const pngA = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    pngA[pngA.length - 13] ^= (Date.now() % 251) + 1;
+    const pngB = Uint8Array.from(pngA);
+    pngB[pngB.length - 14] ^= 1;
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => new Response(url.includes('one') ? pngA : pngB, {
+      status: 200, headers: { 'content-length': String(pngA.byteLength) },
+    })));
+    const pageBuffers = new AsyncSemaphore(1, 'byte-admission-page-buffers');
+    // This capacity admits exactly one 2 MiB initial body plus its 18 MiB
+    // terminal-upgrade headroom. The second page must wait for bytes.
+    const byteBudget = new PageByteBudget(20 * 1024 * 1024);
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'byte-admission-downloads'), 2,
+        pageBuffers, new HostRateLimiter(100), 1, undefined, byteBudget);
+      const importing = executor.importChapter(task!, 'worker-a');
+      await firstUploadStarted;
+      await expect(Promise.race([
+        (async () => {
+          while (byteBudget.snapshot().waiting < 1) await new Promise<void>((resolve) => setTimeout(resolve, 2));
+        })(),
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('SECOND_PAGE_DID_NOT_WAIT_FOR_BYTES')), 500)),
+      ])).resolves.toBeUndefined();
+      // The first page released its count permit before upload; the second is
+      // blocked only on bytes and must not consume that now-free page slot.
+      expect(pageBuffers.active).toBe(0);
+      releaseFirstUpload();
+      await importing;
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
+    expect(byteBudget.snapshot()).toMatchObject({ reservedBytes: 0, waiting: 0 });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);
+  });
+
   it('overlaps the next bounded page wave while scalar receipt persistence waits, then drains before completion', async () => {
     const key = 'pt-br|default|chapter|6-receipt-overlap|-';
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
