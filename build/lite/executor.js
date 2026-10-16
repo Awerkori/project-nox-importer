@@ -675,32 +675,27 @@ export class LiteExecutor {
                         const host = hostFor(url);
                         if (host)
                             await this.sourceRateLimiter.acquire(host);
-                        // A count permit protects the download/validation stage.  Once the
-                        // pre-upload intent is durable, the exact page body is protected by
-                        // `byteReservation` until its receipt finishes; retaining the count
-                        // permit through Telegram/YSQL made completed downloads block the
-                        // next source request despite unused global download capacity.
+                        // Reserve the authoritative payload budget *before* consuming a
+                        // page-count slot.  A byte waiter holds no media at all; admitting
+                        // it through `bufferedPages` first used to fill all 24 count slots
+                        // with producers waiting for bytes, leaving only a fraction able to
+                        // fetch.  The byte budget has the terminal-upgrade priority needed
+                        // to make this ordering deadlock-free.
                         const pageSignal = AbortSignal.timeout(45_000);
-                        await this.bufferedPages.acquire(pageSignal);
-                        let pageBufferHeld = true;
-                        const releasePageBuffer = () => {
-                            if (!pageBufferHeld)
-                                return;
-                            pageBufferHeld = false;
-                            this.bufferedPages.release();
-                        };
+                        const byteReservation = await this.pageBytes.reserve(LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES, pageSignal, { completionHeadroomBytes: 20 * 1024 * 1024 - LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES });
                         try {
-                            // Reserve bytes before requesting the body. The reservation grows
-                            // from the response length while it is read and remains held until
-                            // Telegram has acknowledged the send. The deferred receipt only
-                            // captures scalar metadata, so releasing here still bounds actual
-                            // retained media rather than merely page promises.
-                            // A response header is not available until after fetch begins.
-                            // Reserve 2 MiB initially and retain only the remaining 18 MiB as
-                            // an admission predicate for one terminal upgrade. This permits a
-                            // useful wave of lengthless images without risking the historic
-                            // all-readers-waiting-on-growth deadlock.
-                            const byteReservation = await this.pageBytes.reserve(LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES, pageSignal, { completionHeadroomBytes: 20 * 1024 * 1024 - LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES });
+                            // The count permit protects only the download/validation stage.
+                            // Once the pre-upload intent is durable, the exact page body stays
+                            // byte-reserved through storage and receipt persistence, so the
+                            // next source request need not wait for Telegram/YSQL.
+                            await this.bufferedPages.acquire(pageSignal);
+                            let pageBufferHeld = true;
+                            const releasePageBuffer = () => {
+                                if (!pageBufferHeld)
+                                    return;
+                                pageBufferHeld = false;
+                                this.bufferedPages.release();
+                            };
                             try {
                                 let downloaded;
                                 try {
@@ -804,11 +799,11 @@ export class LiteExecutor {
                                 }
                             }
                             finally {
-                                byteReservation.release();
+                                releasePageBuffer();
                             }
                         }
                         finally {
-                            releasePageBuffer();
+                            byteReservation.release();
                         }
                     });
                 }
