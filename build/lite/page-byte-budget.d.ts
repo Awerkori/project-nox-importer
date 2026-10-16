@@ -32,11 +32,12 @@ export declare class PageByteReservation {
     private readonly budget;
     private _reservedBytes;
     private _released;
+    private completionInProgress;
     constructor(budget: PageByteBudget, _reservedBytes: number);
     get reservedBytes(): number;
     get isCommitted(): boolean;
     get isReleased(): boolean;
-    upgrade(newBytes: number, signal?: AbortSignal, _options?: BufferReservationRequestOptions): Promise<void>;
+    upgrade(newBytes: number, signal?: AbortSignal, options?: BufferReservationRequestOptions): Promise<void>;
     /**
      * Headers can refine the conservative lengthless admission downward before
      * the body is read. Unlike upgrade this is synchronous: it only returns
@@ -47,6 +48,7 @@ export declare class PageByteReservation {
 }
 export declare class PageByteBudget {
     private reservedBytes;
+    private completionInProgress;
     private readonly waiters;
     private _capacityBytes;
     constructor(capacityBytes?: number);
@@ -62,6 +64,8 @@ export declare class PageByteBudget {
         completionHeadroomBytes?: number;
     }): Promise<PageByteReservation>;
     grow(_reservation: PageByteReservation, bytes: number, signal?: AbortSignal): Promise<void>;
+    beginCompletion(): void;
+    endCompletion(): void;
     release(bytes: number): void;
     private acquire;
     private canReserve;

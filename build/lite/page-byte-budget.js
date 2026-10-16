@@ -48,6 +48,7 @@ export class PageByteReservation {
     budget;
     _reservedBytes;
     _released = false;
+    completionInProgress = false;
     constructor(budget, _reservedBytes) {
         this.budget = budget;
         this._reservedBytes = _reservedBytes;
@@ -58,11 +59,20 @@ export class PageByteReservation {
     // is no separate committed state to track.
     get isCommitted() { return false; }
     get isReleased() { return this._released; }
-    async upgrade(newBytes, signal, _options) {
+    async upgrade(newBytes, signal, options) {
         if (this._released || newBytes <= this._reservedBytes)
             return;
         await this.budget.grow(this, newBytes - this._reservedBytes, signal);
         this._reservedBytes = newBytes;
+        // Initial admission reserves headroom for exactly one started stream to
+        // make terminal progress. Once this body has actually grown, that
+        // headroom is represented by its real reservation; keeping it as a
+        // second virtual reservation would strand usable bytes behind one large
+        // page. Other growth requests remain priority waiters in the same budget.
+        if (options?.intent === 'COMPLETION' && !this.completionInProgress) {
+            this.completionInProgress = true;
+            this.budget.beginCompletion();
+        }
     }
     /**
      * Headers can refine the conservative lengthless admission downward before
@@ -80,11 +90,14 @@ export class PageByteReservation {
         if (this._released)
             return;
         this._released = true;
+        if (this.completionInProgress)
+            this.budget.endCompletion();
         this.budget.release(this._reservedBytes);
     }
 }
 export class PageByteBudget {
     reservedBytes = 0;
+    completionInProgress = 0;
     waiters = [];
     _capacityBytes;
     constructor(capacityBytes = LITE_PAGE_BUFFER_BUDGET_BYTES) {
@@ -117,6 +130,14 @@ export class PageByteBudget {
     }
     async grow(_reservation, bytes, signal) {
         await this.acquire(bytes, 'UPGRADE', signal);
+    }
+    beginCompletion() {
+        this.completionInProgress++;
+        this.drain();
+    }
+    endCompletion() {
+        this.completionInProgress = Math.max(0, this.completionInProgress - 1);
+        this.drain();
     }
     release(bytes) {
         this.reservedBytes = Math.max(0, this.reservedBytes - bytes);
@@ -154,7 +175,12 @@ export class PageByteBudget {
         });
     }
     canReserve(bytes, completionHeadroomBytes = 0) {
-        return this.reservedBytes + bytes + completionHeadroomBytes <= this.capacityBytes;
+        // A real upgrade is the completion headroom made concrete. Retaining the
+        // virtual headroom after that point double-counts one bounded body and
+        // unnecessarily blocks ordinary small pages. A second terminal body is
+        // still governed by the regular UPGRADE priority and byte ceiling.
+        const requiredHeadroom = this.completionInProgress > 0 ? 0 : completionHeadroomBytes;
+        return this.reservedBytes + bytes + requiredHeadroom <= this.capacityBytes;
     }
     drain() {
         while (this.waiters.length) {

@@ -93,10 +93,11 @@ describe('PageByteBudget', () => {
 
     expect(budget.snapshot()).toEqual({ capacityBytes: 48 * mib, reservedBytes: 24 * mib, waiting: 0 });
 
-    await reservations[0].upgrade(20 * mib);
-    // Once one active body takes its terminal promotion, a subsequent
-    // speculative request is correctly held back. The 24-page admission is
-    // therefore compatible with the single-body completion guarantee.
+    await reservations[0].upgrade(20 * mib, undefined, { intent: 'COMPLETION' });
+    // Once one active body takes its terminal promotion, that real 20 MiB
+    // reservation replaces the one virtual completion headroom. A following
+    // small producer can use the remaining bytes, but a second terminal
+    // promotion still waits for the first to drain.
     let admitted = false;
     const waiting = budget.reserve(
       LITE_PAGE_BUFFER_UNKNOWN_REDUCED_INITIAL_BYTES,
@@ -106,12 +107,18 @@ describe('PageByteBudget', () => {
       admitted = true;
       return reservation;
     });
-    expect(admitted).toBe(false);
-    expect(budget.snapshot()).toEqual({ capacityBytes: 48 * mib, reservedBytes: 43 * mib, waiting: 1 });
-
-    reservations[0].release();
     const next = await waiting;
     expect(admitted).toBe(true);
+    expect(budget.snapshot()).toEqual({ capacityBytes: 48 * mib, reservedBytes: 44 * mib, waiting: 0 });
+
+    let secondUpgradeDone = false;
+    const secondUpgrade = reservations[1].upgrade(20 * mib, undefined, { intent: 'COMPLETION' }).then(() => { secondUpgradeDone = true; });
+    await Promise.resolve();
+    expect(secondUpgradeDone).toBe(false);
+
+    reservations[0].release();
+    await secondUpgrade;
+    expect(secondUpgradeDone).toBe(true);
     next.release();
     for (const reservation of reservations.slice(1)) reservation.release();
     expect(budget.snapshot()).toEqual({ capacityBytes: 48 * mib, reservedBytes: 0, waiting: 0 });
@@ -132,7 +139,7 @@ describe('PageByteBudget', () => {
       ));
     }
     expect(budget.snapshot()).toEqual({ capacityBytes: 64 * mib, reservedBytes: 46 * mib, waiting: 0 });
-    await reservations[0].upgrade(20 * mib);
+    await reservations[0].upgrade(20 * mib, undefined, { intent: 'COMPLETION' });
     expect(budget.snapshot()).toEqual({ capacityBytes: 64 * mib, reservedBytes: 64 * mib, waiting: 0 });
     for (const reservation of reservations) reservation.release();
   });

@@ -68,6 +68,7 @@ export type PageByteBudgetSnapshot = {
 
 export class PageByteReservation {
   private _released = false;
+  private completionInProgress = false;
 
   constructor(private readonly budget: PageByteBudget, private _reservedBytes: number) {}
 
@@ -81,11 +82,20 @@ export class PageByteReservation {
   async upgrade(
     newBytes: number,
     signal?: AbortSignal,
-    _options?: BufferReservationRequestOptions,
+    options?: BufferReservationRequestOptions,
   ): Promise<void> {
     if (this._released || newBytes <= this._reservedBytes) return;
     await this.budget.grow(this, newBytes - this._reservedBytes, signal);
     this._reservedBytes = newBytes;
+    // Initial admission reserves headroom for exactly one started stream to
+    // make terminal progress. Once this body has actually grown, that
+    // headroom is represented by its real reservation; keeping it as a
+    // second virtual reservation would strand usable bytes behind one large
+    // page. Other growth requests remain priority waiters in the same budget.
+    if (options?.intent === 'COMPLETION' && !this.completionInProgress) {
+      this.completionInProgress = true;
+      this.budget.beginCompletion();
+    }
   }
 
   /**
@@ -103,12 +113,14 @@ export class PageByteReservation {
   release(): void {
     if (this._released) return;
     this._released = true;
+    if (this.completionInProgress) this.budget.endCompletion();
     this.budget.release(this._reservedBytes);
   }
 }
 
 export class PageByteBudget {
   private reservedBytes = 0;
+  private completionInProgress = 0;
   private readonly waiters: Waiter[] = [];
   private _capacityBytes: number;
 
@@ -153,6 +165,16 @@ export class PageByteBudget {
     await this.acquire(bytes, 'UPGRADE', signal);
   }
 
+  beginCompletion(): void {
+    this.completionInProgress++;
+    this.drain();
+  }
+
+  endCompletion(): void {
+    this.completionInProgress = Math.max(0, this.completionInProgress - 1);
+    this.drain();
+  }
+
   release(bytes: number): void {
     this.reservedBytes = Math.max(0, this.reservedBytes - bytes);
     this.drain();
@@ -195,7 +217,12 @@ export class PageByteBudget {
   }
 
   private canReserve(bytes: number, completionHeadroomBytes = 0): boolean {
-    return this.reservedBytes + bytes + completionHeadroomBytes <= this.capacityBytes;
+    // A real upgrade is the completion headroom made concrete. Retaining the
+    // virtual headroom after that point double-counts one bounded body and
+    // unnecessarily blocks ordinary small pages. A second terminal body is
+    // still governed by the regular UPGRADE priority and byte ceiling.
+    const requiredHeadroom = this.completionInProgress > 0 ? 0 : completionHeadroomBytes;
+    return this.reservedBytes + bytes + requiredHeadroom <= this.capacityBytes;
   }
 
   private drain(): void {
