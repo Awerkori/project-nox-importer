@@ -719,8 +719,13 @@ export class ImporterLiteRuntime {
    * low-priority metadata lanes.
    */
   private async runNewWorkCatalog(): Promise<void> {
-    if (!this.isRuntimeLeader || this.pool.waitingCount > 0
-      || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
+    // A chapter receipt can leave a short-lived pool waiter on every busy
+    // wave.  Treating that instantaneous sample as a hard stop recreated the
+    // exact starvation this lane exists to prevent.  The lane is one task
+    // wide, performs no network inside a transaction, and the normal pool
+    // queue naturally serializes its short DB phases; site and memory remain
+    // the admission guardrails.
+    if (!this.isRuntimeLeader || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
       || !this.newWorkCatalogGate.tryAcquire()) return;
     try {
       const task = await this.queue.claimNewWorkCatalog(`${this.runtimeInstanceId}:new-work-catalog`, 90);
