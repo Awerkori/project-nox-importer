@@ -12,12 +12,14 @@
  * a backpressure deadlock.
  */
 export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
-// Production page bodies in the public throughput window were predominantly
-// sub-2 MiB. Start a lengthless body at that measured size and reserve only
-// admission headroom for one 20 MiB terminal promotion; this lets normal and
-// reduced profiles use their bounded page slots without increasing either
-// profile's total byte ceiling.
-export const LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES = 2 * 1024 * 1024;
+// A source that omits Content-Length cannot receive exact admission before
+// its response headers arrive.  Production bodies are usually small, but the
+// former 2 MiB placeholder filled the 48 MiB REDUCED profile at 15--16
+// in-flight pages even though the global download fence is 24. Start at 1 MiB
+// and retain terminal-promotion headroom through the 20 MiB hard bound. Any
+// larger stream upgrades before accepting the overflowing chunk, so this is
+// an admission estimate only: it never weakens the authoritative byte cap.
+export const LITE_PAGE_BUFFER_UNKNOWN_INITIAL_BYTES = 1 * 1024 * 1024;
 // `readImageBody` fills a declared-length response directly into its final
 // Uint8Array, so the former streamed-chunks-plus-final-body duplication no
 // longer determines the normal high-water mark. Keep a deliberately bounded
