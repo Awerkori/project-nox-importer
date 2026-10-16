@@ -718,6 +718,15 @@ export class LiteExecutor {
                                             throw error;
                                         }
                                         const bytes = await readImageBody(response, { signal: pageSignal, reservation });
+                                        // MangaFlix omits Content-Length.  Its stream must retain
+                                        // the 20 MiB terminal reservation while chunks are being
+                                        // assembled, but most completed pages are far smaller.
+                                        // Once the exact validated body exists, retain only its
+                                        // real bytes through Telegram and durable receipt storage.
+                                        // `completeBody` also returns this response's terminal
+                                        // headroom, so the next lengthless response keeps its own
+                                        // bounded completion guarantee.
+                                        reservation.completeBody(bytes.byteLength);
                                         const image = inspectImage(bytes);
                                         if (host)
                                             this.sourceRateLimiter.recordSuccess(host);

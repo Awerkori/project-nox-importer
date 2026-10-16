@@ -44,6 +44,15 @@ export declare class PageByteReservation {
      * already-reserved budget and immediately wakes another producer.
      */
     shrink(newBytes: number): void;
+    /**
+     * A lengthless response temporarily reserves its 20 MiB terminal bound
+     * while its chunks are still being read and assembled.  After
+     * `readImageBody` returns, that transient state is gone: only the exact
+     * returned body remains for upload.  Keep the exact body reservation, but
+     * return both the speculative tail and this response's completion token so
+     * the next lengthless response still receives its own safe headroom.
+     */
+    completeBody(actualBytes: number): void;
     release(): void;
 }
 export declare class PageByteBudget {

@@ -3523,12 +3523,15 @@ describe('LiteRepository against the additive Lite migration', () => {
     const originalFetch = globalThis.fetch;
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       const body = url.includes('one') ? pngA : pngB;
-      return new Response(body, { status: 200, headers: { 'content-length': String(body.byteLength) } });
+      // Exercise MangaFlix's lengthless-image path.  The first tiny body
+      // must shed its 20 MiB terminal reservation before its slow upload,
+      // otherwise the second page cannot enter this 22 MiB bounded wave.
+      return new Response(body, { status: 200 });
     }));
     try {
-      // 2 MiB live body plus 18 MiB terminal-upgrade headroom per page.
-      // Twenty-two MiB admits this two-page test wave without weakening the
-      // production rule that every admitted body can still finish.
+      // One initial 1 MiB lengthless admission plus its 19 MiB completion
+      // headroom fit in this bounded wave.  Once its exact tiny body is
+      // assembled, the second page must overlap its slow upload.
       byteBudget = new PageByteBudget(22 * 1024 * 1024);
       const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
         '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'test-downloads'), 2,
@@ -3540,8 +3543,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     // body is byte-reserved and its pre-upload intent is durable, the next
     // page may download while Telegram drains the first one.
     expect(maxActiveUploads).toBe(2);
-    // Declared tiny images retain their exact bodies rather than the former
-    // 2 MiB floor for each page while both Telegram sends overlap.
+    // Lengthless tiny images retain their exact bodies rather than the
+    // temporary 20 MiB completion reservation while Telegram overlaps.
     expect(reservedBytesAtUploadOverlap).toBeLessThan(1 * 1024 * 1024);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);
   });

@@ -144,6 +144,28 @@ describe('PageByteBudget', () => {
     for (const reservation of reservations) reservation.release();
   });
 
+  it('returns an unknown response\'s terminal slack after its exact body is assembled', async () => {
+    const budget = new PageByteBudget(24);
+    const first = await budget.reserve(2, undefined, { completionHeadroomBytes: 18 });
+
+    // Reading a lengthless body needs the full bounded reservation until its
+    // chunk assembly completes.
+    await first.upgrade(20, undefined, { intent: 'COMPLETION' });
+    expect(budget.snapshot()).toEqual({ capacityBytes: 24, reservedBytes: 20, waiting: 0 });
+
+    // The validated response is only three bytes.  The upload keeps those
+    // three bytes, while a subsequent lengthless response again reserves its
+    // own terminal headroom rather than inheriting the first response's.
+    first.completeBody(3);
+    expect(budget.snapshot()).toEqual({ capacityBytes: 24, reservedBytes: 3, waiting: 0 });
+    const next = await budget.reserve(2, undefined, { completionHeadroomBytes: 18 });
+    expect(budget.snapshot()).toEqual({ capacityBytes: 24, reservedBytes: 5, waiting: 0 });
+
+    next.release();
+    first.release();
+    expect(budget.snapshot()).toEqual({ capacityBytes: 24, reservedBytes: 0, waiting: 0 });
+  });
+
   it('lets existing pages drain when memory pressure lowers capacity', async () => {
     const budget = new PageByteBudget(6);
     const first = await budget.reserve(3);
