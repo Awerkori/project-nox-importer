@@ -85,6 +85,23 @@ export class PageByteReservation {
         this._reservedBytes = newBytes;
         this.budget.release(releasedBytes);
     }
+    /**
+     * A lengthless response temporarily reserves its 20 MiB terminal bound
+     * while its chunks are still being read and assembled.  After
+     * `readImageBody` returns, that transient state is gone: only the exact
+     * returned body remains for upload.  Keep the exact body reservation, but
+     * return both the speculative tail and this response's completion token so
+     * the next lengthless response still receives its own safe headroom.
+     */
+    completeBody(actualBytes) {
+        if (this._released)
+            return;
+        this.shrink(actualBytes);
+        if (this.completionInProgress) {
+            this.completionInProgress = false;
+            this.budget.endCompletion();
+        }
+    }
     release() {
         if (this._released)
             return;
