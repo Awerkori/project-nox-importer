@@ -551,6 +551,28 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows).toEqual([{ source:'001-metadata-live' }]);
   });
 
+  it('briefly reuses a productive source without losing the durable cursor frontier', async () => {
+    await db.query(`INSERT INTO importer_sources(id) VALUES('sticky-metadata-source')`);
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000312','sticky-metadata-source','first',$1::uuid,'p1-a','P1 A','SYNCED'),
+      ('00000000-0000-4000-8000-000000000313','sticky-metadata-source','second',$2::uuid,'p1-b','P1 B','SYNCED')`,
+    [ids.p1a, ids.p1b]);
+
+    expect(await repo.refillSourceMetadataEnrichment(1, 1, 'sticky-metadata-source')).toBe(1);
+    expect((await db.query(`SELECT payload->>'sourceWorkId' AS source_work_id FROM importer_lite_tasks
+      WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows).toEqual([{ source_work_id:'first' }]);
+    await db.query(`UPDATE importer_lite_tasks SET state='DONE',lease_owner=NULL,lease_until=NULL
+      WHERE state='READY' AND payload ? 'metadataSourceRefresh'`);
+
+    expect(await repo.refillSourceMetadataEnrichment(1, 1, 'sticky-metadata-source')).toBe(1);
+    expect((await db.query(`SELECT payload->>'sourceWorkId' AS source_work_id FROM importer_lite_tasks
+      WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows).toEqual([{ source_work_id:'second' }]);
+    expect((await db.query(`SELECT last_source FROM importer_lite_metadata_source_cursor
+      WHERE cursor_name='source_refetch'`)).rows[0].last_source).toBeTruthy();
+  });
+
   it('claims source metadata from its dedicated lane while chapter claims remain available', async () => {
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
       idempotencyKey:'source-metadata-dedicated',payload:{source:'source-a',sourceWorkId:'old-work',metadataSourceRefresh:true} });
@@ -826,6 +848,22 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     expect(wake).toHaveBeenCalledTimes(1);
     memorySpy.mockRestore();
+  });
+
+  it('bounds a productive-source preference before returning to the durable cursor', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db), {}, { get: () => null } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', WORKER_ID: 'metadata-preferred-burst-test',
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
+        LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
+    );
+
+    expect((runtime as any).nextPreferredSourceMetadataSource('productive-source')).toBe('productive-source');
+    expect((runtime as any).nextPreferredSourceMetadataSource('productive-source')).toBe('productive-source');
+    expect((runtime as any).nextPreferredSourceMetadataSource('productive-source')).toBe('productive-source');
+    expect((runtime as any).nextPreferredSourceMetadataSource('productive-source')).toBeUndefined();
+    expect((runtime as any).nextPreferredSourceMetadataSource('other-source')).toBe('other-source');
   });
 
   it('replays legacy Portuguese tag objects with a bounded v3 task after v2 completed', async () => {
