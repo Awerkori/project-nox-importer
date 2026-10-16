@@ -535,10 +535,10 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
   });
 
-  it('runs four network-only metadata fetches while keeping YSQL gates narrow, and degrades to one under sustained pressure', async () => {
+  it('yields new metadata fetches to a queued chapter pool and resumes its bounded lane at idle', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const lanePool = poolFor(db) as any;
-    lanePool.waitingCount = 2;
+    lanePool.waitingCount = 1;
     const runtime = new ImporterLiteRuntime(
       lanePool, {}, { get: () => null } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
@@ -552,87 +552,36 @@ describe('LiteRepository against the additive Lite migration', () => {
       refillSourceMetadataEnrichment: vi.fn().mockResolvedValue(0),
     };
     (runtime as any).isRuntimeLeader = true;
+    // Any queued importer checkout represents chapter persistence waiting on
+    // the tiny direct pool. Metadata is P2: it must not start another claim,
+    // fetch, or later persistence contender under that condition.
+    await (runtime as any).runSourceMetadataRefresh();
+    expect(claim).not.toHaveBeenCalled();
+
+    lanePool.waitingCount = 0;
     let active = 0;
     let maximum = 0;
     let releaseFetches!: () => void;
-    let notifyOneStarted!: () => void;
-    const oneStarted = new Promise<void>((resolve) => { notifyOneStarted = resolve; });
+    let notifyFourStarted!: () => void;
+    const fourStarted = new Promise<void>((resolve) => { notifyFourStarted = resolve; });
     const holdFetches = new Promise<void>((resolve) => { releaseFetches = resolve; });
+    let remainingClaims = 4;
+    claim.mockImplementation(async () => remainingClaims-- > 0 ? ({ id: `metadata-${remainingClaims}` } as any) : null);
     (runtime as any).catalog = async () => {
       active++;
       maximum = Math.max(maximum, active);
-      if (active === 1) notifyOneStarted();
+      if (active === 4) notifyFourStarted();
       await holdFetches;
       active--;
     };
-
-    // A short two-checkout burst occurs while chapter receipts commit. It is
-    // not enough evidence to strand a network-only metadata seat; only the
-    // same signal persisting for the configured guard window reduces claims
-    // to one protected source task rather than dropping the lane to zero.
-    expect((runtime as any).hasSustainedSourceMetadataPoolPressure()).toBe(false);
-    (runtime as any).sourceMetadataPoolWaitStartedAt = Date.now() - 15_000;
-    const pressuredRun = (runtime as any).runSourceMetadataRefresh();
-    await oneStarted;
-    expect(claim).toHaveBeenCalledTimes(1);
-    await (runtime as any).runSourceMetadataRefresh();
-    expect(claim).toHaveBeenCalledTimes(1);
-    releaseFetches();
-    await pressuredRun;
-
-    // One queued importer checkout is normal while chapter receipts use the
-    // small direct pool; it must not strand the four external fetch seats.
-    lanePool.waitingCount = 1;
-    active = 0;
-    maximum = 0;
-    let releaseToleratedFetches!: () => void;
-    let notifyToleratedFourStarted!: () => void;
-    const toleratedFourStarted = new Promise<void>((resolve) => { notifyToleratedFourStarted = resolve; });
-    const toleratedHoldFetches = new Promise<void>((resolve) => { releaseToleratedFetches = resolve; });
-    (runtime as any).catalog = async () => {
-      active++;
-      maximum = Math.max(maximum, active);
-      if (active === 4) notifyToleratedFourStarted();
-      await toleratedHoldFetches;
-      active--;
-    };
-    const toleratedWaiterRun = (runtime as any).runSourceMetadataRefresh();
-    await toleratedFourStarted;
-    expect(claim).toHaveBeenCalledTimes(5);
-    expect(maximum).toBe(4);
-    releaseToleratedFetches();
-    await toleratedWaiterRun;
-
-    // Reset the promises for a clean second call group. The first group proves
-    // immediate seat filling; the explicit calls below keep the old hard cap
-    // regression covered as well.
-    active = 0;
-    maximum = 0;
-    let releaseSecondFetches!: () => void;
-    let notifySecondFourStarted!: () => void;
-    const secondFourStarted = new Promise<void>((resolve) => { notifySecondFourStarted = resolve; });
-    const secondHoldFetches = new Promise<void>((resolve) => { releaseSecondFetches = resolve; });
-    (runtime as any).catalog = async () => {
-      active++;
-      maximum = Math.max(maximum, active);
-      if (active === 4) notifySecondFourStarted();
-      await secondHoldFetches;
-      active--;
-    };
-    lanePool.waitingCount = 0;
-    const runs = [
-      (runtime as any).runSourceMetadataRefresh(),
-      (runtime as any).runSourceMetadataRefresh(),
-      (runtime as any).runSourceMetadataRefresh(),
-    ];
-    await secondFourStarted;
-    expect(claim.mock.calls.length).toBeGreaterThanOrEqual(9);
+    const idleRun = (runtime as any).runSourceMetadataRefresh();
+    await fourStarted;
     expect(maximum).toBe(4);
     expect((runtime as any).sourceMetadataGate.capacity).toBe(4);
     expect((runtime as any).sourceMetadataPreparationGate.capacity).toBe(1);
     expect((runtime as any).sourceMetadataPersistenceGate.capacity).toBe(1);
-    releaseSecondFetches();
-    await Promise.all(runs);
+    releaseFetches();
+    await idleRun;
     memorySpy.mockRestore();
   });
 
