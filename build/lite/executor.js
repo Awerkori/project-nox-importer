@@ -675,13 +675,26 @@ export class LiteExecutor {
                         const host = hostFor(url);
                         if (host)
                             await this.sourceRateLimiter.acquire(host);
-                        return this.bufferedPages.runExclusive(async () => {
+                        // A count permit protects the download/validation stage.  Once the
+                        // pre-upload intent is durable, the exact page body is protected by
+                        // `byteReservation` until its receipt finishes; retaining the count
+                        // permit through Telegram/YSQL made completed downloads block the
+                        // next source request despite unused global download capacity.
+                        const pageSignal = AbortSignal.timeout(45_000);
+                        await this.bufferedPages.acquire(pageSignal);
+                        let pageBufferHeld = true;
+                        const releasePageBuffer = () => {
+                            if (!pageBufferHeld)
+                                return;
+                            pageBufferHeld = false;
+                            this.bufferedPages.release();
+                        };
+                        try {
                             // Reserve bytes before requesting the body. The reservation grows
                             // from the response length while it is read and remains held until
                             // Telegram has acknowledged the send. The deferred receipt only
                             // captures scalar metadata, so releasing here still bounds actual
                             // retained media rather than merely page promises.
-                            const pageSignal = AbortSignal.timeout(45_000);
                             // A response header is not available until after fetch begins.
                             // Reserve 2 MiB initially and retain only the remaining 18 MiB as
                             // an admission predicate for one terminal upgrade. This permits a
@@ -725,6 +738,11 @@ export class LiteExecutor {
                                     return reserved.mediaId;
                                 if (reserved.state === 'UNKNOWN')
                                     throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
+                                // The body remains byte-reserved through storage and receipt
+                                // persistence, so this only frees the count gate for another
+                                // download; it cannot increase retained media beyond the
+                                // bounded PageByteBudget.
+                                releasePageBuffer();
                                 try {
                                     const uploadStartedAt = performance.now();
                                     telemetryCollector.trackActiveTelegramUpload(1);
@@ -788,7 +806,10 @@ export class LiteExecutor {
                             finally {
                                 byteReservation.release();
                             }
-                        });
+                        }
+                        finally {
+                            releasePageBuffer();
+                        }
                     });
                 }
                 catch (error) {
