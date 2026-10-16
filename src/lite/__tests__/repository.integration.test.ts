@@ -531,6 +531,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
   });
 
+  it('keeps the serial onboarding lane live through a transient chapter pool waiter', async () => {
+    await repo.enqueue({ taskType:'CATALOG', workKey:'source:source-a:pool-wait-fresh', priority:'P2',
+      idempotencyKey:'pool-wait-fresh-catalog', payload:{ source:'source-a', sourceWorkId:'pool-wait-fresh' } });
+    const pool = Object.assign(poolFor(db), { waitingCount: 2 });
+    const runtime = new ImporterLiteRuntime(
+      pool as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    const catalog = vi.fn(async () => undefined);
+    (runtime as any).catalog = catalog;
+
+    await (runtime as any).runNewWorkCatalog();
+
+    expect(catalog).toHaveBeenCalledTimes(1);
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE idempotency_key='pool-wait-fresh-catalog'`)).rows[0])
+      .toMatchObject({ state:'RUNNING' });
+  });
+
   it('counts alias and explicit-tag activation once per work', async () => {
     await db.query(`UPDATE works SET aliases=ARRAY['Título nativo'] WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`UPDATE works SET aliases=ARRAY['Título nativo','Romanized title'] WHERE id=$1::uuid`, [ids.p1a]);
