@@ -90,6 +90,9 @@ describe('Tag Normalization', () => {
     }, '00000000-0000-4000-8000-000000000001', 'source-a');
 
     const [statement] = sql.mock.calls[1];
+    expect(statement).toContain('known_tags AS');
+    expect(statement).toContain('missing_tags AS');
+    expect(statement).toContain("SELECT name,slug,'GENRE' FROM missing_tags");
     expect(statement).toContain('ON CONFLICT DO NOTHING');
     expect(statement).toContain("lower(regexp_replace(btrim(supplied.name),'\\s+',' ','g'))");
   });

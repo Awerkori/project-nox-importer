@@ -161,26 +161,42 @@ export class DeduplicationEngine {
         SELECT DISTINCT ON (slug) name,slug
         FROM unnest($3::text[],$4::text[]) AS supplied(name,slug)
         ORDER BY slug,name
-      ), inserted_tags AS (
-        INSERT INTO tags(name,slug,kind)
-        SELECT name,slug,'GENRE' FROM input_tags
-        -- The catalog also enforces canonical display-name uniqueness. A
-        -- legacy row can legitimately have the same normalized name under an
-        -- older slug, so conflict on slug alone misclassified this entirely
-        -- local idempotency case as an external source failure.
-        ON CONFLICT DO NOTHING
-        RETURNING id,slug
-      ), tag_ids AS (
-        SELECT id FROM inserted_tags
-        UNION ALL
-        SELECT existing_tag.id
-        FROM tags existing_tag
-        JOIN input_tags supplied ON (
+      ), known_tags AS (
+        -- The database trigger rejects an INSERT before ON CONFLICT gets a
+        -- chance to handle it when a legacy term has the same normalized
+        -- display name under a different slug. Resolve those rows first, so
+        -- a provider-declared tag can safely reuse the canonical identity.
+        SELECT DISTINCT ON (supplied.slug)
+          supplied.slug AS supplied_slug,
+          existing_tag.id
+        FROM input_tags supplied
+        JOIN tags existing_tag ON (
           supplied.slug=existing_tag.slug
           OR lower(regexp_replace(btrim(supplied.name),'\\s+',' ','g'))
              =lower(regexp_replace(btrim(existing_tag.name),'\\s+',' ','g'))
         )
-        WHERE NOT EXISTS (SELECT 1 FROM inserted_tags inserted WHERE inserted.slug=supplied.slug)
+        ORDER BY supplied.slug,
+          CASE WHEN supplied.slug=existing_tag.slug THEN 0 ELSE 1 END,
+          existing_tag.id
+      ), missing_tags AS (
+        SELECT supplied.name,supplied.slug
+        FROM input_tags supplied
+        WHERE NOT EXISTS (
+          SELECT 1 FROM known_tags known
+          WHERE known.supplied_slug=supplied.slug
+        )
+      ), inserted_tags AS (
+        INSERT INTO tags(name,slug,kind)
+        SELECT name,slug,'GENRE' FROM missing_tags
+        -- This remains necessary for a concurrent insertion of the same
+        -- slug. Existing normalized display names are filtered above because
+        -- the BEFORE INSERT taxonomy trigger raises before conflict handling.
+        ON CONFLICT DO NOTHING
+        RETURNING id,slug
+      ), tag_ids AS (
+        SELECT id FROM known_tags
+        UNION
+        SELECT id FROM inserted_tags
       ), alias_update AS (
         UPDATE works SET aliases=$2::text[],updated_at=now()
         WHERE id=$1::uuid AND $5::boolean
