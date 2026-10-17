@@ -6,6 +6,15 @@ export declare class NexusAdapter implements SourceAdapter {
     readonly id = "nexus";
     readonly name = "Nexus Mangas";
     readonly baseUrl = "https://www.nexusmangas.com";
+    readonly admissionProbe: {
+        url: string;
+        headers: {
+            apikey: string;
+            Authorization: string;
+            Accept: string;
+        };
+        expectedType: "json";
+    };
     private apiUrl;
     private functionsUrl;
     private logger;

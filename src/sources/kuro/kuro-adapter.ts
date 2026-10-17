@@ -22,14 +22,6 @@ export class KuroAdapter implements SourceAdapter {
   readonly name = 'Kuro Mangas';
   readonly baseUrl = 'https://kuromangas.com';
 
-  // Admission probe via bridge (CF Workers → kuromangas.com, bypasses DIScloud WAF block)
-  // Probe hits the bridge healthcheck so engine admission always passes via the legitimate bridge path
-  get probeUrl(): string | undefined {
-    if (!this.bridgeToken) return undefined;
-    const base = process.env.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev';
-    return `${base.replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
-  }
-
   private apiUrl = 'https://kuromangas.com/api';
   private cdnUrl = 'https://cdn.kuromangas.com';
   private logger = new Logger('KuroAdapter');
@@ -45,6 +37,28 @@ export class KuroAdapter implements SourceAdapter {
   private cfClearance: string | null = null;
   private loginPromise: Promise<boolean> | null = null;
   private lastLoginAttempt = 0;
+
+  /**
+   * Kuro's marketing homepage is protected by an interactive Turnstile page,
+   * whereas its authorized JSON catalog is the route actually used by this
+   * adapter.  Probe that real route through the adapter-owned authenticated
+   * session rather than treating a public homepage challenge as a source
+   * outage.  No cookie or bridge token leaves the adapter.
+   */
+  get admissionProbe(): NonNullable<SourceAdapter['admissionProbe']> {
+    const url = `${this.apiUrl}/mangas?page=1&limit=1&sort=view_count&order=DESC`;
+    return {
+      url,
+      expectedType: 'json',
+      request: async () => {
+        const catalog = await this.request(url);
+        return new Response(JSON.stringify(catalog), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    };
+  }
 
   constructor(
     private rateLimiter: HostRateLimiter = new HostRateLimiter(2.0),
@@ -62,10 +76,10 @@ export class KuroAdapter implements SourceAdapter {
     // Initialize from safe environment variables if present
     if (process.env.KURO_COOKIE) {
       const matchSession = process.env.KURO_COOKIE.match(/kuro_session=([^;]+)/);
-      const matchKn = process.env.KURO_COOKIE.match(/_kn=([^;]+)/);
+      const matchContext = process.env.KURO_COOKIE.match(/_(?:vx|kn)=([^;]+)/);
       const matchCf = process.env.KURO_COOKIE.match(/cf_clearance=([^;]+)/);
       if (matchSession) this.sessionCookie = matchSession[1];
-      if (matchKn) this.clientToken = matchKn[1];
+      if (matchContext) this.clientToken = matchContext[1];
       if (matchCf) this.cfClearance = matchCf[1];
     }
     if (process.env.KURO_SESSION) {
@@ -151,24 +165,18 @@ export class KuroAdapter implements SourceAdapter {
           if (bridgeData.status === 200 && Array.isArray(bridgeData.cookies)) {
             const combinedCookies = bridgeData.cookies.join('; ');
             const matchSession = combinedCookies.match(/kuro_session=([^;]+)/);
-            const matchKn = combinedCookies.match(/_kn=([^;]+)/);
+            const matchContext = combinedCookies.match(/_vx=([^;]+)/);
             const matchCf = combinedCookies.match(/cf_clearance=([^;]+)/);
 
-            if (matchSession && matchKn) {
+            if (matchSession && matchContext) {
               this.sessionCookie = matchSession[1];
-              this.clientToken = matchKn[1];
-              if (matchCf) this.cfClearance = matchCf[1];
+              this.clientToken = matchContext[1];
+              this.cfClearance = matchCf?.[1] ?? null;
               this.logger.info('Kuro authentication successful (via Cloudflare Workers bridge)');
               return true;
             }
           }
-          const title = (bridgeData as any)?.text?.match(/<title>([^<]+)<\/title>/i)?.[1];
-          const heading = (bridgeData as any)?.text?.match(/<h1[^>]*>([^<]+)<\/h1>/i)?.[1];
-          this.logger.warn(`Kuro bridge login returned upstream status: ${bridgeData?.status}`, {
-            title,
-            heading,
-            error: bridgeData?.data,
-          });
+          this.logger.warn(`Kuro bridge login returned status ${bridgeData?.status} without usable session cookies`);
         }
       } catch (bridgeErr: any) {
         this.logger.warn('Kuro bridge login encountered error, falling back to direct login', {
@@ -209,19 +217,18 @@ export class KuroAdapter implements SourceAdapter {
 
         const combinedCookies = cookieHeaders.join('; ');
         const matchSession = combinedCookies.match(/kuro_session=([^;]+)/);
-        const matchKn = combinedCookies.match(/_kn=([^;]+)/);
+        const matchContext = combinedCookies.match(/_vx=([^;]+)/);
         const matchCf = combinedCookies.match(/cf_clearance=([^;]+)/);
 
-        if (matchSession && matchKn) {
+        if (matchSession && matchContext) {
           this.sessionCookie = matchSession[1];
-          this.clientToken = matchKn[1];
-          if (matchCf) this.cfClearance = matchCf[1];
+          this.clientToken = matchContext[1];
+          this.cfClearance = matchCf?.[1] ?? null;
           this.logger.info('Kuro authentication successful (direct session established in memory)');
           return true;
         }
       } else {
-        const bodySnippet = await res.text().catch(() => '');
-        this.logger.warn(`Kuro direct login failed: HTTP ${res.status} - ${bodySnippet.slice(0, 150)}`);
+        this.logger.warn(`Kuro direct login failed: HTTP ${res.status}`);
       }
     } catch (err: any) {
       this.logger.warn('Failed to login with Kuro credentials from environment', {
@@ -242,7 +249,7 @@ export class KuroAdapter implements SourceAdapter {
     const buildCookieHeader = () => {
       const cookieParts = [
         `kuro_session=${this.sessionCookie}`,
-        `_kn=${this.clientToken}`,
+        `_vx=${this.clientToken}`,
       ];
       if (this.cfClearance) {
         cookieParts.push(`cf_clearance=${this.cfClearance}`);
@@ -254,7 +261,7 @@ export class KuroAdapter implements SourceAdapter {
     if (this.sessionCookie && this.clientToken) {
       return {
         Cookie: buildCookieHeader(),
-        'X-Client-Token': this.clientToken,
+        'X-Request-Ctx': this.clientToken,
       };
     }
 
@@ -263,7 +270,7 @@ export class KuroAdapter implements SourceAdapter {
     if (loggedIn && this.sessionCookie && this.clientToken) {
       return {
         Cookie: buildCookieHeader(),
-        'X-Client-Token': this.clientToken,
+        'X-Request-Ctx': this.clientToken,
       };
     }
 
@@ -325,15 +332,13 @@ export class KuroAdapter implements SourceAdapter {
                   bridgePayload.text?.includes('error code: 1010') ||
                   bridgePayload.text?.includes('error code: 1033'));
 
-              if (bridgePayload.status === 401) {
+              const csrfMismatch = bridgePayload.status === 403
+                && (bridgePayload.data as { reason?: unknown } | undefined)?.reason === 'csrf_mismatch';
+              if (bridgePayload.status === 401 || csrfMismatch) {
                 if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
-                  const title = bridgePayload.text?.match(/<title>([^<]+)<\/title>/i)?.[1];
-                  const heading = bridgePayload.text?.match(/<h1[^>]*>([^<]+)<\/h1>/i)?.[1];
-                  this.logger.info('Kuro session expired via bridge (401). Auto-renewing session...', {
+                  this.logger.info('Kuro session context rejected via bridge; auto-renewing session...', {
                     upstreamStatus: bridgePayload.status,
-                    upstreamTitle: title,
-                    upstreamHeading: heading,
-                    upstreamError: bridgePayload.data,
+                    csrfMismatch,
                   });
                   const renewed = await this.login(true);
                   if (renewed) continue;
@@ -416,8 +421,7 @@ export class KuroAdapter implements SourceAdapter {
         });
 
         if (response.status === 403) {
-          const errText = await response.text().catch(() => '');
-          throw new Error(`Kuro blocked by Cloudflare (HTTP 403): ${errText.slice(0, 150)}`);
+          throw new Error('Kuro blocked by Cloudflare (HTTP 403)');
         }
 
         if (response.status === 401) {
@@ -445,8 +449,7 @@ export class KuroAdapter implements SourceAdapter {
         }
 
         if (!response.ok) {
-          const errText = await response.text().catch(() => '');
-          throw new Error(`Kuro request failed: HTTP ${response.status} - ${errText.slice(0, 200)}`);
+          throw new Error(`Kuro request failed: HTTP ${response.status}`);
         }
 
         this.rateLimiter.recordSuccess(parsedUrl.host);

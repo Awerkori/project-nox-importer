@@ -10,6 +10,16 @@ export class NexusAdapter implements SourceAdapter {
   readonly name = 'Nexus Mangas';
   readonly baseUrl = 'https://www.nexusmangas.com';
 
+  readonly admissionProbe = {
+    url: 'https://supabase.nexusmangas.com/rest/v1/chapters?select=work_id&limit=1',
+    headers: {
+      apikey: ANON_KEY,
+      Authorization: `Bearer ${ANON_KEY}`,
+      Accept: 'application/json',
+    },
+    expectedType: 'json' as const,
+  };
+
   private apiUrl = 'https://supabase.nexusmangas.com/rest/v1';
   private functionsUrl = 'https://supabase.nexusmangas.com/functions/v1';
   private logger = new Logger('NexusAdapter');

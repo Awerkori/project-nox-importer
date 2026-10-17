@@ -2,6 +2,7 @@ import { MangaThemesiaAdapter } from '../common/mangathemesia-adapter.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
 export declare class PointZeroToonsAdapter extends MangaThemesiaAdapter {
+    get probeUrl(): string;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     fetchUpdatedWorks(cursor?: string | null, options?: {
         mode?: 'bootstrap' | 'maintenance';

@@ -4,6 +4,10 @@ import { SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../t
 import { stripHtml, decodeHtmlEntities, extractChapterNumber, slugify } from '../common/html-utils.js';
 
 export class PointZeroToonsAdapter extends MangaThemesiaAdapter {
+  override get probeUrl(): string {
+    return 'https://kitsuneyako.com/manga/?order=updated';
+  }
+
   constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch) {
     super(
       {

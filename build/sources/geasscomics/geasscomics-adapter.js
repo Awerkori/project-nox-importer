@@ -6,6 +6,7 @@ export class GeassComicsAdapter {
     id = 'geasscomics';
     name = 'Geass Comics';
     baseUrl = 'https://geasscomics.xyz';
+    probeUrl = 'https://api.geasscomics.xyz/api/works?page=1&limit=1&sortBy=recent&sortDir=desc';
     apiUrl = 'https://api.geasscomics.xyz';
     logger = new Logger('GeassComicsAdapter');
     constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {

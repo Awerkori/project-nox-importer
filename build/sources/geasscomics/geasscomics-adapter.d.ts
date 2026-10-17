@@ -6,6 +6,7 @@ export declare class GeassComicsAdapter implements SourceAdapter {
     readonly id = "geasscomics";
     readonly name = "Geass Comics";
     readonly baseUrl = "https://geasscomics.xyz";
+    readonly probeUrl = "https://api.geasscomics.xyz/api/works?page=1&limit=1&sortBy=recent&sortDir=desc";
     private readonly apiUrl;
     private logger;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);

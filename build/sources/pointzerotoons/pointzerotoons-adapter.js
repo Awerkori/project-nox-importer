@@ -1,6 +1,9 @@
 import { MangaThemesiaAdapter } from '../common/mangathemesia-adapter.js';
 import { stripHtml, decodeHtmlEntities, extractChapterNumber, slugify } from '../common/html-utils.js';
 export class PointZeroToonsAdapter extends MangaThemesiaAdapter {
+    get probeUrl() {
+        return 'https://kitsuneyako.com/manga/?order=updated';
+    }
     constructor(rateLimiter, transport) {
         super({
             id: 'pointzerotoons',

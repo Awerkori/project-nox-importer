@@ -26,6 +26,7 @@ import { HealthMonitor } from './core/health.js';
 import { diagnostics } from './core/diagnostics.js';
 import { telemetryCollector } from './core/telemetry-collector.js';
 import { ImporterLiteRuntime } from './lite/runtime.js';
+import { reconcileAuditedSources } from './core/source-audit-bootstrap.js';
 
 async function main() {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -101,7 +102,13 @@ async function main() {
   // 4. Initialize Rate Limiter & Source Registry
   const defaultHostRate = parseFloat(process.env.DEFAULT_HOST_RATE_PER_SECOND || '5.0');
   const rateLimiter = new HostRateLimiter(defaultHostRate);
-  const registry = new SourceRegistry(rateLimiter, config.NOX_STORAGE_BRIDGE_TOKEN, config.NOX_MANGA_URL);
+  const registry = new SourceRegistry(rateLimiter);
+
+  // Keep the narrow, audited source set coherent with the durable source
+  // policy. This is idempotent and never resets a future source cooldown.
+  if (config.IMPORTER_DB_MODE === 'direct') {
+    await reconcileAuditedSources((supabase as DirectSupabaseClient).getPool());
+  }
 
   // 5. Lite is the default in the approved cutover artifact. Both runtimes
   // share a durable leadership lease, so a rolling deploy cannot publish from

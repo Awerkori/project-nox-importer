@@ -8,6 +8,23 @@ export class MadaraAdapter {
     name;
     baseUrl;
     mangaSubString;
+    /**
+     * Madara homepages are frequently protected independently from their
+     * catalog.  Probe the same catalog route fetchUpdatedWorks uses; subsequent
+     * admission stages prove the entire import path rather than trusting it.
+     */
+    get probeUrl() {
+        return `${this.baseUrl}/${this.mangaSubString}/?order=update`;
+    }
+    get admissionProbe() {
+        return {
+            url: this.probeUrl,
+            headers: this.headers,
+            expectedType: 'html',
+            allowInlineJsDetection: true,
+            usableHtmlMarker: /\bwp-manga\b/i,
+        };
+    }
     logger;
     constructor(options, rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
         this.rateLimiter = rateLimiter;

@@ -1,0 +1,188 @@
+import { SourceAdapter, SourceChapterSummary, SourceWorkDetails, SourceWorkSummary } from '../types.js';
+import { HostRateLimiter } from '../../core/rate-limiter.js';
+import { Logger } from '../../core/logger.js';
+import { decryptMangoPayload } from '../mangotoons/mangotoons-decryptor.js';
+
+const BASE_URL = 'https://imperiodabritannia.net';
+const API_URL = 'https://api.imperiodabritannia.net/api';
+const CDN_URL = 'https://cdn.imperiodabritannia.net';
+const MANGO_KEY = 'mangotoons_encryption_key_2025';
+
+function slugify(value: string): string {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function asUrl(value: unknown, cdn = CDN_URL): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  return value.startsWith('http') ? value : `${cdn}/${value.replace(/^\/+/, '')}`;
+}
+
+function chapterNumber(value: unknown): number {
+  const parsed = Number.parseFloat(String(value ?? ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Current implementation of the public MangoTheme API used by Sagrado
+ * Império da Britannia. The token is an optional public cache hint exposed by
+ * its own `env` asset; the adapter continues to work when that hint rotates.
+ */
+export class ImperioDaBritanniaAdapter implements SourceAdapter {
+  readonly id = 'imperiodabritannia';
+  readonly name = 'Sagrado Império da Britannia';
+  readonly baseUrl = BASE_URL;
+  readonly admissionProbe = {
+    url: `${API_URL}/obras?pagina=1&limite=1`,
+    headers: { Accept: 'application/json', 'X-Brit-Cache': 'true', 'X-Noencryptionbritta': '1' },
+    expectedType: 'json' as const,
+  };
+
+  private apiToken: string | null = null;
+  private tokenFetchedAt = 0;
+  private readonly logger = new Logger('ImperioDaBritanniaAdapter');
+
+  constructor(
+    private readonly rateLimiter: HostRateLimiter = new HostRateLimiter(1),
+    private readonly transport: typeof fetch = fetch,
+  ) {
+    this.rateLimiter.setHostRate(new URL(API_URL).host, 1, 2, 2);
+    this.rateLimiter.setHostRate(new URL(CDN_URL).host, 4, 8, 8);
+  }
+
+  private async refreshApiToken(force = false): Promise<string | null> {
+    if (!force && this.apiToken && Date.now() - this.tokenFetchedAt < 30 * 60_000) return this.apiToken;
+    try {
+      const page = await this.transport(BASE_URL, { signal: AbortSignal.timeout(15_000) });
+      const html = await page.text();
+      const envPath = html.match(/<link[^>]+href=["']([^"']*env[^"']*)/i)?.[1];
+      if (!envPath) return this.apiToken;
+      const envUrl = new URL(envPath, BASE_URL).href;
+      const asset = await this.transport(envUrl, { signal: AbortSignal.timeout(15_000) });
+      const text = await asset.text();
+      const token = text.split('apiToken:')[1]?.split(String.fromCharCode(96))[0]
+        ?.replace(/^[^A-Za-z0-9_-]+/, '').trim();
+      if (token) this.apiToken = token;
+      this.tokenFetchedAt = Date.now();
+    } catch (error: any) {
+      this.logger.warn('Could not refresh Britannia public API token', { error: error?.message });
+    }
+    return this.apiToken;
+  }
+
+  private async request(path: string, retry = true): Promise<any> {
+    const url = path.startsWith('http') ? path : `${API_URL}${path}`;
+    const host = new URL(url).host;
+    await this.rateLimiter.acquire(host);
+    const token = await this.refreshApiToken();
+    const response = await this.transport(url, {
+      headers: {
+        Accept: 'application/json',
+        'X-Brit-Cache': 'true',
+        'X-Noencryptionbritta': '1',
+        ...(token ? { 'X-API-Token': token } : {}),
+      },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if ((response.status === 401 || response.status === 403) && retry) {
+      await this.refreshApiToken(true);
+      return this.request(path, false);
+    }
+    if (!response.ok) throw new Error(`Britannia HTTP ${response.status} for ${url}`);
+    this.rateLimiter.recordSuccess(host);
+    const text = await response.text();
+    if (response.headers.get('x-encrypted') === 'true') {
+      return decryptMangoPayload(text, MANGO_KEY);
+    }
+    return JSON.parse(text);
+  }
+
+  private toSummary(work: any): SourceWorkSummary {
+    const title = String(work.nome || work.title || `Obra ${work.id}`);
+    return {
+      sourceWorkId: String(work.id),
+      title,
+      slug: String(work.slug || slugify(title)),
+      coverUrl: asUrl(work.imagem || work.coverImage || work.banner),
+      updatedAt: work.atualizada_em || work.feed_at || undefined,
+    };
+  }
+
+  async fetchUpdatedWorks(cursor?: string | null, options?: { mode?: 'bootstrap' | 'maintenance' }): Promise<{ works: SourceWorkSummary[]; nextCursor: string | null }> {
+    const page = Math.max(1, Number.parseInt(cursor || '1', 10) || 1);
+    const endpoint = options?.mode === 'maintenance'
+      ? `/capitulos/recentes?pagina=${page}&limite=24`
+      : `/obras?pagina=${page}&limite=24`;
+    const response = await this.request(endpoint);
+    const works = (response.obras || response.dados || response.data || [])
+      .filter((work: any) => work?.id)
+      .map((work: any) => this.toSummary(work));
+    return { works, nextCursor: response.pagination?.hasNextPage ? String(page + 1) : null };
+  }
+
+  async searchWorks(query: string): Promise<SourceWorkSummary[]> {
+    const response = await this.request(`/obras?pagina=1&limite=20&busca=${encodeURIComponent(query)}`);
+    return (response.obras || response.dados || response.data || [])
+      .filter((work: any) => work?.id)
+      .map((work: any) => this.toSummary(work));
+  }
+
+  private async work(sourceWorkId: string): Promise<any> {
+    const response = await this.request(`/obras/${encodeURIComponent(sourceWorkId)}`);
+    return response.obra || response.dados || response.data || response;
+  }
+
+  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+    const work = await this.work(sourceWorkId);
+    const title = String(work.nome || work.title || sourceWorkId);
+    const status = String(work.status_nome || '').toLowerCase();
+    return {
+      sourceWorkId: String(work.id || sourceWorkId),
+      title,
+      slug: String(work.slug || slugify(title)),
+      coverUrl: asUrl(work.imagem || work.coverImage || work.banner),
+      synopsis: typeof work.descricao === 'string' ? work.descricao : undefined,
+      status: status.includes('andamento') || status.includes('ativo') ? 'ONGOING'
+        : status.includes('conclu') ? 'COMPLETED'
+          : status.includes('hiato') || status.includes('paus') ? 'HIATUS'
+            : status.includes('cancel') ? 'CANCELLED' : 'UNKNOWN',
+      genres: (work.tags || []).map((tag: any) => typeof tag === 'string' ? tag : tag.nome || tag.name).filter(Boolean),
+      raw: work,
+    };
+  }
+
+  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
+    const work = await this.work(sourceWorkId);
+    return (work.capitulos || []).map((chapter: any) => {
+      const display = String(chapter.numero ?? chapter.id);
+      return {
+        sourceChapterId: `${sourceWorkId}:${encodeURIComponent(display)}`,
+        displayNumber: display,
+        number: chapterNumber(display),
+        title: chapter.nome || chapter.title || undefined,
+        createdAt: chapter.criado_em || chapter.atualizado_em || undefined,
+        pageCount: chapter.total_paginas ?? null,
+      };
+    }).sort((a: SourceChapterSummary, b: SourceChapterSummary) => a.number - b.number);
+  }
+
+  isChapterOwnedByWork(sourceWorkId: string, sourceChapterId: string): boolean {
+    return sourceChapterId.startsWith(`${sourceWorkId}:`);
+  }
+
+  async fetchChapterPages(sourceChapterId: string): Promise<string[]> {
+    const separator = sourceChapterId.indexOf(':');
+    if (separator <= 0) return [];
+    const workId = sourceChapterId.slice(0, separator);
+    const number = decodeURIComponent(sourceChapterId.slice(separator + 1));
+    const response = await this.request(`/obras/${encodeURIComponent(workId)}/capitulos/${encodeURIComponent(number)}`);
+    const chapter = response.capitulo || response.dados || response.data || response;
+    return (chapter.paginas || []).sort((a: any, b: any) => Number(a.numero || 0) - Number(b.numero || 0))
+      .map((page: any) => asUrl(page.url || page.cdn_id || page.imagem || page.image))
+      .filter((url: string | null): url is string => Boolean(url));
+  }
+
+  getImageHeaders(): Record<string, string> {
+    return { Referer: `${BASE_URL}/` };
+  }
+}

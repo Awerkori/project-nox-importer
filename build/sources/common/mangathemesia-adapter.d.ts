@@ -15,6 +15,10 @@ export declare class MangaThemesiaAdapter implements SourceAdapter {
     readonly name: string;
     readonly baseUrl: string;
     readonly mangaSubString: string;
+    /** See MadaraAdapter.probeUrl: use the actual public catalog, not a
+     * separately protected landing page. */
+    get probeUrl(): string;
+    get admissionProbe(): NonNullable<SourceAdapter['admissionProbe']>;
     protected logger: Logger;
     constructor(options: MangaThemesiaOptions, rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     protected get headers(): Record<string, string>;
