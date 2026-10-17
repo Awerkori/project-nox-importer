@@ -354,9 +354,15 @@ export class KuroAdapter implements SourceAdapter {
                 // durable external-failure backoff.  This is bounded by the
                 // adapter's three request attempts and never widens the
                 // metadata lane or source rate limit.
-                if (attempts < maxAttempts && this.hasValidSession() &&
-                  Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
-                  this.logger.info('Kuro bridge challenge with cached session; auto-renewing session...');
+                if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
+                  // A failed cold-start login can leave no structurally valid
+                  // cache at all. A subsequent Cloudflare challenge is still
+                  // a legitimate one-shot renewal signal; retrying the login
+                  // here handles that race without treating a missing cache
+                  // as permanently unauthenticated.
+                  this.logger.info('Kuro bridge challenge; auto-renewing session...', {
+                    hadCachedSession: this.hasValidSession(),
+                  });
                   this.clearSession();
                   const renewed = await this.login(true);
                   if (renewed) continue;
