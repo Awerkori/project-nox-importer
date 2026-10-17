@@ -7,6 +7,9 @@ export interface MangaWorkOptions {
     baseUrl: string;
     seriesPath?: string;
     rateLimitRps?: number;
+    /** Site branding appended to document <title> on templates whose first h1
+     * is the account form rather than the work heading. */
+    titleSuffixes?: string[];
 }
 export declare class MangaWorkAdapter implements SourceAdapter {
     protected rateLimiter: HostRateLimiter;
@@ -15,6 +18,7 @@ export declare class MangaWorkAdapter implements SourceAdapter {
     readonly name: string;
     readonly baseUrl: string;
     readonly seriesPath: string;
+    readonly titleSuffixes: string[];
     protected logger: Logger;
     constructor(options: MangaWorkOptions, rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     protected get headers(): Record<string, string>;

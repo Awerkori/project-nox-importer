@@ -3,6 +3,22 @@ import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { slugify, decodeHtmlEntities, stripHtml, extractChapterNumber } from './html-utils.js';
 
+function htmlAttribute(tag: string, name: string): string | undefined {
+  const match = tag.match(new RegExp(`\\b${name}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, 'i'));
+  return match?.[2];
+}
+
+function metaContent(html: string, names: string[]): string | undefined {
+  const wanted = new Set(names.map((name) => name.toLowerCase()));
+  for (const match of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = match[0];
+    const key = htmlAttribute(tag, 'property') || htmlAttribute(tag, 'name');
+    const content = htmlAttribute(tag, 'content');
+    if (key && content && wanted.has(key.toLowerCase())) return decodeHtmlEntities(content).trim();
+  }
+  return undefined;
+}
+
 export interface ZeistMangaOptions {
   id: string;
   name: string;
@@ -191,19 +207,27 @@ export class ZeistMangaAdapter implements SourceAdapter {
     try {
       const html = await this.fetchHtml(targetUrl);
 
-      const titleMatch = html.match(/<h1[^>]*class=["'][^"']*entry-title[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i) ||
+      // Blogger templates frequently put the site name in their first <h1>.
+      // Prefer explicit document metadata/data attributes, which are stable
+      // across theme layout changes and represent the actual series title.
+      const dataTitleMatch = html.match(/data-title=["']([^"']+)["']/i);
+      const titleMatch = dataTitleMatch ||
+        html.match(/itemprop=["']name["'][^>]*>([\s\S]*?)<\/h1>/i) ||
+        html.match(/<h1[^>]*class=["'][^"']*entry-title[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i) ||
         html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
         html.match(/<title>([^<-]+)/i);
-      const title = decodeHtmlEntities(stripHtml(titleMatch ? titleMatch[1] : 'Sem Título')).trim();
+      const title = (dataTitleMatch ? decodeHtmlEntities(dataTitleMatch[1]).trim() : undefined) ||
+        metaContent(html, ['og:title', 'twitter:title', 'title']) ||
+        decodeHtmlEntities(stripHtml(titleMatch ? titleMatch[1] : 'Sem Título')).trim();
 
       const descMatch = html.match(/id=["']synopsis["'][^>]*>([\s\S]*?)<\/div>/i) ||
         html.match(/class=["'][^"']*synopsis[^"']*["'][^>]*>([\s\S]*?)<\/div>/i) ||
         html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
       const synopsis = descMatch ? decodeHtmlEntities(stripHtml(descMatch[1])).trim() : undefined;
 
-      const coverMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
+      const coverMatch = html.match(/data-image=["']([^"']+)["']/i) ||
         html.match(/class=["'][^"']*entry-content[^"']*["'][\s\S]*?<img[^>]+src=["']([^"']+)["']/i);
-      const coverUrl = coverMatch ? coverMatch[1] : undefined;
+      const coverUrl = metaContent(html, ['og:image', 'twitter:image']) || (coverMatch ? coverMatch[1] : undefined);
 
       const genres: string[] = [];
       const genreMatches = html.matchAll(/rel=["']tag["'][^>]*>([^<]+)<\/a>/gi);

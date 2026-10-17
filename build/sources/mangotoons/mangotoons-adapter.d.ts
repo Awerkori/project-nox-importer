@@ -5,7 +5,7 @@ export declare class MangoToonsAdapter implements SourceAdapter {
     private transport;
     readonly id = "mangotoons";
     readonly name = "Mango Toons";
-    readonly baseUrl = "https://api.mangotoons.com";
+    readonly baseUrl = "https://mangotoons.com";
     private apiUrl;
     private cdnUrl;
     private logger;

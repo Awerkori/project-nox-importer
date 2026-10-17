@@ -110,7 +110,16 @@ export class MadaraAdapter implements SourceAdapter {
       const path = decodeURIComponent(chapterUrl.pathname)
         .replace(/\/+/g, '/')
         .toLocaleLowerCase();
-      const expectedPrefix = `/${this.mangaSubString.toLocaleLowerCase()}/${workSlug}/`;
+      // `baseUrl` may itself be hosted under a stable WordPress subdirectory
+      // (for example /bruxonas).  Compare the chapter path against that
+      // normalized base path as well as the Madara manga route; otherwise a
+      // legitimate /subpath/manga/work/chapter URL looks like a sidebar link
+      // and silently leaves the work with an empty manifest.
+      const basePath = decodeURIComponent(sourceUrl.pathname)
+        .replace(/\/+/g, '/')
+        .replace(/^\/+|\/+$/g, '')
+        .toLocaleLowerCase();
+      const expectedPrefix = `/${basePath ? `${basePath}/` : ''}${this.mangaSubString.toLocaleLowerCase()}/${workSlug}/`;
       return path.startsWith(expectedPrefix);
     } catch {
       return false;
