@@ -7,12 +7,13 @@ export class TaimuMangasAdapter {
     id = 'taimumangas';
     name = 'TaimuMangas';
     baseUrl = 'https://beta.taimumangas.com';
-    apiUrl = 'https://apiv2.taimumangas.com/api/v1/reader';
+    // The provider moved from the retired apiv2 hostname to this public API.
+    apiUrl = 'https://api.taimumangas.com/api/v1/reader';
     logger = new Logger('TaimuMangasAdapter');
     constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
-        this.rateLimiter.setHostRate('apiv2.taimumangas.com', 4.0, 8, 8.0);
+        this.rateLimiter.setHostRate('api.taimumangas.com', 4.0, 8, 8.0);
         this.rateLimiter.setHostRate('cdn.taimumangas.com', 12.0, 24, 24.0);
     }
     get headers() {

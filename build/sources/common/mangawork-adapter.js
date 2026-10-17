@@ -8,6 +8,7 @@ export class MangaWorkAdapter {
     name;
     baseUrl;
     seriesPath;
+    titleSuffixes;
     logger;
     constructor(options, rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
         this.rateLimiter = rateLimiter;
@@ -16,6 +17,7 @@ export class MangaWorkAdapter {
         this.name = options.name;
         this.baseUrl = options.baseUrl.replace(/\/$/, '');
         this.seriesPath = options.seriesPath || 'series';
+        this.titleSuffixes = options.titleSuffixes || [];
         this.logger = new Logger(`MangaWorkAdapter:${this.id}`);
         const host = new URL(this.baseUrl).host;
         const rps = options.rateLimitRps || 2.0;
@@ -121,7 +123,23 @@ export class MangaWorkAdapter {
         const html = await this.fetchHtml(workUrl);
         // Title
         const titleMatch = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-        const title = titleMatch ? stripHtml(decodeHtmlEntities(titleMatch[1])).trim() : sourceWorkId;
+        let title = titleMatch ? stripHtml(decodeHtmlEntities(titleMatch[1])).trim() : sourceWorkId;
+        // Some member-only WordPress themes retain all public work metadata but
+        // render the login heading before it. Use the document title only for
+        // that explicit structural case, and remove only the configured site
+        // suffix—never a meaningful work-title fragment.
+        if (/^(?:login|entrar na conta|sign in)$/i.test(title)) {
+            const documentTitle = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+            if (documentTitle) {
+                let candidate = stripHtml(decodeHtmlEntities(documentTitle[1])).trim();
+                for (const suffix of this.titleSuffixes) {
+                    const suffixPattern = new RegExp(`\\s*(?:-|–|—)\\s*${suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
+                    candidate = candidate.replace(suffixPattern, '').trim();
+                }
+                if (candidate && !/^(?:login|entrar na conta|sign in)$/i.test(candidate))
+                    title = candidate;
+            }
+        }
         // Cover
         const coverMatch = html.match(/itemprop="image"[^>]*src="([^"]+)"/i) ||
             html.match(/class="[^"]*thumb[^"]*"[^>]*src="([^"]+)"/i);

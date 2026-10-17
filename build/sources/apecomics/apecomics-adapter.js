@@ -6,6 +6,7 @@ export class ApeComicsAdapter extends MangaWorkAdapter {
             name: 'Capitoons',
             baseUrl: 'https://capitoons.com',
             seriesPath: 'series',
+            titleSuffixes: ['Capitoons'],
             rateLimitRps: 2.0,
         }, rateLimiter, transport);
     }

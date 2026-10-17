@@ -32,6 +32,14 @@ export interface ProbeReport {
   isAsnBlock: boolean;
 }
 
+function isPlaceholderWork(work: any): boolean {
+  const sourceWorkId = String(work?.sourceWorkId || '').trim().toLocaleLowerCase();
+  if (!sourceWorkId) return true;
+  const normalized = sourceWorkId.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+|\/+$/g, '');
+  const terminal = normalized.split('/').pop() || normalized;
+  return new Set(['feed', 'page', 'order', 'manga', 'obra', 'projeto']).has(terminal);
+}
+
 export class SourceAdmissionGate {
   private logger = new Logger('SourceAdmissionGate');
 
@@ -157,14 +165,6 @@ export class SourceAdmissionGate {
     const t1 = Date.now();
     let discoveredWorks: any[] = [];
     try {
-      const isPlaceholderWork = (work: any): boolean => {
-        const sourceWorkId = String(work?.sourceWorkId || '').trim().toLocaleLowerCase();
-        if (!sourceWorkId) return true;
-        const normalized = sourceWorkId.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+|\/+$/g, '');
-        const terminal = normalized.split('/').pop() || normalized;
-        return new Set(['feed', 'page', 'order', 'manga', 'obra', 'projeto']).has(terminal);
-      };
-
       if (typeof adapter.searchWorks === 'function') {
         try {
           const searchWorks = await this.withStageTimeout('CATALOG_SEARCH', adapter.searchWorks('Solo'));
@@ -289,7 +289,32 @@ export class SourceAdmissionGate {
         // before classifying the source; this is still a read-only probe and
         // never bypasses an upstream challenge.
         let selected: { work: any; details: any; chapters: any[] } | null = null;
-        for (const candidate of discoveredWorks.slice(1, 4)) {
+        // Search results on feed-backed providers can legitimately be chapter
+        // posts rather than a series overview. The normal discovery listing is
+        // then a stronger source of work identities, but it must only be
+        // fetched after the first candidate has proved unusable. Keep this
+        // fallback bounded and deduplicated so an admission probe does not
+        // become a catalogue crawl.
+        let alternateWorks = discoveredWorks.slice(1);
+        if (typeof adapter.fetchUpdatedWorks === 'function') {
+          try {
+            const bootstrap = await this.withStageTimeout(
+              'CATALOG_BOOTSTRAP_AFTER_EMPTY_MANIFEST',
+              adapter.fetchUpdatedWorks(null, { mode: 'bootstrap' }),
+            );
+            const seen = new Set([testWork.sourceWorkId, ...alternateWorks.map((work: any) => work.sourceWorkId)]);
+            const bootstrapWorks = (bootstrap?.works || []).filter((work: any) =>
+              !isPlaceholderWork(work) && !seen.has(work.sourceWorkId),
+            );
+            // Prefer the provider's canonical update feed over more search
+            // hits: it is less likely to contain a chapter-post false work.
+            alternateWorks = [...bootstrapWorks, ...alternateWorks];
+          } catch {
+            // Existing search candidates remain the bounded fallback when a
+            // provider exposes no usable bootstrap listing.
+          }
+        }
+        for (const candidate of alternateWorks.slice(0, 3)) {
           try {
             const candidateDetails = typeof adapter.fetchWorkDetails === 'function'
               ? await this.withStageTimeout('DETAILS_ALTERNATE', adapter.fetchWorkDetails(candidate.sourceWorkId))

@@ -15,9 +15,12 @@ function slugify(text: string): string {
 export class MangoToonsAdapter implements SourceAdapter {
   readonly id = 'mangotoons';
   readonly name = 'Mango Toons';
-  readonly baseUrl = 'https://api.mangotoons.com';
+  readonly baseUrl = 'https://mangotoons.com';
 
-  private apiUrl = 'https://api.mangotoons.com/api';
+  // The public reader moved from /api to the versioned API.  Keep this
+  // separate from the browser base URL: pages are served by the CDN while
+  // catalogue, metadata and manifests come from this stable API surface.
+  private apiUrl = 'https://api.mangotoons.com/api/v1';
   private cdnUrl = 'https://cdn.mangotoons.com';
   private logger = new Logger('MangoToonsAdapter');
   private encKey = DEFAULT_MANGOTOONS_ENC_KEY;
@@ -127,41 +130,38 @@ export class MangoToonsAdapter implements SourceAdapter {
     cursor?: string | null,
     options?: { mode?: 'bootstrap' | 'maintenance' }
   ): Promise<{ works: SourceWorkSummary[]; nextCursor: string | null }> {
-    const mode = options?.mode || 'bootstrap';
-
-    if (mode === 'bootstrap') {
-      const page = parseInt(cursor || '1', 10);
-      const limit = 24;
-      const data = await this.requestApi(`/obras?pagina=${page}&limite=${limit}`);
-      const rawWorks = data.obras || data.dados || data.items || [];
-
-      const works: SourceWorkSummary[] = rawWorks.map((w: any) => ({
-        sourceWorkId: String(w.id),
-        title: w.nome || w.title,
-        slug: w.slug || w.nome_url || slugify(w.nome || w.title || String(w.id)),
-        coverUrl: this.resolveCoverUrl(w.imagem || w.coverImage || w.banner_imagem),
-        updatedAt: w.atualizada_em || w.criada_em || undefined,
-      }));
-
-      const hasNext = data.pagination?.hasNextPage ?? (rawWorks.length === limit);
-      const nextCursor = hasNext ? String(page + 1) : null;
-
-      return { works, nextCursor };
-    } else {
-      // Maintenance mode: check recent chapters/updates
-      const data = await this.requestApi('/capitulos/recentes?pagina=1&limite=24');
-      const rawWorks = data.obras || data.dados || data.items || [];
-
-      const works: SourceWorkSummary[] = rawWorks.map((w: any) => ({
-        sourceWorkId: String(w.id),
-        title: w.nome || w.title,
-        slug: w.slug || w.nome_url || slugify(w.nome || w.title || String(w.id)),
-        coverUrl: this.resolveCoverUrl(w.imagem || w.coverImage || w.banner_imagem),
-        updatedAt: w.atualizada_em || w.criada_em || undefined,
-      }));
-
-      return { works, nextCursor: null };
+    // The releases endpoint is the provider's current public update feed.
+    // It gives us real published chapters and, unlike walking the full work
+    // catalogue, keeps routine maintenance bounded. Cursor pairs are issued
+    // by the provider and preserve a durable, deterministic traversal.
+    const params = new URLSearchParams({ limite: options?.mode === 'maintenance' ? '24' : '48' });
+    if (cursor) {
+      const separator = cursor.lastIndexOf('|');
+      if (separator > 0) {
+        params.set('cursor_data', cursor.slice(0, separator));
+        params.set('cursor_id', cursor.slice(separator + 1));
+      }
     }
+    const rawReleases = await this.requestApi(`/obras/lancamentos?${params.toString()}`);
+    const releases = Array.isArray(rawReleases) ? rawReleases : rawReleases.items || rawReleases.dados || [];
+    const seen = new Set<string>();
+    const works: SourceWorkSummary[] = [];
+    for (const release of releases) {
+      const sourceWorkId = String(release.obra_id || release.work_id || release.id_obra || '');
+      if (!sourceWorkId || seen.has(sourceWorkId)) continue;
+      seen.add(sourceWorkId);
+      const title = release.obra_nome || release.work_title || release.nome || release.title;
+      works.push({
+        sourceWorkId,
+        title: title || sourceWorkId,
+        slug: release.obra_slug || release.slug || slugify(title || sourceWorkId),
+        coverUrl: this.resolveCoverUrl(release.imagem || release.coverImage || release.banner_imagem),
+        updatedAt: release.published_at || release.updated_at || undefined,
+      });
+    }
+    const last = releases[releases.length - 1];
+    const nextCursor = last?.published_at && last?.id ? `${last.published_at}|${last.id}` : null;
+    return { works, nextCursor };
   }
 
   async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
@@ -172,19 +172,19 @@ export class MangoToonsAdapter implements SourceAdapter {
     const slug = w.slug || w.nome_url || slugify(title);
 
     let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
-    const fmt = (w.formato_nome || '').toLowerCase();
+    const fmt = (w.formato_nome || w.formato || '').toLowerCase();
     if (fmt.includes('manga')) kind = 'UNKNOWN';
     else if (fmt.includes('manhua')) kind = 'MANHUA';
     else if (fmt.includes('webtoon') || fmt.includes('comic')) kind = 'WEBTOON';
 
     let status: SourceWorkDetails['status'] = 'UNKNOWN';
-    const st = (w.status_nome || '').toLowerCase();
+    const st = (w.status_nome || w.status || '').toLowerCase();
     if (st.includes('conclu')) status = 'COMPLETED';
     else if (st.includes('hiat') || st.includes('paus')) status = 'HIATUS';
     else if (st.includes('cancel')) status = 'CANCELLED';
     else if (st.includes('ongo') || st.includes('andamento') || st.includes('releasing') || st.includes('ativo') || st.includes('lanç') || st.includes('lanc')) status = 'ONGOING';
 
-    const genres: string[] = (w.tags || []).map((t: any) => t.nome || t.name).filter(Boolean);
+    const genres: string[] = (w.tags || []).map((t: any) => typeof t === 'string' ? t : t.nome || t.name).filter(Boolean);
 
     return {
       sourceWorkId: String(w.id || sourceWorkId),
@@ -200,18 +200,19 @@ export class MangoToonsAdapter implements SourceAdapter {
   }
 
   async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
-    const data = await this.requestApi(`/obras/${sourceWorkId}`);
-    const w = data.obra || data.dados || data;
-    const chaptersList = w.capitulos || [];
+    const data = await this.requestApi(`/obras/${sourceWorkId}/capitulos?pagina=1&limite=500`);
+    const chaptersList = Array.isArray(data) ? data : data.capitulos || data.items || data.dados || [];
 
     const summaries: SourceChapterSummary[] = chaptersList.map((ch: any) => {
       const num = typeof ch.numero === 'number' ? ch.numero : parseFloat(ch.numero);
       return {
-        // Encode both workId and chapterId/number in sourceChapterId so fetchChapterPages has all context
-        sourceChapterId: `${sourceWorkId}:${ch.id || ch.numero}`,
+        // The public manifest is keyed by its displayed chapter value, not
+        // by the internal database ID. Preserve its exact source spelling so
+        // fractional/special chapters are not collapsed.
+        sourceChapterId: `${sourceWorkId}:${encodeURIComponent(String(ch.numero ?? ch.id))}`,
         number: isNaN(num) ? 0 : num,
         title: ch.nome || ch.title || undefined,
-        createdAt: ch.criado_em || ch.atualizado_em || undefined,
+        createdAt: ch.published_at || ch.criado_em || ch.atualizado_em || undefined,
         pageCount: ch.total_paginas || undefined,
       };
     });
@@ -223,22 +224,22 @@ export class MangoToonsAdapter implements SourceAdapter {
   async fetchChapterPages(sourceChapterId: string, chapterNumber?: number): Promise<string[]> {
     // sourceChapterId is formatted as "${sourceWorkId}:${chapterIdOrNumber}"
     let workId = '';
-    let chIdentifier = '';
+    let chapterValue = '';
 
     if (sourceChapterId.includes(':')) {
-      const [wId, cId] = sourceChapterId.split(':');
+      const [wId, cId] = sourceChapterId.split(':', 2);
       workId = wId;
-      chIdentifier = cId || (chapterNumber !== undefined ? String(chapterNumber) : '1');
+      chapterValue = decodeURIComponent(cId || (chapterNumber !== undefined ? String(chapterNumber) : '1'));
     } else {
       workId = sourceChapterId;
-      chIdentifier = chapterNumber !== undefined ? String(chapterNumber) : '1';
+      chapterValue = chapterNumber !== undefined ? String(chapterNumber) : '1';
     }
 
-    const data = await this.requestApi(`/obras/${workId}/capitulos/${chIdentifier}`);
-    const cap = data.capitulo || data.dados || data;
-    const pages = cap.paginas || [];
-
-    const sortedPages = [...pages].sort((a: any, b: any) => (a.numero || 0) - (b.numero || 0));
+    const data = await this.requestApi(
+      `/leitor/obras/${encodeURIComponent(workId)}/capitulos/${encodeURIComponent(chapterValue)}/manifest`,
+    );
+    const pages = data.pages || [];
+    const sortedPages = [...pages].sort((a: any, b: any) => (a.index ?? a.numero ?? 0) - (b.index ?? b.numero ?? 0));
 
     return sortedPages
       .map((p: any) => {
@@ -261,7 +262,7 @@ export class MangoToonsAdapter implements SourceAdapter {
     if (!clean) return [];
 
     try {
-      const data = await this.requestApi(`/obras?pesquisa=${encodeURIComponent(clean)}&limite=20`);
+      const data = await this.requestApi(`/obras?pagina=1&limite=20&busca=${encodeURIComponent(clean)}`);
       const rawWorks = data.obras || data.dados || data.items || [];
 
       return rawWorks.map((w: any) => ({
