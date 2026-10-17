@@ -15,6 +15,40 @@ INSERT INTO public.importer_sources (
   ('imperiodabritannia', 'Sagrado Império da Britannia', 'https://api.imperiodabritannia.net/api', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', '2026-10-17'))
 ON CONFLICT (id) DO NOTHING;
 
+-- Restored adapters use current endpoints and are admitted only for verified
+-- mappings/onboarding; broad catalog discovery remains intentionally off.
+WITH recovered(id, name, base_url) AS (
+  VALUES
+    ('acervohentai', 'Acervo Hentai', 'https://acervohentai.com'),
+    ('amuy', 'AMUY Scan', 'https://www.apenasmaisumyaoi.com'),
+    ('arthurscan', 'Arthur Scan', 'https://arthurscan.xyz'),
+    ('geasscomics', 'Geass Comics', 'https://geasscomics.xyz'),
+    ('inkapk', 'Inkapk', 'https://inkapk.net'),
+    ('mangaonline', 'Manga Online', 'https://mangaonline.love'),
+    ('manhastro', 'Manhastro', 'https://manhastro.net'),
+    ('nexus', 'Nexus Mangas', 'https://www.nexusmangas.com'),
+    ('nocturnesummer', 'Nocturne Summer', 'https://nocfsb.com'),
+    ('pointzerotoons', 'Kitsune Yako', 'https://kitsuneyako.com'),
+    ('tankouhentai', 'Tankou Hentai', 'https://tankouhentai.com'),
+    ('yaoifanclub', 'Yaoi Fan Club', 'https://yaoifanclub.com'),
+    ('yuriverso', 'Yuri on Air', 'https://yurionair.top')
+)
+UPDATE public.importer_sources AS source
+   SET name = recovered.name,
+       base_url = recovered.base_url,
+       enabled = true,
+       status = 'ACTIVE',
+       chapter_ingestion_enabled = true,
+       catalog_discovery_enabled = false,
+       cooldown_until = NULL,
+       blocked_reason = NULL,
+       blocked_details = '{}'::jsonb,
+       config = COALESCE(source.config, '{}'::jsonb) || jsonb_build_object('sourceAuditActivation', '2026-10-17'),
+       updated_at = now()
+  FROM recovered
+ WHERE source.id = recovered.id
+   AND COALESCE(source.config, '{}'::jsonb)->>'sourceAuditActivation' IS DISTINCT FROM '2026-10-17';
+
 UPDATE public.importer_sources
    SET name = 'Kuro Mangas', base_url = 'https://kuromangas.com',
        enabled = true, status = 'ACTIVE', chapter_ingestion_enabled = true,
