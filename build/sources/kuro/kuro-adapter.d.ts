@@ -17,6 +17,7 @@ export declare class KuroAdapter implements SourceAdapter {
     private cfClearance;
     private loginPromise;
     private lastLoginAttempt;
+    private lastAuthDiagnostic;
     /**
      * Kuro's marketing homepage is protected by an interactive Turnstile page,
      * whereas its authorized JSON catalog is the route actually used by this
@@ -28,6 +29,10 @@ export declare class KuroAdapter implements SourceAdapter {
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     hasValidSession(): boolean;
     clearSession(): void;
+    private credentialConfiguration;
+    private hasUsableCredentialConfiguration;
+    private recordAuthDiagnostic;
+    private authenticationFailure;
     login(force?: boolean): Promise<boolean>;
     private getAuthHeaders;
     private request;
