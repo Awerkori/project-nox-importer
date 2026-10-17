@@ -17,6 +17,22 @@ export class MangaThemesiaAdapter implements SourceAdapter {
   readonly baseUrl: string;
   readonly mangaSubString: string;
 
+  /** See MadaraAdapter.probeUrl: use the actual public catalog, not a
+   * separately protected landing page. */
+  get probeUrl(): string {
+    return `${this.baseUrl}/${this.mangaSubString}/?order=update`;
+  }
+
+  get admissionProbe(): NonNullable<SourceAdapter['admissionProbe']> {
+    return {
+      url: this.probeUrl,
+      headers: this.headers,
+      expectedType: 'html',
+      allowInlineJsDetection: true,
+      usableHtmlMarker: /(?:\bbsx\b|\binkra-(?:catalog|series)\b)/i,
+    };
+  }
+
   protected logger: Logger;
 
   constructor(

@@ -85,6 +85,66 @@ describe('KuroAdapter & Rabbit Decryptor', () => {
     );
   });
 
+  it('renews an outdated session using the current _vx request-context contract', async () => {
+    vi.stubEnv('KURO_SESSION', 'stale-session');
+    vi.stubEnv('KURO_CLIENT_TOKEN', 'stale-context');
+    vi.stubEnv('KURO_EMAIL', 'service@example.test');
+    vi.stubEnv('KURO_PASSWORD', 'test-password');
+    vi.stubEnv('NOX_STORAGE_BRIDGE_TOKEN', 'bridge-token');
+    vi.stubEnv('NOX_MANGA_URL', 'https://nox.example.test');
+
+    const bridgeBodies: Array<Record<string, unknown>> = [];
+    const mockTransport = vi.fn(async (_url: string, init?: RequestInit) => {
+      const outer = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>;
+      bridgeBodies.push(outer);
+      const target = String(outer.url || '');
+      if (target.endsWith('/auth/login')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({
+            status: 200,
+            cookies: ['kuro_session=fresh-session; Path=/', '_vx=fresh-context; Path=/'],
+            data: { _v_secure: 'opaque' },
+          }),
+        } as any;
+      }
+      if (bridgeBodies.length === 1) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({ status: 403, data: { reason: 'csrf_mismatch' } }),
+        } as any;
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          status: 200,
+          data: { data: [{ manga_id: 7, manga_title: 'Renewed Work' }], pagination: { hasNext: false } },
+        }),
+      } as any;
+    });
+
+    try {
+      const adapter = new KuroAdapter(new HostRateLimiter(10), mockTransport as any);
+      const { works } = await adapter.fetchUpdatedWorks(null, { mode: 'maintenance' });
+
+      expect(works).toHaveLength(1);
+      expect(works[0].title).toBe('Renewed Work');
+      const finalHeaders = bridgeBodies.at(-1)?.headers as Record<string, string>;
+      expect(finalHeaders.Cookie).toContain('kuro_session=fresh-session');
+      expect(finalHeaders.Cookie).toContain('_vx=fresh-context');
+      expect(finalHeaders['X-Request-Ctx']).toBe('fresh-context');
+      expect(finalHeaders['X-Client-Token']).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('processes authenticated responses cleanly', async () => {
     const mockTransport = vi.fn().mockResolvedValue({
       ok: true,

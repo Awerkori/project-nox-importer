@@ -15,6 +15,13 @@ export declare class MadaraAdapter implements SourceAdapter {
     readonly name: string;
     readonly baseUrl: string;
     readonly mangaSubString: string;
+    /**
+     * Madara homepages are frequently protected independently from their
+     * catalog.  Probe the same catalog route fetchUpdatedWorks uses; subsequent
+     * admission stages prove the entire import path rather than trusting it.
+     */
+    get probeUrl(): string;
+    get admissionProbe(): NonNullable<SourceAdapter['admissionProbe']>;
     protected logger: Logger;
     constructor(options: MadaraOptions, rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     protected get headers(): Record<string, string>;

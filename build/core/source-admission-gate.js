@@ -43,30 +43,54 @@ export class SourceAdmissionGate {
         let cfRay = null;
         let primaryClassification = null;
         let isAsnBlock = false;
-        // Use probeUrl if adapter defines one (e.g. Kuro via CF Workers bridge)
-        const targetUrl = adapter.probeUrl ?? adapter.baseUrl;
+        // Probe the same public catalog/API route used by the adapter when one is
+        // declared.  A number of providers protect their marketing homepage while
+        // their actual public catalog remains available.  The following stages
+        // still require catalog, details, chapters, reader and an image download.
+        const probe = adapter.admissionProbe;
+        const targetUrl = probe?.url ?? adapter.probeUrl ?? adapter.baseUrl;
         this.logger.info(`Starting Production Admission Probe for source: ${sourceId} (${targetUrl})`);
         // Helper sleep
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         // STAGE 1: BASE URL
         const t0 = Date.now();
         try {
-            const res = await transport(targetUrl, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-                    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-                },
-                signal: AbortSignal.timeout(10_000),
-            });
+            // An explicitly declared adapter-owned request is reserved for a
+            // provider's authorized API session (for example, Kuro). It exercises
+            // the exact catalog path the importer will use while keeping its
+            // credentials out of the Gate. Public providers continue using the
+            // ordinary direct probe below.
+            const res = probe?.request
+                ? await this.withStageTimeout('BASE_URL', probe.request())
+                : await transport(targetUrl, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+                        Referer: `${adapter.baseUrl.replace(/\/$/, '')}/`,
+                        ...(probe?.headers || {}),
+                    },
+                    signal: AbortSignal.timeout(10_000),
+                });
             const bodyText = res.text ? await res.text().catch(() => '') : '';
             cfRay = res.headers?.get ? res.headers.get('cf-ray') : null;
             const insp = CloudflareClassifier.inspect(res.status, res.headers, bodyText, {
                 url: targetUrl,
-                expectedType: 'html',
+                expectedType: probe?.expectedType ?? 'html',
                 isIsolatedRequest: true,
             });
-            if (insp.isBlocked || insp.isChallenge || res.status === 403) {
+            // Cloudflare JS detection or a Turnstile widget can be embedded in an
+            // otherwise complete public catalog. It is not an executable gate when
+            // the precise catalog structure is already in the document; let the five
+            // real adapter stages prove that distinction. Never soften 403/429 or a
+            // short/interstitial document.
+            const hasUsableInlineCatalog = Boolean(probe?.allowInlineJsDetection &&
+                res.ok &&
+                (insp.classification === 'JS_CHALLENGE' || insp.classification === 'TURNSTILE') &&
+                bodyText.length >= 20_000 &&
+                Boolean(probe?.usableHtmlMarker?.test(bodyText)) &&
+                !/<title>\s*just a moment/i.test(bodyText));
+            if ((insp.isBlocked || insp.isChallenge || res.status === 403) && !hasUsableInlineCatalog) {
                 stages.push({
                     stage: 'BASE_URL',
                     status: 'FAIL',
@@ -96,6 +120,7 @@ export class SourceAdmissionGate {
                 status: 'PASS',
                 httpStatus: res.status,
                 durationMs: Date.now() - t0,
+                detail: hasUsableInlineCatalog ? 'Complete catalog HTML with passive Cloudflare markup' : undefined,
             });
         }
         catch (err) {

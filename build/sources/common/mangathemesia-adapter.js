@@ -8,6 +8,20 @@ export class MangaThemesiaAdapter {
     name;
     baseUrl;
     mangaSubString;
+    /** See MadaraAdapter.probeUrl: use the actual public catalog, not a
+     * separately protected landing page. */
+    get probeUrl() {
+        return `${this.baseUrl}/${this.mangaSubString}/?order=update`;
+    }
+    get admissionProbe() {
+        return {
+            url: this.probeUrl,
+            headers: this.headers,
+            expectedType: 'html',
+            allowInlineJsDetection: true,
+            usableHtmlMarker: /(?:\bbsx\b|\binkra-(?:catalog|series)\b)/i,
+        };
+    }
     logger;
     constructor(options, rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
         this.rateLimiter = rateLimiter;

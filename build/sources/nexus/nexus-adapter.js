@@ -7,6 +7,15 @@ export class NexusAdapter {
     id = 'nexus';
     name = 'Nexus Mangas';
     baseUrl = 'https://www.nexusmangas.com';
+    admissionProbe = {
+        url: 'https://supabase.nexusmangas.com/rest/v1/chapters?select=work_id&limit=1',
+        headers: {
+            apikey: ANON_KEY,
+            Authorization: `Bearer ${ANON_KEY}`,
+            Accept: 'application/json',
+        },
+        expectedType: 'json',
+    };
     apiUrl = 'https://supabase.nexusmangas.com/rest/v1';
     functionsUrl = 'https://supabase.nexusmangas.com/functions/v1';
     logger = new Logger('NexusAdapter');

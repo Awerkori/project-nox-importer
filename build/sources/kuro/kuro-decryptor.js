@@ -211,7 +211,7 @@ export async function fetchLiveEncryptionKey(baseUrl = 'https://kuromangas.com')
                 : `${baseUrl.replace(/\/$/, '')}${scriptMatch[1]}`;
             const jsRes = await fetch(scriptUrl, { signal: AbortSignal.timeout(15_000) });
             const js = await jsRes.text();
-            const keyMatch = js.match(/ENCRYPTION_KEY\s*[:=]\s*["']([^"']+)["']/);
+            const keyMatch = js.match(/(?:VITE_API_ENCRYPTION_KEY|ENCRYPTION_KEY)\s*[:=]\s*["']([^"']+)["']/);
             if (keyMatch && keyMatch[1]) {
                 _cachedLiveKey = keyMatch[1];
                 _lastKeyFetch = now;

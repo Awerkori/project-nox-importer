@@ -213,6 +213,72 @@ describe('Cloudflare Classifier & Resilience Suite', () => {
       expect(report.stages.every((s) => s.status === 'PASS')).toBe(true);
     });
 
+    it('accepts passive Cloudflare markup only for an opted-in, complete catalog and still runs every functional stage', async () => {
+      const gate = new SourceAdmissionGate();
+      const mockAdapter: SourceAdapter = {
+        id: 'passive-cf-source',
+        name: 'Passive CF Source',
+        baseUrl: 'https://passive-cf.example.com',
+        admissionProbe: {
+          url: 'https://passive-cf.example.com/manga/?order=update',
+          usableHtmlMarker: /catalog-card/,
+          allowInlineJsDetection: true,
+        },
+        searchWorks: vi.fn(async () => [{ sourceWorkId: 'work-1', title: 'Work 1', slug: 'work-1' }]),
+        fetchUpdatedWorks: vi.fn(),
+        fetchWorkDetails: vi.fn(async () => ({ sourceWorkId: 'work-1', title: 'Work 1' })),
+        fetchChapters: vi.fn(async () => [{ sourceChapterId: 'chapter-1', number: 1, pageCount: 1 }]),
+        fetchChapterPages: vi.fn(async () => ['https://cdn.example.com/page.jpg']),
+      };
+      const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+      const fullCatalog = `<html><body><script src=\"/cdn-cgi/challenge-platform/scripts/jsd/main.js\"></script><article class=\"catalog-card\"></article>${'x'.repeat(20_000)}</body></html>`;
+      const transport = vi.fn(async (url: string) => url.includes('page.jpg')
+        ? ({ ok: true, status: 200, headers: new Headers({ 'content-type': 'image/jpeg' }), arrayBuffer: async () => jpeg.buffer } as any)
+        : ({ ok: true, status: 200, headers: new Headers({ 'content-type': 'text/html' }), text: async () => fullCatalog } as any));
+
+      const report = await gate.executeProdProbe(mockAdapter, transport);
+      expect(report.overallStatus).toBe('PASS');
+      expect(report.stages).toHaveLength(6);
+      expect(report.stages[0].detail).toContain('passive Cloudflare');
+      expect(mockAdapter.searchWorks).toHaveBeenCalledOnce();
+      expect(mockAdapter.fetchChapterPages).toHaveBeenCalledWith('chapter-1', 1);
+    });
+
+    it('uses an adapter-owned authenticated catalog probe without weakening the other five stages', async () => {
+      const gate = new SourceAdmissionGate();
+      const authenticatedRequest = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: 1 }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+      const mockAdapter: SourceAdapter = {
+        id: 'authorized-api-source',
+        name: 'Authorized API Source',
+        baseUrl: 'https://homepage-with-turnstile.example.com',
+        admissionProbe: {
+          url: 'https://api.example.com/catalog',
+          expectedType: 'json',
+          request: authenticatedRequest,
+        },
+        searchWorks: vi.fn(async () => [{ sourceWorkId: 'work-1', title: 'Work 1', slug: 'work-1' }]),
+        fetchUpdatedWorks: vi.fn(),
+        fetchWorkDetails: vi.fn(async () => ({ sourceWorkId: 'work-1', title: 'Work 1' })),
+        fetchChapters: vi.fn(async () => [{ sourceChapterId: 'chapter-1', number: 1, pageCount: 1 }]),
+        fetchChapterPages: vi.fn(async () => ['https://images.example.com/1.jpg']),
+      };
+      const jpeg = new Uint8Array(5_000);
+      jpeg.set([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+      const imageTransport = vi.fn(async () => new Response(
+        jpeg,
+        { status: 200, headers: { 'content-type': 'image/jpeg' } },
+      ));
+      const report = await gate.executeProdProbe(mockAdapter, imageTransport as any);
+      expect(report.overallStatus).toBe('PASS');
+      expect(authenticatedRequest).toHaveBeenCalledOnce();
+      expect(report.stages.map((stage) => stage.stage)).toEqual([
+        'BASE_URL', 'CATALOG', 'DETAILS', 'CHAPTERS', 'PAGES', 'IMAGE_DOWNLOAD',
+      ]);
+    });
+
     it('immediately rejects and marks UPSTREAM_BLOCKED if Base URL returns Cloudflare 403', async () => {
       const gate = new SourceAdmissionGate();
 

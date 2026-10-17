@@ -7,7 +7,6 @@ import { MangoToonsAdapter } from './mangotoons/mangotoons-adapter.js';
 import { HanamiHeavenAdapter } from './hanamiheaven/hanamiheaven-adapter.js';
 import { HipercoolAdapter } from './hipercool/hipercool-adapter.js';
 import { InstaHentaiAdapter } from './instahentai/instahentai-adapter.js';
-import { MegaHentaiAdapter } from './megahentai/megahentai-adapter.js';
 import { TaimuMangasAdapter } from './taimumangas/taimumangas-adapter.js';
 import { EuphoriaScanAdapter } from './euphoriascan/euphoriascan-adapter.js';
 import { FleurBlancheAdapter } from './fleurblanche/fleurblanche-adapter.js';
@@ -38,12 +37,12 @@ import { PinkRosaAdapter } from './pinkrosa/pinkrosa-adapter.js';
 import { GalaxScanlatorAdapter } from './galaxscanlator/galaxscanlator-adapter.js';
 import { ApenasUmaFaAdapter } from './apenasumafa/apenasumafa-adapter.js';
 import { Ler999Adapter } from './ler999/ler999-adapter.js';
-import { OsakaScanAdapter } from './osakascan/osakascan-adapter.js';
 import { MaidScanAdapter } from './maidscan/maidscan-adapter.js';
 import { VegitoonsAdapter } from './vegitoons/vegitoons-adapter.js';
 import { HentaiHomeAdapter } from './hentaihome/hentaihome-adapter.js';
 import { MundoHentaiAdapter } from './mundohentai/mundohentai-adapter.js';
 import { HentaiSeasonAdapter } from './hentaiseason/hentaiseason-adapter.js';
+import { HentaiTecaAdapter } from './hentaiteca/hentaiteca-adapter.js';
 import { HentaiTokyoAdapter } from './hentaitokyo/hentaitokyo-adapter.js';
 import { UniversoHentaiAdapter } from './universohentai/universohentai-adapter.js';
 import { HentaiFusionAdapter } from './hentaifusion/hentaifusion-adapter.js';
@@ -54,14 +53,14 @@ import { PointZeroToonsAdapter } from './pointzerotoons/pointzerotoons-adapter.j
 import { GeassComicsAdapter } from './geasscomics/geasscomics-adapter.js';
 import { BRScansAdapter } from './brscans/brscans-adapter.js';
 import { MangaStopAdapter } from './mangastop/mangastop-adapter.js';
+import { ImperioDaBritanniaAdapter } from './imperiodabritannia/imperiodabritannia-adapter.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 
 export class SourceRegistry {
   private adapters = new Map<string, SourceAdapter>();
 
-  constructor(rateLimiter?: HostRateLimiter, bridgeToken?: string | null, mangaUrl?: string | null) {
+  constructor(rateLimiter?: HostRateLimiter) {
     if (rateLimiter) {
-      const bridgeUrl = bridgeToken && mangaUrl ? `${mangaUrl.replace(/\/$/, '')}/api/internal/importer/kuro-bridge` : undefined;
       // Register all supported adapters
       this.register(new NexusAdapter(rateLimiter));
       this.register(new MangaFlixAdapter(rateLimiter));
@@ -93,19 +92,18 @@ export class SourceRegistry {
       this.register(new GalaxScanlatorAdapter(rateLimiter));
       this.register(new ApenasUmaFaAdapter(rateLimiter));
       this.register(new Ler999Adapter(rateLimiter));
-      this.register(new OsakaScanAdapter(rateLimiter));
       this.register(new MaidScanAdapter(rateLimiter));
       this.register(new VegitoonsAdapter(rateLimiter));
       this.register(new PointZeroToonsAdapter(rateLimiter));
       this.register(new GeassComicsAdapter(rateLimiter));
       this.register(new BRScansAdapter(rateLimiter));
       this.register(new MangaStopAdapter(rateLimiter));
+      this.register(new ImperioDaBritanniaAdapter(rateLimiter));
 
       // Register adult sources (+18 / Adulto / Yaoi / Hentai)
       this.register(new HanamiHeavenAdapter(rateLimiter));
       this.register(new HipercoolAdapter(rateLimiter));
       this.register(new InstaHentaiAdapter(rateLimiter));
-      this.register(new MegaHentaiAdapter(rateLimiter));
       this.register(new TankouHentaiAdapter(rateLimiter));
       this.register(new CafeComYaoiAdapter(rateLimiter));
       this.register(new HotCabaretScanAdapter(rateLimiter));
@@ -116,6 +114,7 @@ export class SourceRegistry {
       this.register(new HentaiHomeAdapter(rateLimiter));
       this.register(new MundoHentaiAdapter(rateLimiter));
       this.register(new HentaiSeasonAdapter(rateLimiter));
+      this.register(new HentaiTecaAdapter(rateLimiter));
       this.register(new HentaiTokyoAdapter(rateLimiter));
       this.register(new UniversoHentaiAdapter(rateLimiter));
       this.register(new HentaiFusionAdapter(rateLimiter));

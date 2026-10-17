@@ -6,7 +6,6 @@ export declare class KuroAdapter implements SourceAdapter {
     readonly id = "kuro";
     readonly name = "Kuro Mangas";
     readonly baseUrl = "https://kuromangas.com";
-    get probeUrl(): string | undefined;
     private apiUrl;
     private cdnUrl;
     private logger;
@@ -18,6 +17,14 @@ export declare class KuroAdapter implements SourceAdapter {
     private cfClearance;
     private loginPromise;
     private lastLoginAttempt;
+    /**
+     * Kuro's marketing homepage is protected by an interactive Turnstile page,
+     * whereas its authorized JSON catalog is the route actually used by this
+     * adapter.  Probe that real route through the adapter-owned authenticated
+     * session rather than treating a public homepage challenge as a source
+     * outage.  No cookie or bridge token leaves the adapter.
+     */
+    get admissionProbe(): NonNullable<SourceAdapter['admissionProbe']>;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     hasValidSession(): boolean;
     clearSession(): void;

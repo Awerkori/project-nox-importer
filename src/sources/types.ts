@@ -59,6 +59,35 @@ export interface SourceAdapter {
   readonly probeUrl?: string;
 
   /**
+   * Optional admission request for adapters whose public catalog/API has a
+   * different origin or requires the same public headers used by the normal
+   * adapter requests.  This is deliberately limited to an ordinary public
+   * HTTP request.  An adapter with an explicitly authorized authenticated API
+   * may supply `request` so stage one exercises that same API path; it never
+   * grants the Gate a browser challenge bypass or a raw credential.
+   */
+  readonly admissionProbe?: {
+    url: string;
+    headers?: Record<string, string>;
+    expectedType?: 'html' | 'json';
+    /**
+     * Optional adapter-owned request for an authenticated catalog/API.  The
+     * adapter keeps credentials/session handling private and returns only the
+     * upstream response to classify.  All five functional stages still run.
+     */
+    request?: () => Promise<Response>;
+    /** Structural marker the adapter itself needs from a usable HTML catalog. */
+    usableHtmlMarker?: RegExp;
+    /**
+     * Some public WordPress catalogs receive Cloudflare's passive JS-detection
+     * snippet together with their complete usable HTML.  Permit stage one to
+     * continue only when that full document is present; all functional stages
+     * remain mandatory.
+     */
+    allowInlineJsDetection?: boolean;
+  };
+
+  /**
    * Discover recently updated works from this source
    */
   fetchUpdatedWorks(

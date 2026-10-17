@@ -17,6 +17,25 @@ export class MadaraAdapter implements SourceAdapter {
   readonly baseUrl: string;
   readonly mangaSubString: string;
 
+  /**
+   * Madara homepages are frequently protected independently from their
+   * catalog.  Probe the same catalog route fetchUpdatedWorks uses; subsequent
+   * admission stages prove the entire import path rather than trusting it.
+   */
+  get probeUrl(): string {
+    return `${this.baseUrl}/${this.mangaSubString}/?order=update`;
+  }
+
+  get admissionProbe(): NonNullable<SourceAdapter['admissionProbe']> {
+    return {
+      url: this.probeUrl,
+      headers: this.headers,
+      expectedType: 'html',
+      allowInlineJsDetection: true,
+      usableHtmlMarker: /\bwp-manga\b/i,
+    };
+  }
+
   protected logger: Logger;
 
   constructor(

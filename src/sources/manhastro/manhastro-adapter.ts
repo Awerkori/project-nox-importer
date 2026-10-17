@@ -29,6 +29,7 @@ export class ManhastroAdapter implements SourceAdapter {
   readonly id = 'manhastro';
   readonly name = 'Manhastro';
   readonly baseUrl = 'https://manhastro.net';
+  readonly probeUrl = 'https://api2.manhastro.net/lancamentos?p=1';
 
   private apiUrl = 'https://api2.manhastro.net';
   private logger = new Logger('ManhastroAdapter');
@@ -204,6 +205,7 @@ export class ManhastroAdapter implements SourceAdapter {
         descricao_brasil?: string | null;
         imagem?: string | null;
         generos?: string[];
+        titulo_alternative?: string[] | null;
         categoria?: string | null;
         status?: string | null;
       }>;
@@ -213,8 +215,13 @@ export class ManhastroAdapter implements SourceAdapter {
     if (!item) throw new Error(`Work not found on Manhastro: ${sourceWorkId}`);
 
     const title = item.titulo_brasil?.trim() || item.titulo.trim();
-    const alternativeTitles = [item.titulo.trim(), item.titulo_brasil?.trim()]
-      .filter((candidate): candidate is string => Boolean(candidate) && candidate !== title);
+    const alternativeTitles = Array.from(new Set([
+      item.titulo.trim(),
+      item.titulo_brasil?.trim(),
+      ...(Array.isArray(item.titulo_alternative) ? item.titulo_alternative : []),
+    ]
+      .map((candidate) => candidate?.trim())
+      .filter((candidate): candidate is string => Boolean(candidate) && candidate !== title)));
     const cover = item.imagem
       ? item.imagem.startsWith('http')
         ? item.imagem

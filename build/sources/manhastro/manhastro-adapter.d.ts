@@ -6,6 +6,7 @@ export declare class ManhastroAdapter implements SourceAdapter {
     readonly id = "manhastro";
     readonly name = "Manhastro";
     readonly baseUrl = "https://manhastro.net";
+    readonly probeUrl = "https://api2.manhastro.net/lancamentos?p=1";
     private apiUrl;
     private logger;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);

@@ -278,7 +278,7 @@ describe('Cover Pipeline Hardening & Resilient Ingestion', () => {
 
     const rateLimiter = new HostRateLimiter(10.0);
     storage = new MockStorageProvider();
-    registry = new SourceRegistry(rateLimiter, 'test-token', 'https://mock.manga.workers.dev');
+    registry = new SourceRegistry(rateLimiter);
 
     mockAdapter = {
       id: 'mocksource',
