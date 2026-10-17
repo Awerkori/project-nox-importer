@@ -24,10 +24,10 @@ export async function reconcileAuditedSources(pool: Queryable): Promise<void> {
        sync_interval_minutes, chapter_ingestion_enabled,
        catalog_discovery_enabled, config
      ) VALUES
-       ('brscans', 'BR Scans', 'https://brscans.com', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1)),
-       ('mangastop', 'MangaStop', 'https://mangastop.net', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1)),
-       ('hentaiteca', 'HentaiTeca', 'https://hentaiteca.online', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1)),
-       ('imperiodabritannia', 'Sagrado Império da Britannia', 'https://api.imperiodabritannia.net/api', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1))
+       ('brscans', 'BR Scans', 'https://brscans.com', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1::text)),
+       ('mangastop', 'MangaStop', 'https://mangastop.net', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1::text)),
+       ('hentaiteca', 'HentaiTeca', 'https://hentaiteca.online', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1::text)),
+       ('imperiodabritannia', 'Sagrado Império da Britannia', 'https://api.imperiodabritannia.net/api', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1::text))
      ON CONFLICT (id) DO NOTHING`,
     [SOURCE_AUDIT_RELEASE],
   );
@@ -47,10 +47,10 @@ export async function reconcileAuditedSources(pool: Queryable): Promise<void> {
            cooldown_until = NULL,
            blocked_reason = NULL,
            blocked_details = '{}'::jsonb,
-           config = COALESCE(config, '{}'::jsonb) || jsonb_build_object('sourceAuditRecovery', $1),
+           config = COALESCE(config, '{}'::jsonb) || jsonb_build_object('sourceAuditRecovery', $1::text),
            updated_at = now()
      WHERE id = 'kuro'
-       AND COALESCE(config, '{}'::jsonb)->>'sourceAuditRecovery' IS DISTINCT FROM $1`,
+       AND COALESCE(config, '{}'::jsonb)->>'sourceAuditRecovery' IS DISTINCT FROM $1::text`,
     [SOURCE_AUDIT_RELEASE],
   );
 
@@ -65,11 +65,11 @@ export async function reconcileAuditedSources(pool: Queryable): Promise<void> {
            catalog_discovery_enabled = false,
            cooldown_until = NULL,
            blocked_reason = 'Retired after source audit: no sustainable public Reader route',
-           blocked_details = jsonb_build_object('sourceAuditRetired', $1),
-           config = COALESCE(config, '{}'::jsonb) || jsonb_build_object('sourceAuditRetired', $1),
+           blocked_details = jsonb_build_object('sourceAuditRetired', $1::text),
+           config = COALESCE(config, '{}'::jsonb) || jsonb_build_object('sourceAuditRetired', $1::text),
            updated_at = now()
      WHERE id IN ('megahentai', 'osakascan')
-       AND COALESCE(config, '{}'::jsonb)->>'sourceAuditRetired' IS DISTINCT FROM $1`,
+       AND COALESCE(config, '{}'::jsonb)->>'sourceAuditRetired' IS DISTINCT FROM $1::text`,
     [SOURCE_AUDIT_RELEASE],
   );
 
