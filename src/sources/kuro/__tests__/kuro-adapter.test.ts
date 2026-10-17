@@ -61,4 +61,29 @@ describe('KuroAdapter bridge session recovery', () => {
     expect(bridgeLoginRequests).toBe(2);
     expect(detailRequests).toBe(2);
   });
+
+  it('reports a blank runtime credential without sending a useless login retry', async () => {
+    vi.stubEnv('NOX_MANGA_URL', 'https://bridge.test');
+    vi.stubEnv('NOX_STORAGE_BRIDGE_TOKEN', 'test-token');
+    vi.stubEnv('KURO_EMAIL', '');
+    vi.stubEnv('KURO_PASSWORD', 'configured-but-not-logged');
+
+    let loginRequests = 0;
+    let detailRequests = 0;
+    const adapter = new KuroAdapter(undefined, async (_url, init) => {
+      const target = JSON.parse(String(init?.body || '{}')).url || '';
+      if (target.endsWith('/auth/login')) loginRequests++;
+      if (target.endsWith('/mangas/101')) {
+        detailRequests++;
+        return Response.json({ status: 403, text: 'Just a moment...' });
+      }
+      throw new Error(`Unexpected bridge target: ${target}`);
+    });
+
+    await expect(adapter.fetchWorkDetails('101')).rejects.toThrow(
+      'Kuro auth diagnostic: CONFIG_EMAIL_BLANK',
+    );
+    expect(loginRequests).toBe(0);
+    expect(detailRequests).toBe(1);
+  });
 });

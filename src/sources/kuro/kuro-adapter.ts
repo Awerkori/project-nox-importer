@@ -37,6 +37,11 @@ export class KuroAdapter implements SourceAdapter {
   private cfClearance: string | null = null;
   private loginPromise: Promise<boolean> | null = null;
   private lastLoginAttempt = 0;
+  // A deliberately non-sensitive outcome marker. It is appended to a
+  // persistent metadata error only when authentication cannot be established,
+  // so production can distinguish configuration shape from an upstream/WAF
+  // failure without logging credential values, lengths, cookies or tokens.
+  private lastAuthDiagnostic = 'NOT_ATTEMPTED';
 
   /**
    * Kuro's marketing homepage is protected by an interactive Turnstile page,
@@ -102,6 +107,33 @@ export class KuroAdapter implements SourceAdapter {
     this.clientToken = null;
   }
 
+  private credentialConfiguration(): { email?: string; password?: string; diagnostic: string } {
+    const email = process.env.KURO_EMAIL;
+    const password = process.env.KURO_PASSWORD;
+    if (email === undefined) return { diagnostic: 'EMAIL_MISSING' };
+    if (password === undefined) return { diagnostic: 'PASSWORD_MISSING' };
+    if (!email.trim()) return { diagnostic: 'EMAIL_BLANK' };
+    if (!password.trim()) return { diagnostic: 'PASSWORD_BLANK' };
+    if (email !== email.trim()) return { diagnostic: 'EMAIL_OUTER_WHITESPACE' };
+    if (password !== password.trim()) return { diagnostic: 'PASSWORD_OUTER_WHITESPACE' };
+    return { email, password, diagnostic: 'PRESENT' };
+  }
+
+  private hasUsableCredentialConfiguration(): boolean {
+    const credentials = this.credentialConfiguration();
+    return Boolean(credentials.email && credentials.password);
+  }
+
+  private recordAuthDiagnostic(diagnostic: string): void {
+    this.lastAuthDiagnostic = this.lastAuthDiagnostic === 'NOT_ATTEMPTED'
+      ? diagnostic
+      : `${this.lastAuthDiagnostic}>${diagnostic}`.slice(0, 240);
+  }
+
+  private authenticationFailure(message: string): Error {
+    return new Error(`${message}; Kuro auth diagnostic: ${this.lastAuthDiagnostic}`);
+  }
+
   async login(force = false): Promise<boolean> {
     if (!force && this.hasValidSession()) {
       return true;
@@ -111,12 +143,13 @@ export class KuroAdapter implements SourceAdapter {
       return this.loginPromise;
     }
 
-    const email = process.env.KURO_EMAIL;
-    const password = process.env.KURO_PASSWORD;
-
-    if (!email || !password) {
+    this.lastAuthDiagnostic = 'NOT_ATTEMPTED';
+    const credentials = this.credentialConfiguration();
+    if (!credentials.email || !credentials.password) {
+      this.recordAuthDiagnostic(`CONFIG_${credentials.diagnostic}`);
       return false;
     }
+    const { email, password } = credentials;
 
     this.loginPromise = (async () => {
       try {
@@ -154,6 +187,7 @@ export class KuroAdapter implements SourceAdapter {
         });
 
         if (!res.ok) {
+          this.recordAuthDiagnostic(`BRIDGE_LOGIN_TRANSPORT_HTTP_${res.status}`);
           this.logger.warn(`Kuro bridge login HTTP error: ${res.status}`);
         } else {
           const bridgeData = (await res.json()) as {
@@ -172,13 +206,18 @@ export class KuroAdapter implements SourceAdapter {
               this.sessionCookie = matchSession[1];
               this.clientToken = matchContext[1];
               this.cfClearance = matchCf?.[1] ?? null;
+              this.recordAuthDiagnostic('BRIDGE_SESSION_ESTABLISHED');
               this.logger.info('Kuro authentication successful (via Cloudflare Workers bridge)');
               return true;
             }
           }
+          this.recordAuthDiagnostic(bridgeData?.status
+            ? `BRIDGE_LOGIN_UPSTREAM_HTTP_${bridgeData.status}_SESSION_COOKIES_UNUSABLE`
+            : 'BRIDGE_LOGIN_RESPONSE_UNUSABLE');
           this.logger.warn(`Kuro bridge login returned status ${bridgeData?.status} without usable session cookies`);
         }
       } catch (bridgeErr: any) {
+        this.recordAuthDiagnostic('BRIDGE_LOGIN_NETWORK_ERROR');
         this.logger.warn('Kuro bridge login encountered error, falling back to direct login', {
           error: bridgeErr?.message,
         });
@@ -224,13 +263,17 @@ export class KuroAdapter implements SourceAdapter {
           this.sessionCookie = matchSession[1];
           this.clientToken = matchContext[1];
           this.cfClearance = matchCf?.[1] ?? null;
+          this.recordAuthDiagnostic('DIRECT_SESSION_ESTABLISHED');
           this.logger.info('Kuro authentication successful (direct session established in memory)');
           return true;
         }
+        this.recordAuthDiagnostic('DIRECT_LOGIN_SESSION_COOKIES_UNUSABLE');
       } else {
+        this.recordAuthDiagnostic(`DIRECT_LOGIN_HTTP_${res.status}`);
         this.logger.warn(`Kuro direct login failed: HTTP ${res.status}`);
       }
     } catch (err: any) {
+      this.recordAuthDiagnostic('DIRECT_LOGIN_NETWORK_ERROR');
       this.logger.warn('Failed to login with Kuro credentials from environment', {
         error: err?.message,
       });
@@ -335,7 +378,7 @@ export class KuroAdapter implements SourceAdapter {
               const csrfMismatch = bridgePayload.status === 403
                 && (bridgePayload.data as { reason?: unknown } | undefined)?.reason === 'csrf_mismatch';
               if (bridgePayload.status === 401 || csrfMismatch) {
-                if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
+                if (attempts < maxAttempts && this.hasUsableCredentialConfiguration()) {
                   this.logger.info('Kuro session context rejected via bridge; auto-renewing session...', {
                     upstreamStatus: bridgePayload.status,
                     csrfMismatch,
@@ -344,7 +387,7 @@ export class KuroAdapter implements SourceAdapter {
                   if (renewed) continue;
                 }
                 this.clearSession();
-                throw new Error('Kuro requires authentication: session expired or invalid credentials');
+                throw this.authenticationFailure('Kuro requires authentication: session expired or invalid credentials');
               }
 
               if (isCf) {
@@ -354,7 +397,7 @@ export class KuroAdapter implements SourceAdapter {
                 // durable external-failure backoff.  This is bounded by the
                 // adapter's three request attempts and never widens the
                 // metadata lane or source rate limit.
-                if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
+                if (attempts < maxAttempts && this.hasUsableCredentialConfiguration()) {
                   // A failed cold-start login can leave no structurally valid
                   // cache at all. A subsequent Cloudflare challenge is still
                   // a legitimate one-shot renewal signal; retrying the login
@@ -368,7 +411,7 @@ export class KuroAdapter implements SourceAdapter {
                   if (renewed) continue;
                 }
                 const title = bridgePayload.text?.match(/<title>([^<]+)<\/title>/i)?.[1];
-                throw new Error(`Kuro bridge blocked by Cloudflare (HTTP 403): ${title || 'WAF challenge'}`);
+                throw this.authenticationFailure(`Kuro bridge blocked by Cloudflare (HTTP 403): ${title || 'WAF challenge'}`);
               }
 
               if (bridgePayload.status === 404) {
@@ -444,7 +487,7 @@ export class KuroAdapter implements SourceAdapter {
         }
 
         if (response.status === 401) {
-          if (attempts < maxAttempts && Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
+          if (attempts < maxAttempts && this.hasUsableCredentialConfiguration()) {
             this.logger.info('Kuro session expired (401). Auto-renewing session...');
             const renewed = await this.login(true);
             if (renewed) {
@@ -452,9 +495,7 @@ export class KuroAdapter implements SourceAdapter {
             }
           }
           this.clearSession();
-          throw new Error(
-            'Kuro requires authentication: session expired or invalid credentials'
-          );
+          throw this.authenticationFailure('Kuro requires authentication: session expired or invalid credentials');
         }
 
         if (response.status === 429) {
@@ -489,6 +530,13 @@ export class KuroAdapter implements SourceAdapter {
         return json as T;
       } catch (err: any) {
         if (err.message?.includes('requires authentication') || attempts >= maxAttempts) {
+          throw err;
+        }
+        // A malformed/missing environment value cannot be improved by waiting
+        // inside this request. Return its safe configuration diagnostic to the
+        // durable metadata classifier immediately instead of spending the two
+        // remaining bounded attempts on the same challenge.
+        if (err.message?.includes('Kuro auth diagnostic: CONFIG_')) {
           throw err;
         }
         await new Promise((r) => setTimeout(r, 1000 * attempts));
