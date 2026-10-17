@@ -52,6 +52,8 @@ import { NHentaiBrAdapter } from './nhentaibr/nhentaibr-adapter.js';
 import { BrasilHentaiAdapter } from './brasilhentai/brasilhentai-adapter.js';
 import { PointZeroToonsAdapter } from './pointzerotoons/pointzerotoons-adapter.js';
 import { GeassComicsAdapter } from './geasscomics/geasscomics-adapter.js';
+import { BRScansAdapter } from './brscans/brscans-adapter.js';
+import { MangaStopAdapter } from './mangastop/mangastop-adapter.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 
 export class SourceRegistry {
@@ -96,6 +98,8 @@ export class SourceRegistry {
       this.register(new VegitoonsAdapter(rateLimiter));
       this.register(new PointZeroToonsAdapter(rateLimiter));
       this.register(new GeassComicsAdapter(rateLimiter));
+      this.register(new BRScansAdapter(rateLimiter));
+      this.register(new MangaStopAdapter(rateLimiter));
 
       // Register adult sources (+18 / Adulto / Yaoi / Hentai)
       this.register(new HanamiHeavenAdapter(rateLimiter));

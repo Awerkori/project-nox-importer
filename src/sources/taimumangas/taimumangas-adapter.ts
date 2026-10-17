@@ -8,14 +8,15 @@ export class TaimuMangasAdapter implements SourceAdapter {
   readonly name = 'TaimuMangas';
   readonly baseUrl = 'https://beta.taimumangas.com';
 
-  private apiUrl = 'https://apiv2.taimumangas.com/api/v1/reader';
+  // The provider moved from the retired apiv2 hostname to this public API.
+  private apiUrl = 'https://api.taimumangas.com/api/v1/reader';
   private logger = new Logger('TaimuMangasAdapter');
 
   constructor(
     private rateLimiter: HostRateLimiter = new HostRateLimiter(2.0),
     private transport: typeof fetch = fetch
   ) {
-    this.rateLimiter.setHostRate('apiv2.taimumangas.com', 4.0, 8, 8.0);
+    this.rateLimiter.setHostRate('api.taimumangas.com', 4.0, 8, 8.0);
     this.rateLimiter.setHostRate('cdn.taimumangas.com', 12.0, 24, 24.0);
   }
 
