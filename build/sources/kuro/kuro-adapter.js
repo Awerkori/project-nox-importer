@@ -305,6 +305,20 @@ export class KuroAdapter {
                                 throw new Error('Kuro requires authentication: session expired or invalid credentials');
                             }
                             if (isCf) {
+                                // A bridge session can remain structurally valid while its
+                                // Cloudflare context has expired.  Treat one challenge as a
+                                // session-refresh signal before handing control back to the
+                                // durable external-failure backoff.  This is bounded by the
+                                // adapter's three request attempts and never widens the
+                                // metadata lane or source rate limit.
+                                if (attempts < maxAttempts && this.hasValidSession() &&
+                                    Boolean(process.env.KURO_EMAIL && process.env.KURO_PASSWORD)) {
+                                    this.logger.info('Kuro bridge challenge with cached session; auto-renewing session...');
+                                    this.clearSession();
+                                    const renewed = await this.login(true);
+                                    if (renewed)
+                                        continue;
+                                }
                                 const title = bridgePayload.text?.match(/<title>([^<]+)<\/title>/i)?.[1];
                                 throw new Error(`Kuro bridge blocked by Cloudflare (HTTP 403): ${title || 'WAF challenge'}`);
                             }
