@@ -3950,7 +3950,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refillStoredMetadataEnrichment();
 
     expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
-    expect(v4).toHaveBeenCalledWith(2, 2_000);
+    expect(v4).toHaveBeenCalledWith(2, 2_000, 4);
   });
 
   it('fills both exclusive V4 seats through one serialized producer', async () => {
@@ -3968,8 +3968,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refillStoredMetadataEnrichment();
 
     expect(v4).toHaveBeenCalledTimes(2);
-    expect(v4).toHaveBeenNthCalledWith(1, 2, 1_000);
-    expect(v4).toHaveBeenNthCalledWith(2, 2, 1_000);
+    expect(v4).toHaveBeenNthCalledWith(1, 2, 1_000, 4);
+    expect(v4).toHaveBeenNthCalledWith(2, 2, 1_000, 4);
+  });
+
+  it('continues a bounded exclusive V4 cursor probe without the normal producer throttle', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    (runtime as any).metadataReplayV4Exclusive = { enabled: true, intervalMs: 1_000 };
+    (runtime as any).queue.refillStoredMetadataEnrichment = vi.fn().mockResolvedValue(0);
+    const v4 = vi.fn().mockResolvedValue(0);
+    (runtime as any).queue.refillStoredMetadataEnrichmentV4 = v4;
+
+    await (runtime as any).refillStoredMetadataEnrichment();
+    await (runtime as any).refillStoredMetadataEnrichment();
+
+    expect(v4).toHaveBeenCalledTimes(2);
+    expect(v4).toHaveBeenCalledWith(2, 1_000, 4);
   });
 
   it('retains V4 ownership after boot when a due retry already occupies its durable seat', async () => {

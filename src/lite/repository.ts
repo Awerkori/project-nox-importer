@@ -47,6 +47,12 @@ const METADATA_REPLAY_V4_SOURCE_BURST_LIMIT = 3;
 // the next eligible local merge is found. Task execution remains one-at-a-
 // time and retains the 20-second due-time fence.
 const METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN = 12;
+// The exclusive campaign retries its producer on the two-second metadata
+// timer.  Bound one miss tightly so a sparse/exhausted source cannot hold the
+// producer connection for a 12-window serial scan while both merge seats are
+// empty.  The durable source/mapping cursors resume at the next window, so
+// this changes latency only; it never skips a mapping.
+const METADATA_REPLAY_V4_EXCLUSIVE_SOURCE_WINDOWS_PER_TURN = 4;
 
 const sourceExecutionEligibilitySql = (alias: string): string => `(
   (COALESCE(${alias}.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
@@ -579,7 +585,8 @@ export class LiteRepository {
    * full catalog. The runtime chooses the due-time fence for normal versus
    * explicitly enabled exclusive operation.
    */
-  async refillStoredMetadataEnrichmentV4(maxPending = 2, minimumIntervalMs = METADATA_REPLAY_V4_INTERVAL_MS): Promise<number> {
+  async refillStoredMetadataEnrichmentV4(maxPending = 2, minimumIntervalMs = METADATA_REPLAY_V4_INTERVAL_MS,
+    sourceWindowsPerTurn = METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN): Promise<number> {
     // Exclusive mode can safely keep two mappings from *different canonical
     // works* in flight. The candidate query below excludes the work_id of an
     // outstanding V4 task; per-work serialization in the runtime is the
@@ -615,7 +622,10 @@ export class LiteRepository {
       let sourceAfter = sourceCursor.rows[0]?.value || null;
       let activeSourceId: string | null = null;
       let activeSourceWindows = 0;
-      for (let probe = 0; probe < METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN && !row; probe++) {
+      const sourceWindows = Math.max(1, Math.min(
+        METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN, Math.trunc(sourceWindowsPerTurn),
+      ));
+      for (let probe = 0; probe < sourceWindows && !row; probe++) {
         let sourceId: string | null = activeSourceId;
         if (!sourceId) {
           const source = await client.query<{ id: string }>(`
