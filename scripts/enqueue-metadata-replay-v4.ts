@@ -47,7 +47,16 @@ async function main(): Promise<void> {
     const fields = [...STORED_MAPPING_ALIAS_FIELDS, ...STORED_MAPPING_TAG_FIELDS];
     const candidates = await pool.query<ReplayCandidate>(`
       SELECT m.source,m.source_work_id,m.work_id::text,w.title AS canonical_title,m.source_title,
-        (m.metadata ?| $1::text[]) AS has_explicit_metadata,
+        EXISTS (
+          SELECT 1 FROM jsonb_each(m.metadata) evidence(key,value)
+          WHERE evidence.key=ANY($1::text[]) AND (
+            (jsonb_typeof(evidence.value)='string' AND btrim(evidence.value #>> '{}')<>'') OR
+            (jsonb_typeof(evidence.value)='array' AND EXISTS (
+              SELECT 1 FROM jsonb_array_elements(evidence.value) item(value)
+              WHERE jsonb_typeof(item.value)='string' AND btrim(item.value #>> '{}')<>''
+            ))
+          )
+        ) AS has_explicit_metadata,
         lower(regexp_replace(btrim(m.source_title), '[[:space:]]+', ' ', 'g'))
           <> lower(regexp_replace(btrim(w.title), '[[:space:]]+', ' ', 'g')) AS has_title_variant
       FROM importer_work_mappings m
@@ -57,7 +66,16 @@ async function main(): Promise<void> {
         AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
         AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
         AND m.work_id IS NOT NULL
-        AND (m.metadata ?| $1::text[] OR (m.source_title IS DISTINCT FROM m.source_slug
+        AND (EXISTS (
+          SELECT 1 FROM jsonb_each(m.metadata) evidence(key,value)
+          WHERE evidence.key=ANY($1::text[]) AND (
+            (jsonb_typeof(evidence.value)='string' AND btrim(evidence.value #>> '{}')<>'') OR
+            (jsonb_typeof(evidence.value)='array' AND EXISTS (
+              SELECT 1 FROM jsonb_array_elements(evidence.value) item(value)
+              WHERE jsonb_typeof(item.value)='string' AND btrim(item.value #>> '{}')<>''
+            ))
+          )
+        ) OR (m.source_title IS DISTINCT FROM m.source_slug
           AND lower(regexp_replace(btrim(m.source_title), '[[:space:]]+', ' ', 'g'))
             <> lower(regexp_replace(btrim(w.title), '[[:space:]]+', ' ', 'g'))))
         AND ($2::text IS NULL OR m.source=$2)

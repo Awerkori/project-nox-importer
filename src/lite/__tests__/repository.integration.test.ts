@@ -957,7 +957,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
       VALUES ('00000000-0000-4000-8000-000000000127','source-a','slug-fallback',$1::uuid,
-        'p1-a-machine-slug','p1-a-machine-slug','{}'::jsonb,'SYNCED')`, [ids.p1a]);
+        'p1-a-machine-slug','p1-a-machine-slug','{"genres":[]}'::jsonb,'SYNCED')`, [ids.p1a]);
     await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','true')`);
 
     expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(0);
