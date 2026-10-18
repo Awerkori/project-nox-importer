@@ -1077,7 +1077,18 @@ export class ImporterLiteRuntime {
       await this.queue.reclaimExpiredStoredMetadataReplayV4();
       const task = await this.queue.claimStoredMetadataReplay(workerId, STORED_METADATA_REPLAY_V4_LEASE_SECONDS, 4)
         || (Number(this.pool.waitingCount || 0) < 2 ? await this.queue.claimStoredMetadataReplay(workerId, 45) : null);
-      if (task) await this.catalog(task, workerId);
+      if (task) {
+        await this.catalog(task, workerId);
+        // A V4 item has a durable 20-second due-time fence, but relying only
+        // on the slower producer poll to create its successor adds another
+        // 15 seconds to every completed merge. Refill immediately after the
+        // single-flight task settles: the repository still permits one
+        // outstanding item and applies that fence, so this improves cadence
+        // without raising concurrency or taking a chapter worker.
+        if (task.payload?.metadataEnrichmentVersion === 4 && !this.shouldPauseLowPriorityMetadata()) {
+          await this.queue.refillStoredMetadataEnrichmentV4();
+        }
+      }
     } catch (error: any) {
       this.logger.warn('Stored metadata replay failed', { error: error?.message });
     } finally {
