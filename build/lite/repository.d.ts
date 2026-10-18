@@ -122,6 +122,16 @@ export declare class LiteRepository {
      */
     refillStoredMetadataEnrichment(maxPending?: number): Promise<number>;
     /**
+     * Version 4 is an explicitly enabled historical campaign, separate from
+     * the older parser-only replays.  It combines every provider-declared
+     * alias/tag field with the already-attached secondary source title, but it
+     * never uses either value to match a different work. Source-local durable
+     * cursors, one outstanding P2 task, and a 20-second due-time fence keep
+     * its target rate near three local merges per minute without competing with
+     * chapters or rescanning the full catalog.
+     */
+    refillStoredMetadataEnrichmentV4(maxPending?: number): Promise<number>;
+    /**
      * Materialise only chapters already positively confirmed by a durable source
      * manifest.  Historical catalog tasks are useful for obtaining new
      * manifests, but a completed old catalog task must not make its confirmed

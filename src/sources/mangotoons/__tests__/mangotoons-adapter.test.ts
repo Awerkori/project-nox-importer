@@ -23,4 +23,18 @@ describe('MangoToonsAdapter v1 API', () => {
     expect(pages).toEqual(['https://cdn.mangotoons.com/cdn/p/0', 'https://cdn.mangotoons.com/cdn/p/1']);
     expect(requested.some((url) => url.includes('/api/v1/obras/lancamentos'))).toBe(true);
   });
+
+  it('preserves only explicit alternate-title values from the work API', async () => {
+    const adapter = new MangoToonsAdapter(undefined, async () => Response.json({
+      id: 42,
+      nome: 'Título em português',
+      titulo_alternativo: ['Original title', 'English publisher title', 'Título em português'],
+      tags: [{ nome: 'Ação' }],
+    }));
+
+    const work = await adapter.fetchWorkDetails('42');
+
+    expect(work.alternativeTitles).toEqual(['Original title', 'English publisher title']);
+    expect(work.genres).toEqual(['Ação']);
+  });
 });

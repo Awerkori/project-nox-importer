@@ -53,6 +53,19 @@ describe('stored mapping metadata enrichment', () => {
     expect(metadata.genres).toEqual(['Yuri']);
   });
 
+  it('recovers explicit Portuguese provider fields without mining prose', () => {
+    const metadata = extractStoredMappingMetadata({
+      titulo_alternative: ['Nome original', 'English Publisher Title', 'Título BR'],
+      titulo_original: '원작 제목',
+      generos: [{ nome: 'Ação' }, { name: 'Fantasia' }],
+      categoria: 'Manhua',
+      descricao: 'An English title mentioned in prose is not an alias.',
+    }, 'Título BR');
+
+    expect(metadata.aliases).toEqual(['Nome original', 'English Publisher Title', '원작 제목']);
+    expect(metadata.genres).toEqual(['Ação', 'Fantasia', 'Manhua']);
+  });
+
   it('classifies explicit metadata without mistaking a primary-title echo for a parser error', () => {
     expect(classifyExplicitSourceMetadata({ aliases: ['Primary'], genres: ['Vanilla'] }, 'Primary')).toMatchObject({
       aliasesState: 'NO_ALIASES', tagsState: 'ENRICHED', parserError: false,

@@ -915,6 +915,28 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
   });
 
+  it('gates the v4 multifonte replay and schedules one durable, throttled P2 mapping', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000125','source-b','v4-provider-evidence',$1::uuid,
+        'p1-a-secondary','P1 Secondary Title',$2::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({
+      titulo_alternative: ['P1 Native Title'], generos: ['Ação'],
+    })]);
+    expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(0);
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','true')`);
+
+    expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(1);
+    const task = await db.query(`SELECT idempotency_key,payload,max_attempts,priority,next_run_at
+      FROM importer_lite_tasks WHERE idempotency_key='lite:metadata:v4:source-b:v4-provider-evidence'`);
+    expect(task.rows[0]).toMatchObject({
+      idempotency_key: 'lite:metadata:v4:source-b:v4-provider-evidence', max_attempts: 4, priority: 3,
+      payload: expect.objectContaining({ metadataEnrichment: true, metadataEnrichmentVersion: 4,
+        metadataReplayReason: 'EXPLICIT_METADATA' }),
+    });
+    expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(0);
+  });
+
   it('prioritizes a real alias over empty or tag-only legacy metadata from the same source', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings
@@ -3359,6 +3381,34 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
   });
 
+  it('treats an already-attached secondary source title as an additive alias', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000113','source-a','secondary-title',$1::uuid,
+        'p1-secondary','P1 Secondary Title','{}'::jsonb,'SYNCED')`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
+      idempotencyKey: 'stored-secondary-title-enrichment',
+      payload: { source: 'source-a', sourceWorkId: 'secondary-title', metadataEnrichment: true } });
+    const task = await repo.claim('metadata-worker', 120);
+    const registry = { get: () => { throw new Error('metadata enrichment must not call an adapter'); } } as unknown as SourceRegistry;
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, registry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    let candidate: any;
+    (runtime as any).dedupe = { resolveWork: async (value: any) => {
+      candidate = value;
+      return { workId: ids.p1a, status: 'EXISTING_MAPPING' };
+    } };
+
+    await (runtime as any).catalog(task, 'metadata-worker');
+
+    expect(candidate).toMatchObject({ title: 'P1 Secondary Title', aliases: ['P1 Secondary Title'], genres: [] });
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
+  });
+
   it('re-fetches source metadata, persists raw provider fields, and classifies empty fields per mapping', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings
@@ -3583,7 +3633,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     (runtime as any).isRuntimeLeader = true;
     const refill = vi.fn(async () => 0);
+    const refillV4 = vi.fn(async () => 0);
     (runtime as any).queue.refillStoredMetadataEnrichment = refill;
+    (runtime as any).queue.refillStoredMetadataEnrichmentV4 = refillV4;
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-14T00:00:00Z'));
     try {
@@ -3594,6 +3646,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       await vi.advanceTimersByTimeAsync(1_000);
       await (runtime as any).refillStoredMetadataEnrichment();
       expect(refill).toHaveBeenCalledTimes(2);
+      expect(refillV4).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }

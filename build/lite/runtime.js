@@ -15,6 +15,7 @@ import { telemetryCollector } from '../core/telemetry-collector.js';
 import { SourceAdmissionGate } from '../core/source-admission-gate.js';
 import { sanitizeSynopsis } from './metadata.js';
 import { classifyExplicitSourceMetadata, extractStoredMappingMetadata } from './mapping-metadata.js';
+import { mergeAlternativeTitles } from '../core/alternative-titles.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
 import { LiteMemoryPressureGuard } from './memory-pressure.js';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -673,8 +674,14 @@ export class ImporterLiteRuntime {
         this.lastMetadataEnrichmentAt = Date.now();
         try {
             const admitted = await this.queue.refillStoredMetadataEnrichment();
-            if (admitted)
-                this.logger.info('Admitted bounded stored metadata enrichment', { admitted });
+            // v4 is deliberately opt-in through a durable production setting. A
+            // real-work canary is queued first; only then does its low-rate cursor
+            // begin draining the historical campaign.
+            const admittedV4 = admitted ? 0 : await this.queue.refillStoredMetadataEnrichmentV4();
+            if (admitted || admittedV4)
+                this.logger.info('Admitted bounded stored metadata enrichment', {
+                    admitted: admitted + admittedV4, version: admittedV4 ? 4 : undefined,
+                });
         }
         catch (error) {
             this.logger.warn('Stored metadata enrichment refill failed', { error: error?.message });
@@ -1974,8 +1981,16 @@ export class ImporterLiteRuntime {
                 await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_ENRICHMENT_MAPPING_MISSING' });
                 return;
             }
-            const extracted = extractStoredMappingMetadata(row.metadata, row.work_title || row.source_title || '');
-            if (!extracted.aliases.length && !extracted.genres.length) {
+            const primaryTitle = row.work_title || row.source_title || '';
+            const extracted = extractStoredMappingMetadata(row.metadata, primaryTitle);
+            // The mapping has already been attached to this canonical work. Its
+            // provider-facing title is therefore first-party evidence of an alias
+            // when it differs from the canonical title, even if that provider did
+            // not expose a separate alternative-title field. Keep the comparison
+            // and Unicode-safe de-duplication in the shared merge helper; this is
+            // deliberately not a new cross-work matching signal.
+            const aliases = mergeAlternativeTitles(extracted.aliases, [row.source_title], primaryTitle);
+            if (!aliases.length && !extracted.genres.length) {
                 await this.queue.finish(task, workerId, { state: 'DONE', checkpoint: { metadataEnrichment: true, empty: true }, resetAttempts: true });
                 return;
             }
@@ -1983,7 +1998,7 @@ export class ImporterLiteRuntime {
                 source, sourceWorkId,
                 title: row.source_title || row.work_title,
                 slug: row.source_slug || row.work_title,
-                aliases: extracted.aliases,
+                aliases,
                 genres: extracted.genres,
             });
             if (!resolved.workId || resolved.status === 'AMBIGUOUS') {
@@ -1992,7 +2007,7 @@ export class ImporterLiteRuntime {
             }
             await this.queue.finish(task, workerId, {
                 state: 'DONE', workId: resolved.workId,
-                checkpoint: { metadataEnrichment: true, aliases: extracted.aliases.length, tags: extracted.genres.length },
+                checkpoint: { metadataEnrichment: true, aliases: aliases.length, tags: extracted.genres.length },
                 resetAttempts: true,
             });
         }
