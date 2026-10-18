@@ -19,7 +19,7 @@ async function main() {
   const resSources = await client.query(`
     UPDATE importer_sources
     SET status = 'ACTIVE', updated_at = NOW()
-    WHERE id IN ('fleurblanche', 'hanamiheaven', 'mangalivreto', 'manhastro', 'nexus', 'taimumangas', 'vegitoons')
+    WHERE id IN ('fleurblanche', 'hanamiheaven', 'mangalivreto', 'manhastro', 'nexus', 'taimumangas')
     RETURNING id
   `);
   console.log(`Reactivated sources: ${resSources.rows.map(r => r.id).join(', ')}`);

@@ -10,6 +10,26 @@ The audited retirement is also persisted as `DISABLED` with both ingestion
 flags off in `importer_sources`; this only stops future admission and preserves
 the historical rows.
 
+## Production admission-gate retirements (`2026-10-18`)
+
+The following providers were retired only after their real production route
+failed the complete admission gate from the Discloud environment. The gate
+uses the same public catalog/API route as the adapter, then requires a work,
+chapters, Reader pages and an image download. No browser-cookie, JavaScript
+challenge, or temporary Cloudflare bypass is used.
+
+- **Acervo Hentai, AMUY Scan, Arthur Scan, Inkapk, Manga Online, MangaStop,
+  Kitsune Yako / Point Zero Toons, Yaoi Fan Club and Yuri on Air:** their
+  actual public catalog route returned HTTP 403 with a JavaScript challenge.
+- **Geass Comics:** its public `api.geasscomics.xyz/api/works` catalog route
+  returned HTTP 403 with a JavaScript challenge.
+- **Vegitoons:** its public adapter API returned HTTP 403 / `API_BLOCK`, even
+  after the adapter-specific API admission probe was deployed.
+
+They may be reconsidered only when an official, ungated catalog and Reader
+route passes the complete production gate. Their public works, chapters,
+pages, media, aliases, tags and editorial data are not deleted by retirement.
+
 ## MegaHentai (`megahentai`)
 
 - **Known URL:** `https://megahentai.biz`

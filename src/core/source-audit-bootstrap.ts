@@ -10,6 +10,7 @@ import { Logger } from './logger.js';
  */
 export const SOURCE_AUDIT_RELEASE = '2026-10-17';
 export const KURO_RETIREMENT_RELEASE = '2026-10-18';
+export const BLOCKED_SOURCE_RETIREMENT_RELEASE = '2026-10-18';
 
 type Queryable = Pick<pg.Pool, 'query'>;
 
@@ -22,19 +23,25 @@ const logger = new Logger('SourceAuditBootstrap');
  * off: this reconciliation only makes their verified mappings runnable.
  */
 const RECOVERED_SOURCES = [
-  ['acervohentai', 'Acervo Hentai', 'https://acervohentai.com'],
-  ['amuy', 'AMUY Scan', 'https://www.apenasmaisumyaoi.com'],
-  ['arthurscan', 'Arthur Scan', 'https://arthurscan.xyz'],
-  ['geasscomics', 'Geass Comics', 'https://geasscomics.xyz'],
-  ['inkapk', 'Inkapk', 'https://inkapk.net'],
-  ['mangaonline', 'Manga Online', 'https://mangaonline.love'],
   ['manhastro', 'Manhastro', 'https://manhastro.net'],
   ['nexus', 'Nexus Mangas', 'https://www.nexusmangas.com'],
   ['nocturnesummer', 'Nocturne Summer', 'https://nocfsb.com'],
-  ['pointzerotoons', 'Kitsune Yako', 'https://kitsuneyako.com'],
   ['tankouhentai', 'Tankou Hentai', 'https://tankouhentai.com'],
-  ['yaoifanclub', 'Yaoi Fan Club', 'https://yaoifanclub.com'],
-  ['yuriverso', 'Yuri on Air', 'https://yurionair.top'],
+] as const;
+
+/** Permanently retired after a full production admission-gate audit. */
+export const BLOCKED_SOURCE_RETIREMENTS = [
+  ['acervohentai', 'AUDIT_2026_10_JS_CHALLENGE'],
+  ['amuy', 'AUDIT_2026_10_JS_CHALLENGE'],
+  ['arthurscan', 'AUDIT_2026_10_JS_CHALLENGE'],
+  ['geasscomics', 'AUDIT_2026_10_JS_CHALLENGE'],
+  ['inkapk', 'AUDIT_2026_10_JS_CHALLENGE'],
+  ['mangaonline', 'AUDIT_2026_10_JS_CHALLENGE'],
+  ['mangastop', 'AUDIT_2026_10_JS_CHALLENGE'],
+  ['pointzerotoons', 'AUDIT_2026_10_JS_CHALLENGE'],
+  ['vegitoons', 'AUDIT_2026_10_API_BLOCK'],
+  ['yaoifanclub', 'AUDIT_2026_10_JS_CHALLENGE'],
+  ['yuriverso', 'AUDIT_2026_10_JS_CHALLENGE'],
 ] as const;
 
 export async function reconcileAuditedSources(pool: Queryable): Promise<void> {
@@ -48,7 +55,6 @@ export async function reconcileAuditedSources(pool: Queryable): Promise<void> {
        catalog_discovery_enabled, config
      ) VALUES
        ('brscans', 'BR Scans', 'https://brscans.com', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1::text)),
-       ('mangastop', 'MangaStop', 'https://mangastop.net', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1::text)),
        ('hentaiteca', 'HentaiTeca', 'https://hentaiteca.online', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1::text)),
        ('imperiodabritannia', 'Sagrado Império da Britannia', 'https://api.imperiodabritannia.net/api', true, 'ACTIVE', 1.00, 30, true, false, jsonb_build_object('sourceAuditRelease', $1::text))
      ON CONFLICT (id) DO NOTHING`,
@@ -121,10 +127,49 @@ export async function reconcileAuditedSources(pool: Queryable): Promise<void> {
     [SOURCE_AUDIT_RELEASE],
   );
 
+  // These providers failed their actual catalog/API gate from the production
+  // datacenter (ten JS challenges and one API block). Keep the durable marker
+  // on every boot so stale rows, bootstrap scripts, and restarts cannot make
+  // a retired provider schedulable again. The archival runner removes only
+  // operational records later; public works, chapters, pages and media stay.
+  const blocked = await pool.query(
+    `WITH retired(id, reason) AS (
+       VALUES ${BLOCKED_SOURCE_RETIREMENTS.map((_, index) => `($${index * 2 + 2}::text, $${index * 2 + 3}::text)`).join(',\n              ')}
+     )
+     UPDATE public.importer_sources AS source
+        SET enabled = false,
+            status = 'DISABLED',
+            chapter_ingestion_enabled = false,
+            catalog_discovery_enabled = false,
+            cooldown_until = NULL,
+            blocked_reason = 'Retired after production source audit: ' || retired.reason,
+            blocked_details = jsonb_build_object(
+              'sourceRetirement', $1::text,
+              'reason', retired.reason,
+              'audit', 'production-admission-gate'
+            ),
+            config = COALESCE(source.config, '{}'::jsonb) || jsonb_build_object(
+              'sourceRetirement', $1::text,
+              'sourceRetirementReason', retired.reason
+            ),
+            updated_at = now()
+       FROM retired
+      WHERE source.id = retired.id
+        AND (
+          COALESCE(source.config, '{}'::jsonb)->>'sourceRetirement' IS DISTINCT FROM $1::text
+          OR source.enabled IS DISTINCT FROM false
+          OR source.status IS DISTINCT FROM 'DISABLED'
+          OR source.chapter_ingestion_enabled IS DISTINCT FROM false
+          OR source.catalog_discovery_enabled IS DISTINCT FROM false
+        )`,
+    [BLOCKED_SOURCE_RETIREMENT_RELEASE, ...BLOCKED_SOURCE_RETIREMENTS.flat()],
+  );
+
   logger.info('Reconciled audited source admission state', {
     inserted: inserted.rowCount ?? 0,
     recovered: recovered.rowCount ?? 0,
     kuroRetired: kuro.rowCount ?? 0,
     retired: retired.rowCount ?? 0,
+    blockedRetired: blocked.rowCount ?? 0,
   });
 }

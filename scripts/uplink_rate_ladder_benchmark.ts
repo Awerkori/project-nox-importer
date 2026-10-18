@@ -54,7 +54,6 @@ const ALL_SOURCES = [
   'manhastro',
   'fleurblanche',
   'taimumangas',
-  'vegitoons',
   'hanamiheaven',
   'mangalivreto',
   'nexus',

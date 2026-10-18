@@ -35,7 +35,6 @@ const ALL_SOURCES = [
   'mangaflix',
   'fleurblanche',
   'taimumangas',
-  'vegitoons',
   'hanamiheaven',
   'mangalivreto',
   'nexus'
