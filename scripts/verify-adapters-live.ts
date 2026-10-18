@@ -1,6 +1,5 @@
 import { MangaFlixAdapter } from '../src/sources/mangaflix/mangaflix-adapter.js';
 import { ManhastroAdapter } from '../src/sources/manhastro/manhastro-adapter.js';
-import { KuroAdapter } from '../src/sources/kuro/kuro-adapter.js';
 import { HostRateLimiter } from '../src/core/rate-limiter.js';
 
 async function main() {
@@ -11,7 +10,7 @@ async function main() {
   console.log('================================================================');
 
   // 1. MangaFlix
-  console.log('\n[1/3] MangaFlix Live Verification:');
+  console.log('\n[1/2] MangaFlix Live Verification:');
   try {
     const mf = new MangaFlixAdapter(rateLimiter);
     const { works: mfWorks } = await mf.fetchUpdatedWorks(null, { mode: 'maintenance' });
@@ -34,7 +33,7 @@ async function main() {
   }
 
   // 2. Manhastro
-  console.log('\n[2/3] Manhastro Live Verification:');
+  console.log('\n[2/2] Manhastro Live Verification:');
   try {
     const mh = new ManhastroAdapter(rateLimiter);
     const { works: mhWorks } = await mh.fetchUpdatedWorks(null, { mode: 'maintenance' });
@@ -54,16 +53,6 @@ async function main() {
     }
   } catch (err: any) {
     console.error(`  ✗ Manhastro error: ${err.message}`);
-  }
-
-  // 3. Kuro
-  console.log('\n[3/3] Kuro Live Protection Verification:');
-  try {
-    const kr = new KuroAdapter(rateLimiter);
-    await kr.fetchUpdatedWorks(null, { mode: 'maintenance' });
-    console.log('  ✗ Unexpected: Kuro succeeded without auth');
-  } catch (err: any) {
-    console.log(`  ✓ Safe auth rejection verified: "${err.message}"`);
   }
 
   console.log('\n================================================================');

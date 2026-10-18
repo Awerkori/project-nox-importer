@@ -14,7 +14,7 @@ const activeInImporter = new Set([
   'euphoriascan', 'fleurblanche', 'galaxscanlator', 'geasscomics',
   'hanamiheaven', 'hentaifusion', 'hentaihome', 'hentaiseason',
   'hentaitokyo', 'hipercool', 'hotcabaretscan', 'inkapk', 'instahentai',
-  'kamisamaexplorer', 'kuro', 'ler999', 'littletyrant', 'maidscan',
+  'kamisamaexplorer', 'ler999', 'littletyrant', 'maidscan',
   'mangaflix', 'mangalivreto', 'mangaonline', 'mangaonlinetv',
   'mangotoons', 'manhastro', 'megahentai', 'montetai', 'mrtenzus',
   'mundohentai', 'nebulosascan', 'nexus', 'nhentaibr', 'ninjascan',
@@ -50,8 +50,8 @@ for (const ext of cat) {
     statusNoImporter = 'REBRAND_ALIAS';
     acao = 'Redireciona para nexustoons.com (coberto por nexus)';
   } else if (ext.id === 'kuromangas') {
-    statusNoImporter = 'ALIAS_KURO';
-    acao = 'Coberto pelo adapter kuro';
+    statusNoImporter = 'RETIRED';
+    acao = 'Kuro aposentada permanentemente do importer';
   } else if (ext.id === 'noindexscan') {
     statusNoImporter = 'ALIAS_HANAMI';
     acao = 'Coberto pelo adapter hanamiheaven';

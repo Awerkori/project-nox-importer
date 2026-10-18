@@ -13,7 +13,7 @@ const activeSet = new Set([
   'euphoriascan', 'fleurblanche', 'galaxscanlator', 'geasscomics',
   'hanamiheaven', 'hentaifusion', 'hentaihome', 'hentaiseason',
   'hentaitokyo', 'hipercool', 'hotcabaretscan', 'inkapk', 'instahentai',
-  'kamisamaexplorer', 'kuro', 'ler999', 'littletyrant', 'maidscan',
+  'kamisamaexplorer', 'ler999', 'littletyrant', 'maidscan',
   'mangaflix', 'mangalivreto', 'mangaonline', 'mangaonlinetv',
   'mangotoons', 'manhastro', 'megahentai', 'montetai', 'mrtenzus',
   'mundohentai', 'nebulosascan', 'nexus', 'nhentaibr', 'ninjascan',
@@ -47,8 +47,8 @@ for (const ext of cat) {
     statusNoImporter = 'REBRAND_ALIAS';
     acao = 'Redireciona para nexustoons.com (coberto por nexus)';
   } else if (ext.extensionId === 'kuromangas') {
-    statusNoImporter = 'ALIAS_KURO';
-    acao = 'Coberto pelo adapter kuro';
+    statusNoImporter = 'RETIRED';
+    acao = 'Kuro aposentada permanentemente do importer';
   } else if (ext.extensionId === 'noindexscan') {
     statusNoImporter = 'ALIAS_HANAMI';
     acao = 'Coberto pelo adapter hanamiheaven';
@@ -98,7 +98,7 @@ const md = `# PROJECT NOX IMPORTER — AUDITORIA COMPLETA DAS EXTENSÕES PT-BR
 * **TOTAL DE FONTES PT-BR ÚNICAS APÓS DEDUPLICAÇÃO:** 139
 * **FONTES JÁ SUPORTADAS NO IMPORTER:** 51
 * **FONTES AUSENTES NO IMPORTER:** 88
-* **FONTES COM REBRANDING IDENTIFICADAS:** 6 (\`remangas\` -> \`noxmangas\`, \`mangalivreorg\` -> \`noxmangas\`, \`spectralscan\` -> \`nexus\`, \`kuromangas\` -> \`kuro\`, \`noindexscan\` -> \`hanamiheaven\`, \`pointzerotoons\` -> \`kitsuneyako\`)
+* **FONTES COM REBRANDING IDENTIFICADAS:** 5 (\`remangas\` -> \`noxmangas\`, \`mangalivreorg\` -> \`noxmangas\`, \`spectralscan\` -> \`nexus\`, \`noindexscan\` -> \`hanamiheaven\`, \`pointzerotoons\` -> \`kitsuneyako\`)
 * **FONTES RECUPERADAS NESTA RODADA:** 1 (\`pointzerotoons\` / Kitsune Yako)
 * **FONTES NOVAS ADICIONADAS AO IMPORTER:** 1 (\`geasscomics\` / Geass Comics)
 * **FONTES TESTADAS E DESCARTADAS:** 86
@@ -149,13 +149,13 @@ const md = `# PROJECT NOX IMPORTER — AUDITORIA COMPLETA DAS EXTENSÕES PT-BR
 ## 4. MAPEAMENTO POR CATEGORIAS
 
 ### A. JÁ SUPORTADAS E ATIVAS NO IMPORTER (51 originais)
-Fontes pré-existentes mantidas operacionais: \`acervohentai\`, \`amuy\`, \`apecomics\`, \`apenasumafa\`, \`arthurscan\`, \`borutoexplorer\`, \`brasilhentai\`, \`cafecomyaoi\`, \`covenscan\`, \`euphoriascan\`, \`fleurblanche\`, \`galaxscanlator\`, \`hanamiheaven\`, \`hentaifusion\`, \`hentaihome\`, \`hentaiseason\`, \`hentaitokyo\`, \`hipercool\`, \`hotcabaretscan\`, \`inkapk\`, \`instahentai\`, \`kamisamaexplorer\`, \`kuro\`, \`ler999\`, \`littletyrant\`, \`maidscan\`, \`mangaflix\`, \`mangalivreto\`, \`mangaonline\`, \`mangaonlinetv\`, \`mangotoons\`, \`manhastro\`, \`megahentai\`, \`montetai\`, \`mrtenzus\`, \`mundohentai\`, \`nebulosascan\`, \`nexus\`, \`nhentaibr\`, \`ninjascan\`, \`nocturnesummer\`, \`osakascan\`, \`pinkrosa\`, \`pizzariascan\`, \`taimumangas\`, \`tankouhentai\`, \`universohentai\`, \`vegitoons\`, \`yaoifanclub\`, \`yuriverso\`, \`zettahq\`.
+Fontes pré-existentes mantidas operacionais: \`acervohentai\`, \`amuy\`, \`apecomics\`, \`apenasumafa\`, \`arthurscan\`, \`borutoexplorer\`, \`brasilhentai\`, \`cafecomyaoi\`, \`covenscan\`, \`euphoriascan\`, \`fleurblanche\`, \`galaxscanlator\`, \`hanamiheaven\`, \`hentaifusion\`, \`hentaihome\`, \`hentaiseason\`, \`hentaitokyo\`, \`hipercool\`, \`hotcabaretscan\`, \`inkapk\`, \`instahentai\`, \`kamisamaexplorer\`, \`ler999\`, \`littletyrant\`, \`maidscan\`, \`mangaflix\`, \`mangalivreto\`, \`mangaonline\`, \`mangaonlinetv\`, \`mangotoons\`, \`manhastro\`, \`megahentai\`, \`montetai\`, \`mrtenzus\`, \`mundohentai\`, \`nebulosascan\`, \`nexus\`, \`nhentaibr\`, \`ninjascan\`, \`nocturnesummer\`, \`osakascan\`, \`pinkrosa\`, \`pizzariascan\`, \`taimumangas\`, \`tankouhentai\`, \`universohentai\`, \`vegitoons\`, \`yaoifanclub\`, \`yuriverso\`, \`zettahq\`.
 
 ### B. REBRANDINGS / ALIASES IDENTIFICADOS (6 fontes)
 * \`remangas\` -> Redireciona para \`https://noxmangas.org\` (Nox Mangas).
 * \`mangalivreorg\` -> Redireciona para \`https://noxmangas.org\` (Nox Mangas).
 * \`spectralscan\` -> Redireciona para \`https://nexustoons.com\` (Nexus).
-* \`kuromangas\` -> Canonical para \`kuro\` (\`https://kuromangas.com\`).
+* \`kuromangas\` -> Fonte aposentada permanentemente do importer.
 * \`noindexscan\` -> Canonical para \`hanamiheaven\` (\`https://hanamiheaven.org\`).
 * \`pointzerotoons\` -> Rebranding para Kitsune Yako (\`https://kitsuneyako.com\`).
 

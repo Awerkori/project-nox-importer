@@ -212,41 +212,14 @@ describe('Metadata Precedence & Field-Level Provenance', () => {
     expect(prov.author.source).toBe('nexus');
   });
 
-  it('allows Kuro to upgrade non-manual fields of an existing work created by another source', async () => {
-    // 1. Kuro processes the same work
-    const res = await deduplication.resolveWork({
-      source: 'kuro',
-      sourceWorkId: 'kuro-work-1',
-      title: 'Original Nexus Title',
-      slug: 'original-nexus-title',
-      synopsis: 'Superior comprehensive synopsis provided by Kuro editorial team.',
-      author: 'Kuro Verified Author',
-    });
-
-    expect(res.status).toBe('EXISTING_MAPPING');
-
-    const dbWork = await db.query('select * from public.works where slug = $1', ['original-nexus-title']);
-    const work = dbWork.rows[0] as any;
-    const prov = work.metadata_provenance;
-
-    // Kuro upgraded the synopsis and author
-    expect(work.synopsis).toBe('Superior comprehensive synopsis provided by Kuro editorial team.');
-    expect(prov.synopsis.source).toBe('kuro');
-    expect(work.author).toBe('Kuro Verified Author');
-    expect(prov.author.source).toBe('kuro');
-    // Artist was not in Kuro candidate, so Nexus artist is preserved
-    expect(work.artist).toBe('Nexus Artist');
-    expect(prov.artist.source).toBe('nexus');
-  });
-
-  it('prevents another automated source (e.g. MangaFlix) from overwriting fields populated by Kuro', async () => {
+  it('does not allow a later automated source to overwrite populated fields', async () => {
     const res = await deduplication.resolveWork({
       source: 'mangaflix',
       sourceWorkId: 'mf-work-1',
       title: 'Original Nexus Title',
       slug: 'original-nexus-title',
-      synopsis: 'Inferior synopsis from mangaflix that should be ignored.',
-      author: 'Mangaflix Wrong Author',
+      synopsis: 'A later automated synopsis that must not replace source data.',
+      author: 'Later automated author',
     });
 
     expect(res.status).toBe('EXISTING_MAPPING');
@@ -255,17 +228,18 @@ describe('Metadata Precedence & Field-Level Provenance', () => {
     const work = dbWork.rows[0] as any;
     const prov = work.metadata_provenance;
 
-    // Kuro's values remain intact
-    expect(work.synopsis).toBe('Superior comprehensive synopsis provided by Kuro editorial team.');
-    expect(prov.synopsis.source).toBe('kuro');
-    expect(work.author).toBe('Kuro Verified Author');
-    expect(prov.author.source).toBe('kuro');
+    expect(work.synopsis).toBe('Initial synopsis from nexus.');
+    expect(prov.synopsis.source).toBe('nexus');
+    expect(work.author).toBe('Nexus Author');
+    expect(prov.author.source).toBe('nexus');
+    expect(work.artist).toBe('Nexus Artist');
+    expect(prov.artist.source).toBe('nexus');
   });
 
   it('never replaces an existing populated field with null or empty from candidate', async () => {
     await deduplication.resolveWork({
-      source: 'kuro',
-      sourceWorkId: 'kuro-work-1',
+      source: 'mangaflix',
+      sourceWorkId: 'mf-work-1',
       title: 'Original Nexus Title',
       slug: 'original-nexus-title',
       synopsis: '', // Empty synopsis in incoming candidate
@@ -275,11 +249,11 @@ describe('Metadata Precedence & Field-Level Provenance', () => {
     const dbWork = await db.query('select * from public.works where slug = $1', ['original-nexus-title']);
     const work = dbWork.rows[0] as any;
 
-    expect(work.synopsis).toBe('Superior comprehensive synopsis provided by Kuro editorial team.');
-    expect(work.author).toBe('Kuro Verified Author');
+    expect(work.synopsis).toBe('Initial synopsis from nexus.');
+    expect(work.author).toBe('Nexus Author');
   });
 
-  it('protects fields manually edited by Admin via trigger: title.source becomes manual and Kuro cannot overwrite it', async () => {
+  it('protects fields manually edited by Admin from automated updates', async () => {
     const workRes = await db.query('select id from public.works where slug = $1', ['original-nexus-title']);
     const workId = (workRes.rows[0] as any).id;
 
@@ -294,17 +268,17 @@ describe('Metadata Precedence & Field-Level Provenance', () => {
     expect(provAfterAdmin.title.source).toBe('manual');
     expect((checkWork.rows[0] as any).title).toBe('Admin Definitive Title');
 
-    // Kuro attempts to update title and synopsis
+    // A later source attempts to update title and synopsis.
     await deduplication.applyMetadataPrecedence(
       workId,
       {
-        source: 'kuro',
-        sourceWorkId: 'kuro-work-1',
-        title: 'Kuro Attempted Overwrite Title',
+        source: 'mangaflix',
+        sourceWorkId: 'mf-work-1',
+        title: 'Attempted automated overwrite title',
         slug: 'original-nexus-title',
-        synopsis: 'Even better Kuro synopsis V2.',
+        synopsis: 'Attempted automated overwrite synopsis.',
       },
-      'kuro'
+      'mangaflix'
     );
 
     const finalWork = await db.query('select * from public.works where id = $1', [workId]);
@@ -314,9 +288,8 @@ describe('Metadata Precedence & Field-Level Provenance', () => {
     expect(finalWorkRow.title).toBe('Admin Definitive Title');
     expect(finalWorkRow.metadata_provenance.title.source).toBe('manual');
 
-    // Synopsis was NOT manually edited by Admin, so Kuro successfully upgraded it!
-    expect(finalWorkRow.synopsis).toBe('Even better Kuro synopsis V2.');
-    expect(finalWorkRow.metadata_provenance.synopsis.source).toBe('kuro');
+    expect(finalWorkRow.synopsis).toBe('Initial synopsis from nexus.');
+    expect(finalWorkRow.metadata_provenance.synopsis.source).toBe('nexus');
   });
 
   it('prevents regular users (role USER) from triggering manual edit provenance', async () => {

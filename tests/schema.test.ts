@@ -81,11 +81,11 @@ describe('Importer Database Schema & Atomic Lease Locks', () => {
     expect((res.rows[0] as any).name).toBe('Nexus Mangas');
     expect((res.rows[0] as any).status).toBe('ACTIVE');
 
-    // Check reactivated source Kuro is ACTIVE and enabled
+    // Kuro is retained as historical source metadata but cannot be scheduled.
     const kuro = await db.query('select * from public.importer_sources where id = $1', ['kuro']);
     expect(kuro.rows.length).toBe(1);
-    expect((kuro.rows[0] as any).status).toBe('ACTIVE');
-    expect((kuro.rows[0] as any).enabled).toBe(true);
+    expect((kuro.rows[0] as any).status).toBe('DISABLED');
+    expect((kuro.rows[0] as any).enabled).toBe(false);
   });
 
   it('enforces atomic job lease acquisition with locked_by and lease_expires_at', async () => {

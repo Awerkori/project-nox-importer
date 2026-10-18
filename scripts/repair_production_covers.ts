@@ -83,8 +83,7 @@ async function fetchCandidateBytes(
     }
   }
 
-  const isKuro = parsed.host.includes('kuromangas.com');
-  const referer = isKuro ? 'https://kuromangas.com/' : `${parsed.origin}/`;
+  const referer = `${parsed.origin}/`;
 
   const requestHeaders: Record<string, string> = {
     'User-Agent':

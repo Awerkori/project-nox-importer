@@ -45,7 +45,6 @@ describe('Adult Classification & Monotonicity Guarantee', () => {
     await db.exec(`
       insert into public.importer_sources (id, name, base_url, enabled, status) values
         ('mangaflix', 'MangaFlix', 'https://mangaflix.org', true, 'ACTIVE'),
-        ('kuro', 'Kuro', 'https://kuro.moe', true, 'ACTIVE'),
         ('hanamiheaven', 'Hanami Heaven', 'https://hanamiheaven.com', true, 'ACTIVE'),
         ('hipercool', 'HipercooL', 'https://lerhentais.com', true, 'ACTIVE'),
         ('instahentai', 'InstaHentai', 'https://instahentai.com', true, 'ACTIVE'),
@@ -278,22 +277,22 @@ describe('Adult Classification & Monotonicity Guarantee', () => {
     });
     const workId = res.workId!;
 
-    // 2. Non-adult source (Kuro) tries to update metadata with GENERAL content rating
+    // 2. A non-adult source tries to downgrade the metadata.
     await engine.applyMetadataPrecedence(workId, {
-      source: 'kuro',
-      sourceWorkId: 'kuro-999',
-      title: 'Campus Queen Adult Affair (Kuro HD)',
+      source: 'mangaflix',
+      sourceWorkId: 'mf-999',
+      title: 'Campus Queen Adult Affair (alternate title)',
       slug: 'campus-queen-adult-affair',
       ageRating: 12, // Lower age rating
       contentRating: 'GENERAL', // Trying to downgrade
-    }, 'kuro');
+    }, 'mangaflix');
 
     // 3. Confirm work did NOT downgrade!
     const dbWork = await db.query('select * from public.works where id = $1', [workId]);
     const work = dbWork.rows[0] as any;
     expect(work.content_rating).toBe('ADULT_18'); // Monotonically preserved!
     expect(work.age_rating).toBe(18); // Cannot downgrade below 18!
-    expect(work.title).toBe('Campus Queen Adult Affair (Kuro HD)'); // Kuro still upgraded valid non-rating field
+    expect(work.title).toBe('Campus Queen Adult Affair');
   });
 
   it('promotes GENERAL work to ADULT_18 when an adult source later matches it', async () => {

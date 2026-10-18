@@ -2,7 +2,6 @@ import { Logger } from './logger.js';
 import { computeCanonicalChapterKey } from './deduplication.js';
 import { matchWorkCandidate } from './matching.js';
 const SOURCE_PRIORITY_ORDER = {
-    kuro: 100,
     nexus: 80,
     manhastro: 60,
     mangaflix: 40,

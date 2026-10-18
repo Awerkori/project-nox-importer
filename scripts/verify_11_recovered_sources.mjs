@@ -8,7 +8,6 @@ const rateLimiter = new HostRateLimiter(5.0);
 const registry = new SourceRegistry(rateLimiter);
 
 const RECOVERED_SOURCES = [
-  'kuro',
   'nocturnesummer',
   'tankouhentai',
   'osakascan',

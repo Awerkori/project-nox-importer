@@ -13,7 +13,7 @@ for (const r of (data || [])) {
 }
 
 // Jobs for affected sources
-const targets = ['kuro','maidscan','mangaonline','acervohentai','amuy','arthurscan','inkapk','tiamanhwa','yaoifanclub','yuriverso','covenscan'];
+const targets = ['maidscan','mangaonline','acervohentai','amuy','arthurscan','inkapk','tiamanhwa','yaoifanclub','yuriverso','covenscan'];
 const { data: jobs } = await s.from('importer_queue')
   .select('source, status')
   .in('source', targets)

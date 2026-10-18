@@ -7,6 +7,7 @@ import { Logger } from './logger.js';
  * avoiding a broad "enable every registered adapter" action on each boot.
  */
 export const SOURCE_AUDIT_RELEASE = '2026-10-17';
+export const KURO_RETIREMENT_RELEASE = '2026-10-18';
 const logger = new Logger('SourceAuditBootstrap');
 /**
  * These adapters passed the same catalog → work → chapter → Reader/image
@@ -61,24 +62,27 @@ export async function reconcileAuditedSources(pool) {
        FROM recovered
       WHERE source.id = recovered.id
         AND COALESCE(source.config, '{}'::jsonb)->>'sourceAuditActivation' IS DISTINCT FROM $1::text`, [SOURCE_AUDIT_RELEASE, ...RECOVERED_SOURCES.flat()]);
-    // Kuro was disabled while the old _kn/X-Client-Token contract was stale.
-    // The current authenticated _vx/X-Request-Ctx flow passed a full live E2E.
-    // The marker makes this activation one-shot; a future runtime cooldown is
-    // never erased by an ordinary restart.
+    // Kuro is permanently retired from the importer.  This guard runs on every
+    // boot until the retirement marker is present, so an old row cannot be
+    // re-enabled by a stale configuration or a future scheduler change.
     const kuro = await pool.query(`UPDATE public.importer_sources
-       SET name = 'Kuro Mangas',
-           base_url = 'https://kuromangas.com',
-           enabled = true,
-           status = 'ACTIVE',
-           chapter_ingestion_enabled = true,
+       SET enabled = false,
+           status = 'DISABLED',
+           chapter_ingestion_enabled = false,
            catalog_discovery_enabled = false,
            cooldown_until = NULL,
-           blocked_reason = NULL,
-           blocked_details = '{}'::jsonb,
-           config = COALESCE(config, '{}'::jsonb) || jsonb_build_object('sourceAuditRecovery', $1::text),
+           blocked_reason = 'Retired: recurring Cloudflare authentication challenge has no sustainable importer route',
+           blocked_details = jsonb_build_object(
+             'sourceRetirement', $1::text,
+             'reason', 'KURO_EXTERNAL_CLOUDFLARE_LOGIN_CHALLENGE'
+           ),
+           config = COALESCE(config, '{}'::jsonb) || jsonb_build_object(
+             'sourceRetirement', $1::text,
+             'sourceRetirementReason', 'KURO_EXTERNAL_CLOUDFLARE_LOGIN_CHALLENGE'
+           ),
            updated_at = now()
      WHERE id = 'kuro'
-       AND COALESCE(config, '{}'::jsonb)->>'sourceAuditRecovery' IS DISTINCT FROM $1::text`, [SOURCE_AUDIT_RELEASE]);
+       AND COALESCE(config, '{}'::jsonb)->>'sourceRetirement' IS DISTINCT FROM $1::text`, [KURO_RETIREMENT_RELEASE]);
     // Preserve all historical rows and provenance, but make the retirement
     // explicit in the scheduler state as well as removing the adapters from the
     // registry.  The marker similarly avoids rewriting a future manual review.
@@ -97,7 +101,7 @@ export async function reconcileAuditedSources(pool) {
     logger.info('Reconciled audited source admission state', {
         inserted: inserted.rowCount ?? 0,
         recovered: recovered.rowCount ?? 0,
-        kuroRecovered: kuro.rowCount ?? 0,
+        kuroRetired: kuro.rowCount ?? 0,
         retired: retired.rowCount ?? 0,
     });
 }

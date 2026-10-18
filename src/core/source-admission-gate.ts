@@ -92,7 +92,7 @@ export class SourceAdmissionGate {
     const t0 = Date.now();
     try {
       // An explicitly declared adapter-owned request is reserved for a
-      // provider's authorized API session (for example, Kuro). It exercises
+      // provider's authorized API session. It exercises
       // the exact catalog path the importer will use while keeping its
       // credentials out of the Gate. Public providers continue using the
       // ordinary direct probe below.

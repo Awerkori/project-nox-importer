@@ -316,7 +316,6 @@ describe('Cover Pipeline Hardening & Resilient Ingestion', () => {
     await db.query(`
       INSERT INTO importer_sources (id, name, base_url, status, enabled)
       VALUES ('mocksource', 'Mock Source', 'https://mocksource.com', 'ACTIVE', true),
-             ('kuro', 'Kuro', 'https://kuromangas.com', 'ACTIVE', true),
              ('mangaflix', 'MangaFlix', 'https://mangaflix.net', 'ACTIVE', true),
              ('mangadex', 'MangaDex', 'https://mangadex.org', 'ACTIVE', true),
              ('hipercool', 'Hipercool', 'https://lerhentais.com', 'ACTIVE', true)
@@ -488,14 +487,14 @@ describe('Cover Pipeline Hardening & Resilient Ingestion', () => {
       `, [workId, manualCoverId, JSON.stringify({ cover: { source: 'manual', updated_at: new Date().toISOString() } })]);
 
       const candidate: CandidateWork = {
-        source: 'kuro',
-        sourceWorkId: 'kw-1',
+        source: 'mangaflix',
+        sourceWorkId: 'mf-manual-cover-1',
         title: 'Manual Work',
         slug: 'manual-work',
         coverId: crypto.randomUUID(), // New candidate cover
       };
 
-      await deduplication.applyMetadataPrecedence(workId, candidate, 'kuro');
+      await deduplication.applyMetadataPrecedence(workId, candidate, 'mangaflix');
 
       const { data: updatedWork } = await supabaseMock.from('works').select('cover_id').eq('id', workId).single();
       expect(updatedWork.cover_id).toBe(manualCoverId);
@@ -607,14 +606,14 @@ describe('Cover Pipeline Hardening & Resilient Ingestion', () => {
       `, [workId, existingCoverId]);
 
       const candidate: CandidateWork = {
-        source: 'kuro',
-        sourceWorkId: 'kw-null',
+        source: 'mangaflix',
+        sourceWorkId: 'mf-null-cover',
         title: 'Preserve Work',
         slug: 'preserve-work',
         coverId: null, // Null cover from sync
       };
 
-      await deduplication.applyMetadataPrecedence(workId, candidate, 'kuro');
+      await deduplication.applyMetadataPrecedence(workId, candidate, 'mangaflix');
 
       const { data: updatedWork } = await supabaseMock.from('works').select('cover_id').eq('id', workId).single();
       expect(updatedWork.cover_id).toBe(existingCoverId);

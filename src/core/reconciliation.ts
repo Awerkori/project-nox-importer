@@ -38,7 +38,6 @@ export interface WorkReconciliationResult {
 }
 
 const SOURCE_PRIORITY_ORDER: Record<string, number> = {
-  kuro: 100,
   nexus: 80,
   manhastro: 60,
   mangaflix: 40,

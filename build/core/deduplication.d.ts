@@ -89,12 +89,11 @@ export declare class DeduplicationEngine {
     resolveWork(candidate: CandidateWork): Promise<DeduplicationResult>;
     /**
      * Applies field-level metadata precedence:
-     * Priority: MANUAL (Admin/Editor) > KURO > OTHER SOURCES
+     * Priority: MANUAL (Admin/Editor) > source data for empty fields
      * Rules:
      * 1. Manual edit provenance is strictly immutable.
-     * 2. Kuro upgrades non-manual fields if candidate has valid data.
-     * 3. Other sources only fill empty/null fields.
-     * 4. Never overwrite valid data with empty/null.
+     * 2. Source data only fills empty/null fields.
+     * 3. Never overwrite valid data with empty/null.
      */
     applyMetadataPrecedence(workId: string, candidate: CandidateWork, source: string): Promise<MetadataMergeDelta>;
     /**

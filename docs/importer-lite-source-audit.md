@@ -16,11 +16,10 @@ a permanent availability guarantee.
 
 | Source | Problem proven by the sample | Impact | Alternative | Recommendation |
 |---|---|---|---|---|
-| Kuro | Adapter reported expired/invalid authentication | Discovery unavailable in this run; no access workaround attempted | Other confirmed routes when present | Correct credentials/session; keep mappings and source enabled |
+| Kuro | Recurrent Cloudflare authentication challenge in the production runtime | Retired from discovery, import and metadata lanes; historical published chapters remain available | Other confirmed routes when present | Permanently retired; do not recreate mappings or tasks |
 | Taimu Mangas | One discovery request failed | Temporary discovery failure only; permanence not established | Other confirmed routes when present | Keep with cooldown/backoff; investigate with a later sample |
 
-There are **no candidates to disable or remove** from this audit. In
-particular, neither a single failed request nor a historical queue count is
-sufficient evidence for a permanent removal. Lite stores source health and
-cooldown separately from priority and can select a confirmed alternative route
-without allowing a preferred source to block the task.
+Aside from Kuro's subsequent permanent retirement, this audit found no
+additional candidate for removal. Lite stores source health and cooldown
+separately from priority and can select a confirmed alternative route without
+allowing a preferred source to block the task.
