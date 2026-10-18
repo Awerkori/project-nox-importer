@@ -2,13 +2,26 @@ import { mergeAlternativeTitles } from '../core/alternative-titles.js';
 
 type RawRecord = Record<string, unknown>;
 
-const aliasesFields = [
+export const STORED_MAPPING_ALIAS_FIELDS = [
   'alternativeTitles', 'alternative_titles', 'alternativeTitle', 'alternative_title',
   'aliases', 'alternativeNames', 'alternative_names', 'otherNames', 'other_names', 'alsoKnownAs', 'also_known_as',
   'originalTitle', 'original_title', 'nativeTitle', 'native_title', 'nativeName', 'native_name',
   'englishTitle', 'english_title', 'romanizedTitle', 'romanized_title', 'romajiTitle', 'romaji_title',
+  // These are provider-declared fields from the two Portuguese APIs already
+  // persisted in mapping metadata.  They are not inferred from a page title:
+  // `titulo_alternative` is Manhastro's explicit list and
+  // `titulo_alternativo` is MangoToons' explicit list.
+  'titulo_alternative', 'titulo_alternativo', 'titulos_alternativos',
+  'titulo_original', 'nome_original', 'titulo_nativo', 'nome_nativo',
+  'titulo_ingles', 'titulo_em_ingles', 'titulo_romanizado', 'romaji',
 ];
-const tagFields = ['genres', 'genre', 'tags', 'tag', 'categories'];
+export const STORED_MAPPING_TAG_FIELDS = [
+  'genres', 'genre', 'tags', 'tag', 'categories',
+  // The same APIs expose their source taxonomy under Portuguese names.  A
+  // category such as Manhua is explicit provider metadata and may be merged
+  // just like an English `category`; no genre is guessed from prose.
+  'generos', 'genero', 'categorias', 'categoria',
+];
 
 function explicitJsonArray(value: string): unknown[] | null {
   const text = value.trim();
@@ -62,14 +75,17 @@ export function extractStoredMappingMetadata(raw: unknown, primaryTitle: string)
   genres: string[];
 } {
   const metadata = raw && typeof raw === 'object' ? raw as RawRecord : {};
-  const aliases = aliasesFields.flatMap((field) => asTextList(metadata[field], [
+  const aliases = STORED_MAPPING_ALIAS_FIELDS.flatMap((field) => asTextList(metadata[field], [
     'title', 'name', 'value', 'alternativeTitle', 'alternative_title', 'nativeTitle', 'native_title',
     'englishTitle', 'english_title', 'romanizedTitle', 'romanized_title',
+    'titulo_alternative', 'titulo_alternativo', 'titulo_original',
+    'nome_original', 'titulo_nativo', 'nome_nativo', 'titulo_ingles',
+    'titulo_em_ingles', 'titulo_romanizado', 'romaji',
   ]));
   // Legacy Portuguese adapters persisted tag records with `nome`; accept it
   // alongside the common English keys so the no-network replay can recover
   // metadata already stored in YSQL.
-  const genres = tagFields.flatMap((field) => asTextList(metadata[field], ['name', 'nome', 'title', 'label']));
+  const genres = STORED_MAPPING_TAG_FIELDS.flatMap((field) => asTextList(metadata[field], ['name', 'nome', 'title', 'label']));
   return {
     aliases: mergeAlternativeTitles([], aliases, primaryTitle),
     genres: [...new Set(genres.map((value) => value.normalize('NFKC').replace(/\s+/g, ' ').trim()).filter(Boolean))],
@@ -96,8 +112,8 @@ export function classifyExplicitSourceMetadata(raw: unknown, primaryTitle: strin
     ? extracted.aliases
     : extractStoredMappingMetadata(metadata, '').aliases;
   const rawAliasEvidence = hasExplicitValue(metadata,
-    /^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title)$/i);
-  const rawTagEvidence = hasExplicitValue(metadata, /^(genres?|tags?|categories)$/i);
+    /^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title|titulo.?alternative|titulos?.?alternativos?|titulo.?original|nome.?original|titulo.?nativo|nome.?nativo|titulo.?(em.)?ingles|titulo.?romanizado|romaji)$/i);
+  const rawTagEvidence = hasExplicitValue(metadata, /^(genres?|tags?|categories|generos?|categorias?)$/i);
   const aliasesParserError = rawAliasEvidence && parsedAliasEvidence.length === 0;
   const tagsParserError = rawTagEvidence && extracted.genres.length === 0;
   return {

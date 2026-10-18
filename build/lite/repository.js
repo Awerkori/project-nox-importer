@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { LITE_PRIORITY_RANK } from './types.js';
 import { parseCanonicalChapterKey } from './chapter-identity.js';
+import { STORED_MAPPING_ALIAS_FIELDS, STORED_MAPPING_TAG_FIELDS } from './mapping-metadata.js';
 /**
  * Older catalog passes could put two legacy mappings for one canonical chapter
  * in a single UPSERT. PostgreSQL/YSQL rejects that statement before its
@@ -25,6 +26,10 @@ const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK = 2;
 // source cursor lets a two-source horizon cover every provider without
 // repeatedly scanning the catalogue.
 const SOURCE_METADATA_SOURCE_PROBE_LIMIT = 2;
+const METADATA_REPLAY_V4_ENABLED_KEY = 'metadata_replay_v4_enabled';
+const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
+const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
+const METADATA_REPLAY_V4_INTERVAL_MS = 20_000;
 const sourceExecutionEligibilitySql = (alias) => `(
   (COALESCE(${alias}.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
    (${alias}.status='COOLDOWN' AND ${alias}.cooldown_until IS NOT NULL AND ${alias}.cooldown_until<=now()))
@@ -465,6 +470,105 @@ export class LiteRepository {
             ]);
             if (inserted.rowCount)
                 await this.refreshReadyWork(client, inserted.rows[0].work_key);
+            await client.query('COMMIT');
+            return inserted.rowCount || 0;
+        }
+        catch (error) {
+            await client.query('ROLLBACK').catch(() => { });
+            throw error;
+        }
+        finally {
+            client.release();
+        }
+    }
+    /**
+     * Version 4 is an explicitly enabled historical campaign, separate from
+     * the older parser-only replays.  It combines every provider-declared
+     * alias/tag field with the already-attached secondary source title, but it
+     * never uses either value to match a different work. Source-local durable
+     * cursors, one outstanding P2 task, and a 20-second due-time fence keep
+     * its target rate near three local merges per minute without competing with
+     * chapters or rescanning the full catalog.
+     */
+    async refillStoredMetadataEnrichmentV4(maxPending = 2) {
+        const ceiling = Math.max(1, Math.min(2, maxPending));
+        const client = await this.db.connect();
+        try {
+            await client.query('BEGIN');
+            const enabled = await client.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_ENABLED_KEY]);
+            if (enabled.rows[0]?.value !== 'true') {
+                await client.query('COMMIT');
+                return 0;
+            }
+            const pending = await client.query(`SELECT count(*)::int AS count
+        FROM importer_lite_tasks
+        WHERE task_type='CATALOG' AND state IN ('READY','RUNNING','RETRY_WAIT')
+          AND payload->>'metadataEnrichmentVersion'='4'`);
+            if (Number(pending.rows[0]?.count || 0) >= ceiling) {
+                await client.query('COMMIT');
+                return 0;
+            }
+            const fields = [...STORED_MAPPING_ALIAS_FIELDS, ...STORED_MAPPING_TAG_FIELDS];
+            let row;
+            // A source-local cursor rides the existing (source,source_work_id)
+            // index. This intentionally avoids the catalogue-wide JSON scan that
+            // made a diagnostic count exceed the protected YSQL query budget.
+            for (let probe = 0; probe < 64 && !row; probe++) {
+                const source = await client.query(`SELECT s.id
+          FROM importer_sources s
+          WHERE s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+            AND NOT EXISTS (SELECT 1 FROM settings completed
+              WHERE completed.key=$1 || s.id AND completed.value='complete')
+          ORDER BY s.id LIMIT 1`, [METADATA_REPLAY_V4_SOURCE_DONE_PREFIX]);
+                const sourceId = source.rows[0]?.id;
+                if (!sourceId)
+                    break;
+                const cursor = await client.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`]);
+                const candidate = await client.query(`
+          SELECT m.source,m.source_work_id,m.work_id::text,
+            CASE WHEN m.metadata ?| $1::text[] THEN 'EXPLICIT_METADATA' ELSE 'SECONDARY_SOURCE_TITLE' END AS reason
+          FROM importer_work_mappings m
+          JOIN works w ON w.id=m.work_id AND w.published=true
+          WHERE m.source=$2 AND m.work_id IS NOT NULL
+            AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+            AND ($3::text IS NULL OR m.source_work_id>$3)
+            AND (m.metadata ?| $1::text[] OR lower(regexp_replace(btrim(m.source_title), '[[:space:]]+', ' ', 'g'))
+              <> lower(regexp_replace(btrim(w.title), '[[:space:]]+', ' ', 'g')))
+            AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks existing
+              WHERE existing.idempotency_key='lite:metadata:v4:' || m.source || ':' || m.source_work_id)
+          ORDER BY m.source_work_id LIMIT 1`, [fields, sourceId, cursor.rows[0]?.value || null]);
+                row = candidate.rows[0];
+                if (!row)
+                    await client.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,'complete',now())
+          ON CONFLICT(key) DO UPDATE SET value='complete',updated_at=now()`, [`${METADATA_REPLAY_V4_SOURCE_DONE_PREFIX}${sourceId}`]);
+            }
+            if (!row) {
+                // Completion is durable and prevents an exhausted historical cursor
+                // from repeatedly re-reading the mapping catalog. New onboarding does
+                // not rely on this campaign: it enriches during normal cataloguing.
+                await client.query(`UPDATE settings SET value='complete',updated_at=now()
+          WHERE key=$1 AND value='true'`, [METADATA_REPLAY_V4_ENABLED_KEY]);
+                await client.query('COMMIT');
+                return 0;
+            }
+            const lastCompleted = await client.query(`SELECT max(updated_at) AS completed_at
+        FROM importer_lite_tasks WHERE idempotency_key LIKE 'lite:metadata:v4:%' AND state='DONE'`);
+            const lastAt = lastCompleted.rows[0]?.completed_at ? new Date(lastCompleted.rows[0].completed_at).getTime() : 0;
+            const nextRunAt = new Date(Math.max(Date.now(), lastAt + METADATA_REPLAY_V4_INTERVAL_MS));
+            const idempotencyKey = `lite:metadata:v4:${row.source}:${row.source_work_id}`;
+            const inserted = await client.query(`INSERT INTO importer_lite_tasks
+        (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
+        VALUES('CATALOG',$1::uuid,$2,3,3,$3,$4,4,$5::jsonb,'{}'::jsonb,false)
+        ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
+                row.work_id, `work:${row.work_id}`, idempotencyKey, nextRunAt,
+                JSON.stringify({ source: row.source, sourceWorkId: row.source_work_id, metadataEnrichment: true,
+                    metadataEnrichmentVersion: 4, metadataReplayReason: row.reason }),
+            ]);
+            if (inserted.rowCount) {
+                await client.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,$2,now())
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()`, [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${row.source}`, row.source_work_id]);
+                await this.refreshReadyWork(client, inserted.rows[0].work_key);
+            }
             await client.query('COMMIT');
             return inserted.rowCount || 0;
         }

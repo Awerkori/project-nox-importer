@@ -12,6 +12,20 @@ function slugify(text: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+/**
+ * MangoToons declares alternate names under `titulo_alternativo`.  Preserve
+ * only explicit scalar/list values from that API field; a description or an
+ * inferred translation must never enter the alias pipeline.
+ */
+function explicitAlternativeTitles(value: unknown, primaryTitle: string): string[] {
+  const values = Array.isArray(value) ? value : [value];
+  const aliases = values
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.normalize('NFKC').replace(/\s+/g, ' ').trim())
+    .filter((entry) => entry.length >= 2 && entry !== primaryTitle);
+  return [...new Map(aliases.map((entry) => [entry.toLocaleLowerCase(), entry])).values()];
+}
+
 export class MangoToonsAdapter implements SourceAdapter {
   readonly id = 'mangotoons';
   readonly name = 'Mango Toons';
@@ -185,6 +199,10 @@ export class MangoToonsAdapter implements SourceAdapter {
     else if (st.includes('ongo') || st.includes('andamento') || st.includes('releasing') || st.includes('ativo') || st.includes('lanç') || st.includes('lanc')) status = 'ONGOING';
 
     const genres: string[] = (w.tags || []).map((t: any) => typeof t === 'string' ? t : t.nome || t.name).filter(Boolean);
+    const alternativeTitles = explicitAlternativeTitles(
+      w.titulo_alternativo ?? w.titulo_alternative ?? w.alternative_titles ?? w.alternativeTitles,
+      title,
+    );
 
     return {
       sourceWorkId: String(w.id || sourceWorkId),
@@ -195,6 +213,7 @@ export class MangoToonsAdapter implements SourceAdapter {
       kind,
       status,
       genres,
+      alternativeTitles: alternativeTitles.length ? alternativeTitles : undefined,
       raw: w,
     };
   }

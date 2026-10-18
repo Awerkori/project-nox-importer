@@ -1,3 +1,5 @@
+export declare const STORED_MAPPING_ALIAS_FIELDS: string[];
+export declare const STORED_MAPPING_TAG_FIELDS: string[];
 /**
  * Only explicitly named upstream metadata fields are eligible for the
  * no-network historical enrichment pass. It must never mine prose, URLs, or
