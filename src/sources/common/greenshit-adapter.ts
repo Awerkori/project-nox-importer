@@ -56,6 +56,21 @@ export class GreenShitAdapter implements SourceAdapter {
     };
   }
 
+  /**
+   * The public homepage is often protected separately from the JSON API
+   * actually used by this adapter.  Admission must test that API, with the
+   * same ordinary public headers, before classifying a provider as a
+   * datacenter block.  The later catalog/details/pages stages remain the
+   * functional proof of an importable source.
+   */
+  get admissionProbe(): NonNullable<SourceAdapter['admissionProbe']> {
+    return {
+      url: `${this.apiUrl}/obras/atualizacoes?pagina=1&limite=1&gen_id=${encodeURIComponent(this.defaultGenreId)}`,
+      headers: this.headers,
+      expectedType: 'json',
+    };
+  }
+
   protected async fetchJson<T = any>(url: string): Promise<T> {
     const host = new URL(url).host;
     await this.rateLimiter.acquire(host);

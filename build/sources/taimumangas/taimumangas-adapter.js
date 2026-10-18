@@ -23,6 +23,16 @@ export class TaimuMangasAdapter {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
         };
     }
+    /** The importer uses this public reader API, not the Cloudflare-protected
+     * marketing homepage. Keep the admission gate on the same sustainable route
+     * so a homepage challenge cannot incorrectly park an otherwise usable API. */
+    get admissionProbe() {
+        return {
+            url: `${this.apiUrl}/updates?page=1&per_page=1&adult_mode=true`,
+            headers: this.headers,
+            expectedType: 'json',
+        };
+    }
     async request(url, options = {}) {
         const host = new URL(url).host;
         await this.rateLimiter.acquire(host);

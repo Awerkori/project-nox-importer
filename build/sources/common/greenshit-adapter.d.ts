@@ -24,6 +24,14 @@ export declare class GreenShitAdapter implements SourceAdapter {
     protected logger: Logger;
     constructor(options: GreenShitOptions, rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     protected get headers(): Record<string, string>;
+    /**
+     * The public homepage is often protected separately from the JSON API
+     * actually used by this adapter.  Admission must test that API, with the
+     * same ordinary public headers, before classifying a provider as a
+     * datacenter block.  The later catalog/details/pages stages remain the
+     * functional proof of an importable source.
+     */
+    get admissionProbe(): NonNullable<SourceAdapter['admissionProbe']>;
     protected fetchJson<T = any>(url: string): Promise<T>;
     fetchUpdatedWorks(cursor?: string | null, options?: {
         mode?: 'bootstrap' | 'maintenance';

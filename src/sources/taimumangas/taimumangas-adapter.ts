@@ -29,6 +29,17 @@ export class TaimuMangasAdapter implements SourceAdapter {
     };
   }
 
+  /** The importer uses this public reader API, not the Cloudflare-protected
+   * marketing homepage. Keep the admission gate on the same sustainable route
+   * so a homepage challenge cannot incorrectly park an otherwise usable API. */
+  get admissionProbe(): NonNullable<SourceAdapter['admissionProbe']> {
+    return {
+      url: `${this.apiUrl}/updates?page=1&per_page=1&adult_mode=true`,
+      headers: this.headers,
+      expectedType: 'json',
+    };
+  }
+
   private async request<T>(url: string, options: RequestInit = {}): Promise<T> {
     const host = new URL(url).host;
     await this.rateLimiter.acquire(host);
