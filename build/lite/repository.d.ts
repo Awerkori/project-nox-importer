@@ -197,6 +197,8 @@ export declare class LiteRepository {
      * wait forever despite requiring neither a source slot nor a chapter worker.
      */
     claimStoredMetadataReplay(workerId: string, leaseSeconds: number, metadataVersion?: 4): Promise<LiteTask | null>;
+    /** Recover one expired v4 lease without waiting for the chapter-pool reconciler. */
+    reclaimExpiredStoredMetadataReplayV4(): Promise<number>;
     /**
      * A bounded view of sources that can serve an actual next-priority chapter
      * import. One task is sampled per ready work, rather than the first N task

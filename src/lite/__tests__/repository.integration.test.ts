@@ -3670,6 +3670,21 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(claims).toBe(1);
   });
 
+  it('reclaims one expired v4 metadata lease on the isolated lane', async () => {
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
+      idempotencyKey: 'lite:metadata:v4:source-a:expired',
+      payload: { source: 'source-a', sourceWorkId: 'expired', metadataEnrichment: true, metadataEnrichmentVersion: 4 } });
+    await db.query(`UPDATE importer_lite_tasks SET state='RUNNING',attempts=3,
+      lease_owner='dead-worker',lease_until=now()-interval '1 minute'
+      WHERE idempotency_key='lite:metadata:v4:source-a:expired'`);
+
+    expect(await repo.reclaimExpiredStoredMetadataReplayV4()).toBe(1);
+    expect((await db.query(`SELECT state,reason,lease_owner FROM importer_lite_tasks
+      WHERE idempotency_key='lite:metadata:v4:source-a:expired'`)).rows[0]).toMatchObject({
+      state: 'READY', reason: 'LEASE_EXPIRED', lease_owner: null,
+    });
+  });
+
   it('refills stored metadata less often than the replay worker polls', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,

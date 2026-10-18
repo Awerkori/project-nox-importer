@@ -1062,6 +1062,7 @@ export class ImporterLiteRuntime {
         try {
             this.lastMetadataReplayAt = Date.now();
             const workerId = `${this.runtimeInstanceId}:metadata-replay`;
+            await this.queue.reclaimExpiredStoredMetadataReplayV4();
             const task = await this.queue.claimStoredMetadataReplay(workerId, 45, 4)
                 || (Number(this.pool.waitingCount || 0) < 2 ? await this.queue.claimStoredMetadataReplay(workerId, 45) : null);
             if (task)
