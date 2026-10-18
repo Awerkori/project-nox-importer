@@ -500,7 +500,7 @@ export class LiteRepository {
      * its target rate near three local merges per minute without competing with
      * chapters or rescanning the full catalog.
      */
-    async refillStoredMetadataEnrichmentV4(maxPending = 2) {
+    async refillStoredMetadataEnrichmentV4(maxPending = 2, minimumIntervalMs = METADATA_REPLAY_V4_INTERVAL_MS) {
         const ceiling = Math.max(1, Math.min(1, maxPending));
         const client = await this.sourceMetadataDb.connect();
         try {
@@ -631,7 +631,8 @@ export class LiteRepository {
             const lastCompleted = await client.query(`SELECT max(updated_at) AS completed_at
         FROM importer_lite_tasks WHERE idempotency_key LIKE 'lite:metadata:v4:%' AND state='DONE'`);
             const lastAt = lastCompleted.rows[0]?.completed_at ? new Date(lastCompleted.rows[0].completed_at).getTime() : 0;
-            const nextRunAt = new Date(Math.max(Date.now(), lastAt + METADATA_REPLAY_V4_INTERVAL_MS));
+            const intervalMs = Math.max(5_000, Math.min(60_000, Math.trunc(minimumIntervalMs)));
+            const nextRunAt = new Date(Math.max(Date.now(), lastAt + intervalMs));
             const idempotencyKey = `lite:metadata:v4:${row.source}:${row.source_work_id}`;
             const inserted = await client.query(`INSERT INTO importer_lite_tasks
         (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)

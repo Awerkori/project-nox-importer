@@ -130,7 +130,7 @@ export declare class LiteRepository {
      * its target rate near three local merges per minute without competing with
      * chapters or rescanning the full catalog.
      */
-    refillStoredMetadataEnrichmentV4(maxPending?: number): Promise<number>;
+    refillStoredMetadataEnrichmentV4(maxPending?: number, minimumIntervalMs?: number): Promise<number>;
     /** The V4 campaign owns the one isolated metadata seat while it has debt. */
     isStoredMetadataReplayV4Enabled(): Promise<boolean>;
     /**
