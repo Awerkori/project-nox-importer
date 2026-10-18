@@ -1002,6 +1002,24 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE idempotency_key='lite:metadata:v4:source-a:object-metadata'`)).rows[0].count).toBe(1);
   });
 
+  it('keeps a bounded three-item v4 burst before returning to source rotation', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES
+        ('00000000-0000-4000-8000-000000000132','source-a','burst-1',$1::uuid,'p1-a','P1 A',$2::jsonb,'SYNCED'),
+        ('00000000-0000-4000-8000-000000000133','source-a','burst-2',$1::uuid,'p1-a','P1 A',$2::jsonb,'SYNCED')`,
+      [ids.p1a, JSON.stringify({ tags: ['Ação'] })]);
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','true')`);
+
+    expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(1);
+    await db.query(`UPDATE importer_lite_tasks SET state='DONE',updated_at=now()
+      WHERE idempotency_key='lite:metadata:v4:source-a:burst-1'`);
+    expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key='lite:metadata:v4:source-a:burst-2'`)).rows[0].count).toBe(1);
+  });
+
   it('prioritizes a real alias over empty or tag-only legacy metadata from the same source', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings

@@ -36,8 +36,10 @@ const METADATA_REPLAY_V4_ENABLED_KEY = 'metadata_replay_v4_enabled';
 const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
 const METADATA_REPLAY_V4_SOURCE_CURSOR_KEY = 'metadata_replay_v4_source_cursor';
+const METADATA_REPLAY_V4_SOURCE_BURST_PREFIX = 'metadata_replay_v4_source_burst:';
 const METADATA_REPLAY_V4_INTERVAL_MS = 20_000;
 const METADATA_REPLAY_V4_WINDOWS_PER_SOURCE_TURN = 4;
+const METADATA_REPLAY_V4_SOURCE_BURST_LIMIT = 3;
 // Sources with usable stored metadata are sparse. Twelve indexed windows are
 // still a bounded serial probe (at most 1,536 mappings per producer turn),
 // but avoid spending several minutes rotating across empty providers before
@@ -724,6 +726,23 @@ export class LiteRepository {
         await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
           ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
         [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${row.source}`, row.source_work_id]);
+        // A source is selected fairly by cursor, but moving to a different
+        // provider after every single hit leaves sparse cursor scans idle for
+        // most of the 20-second fence. Retain at most three consecutive
+        // mappings from a source, then resume the normal round-robin.
+        const burstKey = `${METADATA_REPLAY_V4_SOURCE_BURST_PREFIX}${row.source}`;
+        const currentBurst = await client.query<{ value: string }>(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [burstKey]);
+        const burst = Math.max(0, Number(currentBurst.rows[0]?.value || 0)) + 1;
+        if (burst < METADATA_REPLAY_V4_SOURCE_BURST_LIMIT) {
+          const predecessor = await client.query<{ id: string | null }>(`SELECT max(id) AS id FROM importer_sources
+            WHERE enabled=true AND COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') AND id<$1`, [row.source]);
+          await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+          [METADATA_REPLAY_V4_SOURCE_CURSOR_KEY, predecessor.rows[0]?.id || '']);
+        }
+        await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+        [burstKey, String(burst >= METADATA_REPLAY_V4_SOURCE_BURST_LIMIT ? 0 : burst)]);
         await this.refreshReadyWork(client, inserted.rows[0].work_key);
       }
       await client.query('COMMIT');
