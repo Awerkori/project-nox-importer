@@ -1,4 +1,22 @@
-import { mergeAlternativeTitles } from '../core/alternative-titles.js';
+import { alternativeTitleKey, cleanAlternativeTitle, mergeAlternativeTitles } from '../core/alternative-titles.js';
+const SOURCE_TITLE_PLACEHOLDERS = new Set(['unknown', 'n/a', 'none', 'null', 'undefined', 'untitled', 'sem titulo', 'sem título']);
+/**
+ * A mapping title is first-party evidence only after its mapping is attached
+ * to the canonical work. Older adapters sometimes copied a machine slug (or
+ * API id) into this field; reject just those fallbacks while accepting a
+ * reader-facing title even when the provider uses it as the slug as well.
+ */
+export function isProviderDisplayTitleAlias(sourceTitle, sourceSlug, primaryTitle) {
+    const title = cleanAlternativeTitle(sourceTitle);
+    if (!title || alternativeTitleKey(title) === alternativeTitleKey(primaryTitle))
+        return false;
+    const folded = title.toLocaleLowerCase();
+    if (SOURCE_TITLE_PLACEHOLDERS.has(folded) || /^\d+$/u.test(title))
+        return false;
+    const slug = cleanAlternativeTitle(sourceSlug);
+    return alternativeTitleKey(title) !== alternativeTitleKey(slug)
+        || !/^[a-z0-9]+(?:[-_][a-z0-9]+)+$/u.test(title);
+}
 export const STORED_MAPPING_ALIAS_FIELDS = [
     'alternativeTitles', 'alternative_titles', 'alternativeTitle', 'alternative_title',
     'aliases', 'alternativeNames', 'alternative_names', 'otherNames', 'other_names', 'alsoKnownAs', 'also_known_as',

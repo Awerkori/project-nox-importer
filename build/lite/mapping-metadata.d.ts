@@ -1,3 +1,10 @@
+/**
+ * A mapping title is first-party evidence only after its mapping is attached
+ * to the canonical work. Older adapters sometimes copied a machine slug (or
+ * API id) into this field; reject just those fallbacks while accepting a
+ * reader-facing title even when the provider uses it as the slug as well.
+ */
+export declare function isProviderDisplayTitleAlias(sourceTitle: unknown, sourceSlug: unknown, primaryTitle: unknown): boolean;
 export declare const STORED_MAPPING_ALIAS_FIELDS: string[];
 export declare const STORED_MAPPING_TAG_FIELDS: string[];
 /**

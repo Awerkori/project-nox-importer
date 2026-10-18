@@ -975,6 +975,19 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE idempotency_key='lite:metadata:v4:source-a:slug-fallback'`)).rows[0].count).toBe(0);
   });
 
+  it('replays a display title even when a provider stores it as its slug', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000130','source-a','display-title-slug',$1::uuid,
+        'Secondary Display Title','Secondary Display Title','{}'::jsonb,'SYNCED')`, [ids.p1a]);
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','true')`);
+
+    expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key='lite:metadata:v4:source-a:display-title-slug'`)).rows[0].count).toBe(1);
+  });
+
   it('prioritizes a real alias over empty or tag-only legacy metadata from the same source', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings

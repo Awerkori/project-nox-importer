@@ -663,9 +663,14 @@ export class LiteRepository {
             SELECT m.source,m.source_work_id,m.work_id::text,
               CASE WHEN m.has_explicit_metadata THEN 'EXPLICIT_METADATA' ELSE 'SECONDARY_SOURCE_TITLE' END AS reason
             FROM scanned m JOIN works w ON w.id=m.work_id AND w.published=true
-            WHERE (m.has_explicit_metadata OR (m.source_title IS DISTINCT FROM m.source_slug
-              AND lower(regexp_replace(btrim(m.source_title), '[[:space:]]+', ' ', 'g'))
-                <> lower(regexp_replace(btrim(w.title), '[[:space:]]+', ' ', 'g'))))
+            WHERE (m.has_explicit_metadata OR (
+              lower(regexp_replace(btrim(m.source_title), '[[:space:]]+', ' ', 'g'))
+                <> lower(regexp_replace(btrim(w.title), '[[:space:]]+', ' ', 'g'))
+              AND lower(btrim(COALESCE(m.source_title,''))) NOT IN ('unknown','n/a','none','null','undefined','untitled','sem titulo','sem título')
+              AND btrim(COALESCE(m.source_title,'')) !~ '^[0-9]+$'
+              AND NOT (m.source_title IS NOT DISTINCT FROM m.source_slug
+                AND btrim(COALESCE(m.source_title,'')) ~ '^[a-z0-9]+([-_][a-z0-9]+)+$')
+            ))
               AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks existing
                 WHERE existing.idempotency_key='lite:metadata:v4:' || m.source || ':' || m.source_work_id)
             ORDER BY m.source_work_id LIMIT 1
