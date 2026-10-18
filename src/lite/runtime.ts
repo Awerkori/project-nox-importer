@@ -19,7 +19,7 @@ import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
 import { SourceAdmissionGate } from '../core/source-admission-gate.js';
 import { sanitizeSynopsis } from './metadata.js';
-import { classifyExplicitSourceMetadata, extractStoredMappingMetadata } from './mapping-metadata.js';
+import { classifyExplicitSourceMetadata, extractStoredMappingMetadata, isProviderDisplayTitleAlias } from './mapping-metadata.js';
 import { mergeAlternativeTitles } from '../core/alternative-titles.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
 import { LiteMemoryPressureGuard, type LiteMemoryPressureSnapshot } from './memory-pressure.js';
@@ -2037,7 +2037,10 @@ export class ImporterLiteRuntime {
       // not expose a separate alternative-title field. Keep the comparison
       // and Unicode-safe de-duplication in the shared merge helper; this is
       // deliberately not a new cross-work matching signal.
-      const aliases = mergeAlternativeTitles(extracted.aliases, [row.source_title], primaryTitle);
+      const sourceTitleAlias = isV4 && isProviderDisplayTitleAlias(row.source_title, row.source_slug, primaryTitle)
+        ? [row.source_title]
+        : [];
+      const aliases = mergeAlternativeTitles(extracted.aliases, sourceTitleAlias, primaryTitle);
       if (!aliases.length && !extracted.genres.length) {
         await this.queue.finish(task, workerId, { state: 'DONE', checkpoint: { metadataEnrichment: true, empty: true }, resetAttempts: true });
         return;

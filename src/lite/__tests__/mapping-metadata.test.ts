@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { classifyExplicitSourceMetadata, extractStoredMappingMetadata } from '../mapping-metadata.js';
+import { classifyExplicitSourceMetadata, extractStoredMappingMetadata, isProviderDisplayTitleAlias } from '../mapping-metadata.js';
 
 describe('stored mapping metadata enrichment', () => {
+  it('accepts a display title stored as a slug but rejects machine fallbacks', () => {
+    expect(isProviderDisplayTitleAlias('Distant Sky', 'Distant Sky', 'Céu Distante')).toBe(true);
+    expect(isProviderDisplayTitleAlias('distant-sky', 'distant-sky', 'Céu Distante')).toBe(false);
+    expect(isProviderDisplayTitleAlias('10823', '10823', 'Imperador Mágico')).toBe(false);
+    expect(isProviderDisplayTitleAlias('unknown', 'unknown', 'Imperador Mágico')).toBe(false);
+  });
+
   it('uses only explicit aliases and preserves original Unicode display text', () => {
     const metadata = extractStoredMappingMetadata({
       alternativeTitles: [' 나 혼자만 레벨업 ', 'Solo Leveling'],
