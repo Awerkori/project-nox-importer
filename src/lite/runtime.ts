@@ -177,6 +177,11 @@ export class ImporterLiteRuntime {
   private lastSourceMetadataRefillAt = 0;
   private sourceMetadataPreferredSource: string | null = null;
   private sourceMetadataPreferredSourceBurst = 0;
+  // V4 is a finite, no-network campaign over metadata we already possess.
+  // It uses the same one-seat isolated pool as optional external re-fetches.
+  // Give it that seat until its durable setting says the campaign is done;
+  // source re-fetch tasks stay durable and resume afterwards.
+  private sourceMetadataRefreshDeferredForV4 = false;
   // The historical producer is intentionally low-rate. Persist its last
   // admission decision in the heartbeat so a guarded skip cannot look like a
   // silently stalled backlog after a native deploy.
@@ -689,6 +694,14 @@ export class ImporterLiteRuntime {
       // one-seat pool has a waiter. The repository still permits only one
       // outstanding v4 task and applies its 20-second due-time fence.
       const admittedV4 = await this.queue.refillStoredMetadataEnrichmentV4();
+      if (admittedV4) this.sourceMetadataRefreshDeferredForV4 = true;
+      else if (this.sourceMetadataRefreshDeferredForV4) {
+        // This is reached only on the 15-second producer cadence after V4
+        // could not admit a successor. Checking the durable switch here (not
+        // in the five-second source-refresh timer) avoids polling the one-seat
+        // pool while preserving automatic resumption after campaign completion.
+        this.sourceMetadataRefreshDeferredForV4 = await this.queue.isStoredMetadataReplayV4Enabled();
+      }
       if (admitted || admittedV4) this.logger.info('Admitted bounded stored metadata enrichment', {
         admitted: admitted + admittedV4, version: admittedV4 ? 4 : undefined,
       });
@@ -708,6 +721,10 @@ export class ImporterLiteRuntime {
     preferredSource?: string,
   ): Promise<void> {
     if (!this.isRuntimeLeader || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS)) return;
+    if (this.sourceMetadataRefreshDeferredForV4) {
+      this.noteSourceMetadataProducer('DEFERRED_V4_BACKLOG');
+      return;
+    }
     // P2 metadata must yield before chapter receipts/finalization queue on
     // the deliberately small importer pool. Existing source requests drain
     // safely; this only prevents a new producer query or HTTP task from
@@ -819,6 +836,7 @@ export class ImporterLiteRuntime {
     // RSS nears the container's 512 MiB boundary. A single importer-pool
     // waiter is normal under chapter load; the one-seat persistence gate
     // below, rather than an idle network slot, protects YSQL in that case.
+    if (this.sourceMetadataRefreshDeferredForV4) return;
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
     // See refillSourceMetadataEnrichment: an intermittent P1 queue still
     // constrains this optional lane to one external request, not zero.

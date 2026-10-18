@@ -3821,6 +3821,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(v4).toHaveBeenCalledTimes(1);
   });
 
+  it('defers optional source refetches while the stored V4 campaign owns the isolated pool', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    (runtime as any).sourceMetadataRefreshDeferredForV4 = true;
+    const refill = vi.fn().mockResolvedValue(1);
+    const claim = vi.fn().mockResolvedValue(null);
+    (runtime as any).queue.refillSourceMetadataEnrichment = refill;
+    (runtime as any).queue.claimSourceMetadataRefresh = claim;
+
+    await (runtime as any).refillSourceMetadataEnrichment();
+    await (runtime as any).runSourceMetadataRefresh();
+
+    expect(refill).not.toHaveBeenCalled();
+    expect(claim).not.toHaveBeenCalled();
+    expect((runtime as any).sourceMetadataProducer.outcome).toBe('DEFERRED_V4_BACKLOG');
+  });
+
   it('classifies normal catalog metadata immediately while honoring chapter ingestion disablement', async () => {
     await db.exec(`ALTER TABLE importer_sources ADD COLUMN chapter_ingestion_enabled boolean NOT NULL DEFAULT true`);
     await db.query(`UPDATE importer_sources SET chapter_ingestion_enabled=false WHERE id='source-a'`);
