@@ -164,6 +164,9 @@ function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, app
  * Protected connections for low-priority historical metadata bookkeeping.
  * Normal operation admits one task; the explicit V4-exclusive campaign may
  * use two distinct-work merges without borrowing the public/chapter pool.
+ * A third connection is reserved for the serialized durable producer: with
+ * only two connections, refilling a successor waits behind both active
+ * merges and leaves the exclusive lane intermittently empty.
  */
 export function createYugabyteMetadataPool(): pg.Pool {
   // These protected P2 connections perform bounded cross-table probes.
@@ -171,7 +174,7 @@ export function createYugabyteMetadataPool(): pg.Pool {
   // prefer its batched variant only here, never on the chapter pool.
   const metadataSessionOptions = '-c enable_nestloop=off';
   const metadataPool = new pg.Pool(yugabytePoolOptions(
-    getConfig(), 2, 'project-nox-importer-metadata', 4_000, 12_000,
+    getConfig(), 3, 'project-nox-importer-metadata', 4_000, 12_000,
     metadataSessionOptions, false,
   ));
   metadataPool.on('error', (err) => {
