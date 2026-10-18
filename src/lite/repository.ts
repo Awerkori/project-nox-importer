@@ -1054,6 +1054,34 @@ export class LiteRepository {
     } finally { client.release(); }
   }
 
+  /** Recover one expired v4 lease without waiting for the chapter-pool reconciler. */
+  async reclaimExpiredStoredMetadataReplayV4(): Promise<number> {
+    const client = await this.sourceMetadataDb.connect();
+    try {
+      await client.query('BEGIN');
+      const recovered = await client.query<{ work_key: string }>(`WITH picked AS (
+          SELECT id,work_key,attempts,max_attempts
+          FROM importer_lite_tasks
+          WHERE task_type='CATALOG' AND state='RUNNING' AND lease_until<now()
+            AND payload->>'metadataEnrichmentVersion'='4'
+          ORDER BY lease_until LIMIT 1 FOR UPDATE SKIP LOCKED
+        ) UPDATE importer_lite_tasks task
+        SET state=CASE WHEN picked.attempts>=picked.max_attempts THEN 'BLOCKED' ELSE 'READY' END,
+            reason=CASE WHEN picked.attempts>=picked.max_attempts
+              THEN 'LEASE_EXPIRED_MAX_ATTEMPTS' ELSE 'LEASE_EXPIRED' END,
+            lease_owner=NULL,lease_until=NULL,next_run_at=CASE WHEN picked.attempts>=picked.max_attempts
+              THEN task.next_run_at ELSE now() END,updated_at=now()
+        FROM picked WHERE task.id=picked.id
+        RETURNING task.work_key`, []);
+      for (const row of recovered.rows) await this.refreshReadyWork(client, row.work_key);
+      await client.query('COMMIT');
+      return recovered.rowCount || 0;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+
   /**
    * A bounded view of sources that can serve an actual next-priority chapter
    * import. One task is sampled per ready work, rather than the first N task
