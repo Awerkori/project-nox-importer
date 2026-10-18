@@ -36,8 +36,8 @@ async function main(): Promise<void> {
   try {
     if (args.enableAuto) {
       console.log(JSON.stringify({ mode: args.apply ? 'APPLY' : 'DRY_RUN', action: 'ENABLE_V4_AUTOMATIC_REPLAY' }));
-      if (args.apply) await pool.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,'true',now())
-        ON CONFLICT(key) DO UPDATE SET value='true',updated_at=now()`, ['metadata_replay_v4_enabled']);
+      if (args.apply) await pool.query(`INSERT INTO settings(key,value) VALUES($1,'true')
+        ON CONFLICT(key) DO UPDATE SET value='true'`, ['metadata_replay_v4_enabled']);
       return;
     }
     // A v4 task is scheduled only by this operator-controlled campaign. It

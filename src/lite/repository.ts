@@ -616,8 +616,8 @@ export class LiteRepository {
         const sourceId = source.rows[0]?.id;
         if (!sourceId) break;
         sourceAfter = sourceId;
-        await client.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,$2,now())
-          ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()`,
+        await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
         [METADATA_REPLAY_V4_SOURCE_CURSOR_KEY, sourceId]);
         const cursor = await client.query<{ value: string }>(`SELECT value FROM settings WHERE key=$1 LIMIT 1`,
           [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`]);
@@ -644,13 +644,13 @@ export class LiteRepository {
           FROM tail LEFT JOIN candidate ON true`, [fields, sourceId, cursor.rows[0]?.value || null]);
         const result = candidate.rows[0];
         if (!result?.tail_source_work_id) {
-          await client.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,'complete',now())
-            ON CONFLICT(key) DO UPDATE SET value='complete',updated_at=now()`, [`${METADATA_REPLAY_V4_SOURCE_DONE_PREFIX}${sourceId}`]);
+          await client.query(`INSERT INTO settings(key,value) VALUES($1,'complete')
+            ON CONFLICT(key) DO UPDATE SET value='complete'`, [`${METADATA_REPLAY_V4_SOURCE_DONE_PREFIX}${sourceId}`]);
           continue;
         }
         if (!result.source || !result.source_work_id || !result.work_id || !result.reason) {
-          await client.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,$2,now())
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()`,
+          await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
           [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`, result.tail_source_work_id]);
           break;
         }
@@ -660,7 +660,7 @@ export class LiteRepository {
         // Completion is durable and prevents an exhausted historical cursor
         // from repeatedly re-reading the mapping catalog. New onboarding does
         // not rely on this campaign: it enriches during normal cataloguing.
-        await client.query(`UPDATE settings SET value='complete',updated_at=now()
+        await client.query(`UPDATE settings SET value='complete'
           WHERE key=$1 AND value='true'`, [METADATA_REPLAY_V4_ENABLED_KEY]);
         await client.query('COMMIT');
         return 0;
@@ -679,8 +679,8 @@ export class LiteRepository {
           metadataEnrichmentVersion: 4, metadataReplayReason: row.reason }),
       ]);
       if (inserted.rowCount) {
-        await client.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,$2,now())
-          ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()`,
+        await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
         [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${row.source}`, row.source_work_id]);
         await this.refreshReadyWork(client, inserted.rows[0].work_key);
       }
