@@ -28,6 +28,17 @@ const confirmed = process.argv.includes('--confirm-retire-kuro');
 console.log(JSON.stringify({ mode: apply ? 'apply-started' : 'dry-run-started', source: SOURCE }));
 
 type Count = Record<string, number>;
+type PublishedTotals = {
+  chapters: number;
+  pages: number;
+  stored_pages: number;
+  unavailable_pages: number;
+};
+
+type PublicationSnapshot = {
+  totals: PublishedTotals;
+  chapterIds: string[];
+};
 
 async function count(client: { query: Function }, sql: string, params: unknown[] = []): Promise<number> {
   const result = await client.query(sql, params);
@@ -62,6 +73,61 @@ async function archiveAndDelete(
   return deleted.rowCount ?? 0;
 }
 
+/**
+ * Mappings are an operational layer, while published chapters and their
+ * media are canonical public data.  Resolve the affected IDs first, then
+ * examine pages through their primary-key prefix in small sequential batches.
+ * This avoids a catalogue-wide join and keeps the preservation proof bounded.
+ */
+async function publishedSnapshot(
+  client: { query: Function },
+  knownChapterIds?: string[],
+): Promise<PublicationSnapshot> {
+  const candidateIds = knownChapterIds ?? [...new Set((await client.query(
+    `SELECT chapter_id
+       FROM public.importer_chapter_mappings
+      WHERE source = ANY($1::text[])
+        AND chapter_id IS NOT NULL`,
+    [SOURCES],
+  )).rows.map((row: { chapter_id: string }) => row.chapter_id))];
+
+  if (candidateIds.length === 0) {
+    return { totals: { chapters: 0, pages: 0, stored_pages: 0, unavailable_pages: 0 }, chapterIds: [] };
+  }
+
+  const chapters = await client.query(
+    `SELECT id
+       FROM public.chapters
+      WHERE id = ANY($1::uuid[])
+        AND published_at IS NOT NULL`,
+    [candidateIds],
+  );
+  const chapterIds = chapters.rows.map((row: { id: string }) => row.id);
+  const totals: PublishedTotals = {
+    chapters: chapterIds.length,
+    pages: 0,
+    stored_pages: 0,
+    unavailable_pages: 0,
+  };
+
+  for (let offset = 0; offset < chapterIds.length; offset += 50) {
+    const pages = await client.query(
+      `SELECT count(page.media_id)::int AS pages,
+              count(*) FILTER (WHERE media.storage_ready IS TRUE)::int AS stored_pages,
+              count(*) FILTER (WHERE media.storage_ready IS DISTINCT FROM TRUE)::int AS unavailable_pages
+         FROM public.pages AS page
+         LEFT JOIN public.media AS media ON media.id = page.media_id
+        WHERE page.chapter_id = ANY($1::uuid[])`,
+      [chapterIds.slice(offset, offset + 50)],
+    );
+    totals.pages += Number(pages.rows[0]?.pages || 0);
+    totals.stored_pages += Number(pages.rows[0]?.stored_pages || 0);
+    totals.unavailable_pages += Number(pages.rows[0]?.unavailable_pages || 0);
+  }
+
+  return { totals, chapterIds };
+}
+
 async function inventory(client: { query: Function }) {
   const sourceParam = [SOURCES];
   const workPatterns = SOURCES.map((source) => `source:${source}:%`);
@@ -76,23 +142,14 @@ async function inventory(client: { query: Function }) {
   const sourceHealth = await count(client, `SELECT count(*)::int AS count FROM public.importer_lite_source_health WHERE source = ANY($1::text[])`, sourceParam);
   const checkpoints = await count(client, `SELECT count(*)::int AS count FROM public.importer_checkpoints WHERE source = ANY($1::text[])`, sourceParam);
   const readyWorks = await count(client, `SELECT count(*)::int AS count FROM public.importer_lite_ready_works WHERE work_key LIKE ANY($1::text[])`, [workPatterns]);
-  const manifests = await count(client, `SELECT count(*)::int AS count FROM public.importer_chapter_manifest WHERE selected_source = ANY($1::text[]) OR available_sources::text ~ '"(?:kuro|kuromangas)"'`, sourceParam);
+  // `?|` checks the JSONB array directly.  Casting it to text and applying a
+  // regex made this guard scan slowly enough to time out on production,
+  // defeating the fail-closed safety check.
+  const manifests = await count(client, `SELECT count(*)::int AS count FROM public.importer_chapter_manifest WHERE selected_source = ANY($1::text[]) OR available_sources ?| $1::text[]`, sourceParam);
   const runningLite = await count(client, `SELECT count(*)::int AS count FROM public.importer_lite_tasks WHERE state = 'RUNNING' AND (COALESCE(payload->>'source', '') = ANY($1::text[]) OR work_key LIKE ANY($2::text[]))`, [SOURCES, workPatterns]);
   const importingLegacy = await count(client, `SELECT count(*)::int AS count FROM public.importer_queue WHERE status = 'IMPORTING' AND source = ANY($1::text[])`, sourceParam);
   const dependentUploads = await count(client, `SELECT count(*)::int AS count FROM public.importer_lite_uploads AS upload JOIN public.importer_lite_tasks AS task ON task.id = upload.task_id WHERE COALESCE(task.payload->>'source', '') = ANY($1::text[]) OR task.work_key LIKE ANY($2::text[])`, [SOURCES, workPatterns]);
-  const published = await client.query(
-    `SELECT count(DISTINCT chapter.id)::int AS chapters,
-            count(page.media_id)::int AS pages,
-            count(*) FILTER (WHERE media.storage_ready IS TRUE)::int AS stored_pages,
-            count(*) FILTER (WHERE media.storage_ready IS DISTINCT FROM TRUE)::int AS unavailable_pages
-       FROM public.importer_chapter_mappings AS mapping
-       JOIN public.chapters AS chapter ON chapter.id = mapping.chapter_id
-       LEFT JOIN public.pages AS page ON page.chapter_id = chapter.id
-       LEFT JOIN public.media AS media ON media.id = page.media_id
-      WHERE mapping.source = ANY($1::text[])
-        AND chapter.published_at IS NOT NULL`,
-    sourceParam,
-  );
+  const published = await publishedSnapshot(client);
 
   return {
     workMappings,
@@ -108,7 +165,7 @@ async function inventory(client: { query: Function }) {
     runningLite,
     importingLegacy,
     dependentUploads,
-    published: published.rows[0],
+    published,
   };
 }
 
@@ -121,7 +178,9 @@ async function main(): Promise<void> {
   const client = await pool.connect();
   try {
     if (!apply) {
-      console.log(JSON.stringify({ mode: 'dry-run', source: SOURCE, ...(await inventory(client)) }));
+      const before = await inventory(client);
+      const { chapterIds: _chapterIds, ...published } = before.published;
+      console.log(JSON.stringify({ mode: 'dry-run', source: SOURCE, ...before, published }));
       return;
     }
 
@@ -234,23 +293,8 @@ async function main(): Promise<void> {
         throw new Error(`Kuro retirement verification failed; ${remaining} operational row(s) remain`);
       }
 
-      const publishedAfter = await client.query(
-        `SELECT count(DISTINCT chapter.id)::int AS chapters,
-                count(page.media_id)::int AS pages,
-                count(*) FILTER (WHERE media.storage_ready IS TRUE)::int AS stored_pages,
-                count(*) FILTER (WHERE media.storage_ready IS DISTINCT FROM TRUE)::int AS unavailable_pages
-           FROM public.importer_retired_source_records AS retired
-           JOIN public.chapters AS chapter
-             ON chapter.id = NULLIF(retired.record->>'chapter_id', '')::uuid
-           LEFT JOIN public.pages AS page ON page.chapter_id = chapter.id
-           LEFT JOIN public.media AS media ON media.id = page.media_id
-          WHERE retired.retirement_run_id = $1
-            AND retired.record_type = 'CHAPTER_MAPPING'
-            AND chapter.published_at IS NOT NULL`,
-        [runId],
-      );
-      const beforePublished = before.published;
-      const afterPublished = publishedAfter.rows[0];
+      const beforePublished = before.published.totals;
+      const afterPublished = (await publishedSnapshot(client, before.published.chapterIds)).totals;
       if (JSON.stringify(beforePublished) !== JSON.stringify(afterPublished)) {
         throw new Error('Published Kuro chapter/page preservation verification failed');
       }
