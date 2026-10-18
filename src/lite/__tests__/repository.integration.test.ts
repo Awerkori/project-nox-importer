@@ -3772,6 +3772,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
   });
 
+  it('reclaims a due V4 retry so a transient metadata-pool contention cannot stall the lane', async () => {
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
+      idempotencyKey: 'lite:metadata:v4:source-a:due-retry',
+      payload: { source: 'source-a', sourceWorkId: 'due-retry', metadataEnrichment: true, metadataEnrichmentVersion: 4 } });
+    await db.query(`UPDATE importer_lite_tasks SET state='RETRY_WAIT',reason='METADATA_ENRICHMENT_DB_CONTENTION',
+      next_run_at=now()-interval '1 second',attempts=0
+      WHERE idempotency_key='lite:metadata:v4:source-a:due-retry'`);
+
+    const claimed = await repo.claimStoredMetadataReplay('v4-retry-worker', 120, 4);
+    expect(claimed).toMatchObject({
+      idempotencyKey: 'lite:metadata:v4:source-a:due-retry', state: 'RUNNING', attempts: 1,
+    });
+  });
+
   it('refills stored metadata less often than the replay worker polls', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
