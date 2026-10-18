@@ -946,7 +946,11 @@ describe('LiteRepository against the additive Lite migration', () => {
       payload: expect.objectContaining({ metadataEnrichment: true, metadataEnrichmentVersion: 4,
         metadataReplayReason: 'EXPLICIT_METADATA' }),
     });
-    const first = await repo.claim('v4-test-worker', 60);
+    // V4 has its own claimant and deliberately does not refresh the generic
+    // chapter-ready projection for each local merge.
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_ready_works
+      WHERE work_key=$1`, [`work:${ids.p1a}`])).rows[0].count).toBe(0);
+    const first = await repo.claimStoredMetadataReplay('v4-test-worker', 60, 4);
     await repo.finish(first!, 'v4-test-worker', { state: 'DONE' });
     // The durable source cursor advances after source-a. Its next turn must
     // give source-b a seat rather than draining one large provider first.
@@ -959,6 +963,15 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
       WHERE idempotency_key='lite:metadata:v4:source-c:v4-source-c'`)).rows[0].count).toBe(1);
     expect((await db.query(`SELECT value FROM settings WHERE key='metadata_replay_v4_enabled'`)).rows[0].value).toBe('true');
+  });
+
+  it('persists and clears the reversible V4 exclusive mode', async () => {
+    expect(await repo.storedMetadataReplayV4ExclusiveMode()).toEqual({ enabled: false, intervalMs: 2_000 });
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_exclusive_mode',$1)`,
+      [JSON.stringify({ enabled: true, intervalMs: 1_000 })]);
+    expect(await repo.storedMetadataReplayV4ExclusiveMode()).toEqual({ enabled: true, intervalMs: 1_000 });
+    await repo.disableStoredMetadataReplayV4ExclusiveMode();
+    expect(await repo.storedMetadataReplayV4ExclusiveMode()).toEqual({ enabled: false, intervalMs: 2_000 });
   });
 
   it('does not turn a source slug fallback into a historical alias candidate', async () => {
@@ -3896,6 +3909,24 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refillStoredMetadataEnrichment();
 
     expect(v4).toHaveBeenCalledWith(2, 5_000);
+  });
+
+  it('uses the persisted exclusive fence while chapter admission is parked', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    (runtime as any).metadataReplayV4Exclusive = { enabled: true, intervalMs: 2_000 };
+    (runtime as any).queue.refillStoredMetadataEnrichment = vi.fn().mockResolvedValue(0);
+    const v4 = vi.fn().mockResolvedValue(0);
+    (runtime as any).queue.refillStoredMetadataEnrichmentV4 = v4;
+
+    await (runtime as any).refillStoredMetadataEnrichment();
+
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
+    expect(v4).toHaveBeenCalledWith(2, 2_000);
   });
 
   it('retains V4 ownership after boot when a due retry already occupies its durable seat', async () => {

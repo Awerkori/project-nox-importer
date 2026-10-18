@@ -42,6 +42,8 @@ export declare class ImporterLiteRuntime {
     private sourceMetadataPreferredSource;
     private sourceMetadataPreferredSourceBurst;
     private sourceMetadataRefreshDeferredForV4;
+    private metadataReplayV4Exclusive;
+    private lastMetadataReplayV4ExclusiveRefreshAt;
     private sourceMetadataProducer;
     private lastSourceRecoveryProbeAt;
     private lastUploadOutcomeRecoveryAt;
@@ -121,6 +123,10 @@ export declare class ImporterLiteRuntime {
     private refillStoredMetadataEnrichment;
     /** Keep V4's isolated-seat ownership correct across boot, retries and direct successors. */
     private refillStoredMetadataEnrichmentV4;
+    /** Refresh the durable campaign switch without relying on process-local state. */
+    private refreshMetadataReplayV4ExclusiveMode;
+    /** One timer turn keeps normal metadata paths out of an exclusive replay. */
+    private runMetadataTurn;
     /** Source-backed historical metadata remains a P2 catalog task and shares
      * normal priority claims; it never steals a chapter worker or bypasses a
      * STAFF/P0/P1 reserve. At most four network-only tasks are admitted across
