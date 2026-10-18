@@ -2025,13 +2025,20 @@ export class ImporterLiteRuntime {
                 await this.queue.finish(task, workerId, { state: 'DONE', checkpoint: { metadataEnrichment: true, empty: true }, resetAttempts: true });
                 return;
             }
-            const resolved = await (isV4 ? this.historicalMetadataDedupe : this.dedupe).resolveWork({
+            const resolve = () => (isV4 ? this.historicalMetadataDedupe : this.dedupe).resolveWork({
                 source, sourceWorkId,
                 title: row.source_title || row.work_title,
                 slug: row.source_slug || row.work_title,
                 aliases,
                 genres: extracted.genres,
             });
+            // Source refresh and V4 merge both use the isolated metadata pool.
+            // The former already serializes its commit path; use that same narrow
+            // gate here so a no-network V4 merge waits briefly rather than timing
+            // out on a concurrent source-metadata persistence checkout.
+            const resolved = isV4
+                ? await this.sourceMetadataPersistenceGate.runExclusive(resolve)
+                : await resolve();
             if (!resolved.workId || resolved.status === 'AMBIGUOUS') {
                 await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: resolved.reason || 'METADATA_ENRICHMENT_AMBIGUOUS' });
                 return;
