@@ -1061,7 +1061,12 @@ export class ImporterLiteRuntime {
    * source slot, page buffer or chapter worker is admitted here.
    */
   private async runStoredMetadataReplay(): Promise<void> {
-    if (!this.isRuntimeLeader || this.sourceMetadataPool.waitingCount > 0 || this.shouldPauseLowPriorityMetadata()
+    // The isolated pool is single-seat.  A strict `waitingCount > 0` guard
+    // here starves an already-durable v4 task whenever source-backed P2 work
+    // has a waiter, even though both paths remain serialized by that pool.
+    // Queueing one local merge preserves the single-flight limit and lets the
+    // longer v4 lease cover the bounded YSQL wait.
+    if (!this.isRuntimeLeader || this.shouldPauseLowPriorityMetadata()
       || Date.now() - this.lastMetadataReplayAt < STORED_METADATA_REPLAY_INTERVAL_MS) return;
     if (!this.metadataReplayGate.tryAcquire()) return;
     try {

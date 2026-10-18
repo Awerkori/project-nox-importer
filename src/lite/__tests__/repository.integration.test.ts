@@ -3689,6 +3689,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(claimArgs[0]).toEqual([expect.stringContaining(':metadata-replay'), 120, 4]);
   });
 
+  it('does not starve one serial v4 replay behind a queued isolated-pool operation', async () => {
+    const chapterPool = poolFor(db) as Pool;
+    const metadataPool = poolFor(db) as Pool;
+    Object.defineProperty(chapterPool, 'waitingCount', { value: 4 });
+    Object.defineProperty(metadataPool, 'waitingCount', { value: 1 });
+    const runtime = new ImporterLiteRuntime(
+      chapterPool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+      new HostRateLimiter(2), metadataPool,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    const claim = vi.fn().mockResolvedValue(null);
+    (runtime as any).queue.claimStoredMetadataReplay = claim;
+    (runtime as any).queue.reclaimExpiredStoredMetadataReplayV4 = vi.fn().mockResolvedValue(0);
+
+    await (runtime as any).runStoredMetadataReplay();
+    expect(claim).toHaveBeenCalledTimes(1);
+    expect(claim).toHaveBeenCalledWith(expect.stringContaining(':metadata-replay'), 120, 4);
+  });
+
   it('reclaims one expired v4 metadata lease on the isolated lane', async () => {
     await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
       idempotencyKey: 'lite:metadata:v4:source-a:expired',
