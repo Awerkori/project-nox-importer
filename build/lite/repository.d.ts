@@ -196,7 +196,7 @@ export declare class LiteRepository {
      * a permanently healthy P1 backlog would make historical aliases and tags
      * wait forever despite requiring neither a source slot nor a chapter worker.
      */
-    claimStoredMetadataReplay(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    claimStoredMetadataReplay(workerId: string, leaseSeconds: number, metadataVersion?: 4): Promise<LiteTask | null>;
     /**
      * A bounded view of sources that can serve an actual next-priority chapter
      * import. One task is sampled per ready work, rather than the first N task
