@@ -35,6 +35,7 @@ const SOURCE_METADATA_SOURCE_PROBE_LIMIT = 2;
 const METADATA_REPLAY_V4_ENABLED_KEY = 'metadata_replay_v4_enabled';
 const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
+const METADATA_REPLAY_V4_SOURCE_CURSOR_KEY = 'metadata_replay_v4_source_cursor';
 const METADATA_REPLAY_V4_INTERVAL_MS = 20_000;
 
 const sourceExecutionEligibilitySql = (alias: string): string => `(
@@ -568,7 +569,7 @@ export class LiteRepository {
    * chapters or rescanning the full catalog.
    */
   async refillStoredMetadataEnrichmentV4(maxPending = 2): Promise<number> {
-    const ceiling = Math.max(1, Math.min(2, maxPending));
+    const ceiling = Math.max(1, Math.min(1, maxPending));
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
@@ -587,36 +588,72 @@ export class LiteRepository {
       }
       const fields = [...STORED_MAPPING_ALIAS_FIELDS, ...STORED_MAPPING_TAG_FIELDS];
       let row: { source: string; source_work_id: string; work_id: string; reason: string } | undefined;
-      // A source-local cursor rides the existing (source,source_work_id)
-      // index. This intentionally avoids the catalogue-wide JSON scan that
-      // made a diagnostic count exceed the protected YSQL query budget.
+      // Source and mapping cursors both ride existing narrow indexes. One
+      // source window is inspected per producer turn, so neither a JSON
+      // predicate nor a provider with many mappings can degrade into a full
+      // catalog scan. Rotating the source cursor also prevents a large source
+      // from starving a later one.
+      const sourceCursor = await client.query<{ value: string }>(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_SOURCE_CURSOR_KEY]);
+      let sourceAfter = sourceCursor.rows[0]?.value || null;
       for (let probe = 0; probe < 64 && !row; probe++) {
-        const source = await client.query<{ id: string }>(`SELECT s.id
-          FROM importer_sources s
-          WHERE s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
-            AND NOT EXISTS (SELECT 1 FROM settings completed
-              WHERE completed.key=$1 || s.id AND completed.value='complete')
-          ORDER BY s.id LIMIT 1`, [METADATA_REPLAY_V4_SOURCE_DONE_PREFIX]);
+        const source = await client.query<{ id: string }>(`
+          WITH after_cursor AS (
+            SELECT s.id FROM importer_sources s
+            WHERE s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+              AND s.id>$2::text
+              AND NOT EXISTS (SELECT 1 FROM settings completed
+                WHERE completed.key=$1 || s.id AND completed.value='complete')
+            ORDER BY s.id LIMIT 1
+          ), wrapped AS (
+            SELECT s.id FROM importer_sources s
+            WHERE NOT EXISTS (SELECT 1 FROM after_cursor)
+              AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+              AND NOT EXISTS (SELECT 1 FROM settings completed
+                WHERE completed.key=$1 || s.id AND completed.value='complete')
+            ORDER BY s.id LIMIT 1
+          ) SELECT id FROM after_cursor UNION ALL SELECT id FROM wrapped LIMIT 1`,
+        [METADATA_REPLAY_V4_SOURCE_DONE_PREFIX, sourceAfter || '']);
         const sourceId = source.rows[0]?.id;
         if (!sourceId) break;
+        sourceAfter = sourceId;
+        await client.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,$2,now())
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()`,
+        [METADATA_REPLAY_V4_SOURCE_CURSOR_KEY, sourceId]);
         const cursor = await client.query<{ value: string }>(`SELECT value FROM settings WHERE key=$1 LIMIT 1`,
           [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`]);
-        const candidate = await client.query<{ source: string; source_work_id: string; work_id: string; reason: string }>(`
-          SELECT m.source,m.source_work_id,m.work_id::text,
-            CASE WHEN m.metadata ?| $1::text[] THEN 'EXPLICIT_METADATA' ELSE 'SECONDARY_SOURCE_TITLE' END AS reason
-          FROM importer_work_mappings m
-          JOIN works w ON w.id=m.work_id AND w.published=true
-          WHERE m.source=$2 AND m.work_id IS NOT NULL
-            AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-            AND ($3::text IS NULL OR m.source_work_id>$3)
-            AND (m.metadata ?| $1::text[] OR lower(regexp_replace(btrim(m.source_title), '[[:space:]]+', ' ', 'g'))
+        const candidate = await client.query<{ source: string | null; source_work_id: string | null; work_id: string | null; reason: string | null; tail_source_work_id: string | null }>(`
+          WITH scanned AS (
+            SELECT m.source,m.source_work_id,m.work_id,m.source_title,m.metadata
+            FROM importer_work_mappings m
+            WHERE m.source=$2 AND m.work_id IS NOT NULL
+              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+              AND ($3::text IS NULL OR m.source_work_id>$3)
+            ORDER BY m.source_work_id LIMIT 128
+          ), candidate AS (
+            SELECT m.source,m.source_work_id,m.work_id::text,
+              CASE WHEN m.metadata ?| $1::text[] THEN 'EXPLICIT_METADATA' ELSE 'SECONDARY_SOURCE_TITLE' END AS reason
+            FROM scanned m JOIN works w ON w.id=m.work_id AND w.published=true
+            WHERE (m.metadata ?| $1::text[] OR lower(regexp_replace(btrim(m.source_title), '[[:space:]]+', ' ', 'g'))
               <> lower(regexp_replace(btrim(w.title), '[[:space:]]+', ' ', 'g')))
-            AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks existing
-              WHERE existing.idempotency_key='lite:metadata:v4:' || m.source || ':' || m.source_work_id)
-          ORDER BY m.source_work_id LIMIT 1`, [fields, sourceId, cursor.rows[0]?.value || null]);
-        row = candidate.rows[0];
-        if (!row) await client.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,'complete',now())
-          ON CONFLICT(key) DO UPDATE SET value='complete',updated_at=now()`, [`${METADATA_REPLAY_V4_SOURCE_DONE_PREFIX}${sourceId}`]);
+              AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks existing
+                WHERE existing.idempotency_key='lite:metadata:v4:' || m.source || ':' || m.source_work_id)
+            ORDER BY m.source_work_id LIMIT 1
+          ), tail AS (SELECT max(source_work_id) AS tail_source_work_id FROM scanned)
+          SELECT candidate.source,candidate.source_work_id,candidate.work_id,candidate.reason,tail.tail_source_work_id
+          FROM tail LEFT JOIN candidate ON true`, [fields, sourceId, cursor.rows[0]?.value || null]);
+        const result = candidate.rows[0];
+        if (!result?.tail_source_work_id) {
+          await client.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,'complete',now())
+            ON CONFLICT(key) DO UPDATE SET value='complete',updated_at=now()`, [`${METADATA_REPLAY_V4_SOURCE_DONE_PREFIX}${sourceId}`]);
+          continue;
+        }
+        if (!result.source || !result.source_work_id || !result.work_id || !result.reason) {
+          await client.query(`INSERT INTO settings(key,value,updated_at) VALUES($1,$2,now())
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()`,
+          [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`, result.tail_source_work_id]);
+          break;
+        }
+        row = { source: result.source, source_work_id: result.source_work_id, work_id: result.work_id, reason: result.reason };
       }
       if (!row) {
         // Completion is durable and prevents an exhausted historical cursor

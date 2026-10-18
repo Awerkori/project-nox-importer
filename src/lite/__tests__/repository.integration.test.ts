@@ -919,8 +919,13 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
-      VALUES ('00000000-0000-4000-8000-000000000125','source-b','v4-provider-evidence',$1::uuid,
-        'p1-a-secondary','P1 Secondary Title',$2::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({
+      VALUES
+        ('00000000-0000-4000-8000-000000000125','source-a','v4-source-a',$1::uuid,
+          'p1-a-source-a','P1 Source A Title',$2::jsonb,'SYNCED'),
+        ('00000000-0000-4000-8000-000000000126','source-b','v4-provider-evidence',$1::uuid,
+          'p1-a-secondary','P1 Secondary Title',$3::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({
+      titulo_alternative: ['P1 Source A Native'], generos: ['Ação'],
+    }), JSON.stringify({
       titulo_alternative: ['P1 Native Title'], generos: ['Ação'],
     })]);
     expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(0);
@@ -928,12 +933,19 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(1);
     const task = await db.query(`SELECT idempotency_key,payload,max_attempts,priority,next_run_at
-      FROM importer_lite_tasks WHERE idempotency_key='lite:metadata:v4:source-b:v4-provider-evidence'`);
+      FROM importer_lite_tasks WHERE idempotency_key='lite:metadata:v4:source-a:v4-source-a'`);
     expect(task.rows[0]).toMatchObject({
-      idempotency_key: 'lite:metadata:v4:source-b:v4-provider-evidence', max_attempts: 4, priority: 3,
+      idempotency_key: 'lite:metadata:v4:source-a:v4-source-a', max_attempts: 4, priority: 3,
       payload: expect.objectContaining({ metadataEnrichment: true, metadataEnrichmentVersion: 4,
         metadataReplayReason: 'EXPLICIT_METADATA' }),
     });
+    const first = await repo.claim('v4-test-worker', 60);
+    await repo.finish(first!, 'v4-test-worker', { state: 'DONE' });
+    // The durable source cursor advances after source-a. Its next turn must
+    // give source-b a seat rather than draining one large provider first.
+    expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key='lite:metadata:v4:source-b:v4-provider-evidence'`)).rows[0].count).toBe(1);
     expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(0);
   });
 
