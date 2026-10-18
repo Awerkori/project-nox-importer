@@ -99,7 +99,7 @@ async function archiveAndDelete(
            SET retirement_run_id = EXCLUDED.retirement_run_id,
                retired_at = now(),
                record = EXCLUDED.record`,
-        [source, recordType, runId, ids],
+        [source, recordType, runId, keys],
       );
       const deleted = await client.query(
         `DELETE FROM public.${table} AS row
