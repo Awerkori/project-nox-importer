@@ -161,18 +161,17 @@ function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, app
 }
 
 /**
- * Exactly one connection for low-priority historical metadata bookkeeping.
- * It is not a chapter worker pool: it only prevents the P2 source producer
- * and its already-single-flight task from sitting indefinitely behind the
- * main pool's high-frequency chapter claims.
+ * Protected connections for low-priority historical metadata bookkeeping.
+ * Normal operation admits one task; the explicit V4-exclusive campaign may
+ * use two distinct-work merges without borrowing the public/chapter pool.
  */
 export function createYugabyteMetadataPool(): pg.Pool {
-  // This one protected P2 connection performs bounded cross-table probes.
+  // These protected P2 connections perform bounded cross-table probes.
   // Yugabyte's default nested-loop plan issued one remote read per mapping;
   // prefer its batched variant only here, never on the chapter pool.
   const metadataSessionOptions = '-c enable_nestloop=off';
   const metadataPool = new pg.Pool(yugabytePoolOptions(
-    getConfig(), 1, 'project-nox-importer-metadata', 4_000, 12_000,
+    getConfig(), 2, 'project-nox-importer-metadata', 4_000, 12_000,
     metadataSessionOptions, false,
   ));
   metadataPool.on('error', (err) => {

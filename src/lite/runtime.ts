@@ -167,6 +167,11 @@ export class ImporterLiteRuntime {
   private readonly claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
   private readonly historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
   private readonly metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
+  // The exclusive V4 campaign may merge two distinct canonical works. A
+  // separate gate keeps normal operation strictly single-flight.
+  private readonly metadataReplayExclusiveGate = new AsyncSemaphore(2, 'lite_metadata_replay_exclusive');
+  private readonly metadataReplayV4RefillGate = new AsyncSemaphore(1, 'lite_metadata_replay_v4_refill');
+  private readonly metadataReplayV4PersistenceGate = new AsyncSemaphore(2, 'lite_metadata_replay_v4_persistence');
   private readonly sourceMetadataRefillGate = new AsyncSemaphore(1, 'lite_source_metadata_refill');
   // Network waits are independent from YSQL work. Four source requests may
   // wait on distinct providers, while preparing a mapping and committing its
@@ -195,6 +200,7 @@ export class ImporterLiteRuntime {
   // exhausts its cursors, so a restart cannot strand chapter ingestion.
   private metadataReplayV4Exclusive = { enabled: false, intervalMs: STORED_METADATA_REPLAY_V4_EXCLUSIVE_DEFAULT_INTERVAL_MS };
   private lastMetadataReplayV4ExclusiveRefreshAt = 0;
+  private readonly metadataReplayV4WorkTails = new Map<string, Promise<void>>();
   // The historical producer is intentionally low-rate. Persist its last
   // admission decision in the heartbeat so a guarded skip cannot look like a
   // silently stalled backlog after a native deploy.
@@ -314,7 +320,7 @@ export class ImporterLiteRuntime {
       // exclusive campaign is active. Existing in-flight operations retain
       // their leases and settle before their worker sees the admission gate.
       await this.refillStoredMetadataEnrichment();
-      await this.runStoredMetadataReplay();
+      await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
     } else {
       await this.seedDiscovery();
       // A former runtime may have left every source observation due at once.
@@ -568,7 +574,7 @@ export class ImporterLiteRuntime {
       // discovery, monitor, or source-refetch work. V4 reclaim is performed
       // by its own runner, so this still recovers an expired local lease.
       await this.refillStoredMetadataEnrichment();
-      await this.runStoredMetadataReplay();
+      await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
       return;
     }
     const now = Date.now();
@@ -738,6 +744,8 @@ export class ImporterLiteRuntime {
 
   /** Keep V4's isolated-seat ownership correct across boot, retries and direct successors. */
   private async refillStoredMetadataEnrichmentV4(): Promise<number> {
+    if (!this.metadataReplayV4RefillGate.tryAcquire()) return 0;
+    try {
     // V4 remains single-flight. With no chapter-pool queue, the bounded
     // five-second floor removes remaining idle time between local merges;
     // any waiter restores the established conservative twenty-second fence.
@@ -746,7 +754,17 @@ export class ImporterLiteRuntime {
       : Number(this.pool.waitingCount || 0) === 0
         ? STORED_METADATA_REPLAY_V4_IDLE_INTERVAL_MS
         : STORED_METADATA_REPLAY_V4_PRESSURED_INTERVAL_MS;
-    const admitted = await this.queue.refillStoredMetadataEnrichmentV4(2, intervalMs);
+    const capacity = this.metadataReplayV4Exclusive.enabled ? 2 : 1;
+    let admitted = 0;
+    // The repository intentionally inserts one cursor-selected mapping per
+    // transaction. Fill the second exclusive seat explicitly, still through
+    // the single producer gate, so it cannot race into the same canonical
+    // work.
+    for (let slot = 0; slot < capacity; slot++) {
+      const inserted = await this.queue.refillStoredMetadataEnrichmentV4(capacity, intervalMs);
+      admitted += inserted;
+      if (!inserted) break;
+    }
     if (admitted) {
       this.sourceMetadataRefreshDeferredForV4 = true;
       return admitted;
@@ -757,6 +775,9 @@ export class ImporterLiteRuntime {
     // has durably marked the campaign complete.
     this.sourceMetadataRefreshDeferredForV4 = await this.queue.isStoredMetadataReplayV4Enabled();
     return 0;
+    } finally {
+      this.metadataReplayV4RefillGate.release();
+    }
   }
 
   /** Refresh the durable campaign switch without relying on process-local state. */
@@ -782,8 +803,12 @@ export class ImporterLiteRuntime {
     try {
       await this.refreshMetadataReplayV4ExclusiveMode();
       await this.refillStoredMetadataEnrichment();
-      await this.runStoredMetadataReplay();
-      if (!this.metadataReplayV4Exclusive.enabled) await this.refillSourceMetadataEnrichment();
+      if (this.metadataReplayV4Exclusive.enabled) {
+        await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
+      } else {
+        await this.runStoredMetadataReplay();
+        await this.refillSourceMetadataEnrichment();
+      }
     } catch (error: any) {
       this.logger.warn('Metadata turn failed', { error: error?.message });
     }
@@ -1169,7 +1194,9 @@ export class ImporterLiteRuntime {
     if (!this.isRuntimeLeader || this.shouldPauseLowPriorityMetadata()
       || (!this.metadataReplayV4Exclusive.enabled
         && Date.now() - this.lastMetadataReplayAt < STORED_METADATA_REPLAY_INTERVAL_MS)) return;
-    if (!this.metadataReplayGate.tryAcquire()) return;
+    const replayGate = this.metadataReplayV4Exclusive.enabled
+      ? this.metadataReplayExclusiveGate : this.metadataReplayGate;
+    if (!replayGate.tryAcquire()) return;
     try {
       this.lastMetadataReplayAt = Date.now();
       const workerId = `${this.runtimeInstanceId}:metadata-replay`;
@@ -1192,7 +1219,27 @@ export class ImporterLiteRuntime {
     } catch (error: any) {
       this.logger.warn('Stored metadata replay failed', { error: error?.message });
     } finally {
-      this.metadataReplayGate.release();
+      replayGate.release();
+    }
+  }
+
+  /**
+   * A canonical work can have several source mappings. Exclusive V4 workers
+   * may run in parallel only when their work ids differ; this in-process tail
+   * lock makes the additive aliases array and tag union deterministic even if
+   * an older queued task bypasses the producer's active-work exclusion.
+   */
+  private async serializeV4Work<T>(workId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.metadataReplayV4WorkTails.get(workId) || Promise.resolve();
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => { release = resolve; });
+    this.metadataReplayV4WorkTails.set(workId, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.metadataReplayV4WorkTails.get(workId) === tail) this.metadataReplayV4WorkTails.delete(workId);
     }
   }
 
@@ -2161,12 +2208,16 @@ export class ImporterLiteRuntime {
         aliases,
         genres: extracted.genres,
       });
-      // Source refresh and V4 merge both use the isolated metadata pool.
-      // The former already serializes its commit path; use that same narrow
-      // gate here so a no-network V4 merge waits briefly rather than timing
-      // out on a concurrent source-metadata persistence checkout.
+      // Source refresh and V4 merge both use the isolated metadata pool. In
+      // exclusive mode, two different works may persist concurrently; a
+      // keyed work tail above retains additive semantics for multiple source
+      // mappings of the same canonical work.
       const resolved = isV4
-        ? await this.sourceMetadataPersistenceGate.runExclusive(resolve)
+        ? await this.serializeV4Work(row.work_id, () => (
+          (this.metadataReplayV4Exclusive.enabled
+            ? this.metadataReplayV4PersistenceGate
+            : this.sourceMetadataPersistenceGate).runExclusive(resolve)
+        ))
         : await resolve();
       if (!resolved.workId || resolved.status === 'AMBIGUOUS') {
         await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: resolved.reason || 'METADATA_ENRICHMENT_AMBIGUOUS' });

@@ -256,10 +256,12 @@ export class DeduplicationEngine {
       ), inserted_tags AS (
         INSERT INTO tags(name,slug,kind)
         SELECT name,slug,'GENRE' FROM missing_tags
-        -- This remains necessary for a concurrent insertion of the same
-        -- slug. Existing normalized display names are filtered above because
-        -- the BEFORE INSERT taxonomy trigger raises before conflict handling.
-        ON CONFLICT DO NOTHING
+        -- Return the existing id after a same-slug race. A V4 exclusive
+        -- worker may merge another *work* concurrently, and both must retain
+        -- the canonical tag link rather than silently skipping it. The slug is
+        -- derived from the same normalized display name; legacy name/slug
+        -- disagreements were already resolved by known_tags above.
+        ON CONFLICT (slug) DO UPDATE SET slug=EXCLUDED.slug
         RETURNING id,slug
       ), tag_ids AS (
         SELECT id FROM known_tags
