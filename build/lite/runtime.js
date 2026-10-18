@@ -692,16 +692,7 @@ export class ImporterLiteRuntime {
             // operation: otherwise the durable cursor is starved whenever that
             // one-seat pool has a waiter. The repository still permits only one
             // outstanding v4 task and applies its 20-second due-time fence.
-            const admittedV4 = await this.queue.refillStoredMetadataEnrichmentV4();
-            if (admittedV4)
-                this.sourceMetadataRefreshDeferredForV4 = true;
-            else if (this.sourceMetadataRefreshDeferredForV4) {
-                // This is reached only on the 15-second producer cadence after V4
-                // could not admit a successor. Checking the durable switch here (not
-                // in the five-second source-refresh timer) avoids polling the one-seat
-                // pool while preserving automatic resumption after campaign completion.
-                this.sourceMetadataRefreshDeferredForV4 = await this.queue.isStoredMetadataReplayV4Enabled();
-            }
+            const admittedV4 = await this.refillStoredMetadataEnrichmentV4();
             if (admitted || admittedV4)
                 this.logger.info('Admitted bounded stored metadata enrichment', {
                     admitted: admitted + admittedV4, version: admittedV4 ? 4 : undefined,
@@ -710,6 +701,20 @@ export class ImporterLiteRuntime {
         catch (error) {
             this.logger.warn('Stored metadata enrichment refill failed', { error: error?.message });
         }
+    }
+    /** Keep V4's isolated-seat ownership correct across boot, retries and direct successors. */
+    async refillStoredMetadataEnrichmentV4() {
+        const admitted = await this.queue.refillStoredMetadataEnrichmentV4();
+        if (admitted) {
+            this.sourceMetadataRefreshDeferredForV4 = true;
+            return admitted;
+        }
+        // A restart can find a V4 RETRY_WAIT task already outstanding, so no new
+        // row is admitted even though the campaign still owns the isolated seat.
+        // This same check releases optional source refreshes after the producer
+        // has durably marked the campaign complete.
+        this.sourceMetadataRefreshDeferredForV4 = await this.queue.isStoredMetadataReplayV4Enabled();
+        return 0;
     }
     /** Source-backed historical metadata remains a P2 catalog task and shares
      * normal priority claims; it never steals a chapter worker or bypasses a
@@ -1107,7 +1112,7 @@ export class ImporterLiteRuntime {
                 // outstanding item and applies that fence, so this improves cadence
                 // without raising concurrency or taking a chapter worker.
                 if (task.payload?.metadataEnrichmentVersion === 4 && !this.shouldPauseLowPriorityMetadata()) {
-                    await this.queue.refillStoredMetadataEnrichmentV4();
+                    await this.refillStoredMetadataEnrichmentV4();
                 }
             }
         }

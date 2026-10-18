@@ -119,6 +119,8 @@ export declare class ImporterLiteRuntime {
      * bounded replay lane; normal chapter claims retain strict priority.
      */
     private refillStoredMetadataEnrichment;
+    /** Keep V4's isolated-seat ownership correct across boot, retries and direct successors. */
+    private refillStoredMetadataEnrichmentV4;
     /** Source-backed historical metadata remains a P2 catalog task and shares
      * normal priority claims; it never steals a chapter worker or bypasses a
      * STAFF/P0/P1 reserve. At most four network-only tasks are admitted across

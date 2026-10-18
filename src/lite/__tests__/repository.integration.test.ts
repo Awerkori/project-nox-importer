@@ -3835,6 +3835,22 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(v4).toHaveBeenCalledTimes(1);
   });
 
+  it('retains V4 ownership after boot when a due retry already occupies its durable seat', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    (runtime as any).queue.refillStoredMetadataEnrichment = vi.fn().mockResolvedValue(0);
+    (runtime as any).queue.refillStoredMetadataEnrichmentV4 = vi.fn().mockResolvedValue(0);
+    (runtime as any).queue.isStoredMetadataReplayV4Enabled = vi.fn().mockResolvedValue(true);
+
+    await (runtime as any).refillStoredMetadataEnrichment();
+
+    expect((runtime as any).sourceMetadataRefreshDeferredForV4).toBe(true);
+  });
+
   it('defers optional source refetches while the stored V4 campaign owns the isolated pool', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
