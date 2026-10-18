@@ -96,7 +96,7 @@ o1DZJoSu3+Cu5ZEv1xOCWs0bOoinIt45bqT0jrEXQDDhwGWR3gC64VMqffla1g==
          ON CONFLICT (source, record_type, original_id) DO UPDATE
            SET retirement_run_id = EXCLUDED.retirement_run_id,
                retired_at = now(),
-               record = EXCLUDED.record`,[e,s,t,ids]),F=await r.query(`DELETE FROM public.${n} AS row
+               record = EXCLUDED.record`,[e,s,t,y]),F=await r.query(`DELETE FROM public.${n} AS row
           WHERE ${c} = ANY($1::${u}[])`,[y]);if((C.rowCount??0)!==y.length||(F.rowCount??0)!==y.length)throw new Error(`selected=${y.length}, archived=${C.rowCount??0}, deleted=${F.rowCount??0}`)}catch(C){let F=C instanceof Error?C.message:String(C);throw new Error(`Archive batch failed for ${e}/${s} after ${d} row(s): ${F}`)}d+=y.length}}async function wa(r,e,t){let s=t??[...new Set((await r.query(`SELECT chapter_id
        FROM public.importer_chapter_mappings
       WHERE source = ANY($1::text[])
