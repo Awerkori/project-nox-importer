@@ -3525,6 +3525,34 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
   });
 
+  it('does not let a V4 machine source title bypass the alias admission guard', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000114','source-a','machine-title',$1::uuid,
+        '10123','10123',$2::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({ alternativeTitles: ['Explicit Human Title'] })]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
+      idempotencyKey: 'lite:metadata:v4:source-a:machine-title',
+      payload: { source: 'source-a', sourceWorkId: 'machine-title', metadataEnrichment: true, metadataEnrichmentVersion: 4 } });
+    const task = await repo.claimStoredMetadataReplay('metadata-worker', 120, 4);
+    const registry = { get: () => { throw new Error('metadata enrichment must not call an adapter'); } } as unknown as SourceRegistry;
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, registry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    let candidate: any;
+    (runtime as any).historicalMetadataDedupe = { resolveWork: async (value: any) => {
+      candidate = value;
+      return { workId: ids.p1a, status: 'EXISTING_MAPPING', metadataDelta: { aliasesAdded: 1, tagsAdded: 0 } };
+    } };
+
+    await (runtime as any).catalog(task, 'metadata-worker');
+
+    expect(candidate).toMatchObject({ title: 'P1 A', aliases: ['Explicit Human Title'] });
+    expect(candidate.aliases).not.toContain('10123');
+  });
+
   it('re-fetches source metadata, persists raw provider fields, and classifies empty fields per mapping', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings

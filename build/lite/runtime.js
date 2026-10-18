@@ -2064,7 +2064,13 @@ export class ImporterLiteRuntime {
             }
             const resolve = () => (isV4 ? this.historicalMetadataDedupe : this.dedupe).resolveWork({
                 source, sourceWorkId,
-                title: row.source_title || row.work_title,
+                // `mergeKnownMappedWork` considers its candidate title as source
+                // evidence.  V4 has already admitted that title separately through
+                // isProviderDisplayTitleAlias above, so passing a machine fallback
+                // here would bypass the guard and turn a slug or numeric API id into
+                // a public alias.  The canonical title is neutral to the additive
+                // merge while all approved source-title evidence remains in aliases.
+                title: isV4 ? primaryTitle : (row.source_title || row.work_title),
                 slug: row.source_slug || row.work_title,
                 aliases,
                 genres: extracted.genres,
