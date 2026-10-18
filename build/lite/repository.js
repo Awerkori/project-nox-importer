@@ -31,12 +31,12 @@ const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
 const METADATA_REPLAY_V4_SOURCE_CURSOR_KEY = 'metadata_replay_v4_source_cursor';
 const METADATA_REPLAY_V4_INTERVAL_MS = 20_000;
-// Sources with usable stored metadata are sparse. Eight indexed windows are
-// still a bounded serial probe (at most 1,024 mappings per producer turn),
+// Sources with usable stored metadata are sparse. Twelve indexed windows are
+// still a bounded serial probe (at most 1,536 mappings per producer turn),
 // but avoid spending several minutes rotating across empty providers before
 // the next eligible local merge is found. Task execution remains one-at-a-
 // time and retains the 20-second due-time fence.
-const METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN = 8;
+const METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN = 12;
 const sourceExecutionEligibilitySql = (alias) => `(
   (COALESCE(${alias}.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
    (${alias}.status='COOLDOWN' AND ${alias}.cooldown_until IS NOT NULL AND ${alias}.cooldown_until<=now()))
@@ -521,7 +521,7 @@ export class LiteRepository {
             // Source and mapping cursors both ride existing narrow indexes. One
             // source window is inspected per producer turn, so neither a JSON
             // predicate nor a provider with many mappings can degrade into a full
-            // catalog scan. At most eight narrow windows are probed in one turn so
+            // catalog scan. At most twelve narrow windows are probed in one turn so
             // sparse sources cannot collapse the intended three-per-minute drain.
             // Rotating the source cursor also prevents a large source from starving
             // a later one.
