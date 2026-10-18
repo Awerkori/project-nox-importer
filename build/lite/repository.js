@@ -503,7 +503,11 @@ export class LiteRepository {
      * explicitly enabled exclusive operation.
      */
     async refillStoredMetadataEnrichmentV4(maxPending = 2, minimumIntervalMs = METADATA_REPLAY_V4_INTERVAL_MS) {
-        const ceiling = Math.max(1, Math.min(1, maxPending));
+        // Exclusive mode can safely keep two mappings from *different canonical
+        // works* in flight. The candidate query below excludes the work_id of an
+        // outstanding V4 task; per-work serialization in the runtime is the
+        // final correctness fence.
+        const ceiling = Math.max(1, Math.min(2, maxPending));
         const client = await this.sourceMetadataDb.connect();
         try {
             await client.query('BEGIN');
@@ -595,6 +599,11 @@ export class LiteRepository {
             ))
               AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks existing
                 WHERE existing.idempotency_key='lite:metadata:v4:' || m.source || ':' || m.source_work_id)
+              AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks active_work
+                WHERE active_work.task_type='CATALOG'
+                  AND active_work.state IN ('READY','RUNNING','RETRY_WAIT')
+                  AND active_work.payload->>'metadataEnrichmentVersion'='4'
+                  AND active_work.work_id=m.work_id)
             ORDER BY m.source_work_id LIMIT 1
           ), tail AS (SELECT max(source_work_id) AS tail_source_work_id FROM scanned)
           SELECT candidate.source,candidate.source_work_id,candidate.work_id,candidate.reason,tail.tail_source_work_id

@@ -6,10 +6,9 @@ import type { GatewayJob, PublishBatchParams } from '../core/gateway-client.js';
  */
 export declare function getSqlFingerprint(queryArg: unknown): string;
 /**
- * Exactly one connection for low-priority historical metadata bookkeeping.
- * It is not a chapter worker pool: it only prevents the P2 source producer
- * and its already-single-flight task from sitting indefinitely behind the
- * main pool's high-frequency chapter claims.
+ * Protected connections for low-priority historical metadata bookkeeping.
+ * Normal operation admits one task; the explicit V4-exclusive campaign may
+ * use two distinct-work merges without borrowing the public/chapter pool.
  */
 export declare function createYugabyteMetadataPool(): pg.Pool;
 export declare function getYugabytePool(): pg.Pool;

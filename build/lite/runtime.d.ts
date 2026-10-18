@@ -27,6 +27,9 @@ export declare class ImporterLiteRuntime {
     private readonly claimGate;
     private readonly historicalP1BackfillGate;
     private readonly metadataReplayGate;
+    private readonly metadataReplayExclusiveGate;
+    private readonly metadataReplayV4RefillGate;
+    private readonly metadataReplayV4PersistenceGate;
     private readonly sourceMetadataRefillGate;
     private readonly sourceMetadataGate;
     private readonly sourceMetadataPreparationGate;
@@ -44,6 +47,7 @@ export declare class ImporterLiteRuntime {
     private sourceMetadataRefreshDeferredForV4;
     private metadataReplayV4Exclusive;
     private lastMetadataReplayV4ExclusiveRefreshAt;
+    private readonly metadataReplayV4WorkTails;
     private sourceMetadataProducer;
     private lastSourceRecoveryProbeAt;
     private lastUploadOutcomeRecoveryAt;
@@ -178,6 +182,13 @@ export declare class ImporterLiteRuntime {
      * source slot, page buffer or chapter worker is admitted here.
      */
     private runStoredMetadataReplay;
+    /**
+     * A canonical work can have several source mappings. Exclusive V4 workers
+     * may run in parallel only when their work ids differ; this in-process tail
+     * lock makes the additive aliases array and tag union deterministic even if
+     * an older queued task bypasses the producer's active-work exclusion.
+     */
+    private serializeV4Work;
     /** A bounded source view refreshes only outside claims and only once per recovery turn. */
     private refreshSourceFairness;
     private upsertChapterSources;
