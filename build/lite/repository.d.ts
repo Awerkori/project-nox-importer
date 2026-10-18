@@ -131,7 +131,7 @@ export declare class LiteRepository {
      * full catalog. The runtime chooses the due-time fence for normal versus
      * explicitly enabled exclusive operation.
      */
-    refillStoredMetadataEnrichmentV4(maxPending?: number, minimumIntervalMs?: number): Promise<number>;
+    refillStoredMetadataEnrichmentV4(maxPending?: number, minimumIntervalMs?: number, sourceWindowsPerTurn?: number): Promise<number>;
     /** The V4 campaign owns the one isolated metadata seat while it has debt. */
     isStoredMetadataReplayV4Enabled(): Promise<boolean>;
     /** A persisted, reversible operator mode for the finite V4 campaign. */

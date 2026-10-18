@@ -67,6 +67,7 @@ const STORED_METADATA_REPLAY_V4_IDLE_INTERVAL_MS = 5_000;
 const STORED_METADATA_REPLAY_V4_PRESSURED_INTERVAL_MS = 20_000;
 const STORED_METADATA_REPLAY_V4_EXCLUSIVE_DEFAULT_INTERVAL_MS = 2_000;
 const STORED_METADATA_REPLAY_V4_EXCLUSIVE_REFRESH_MS = 5_000;
+const STORED_METADATA_REPLAY_V4_EXCLUSIVE_SOURCE_WINDOWS_PER_TURN = 4;
 // A v4 merge performs several local, idempotent YSQL operations.  During
 // observed production contention each operation may consume the database
 // timeout budget, so the normal 45-second claim lease can expire while its
@@ -715,8 +716,14 @@ export class ImporterLiteRuntime {
      * bounded replay lane; normal chapter claims retain strict priority.
      */
     async refillStoredMetadataEnrichment() {
+        // Outside the campaign, retain the fifteen-second producer throttle. In
+        // exclusive mode a no-candidate probe advances only a bounded durable
+        // cursor slice, so the two-second timer may immediately continue that
+        // scan instead of leaving both local merge seats empty for fifteen
+        // seconds.
         if (!this.isRuntimeLeader || this.shouldPauseLowPriorityMetadata()
-            || Date.now() - this.lastMetadataEnrichmentAt < STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS)
+            || (!this.metadataReplayV4Exclusive.enabled
+                && Date.now() - this.lastMetadataEnrichmentAt < STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS))
             return;
         this.lastMetadataEnrichmentAt = Date.now();
         try {
@@ -764,7 +771,9 @@ export class ImporterLiteRuntime {
             // the single producer gate, so it cannot race into the same canonical
             // work.
             for (let slot = 0; slot < capacity; slot++) {
-                const inserted = await this.queue.refillStoredMetadataEnrichmentV4(capacity, intervalMs);
+                const inserted = this.metadataReplayV4Exclusive.enabled
+                    ? await this.queue.refillStoredMetadataEnrichmentV4(capacity, intervalMs, STORED_METADATA_REPLAY_V4_EXCLUSIVE_SOURCE_WINDOWS_PER_TURN)
+                    : await this.queue.refillStoredMetadataEnrichmentV4(capacity, intervalMs);
                 admitted += inserted;
                 if (!inserted)
                     break;
