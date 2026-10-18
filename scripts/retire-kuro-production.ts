@@ -54,12 +54,16 @@ async function archiveAndDelete(
   params: unknown[],
   originalId: string,
 ): Promise<number> {
+  // The archive INSERT reserves $1..$3 for its audit columns.  Shift the
+  // caller's predicate placeholders so a source-array predicate cannot be
+  // confused with the scalar source stored in the archive record.
+  const archiveWhere = where.replace(/\$(\d+)/g, (_match, index) => `$${Number(index) + 3}`);
   const archived = await client.query(
     `INSERT INTO public.importer_retired_source_records
        (source, record_type, original_id, retirement_run_id, record)
      SELECT $1, $2, ${originalId}, $3, to_jsonb(row)
        FROM public.${table} AS row
-      WHERE ${where}
+      WHERE ${archiveWhere}
      ON CONFLICT (source, record_type, original_id) DO UPDATE
        SET retirement_run_id = EXCLUDED.retirement_run_id,
            retired_at = now(),
