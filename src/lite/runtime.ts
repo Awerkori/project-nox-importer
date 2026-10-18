@@ -670,18 +670,17 @@ export class ImporterLiteRuntime {
    * bounded replay lane; normal chapter claims retain strict priority.
    */
   private async refillStoredMetadataEnrichment(): Promise<void> {
-    // A lone direct-pool waiter is normal while P1 persists chapter receipts.
-    // Retain the single bounded replay candidate in that case; its serial,
-    // no-network merge still yields under real contention.
-    if (!this.isRuntimeLeader || this.pool.waitingCount >= 2 || this.shouldPauseLowPriorityMetadata()
+    if (!this.isRuntimeLeader || this.shouldPauseLowPriorityMetadata()
       || Date.now() - this.lastMetadataEnrichmentAt < STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS) return;
     this.lastMetadataEnrichmentAt = Date.now();
     try {
-      const admitted = await this.queue.refillStoredMetadataEnrichment();
+      // Legacy v2/v3 uses the chapter pool, so yield it under real pressure.
+      // v4 uses the dedicated metadata seat and remains independently bounded.
+      const admitted = this.pool.waitingCount >= 2 ? 0 : await this.queue.refillStoredMetadataEnrichment();
       // v4 is deliberately opt-in through a durable production setting. A
       // real-work canary is queued first; only then does its low-rate cursor
       // begin draining the historical campaign.
-      const admittedV4 = await this.queue.refillStoredMetadataEnrichmentV4();
+      const admittedV4 = this.sourceMetadataPool.waitingCount > 0 ? 0 : await this.queue.refillStoredMetadataEnrichmentV4();
       if (admitted || admittedV4) this.logger.info('Admitted bounded stored metadata enrichment', {
         admitted: admitted + admittedV4, version: admittedV4 ? 4 : undefined,
       });
@@ -1056,13 +1055,14 @@ export class ImporterLiteRuntime {
    * source slot, page buffer or chapter worker is admitted here.
    */
   private async runStoredMetadataReplay(): Promise<void> {
-    if (!this.isRuntimeLeader || this.pool.waitingCount >= 2 || this.shouldPauseLowPriorityMetadata()
+    if (!this.isRuntimeLeader || this.sourceMetadataPool.waitingCount > 0 || this.shouldPauseLowPriorityMetadata()
       || Date.now() - this.lastMetadataReplayAt < STORED_METADATA_REPLAY_INTERVAL_MS) return;
     if (!this.metadataReplayGate.tryAcquire()) return;
     try {
       this.lastMetadataReplayAt = Date.now();
       const workerId = `${this.runtimeInstanceId}:metadata-replay`;
-      const task = await this.queue.claimStoredMetadataReplay(workerId, 45);
+      const task = await this.queue.claimStoredMetadataReplay(workerId, 45, 4)
+        || (Number(this.pool.waitingCount || 0) < 2 ? await this.queue.claimStoredMetadataReplay(workerId, 45) : null);
       if (task) await this.catalog(task, workerId);
     } catch (error: any) {
       this.logger.warn('Stored metadata replay failed', { error: error?.message });
@@ -1992,7 +1992,8 @@ export class ImporterLiteRuntime {
       return;
     }
     try {
-      const mapping = await this.pool.query<{ work_id: string; source_title: string; source_slug: string; work_title: string; metadata: unknown }>(
+      const isV4 = task.payload?.metadataEnrichmentVersion === 4;
+      const mapping = await (isV4 ? this.sourceMetadataPool : this.pool).query<{ work_id: string; source_title: string; source_slug: string; work_title: string; metadata: unknown }>(
         `SELECT m.work_id::text,m.source_title,m.source_slug,w.title AS work_title,m.metadata
          FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
          WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`,
@@ -2016,7 +2017,7 @@ export class ImporterLiteRuntime {
         await this.queue.finish(task, workerId, { state: 'DONE', checkpoint: { metadataEnrichment: true, empty: true }, resetAttempts: true });
         return;
       }
-      const resolved = await this.dedupe.resolveWork({
+      const resolved = await (isV4 ? this.historicalMetadataDedupe : this.dedupe).resolveWork({
         source, sourceWorkId,
         title: row.source_title || row.work_title,
         slug: row.source_slug || row.work_title,

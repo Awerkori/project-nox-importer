@@ -3637,14 +3637,18 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('chapter-worker', 120))?.idempotencyKey).toBe('p1-keeps-priority');
   });
 
-  it('does not queue overlapping metadata replay ticks', async () => {
+  it('does not queue overlapping metadata replay ticks while the chapter pool is busy', async () => {
+    const chapterPool = poolFor(db) as Pool;
+    const metadataPool = poolFor(db) as Pool;
+    Object.defineProperty(chapterPool, 'waitingCount', { value: 4 });
+    Object.defineProperty(metadataPool, 'waitingCount', { value: 0 });
     const runtime = new ImporterLiteRuntime(
-      poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
+      chapterPool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+      new HostRateLimiter(2), metadataPool,
     );
     (runtime as any).isRuntimeLeader = true;
-    Object.defineProperty((runtime as any).pool, 'waitingCount', { value: 1 });
     let claims = 0;
     (runtime as any).queue.claimStoredMetadataReplay = async () => {
       claims++;
@@ -3663,7 +3667,6 @@ describe('LiteRepository against the additive Lite migration', () => {
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
     );
     (runtime as any).isRuntimeLeader = true;
-    Object.defineProperty((runtime as any).pool, 'waitingCount', { value: 1 });
     const refill = vi.fn(async () => 0);
     const refillV4 = vi.fn(async () => 0);
     (runtime as any).queue.refillStoredMetadataEnrichment = refill;

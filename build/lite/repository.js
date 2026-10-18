@@ -493,7 +493,7 @@ export class LiteRepository {
      */
     async refillStoredMetadataEnrichmentV4(maxPending = 2) {
         const ceiling = Math.max(1, Math.min(1, maxPending));
-        const client = await this.db.connect();
+        const client = await this.sourceMetadataDb.connect();
         try {
             await client.query('BEGIN');
             const enabled = await client.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_ENABLED_KEY]);
@@ -916,8 +916,8 @@ export class LiteRepository {
      * a permanently healthy P1 backlog would make historical aliases and tags
      * wait forever despite requiring neither a source slot nor a chapter worker.
      */
-    async claimStoredMetadataReplay(workerId, leaseSeconds) {
-        const client = await this.db.connect();
+    async claimStoredMetadataReplay(workerId, leaseSeconds, metadataVersion) {
+        const client = await (metadataVersion === 4 ? this.sourceMetadataDb : this.db).connect();
         try {
             await client.query('BEGIN');
             const result = await client.query(`WITH picked AS (
@@ -926,6 +926,7 @@ export class LiteRepository {
           WHERE task_type='CATALOG' AND state='READY' AND monitoring=false
             AND priority=$1 AND next_run_at<=now()
             AND payload ? 'metadataEnrichment'
+            AND ($4::text IS NULL OR payload->>'metadataEnrichmentVersion'=$4::text)
           ORDER BY next_run_at,created_at,id
           LIMIT 1 FOR UPDATE SKIP LOCKED
         )
@@ -933,7 +934,8 @@ export class LiteRepository {
         SET state='RUNNING',lease_owner=$2,
             lease_until=now()+$3::interval,attempts=attempts+1,updated_at=now()
         FROM picked WHERE task.id=picked.id
-        RETURNING task.*`, [LITE_PRIORITY_RANK.P2, workerId, `${Math.max(30, leaseSeconds)} seconds`]);
+        RETURNING task.*`, [LITE_PRIORITY_RANK.P2, workerId, `${Math.max(30, leaseSeconds)} seconds`,
+                metadataVersion === undefined ? null : String(metadataVersion)]);
             await client.query('COMMIT');
             return result.rows[0] ? asTask(result.rows[0]) : null;
         }
@@ -1532,7 +1534,7 @@ export class LiteRepository {
         }
     }
     async finish(task, workerId, outcome) {
-        const client = await this.db.connect();
+        const client = await (task.payload?.metadataEnrichmentVersion === 4 ? this.sourceMetadataDb : this.db).connect();
         try {
             await client.query('BEGIN');
             const result = await client.query(`UPDATE importer_lite_tasks
