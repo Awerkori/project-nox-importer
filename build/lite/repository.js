@@ -27,6 +27,7 @@ const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK = 2;
 // repeatedly scanning the catalogue.
 const SOURCE_METADATA_SOURCE_PROBE_LIMIT = 2;
 const METADATA_REPLAY_V4_ENABLED_KEY = 'metadata_replay_v4_enabled';
+const METADATA_REPLAY_V4_EXCLUSIVE_MODE_KEY = 'metadata_replay_v4_exclusive_mode';
 const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
 const METADATA_REPLAY_V4_SOURCE_CURSOR_KEY = 'metadata_replay_v4_source_cursor';
@@ -496,9 +497,10 @@ export class LiteRepository {
      * the older parser-only replays.  It combines every provider-declared
      * alias/tag field with the already-attached secondary source title, but it
      * never uses either value to match a different work. Source-local durable
-     * cursors, one outstanding P2 task, and a 20-second due-time fence keep
-     * its target rate near three local merges per minute without competing with
-     * chapters or rescanning the full catalog.
+     * cursors and one outstanding P2 task preserve idempotency and source
+     * rotation without competing with chapter admission or rescanning the
+     * full catalog. The runtime chooses the due-time fence for normal versus
+     * explicitly enabled exclusive operation.
      */
     async refillStoredMetadataEnrichmentV4(maxPending = 2, minimumIntervalMs = METADATA_REPLAY_V4_INTERVAL_MS) {
         const ceiling = Math.max(1, Math.min(1, maxPending));
@@ -631,7 +633,11 @@ export class LiteRepository {
             const lastCompleted = await client.query(`SELECT max(updated_at) AS completed_at
         FROM importer_lite_tasks WHERE idempotency_key LIKE 'lite:metadata:v4:%' AND state='DONE'`);
             const lastAt = lastCompleted.rows[0]?.completed_at ? new Date(lastCompleted.rows[0].completed_at).getTime() : 0;
-            const intervalMs = Math.max(5_000, Math.min(60_000, Math.trunc(minimumIntervalMs)));
+            // Normal runtime calls retain their conservative 5–20s fences. The
+            // lower bound exists solely for the explicitly persisted, reversible
+            // exclusive campaign, where chapter claims and source maintenance are
+            // parked before a faster local replay is admitted.
+            const intervalMs = Math.max(500, Math.min(60_000, Math.trunc(minimumIntervalMs)));
             const nextRunAt = new Date(Math.max(Date.now(), lastAt + intervalMs));
             const idempotencyKey = `lite:metadata:v4:${row.source}:${row.source_work_id}`;
             const inserted = await client.query(`INSERT INTO importer_lite_tasks
@@ -660,7 +666,9 @@ export class LiteRepository {
                 }
                 await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
           ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [burstKey, String(burst >= METADATA_REPLAY_V4_SOURCE_BURST_LIMIT ? 0 : burst)]);
-                await this.refreshReadyWork(client, inserted.rows[0].work_key);
+                // V4 has a dedicated durable claimant. Projecting it into the
+                // generic chapter-ready index would spend an extra expensive
+                // refresh on every mapping without making the task more runnable.
             }
             await client.query('COMMIT');
             return inserted.rowCount || 0;
@@ -677,6 +685,30 @@ export class LiteRepository {
     async isStoredMetadataReplayV4Enabled() {
         const result = await this.sourceMetadataDb.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_ENABLED_KEY]);
         return result.rows[0]?.value === 'true';
+    }
+    /** A persisted, reversible operator mode for the finite V4 campaign. */
+    async storedMetadataReplayV4ExclusiveMode() {
+        const result = await this.sourceMetadataDb.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_EXCLUSIVE_MODE_KEY]);
+        const value = String(result.rows[0]?.value || 'false').trim();
+        if (value === 'true')
+            return { enabled: true, intervalMs: 2_000 };
+        try {
+            const parsed = JSON.parse(value);
+            if (parsed?.enabled !== true)
+                return { enabled: false, intervalMs: 2_000 };
+            return { enabled: true, intervalMs: Math.max(500, Math.min(5_000, Math.trunc(Number(parsed.intervalMs) || 2_000))) };
+        }
+        catch {
+            return { enabled: false, intervalMs: 2_000 };
+        }
+    }
+    /** Completion is durable, idempotent and makes a restart resume normal work. */
+    async disableStoredMetadataReplayV4ExclusiveMode() {
+        await this.sourceMetadataDb.query(`INSERT INTO settings(key,value) VALUES($1,$2)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [
+            METADATA_REPLAY_V4_EXCLUSIVE_MODE_KEY,
+            JSON.stringify({ enabled: false, completedAt: new Date().toISOString() }),
+        ]);
     }
     /**
      * Materialise only chapters already positively confirmed by a durable source
@@ -1637,8 +1669,12 @@ export class LiteRepository {
               attempts=CASE WHEN $10::boolean THEN 0 ELSE attempts END,
               lease_owner=NULL, lease_until=NULL, updated_at=now()
          WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`, [task.id, workerId, outcome.state, outcome.reason || null, outcome.nextRunAt || null, JSON.stringify(outcome.checkpoint || {}), outcome.priority === undefined ? null : LITE_PRIORITY_RANK[outcome.priority], outcome.monitoring === undefined ? null : outcome.monitoring, outcome.workId || null, Boolean(outcome.resetAttempts)]);
-            if (result.rowCount === 1)
+            // The V4 lane claims its own durable tasks and never needs a generic
+            // ready-work projection. Skipping that projection removes a costly
+            // cross-table refresh per mapping without changing chapter scheduling.
+            if (result.rowCount === 1 && task.payload?.metadataEnrichmentVersion !== 4) {
                 await this.refreshReadyWork(client, task.workKey);
+            }
             await client.query('COMMIT');
             return result.rowCount === 1;
         }

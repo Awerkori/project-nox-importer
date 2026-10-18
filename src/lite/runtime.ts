@@ -69,6 +69,8 @@ const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
 // conservative cadence below.
 const STORED_METADATA_REPLAY_V4_IDLE_INTERVAL_MS = 5_000;
 const STORED_METADATA_REPLAY_V4_PRESSURED_INTERVAL_MS = 20_000;
+const STORED_METADATA_REPLAY_V4_EXCLUSIVE_DEFAULT_INTERVAL_MS = 2_000;
+const STORED_METADATA_REPLAY_V4_EXCLUSIVE_REFRESH_MS = 5_000;
 // A v4 merge performs several local, idempotent YSQL operations.  During
 // observed production contention each operation may consume the database
 // timeout budget, so the normal 45-second claim lease can expire while its
@@ -188,6 +190,11 @@ export class ImporterLiteRuntime {
   // Give it that seat until its durable setting says the campaign is done;
   // source re-fetch tasks stay durable and resume afterwards.
   private sourceMetadataRefreshDeferredForV4 = false;
+  // An operator may temporarily reserve importer capacity for the finite V4
+  // replay. The setting is durable and is cleared automatically when V4
+  // exhausts its cursors, so a restart cannot strand chapter ingestion.
+  private metadataReplayV4Exclusive = { enabled: false, intervalMs: STORED_METADATA_REPLAY_V4_EXCLUSIVE_DEFAULT_INTERVAL_MS };
+  private lastMetadataReplayV4ExclusiveRefreshAt = 0;
   // The historical producer is intentionally low-rate. Persist its last
   // admission decision in the heartbeat so a guarded skip cannot look like a
   // silently stalled backlog after a native deploy.
@@ -235,7 +242,7 @@ export class ImporterLiteRuntime {
    * idle time.  Only the independent site-health gate pauses new work.
    */
   private shouldPauseChapterAdmission(): boolean {
-    return Date.now() < this.sitePausedUntil;
+    return Date.now() < this.sitePausedUntil || this.metadataReplayV4Exclusive.enabled;
   }
 
   /**
@@ -301,22 +308,31 @@ export class ImporterLiteRuntime {
     // discover a numeric collision after it has downloaded/uploaded media.
     await this.assertReaderCanonicalIdentitySchema();
     if (!(await this.waitForRuntimeLeadership())) return;
-    await this.seedDiscovery();
-    // A former runtime may have left every source observation due at once.
-    // Stagger only discovery rows; executable catalog/chapter work remains
-    // immediately eligible under the normal strict priority contract.
-    await this.queue.staggerReadyDiscoveries(60_000, 64);
-    await this.queue.recoverDuplicateCanonicalCatalogFailures();
-    await this.refreshSourceFairness();
-    await this.refillHistoricalP1Catalog();
-    await this.refillManifestProvenP1Imports();
-    await this.refillStoredMetadataEnrichment();
-    await this.refillSourceMetadataEnrichment();
-    // Fill both already-approved external seats at boot.  This is not a
-    // third worker: each call is fenced by the two-slot lane below.
-    await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
-    await this.runNewWorkCatalog();
-    await this.runStoredMetadataReplay();
+    await this.refreshMetadataReplayV4ExclusiveMode(true);
+    if (this.metadataReplayV4Exclusive.enabled) {
+      // Do not create discovery/catalog/chapter work while a durable
+      // exclusive campaign is active. Existing in-flight operations retain
+      // their leases and settle before their worker sees the admission gate.
+      await this.refillStoredMetadataEnrichment();
+      await this.runStoredMetadataReplay();
+    } else {
+      await this.seedDiscovery();
+      // A former runtime may have left every source observation due at once.
+      // Stagger only discovery rows; executable catalog/chapter work remains
+      // immediately eligible under the normal strict priority contract.
+      await this.queue.staggerReadyDiscoveries(60_000, 64);
+      await this.queue.recoverDuplicateCanonicalCatalogFailures();
+      await this.refreshSourceFairness();
+      await this.refillHistoricalP1Catalog();
+      await this.refillManifestProvenP1Imports();
+      await this.refillStoredMetadataEnrichment();
+      await this.refillSourceMetadataEnrichment();
+      // Fill both already-approved external seats at boot.  This is not a
+      // third worker: each call is fenced by the two-slot lane below.
+      await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
+      await this.runNewWorkCatalog();
+      await this.runStoredMetadataReplay();
+    }
     // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
     // Lite cutover.  The Lite-specific cap begins safely and can only rise
     // through an explicit, benchmarked staging configuration.
@@ -339,9 +355,7 @@ export class ImporterLiteRuntime {
     memoryTimer.unref(); this.timers.push(memoryTimer);
     const metadataTimer = setInterval(() => {
       if (!this.isRuntimeLeader) return;
-      void this.refillStoredMetadataEnrichment();
-      void this.runStoredMetadataReplay();
-      void this.refillSourceMetadataEnrichment();
+      void this.runMetadataTurn();
     }, STORED_METADATA_REPLAY_INTERVAL_MS);
     metadataTimer.unref(); this.timers.push(metadataTimer);
     const sourceMetadataTimer = setInterval(() => {
@@ -548,6 +562,15 @@ export class ImporterLiteRuntime {
   }
 
   private async runRecoveryTurn(): Promise<void> {
+    await this.refreshMetadataReplayV4ExclusiveMode();
+    if (this.metadataReplayV4Exclusive.enabled) {
+      // The exclusive campaign must not periodically re-admit chapter,
+      // discovery, monitor, or source-refetch work. V4 reclaim is performed
+      // by its own runner, so this still recovers an expired local lease.
+      await this.refillStoredMetadataEnrichment();
+      await this.runStoredMetadataReplay();
+      return;
+    }
     const now = Date.now();
     const recoverUploadOutcomes = now - this.lastUploadOutcomeRecoveryAt >= UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS;
     if (recoverUploadOutcomes) this.lastUploadOutcomeRecoveryAt = now;
@@ -691,6 +714,11 @@ export class ImporterLiteRuntime {
       || Date.now() - this.lastMetadataEnrichmentAt < STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS) return;
     this.lastMetadataEnrichmentAt = Date.now();
     try {
+      if (this.metadataReplayV4Exclusive.enabled) {
+        const admittedV4 = await this.refillStoredMetadataEnrichmentV4();
+        if (admittedV4) this.logger.info('Admitted exclusive V4 metadata enrichment', { admitted: admittedV4 });
+        return;
+      }
       // Legacy v2/v3 uses the chapter pool, so yield it under real pressure.
       // v4 uses the dedicated metadata seat and remains independently bounded.
       const admitted = this.pool.waitingCount >= 2 ? 0 : await this.queue.refillStoredMetadataEnrichment();
@@ -713,9 +741,11 @@ export class ImporterLiteRuntime {
     // V4 remains single-flight. With no chapter-pool queue, the bounded
     // five-second floor removes remaining idle time between local merges;
     // any waiter restores the established conservative twenty-second fence.
-    const intervalMs = Number(this.pool.waitingCount || 0) === 0
-      ? STORED_METADATA_REPLAY_V4_IDLE_INTERVAL_MS
-      : STORED_METADATA_REPLAY_V4_PRESSURED_INTERVAL_MS;
+    const intervalMs = this.metadataReplayV4Exclusive.enabled
+      ? this.metadataReplayV4Exclusive.intervalMs
+      : Number(this.pool.waitingCount || 0) === 0
+        ? STORED_METADATA_REPLAY_V4_IDLE_INTERVAL_MS
+        : STORED_METADATA_REPLAY_V4_PRESSURED_INTERVAL_MS;
     const admitted = await this.queue.refillStoredMetadataEnrichmentV4(2, intervalMs);
     if (admitted) {
       this.sourceMetadataRefreshDeferredForV4 = true;
@@ -729,6 +759,36 @@ export class ImporterLiteRuntime {
     return 0;
   }
 
+  /** Refresh the durable campaign switch without relying on process-local state. */
+  private async refreshMetadataReplayV4ExclusiveMode(force = false): Promise<void> {
+    if (!this.isRuntimeLeader) return;
+    const now = Date.now();
+    if (!force && now - this.lastMetadataReplayV4ExclusiveRefreshAt < STORED_METADATA_REPLAY_V4_EXCLUSIVE_REFRESH_MS) return;
+    this.lastMetadataReplayV4ExclusiveRefreshAt = now;
+    let next = await this.queue.storedMetadataReplayV4ExclusiveMode();
+    if (next.enabled && !(await this.queue.isStoredMetadataReplayV4Enabled())) {
+      await this.queue.disableStoredMetadataReplayV4ExclusiveMode();
+      next = { enabled: false, intervalMs: STORED_METADATA_REPLAY_V4_EXCLUSIVE_DEFAULT_INTERVAL_MS };
+      this.logger.info('Exclusive V4 metadata mode completed; normal importer admission restored');
+    }
+    if (next.enabled !== this.metadataReplayV4Exclusive.enabled || next.intervalMs !== this.metadataReplayV4Exclusive.intervalMs) {
+      this.logger.warn('Updated exclusive V4 metadata mode', next);
+    }
+    this.metadataReplayV4Exclusive = next;
+  }
+
+  /** One timer turn keeps normal metadata paths out of an exclusive replay. */
+  private async runMetadataTurn(): Promise<void> {
+    try {
+      await this.refreshMetadataReplayV4ExclusiveMode();
+      await this.refillStoredMetadataEnrichment();
+      await this.runStoredMetadataReplay();
+      if (!this.metadataReplayV4Exclusive.enabled) await this.refillSourceMetadataEnrichment();
+    } catch (error: any) {
+      this.logger.warn('Metadata turn failed', { error: error?.message });
+    }
+  }
+
   /** Source-backed historical metadata remains a P2 catalog task and shares
    * normal priority claims; it never steals a chapter worker or bypasses a
    * STAFF/P0/P1 reserve. At most four network-only tasks are admitted across
@@ -739,7 +799,8 @@ export class ImporterLiteRuntime {
     emptyProbeTurn = 0,
     preferredSource?: string,
   ): Promise<void> {
-    if (!this.isRuntimeLeader || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS)) return;
+    if (!this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled
+      || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS)) return;
     if (this.sourceMetadataRefreshDeferredForV4) {
       this.noteSourceMetadataProducer('DEFERRED_V4_BACKLOG');
       return;
@@ -855,7 +916,7 @@ export class ImporterLiteRuntime {
     // RSS nears the container's 512 MiB boundary. A single importer-pool
     // waiter is normal under chapter load; the one-seat persistence gate
     // below, rather than an idle network slot, protects YSQL in that case.
-    if (this.sourceMetadataRefreshDeferredForV4) return;
+    if (this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4) return;
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
     // See refillSourceMetadataEnrichment: an intermittent P1 queue still
     // constrains this optional lane to one external request, not zero.
@@ -951,7 +1012,7 @@ export class ImporterLiteRuntime {
     // wide, performs no network inside a transaction, and the normal pool
     // queue naturally serializes its short DB phases; site and memory remain
     // the admission guardrails.
-    if (!this.isRuntimeLeader || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
+    if (!this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
       || !this.newWorkCatalogGate.tryAcquire()) return;
     try {
       const workerId = `${this.runtimeInstanceId}:new-work-catalog`;
@@ -1106,14 +1167,16 @@ export class ImporterLiteRuntime {
     // Queueing one local merge preserves the single-flight limit and lets the
     // longer v4 lease cover the bounded YSQL wait.
     if (!this.isRuntimeLeader || this.shouldPauseLowPriorityMetadata()
-      || Date.now() - this.lastMetadataReplayAt < STORED_METADATA_REPLAY_INTERVAL_MS) return;
+      || (!this.metadataReplayV4Exclusive.enabled
+        && Date.now() - this.lastMetadataReplayAt < STORED_METADATA_REPLAY_INTERVAL_MS)) return;
     if (!this.metadataReplayGate.tryAcquire()) return;
     try {
       this.lastMetadataReplayAt = Date.now();
       const workerId = `${this.runtimeInstanceId}:metadata-replay`;
       await this.queue.reclaimExpiredStoredMetadataReplayV4();
       const task = await this.queue.claimStoredMetadataReplay(workerId, STORED_METADATA_REPLAY_V4_LEASE_SECONDS, 4)
-        || (Number(this.pool.waitingCount || 0) < 2 ? await this.queue.claimStoredMetadataReplay(workerId, 45) : null);
+        || (!this.metadataReplayV4Exclusive.enabled && Number(this.pool.waitingCount || 0) < 2
+          ? await this.queue.claimStoredMetadataReplay(workerId, 45) : null);
       if (task) {
         await this.catalog(task, workerId);
         // A V4 item has a durable 20-second due-time fence, but relying only
@@ -1353,7 +1416,8 @@ export class ImporterLiteRuntime {
    * claims. This is a resource budget, not a second priority scheduler.
    */
   private async runMonitorTurn(): Promise<void> {
-    if (this.stopped || !this.isRuntimeLeader || Date.now() < this.sitePausedUntil || this.pool.waitingCount > 0) return;
+    if (this.stopped || !this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled
+      || Date.now() < this.sitePausedUntil || this.pool.waitingCount > 0) return;
     if (!this.monitorGate.tryAcquire()) return;
     try {
       if (Date.now() < this.idleMonitorUntil) return;
@@ -1437,6 +1501,7 @@ export class ImporterLiteRuntime {
         runtimeInstanceId: this.runtimeInstanceId,
         leader: this.isRuntimeLeader,
         chapterWorkers: this.chapterWorkerCapacity,
+        metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
         snapshotDeferred: 'POOL_BUSY',
         ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
         sourceMetadataYsql: {
@@ -1518,6 +1583,7 @@ export class ImporterLiteRuntime {
       runtimeInstanceId: this.runtimeInstanceId,
       leader: this.isRuntimeLeader,
       chapterWorkers: this.chapterWorkerCapacity,
+      metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
       publishedLastMinute: progress.publishedLastMinute,
       oldestReadyAt: progress.oldestReadyAt?.toISOString() || null,
       oldestStoredUnpublishedAt: progress.oldestStoredUnpublishedAt?.toISOString() || null,

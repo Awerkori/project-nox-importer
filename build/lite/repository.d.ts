@@ -126,13 +126,21 @@ export declare class LiteRepository {
      * the older parser-only replays.  It combines every provider-declared
      * alias/tag field with the already-attached secondary source title, but it
      * never uses either value to match a different work. Source-local durable
-     * cursors, one outstanding P2 task, and a 20-second due-time fence keep
-     * its target rate near three local merges per minute without competing with
-     * chapters or rescanning the full catalog.
+     * cursors and one outstanding P2 task preserve idempotency and source
+     * rotation without competing with chapter admission or rescanning the
+     * full catalog. The runtime chooses the due-time fence for normal versus
+     * explicitly enabled exclusive operation.
      */
     refillStoredMetadataEnrichmentV4(maxPending?: number, minimumIntervalMs?: number): Promise<number>;
     /** The V4 campaign owns the one isolated metadata seat while it has debt. */
     isStoredMetadataReplayV4Enabled(): Promise<boolean>;
+    /** A persisted, reversible operator mode for the finite V4 campaign. */
+    storedMetadataReplayV4ExclusiveMode(): Promise<{
+        enabled: boolean;
+        intervalMs: number;
+    }>;
+    /** Completion is durable, idempotent and makes a restart resume normal work. */
+    disableStoredMetadataReplayV4ExclusiveMode(): Promise<void>;
     /**
      * Materialise only chapters already positively confirmed by a durable source
      * manifest.  Historical catalog tasks are useful for obtaining new
