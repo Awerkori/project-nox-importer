@@ -57,8 +57,9 @@ async function main(): Promise<void> {
         AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
         AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
         AND m.work_id IS NOT NULL
-        AND (m.metadata ?| $1::text[] OR lower(regexp_replace(btrim(m.source_title), '[[:space:]]+', ' ', 'g'))
-          <> lower(regexp_replace(btrim(w.title), '[[:space:]]+', ' ', 'g')))
+        AND (m.metadata ?| $1::text[] OR (m.source_title IS DISTINCT FROM m.source_slug
+          AND lower(regexp_replace(btrim(m.source_title), '[[:space:]]+', ' ', 'g'))
+            <> lower(regexp_replace(btrim(w.title), '[[:space:]]+', ' ', 'g'))))
         AND ($2::text IS NULL OR m.source=$2)
         AND ($3::text IS NULL OR m.source_work_id=$3)
         AND NOT EXISTS (

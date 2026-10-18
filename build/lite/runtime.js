@@ -677,7 +677,7 @@ export class ImporterLiteRuntime {
             // v4 is deliberately opt-in through a durable production setting. A
             // real-work canary is queued first; only then does its low-rate cursor
             // begin draining the historical campaign.
-            const admittedV4 = admitted ? 0 : await this.queue.refillStoredMetadataEnrichmentV4();
+            const admittedV4 = await this.queue.refillStoredMetadataEnrichmentV4();
             if (admitted || admittedV4)
                 this.logger.info('Admitted bounded stored metadata enrichment', {
                     admitted: admitted + admittedV4, version: admittedV4 ? 4 : undefined,
@@ -2005,9 +2005,16 @@ export class ImporterLiteRuntime {
                 await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: resolved.reason || 'METADATA_ENRICHMENT_AMBIGUOUS' });
                 return;
             }
+            const aliasesAdded = Math.max(0, Number(resolved.metadataDelta?.aliasesAdded || 0));
+            const tagsAdded = Math.max(0, Number(resolved.metadataDelta?.tagsAdded || 0));
             await this.queue.finish(task, workerId, {
                 state: 'DONE', workId: resolved.workId,
-                checkpoint: { metadataEnrichment: true, aliases: aliases.length, tags: extracted.genres.length },
+                // `aliases`/`tags` describe provider evidence; the deltas are the
+                // exact number actually persisted after idempotent de-duplication.
+                // Keep both so production reporting never mistakes a duplicate source
+                // value for a new public alias or tag.
+                checkpoint: { metadataEnrichment: true, aliases: aliases.length, tags: extracted.genres.length,
+                    aliasesAdded, tagsAdded },
                 resetAttempts: true,
             });
         }

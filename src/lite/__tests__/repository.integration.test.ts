@@ -949,6 +949,19 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(0);
   });
 
+  it('does not turn a source slug fallback into a historical alias candidate', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000127','source-a','slug-fallback',$1::uuid,
+        'p1-a-machine-slug','p1-a-machine-slug','{}'::jsonb,'SYNCED')`, [ids.p1a]);
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','true')`);
+
+    expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(0);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key='lite:metadata:v4:source-a:slug-fallback'`)).rows[0].count).toBe(0);
+  });
+
   it('prioritizes a real alias over empty or tag-only legacy metadata from the same source', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings
@@ -3385,12 +3398,14 @@ describe('LiteRepository against the additive Lite migration', () => {
     let candidate: any;
     (runtime as any).dedupe = { resolveWork: async (value: any) => {
       candidate = value;
-      return { workId: ids.p1a, status: 'EXISTING_MAPPING' };
+      return { workId: ids.p1a, status: 'EXISTING_MAPPING', metadataDelta: { aliasesAdded: 1, tagsAdded: 2 } };
     } };
 
     await (runtime as any).catalog(task, 'metadata-worker');
     expect(candidate).toMatchObject({ aliases: ['P1 Historical Alias'], genres: ['MILF', 'Vanilla'] });
-    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
+    expect((await db.query(`SELECT state,checkpoint FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0]).toMatchObject({
+      state: 'DONE', checkpoint: { aliasesAdded: 1, tagsAdded: 2 },
+    });
   });
 
   it('treats an already-attached secondary source title as an additive alias', async () => {
