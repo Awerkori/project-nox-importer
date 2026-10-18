@@ -2168,9 +2168,19 @@ export class ImporterLiteRuntime {
         }
         try {
             const isV4 = task.payload?.metadataEnrichmentVersion === 4;
-            const mapping = await (isV4 ? this.sourceMetadataPool : this.pool).query(`SELECT m.work_id::text,m.source_title,m.source_slug,w.title AS work_title,m.metadata
+            const timings = {};
+            const phase = async (name, operation) => {
+                const startedAt = performance.now();
+                try {
+                    return await operation();
+                }
+                finally {
+                    timings[name] = Math.round(performance.now() - startedAt);
+                }
+            };
+            const mapping = await phase('mappingLoadMs', () => (isV4 ? this.sourceMetadataPool : this.pool).query(`SELECT m.work_id::text,m.source_title,m.source_slug,w.title AS work_title,m.metadata
          FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
-         WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId]);
+         WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId]));
             const row = mapping.rows[0];
             if (!row) {
                 await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_ENRICHMENT_MAPPING_MISSING' });
@@ -2210,26 +2220,27 @@ export class ImporterLiteRuntime {
             // keyed work tail above retains additive semantics for multiple source
             // mappings of the same canonical work.
             const resolved = isV4
-                ? await this.serializeV4Work(row.work_id, () => ((this.metadataReplayV4Exclusive.enabled
+                ? await phase('mergeAndPersistMs', () => this.serializeV4Work(row.work_id, () => ((this.metadataReplayV4Exclusive.enabled
                     ? this.metadataReplayV4PersistenceGate
-                    : this.sourceMetadataPersistenceGate).runExclusive(resolve)))
+                    : this.sourceMetadataPersistenceGate).runExclusive(resolve))))
                 : await resolve();
             if (!resolved.workId || resolved.status === 'AMBIGUOUS') {
                 await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: resolved.reason || 'METADATA_ENRICHMENT_AMBIGUOUS' });
                 return;
             }
+            const resolvedWorkId = resolved.workId;
             const aliasesAdded = Math.max(0, Number(resolved.metadataDelta?.aliasesAdded || 0));
             const tagsAdded = Math.max(0, Number(resolved.metadataDelta?.tagsAdded || 0));
-            await this.queue.finish(task, workerId, {
-                state: 'DONE', workId: resolved.workId,
+            await phase('taskFinalizeMs', () => this.queue.finish(task, workerId, {
+                state: 'DONE', workId: resolvedWorkId,
                 // `aliases`/`tags` describe provider evidence; the deltas are the
                 // exact number actually persisted after idempotent de-duplication.
                 // Keep both so production reporting never mistakes a duplicate source
                 // value for a new public alias or tag.
                 checkpoint: { metadataEnrichment: true, aliases: aliases.length, tags: extracted.genres.length,
-                    aliasesAdded, tagsAdded },
+                    aliasesAdded, tagsAdded, metadataTiming: isV4 ? timings : undefined },
                 resetAttempts: true,
-            });
+            }));
         }
         catch (error) {
             const reason = String(error?.message || 'METADATA_ENRICHMENT_FAILED').slice(0, 500);
