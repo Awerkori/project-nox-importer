@@ -923,7 +923,9 @@ describe('LiteRepository against the additive Lite migration', () => {
         ('00000000-0000-4000-8000-000000000125','source-a','v4-source-a',$1::uuid,
           'p1-a-source-a','P1 Source A Title',$2::jsonb,'SYNCED'),
         ('00000000-0000-4000-8000-000000000126','source-b','v4-provider-evidence',$1::uuid,
-          'p1-a-secondary','P1 Secondary Title',$3::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({
+          'p1-a-secondary','P1 Secondary Title',$3::jsonb,'SYNCED'),
+        ('00000000-0000-4000-8000-000000000128','source-a','v4-z-empty',$1::uuid,
+          'p1-a-empty','P1 A','{}'::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({
       titulo_alternative: ['P1 Source A Native'], generos: ['Ação'],
     }), JSON.stringify({
       titulo_alternative: ['P1 Native Title'], generos: ['Ação'],
@@ -946,7 +948,10 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(1);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
       WHERE idempotency_key='lite:metadata:v4:source-b:v4-provider-evidence'`)).rows[0].count).toBe(1);
+    await db.query(`UPDATE importer_lite_tasks SET state='DONE',updated_at=now()
+      WHERE idempotency_key='lite:metadata:v4:source-b:v4-provider-evidence'`);
     expect(await repo.refillStoredMetadataEnrichmentV4()).toBe(0);
+    expect((await db.query(`SELECT value FROM settings WHERE key='metadata_replay_v4_enabled'`)).rows[0].value).toBe('true');
   });
 
   it('does not turn a source slug fallback into a historical alias candidate', async () => {
