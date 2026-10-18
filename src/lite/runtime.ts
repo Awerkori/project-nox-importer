@@ -670,7 +670,10 @@ export class ImporterLiteRuntime {
    * bounded replay lane; normal chapter claims retain strict priority.
    */
   private async refillStoredMetadataEnrichment(): Promise<void> {
-    if (!this.isRuntimeLeader || this.pool.waitingCount > 0 || this.shouldPauseLowPriorityMetadata()
+    // A lone direct-pool waiter is normal while P1 persists chapter receipts.
+    // Retain the single bounded replay candidate in that case; its serial,
+    // no-network merge still yields under real contention.
+    if (!this.isRuntimeLeader || this.pool.waitingCount >= 2 || this.shouldPauseLowPriorityMetadata()
       || Date.now() - this.lastMetadataEnrichmentAt < STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS) return;
     this.lastMetadataEnrichmentAt = Date.now();
     try {
@@ -1053,7 +1056,7 @@ export class ImporterLiteRuntime {
    * source slot, page buffer or chapter worker is admitted here.
    */
   private async runStoredMetadataReplay(): Promise<void> {
-    if (!this.isRuntimeLeader || this.pool.waitingCount > 0 || this.shouldPauseLowPriorityMetadata()
+    if (!this.isRuntimeLeader || this.pool.waitingCount >= 2 || this.shouldPauseLowPriorityMetadata()
       || Date.now() - this.lastMetadataReplayAt < STORED_METADATA_REPLAY_INTERVAL_MS) return;
     if (!this.metadataReplayGate.tryAcquire()) return;
     try {

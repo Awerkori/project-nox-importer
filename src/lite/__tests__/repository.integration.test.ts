@@ -3644,6 +3644,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
     );
     (runtime as any).isRuntimeLeader = true;
+    Object.defineProperty((runtime as any).pool, 'waitingCount', { value: 1 });
     let claims = 0;
     (runtime as any).queue.claimStoredMetadataReplay = async () => {
       claims++;
@@ -3662,6 +3663,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
     );
     (runtime as any).isRuntimeLeader = true;
+    Object.defineProperty((runtime as any).pool, 'waitingCount', { value: 1 });
     const refill = vi.fn(async () => 0);
     const refillV4 = vi.fn(async () => 0);
     (runtime as any).queue.refillStoredMetadataEnrichment = refill;
