@@ -37,6 +37,7 @@ const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
 const METADATA_REPLAY_V4_SOURCE_CURSOR_KEY = 'metadata_replay_v4_source_cursor';
 const METADATA_REPLAY_V4_INTERVAL_MS = 20_000;
+const METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN = 4;
 
 const sourceExecutionEligibilitySql = (alias: string): string => `(
   (COALESCE(${alias}.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
@@ -588,15 +589,17 @@ export class LiteRepository {
       }
       const fields = [...STORED_MAPPING_ALIAS_FIELDS, ...STORED_MAPPING_TAG_FIELDS];
       let row: { source: string; source_work_id: string; work_id: string; reason: string } | undefined;
-      let advancedIncompleteSource = false;
+      let exhaustedAllSources = false;
       // Source and mapping cursors both ride existing narrow indexes. One
       // source window is inspected per producer turn, so neither a JSON
       // predicate nor a provider with many mappings can degrade into a full
-      // catalog scan. Rotating the source cursor also prevents a large source
-      // from starving a later one.
+      // catalog scan. At most four narrow windows are probed in one turn so
+      // sparse sources cannot collapse the intended three-per-minute drain.
+      // Rotating the source cursor also prevents a large source from starving
+      // a later one.
       const sourceCursor = await client.query<{ value: string }>(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_SOURCE_CURSOR_KEY]);
       let sourceAfter = sourceCursor.rows[0]?.value || null;
-      for (let probe = 0; probe < 64 && !row; probe++) {
+      for (let probe = 0; probe < METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN && !row; probe++) {
         const source = await client.query<{ id: string }>(`
           WITH after_cursor AS (
             SELECT s.id FROM importer_sources s
@@ -615,7 +618,10 @@ export class LiteRepository {
           ) SELECT id FROM after_cursor UNION ALL SELECT id FROM wrapped LIMIT 1`,
         [METADATA_REPLAY_V4_SOURCE_DONE_PREFIX, sourceAfter || '']);
         const sourceId = source.rows[0]?.id;
-        if (!sourceId) break;
+        if (!sourceId) {
+          exhaustedAllSources = true;
+          break;
+        }
         sourceAfter = sourceId;
         await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
           ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
@@ -663,15 +669,14 @@ export class LiteRepository {
           await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
           [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`, result.tail_source_work_id]);
-          // The source still has later windows. Finish this bounded producer
-          // turn without treating an empty window as global completion.
-          advancedIncompleteSource = true;
-          break;
+          // The source still has later windows. Advance it and inspect the
+          // next bounded source window without treating this as completion.
+          continue;
         }
         row = { source: result.source, source_work_id: result.source_work_id, work_id: result.work_id, reason: result.reason };
       }
       if (!row) {
-        if (!advancedIncompleteSource) {
+        if (exhaustedAllSources) {
           // Completion is durable and prevents an exhausted historical cursor
           // from repeatedly re-reading the mapping catalog. New onboarding does
           // not rely on this campaign: it enriches during normal cataloguing.
