@@ -131,6 +131,8 @@ export declare class LiteRepository {
      * chapters or rescanning the full catalog.
      */
     refillStoredMetadataEnrichmentV4(maxPending?: number): Promise<number>;
+    /** The V4 campaign owns the one isolated metadata seat while it has debt. */
+    isStoredMetadataReplayV4Enabled(): Promise<boolean>;
     /**
      * Materialise only chapters already positively confirmed by a durable source
      * manifest.  Historical catalog tasks are useful for obtaining new
