@@ -3421,6 +3421,22 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
   });
 
+  it('retries transient isolated-pool contention without consuming the mapping retry budget', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    const outcomes: any[] = [];
+    (runtime as any).sourceMetadataPool = { query: async () => { throw new Error('timeout exceeded when trying to connect'); } };
+    (runtime as any).queue.finish = async (_task: any, _worker: string, outcome: any) => { outcomes.push(outcome); return true; };
+    await (runtime as any).enrichStoredMappingMetadata({ attempts: 4, maxAttempts: 4, checkpoint: {},
+      payload: { metadataEnrichmentVersion: 4 } } as any, 'metadata-worker', 'source-a', 'transient');
+
+    expect(outcomes[0]).toMatchObject({ state: 'RETRY_WAIT', reason: 'METADATA_ENRICHMENT_DB_CONTENTION',
+      resetAttempts: true, checkpoint: { metadataDbContentionCount: 1 } });
+  });
+
   it('treats an already-attached secondary source title as an additive alias', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings

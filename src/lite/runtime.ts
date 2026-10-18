@@ -2042,9 +2042,20 @@ export class ImporterLiteRuntime {
         resetAttempts: true,
       });
     } catch (error: any) {
+      const reason = String(error?.message || 'METADATA_ENRICHMENT_FAILED').slice(0, 500);
+      const poolContention = /timeout exceeded when trying to connect/i.test(reason);
+      const contentionCount = Math.max(0, Number(task.checkpoint.metadataDbContentionCount) || 0) + 1;
+      if (poolContention && contentionCount <= 3) {
+        await this.queue.finish(task, workerId, {
+          state: 'RETRY_WAIT', reason: 'METADATA_ENRICHMENT_DB_CONTENTION',
+          nextRunAt: new Date(Date.now() + 30_000), resetAttempts: true,
+          checkpoint: { metadataDbContentionCount: contentionCount },
+        });
+        return;
+      }
       await this.queue.finish(task, workerId, {
         state: task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
-        reason: String(error?.message || 'METADATA_ENRICHMENT_FAILED').slice(0, 500),
+        reason: poolContention ? 'METADATA_ENRICHMENT_DB_CONTENTION_EXHAUSTED' : reason,
         nextRunAt: new Date(Date.now() + this.recurringRetryDelayMs(task.attempts)),
       });
     }
