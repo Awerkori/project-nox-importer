@@ -976,7 +976,7 @@ export class LiteRepository {
             const result = await client.query(`WITH picked AS (
           SELECT id
           FROM importer_lite_tasks
-          WHERE task_type='CATALOG' AND state='READY' AND monitoring=false
+          WHERE task_type='CATALOG' AND state IN ('READY','RETRY_WAIT') AND monitoring=false
             AND priority=$1 AND next_run_at<=now()
             AND payload ? 'metadataEnrichment'
             AND ($4::text IS NULL OR payload->>'metadataEnrichmentVersion'=$4::text)
