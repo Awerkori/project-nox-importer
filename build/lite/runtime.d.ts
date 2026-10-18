@@ -41,6 +41,7 @@ export declare class ImporterLiteRuntime {
     private lastSourceMetadataRefillAt;
     private sourceMetadataPreferredSource;
     private sourceMetadataPreferredSourceBurst;
+    private sourceMetadataRefreshDeferredForV4;
     private sourceMetadataProducer;
     private lastSourceRecoveryProbeAt;
     private lastUploadOutcomeRecoveryAt;

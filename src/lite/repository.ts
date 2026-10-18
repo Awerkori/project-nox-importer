@@ -753,6 +753,14 @@ export class LiteRepository {
     } finally { client.release(); }
   }
 
+  /** The V4 campaign owns the one isolated metadata seat while it has debt. */
+  async isStoredMetadataReplayV4Enabled(): Promise<boolean> {
+    const result = await this.sourceMetadataDb.query<{ value: string }>(
+      `SELECT value FROM settings WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_ENABLED_KEY],
+    );
+    return result.rows[0]?.value === 'true';
+  }
+
   /**
    * Materialise only chapters already positively confirmed by a durable source
    * manifest.  Historical catalog tasks are useful for obtaining new
