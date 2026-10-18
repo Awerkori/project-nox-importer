@@ -544,7 +544,7 @@ export class LiteRepository {
                 const cursor = await client.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`]);
                 const candidate = await client.query(`
           WITH scanned AS (
-            SELECT m.source,m.source_work_id,m.work_id,m.source_title,m.metadata
+            SELECT m.source,m.source_work_id,m.work_id,m.source_slug,m.source_title,m.metadata
             FROM importer_work_mappings m
             WHERE m.source=$2 AND m.work_id IS NOT NULL
               AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
@@ -554,8 +554,9 @@ export class LiteRepository {
             SELECT m.source,m.source_work_id,m.work_id::text,
               CASE WHEN m.metadata ?| $1::text[] THEN 'EXPLICIT_METADATA' ELSE 'SECONDARY_SOURCE_TITLE' END AS reason
             FROM scanned m JOIN works w ON w.id=m.work_id AND w.published=true
-            WHERE (m.metadata ?| $1::text[] OR lower(regexp_replace(btrim(m.source_title), '[[:space:]]+', ' ', 'g'))
-              <> lower(regexp_replace(btrim(w.title), '[[:space:]]+', ' ', 'g')))
+            WHERE (m.metadata ?| $1::text[] OR (m.source_title IS DISTINCT FROM m.source_slug
+              AND lower(regexp_replace(btrim(m.source_title), '[[:space:]]+', ' ', 'g'))
+                <> lower(regexp_replace(btrim(w.title), '[[:space:]]+', ' ', 'g'))))
               AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks existing
                 WHERE existing.idempotency_key='lite:metadata:v4:' || m.source || ':' || m.source_work_id)
             ORDER BY m.source_work_id LIMIT 1
