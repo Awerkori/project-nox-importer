@@ -70,25 +70,27 @@ async function archiveAndDelete(
   selectionKey: string,
   selectionKeyType: 'text' | 'uuid',
 ): Promise<number> {
-  let selected;
-  try {
-    // Select once: `source` has no physical index on the historical queue.
-    // Repeating this scan per batch is both slower and less reliable than one
-    // bounded ID collection followed by primary-key archive/delete batches.
-    selected = await client.query(
-      `SELECT ${selectionKey} AS selection_key
-         FROM public.${table} AS row
-        WHERE ${where}`,
-      params,
-    );
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Archive selection failed for ${source}/${recordType}: ${detail}`);
-  }
-  const selectedKeys = selected.rows.map((row: { selection_key: string }) => row.selection_key);
   let total = 0;
-  for (let offset = 0; offset < selectedKeys.length; offset += ARCHIVE_BATCH_SIZE) {
-    const keys = selectedKeys.slice(offset, offset + ARCHIVE_BATCH_SIZE);
+  while (true) {
+    let selected;
+    try {
+      // YSQL can serve a small source-index page promptly, while materialising
+      // every historical Vegitoons ID in one statement exceeds its protected
+      // statement timeout. Deleting the selected keys before the next page
+      // advances the cursor without relying on an unstable OFFSET or UUID sort.
+      selected = await client.query(
+        `SELECT ${selectionKey} AS selection_key
+           FROM public.${table} AS row
+          WHERE ${where}
+          LIMIT ${ARCHIVE_BATCH_SIZE}`,
+        params,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Archive selection failed for ${source}/${recordType} after ${total} row(s): ${detail}`);
+    }
+    const keys = selected.rows.map((row: { selection_key: string }) => row.selection_key);
+    if (keys.length === 0) return total;
     try {
       const archived = await client.query(
         `INSERT INTO public.importer_retired_source_records
@@ -116,7 +118,6 @@ async function archiveAndDelete(
     }
     total += keys.length;
   }
-  return total;
 }
 
 async function publishedSnapshot(
