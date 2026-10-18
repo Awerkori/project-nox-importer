@@ -54,7 +54,7 @@ export interface SourceAdapter {
   /**
    * Optional: override URL used by the admission probe.
    * If set, the probe hits this URL instead of baseUrl.
-   * Use for sources that work via internal bridge (e.g. Kuro via CF Workers bridge).
+   * Use for sources that work through an internal bridge.
    */
   readonly probeUrl?: string;
 

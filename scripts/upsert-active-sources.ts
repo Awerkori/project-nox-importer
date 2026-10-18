@@ -12,7 +12,7 @@ async function main() {
   console.log(`Upserting ${allAdapters.length} active sources into importer_sources...`);
 
   for (const a of allAdapters) {
-    const isBlockedPolicy = a.id === 'hanamiheaven' || a.id === 'kuro';
+    const isBlockedPolicy = a.id === 'hanamiheaven';
     const payload = {
       id: a.id,
       name: a.name,

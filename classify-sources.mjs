@@ -15,8 +15,6 @@ const updates = [
     blocked_reason: 'Domain migrated to mangaonline.love, currently unreachable',
     blocked_details: 'mangaonline.red redirects to mangaonline.love but connection times out (tested 2026-09-14)'
   },
-  // kuro: UPSTREAM_BLOCKED confirmed - site needs CF clearance, bridge exists but session expired
-  // Keep as-is: UPSTREAM_BLOCKED + enabled=false
 ];
 
 let success = 0, fail = 0;

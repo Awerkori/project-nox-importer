@@ -281,15 +281,15 @@ describe('ExistingWorksReconciler - Canonical Gap & Fresh Release Discovery', ()
   });
 
   it('selects higher-priority source when multiple sources have the same chapter', async () => {
-    // Both Kuro (prio 100) and MangaFlix (prio 40) provide Ch 4
-    const kuroAdapter: SourceAdapter = {
-      id: 'kuro',
-      name: 'Kuro',
-      baseUrl: 'https://kuro.com',
+    // Nexus (prio 80) and MangaFlix (prio 40) provide Ch 4.
+    const nexusAdapter: SourceAdapter = {
+      id: 'nexus',
+      name: 'Nexus',
+      baseUrl: 'https://nexus.example.test',
       fetchUpdatedWorks: vi.fn(),
       fetchWorkDetails: vi.fn(),
       fetchChapters: vi.fn(async () => [
-        { sourceChapterId: 'kuro-ch-4', number: 4, title: 'Cap 4' },
+        { sourceChapterId: 'nexus-ch-4', number: 4, title: 'Cap 4' },
       ]),
       fetchChapterPages: vi.fn(),
     };
@@ -304,7 +304,7 @@ describe('ExistingWorksReconciler - Canonical Gap & Fresh Release Discovery', ()
       ]),
       fetchChapterPages: vi.fn(),
     };
-    registry.register(kuroAdapter);
+    registry.register(nexusAdapter);
     registry.register(mfAdapter);
 
     mockSupabase = {
@@ -324,10 +324,10 @@ describe('ExistingWorksReconciler - Canonical Gap & Fresh Release Discovery', ()
                   works: { title: 'Test Work' },
                 },
                 {
-                  id: 'map-kuro',
+                  id: 'map-nexus',
                   work_id: workId,
-                  source: 'kuro',
-                  source_work_id: 'kuro-1',
+                  source: 'nexus',
+                  source_work_id: 'nexus-1',
                   works: { title: 'Test Work' },
                 },
               ],
@@ -363,10 +363,10 @@ describe('ExistingWorksReconciler - Canonical Gap & Fresh Release Discovery', ()
     reconciler = new ExistingWorksReconciler(mockSupabase, mockQueue, registry);
     const stats = await reconciler.reconcileExistingWorks(10);
 
-    // Exactly 1 job enqueued with Kuro as primary source and MangaFlix as fallback
+    // Exactly 1 job enqueued with Nexus as primary source and MangaFlix as fallback.
     expect(enqueuedJobs.length).toBe(1);
-    expect(enqueuedJobs[0].source).toBe('kuro');
-    expect(enqueuedJobs[0].payload.sourceChapterId).toBe('kuro-ch-4');
+    expect(enqueuedJobs[0].source).toBe('nexus');
+    expect(enqueuedJobs[0].payload.sourceChapterId).toBe('nexus-ch-4');
     expect(enqueuedJobs[0].priority).toBe(70);
     expect(enqueuedJobs[0].payload.isFreshRelease).toBe(false);
     expect(enqueuedJobs[0].payload.fallbackSources).toBeDefined();

@@ -7,7 +7,7 @@ const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const sb = createClient(url, key);
 
 async function main() {
-  const sources = ['kuro', 'mangotoons', 'nexus', 'manhastro', 'wpgallery'];
+  const sources = ['mangotoons', 'nexus', 'manhastro', 'wpgallery'];
   for (const src of sources) {
     const { data, error } = await sb.rpc('importer_acquire_job', {
       p_worker_id: 'test-1',

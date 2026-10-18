@@ -632,7 +632,7 @@ export class DeduplicationEngine {
                 }, { onConflict: 'source,source_work_id' })
                     .select()
                     .single();
-                // Apply per-field metadata precedence (ADMIN > KURO > OTHER)
+                // Preserve manual fields and fill only missing automated metadata.
                 const metadataDelta = await this.applyMetadataPrecedence(matched.id, candidate, source);
                 return {
                     workId: matched.id,
@@ -814,12 +814,11 @@ export class DeduplicationEngine {
     }
     /**
      * Applies field-level metadata precedence:
-     * Priority: MANUAL (Admin/Editor) > KURO > OTHER SOURCES
+     * Priority: MANUAL (Admin/Editor) > source data for empty fields
      * Rules:
      * 1. Manual edit provenance is strictly immutable.
-     * 2. Kuro upgrades non-manual fields if candidate has valid data.
-     * 3. Other sources only fill empty/null fields.
-     * 4. Never overwrite valid data with empty/null.
+     * 2. Source data only fills empty/null fields.
+     * 3. Never overwrite valid data with empty/null.
      */
     async applyMetadataPrecedence(workId, candidate, source) {
         const { data: work, error } = await this.supabase
@@ -860,10 +859,7 @@ export class DeduplicationEngine {
             // 4.5 UNKNOWN should never overwrite a known value
             if ((fieldName === 'kind' || fieldName === 'status') && candidateValue === 'UNKNOWN' && !isCurrentEmpty && currentVal !== 'UNKNOWN')
                 return false;
-            // 5. Kuro can upgrade any non-manual field
-            if (source === 'kuro')
-                return true;
-            // Other sources cannot overwrite populated fields
+            // Sources cannot overwrite populated fields.
             return false;
         };
         // Adult rating promotion & monotonicity
@@ -897,7 +893,7 @@ export class DeduplicationEngine {
             aliasesAdded = mergedAliases.filter((alias) => !existingAliasKeys.has(this.tagLookupKey(alias))).length;
             const aliasesChanged = mergedAliases.length !== existingAliases.length
                 || mergedAliases.some((alias, index) => alias !== existingAliases[index]);
-            if (aliasesChanged || (source === 'kuro' && existingAliases.length === 0)) {
+            if (aliasesChanged) {
                 updates.aliases = mergedAliases;
                 // Preserve the audit signal that an editor curated this field while
                 // retaining every editor-entered value in the union above.

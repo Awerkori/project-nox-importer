@@ -208,7 +208,6 @@ export const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig> 
   nocturnesummer: { maxChapters: 2, maxPagesPerChapter: 4 },
   tankouhentai: { maxChapters: 2, maxPagesPerChapter: 4 },
   cafecomyaoi: { maxChapters: 2, maxPagesPerChapter: 4 },
-  kuro: { maxChapters: 1, maxPagesPerChapter: 2 },
   // Production ramp 2026-10-11: the 1→2 step sustained healthy media work
   // with no 429, cooldown or failure streak. Keep the adapter's own 2→4
   // req/s host limiter and page fence; three chapters remains below the four

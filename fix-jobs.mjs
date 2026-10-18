@@ -7,15 +7,7 @@ const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
 
 const now = new Date().toISOString();
 
-// 1. Kuro: BLOCKED_BY_UPSTREAM job - reset to QUEUED (bridge session renewed, source reactivated)
-{
-  const { data, error } = await supabase.from('importer_queue')
-    .update({ status: 'QUEUED', last_error: null, next_run_at: now, updated_at: now })
-    .eq('source', 'kuro').eq('status', 'BLOCKED_BY_UPSTREAM').select('id');
-  console.log(`kuro BLOCKED→QUEUED: ${data?.length || 0} jobs | ${error?.message || 'ok'}`);
-}
-
-// 2. Taimumangas: storage 404 - transient, reset to QUEUED
+// 1. Taimumangas: storage 404 - transient, reset to QUEUED
 {
   const { data, error } = await supabase.from('importer_queue')
     .update({ status: 'QUEUED', attempts: 0, last_error: null, next_run_at: now, updated_at: now })
@@ -23,7 +15,7 @@ const now = new Date().toISOString();
   console.log(`taimumangas RETRY→QUEUED: ${data?.length || 0} jobs | ${error?.message || 'ok'}`);
 }
 
-// 3. Osakascan: adapter fixed (Blogger JSON API) - reset RETRY jobs to QUEUED
+// 2. Osakascan: adapter fixed (Blogger JSON API) - reset RETRY jobs to QUEUED
 {
   const { data, error } = await supabase.from('importer_queue')
     .update({ status: 'QUEUED', attempts: 0, last_error: null, next_run_at: now, updated_at: now })
@@ -31,7 +23,7 @@ const now = new Date().toISOString();
   console.log(`osakascan RETRY→QUEUED: ${data?.length || 0} jobs | ${error?.message || 'ok'}`);
 }
 
-// 4. Covenscan: adapter fixed (baseUrl updated to /bruxonas/) - reset RETRY jobs
+// 3. Covenscan: adapter fixed (baseUrl updated to /bruxonas/) - reset RETRY jobs
 {
   const { data, error } = await supabase.from('importer_queue')
     .update({ status: 'QUEUED', attempts: 0, last_error: null, next_run_at: now, updated_at: now })
@@ -39,7 +31,7 @@ const now = new Date().toISOString();
   console.log(`covenscan RETRY→QUEUED: ${data?.length || 0} jobs | ${error?.message || 'ok'}`);
 }
 
-// 5. Hipercool: slug not found - mark those specific jobs CANCELLED (stale slug, can't recover without knowing new slug)
+// 4. Hipercool: slug not found - mark those specific jobs CANCELLED (stale slug, can't recover without knowing new slug)
 {
   const { data, error } = await supabase.from('importer_queue')
     .update({ 
@@ -53,7 +45,7 @@ const now = new Date().toISOString();
   console.log(`hipercool stale slug→CANCELLED: ${data?.length || 0} jobs | ${error?.message || 'ok'}`);
 }
 
-// 6. Maidscan FAILED (PERMANENT_404): these are definitively dead chapters - keep as FAILED (already terminal)
+// 5. Maidscan FAILED (PERMANENT_404): these are definitively dead chapters - keep as FAILED (already terminal)
 // Count them for reporting
 {
   const { count } = await supabase.from('importer_queue')
@@ -62,7 +54,7 @@ const now = new Date().toISOString();
   console.log(`maidscan FAILED (permanent 404): ${count} jobs - keeping as FAILED (terminal)`);
 }
 
-// 7. Ninjascan FAILED: same - permanent 404 images, keep as FAILED
+// 6. Ninjascan FAILED: same - permanent 404 images, keep as FAILED
 {
   const { count } = await supabase.from('importer_queue')
     .select('*', { count: 'exact', head: true })
@@ -70,7 +62,7 @@ const now = new Date().toISOString();
   console.log(`ninjascan FAILED (permanent 404): ${count} jobs - keeping as FAILED (terminal)`);
 }
 
-// 8. Nocturnesummer: Cloudflare blocks image downloads - check if RETRY should be reset
+// 7. Nocturnesummer: Cloudflare blocks image downloads - check if RETRY should be reset
 // These are RETRY with attempts=1 (new failures), give them one more chance
 {
   const { data, error } = await supabase.from('importer_queue')
@@ -81,7 +73,7 @@ const now = new Date().toISOString();
   console.log(`nocturnesummer low-attempt RETRY→QUEUED: ${data?.length || 0} jobs | ${error?.message || 'ok'}`);
 }
 
-// 9. Mrtenzus and littletyrant: low attempt RETRY - reset for retry
+// 8. Mrtenzus and littletyrant: low attempt RETRY - reset for retry
 {
   for (const src of ['mrtenzus', 'littletyrant']) {
     const { data, error } = await supabase.from('importer_queue')

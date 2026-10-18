@@ -14,7 +14,6 @@ const DB_CONFIG = {
 };
 
 const TO_ACTIVATE = [
-  'kuro',
   'nocturnesummer',
   'tankouhentai',
   'osakascan',

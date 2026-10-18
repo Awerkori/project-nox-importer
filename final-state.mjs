@@ -18,9 +18,9 @@ console.log(`Upstream Blocked block: ${upstream.length} → ${upstream.map(r=>r.
 console.log(`Excluded by Policy: ${excl.length} → ${excl.map(r=>r.id).join(', ')}`);
 console.log(`DISABLED (hidden from panel): ${disabled.length} → ${disabled.map(r=>r.id).join(', ')}`);
 
-// Kuro specific
+// Retired source state (informational only; it is not an operational source).
 const kuro = src.find(r => r.id === 'kuro');
-console.log(`\nKuro: status=${kuro?.status} enabled=${kuro?.enabled}`);
+console.log(`\nKuro retired: status=${kuro?.status} enabled=${kuro?.enabled}`);
 
 // Job counts
 const { data: qc } = await s.rpc('admin_importer_queue_counts').catch(() => ({ data: null }));

@@ -52,10 +52,6 @@ async function main() {
     if (!dbSource && ext.extensionId === 'pointzerotoons') {
       dbSource = dbSourcesMap.get('pointzerotoons');
     }
-    if (!dbSource && ext.extensionId === 'kuromangas') {
-      dbSource = dbSourcesMap.get('kuro');
-      matchedBy = 'ALIAS_KURO';
-    }
     if (!dbSource && (ext.extensionId === 'nexusmangas' || ext.extensionId === 'nexus_toons')) {
       dbSource = dbSourcesMap.get('nexus');
       matchedBy = 'ALIAS_NEXUS';

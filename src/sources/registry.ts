@@ -2,7 +2,6 @@ import { SourceAdapter } from './types.js';
 import { NexusAdapter } from './nexus/nexus-adapter.js';
 import { MangaFlixAdapter } from './mangaflix/mangaflix-adapter.js';
 import { ManhastroAdapter } from './manhastro/manhastro-adapter.js';
-import { KuroAdapter } from './kuro/kuro-adapter.js';
 import { MangoToonsAdapter } from './mangotoons/mangotoons-adapter.js';
 import { HanamiHeavenAdapter } from './hanamiheaven/hanamiheaven-adapter.js';
 import { HipercoolAdapter } from './hipercool/hipercool-adapter.js';
@@ -65,7 +64,6 @@ export class SourceRegistry {
       this.register(new NexusAdapter(rateLimiter));
       this.register(new MangaFlixAdapter(rateLimiter));
       this.register(new ManhastroAdapter(rateLimiter));
-      this.register(new KuroAdapter(rateLimiter));
       this.register(new MangoToonsAdapter(rateLimiter));
 
       // Register general PT-BR sources
@@ -133,9 +131,6 @@ export class SourceRegistry {
       this.adapters.set('nexusmangas', adapter);
       this.adapters.set('nexus_toons', adapter);
       this.adapters.set('nexustoons', adapter);
-    }
-    if (adapter.id === 'kuro') {
-      this.adapters.set('kuromangas', adapter);
     }
     if (adapter.id === 'hanamiheaven') {
       this.adapters.set('noindexscan', adapter);

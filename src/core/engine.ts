@@ -1331,10 +1331,9 @@ export class ImporterEngine {
         const err = job.last_error || '';
         // Only recover jobs that are demonstrably 502/503/timeout and scheduled into the future
         const isStorageErr = /502|503|timeout|aborted|ETIMEDOUT|Internal storage upload failed/i.test(err);
-        const isPausedKuro = job.source === 'kuro' && /PAUSED/i.test(err);
         const isFuture = job.next_run_at && new Date(job.next_run_at) > now;
 
-        if (isStorageErr && !isPausedKuro && isFuture) {
+        if (isStorageErr && isFuture) {
           // Reschedule for quick execution (10 to 35 seconds with jitter)
           const delaySec = 10 + Math.floor(Math.random() * 25);
           const newNextRun = new Date(Date.now() + delaySec * 1000).toISOString();
@@ -4902,10 +4901,6 @@ export class ImporterEngine {
       });
 
       if (activeJob) {
-        // If Kuro already has active job, secondary source defers
-        if (activeJob.source === 'kuro' && job.source !== 'kuro') {
-          return false;
-        }
         // If current source already has active job, do not duplicate
         if (activeJob.source === job.source) {
           return false;
@@ -5334,7 +5329,7 @@ export class ImporterEngine {
 
 
     // Detect Source / ID format mismatch
-    // (e.g. MangaFlix job with numeric Manhastro/Kuro chapter ID)
+    // (e.g. a job with another provider's numeric chapter ID)
     if (effectiveSource === 'mangaflix' && /^\d+$/.test(effectiveSourceChapterId)) {
       let { data: realMapping } = await this.supabase
         .from('importer_chapter_mappings')
@@ -6888,13 +6883,7 @@ export class ImporterEngine {
     }
   ): Promise<Uint8Array> {
     const parsedUrl = new URL(url);
-    const isKuro = parsedUrl.host.includes('kuromangas.com');
-
-    const referer = options?.refererOverride
-      ? options.refererOverride
-      : isKuro
-      ? 'https://kuromangas.com/'
-      : `${parsedUrl.origin}/`;
+    const referer = options?.refererOverride || `${parsedUrl.origin}/`;
 
     let customHeaders: Record<string, string> = {};
     if (source && source !== 'unknown') {
@@ -7007,132 +6996,6 @@ export class ImporterEngine {
           continue;
         }
         break;
-      }
-    }
-
-    // If Cloudflare 403 or network error occurred and internal bridge is configured, fallback to bridge
-    if ((fetchError || res?.status === 403) && this.config.NOX_STORAGE_BRIDGE_TOKEN && isKuro) {
-      let bridgeSignal: AbortSignal | undefined;
-      let bridgeFailureTraced = false;
-      try {
-        const bridgeUrl = `${(this.config.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev').replace(/\/$/, '')}/api/internal/importer/kuro-bridge`;
-        bridgeSignal = AbortSignal.any([
-          this.abortController.signal,
-          ...(options?.signal ? [options.signal] : []),
-          AbortSignal.timeout(timeoutDuration),
-        ]);
-        const bridgeRequestStartedAt = Date.now();
-        emitTrace('DOWNLOAD_BRIDGE_REQUEST_STARTED', {
-          timeoutMs: timeoutDuration,
-          requestStartedAtMs: bridgeRequestStartedAt,
-        });
-        const bridgeRes = await fetch(bridgeUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${this.config.NOX_STORAGE_BRIDGE_TOKEN}`,
-          },
-          body: JSON.stringify({
-            url,
-            headers: {
-              Referer: referer,
-            },
-          }),
-          signal: bridgeSignal,
-        });
-        emitTrace('DOWNLOAD_BRIDGE_REQUEST_HEADERS', {
-          status: bridgeRes.status,
-          contentLengthBytes: (() => {
-            const raw = bridgeRes.headers.get('content-length');
-            const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-            return Number.isFinite(parsed) ? parsed : null;
-          })(),
-          elapsedMs: Date.now() - bridgeRequestStartedAt,
-        });
-
-        if (bridgeRes.ok) {
-          this.rateLimiter.recordSuccess(parsedUrl.host);
-          const bridgeLenStr = bridgeRes.headers.get('content-length');
-          if (bridgeLenStr) {
-            const bridgeBytes = parseInt(bridgeLenStr, 10);
-            if (!Number.isNaN(bridgeBytes)) {
-              if (bridgeBytes > MAX_IMAGE_BODY_BYTES) {
-                await bridgeRes.body?.cancel().catch(() => {});
-                throw new InvalidMediaError(url, `Bridge image declared content-length exceeds 20MB limit`);
-              }
-              if (options?.reservation && bridgeBytes > options.reservation.reservedBytes) {
-                emitTrace('DOWNLOAD_BRIDGE_RESERVATION_UPGRADE_STARTED', {
-                  fromBytes: options.reservation.reservedBytes,
-                  toBytes: bridgeBytes,
-                  elapsedMs: Date.now() - bridgeRequestStartedAt,
-                });
-                try {
-                  await options.reservation.upgrade(bridgeBytes, bridgeSignal, { intent: 'COMPLETION' });
-                  emitTrace('DOWNLOAD_BRIDGE_RESERVATION_UPGRADE_COMPLETED', {
-                    reservedBytes: options.reservation.reservedBytes,
-                    elapsedMs: Date.now() - bridgeRequestStartedAt,
-                  });
-                } catch (error) {
-                  bridgeFailureTraced = true;
-                  emitTrace('DOWNLOAD_BRIDGE_REQUEST_FAILED', {
-                    stage: 'RESERVATION_UPGRADE',
-                    errorType: classifyDownloadTraceError(error),
-                    abortReason: classifyDownloadTraceAbort(this.abortController.signal, options?.signal, bridgeSignal),
-                    elapsedMs: Date.now() - bridgeRequestStartedAt,
-                  });
-                  throw error;
-                }
-              }
-            }
-          }
-          return await readImageBody(bridgeRes, {
-            reservation: options?.reservation,
-            signal: bridgeSignal,
-            trace: requestTrace ? {
-              onFirstChunk: ({ bytes, elapsedMs }) => emitTrace('DOWNLOAD_BRIDGE_REQUEST_FIRST_BODY_CHUNK', {
-                bytes,
-                bodyElapsedMs: elapsedMs,
-                elapsedMs: Date.now() - bridgeRequestStartedAt,
-              }),
-              onComplete: ({ bytes, chunks, elapsedMs }) => emitTrace('DOWNLOAD_BRIDGE_REQUEST_BODY_COMPLETED', {
-                bytes,
-                chunks,
-                bodyElapsedMs: elapsedMs,
-                elapsedMs: Date.now() - bridgeRequestStartedAt,
-              }),
-              onReservationUpgrade: ({ phase, state, fromBytes, toBytes, elapsedMs }) => emitTrace(
-                `DOWNLOAD_BRIDGE_BODY_RESERVATION_UPGRADE_${state}`,
-                { phase, fromBytes, toBytes, bodyElapsedMs: elapsedMs, elapsedMs: Date.now() - bridgeRequestStartedAt },
-              ),
-              onError: ({ bytes, chunks, elapsedMs, waitingOn, error }) => {
-                bridgeFailureTraced = true;
-                emitTrace('DOWNLOAD_BRIDGE_REQUEST_FAILED', {
-                  stage: 'BODY_READ',
-                  errorType: classifyDownloadTraceError(error),
-                  abortReason: classifyDownloadTraceAbort(this.abortController.signal, options?.signal, bridgeSignal),
-                  bytes,
-                  chunks,
-                  bodyElapsedMs: elapsedMs,
-                  waitingOn,
-                  elapsedMs: Date.now() - bridgeRequestStartedAt,
-                });
-              },
-            } : undefined,
-          });
-        }
-      } catch (bridgeErr: any) {
-        if (!bridgeFailureTraced) {
-          emitTrace('DOWNLOAD_BRIDGE_REQUEST_FAILED', {
-            stage: 'BRIDGE_REQUEST',
-            errorType: classifyDownloadTraceError(bridgeErr),
-            abortReason: classifyDownloadTraceAbort(this.abortController.signal, options?.signal, bridgeSignal),
-            elapsedMs: Date.now() - requestStartedAt,
-          });
-        }
-        if (bridgeSignal?.aborted || this.abortController.signal.aborted || options?.signal?.aborted) {
-          throw bridgeErr;
-        }
-        this.logger.warn(`Failed image download via bridge for ${url}`, { error: bridgeErr?.message });
       }
     }
 

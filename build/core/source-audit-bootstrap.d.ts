@@ -7,6 +7,7 @@ import type pg from 'pg';
  * avoiding a broad "enable every registered adapter" action on each boot.
  */
 export declare const SOURCE_AUDIT_RELEASE = "2026-10-17";
+export declare const KURO_RETIREMENT_RELEASE = "2026-10-18";
 type Queryable = Pick<pg.Pool, 'query'>;
 export declare function reconcileAuditedSources(pool: Queryable): Promise<void>;
 export {};

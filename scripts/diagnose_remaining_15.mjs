@@ -20,7 +20,6 @@ const TARGET_SOURCES = [
   'amuy',
   'arthurscan',
   'inkapk',
-  'kuro',
   'mangaonline',
   'nexus_toons',
   'nocturnesummer',

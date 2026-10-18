@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { reconcileAuditedSources, SOURCE_AUDIT_RELEASE } from '../src/core/source-audit-bootstrap.js';
+import { KURO_RETIREMENT_RELEASE, reconcileAuditedSources, SOURCE_AUDIT_RELEASE } from '../src/core/source-audit-bootstrap.js';
 
 describe('source audit bootstrap', () => {
-  it('adds only validated providers, reactivates the audited adapters once, restores Kuro, and retires only the two proven dead adapters', async () => {
+  it('adds only validated providers, reactivates audited adapters once, and permanently retires Kuro', async () => {
     const query = vi.fn()
       .mockResolvedValueOnce({ rowCount: 4 })
       .mockResolvedValueOnce({ rowCount: 13 })
@@ -23,8 +23,9 @@ describe('source audit bootstrap', () => {
     expect(calls[1]).toContain("status = 'ACTIVE'");
     expect(calls[1]).toContain('catalog_discovery_enabled = false');
     expect(calls[2]).toContain("id = 'kuro'");
-    expect(calls[2]).toContain("status = 'ACTIVE'");
-    expect(calls[2]).toContain('sourceAuditRecovery');
+    expect(calls[2]).toContain("status = 'DISABLED'");
+    expect(calls[2]).toContain('sourceRetirement');
+    expect(calls[2]).toContain('KURO_EXTERNAL_CLOUDFLARE_LOGIN_CHALLENGE');
     expect(calls[3]).toContain("'megahentai'");
     expect(calls[3]).toContain("'osakascan'");
     expect(calls[3]).toContain("status = 'DISABLED'");
@@ -45,7 +46,7 @@ describe('source audit bootstrap', () => {
       'yaoifanclub', 'Yaoi Fan Club', 'https://yaoifanclub.com',
       'yuriverso', 'Yuri on Air', 'https://yurionair.top',
     ]);
-    expect(query.mock.calls[2][1]).toEqual([SOURCE_AUDIT_RELEASE]);
+    expect(query.mock.calls[2][1]).toEqual([KURO_RETIREMENT_RELEASE]);
     expect(query.mock.calls[3][1]).toEqual([SOURCE_AUDIT_RELEASE]);
   });
 });
