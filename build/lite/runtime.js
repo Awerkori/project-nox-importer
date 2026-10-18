@@ -682,10 +682,12 @@ export class ImporterLiteRuntime {
             // Legacy v2/v3 uses the chapter pool, so yield it under real pressure.
             // v4 uses the dedicated metadata seat and remains independently bounded.
             const admitted = this.pool.waitingCount >= 2 ? 0 : await this.queue.refillStoredMetadataEnrichment();
-            // v4 is deliberately opt-in through a durable production setting. A
-            // real-work canary is queued first; only then does its low-rate cursor
-            // begin draining the historical campaign.
-            const admittedV4 = this.sourceMetadataPool.waitingCount > 0 ? 0 : await this.queue.refillStoredMetadataEnrichmentV4();
+            // v4 is deliberately opt-in through a durable production setting. Its
+            // single local producer must be allowed to wait behind an isolated P2
+            // operation: otherwise the durable cursor is starved whenever that
+            // one-seat pool has a waiter. The repository still permits only one
+            // outstanding v4 task and applies its 20-second due-time fence.
+            const admittedV4 = await this.queue.refillStoredMetadataEnrichmentV4();
             if (admitted || admittedV4)
                 this.logger.info('Admitted bounded stored metadata enrichment', {
                     admitted: admitted + admittedV4, version: admittedV4 ? 4 : undefined,
