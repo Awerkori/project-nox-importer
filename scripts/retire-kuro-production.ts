@@ -61,7 +61,7 @@ async function archiveAndDelete(
   const archived = await client.query(
     `INSERT INTO public.importer_retired_source_records
        (source, record_type, original_id, retirement_run_id, record)
-     SELECT $1, $2, ${originalId}, $3, to_jsonb(row)
+     SELECT $1::text, $2::text, ${originalId}, $3::uuid, to_jsonb(row)
        FROM public.${table} AS row
       WHERE ${archiveWhere}
      ON CONFLICT (source, record_type, original_id) DO UPDATE
