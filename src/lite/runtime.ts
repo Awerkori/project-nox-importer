@@ -63,6 +63,12 @@ const SAFE_BUFFERED_PAGE_CAP = 24;
 // showed a costly mapping scan; pace its refill to once per 15 seconds while
 // retaining a two-task reserve and leaving chapter workers unchanged.
 const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
+// A v4 merge performs several local, idempotent YSQL operations.  During
+// observed production contention each operation may consume the database
+// timeout budget, so the normal 45-second claim lease can expire while its
+// owner is still safely completing.  This affects only the single-flight,
+// no-network v4 lane; it does not add concurrency or change chapter leases.
+const STORED_METADATA_REPLAY_V4_LEASE_SECONDS = 120;
 const STORED_METADATA_ENRICHMENT_REFILL_INTERVAL_MS = 15_000;
 const SOURCE_METADATA_REFILL_INTERVAL_MS = 15_000;
 // A recently productive source may own hundreds of still-unclassified
@@ -1062,7 +1068,7 @@ export class ImporterLiteRuntime {
       this.lastMetadataReplayAt = Date.now();
       const workerId = `${this.runtimeInstanceId}:metadata-replay`;
       await this.queue.reclaimExpiredStoredMetadataReplayV4();
-      const task = await this.queue.claimStoredMetadataReplay(workerId, 45, 4)
+      const task = await this.queue.claimStoredMetadataReplay(workerId, STORED_METADATA_REPLAY_V4_LEASE_SECONDS, 4)
         || (Number(this.pool.waitingCount || 0) < 2 ? await this.queue.claimStoredMetadataReplay(workerId, 45) : null);
       if (task) await this.catalog(task, workerId);
     } catch (error: any) {
