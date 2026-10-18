@@ -3752,6 +3752,28 @@ describe('LiteRepository against the additive Lite migration', () => {
     }
   });
 
+  it('keeps the bounded v4 producer eligible behind isolated-pool P2 work', async () => {
+    const chapterPool = poolFor(db) as Pool;
+    const metadataPool = poolFor(db) as Pool;
+    Object.defineProperty(chapterPool, 'waitingCount', { value: 4 });
+    Object.defineProperty(metadataPool, 'waitingCount', { value: 1 });
+    const runtime = new ImporterLiteRuntime(
+      chapterPool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+      new HostRateLimiter(2), metadataPool,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    const legacy = vi.fn().mockResolvedValue(0);
+    const v4 = vi.fn().mockResolvedValue(0);
+    (runtime as any).queue.refillStoredMetadataEnrichment = legacy;
+    (runtime as any).queue.refillStoredMetadataEnrichmentV4 = v4;
+
+    await (runtime as any).refillStoredMetadataEnrichment();
+    expect(legacy).not.toHaveBeenCalled();
+    expect(v4).toHaveBeenCalledTimes(1);
+  });
+
   it('classifies normal catalog metadata immediately while honoring chapter ingestion disablement', async () => {
     await db.exec(`ALTER TABLE importer_sources ADD COLUMN chapter_ingestion_enabled boolean NOT NULL DEFAULT true`);
     await db.query(`UPDATE importer_sources SET chapter_ingestion_enabled=false WHERE id='source-a'`);
