@@ -59,6 +59,8 @@ const SAFE_BUFFERED_PAGE_CAP = 24;
 // showed a costly mapping scan; pace its refill to once per 15 seconds while
 // retaining a two-task reserve and leaving chapter workers unchanged.
 const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
+const STORED_METADATA_REPLAY_V4_IDLE_INTERVAL_MS = 10_000;
+const STORED_METADATA_REPLAY_V4_PRESSURED_INTERVAL_MS = 20_000;
 // A v4 merge performs several local, idempotent YSQL operations.  During
 // observed production contention each operation may consume the database
 // timeout budget, so the normal 45-second claim lease can expire while its
@@ -704,7 +706,13 @@ export class ImporterLiteRuntime {
     }
     /** Keep V4's isolated-seat ownership correct across boot, retries and direct successors. */
     async refillStoredMetadataEnrichmentV4() {
-        const admitted = await this.queue.refillStoredMetadataEnrichmentV4();
+        // V4 remains single-flight. With no chapter-pool queue, ten seconds
+        // removes measured idle time between local merges; any waiter restores
+        // the established conservative twenty-second fence.
+        const intervalMs = Number(this.pool.waitingCount || 0) === 0
+            ? STORED_METADATA_REPLAY_V4_IDLE_INTERVAL_MS
+            : STORED_METADATA_REPLAY_V4_PRESSURED_INTERVAL_MS;
+        const admitted = await this.queue.refillStoredMetadataEnrichmentV4(2, intervalMs);
         if (admitted) {
             this.sourceMetadataRefreshDeferredForV4 = true;
             return admitted;

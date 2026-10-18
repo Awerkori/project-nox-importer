@@ -1022,6 +1022,19 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE idempotency_key='lite:metadata:v4:source-a:burst-2'`)).rows[0].count).toBe(1);
   });
 
+  it('uses a bounded faster due fence for V4 without admitting a second task', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000134','source-a','fast-fence',$1::uuid,
+        'p1-a','P1 A',$2::jsonb,'SYNCED')`, [ids.p1a, JSON.stringify({ tags: ['Ação'] })]);
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','true')`);
+
+    expect(await repo.refillStoredMetadataEnrichmentV4(2, 10_000)).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key LIKE 'lite:metadata:v4:%' AND state IN ('READY','RUNNING','RETRY_WAIT')`)).rows[0].count).toBe(1);
+  });
+
   it('prioritizes a real alias over empty or tag-only legacy metadata from the same source', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings
@@ -3797,6 +3810,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     const refillV4 = vi.fn(async () => 0);
     (runtime as any).queue.refillStoredMetadataEnrichment = refill;
     (runtime as any).queue.refillStoredMetadataEnrichmentV4 = refillV4;
+    (runtime as any).queue.isStoredMetadataReplayV4Enabled = vi.fn().mockResolvedValue(false);
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-14T00:00:00Z'));
     try {
@@ -3829,6 +3843,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     const v4 = vi.fn().mockResolvedValue(0);
     (runtime as any).queue.refillStoredMetadataEnrichment = legacy;
     (runtime as any).queue.refillStoredMetadataEnrichmentV4 = v4;
+    (runtime as any).queue.isStoredMetadataReplayV4Enabled = vi.fn().mockResolvedValue(true);
 
     await (runtime as any).refillStoredMetadataEnrichment();
     expect(legacy).not.toHaveBeenCalled();
