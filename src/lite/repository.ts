@@ -648,10 +648,8 @@ export class LiteRepository {
                 SELECT 1 FROM jsonb_each(m.metadata) evidence(key,value)
                 WHERE evidence.key=ANY($1::text[]) AND (
                   (jsonb_typeof(evidence.value)='string' AND btrim(evidence.value #>> '{}')<>'') OR
-                  (jsonb_typeof(evidence.value)='array' AND EXISTS (
-                    SELECT 1 FROM jsonb_array_elements(evidence.value) item(value)
-                    WHERE jsonb_typeof(item.value)='string' AND btrim(item.value #>> '{}')<>''
-                  ))
+                  (jsonb_typeof(evidence.value)='array' AND jsonb_array_length(evidence.value)>0) OR
+                  (jsonb_typeof(evidence.value)='object' AND evidence.value<>'{}'::jsonb)
                 )
               ) AS has_explicit_metadata
             FROM importer_work_mappings m
