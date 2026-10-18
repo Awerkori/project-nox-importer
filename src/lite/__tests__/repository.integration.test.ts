@@ -950,6 +950,9 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('does not turn a source slug fallback into a historical alias candidate', async () => {
+    // Production's legacy settings table deliberately has no updated_at
+    // column; replay cursors must remain compatible with it.
+    await db.query(`ALTER TABLE settings DROP COLUMN updated_at`);
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
