@@ -37,7 +37,12 @@ const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
 const METADATA_REPLAY_V4_SOURCE_CURSOR_KEY = 'metadata_replay_v4_source_cursor';
 const METADATA_REPLAY_V4_INTERVAL_MS = 20_000;
-const METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN = 4;
+// Sources with usable stored metadata are sparse. Eight indexed windows are
+// still a bounded serial probe (at most 1,024 mappings per producer turn),
+// but avoid spending several minutes rotating across empty providers before
+// the next eligible local merge is found. Task execution remains one-at-a-
+// time and retains the 20-second due-time fence.
+const METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN = 8;
 
 const sourceExecutionEligibilitySql = (alias: string): string => `(
   (COALESCE(${alias}.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
@@ -593,7 +598,7 @@ export class LiteRepository {
       // Source and mapping cursors both ride existing narrow indexes. One
       // source window is inspected per producer turn, so neither a JSON
       // predicate nor a provider with many mappings can degrade into a full
-      // catalog scan. At most four narrow windows are probed in one turn so
+      // catalog scan. At most eight narrow windows are probed in one turn so
       // sparse sources cannot collapse the intended three-per-minute drain.
       // Rotating the source cursor also prevents a large source from starving
       // a later one.
@@ -670,7 +675,7 @@ export class LiteRepository {
             ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
           [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`, result.tail_source_work_id]);
           // The source still has later windows. Advance it and inspect the
-          // next bounded source window without treating this as completion.
+      // next bounded source window without treating this as completion.
           continue;
         }
         row = { source: result.source, source_work_id: result.source_work_id, work_id: result.work_id, reason: result.reason };
