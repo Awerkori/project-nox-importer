@@ -588,6 +588,7 @@ export class LiteRepository {
       }
       const fields = [...STORED_MAPPING_ALIAS_FIELDS, ...STORED_MAPPING_TAG_FIELDS];
       let row: { source: string; source_work_id: string; work_id: string; reason: string } | undefined;
+      let advancedIncompleteSource = false;
       // Source and mapping cursors both ride existing narrow indexes. One
       // source window is inspected per producer turn, so neither a JSON
       // predicate nor a provider with many mappings can degrade into a full
@@ -662,16 +663,21 @@ export class LiteRepository {
           await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
           [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`, result.tail_source_work_id]);
+          // The source still has later windows. Finish this bounded producer
+          // turn without treating an empty window as global completion.
+          advancedIncompleteSource = true;
           break;
         }
         row = { source: result.source, source_work_id: result.source_work_id, work_id: result.work_id, reason: result.reason };
       }
       if (!row) {
-        // Completion is durable and prevents an exhausted historical cursor
-        // from repeatedly re-reading the mapping catalog. New onboarding does
-        // not rely on this campaign: it enriches during normal cataloguing.
-        await client.query(`UPDATE settings SET value='complete'
-          WHERE key=$1 AND value='true'`, [METADATA_REPLAY_V4_ENABLED_KEY]);
+        if (!advancedIncompleteSource) {
+          // Completion is durable and prevents an exhausted historical cursor
+          // from repeatedly re-reading the mapping catalog. New onboarding does
+          // not rely on this campaign: it enriches during normal cataloguing.
+          await client.query(`UPDATE settings SET value='complete'
+            WHERE key=$1 AND value='true'`, [METADATA_REPLAY_V4_ENABLED_KEY]);
+        }
         await client.query('COMMIT');
         return 0;
       }
