@@ -283,8 +283,8 @@ async function main(): Promise<void> {
                 catalog_discovery_enabled = false,
                 cooldown_until = NULL,
                 blocked_reason = 'Retired: recurring Cloudflare authentication challenge has no sustainable importer route',
-                blocked_details = jsonb_build_object('sourceRetirement', '2026-10-18', 'reason', $1),
-                config = COALESCE(config, '{}'::jsonb) || jsonb_build_object('sourceRetirement', '2026-10-18', 'sourceRetirementReason', $1),
+                blocked_details = jsonb_build_object('sourceRetirement', '2026-10-18', 'reason', $1::text),
+                config = COALESCE(config, '{}'::jsonb) || jsonb_build_object('sourceRetirement', '2026-10-18', 'sourceRetirementReason', $1::text),
                 updated_at = now()
           WHERE id = 'kuro'`,
         [RETIREMENT_REASON],
