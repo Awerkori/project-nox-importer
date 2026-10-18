@@ -70,24 +70,25 @@ async function archiveAndDelete(
   selectionKey: string,
   selectionKeyType: 'text' | 'uuid',
 ): Promise<number> {
+  let selected;
+  try {
+    // Select once: `source` has no physical index on the historical queue.
+    // Repeating this scan per batch is both slower and less reliable than one
+    // bounded ID collection followed by primary-key archive/delete batches.
+    selected = await client.query(
+      `SELECT ${selectionKey} AS selection_key
+         FROM public.${table} AS row
+        WHERE ${where}`,
+      params,
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Archive selection failed for ${source}/${recordType}: ${detail}`);
+  }
+  const selectedKeys = selected.rows.map((row: { selection_key: string }) => row.selection_key);
   let total = 0;
-  while (true) {
-    let selected;
-    try {
-      selected = await client.query(
-        `SELECT ${selectionKey} AS selection_key, (${originalId})::text AS original_id
-           FROM public.${table} AS row
-          WHERE ${where}
-          ORDER BY 1
-          LIMIT ${ARCHIVE_BATCH_SIZE}`,
-        params,
-      );
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`Archive selection failed for ${source}/${recordType} after ${total} row(s): ${detail}`);
-    }
-    const keys = selected.rows.map((row: { selection_key: string }) => row.selection_key);
-    if (keys.length === 0) return total;
+  for (let offset = 0; offset < selectedKeys.length; offset += ARCHIVE_BATCH_SIZE) {
+    const keys = selectedKeys.slice(offset, offset + ARCHIVE_BATCH_SIZE);
     try {
       const archived = await client.query(
         `INSERT INTO public.importer_retired_source_records
@@ -115,6 +116,7 @@ async function archiveAndDelete(
     }
     total += keys.length;
   }
+  return total;
 }
 
 async function publishedSnapshot(
