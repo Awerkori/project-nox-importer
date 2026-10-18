@@ -48,6 +48,11 @@ type PublicationSnapshot = { totals: PublishedTotals; chapterIds: string[] };
 type Retirement = (typeof RETIREMENTS)[number];
 type Counts = Record<string, number>;
 
+// A source can have thousands of historical rows. Keep each archive/delete
+// statement bounded so the production YSQL client never has to wait behind a
+// large JSON serialization or a whole-table delete.
+const ARCHIVE_BATCH_SIZE = 50;
+
 async function count(client: Queryable, sql: string, params: unknown[] = []): Promise<number> {
   const result = await client.query(sql, params);
   return Number(result.rows[0]?.count || 0);
@@ -62,25 +67,54 @@ async function archiveAndDelete(
   where: string,
   params: unknown[],
   originalId: string,
+  selectionKey: string,
+  selectionKeyType: 'text' | 'uuid',
 ): Promise<number> {
-  const archiveWhere = where.replace(/\$(\d+)/g, (_match, index) => `$${Number(index) + 3}`);
-  const archived = await client.query(
-    `INSERT INTO public.importer_retired_source_records
-       (source, record_type, original_id, retirement_run_id, record)
-     SELECT $1::text, $2::text, ${originalId}, $3::uuid, to_jsonb(row)
-       FROM public.${table} AS row
-      WHERE ${archiveWhere}
-     ON CONFLICT (source, record_type, original_id) DO UPDATE
-       SET retirement_run_id = EXCLUDED.retirement_run_id,
-           retired_at = now(),
-           record = EXCLUDED.record`,
-    [source, recordType, runId, ...params],
-  );
-  const deleted = await client.query(`DELETE FROM public.${table} AS row WHERE ${where}`, params);
-  if ((archived.rowCount ?? 0) !== (deleted.rowCount ?? 0)) {
-    throw new Error(`Archive/delete mismatch for ${source}/${recordType}`);
+  let total = 0;
+  while (true) {
+    let selected;
+    try {
+      selected = await client.query(
+        `SELECT ${selectionKey} AS selection_key, (${originalId})::text AS original_id
+           FROM public.${table} AS row
+          WHERE ${where}
+          ORDER BY 1
+          LIMIT ${ARCHIVE_BATCH_SIZE}`,
+        params,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Archive selection failed for ${source}/${recordType} after ${total} row(s): ${detail}`);
+    }
+    const keys = selected.rows.map((row: { selection_key: string }) => row.selection_key);
+    if (keys.length === 0) return total;
+    try {
+      const archived = await client.query(
+        `INSERT INTO public.importer_retired_source_records
+           (source, record_type, original_id, retirement_run_id, record)
+         SELECT $1::text, $2::text, (${originalId})::text, $3::uuid, to_jsonb(row)
+           FROM public.${table} AS row
+          WHERE ${selectionKey} = ANY($4::${selectionKeyType}[])
+         ON CONFLICT (source, record_type, original_id) DO UPDATE
+           SET retirement_run_id = EXCLUDED.retirement_run_id,
+               retired_at = now(),
+               record = EXCLUDED.record`,
+        [source, recordType, runId, ids],
+      );
+      const deleted = await client.query(
+        `DELETE FROM public.${table} AS row
+          WHERE ${selectionKey} = ANY($1::${selectionKeyType}[])`,
+        [keys],
+      );
+      if ((archived.rowCount ?? 0) !== keys.length || (deleted.rowCount ?? 0) !== keys.length) {
+        throw new Error(`selected=${keys.length}, archived=${archived.rowCount ?? 0}, deleted=${deleted.rowCount ?? 0}`);
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Archive batch failed for ${source}/${recordType} after ${total} row(s): ${detail}`);
+    }
+    total += keys.length;
   }
-  return deleted.rowCount ?? 0;
 }
 
 async function publishedSnapshot(
@@ -207,15 +241,15 @@ async function retireOne(client: Queryable, retirement: Retirement) {
     const workPatterns = ids.map((source) => `source:${source}:%`);
     const counts: Counts = {};
 
-    counts.liteReadyWorks = await archiveAndDelete(client, retirement.source, runId, 'LITE_READY_WORK', 'importer_lite_ready_works', 'row.work_key LIKE ANY($1::text[])', [workPatterns], 'row.work_key');
-    counts.liteTasks = await archiveAndDelete(client, retirement.source, runId, 'LITE_TASK', 'importer_lite_tasks', "COALESCE(row.payload->>'source', '') = ANY($1::text[]) OR row.work_key LIKE ANY($2::text[])", [ids, workPatterns], 'row.id::text');
-    counts.liteChapterSources = await archiveAndDelete(client, retirement.source, runId, 'LITE_CHAPTER_SOURCE', 'importer_lite_chapter_sources', 'row.source = ANY($1::text[])', [ids], 'row.id::text');
-    counts.metadataEnrichment = await archiveAndDelete(client, retirement.source, runId, 'METADATA_ENRICHMENT', 'importer_lite_metadata_enrichment', 'row.source = ANY($1::text[])', [ids], "row.source || ':' || row.source_work_id");
-    counts.sourceHealth = await archiveAndDelete(client, retirement.source, runId, 'LITE_SOURCE_HEALTH', 'importer_lite_source_health', 'row.source = ANY($1::text[])', [ids], 'row.source');
-    counts.checkpoints = await archiveAndDelete(client, retirement.source, runId, 'CHECKPOINT', 'importer_checkpoints', 'row.source = ANY($1::text[])', [ids], 'row.id::text');
-    counts.legacyTasks = await archiveAndDelete(client, retirement.source, runId, 'LEGACY_QUEUE_TASK', 'importer_queue', 'row.source = ANY($1::text[])', [ids], 'row.id::text');
-    counts.chapterMappings = await archiveAndDelete(client, retirement.source, runId, 'CHAPTER_MAPPING', 'importer_chapter_mappings', 'row.source = ANY($1::text[])', [ids], 'row.id::text');
-    counts.workMappings = await archiveAndDelete(client, retirement.source, runId, 'WORK_MAPPING', 'importer_work_mappings', 'row.source = ANY($1::text[])', [ids], 'row.id::text');
+    counts.liteReadyWorks = await archiveAndDelete(client, retirement.source, runId, 'LITE_READY_WORK', 'importer_lite_ready_works', 'row.work_key LIKE ANY($1::text[])', [workPatterns], 'row.work_key', 'row.work_key', 'text');
+    counts.liteTasks = await archiveAndDelete(client, retirement.source, runId, 'LITE_TASK', 'importer_lite_tasks', "COALESCE(row.payload->>'source', '') = ANY($1::text[]) OR row.work_key LIKE ANY($2::text[])", [ids, workPatterns], 'row.id::text', 'row.id', 'uuid');
+    counts.liteChapterSources = await archiveAndDelete(client, retirement.source, runId, 'LITE_CHAPTER_SOURCE', 'importer_lite_chapter_sources', 'row.source = ANY($1::text[])', [ids], 'row.id::text', 'row.id', 'uuid');
+    counts.metadataEnrichment = await archiveAndDelete(client, retirement.source, runId, 'METADATA_ENRICHMENT', 'importer_lite_metadata_enrichment', 'row.source = ANY($1::text[])', [ids], "row.source || ':' || row.source_work_id", "row.source || ':' || row.source_work_id", 'text');
+    counts.sourceHealth = await archiveAndDelete(client, retirement.source, runId, 'LITE_SOURCE_HEALTH', 'importer_lite_source_health', 'row.source = ANY($1::text[])', [ids], 'row.source', 'row.source', 'text');
+    counts.checkpoints = await archiveAndDelete(client, retirement.source, runId, 'CHECKPOINT', 'importer_checkpoints', 'row.source = ANY($1::text[])', [ids], 'row.id::text', 'row.id', 'uuid');
+    counts.legacyTasks = await archiveAndDelete(client, retirement.source, runId, 'LEGACY_QUEUE_TASK', 'importer_queue', 'row.source = ANY($1::text[])', [ids], 'row.id::text', 'row.id', 'uuid');
+    counts.chapterMappings = await archiveAndDelete(client, retirement.source, runId, 'CHAPTER_MAPPING', 'importer_chapter_mappings', 'row.source = ANY($1::text[])', [ids], 'row.id::text', 'row.id', 'uuid');
+    counts.workMappings = await archiveAndDelete(client, retirement.source, runId, 'WORK_MAPPING', 'importer_work_mappings', 'row.source = ANY($1::text[])', [ids], 'row.id::text', 'row.id', 'uuid');
     counts.metadataCursorsReset = await resetMetadataCursor(client, retirement.source, runId, ids);
 
     await client.query(
@@ -276,7 +310,10 @@ async function main(): Promise<void> {
     await client.query(readFileSync(resolve('migrations/20261018010000_retire_kuro_operational_state.sql'), 'utf8'));
     await client.query(readFileSync(resolve('migrations/20261018090000_retire_persistently_blocked_sources.sql'), 'utf8'));
     const results = [];
-    for (const retirement of RETIREMENTS) results.push(await retireOne(client, retirement));
+    for (const retirement of RETIREMENTS) {
+      console.log(JSON.stringify({ mode: 'apply-source-started', source: retirement.source }));
+      results.push(await retireOne(client, retirement));
+    }
     console.log(JSON.stringify({ mode: 'applied', results }));
   } finally {
     client.release();
