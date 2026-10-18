@@ -5,9 +5,11 @@
 -- every claim sort a remote ready-work set before it could lock one row.
 --
 -- This is additive only: it changes neither priority policy nor task state.
--- Production applies the equivalent CREATE INDEX CONCURRENTLY statement via
--- scripts/apply-lite-claim-performance-migration.ts; this transactional form
--- keeps the disposable PGlite integration fixture faithful to that schema.
+-- YugabyteDB does not support CREATE INDEX CONCURRENTLY.  Its regular index
+-- build is atomic, and the production runner uses a five-second lock budget
+-- so it either starts promptly or declines without delaying publication.
+-- This transactional form keeps the disposable PGlite integration fixture
+-- faithful to that schema.
 CREATE INDEX IF NOT EXISTS importer_lite_ready_works_fair_claim_idx
   ON public.importer_lite_ready_works
     (priority, operation_rank, last_claimed_at NULLS FIRST, next_run_at, work_key);
