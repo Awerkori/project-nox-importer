@@ -3950,7 +3950,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refillStoredMetadataEnrichment();
 
     expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
-    expect(v4).toHaveBeenCalledWith(2, 2_000, 4);
+    expect(v4).toHaveBeenCalledWith(2, 2_000, 1);
   });
 
   it('fills both exclusive V4 seats through one serialized producer', async () => {
@@ -3968,8 +3968,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refillStoredMetadataEnrichment();
 
     expect(v4).toHaveBeenCalledTimes(2);
-    expect(v4).toHaveBeenNthCalledWith(1, 2, 1_000, 4);
-    expect(v4).toHaveBeenNthCalledWith(2, 2, 1_000, 4);
+    expect(v4).toHaveBeenNthCalledWith(1, 2, 1_000, 1);
+    expect(v4).toHaveBeenNthCalledWith(2, 2, 1_000, 1);
   });
 
   it('continues a bounded exclusive V4 cursor probe without the normal producer throttle', async () => {
@@ -3988,7 +3988,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refillStoredMetadataEnrichment();
 
     expect(v4).toHaveBeenCalledTimes(2);
-    expect(v4).toHaveBeenCalledWith(2, 1_000, 4);
+    expect(v4).toHaveBeenCalledWith(2, 1_000, 1);
   });
 
   it('retains V4 ownership after boot when a due retry already occupies its durable seat', async () => {
