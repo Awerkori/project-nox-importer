@@ -3676,14 +3676,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     (runtime as any).isRuntimeLeader = true;
     let claims = 0;
-    (runtime as any).queue.claimStoredMetadataReplay = async () => {
+    const claimArgs: any[][] = [];
+    (runtime as any).queue.claimStoredMetadataReplay = async (...args: any[]) => {
       claims++;
+      claimArgs.push(args);
       await new Promise((resolve) => setTimeout(resolve, 30));
       return null;
     };
 
     await Promise.all([(runtime as any).runStoredMetadataReplay(), (runtime as any).runStoredMetadataReplay()]);
     expect(claims).toBe(1);
+    expect(claimArgs[0]).toEqual([expect.stringContaining(':metadata-replay'), 120, 4]);
   });
 
   it('reclaims one expired v4 metadata lease on the isolated lane', async () => {
