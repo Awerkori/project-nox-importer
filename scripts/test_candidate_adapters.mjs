@@ -38,15 +38,11 @@ const CANDIDATE_SOURCES = [
   'ler999',
   'littletyrant',
   'maidscan',
-  'mangaonline',
   'mangotoons',
-  'megahentai',
   'mundohentai',
   'nhentaibr',
-  'osakascan',
   'pinkrosa',
   'pizzariascan',
-  'pointzerotoons',
   'universohentai',
   'zettahq'
 ];

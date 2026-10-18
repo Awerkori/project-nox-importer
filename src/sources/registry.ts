@@ -17,27 +17,19 @@ import { NocturneSummerAdapter } from './nocturnesummer/nocturnesummer-adapter.j
 import { TankouHentaiAdapter } from './tankouhentai/tankouhentai-adapter.js';
 import { CafeComYaoiAdapter } from './cafecomyaoi/cafecomyaoi-adapter.js';
 import { HotCabaretScanAdapter } from './hotcabaretscan/hotcabaretscan-adapter.js';
-import { AmuyAdapter } from './amuy/amuy-adapter.js';
-import { ArthurScanAdapter } from './arthurscan/arthurscan-adapter.js';
 import { BorutoExplorerAdapter } from './borutoexplorer/borutoexplorer-adapter.js';
 import { CovenScanAdapter } from './covenscan/covenscan-adapter.js';
 import { KamiSamaExplorerAdapter } from './kamisamaexplorer/kamisamaexplorer-adapter.js';
 import { MrTenzusAdapter } from './mrtenzus/mrtenzus-adapter.js';
 import { NinjaScanAdapter } from './ninjascan/ninjascan-adapter.js';
-import { YuriVersoAdapter } from './yuriverso/yuriverso-adapter.js';
-import { AcervoHentaiAdapter } from './acervohentai/acervohentai-adapter.js';
-import { InkapkAdapter } from './inkapk/inkapk-adapter.js';
 import { ApeComicsAdapter } from './apecomics/apecomics-adapter.js';
 import { PizzariaScanAdapter } from './pizzariascan/pizzariascan-adapter.js';
-import { YaoiFanClubAdapter } from './yaoifanclub/yaoifanclub-adapter.js';
 import { MangaOnlineTvAdapter } from './mangaonlinetv/mangaonlinetv-adapter.js';
-import { MangaOnlineAdapter } from './mangaonline/mangaonline-adapter.js';
 import { PinkRosaAdapter } from './pinkrosa/pinkrosa-adapter.js';
 import { GalaxScanlatorAdapter } from './galaxscanlator/galaxscanlator-adapter.js';
 import { ApenasUmaFaAdapter } from './apenasumafa/apenasumafa-adapter.js';
 import { Ler999Adapter } from './ler999/ler999-adapter.js';
 import { MaidScanAdapter } from './maidscan/maidscan-adapter.js';
-import { VegitoonsAdapter } from './vegitoons/vegitoons-adapter.js';
 import { HentaiHomeAdapter } from './hentaihome/hentaihome-adapter.js';
 import { MundoHentaiAdapter } from './mundohentai/mundohentai-adapter.js';
 import { HentaiSeasonAdapter } from './hentaiseason/hentaiseason-adapter.js';
@@ -48,10 +40,7 @@ import { HentaiFusionAdapter } from './hentaifusion/hentaifusion-adapter.js';
 import { ZettaHqAdapter } from './zettahq/zettahq-adapter.js';
 import { NHentaiBrAdapter } from './nhentaibr/nhentaibr-adapter.js';
 import { BrasilHentaiAdapter } from './brasilhentai/brasilhentai-adapter.js';
-import { PointZeroToonsAdapter } from './pointzerotoons/pointzerotoons-adapter.js';
-import { GeassComicsAdapter } from './geasscomics/geasscomics-adapter.js';
 import { BRScansAdapter } from './brscans/brscans-adapter.js';
-import { MangaStopAdapter } from './mangastop/mangastop-adapter.js';
 import { ImperioDaBritanniaAdapter } from './imperiodabritannia/imperiodabritannia-adapter.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 
@@ -75,27 +64,20 @@ export class SourceRegistry {
       this.register(new MonteTaiAdapter(rateLimiter));
       this.register(new NebulosaScanAdapter(rateLimiter));
       this.register(new NocturneSummerAdapter(rateLimiter));
-      this.register(new ArthurScanAdapter(rateLimiter));
       this.register(new BorutoExplorerAdapter(rateLimiter));
       this.register(new CovenScanAdapter(rateLimiter));
       this.register(new KamiSamaExplorerAdapter(rateLimiter));
       this.register(new MrTenzusAdapter(rateLimiter));
       this.register(new NinjaScanAdapter(rateLimiter));
-      this.register(new YuriVersoAdapter(rateLimiter));
       this.register(new ApeComicsAdapter(rateLimiter));
       this.register(new PizzariaScanAdapter(rateLimiter));
       this.register(new MangaOnlineTvAdapter(rateLimiter));
-      this.register(new MangaOnlineAdapter(rateLimiter));
       this.register(new PinkRosaAdapter(rateLimiter));
       this.register(new GalaxScanlatorAdapter(rateLimiter));
       this.register(new ApenasUmaFaAdapter(rateLimiter));
       this.register(new Ler999Adapter(rateLimiter));
       this.register(new MaidScanAdapter(rateLimiter));
-      this.register(new VegitoonsAdapter(rateLimiter));
-      this.register(new PointZeroToonsAdapter(rateLimiter));
-      this.register(new GeassComicsAdapter(rateLimiter));
       this.register(new BRScansAdapter(rateLimiter));
-      this.register(new MangaStopAdapter(rateLimiter));
       this.register(new ImperioDaBritanniaAdapter(rateLimiter));
 
       // Register adult sources (+18 / Adulto / Yaoi / Hentai)
@@ -105,10 +87,6 @@ export class SourceRegistry {
       this.register(new TankouHentaiAdapter(rateLimiter));
       this.register(new CafeComYaoiAdapter(rateLimiter));
       this.register(new HotCabaretScanAdapter(rateLimiter));
-      this.register(new AmuyAdapter(rateLimiter));
-      this.register(new AcervoHentaiAdapter(rateLimiter));
-      this.register(new InkapkAdapter(rateLimiter));
-      this.register(new YaoiFanClubAdapter(rateLimiter));
       this.register(new HentaiHomeAdapter(rateLimiter));
       this.register(new MundoHentaiAdapter(rateLimiter));
       this.register(new HentaiSeasonAdapter(rateLimiter));
@@ -134,11 +112,6 @@ export class SourceRegistry {
     }
     if (adapter.id === 'hanamiheaven') {
       this.adapters.set('noindexscan', adapter);
-    }
-    if (adapter.id === 'pointzerotoons') {
-      this.adapters.set('kitsuneyako', adapter);
-      this.adapters.set('pointzero', adapter);
-      this.adapters.set('point_zero_toons', adapter);
     }
   }
 
