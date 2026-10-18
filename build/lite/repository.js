@@ -31,6 +31,7 @@ const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
 const METADATA_REPLAY_V4_SOURCE_CURSOR_KEY = 'metadata_replay_v4_source_cursor';
 const METADATA_REPLAY_V4_INTERVAL_MS = 20_000;
+const METADATA_REPLAY_V4_WINDOWS_PER_SOURCE_TURN = 4;
 // Sources with usable stored metadata are sparse. Twelve indexed windows are
 // still a bounded serial probe (at most 1,536 mappings per producer turn),
 // but avoid spending several minutes rotating across empty providers before
@@ -521,37 +522,44 @@ export class LiteRepository {
             // Source and mapping cursors both ride existing narrow indexes. One
             // source window is inspected per producer turn, so neither a JSON
             // predicate nor a provider with many mappings can degrade into a full
-            // catalog scan. At most twelve narrow windows are probed in one turn so
-            // sparse sources cannot collapse the intended three-per-minute drain.
-            // Rotating the source cursor also prevents a large source from starving
-            // a later one.
+            // catalog scan. A turn probes at most twelve windows in three bounded
+            // four-window source slices: a sparse large provider advances far
+            // enough to find deep evidence, while rotation still prevents it from
+            // monopolising the historical lane.
             const sourceCursor = await client.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_SOURCE_CURSOR_KEY]);
             let sourceAfter = sourceCursor.rows[0]?.value || null;
+            let activeSourceId = null;
+            let activeSourceWindows = 0;
             for (let probe = 0; probe < METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN && !row; probe++) {
-                const source = await client.query(`
-          WITH after_cursor AS (
-            SELECT s.id FROM importer_sources s
-            WHERE s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
-              AND s.id>$2::text
-              AND NOT EXISTS (SELECT 1 FROM settings completed
-                WHERE completed.key=$1 || s.id AND completed.value='complete')
-            ORDER BY s.id LIMIT 1
-          ), wrapped AS (
-            SELECT s.id FROM importer_sources s
-            WHERE NOT EXISTS (SELECT 1 FROM after_cursor)
-              AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
-              AND NOT EXISTS (SELECT 1 FROM settings completed
-                WHERE completed.key=$1 || s.id AND completed.value='complete')
-            ORDER BY s.id LIMIT 1
-          ) SELECT id FROM after_cursor UNION ALL SELECT id FROM wrapped LIMIT 1`, [METADATA_REPLAY_V4_SOURCE_DONE_PREFIX, sourceAfter || '']);
-                const sourceId = source.rows[0]?.id;
+                let sourceId = activeSourceId;
                 if (!sourceId) {
-                    exhaustedAllSources = true;
-                    break;
+                    const source = await client.query(`
+            WITH after_cursor AS (
+              SELECT s.id FROM importer_sources s
+              WHERE s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+                AND s.id>$2::text
+                AND NOT EXISTS (SELECT 1 FROM settings completed
+                  WHERE completed.key=$1 || s.id AND completed.value='complete')
+              ORDER BY s.id LIMIT 1
+            ), wrapped AS (
+              SELECT s.id FROM importer_sources s
+              WHERE NOT EXISTS (SELECT 1 FROM after_cursor)
+                AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+                AND NOT EXISTS (SELECT 1 FROM settings completed
+                  WHERE completed.key=$1 || s.id AND completed.value='complete')
+              ORDER BY s.id LIMIT 1
+            ) SELECT id FROM after_cursor UNION ALL SELECT id FROM wrapped LIMIT 1`, [METADATA_REPLAY_V4_SOURCE_DONE_PREFIX, sourceAfter || '']);
+                    sourceId = source.rows[0]?.id || null;
+                    if (!sourceId) {
+                        exhaustedAllSources = true;
+                        break;
+                    }
+                    sourceAfter = sourceId;
+                    activeSourceId = sourceId;
+                    activeSourceWindows = 0;
+                    await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [METADATA_REPLAY_V4_SOURCE_CURSOR_KEY, sourceId]);
                 }
-                sourceAfter = sourceId;
-                await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
-          ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [METADATA_REPLAY_V4_SOURCE_CURSOR_KEY, sourceId]);
                 const cursor = await client.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`]);
                 const candidate = await client.query(`
           WITH scanned AS (
@@ -588,13 +596,18 @@ export class LiteRepository {
                 if (!result?.tail_source_work_id) {
                     await client.query(`INSERT INTO settings(key,value) VALUES($1,'complete')
             ON CONFLICT(key) DO UPDATE SET value='complete'`, [`${METADATA_REPLAY_V4_SOURCE_DONE_PREFIX}${sourceId}`]);
+                    activeSourceId = null;
+                    activeSourceWindows = 0;
                     continue;
                 }
                 if (!result.source || !result.source_work_id || !result.work_id || !result.reason) {
                     await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`, result.tail_source_work_id]);
-                    // The source still has later windows. Advance it and inspect the
-                    // next bounded source window without treating this as completion.
+                    activeSourceWindows += 1;
+                    if (activeSourceWindows >= METADATA_REPLAY_V4_WINDOWS_PER_SOURCE_TURN) {
+                        activeSourceId = null;
+                        activeSourceWindows = 0;
+                    }
                     continue;
                 }
                 row = { source: result.source, source_work_id: result.source_work_id, work_id: result.work_id, reason: result.reason };
