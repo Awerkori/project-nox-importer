@@ -508,11 +508,11 @@ export class LiteRepository {
      * explicitly enabled exclusive operation.
      */
     async refillStoredMetadataEnrichmentV4(maxPending = 2, minimumIntervalMs = METADATA_REPLAY_V4_INTERVAL_MS, sourceWindowsPerTurn = METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN) {
-        // Exclusive mode can safely keep three mappings from *different canonical
+        // Exclusive mode can safely keep four mappings from *different canonical
         // works* in flight. The candidate query below excludes the work_id of an
         // outstanding V4 task; per-work serialization in the runtime is the
         // final correctness fence.
-        const ceiling = Math.max(1, Math.min(3, maxPending));
+        const ceiling = Math.max(1, Math.min(4, maxPending));
         const client = await this.sourceMetadataDb.connect();
         try {
             await client.query('BEGIN');
