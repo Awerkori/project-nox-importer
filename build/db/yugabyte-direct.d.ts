@@ -8,10 +8,9 @@ export declare function getSqlFingerprint(queryArg: unknown): string;
 /**
  * Protected connections for low-priority historical metadata bookkeeping.
  * Normal operation admits one task; the explicit V4-exclusive campaign may
- * use two distinct-work merges without borrowing the public/chapter pool.
- * A third connection is reserved for the serialized durable producer: with
- * only two connections, refilling a successor waits behind both active
- * merges and leaves the exclusive lane intermittently empty.
+ * use three distinct-work merges without borrowing the public/chapter pool.
+ * One additional connection is reserved for the serialized durable producer,
+ * so refilling a successor never waits behind every active merge.
  */
 export declare function createYugabyteMetadataPool(): pg.Pool;
 export declare function getYugabytePool(): pg.Pool;
