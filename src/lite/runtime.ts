@@ -783,10 +783,10 @@ export class ImporterLiteRuntime {
         : STORED_METADATA_REPLAY_V4_PRESSURED_INTERVAL_MS;
     const capacity = this.metadataReplayV4Exclusive.enabled ? 4 : 1;
     let admitted = 0;
-    // The repository intentionally inserts one cursor-selected mapping per
-    // transaction. Fill each exclusive seat explicitly, still through
-    // the single producer gate, so it cannot race into the same canonical
-    // work.
+    // The repository may fill one bounded, distinct-work source burst per
+    // transaction. Repeat only until the exclusive capacity is full; every
+    // call remains behind the single producer gate and preserves per-work
+    // serialization.
     for (let slot = 0; slot < capacity; slot++) {
       const inserted = this.metadataReplayV4Exclusive.enabled
         ? await this.queue.refillStoredMetadataEnrichmentV4(
