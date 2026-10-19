@@ -1782,64 +1782,63 @@ export class LiteRepository {
                     return 1;
                 }
             }
-            // Keep one probe for a work lacking active mappings, but reserve the
-            // second durable seat for the most-read aliasless public work. Otherwise
-            // the 162 unlinked works delay high-value confirmed mappings for an
-            // entire catalog lap. Both paths remain part of one full-catalog pass.
-            const candidate = await client.query(`
-        WITH active_mapping AS (
-          SELECT DISTINCT m.work_id
-          FROM importer_work_mappings m
-          JOIN importer_sources s ON s.id=m.source
-          LEFT JOIN importer_lite_source_health h ON h.source=s.id
-          WHERE m.work_id IS NOT NULL AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-            AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
-            AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-        ), unlinked AS (
-          SELECT w.id::text AS work_id,0 AS lane
+            // Keep one probe for a work lacking an operational mapping and one for
+            // a popular, confirmed mapping. Do not materialize the complete mapping
+            // set here: under YSQL pressure that CTE became the global campaign's
+            // bottleneck. Both queries use the published/views order and the narrow
+            // active-work index, then stop at one candidate.
+            const activeMappingForWork = (negated) => `${negated ? 'NOT ' : ''}EXISTS (
+        SELECT 1
+        FROM importer_work_mappings m
+        JOIN importer_sources s ON s.id=m.source
+        LEFT JOIN importer_lite_source_health h ON h.source=s.id
+        WHERE m.work_id=w.id
+          AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+          AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+          AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+      )`;
+            const selectCandidate = async (lane, excludedWorkId) => {
+                const hasMapping = lane === 'popular';
+                return client.query(`
+          SELECT w.id::text AS work_id
           FROM works w
           WHERE w.published=true
-            AND NOT EXISTS (SELECT 1 FROM active_mapping active WHERE active.work_id=w.id)
+            AND COALESCE(array_length(w.aliases,1),0)=0
+            AND ($2::uuid IS NULL OR w.id<>$2::uuid)
             AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks prior
               WHERE prior.idempotency_key=$1 || w.id::text)
-          ORDER BY w.views_total DESC,w.id LIMIT 1
-        ), popular_aliasless AS (
-          SELECT w.id::text AS work_id,1 AS lane
-          FROM works w
-          WHERE w.published=true AND COALESCE(array_length(w.aliases,1),0)=0
-            AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks prior
-              WHERE prior.idempotency_key=$1 || w.id::text)
-            AND NOT EXISTS (SELECT 1 FROM unlinked selected WHERE selected.work_id=w.id::text)
-          ORDER BY w.views_total DESC,w.id LIMIT 1
-        )
-        SELECT work_id FROM (
-          SELECT work_id,lane FROM unlinked
-          UNION ALL
-          SELECT work_id,lane FROM popular_aliasless
-        ) candidates
-        -- When only one durable seat opens, fill the lane that is not already
-        -- represented. Otherwise each completion would repeatedly refill the
-        -- unmapped lane and popular linked works would never begin coverage.
-        WHERE (lane=0 AND $3::boolean) OR (lane=1 AND $4::boolean)
-        ORDER BY lane LIMIT $2`, [
-                METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX,
-                capacity - pendingCount,
-                pendingCount - Number(pending.rows[0]?.linked || 0) === 0,
-                Number(pending.rows[0]?.linked || 0) === 0,
-            ]);
-            if (!candidate.rowCount) {
+            AND ${activeMappingForWork(!hasMapping)}
+          ORDER BY w.views_total DESC,w.id LIMIT 1`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, excludedWorkId]);
+            };
+            const available = capacity - pendingCount;
+            const pendingLinked = Number(pending.rows[0]?.linked || 0);
+            const pendingUnlinked = pendingCount - pendingLinked;
+            const laneOrder = [
+                ...(pendingUnlinked === 0 ? ['unlinked'] : []),
+                ...(pendingLinked === 0 ? ['popular'] : []),
+            ];
+            const selected = [];
+            for (const lane of laneOrder) {
+                if (selected.length >= available)
+                    break;
+                const candidate = await selectCandidate(lane, selected[0]?.work_id || null);
+                if (candidate.rows[0])
+                    selected.push({ ...candidate.rows[0], lane });
+            }
+            if (!selected.length) {
                 await client.query('COMMIT');
                 return 0;
             }
             let admitted = 0;
-            for (const row of candidate.rows) {
+            for (const row of selected) {
                 const workId = String(row.work_id);
                 const inserted = await client.query(`INSERT INTO importer_lite_tasks
           (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
           VALUES('CATALOG',$1::uuid,$2,3,3,$3,now(),4,$4::jsonb,'{}'::jsonb,false)
           ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
                     workId, `work:${workId}`, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}${workId}`,
-                    JSON.stringify({ metadataCrossSourceDiscovery: true, metadataEnrichmentVersion: METADATA_ALIAS_COVERAGE_V5_VERSION }),
+                    JSON.stringify({ metadataCrossSourceDiscovery: true, metadataEnrichmentVersion: METADATA_ALIAS_COVERAGE_V5_VERSION,
+                        discoveryLane: row.lane }),
                 ]);
                 if (inserted.rowCount) {
                     admitted += 1;
