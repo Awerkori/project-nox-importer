@@ -372,7 +372,7 @@ export class LiteRepository {
       // stalling every other V5 candidate behind it.
       const candidates: CandidateRow[] = [];
       const candidateCapacity = admissionLimit - priorityCandidates.length;
-      const perSourceLimit = isTurbo ? Math.min(12, candidateCapacity) : 1;
+      const perSourceLimit = isTurbo ? candidateCapacity : 1;
       for (const source of probeSources) {
         if (candidates.length >= candidateCapacity) break;
         const needed = Math.min(perSourceLimit, candidateCapacity - candidates.length);

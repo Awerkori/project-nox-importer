@@ -901,6 +901,7 @@ export class ImporterLiteRuntime {
             }
             this.sourceMetadataLaneGate.setCapacity(next.enabled ? 16 : 4);
             this.sourceMetadataGate.setCapacity(next.enabled ? 28 : 4);
+            this.sourceMetadataPreparationGate.setCapacity(next.enabled ? 12 : 1);
             this.sourceMetadataPersistenceGate.setCapacity(next.enabled ? 6 : 1);
             this.crossSourceDiscoveryLaneGate.setCapacity(next.enabled ? 20 : 2);
             this.crossSourceMetadataGate.setCapacity(next.enabled ? 20 : 2);
