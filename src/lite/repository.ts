@@ -33,6 +33,12 @@ const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK = 2;
 // repeatedly scanning the catalogue.
 const SOURCE_METADATA_SOURCE_PROBE_LIMIT = 2;
 const METADATA_REPLAY_V4_ENABLED_KEY = 'metadata_replay_v4_enabled';
+// V4 replays evidence already stored in YSQL. Once it has exhausted that
+// finite input, this version marker switches the existing source-refetch lane
+// to a real, one-pass observation of every confirmed active mapping. Keeping
+// the marker on the durable enrichment row makes coverage measurable without
+// turning an old NO_ALIASES classification into a permanent conclusion.
+const METADATA_ALIAS_COVERAGE_V5_VERSION = 5;
 const METADATA_REPLAY_V4_EXCLUSIVE_MODE_KEY = 'metadata_replay_v4_exclusive_mode';
 const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
@@ -165,11 +171,29 @@ export class LiteRepository {
     sourceProbeLimit = SOURCE_METADATA_SOURCE_PROBE_LIMIT,
     preferredSource?: string,
   ): Promise<number> {
-    const ceiling = Math.max(1, Math.min(2, maxPending));
     const probeLimit = Math.max(1, Math.min(SOURCE_METADATA_SOURCE_PROBE_LIMIT, sourceProbeLimit));
     const client = await this.sourceMetadataDb.connect();
     try {
       await client.query('BEGIN');
+      // A completed V4 is a durable handoff, not evidence that aliases were
+      // discovered. Version five therefore reuses this carefully bounded
+      // source lane to fetch every confirmed mapping once from its provider.
+      // Before that handoff, retain the old two-seat v3 behaviour unchanged.
+      const replay = await client.query<{ value: string }>(`SELECT value FROM settings
+        WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_ENABLED_KEY]);
+      const coverageVersion = replay.rows[0]?.value === 'complete' ? METADATA_ALIAS_COVERAGE_V5_VERSION : 3;
+      const isCoverageV5 = coverageVersion === METADATA_ALIAS_COVERAGE_V5_VERSION;
+      const ceiling = Math.max(1, Math.min(isCoverageV5 ? 4 : 2, maxPending));
+      const sourceTaskPrefix = `lite:metadata:source:v${coverageVersion}:`;
+      const stateEligible = isCoverageV5
+        ? `(status.source IS NULL OR status.version<${METADATA_ALIAS_COVERAGE_V5_VERSION}
+            OR status.aliases_state='PENDING' OR status.tags_state='PENDING'
+            OR ((status.aliases_state='EXTERNAL_BLOCKED' OR status.tags_state='EXTERNAL_BLOCKED')
+              AND status.attempt_count<4 AND COALESCE(status.next_retry_at,'-infinity'::timestamptz)<=now()))`
+        : `(status.source IS NULL OR status.aliases_state='PENDING' OR status.tags_state='PENDING'
+            OR (status.version<3 AND (status.aliases_state='PARSER_ERROR' OR status.tags_state='PARSER_ERROR'))
+            OR ((status.aliases_state='EXTERNAL_BLOCKED' OR status.tags_state='EXTERNAL_BLOCKED')
+              AND COALESCE(status.next_retry_at,'-infinity'::timestamptz)<=now()))`;
       const pending = await client.query<{ count: string }>(`SELECT count(*)::int AS count
         FROM importer_lite_tasks
         WHERE task_type='CATALOG' AND (state='READY'
@@ -293,12 +317,12 @@ export class LiteRepository {
               WHERE m.source=turn.source AND m.work_id IS NOT NULL
                 AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
                 AND (turn.last_source_work_id IS NULL OR m.source_work_id>turn.last_source_work_id)
-                AND (status.source IS NULL OR status.aliases_state='PENDING' OR status.tags_state='PENDING'
-                  OR (status.version<3 AND (status.aliases_state='PARSER_ERROR' OR status.tags_state='PARSER_ERROR'))
-                  OR ((status.aliases_state='EXTERNAL_BLOCKED' OR status.tags_state='EXTERNAL_BLOCKED')
-                    AND COALESCE(status.next_retry_at,'-infinity'::timestamptz)<=now()))
+                AND ${stateEligible}
                 AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
-                  WHERE task.idempotency_key='lite:metadata:source:v3:' || m.source || ':' || m.source_work_id)
+                  WHERE task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')
+                    AND task.payload ? 'metadataSourceRefresh'
+                    AND task.payload->>'source'=m.source
+                    AND task.payload->>'sourceWorkId'=m.source_work_id)
               ORDER BY m.source_work_id LIMIT 32
             ), wrapped AS (
               SELECT m.source_work_id,m.work_id,w.aliases
@@ -310,12 +334,12 @@ export class LiteRepository {
                 AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
                 AND m.source_work_id<=turn.last_source_work_id
                 AND NOT EXISTS (SELECT 1 FROM after_cursor)
-                AND (status.source IS NULL OR status.aliases_state='PENDING' OR status.tags_state='PENDING'
-                  OR (status.version<3 AND (status.aliases_state='PARSER_ERROR' OR status.tags_state='PARSER_ERROR'))
-                  OR ((status.aliases_state='EXTERNAL_BLOCKED' OR status.tags_state='EXTERNAL_BLOCKED')
-                    AND COALESCE(status.next_retry_at,'-infinity'::timestamptz)<=now()))
+                AND ${stateEligible}
                 AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
-                  WHERE task.idempotency_key='lite:metadata:source:v3:' || m.source || ':' || m.source_work_id)
+                  WHERE task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')
+                    AND task.payload ? 'metadataSourceRefresh'
+                    AND task.payload->>'source'=m.source
+                    AND task.payload->>'sourceWorkId'=m.source_work_id)
               ORDER BY m.source_work_id LIMIT 32
             )
             SELECT source_work_id,work_id,aliases,0 AS cursor_turn FROM after_cursor
@@ -349,8 +373,8 @@ export class LiteRepository {
           (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
           VALUES('CATALOG',$1::uuid,$2,3,3,$3,now(),32,$4::jsonb,'{}'::jsonb,false)
           ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
-          workId, workKey, `lite:metadata:source:v3:${source}:${sourceWorkId}`,
-          JSON.stringify({ source, sourceWorkId, metadataSourceRefresh: true, metadataEnrichmentVersion: 3 }),
+          workId, workKey, `${sourceTaskPrefix}${source}:${sourceWorkId}`,
+          JSON.stringify({ source, sourceWorkId, metadataSourceRefresh: true, metadataEnrichmentVersion: coverageVersion }),
         ]);
         for (const task of inserted.rows) await this.refreshReadyWork(client, String(task.work_key));
       }
@@ -368,6 +392,7 @@ export class LiteRepository {
     tagsState: 'ENRICHED' | 'NO_TAGS' | 'EXTERNAL_BLOCKED' | 'PARSER_ERROR';
     aliasesAdded?: number; tagsAdded?: number; error?: string | null; nextRetryAt?: Date | null;
     rawMetadata?: Record<string, unknown>;
+    version?: number;
   }): Promise<void> {
     const client = await this.sourceMetadataDb.connect();
     try {
@@ -381,15 +406,18 @@ export class LiteRepository {
       await client.query(`INSERT INTO importer_lite_metadata_enrichment
         (source,source_work_id,work_id,aliases_state,tags_state,aliases_added,tags_added,attempt_count,
         last_checked_at,next_retry_at,last_error,version,updated_at)
-        VALUES($1,$2,$3::uuid,$4,$5,$6,$7,1,now(),$8,$9,3,now())
+        VALUES($1,$2,$3::uuid,$4,$5,$6,$7,1,now(),$8,$9,$10,now())
         ON CONFLICT(source,source_work_id) DO UPDATE SET work_id=excluded.work_id,
           aliases_state=excluded.aliases_state,tags_state=excluded.tags_state,
           aliases_added=importer_lite_metadata_enrichment.aliases_added+excluded.aliases_added,
           tags_added=importer_lite_metadata_enrichment.tags_added+excluded.tags_added,
-          attempt_count=importer_lite_metadata_enrichment.attempt_count+1,
+          attempt_count=CASE WHEN importer_lite_metadata_enrichment.version<excluded.version THEN 1
+            ELSE importer_lite_metadata_enrichment.attempt_count+1 END,
           last_checked_at=now(),next_retry_at=excluded.next_retry_at,last_error=excluded.last_error,
-        version=3,updated_at=now()`, [input.source,input.sourceWorkId,input.workId,input.aliasesState,input.tagsState,
-        Math.max(0,input.aliasesAdded || 0),Math.max(0,input.tagsAdded || 0),input.nextRetryAt || null,input.error || null]);
+        version=excluded.version,updated_at=now()
+        WHERE excluded.version>=importer_lite_metadata_enrichment.version`, [input.source,input.sourceWorkId,input.workId,input.aliasesState,input.tagsState,
+        Math.max(0,input.aliasesAdded || 0),Math.max(0,input.tagsAdded || 0),input.nextRetryAt || null,input.error || null,
+        Math.max(3, Math.trunc(Number(input.version) || 3))]);
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
@@ -403,7 +431,7 @@ export class LiteRepository {
   async completeSourceMetadataRefresh(task: LiteTask, workerId: string, input: {
     source: string; sourceWorkId: string; workId: string;
     aliasesState: 'ENRICHED' | 'NO_ALIASES'; tagsState: 'ENRICHED' | 'NO_TAGS';
-    aliasesAdded: number; tagsAdded: number; rawMetadata: Record<string, unknown>;
+    aliasesAdded: number; tagsAdded: number; rawMetadata: Record<string, unknown>; version?: number;
   }, checkpoint: Record<string, unknown>): Promise<boolean> {
     const transactionStartedAt = performance.now();
     const client = await this.sourceMetadataDb.connect();
@@ -416,15 +444,18 @@ export class LiteRepository {
       await client.query(`INSERT INTO importer_lite_metadata_enrichment
         (source,source_work_id,work_id,aliases_state,tags_state,aliases_added,tags_added,attempt_count,
         last_checked_at,next_retry_at,last_error,version,updated_at)
-        VALUES($1,$2,$3::uuid,$4,$5,$6,$7,1,now(),NULL,NULL,3,now())
+        VALUES($1,$2,$3::uuid,$4,$5,$6,$7,1,now(),NULL,NULL,$8,now())
         ON CONFLICT(source,source_work_id) DO UPDATE SET work_id=excluded.work_id,
           aliases_state=excluded.aliases_state,tags_state=excluded.tags_state,
           aliases_added=importer_lite_metadata_enrichment.aliases_added+excluded.aliases_added,
           tags_added=importer_lite_metadata_enrichment.tags_added+excluded.tags_added,
-          attempt_count=importer_lite_metadata_enrichment.attempt_count+1,
-          last_checked_at=now(),next_retry_at=NULL,last_error=NULL,version=3,updated_at=now()`,
+          attempt_count=CASE WHEN importer_lite_metadata_enrichment.version<excluded.version THEN 1
+            ELSE importer_lite_metadata_enrichment.attempt_count+1 END,
+          last_checked_at=now(),next_retry_at=NULL,last_error=NULL,
+          version=excluded.version,updated_at=now()
+        WHERE excluded.version>=importer_lite_metadata_enrichment.version`,
         [input.source,input.sourceWorkId,input.workId,input.aliasesState,input.tagsState,
-          Math.max(0,input.aliasesAdded),Math.max(0,input.tagsAdded)]);
+          Math.max(0,input.aliasesAdded),Math.max(0,input.tagsAdded),Math.max(3, Math.trunc(Number(input.version) || 3))]);
       await client.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
         VALUES($1,'HEALTHY',NULL,0,NULL)
         ON CONFLICT(source) DO UPDATE SET health='HEALTHY',cooldown_until=NULL,

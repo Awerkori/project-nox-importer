@@ -99,6 +99,7 @@ export declare class LiteRepository {
         error?: string | null;
         nextRetryAt?: Date | null;
         rawMetadata?: Record<string, unknown>;
+        version?: number;
     }): Promise<void>;
     /** Commit a successful source refresh, its durable classification, source
      * health and task completion together. This avoids two YSQL transactions
@@ -112,6 +113,7 @@ export declare class LiteRepository {
         aliasesAdded: number;
         tagsAdded: number;
         rawMetadata: Record<string, unknown>;
+        version?: number;
     }, checkpoint: Record<string, unknown>): Promise<boolean>;
     /**
      * Incrementally replays explicit aliases/genres already stored on legacy

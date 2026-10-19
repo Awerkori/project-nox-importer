@@ -557,6 +557,49 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows).toEqual([{ source:'001-metadata-live' }]);
   });
 
+  it('rechecks a formerly NO_ALIASES active mapping after V4 completes', async () => {
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id=$1`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000314','source-a','v5-recheck',$1::uuid,'p1-a','P1 A','SYNCED')`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_lite_metadata_enrichment
+      (source,source_work_id,work_id,aliases_state,tags_state,version)
+      VALUES('source-a','v5-recheck',$1::uuid,'NO_ALIASES','NO_TAGS',3)`, [ids.p1a]);
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','complete')`);
+
+    expect(await repo.refillSourceMetadataEnrichment(4, 1)).toBe(1);
+    expect((await db.query(`SELECT idempotency_key,payload->>'metadataEnrichmentVersion' AS version
+      FROM importer_lite_tasks WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows)
+      .toEqual([{ idempotency_key:'lite:metadata:source:v5:source-a:v5-recheck', version:'5' }]);
+  });
+
+  it('persists aliases found by a V5 external recheck', async () => {
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id=$1`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000315','source-a','v5-persist',$1::uuid,'p1-a','P1 A','SYNCED')`, [ids.p1a]);
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:'lite:metadata:source:v5:source-a:v5-persist',
+      payload:{source:'source-a',sourceWorkId:'v5-persist',metadataSourceRefresh:true,metadataEnrichmentVersion:5} });
+    const task = await repo.claimSourceMetadataRefresh('metadata-v5-worker', 60);
+    const adapter = { id:'source-a',baseUrl:'https://source-a.example',fetchWorkDetails:async () => ({
+      sourceWorkId:'v5-persist',title:'P1 A',slug:'p1-a',alternativeTitles:['P1 V5 Alias'],genres:[],raw:{},
+    }) };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, { sql: (text: string, values?: unknown[]) => db.query(text, values) },
+      { get: () => adapter } as unknown as SourceRegistry,
+      { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
+    );
+    await (runtime as any).catalog(task,'metadata-v5-worker');
+
+    expect((await db.query(`SELECT aliases FROM works WHERE id=$1`, [ids.p1a])).rows[0].aliases).toContain('P1 V5 Alias');
+    expect((await db.query(`SELECT aliases_state,version FROM importer_lite_metadata_enrichment
+      WHERE source='source-a' AND source_work_id='v5-persist'`)).rows[0])
+      .toMatchObject({ aliases_state:'ENRICHED',version:5 });
+  });
+
   it('briefly reuses a productive source without losing the durable cursor frontier', async () => {
     await db.query(`INSERT INTO importer_sources(id) VALUES('sticky-metadata-source')`);
     await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
