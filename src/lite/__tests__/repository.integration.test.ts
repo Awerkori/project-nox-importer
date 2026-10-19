@@ -3992,6 +3992,32 @@ describe('LiteRepository against the additive Lite migration', () => {
     schedule.mockRestore();
   });
 
+  it('rearms the exclusive V4 tick before a slow turn completes', () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    let releaseTurn!: () => void;
+    (runtime as any).metadataReplayV4Exclusive = { enabled: true, intervalMs: 1_000 };
+    (runtime as any).isRuntimeLeader = true;
+    (runtime as any).runMetadataTurn = vi.fn(() => new Promise<void>((resolve) => { releaseTurn = resolve; }));
+    const schedule = vi.spyOn(globalThis, 'setTimeout');
+
+    (runtime as any).scheduleMetadataTurn();
+    const firstTimer = (runtime as any).metadataTurnTimer;
+    const callback = schedule.mock.calls[0][0] as () => void;
+    clearTimeout(firstTimer);
+    callback();
+
+    expect((runtime as any).runMetadataTurn).toHaveBeenCalledTimes(1);
+    expect(schedule).toHaveBeenCalledTimes(2);
+    releaseTurn();
+    (runtime as any).isRuntimeLeader = false;
+    runtime.stop();
+    schedule.mockRestore();
+  });
+
   it('claims ready exclusive V4 work before a non-blocking producer refill', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,

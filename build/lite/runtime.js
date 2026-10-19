@@ -425,8 +425,10 @@ export class ImporterLiteRuntime {
      * The normal importer retains its two-second metadata cadence. During the
      * explicit V4 campaign the durable one-second admission fence must not be
      * hidden behind that slower timer: a completed local merge would otherwise
-     * leave all exclusive seats idle for up to another second. A recursive
-     * timeout also prevents timer overlap from accumulating producer probes.
+     * leave all exclusive seats idle for up to another second. Schedule the
+     * successor before starting the bounded turn, so a local merge does not
+     * stretch the one-second cadence; the replay and producer gates fence any
+     * overlap.
      */
     scheduleMetadataTurn() {
         if (this.stopped)
@@ -434,10 +436,10 @@ export class ImporterLiteRuntime {
         const delayMs = this.metadataReplayV4Exclusive.enabled
             ? Math.max(250, Math.min(STORED_METADATA_REPLAY_INTERVAL_MS, this.metadataReplayV4Exclusive.intervalMs))
             : STORED_METADATA_REPLAY_INTERVAL_MS;
-        this.metadataTurnTimer = setTimeout(async () => {
-            if (this.isRuntimeLeader)
-                await this.runMetadataTurn();
+        this.metadataTurnTimer = setTimeout(() => {
             this.scheduleMetadataTurn();
+            if (this.isRuntimeLeader)
+                void this.runMetadataTurn();
         }, delayMs);
         this.metadataTurnTimer.unref();
     }
