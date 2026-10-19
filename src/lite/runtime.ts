@@ -2017,6 +2017,10 @@ export class ImporterLiteRuntime {
   private async refreshMappingMetadataFromSource(task: LiteTask, workerId: string, source: string, sourceWorkId: string,
     initialTimings: Record<string, number | null> = {}): Promise<void> {
     const totalStartedAt = performance.now();
+    // V5 is the explicit external-coverage pass that follows V4.  Older
+    // source-refresh tasks retain their v3 semantics, including their
+    // existing retry policy, so this campaign cannot rewrite history.
+    const metadataVersion = task.payload?.metadataEnrichmentVersion === 5 ? 5 : 3;
     const timings: Record<string, number | null> = { ...initialTimings };
     const timePhase = async <T>(name: string, operation: () => Promise<T>): Promise<T> => {
       const startedAt = performance.now();
@@ -2042,9 +2046,12 @@ export class ImporterLiteRuntime {
       if (mapping.rows[0]) await this.queue.recordSourceMetadataEnrichment({
         source, sourceWorkId, workId: String(mapping.rows[0].work_id), aliasesState: 'EXTERNAL_BLOCKED',
         tagsState: 'EXTERNAL_BLOCKED', error: 'SOURCE_ADAPTER_MISSING', nextRetryAt: new Date(Date.now() + 6 * 60 * 60_000),
+        version: metadataVersion,
       });
-      await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: 'SOURCE_ADAPTER_MISSING',
-        nextRunAt: new Date(Date.now() + 6 * 60 * 60_000), resetAttempts: true });
+      await this.queue.finish(task, workerId, metadataVersion >= 5
+        ? { state: 'BLOCKED', reason: 'METADATA_SOURCE_ADAPTER_MISSING' }
+        : { state: 'RETRY_WAIT', reason: 'SOURCE_ADAPTER_MISSING',
+            nextRunAt: new Date(Date.now() + 6 * 60 * 60_000), resetAttempts: true });
       return;
     }
     let mappingWorkId = '';
@@ -2089,11 +2096,15 @@ export class ImporterLiteRuntime {
       if (!runnable) {
         const nextRunAt = cooldownUntil && cooldownUntil > new Date()
           ? cooldownUntil : new Date(Date.now() + 6 * 60 * 60_000);
+        const unavailableCount = Math.max(0, Number(task.checkpoint.sourceUnavailableCount) || 0) + 1;
         await this.sourceMetadataPersistenceGate.runExclusive(() => this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
           aliasesState: 'EXTERNAL_BLOCKED', tagsState: 'EXTERNAL_BLOCKED',
-          error: `SOURCE_NOT_READY:${status || 'MISSING'}`, nextRetryAt: nextRunAt }));
-        await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: `SOURCE_NOT_READY:${status || 'MISSING'}`,
-          nextRunAt, resetAttempts: true });
+          error: `SOURCE_NOT_READY:${status || 'MISSING'}`, nextRetryAt: nextRunAt, version: metadataVersion }));
+        await this.queue.finish(task, workerId, metadataVersion >= 5 && unavailableCount >= 4
+          ? { state: 'BLOCKED', reason: `METADATA_SOURCE_UNAVAILABLE_AFTER_RECHECK:${status || 'MISSING'}` }
+          : { state: 'RETRY_WAIT', reason: `SOURCE_NOT_READY:${status || 'MISSING'}`,
+              nextRunAt, resetAttempts: true,
+              checkpoint: { metadataSourceRefresh: true, sourceUnavailableCount: unavailableCount } });
         return;
       }
       const host = new URL(adapter.baseUrl).host;
@@ -2113,7 +2124,7 @@ export class ImporterLiteRuntime {
         await timePhase('metadataPersistCommitMs', () => this.sourceMetadataPersistenceGate.runExclusive(() => this.queue.recordSourceMetadataEnrichment({ source, sourceWorkId, workId: mappingWorkId,
           aliasesState: extracted.aliasesState,
           tagsState: extracted.tagsState,
-          error: 'EXPLICIT_SOURCE_METADATA_NOT_PARSED', rawMetadata: sourceMetadata })));
+          error: 'EXPLICIT_SOURCE_METADATA_NOT_PARSED', rawMetadata: sourceMetadata, version: metadataVersion })));
         const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
         const finalizeStartedAt = performance.now();
         await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'METADATA_SOURCE_PARSER_ERROR',
@@ -2150,8 +2161,8 @@ export class ImporterLiteRuntime {
           source, sourceWorkId, workId: mappingWorkId,
           aliasesState: extracted.aliases.length ? 'ENRICHED' : 'NO_ALIASES',
           tagsState: extracted.genres.length ? 'ENRICHED' : 'NO_TAGS',
-          aliasesAdded: aliasDelta, tagsAdded: tagDelta, rawMetadata: sourceMetadata,
-        }, { metadataSourceRefresh: true, version: 2, aliases: extracted.aliases.length, aliasDelta,
+          aliasesAdded: aliasDelta, tagsAdded: tagDelta, rawMetadata: sourceMetadata, version: metadataVersion,
+        }, { metadataSourceRefresh: true, version: metadataVersion, aliases: extracted.aliases.length, aliasDelta,
           tags: extracted.genres.length, tagDelta,
           metadataTiming: { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) } }));
       });
@@ -2176,7 +2187,7 @@ export class ImporterLiteRuntime {
         source, sourceWorkId, workId: mappingWorkId,
         aliasesState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED',
         tagsState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED', error: message,
-        nextRetryAt: parserFailure ? null : new Date(Date.now() + retryDelay),
+        nextRetryAt: parserFailure ? null : new Date(Date.now() + retryDelay), version: metadataVersion,
       })));
       if (!parserFailure && !persistenceFailure) await timePhase('sourceHealthPersistMs', () => this.queue.recordSourceFailure(source, error));
       const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
@@ -2187,9 +2198,12 @@ export class ImporterLiteRuntime {
           ? { state: 'RETRY_WAIT', reason: 'METADATA_ALIAS_PERSISTENCE_FAILED',
               nextRunAt: new Date(Date.now() + Math.min(5 * 60_000, retryDelay)), resetAttempts: true,
               checkpoint: { metadataTiming: checkpointTiming } }
-        : { state: 'RETRY_WAIT', reason: `METADATA_SOURCE_EXTERNAL:${message}`,
-            nextRunAt: new Date(Date.now() + retryDelay),
-            checkpoint: { metadataSourceRefresh: true, sourceExternalFailureCount, metadataTiming: checkpointTiming }, resetAttempts: true });
+        : metadataVersion >= 5 && sourceExternalFailureCount >= 4
+          ? { state: 'BLOCKED', reason: `METADATA_SOURCE_EXTERNAL_RETRY_EXHAUSTED:${message}`,
+              checkpoint: { metadataSourceRefresh: true, sourceExternalFailureCount, metadataTiming: checkpointTiming } }
+          : { state: 'RETRY_WAIT', reason: `METADATA_SOURCE_EXTERNAL:${message}`,
+              nextRunAt: new Date(Date.now() + retryDelay),
+              checkpoint: { metadataSourceRefresh: true, sourceExternalFailureCount, metadataTiming: checkpointTiming }, resetAttempts: true });
       timings.finishCommitMs = Math.round(performance.now() - finalizeStartedAt);
       reportTiming(parserFailure ? 'PARSER_ERROR' : persistenceFailure ? 'PERSISTENCE_FAILURE' : 'EXTERNAL_BLOCKED');
     } finally {}
