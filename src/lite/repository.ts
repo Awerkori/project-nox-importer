@@ -48,11 +48,11 @@ const METADATA_REPLAY_V4_SOURCE_BURST_LIMIT = 3;
 // time and retains the 20-second due-time fence.
 const METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN = 12;
 // The exclusive campaign retries its producer on the two-second metadata
-// timer.  Bound one miss tightly so a sparse/exhausted source cannot hold the
-// producer connection for a 12-window serial scan while both merge seats are
-// empty.  The durable source/mapping cursors resume at the next window, so
+// timer.  A single window makes a sparse/exhausted source yield immediately
+// instead of serializing a multi-window probe while both merge seats are
+// empty. The durable source/mapping cursors resume at the next window, so
 // this changes latency only; it never skips a mapping.
-const METADATA_REPLAY_V4_EXCLUSIVE_SOURCE_WINDOWS_PER_TURN = 4;
+const METADATA_REPLAY_V4_EXCLUSIVE_SOURCE_WINDOWS_PER_TURN = 1;
 
 const sourceExecutionEligibilitySql = (alias: string): string => `(
   (COALESCE(${alias}.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
