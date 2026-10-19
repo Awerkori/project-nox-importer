@@ -587,6 +587,16 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual([{ work_id: ids.p1a, coverage:'true' }]);
   });
 
+  it('claims cross-source coverage outside the generic P2 claim', async () => {
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id=$1`, [ids.p1a]);
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:`lite:metadata:cross-source:v5:${ids.p1a}`,
+      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:5} });
+
+    const task = await repo.claimCrossSourceMetadataDiscovery('cross-source-worker', 90);
+    expect(task).toMatchObject({ workId:ids.p1a,state:'RUNNING',payload:{metadataCrossSourceDiscovery:true} });
+  });
+
   it('reopens a bounded partial global-discovery pass only for deferred providers', async () => {
     await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id=$1`, [ids.p1a]);
     await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','complete')`);

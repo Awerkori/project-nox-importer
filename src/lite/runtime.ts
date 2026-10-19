@@ -194,6 +194,7 @@ export class ImporterLiteRuntime {
   private readonly sourceMetadataPersistenceGate = new AsyncSemaphore(1, 'lite_source_metadata_persistence');
   private readonly newWorkCatalogGate = new AsyncSemaphore(1, 'lite_new_work_catalog_lane');
   private readonly crossSourceMetadataGate = new AsyncSemaphore(1, 'lite_cross_source_metadata');
+  private readonly crossSourceDiscoveryLaneGate = new AsyncSemaphore(1, 'lite_cross_source_discovery_lane');
   private sourceMetadataPoolWaitStartedAt = 0;
   private readonly sourceAdmissionGate = new SourceAdmissionGate(10_000);
   private lastMetadataEnrichmentAt = 0;
@@ -349,6 +350,7 @@ export class ImporterLiteRuntime {
       // Fill both already-approved external seats at boot. Each call remains
       // fenced by the dedicated source-metadata lane below.
       await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
+      await this.runCrossSourceMetadataDiscovery();
       await this.runNewWorkCatalog();
       await this.runStoredMetadataReplay();
     }
@@ -856,6 +858,7 @@ export class ImporterLiteRuntime {
         await this.runStoredMetadataReplay();
         await this.refillSourceMetadataEnrichment();
         await this.refillCrossSourceMetadataDiscovery();
+        await this.runCrossSourceMetadataDiscovery();
       }
     } catch (error: any) {
       this.logger.warn('Metadata turn failed', { error: error?.message });
@@ -1045,6 +1048,37 @@ export class ImporterLiteRuntime {
         void this.refillSourceMetadataEnrichment(true, 0, preferredSource)
           .then(() => this.runSourceMetadataRefresh())
           .catch((error: any) => this.logger.warn('Source metadata replacement failed', { error: error?.message }));
+      }
+    }
+  }
+
+  /**
+   * A single durable cross-source probe advances independently of generic P2
+   * chapter/catalog claims.  It still shares the provider gate, per-host rate
+   * limiter and one-work identity lock with V5, so this removes starvation
+   * without increasing unsafe external or YSQL concurrency.
+   */
+  private async runCrossSourceMetadataDiscovery(): Promise<void> {
+    if (this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4
+      || !this.isRuntimeLeader || Date.now() < this.sitePausedUntil
+      || this.lastSiteProbe.state === 'PAUSED' || this.shouldPauseLowPriorityMetadata()
+      || !this.crossSourceDiscoveryLaneGate.tryAcquire()) return;
+    let claimed = false;
+    try {
+      const workerId = `${this.runtimeInstanceId}:cross-source-metadata`;
+      const task = await this.queue.claimCrossSourceMetadataDiscovery(workerId, 90);
+      if (!task) return;
+      claimed = true;
+      await this.catalog(task, workerId);
+    } catch (error: any) {
+      this.logger.warn('Cross-source metadata lane failed', { error: error?.message });
+    } finally {
+      this.crossSourceDiscoveryLaneGate.release();
+      // A coverage task advances one provider per durable checkpoint.  Wake
+      // its successor promptly, but never spin when no due task exists.
+      if (claimed && this.isRuntimeLeader) {
+        const timer = setTimeout(() => void this.runCrossSourceMetadataDiscovery(), 300);
+        timer.unref();
       }
     }
   }

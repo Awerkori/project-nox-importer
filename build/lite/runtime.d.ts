@@ -38,6 +38,7 @@ export declare class ImporterLiteRuntime {
     private readonly sourceMetadataPersistenceGate;
     private readonly newWorkCatalogGate;
     private readonly crossSourceMetadataGate;
+    private readonly crossSourceDiscoveryLaneGate;
     private sourceMetadataPoolWaitStartedAt;
     private readonly sourceAdmissionGate;
     private lastMetadataEnrichmentAt;
@@ -162,6 +163,13 @@ export declare class ImporterLiteRuntime {
     /** Dedicated bounded workers give source refetch continuous progress without
      * consuming chapter workers or competing with P0/P1 task selection. */
     private runSourceMetadataRefresh;
+    /**
+     * A single durable cross-source probe advances independently of generic P2
+     * chapter/catalog claims.  It still shares the provider gate, per-host rate
+     * limiter and one-work identity lock with V5, so this removes starvation
+     * without increasing unsafe external or YSQL concurrency.
+     */
+    private runCrossSourceMetadataDiscovery;
     /**
      * Catalog HTTP intentionally happens outside YSQL transactions.  A first
      * catalog pass can outlive its initial lease while it checks bounded,
