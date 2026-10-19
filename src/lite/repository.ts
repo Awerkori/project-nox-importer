@@ -213,6 +213,47 @@ export class LiteRepository {
         await client.query('COMMIT');
         return 0;
       }
+      const admissionLimit = ceiling - Number(pending.rows[0]?.count || 0);
+      type CandidateRow = Row & { selected_aliasless: boolean; selected_tagless: boolean };
+      const priorityCandidates: CandidateRow[] = [];
+      // Keep one of the protected V5 seats focused on a genuinely popular
+      // aliasless public work. The published/views index makes this a bounded
+      // lookup, while the remaining seats retain the fair per-source cursor
+      // so the long tail cannot starve.
+      if (isCoverageV5 && admissionLimit > 0) {
+        await client.query('SAVEPOINT v5_popular_alias_candidate');
+        try {
+          await client.query(`SET LOCAL statement_timeout = '2500ms'`);
+          const priority = await client.query<CandidateRow>(`
+            SELECT m.source,m.source_work_id,m.work_id,
+              true AS selected_aliasless,
+              NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=m.work_id) AS selected_tagless
+            FROM works w
+            JOIN importer_work_mappings m ON m.work_id=w.id
+            JOIN importer_sources s ON s.id=m.source
+            LEFT JOIN importer_lite_source_health health ON health.source=s.id
+            LEFT JOIN importer_lite_metadata_enrichment status
+              ON status.source=m.source AND status.source_work_id=m.source_work_id
+            WHERE w.published=true AND COALESCE(cardinality(w.aliases),0)=0
+              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+              AND s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
+              AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+              AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+              AND ${stateEligible}
+              AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
+                WHERE task.idempotency_key IN (
+                  'lite:metadata:source:v3:' || m.source || ':' || m.source_work_id,
+                  'lite:metadata:source:v5:' || m.source || ':' || m.source_work_id
+                ) AND task.state IN ('READY','RUNNING','RETRY_WAIT'))
+            ORDER BY w.views_total DESC,m.source,m.source_work_id LIMIT 1`);
+          await client.query('RELEASE SAVEPOINT v5_popular_alias_candidate');
+          if (priority.rows[0]) priorityCandidates.push(priority.rows[0]);
+        } catch {
+          await client.query('ROLLBACK TO SAVEPOINT v5_popular_alias_candidate');
+        } finally {
+          await client.query(`SET LOCAL statement_timeout = '12000ms'`);
+        }
+      }
       // Advance the source frontier even if every mapping in this small
       // horizon was already classified.  Otherwise an exhausted provider at
       // the front would be revisited forever and hide healthy providers that
@@ -287,14 +328,13 @@ export class LiteRepository {
       // per-source cursor semantics, but issue one indexed source window at
       // a time. A pathological provider is skipped by a savepoint instead of
       // stalling every other V5 candidate behind it.
-      const admissionLimit = ceiling - Number(pending.rows[0]?.count || 0);
-      const candidates: Array<Row & { selected_aliasless: boolean; selected_tagless: boolean }> = [];
+      const candidates: CandidateRow[] = [];
       for (const source of probeSources) {
-        if (candidates.length >= admissionLimit) break;
+        if (candidates.length >= admissionLimit - priorityCandidates.length) break;
         await client.query('SAVEPOINT v5_source_candidate');
         try {
           await client.query(`SET LOCAL statement_timeout = '2500ms'`);
-          const candidate = await client.query<Row & { selected_aliasless: boolean; selected_tagless: boolean }>(`
+          const candidate = await client.query<CandidateRow>(`
             WITH history AS (
               SELECT task.payload->>'sourceWorkId' AS last_source_work_id
               FROM importer_lite_tasks task
@@ -356,7 +396,9 @@ export class LiteRepository {
       }
       candidates.sort((left, right) => Number(right.selected_aliasless) - Number(left.selected_aliasless)
         || Number(right.selected_tagless) - Number(left.selected_tagless));
-      const selectedCandidates = candidates.slice(0, admissionLimit);
+      const selectedCandidates = [...new Map(
+        [...priorityCandidates, ...candidates].map((candidate) => [`${candidate.source}:${candidate.source_work_id}`, candidate]),
+      ).values()].slice(0, admissionLimit);
 
       for (const row of selectedCandidates) {
         const source = String(row.source);
