@@ -243,8 +243,9 @@ export class LiteRepository {
             // providers before reaching a source with historical V5 debt. Add one
             // indexed backlog hint *after* the cursor slice: it fills otherwise
             // idle seats but can never displace the normal rotating sources. The
-            // active-mapping EXISTS prevents a stale enrichment row from becoming a
-            // permanent preference after a mapping was retired.
+            // per-source candidate query below remains the authoritative active-
+            // mapping validation; duplicating that EXISTS here defeated the narrow
+            // backlog index under YSQL pressure.
             const backlogPreferred = isCoverageV5
                 ? await client.query(`
             SELECT status.source
@@ -255,12 +256,6 @@ export class LiteRepository {
               AND s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
               AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
               AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
-              AND EXISTS (
-                SELECT 1 FROM importer_work_mappings m
-                WHERE m.source=status.source AND m.source_work_id=status.source_work_id
-                  AND m.work_id IS NOT NULL
-                  AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-              )
             ORDER BY status.updated_at,status.source,status.source_work_id
             LIMIT 1`)
                 : { rows: [] };
