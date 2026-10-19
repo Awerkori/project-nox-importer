@@ -310,8 +310,8 @@ export class ImporterLiteRuntime {
             // Do not create discovery/catalog/chapter work while a durable
             // exclusive campaign is active. Existing in-flight operations retain
             // their leases and settle before their worker sees the admission gate.
-            await this.refillStoredMetadataEnrichment();
             await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
+            await this.refillStoredMetadataEnrichment();
         }
         else {
             await this.seedDiscovery();
@@ -584,8 +584,8 @@ export class ImporterLiteRuntime {
             // The exclusive campaign must not periodically re-admit chapter,
             // discovery, monitor, or source-refetch work. V4 reclaim is performed
             // by its own runner, so this still recovers an expired local lease.
-            await this.refillStoredMetadataEnrichment();
             await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
+            await this.refillStoredMetadataEnrichment();
             return;
         }
         const now = Date.now();
@@ -834,11 +834,15 @@ export class ImporterLiteRuntime {
     async runMetadataTurn() {
         try {
             await this.refreshMetadataReplayV4ExclusiveMode();
-            await this.refillStoredMetadataEnrichment();
             if (this.metadataReplayV4Exclusive.enabled) {
                 await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
+                // A source-cursor probe can take materially longer than a local
+                // merge. Claim all already-due V4 rows first, then refill the durable
+                // reserve; otherwise ready mappings sit idle behind producer scans.
+                await this.refillStoredMetadataEnrichment();
             }
             else {
+                await this.refillStoredMetadataEnrichment();
                 await this.runStoredMetadataReplay();
                 await this.refillSourceMetadataEnrichment();
             }
@@ -1241,13 +1245,12 @@ export class ImporterLiteRuntime {
                     ? await this.queue.claimStoredMetadataReplay(workerId, 45) : null);
             if (task) {
                 await this.catalog(task, workerId);
-                // A V4 item has a durable 20-second due-time fence, but relying only
-                // on the slower producer poll to create its successor adds another
-                // 15 seconds to every completed merge. Refill immediately after the
-                // single-flight task settles: the repository still permits one
-                // outstanding item and applies that fence, so this improves cadence
-                // without raising concurrency or taking a chapter worker.
-                if (task.payload?.metadataEnrichmentVersion === 4 && !this.shouldPauseLowPriorityMetadata()) {
+                // Outside the exclusive campaign, a V4 item still needs an immediate
+                // successor: its normal producer poll is deliberately slower. The
+                // campaign's one-second turn refills after claiming all ready rows so
+                // a serial cursor probe cannot hold those rows idle.
+                if (task.payload?.metadataEnrichmentVersion === 4
+                    && !this.metadataReplayV4Exclusive.enabled && !this.shouldPauseLowPriorityMetadata()) {
                     await this.refillStoredMetadataEnrichmentV4();
                 }
             }
