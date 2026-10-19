@@ -1095,6 +1095,22 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE idempotency_key LIKE 'lite:metadata:v4:%' AND state IN ('READY','RUNNING','RETRY_WAIT')`)).rows[0].count).toBe(4);
   });
 
+  it('fills one bounded source burst with distinct canonical V4 works', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id IN ($1::uuid,$2::uuid,$3::uuid)`, [ids.staff, ids.p1a, ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
+      VALUES
+        ('00000000-0000-4000-8000-000000000142','source-a','batch-1',$1::uuid,'staff','Staff',$4::jsonb,'SYNCED'),
+        ('00000000-0000-4000-8000-000000000143','source-a','batch-2',$2::uuid,'p1-a','P1 A',$4::jsonb,'SYNCED'),
+        ('00000000-0000-4000-8000-000000000144','source-a','batch-3',$3::uuid,'p1-b','P1 B',$4::jsonb,'SYNCED')`,
+      [ids.staff, ids.p1a, ids.p1b, JSON.stringify({ tags: ['Ação'] })]);
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','true')`);
+
+    expect(await repo.refillStoredMetadataEnrichmentV4(4, 500)).toBe(3);
+    expect((await db.query(`SELECT count(DISTINCT work_id)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key LIKE 'lite:metadata:v4:%' AND state IN ('READY','RUNNING','RETRY_WAIT')`)).rows[0].count).toBe(3);
+  });
+
   it('prioritizes a real alias over empty or tag-only legacy metadata from the same source', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings

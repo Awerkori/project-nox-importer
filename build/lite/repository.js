@@ -530,7 +530,8 @@ export class LiteRepository {
                 return 0;
             }
             const fields = [...STORED_MAPPING_ALIAS_FIELDS, ...STORED_MAPPING_TAG_FIELDS];
-            let row;
+            let rows = [];
+            let selectedBurst = 0;
             let exhaustedAllSources = false;
             // Source and mapping cursors both ride existing narrow indexes. One
             // source window is inspected per producer turn, so neither a JSON
@@ -544,7 +545,7 @@ export class LiteRepository {
             let activeSourceId = null;
             let activeSourceWindows = 0;
             const sourceWindows = Math.max(1, Math.min(METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN, Math.trunc(sourceWindowsPerTurn)));
-            for (let probe = 0; probe < sourceWindows && !row; probe++) {
+            for (let probe = 0; probe < sourceWindows && rows.length === 0; probe++) {
                 let sourceId = activeSourceId;
                 if (!sourceId) {
                     const source = await client.query(`
@@ -575,6 +576,13 @@ export class LiteRepository {
             ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [METADATA_REPLAY_V4_SOURCE_CURSOR_KEY, sourceId]);
                 }
                 const cursor = await client.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`]);
+                // Keep the existing three-mapping source burst, but select that
+                // bounded set in one indexed scan. Repeating one-row scans mostly
+                // spends time on Discloud-to-YSQL round trips rather than merging
+                // metadata, while the partition below still excludes same-work rows.
+                const burstState = await client.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [`${METADATA_REPLAY_V4_SOURCE_BURST_PREFIX}${sourceId}`]);
+                const sourceBurst = Math.max(0, Number(burstState.rows[0]?.value || 0) || 0) % METADATA_REPLAY_V4_SOURCE_BURST_LIMIT;
+                const batchLimit = Math.max(1, Math.min(ceiling - Number(pending.rows[0]?.count || 0), METADATA_REPLAY_V4_SOURCE_BURST_LIMIT - sourceBurst));
                 const candidate = await client.query(`
           WITH scanned AS (
             SELECT m.source,m.source_work_id,m.work_id,m.source_slug,m.source_title,m.metadata,
@@ -591,7 +599,7 @@ export class LiteRepository {
               AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
               AND ($3::text IS NULL OR m.source_work_id>$3)
             ORDER BY m.source_work_id LIMIT 128
-          ), candidate AS (
+          ), eligible AS (
             SELECT m.source,m.source_work_id,m.work_id::text,
               CASE WHEN m.has_explicit_metadata THEN 'EXPLICIT_METADATA' ELSE 'SECONDARY_SOURCE_TITLE' END AS reason
             FROM scanned m JOIN works w ON w.id=m.work_id AND w.published=true
@@ -610,21 +618,32 @@ export class LiteRepository {
                   AND active_work.state IN ('READY','RUNNING','RETRY_WAIT')
                   AND active_work.payload->>'metadataEnrichmentVersion'='4'
                   AND active_work.work_id=m.work_id)
-            ORDER BY m.source_work_id LIMIT 1
+          ), candidate AS (
+            SELECT source,source_work_id,work_id,reason
+            FROM (
+              SELECT eligible.*,row_number() OVER (PARTITION BY work_id ORDER BY source_work_id) AS work_rank
+              FROM eligible
+            ) distinct_works
+            WHERE work_rank=1
+            ORDER BY source_work_id LIMIT $4
           ), tail AS (SELECT max(source_work_id) AS tail_source_work_id FROM scanned)
           SELECT candidate.source,candidate.source_work_id,candidate.work_id,candidate.reason,tail.tail_source_work_id
-          FROM tail LEFT JOIN candidate ON true`, [fields, sourceId, cursor.rows[0]?.value || null]);
-                const result = candidate.rows[0];
-                if (!result?.tail_source_work_id) {
+          FROM tail LEFT JOIN candidate ON true
+          ORDER BY candidate.source_work_id NULLS LAST`, [fields, sourceId, cursor.rows[0]?.value || null, batchLimit]);
+                const tailSourceWorkId = candidate.rows[0]?.tail_source_work_id || null;
+                if (!tailSourceWorkId) {
                     await client.query(`INSERT INTO settings(key,value) VALUES($1,'complete')
             ON CONFLICT(key) DO UPDATE SET value='complete'`, [`${METADATA_REPLAY_V4_SOURCE_DONE_PREFIX}${sourceId}`]);
                     activeSourceId = null;
                     activeSourceWindows = 0;
                     continue;
                 }
-                if (!result.source || !result.source_work_id || !result.work_id || !result.reason) {
+                rows = candidate.rows.flatMap((result) => (result.source && result.source_work_id && result.work_id && result.reason
+                    ? [{ source: result.source, source_work_id: result.source_work_id, work_id: result.work_id, reason: result.reason }]
+                    : []));
+                if (rows.length === 0) {
                     await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`, result.tail_source_work_id]);
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${sourceId}`, tailSourceWorkId]);
                     activeSourceWindows += 1;
                     if (activeSourceWindows >= METADATA_REPLAY_V4_WINDOWS_PER_SOURCE_TURN) {
                         activeSourceId = null;
@@ -632,9 +651,9 @@ export class LiteRepository {
                     }
                     continue;
                 }
-                row = { source: result.source, source_work_id: result.source_work_id, work_id: result.work_id, reason: result.reason };
+                selectedBurst = sourceBurst;
             }
-            if (!row) {
+            if (rows.length === 0) {
                 if (exhaustedAllSources) {
                     // Completion is durable and prevents an exhausted historical cursor
                     // from repeatedly re-reading the mapping catalog. New onboarding does
@@ -654,28 +673,33 @@ export class LiteRepository {
             // parked before a faster local replay is admitted.
             const intervalMs = Math.max(500, Math.min(60_000, Math.trunc(minimumIntervalMs)));
             const nextRunAt = new Date(Math.max(Date.now(), lastAt + intervalMs));
-            const idempotencyKey = `lite:metadata:v4:${row.source}:${row.source_work_id}`;
-            const inserted = await client.query(`INSERT INTO importer_lite_tasks
-        (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
-        VALUES('CATALOG',$1::uuid,$2,3,3,$3,$4,4,$5::jsonb,'{}'::jsonb,false)
-        ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
-                row.work_id, `work:${row.work_id}`, idempotencyKey, nextRunAt,
-                JSON.stringify({ source: row.source, sourceWorkId: row.source_work_id, metadataEnrichment: true,
-                    metadataEnrichmentVersion: 4, metadataReplayReason: row.reason }),
-            ]);
-            if (inserted.rowCount) {
+            const inserted = [];
+            for (const row of rows) {
+                const idempotencyKey = `lite:metadata:v4:${row.source}:${row.source_work_id}`;
+                const result = await client.query(`INSERT INTO importer_lite_tasks
+          (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
+          VALUES('CATALOG',$1::uuid,$2,3,3,$3,$4,4,$5::jsonb,'{}'::jsonb,false)
+          ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
+                    row.work_id, `work:${row.work_id}`, idempotencyKey, nextRunAt,
+                    JSON.stringify({ source: row.source, sourceWorkId: row.source_work_id, metadataEnrichment: true,
+                        metadataEnrichmentVersion: 4, metadataReplayReason: row.reason }),
+                ]);
+                if (result.rowCount)
+                    inserted.push({ source: row.source, sourceWorkId: row.source_work_id });
+            }
+            if (inserted.length) {
+                const source = inserted[0].source;
                 await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
-          ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${row.source}`, row.source_work_id]);
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [`${METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX}${source}`, inserted[inserted.length - 1].sourceWorkId]);
                 // A source is selected fairly by cursor, but moving to a different
                 // provider after every single hit leaves sparse cursor scans idle for
                 // most of the 20-second fence. Retain at most three consecutive
                 // mappings from a source, then resume the normal round-robin.
-                const burstKey = `${METADATA_REPLAY_V4_SOURCE_BURST_PREFIX}${row.source}`;
-                const currentBurst = await client.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [burstKey]);
-                const burst = Math.max(0, Number(currentBurst.rows[0]?.value || 0)) + 1;
+                const burstKey = `${METADATA_REPLAY_V4_SOURCE_BURST_PREFIX}${source}`;
+                const burst = selectedBurst + inserted.length;
                 if (burst < METADATA_REPLAY_V4_SOURCE_BURST_LIMIT) {
                     const predecessor = await client.query(`SELECT max(id) AS id FROM importer_sources
-            WHERE enabled=true AND COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') AND id<$1`, [row.source]);
+            WHERE enabled=true AND COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') AND id<$1`, [source]);
                     await client.query(`INSERT INTO settings(key,value) VALUES($1,$2)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [METADATA_REPLAY_V4_SOURCE_CURSOR_KEY, predecessor.rows[0]?.id || '']);
                 }
@@ -686,7 +710,7 @@ export class LiteRepository {
                 // refresh on every mapping without making the task more runnable.
             }
             await client.query('COMMIT');
-            return inserted.rowCount || 0;
+            return inserted.length;
         }
         catch (error) {
             await client.query('ROLLBACK').catch(() => { });
