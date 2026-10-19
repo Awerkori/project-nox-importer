@@ -1719,12 +1719,24 @@ export class LiteRepository {
                 await client.query('COMMIT');
                 return 0;
             }
-            const pending = await client.query(`SELECT count(*)::int AS count
-        FROM importer_lite_tasks
-        WHERE task_type='CATALOG' AND state IN ('READY','RUNNING','RETRY_WAIT')
-          AND payload ? 'metadataCrossSourceDiscovery'`);
+            const pending = await client.query(`SELECT
+          count(*)::int AS count,
+          count(*) FILTER (WHERE EXISTS (
+            SELECT 1
+            FROM importer_work_mappings m
+            JOIN importer_sources s ON s.id=m.source
+            LEFT JOIN importer_lite_source_health h ON h.source=s.id
+            WHERE m.work_id=task.work_id
+              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+              AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+              AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+          ))::int AS linked
+        FROM importer_lite_tasks task
+        WHERE task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')
+          AND task.payload ? 'metadataCrossSourceDiscovery'`);
             const capacity = Math.max(1, Math.min(2, Math.trunc(maxPending)));
-            if (Number(pending.rows[0]?.count || 0) >= capacity) {
+            const pendingCount = Number(pending.rows[0]?.count || 0);
+            if (pendingCount >= capacity) {
                 await client.query('COMMIT');
                 return 0;
             }
@@ -1805,7 +1817,16 @@ export class LiteRepository {
           UNION ALL
           SELECT work_id,lane FROM popular_aliasless
         ) candidates
-        ORDER BY lane LIMIT $2`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, capacity - Number(pending.rows[0]?.count || 0)]);
+        -- When only one durable seat opens, fill the lane that is not already
+        -- represented. Otherwise each completion would repeatedly refill the
+        -- unmapped lane and popular linked works would never begin coverage.
+        WHERE (lane=0 AND $3::boolean) OR (lane=1 AND $4::boolean)
+        ORDER BY lane LIMIT $2`, [
+                METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX,
+                capacity - pendingCount,
+                pendingCount - Number(pending.rows[0]?.linked || 0) === 0,
+                Number(pending.rows[0]?.linked || 0) === 0,
+            ]);
             if (!candidate.rowCount) {
                 await client.query('COMMIT');
                 return 0;

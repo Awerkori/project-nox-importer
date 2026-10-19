@@ -590,6 +590,22 @@ describe('LiteRepository against the additive Lite migration', () => {
       ]);
   });
 
+  it('fills the popular linked discovery seat when an unmapped coverage pass is already active', async () => {
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000317','source-a','linked-popular',$1::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1b]);
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','complete')`);
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:`lite:metadata:cross-source:v5:${ids.p1a}`,
+      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:5} });
+
+    expect(await repo.refillCrossSourceMetadataDiscovery()).toBe(1);
+    expect((await db.query(`SELECT work_id::text FROM importer_lite_tasks
+      WHERE payload ? 'metadataCrossSourceDiscovery' ORDER BY work_id`)).rows)
+      .toEqual([{ work_id:ids.p1a }, { work_id:ids.p1b }]);
+  });
+
   it('claims cross-source coverage outside the generic P2 claim', async () => {
     await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id=$1`, [ids.p1a]);
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
