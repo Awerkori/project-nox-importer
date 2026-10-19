@@ -919,7 +919,10 @@ describe('LiteRepository against the additive Lite migration', () => {
         LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
     );
     const refill = vi.fn().mockResolvedValue(1);
-    (runtime as any).queue = { refillSourceMetadataEnrichment: refill };
+    (runtime as any).queue = {
+      refillSourceMetadataEnrichment: refill,
+      claimSourceMetadataRefresh: vi.fn().mockResolvedValue(null),
+    };
     (runtime as any).isRuntimeLeader = true;
 
     await (runtime as any).refillSourceMetadataEnrichment(true);
@@ -930,6 +933,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refillSourceMetadataEnrichment(true);
     expect(refill).toHaveBeenLastCalledWith(2, 2);
     memorySpy.mockRestore();
+  });
+
+  it('does not constrain source metadata prefetch for unrelated main-pool waiters', async () => {
+    const chapterPool = Object.assign(poolFor(db), { waitingCount: 4 }) as Pool;
+    const metadataPool = Object.assign(poolFor(db), { waitingCount: 0 }) as Pool;
+    const runtime = new ImporterLiteRuntime(
+      chapterPool, {}, { get: () => null } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', WORKER_ID: 'isolated-source-metadata-test',
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+      new HostRateLimiter(2), metadataPool,
+    );
+    const refill = vi.fn().mockResolvedValue(1);
+    (runtime as any).queue = {
+      refillSourceMetadataEnrichment: refill,
+      claimSourceMetadataRefresh: vi.fn().mockResolvedValue(null),
+    };
+    (runtime as any).isRuntimeLeader = true;
+
+    await (runtime as any).refillSourceMetadataEnrichment(true);
+    expect(refill).toHaveBeenLastCalledWith(4, undefined);
   });
 
   it('advances only a bounded number of empty historical source horizons', async () => {
@@ -953,7 +977,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     memorySpy.mockRestore();
   });
 
-  it('keeps only one historical source fetch active while the shared pool is queued', async () => {
+  it('keeps only one historical source fetch active while its metadata pool is persistently queued', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const lanePool = poolFor(db) as any;
     lanePool.waitingCount = 2;
@@ -968,6 +992,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     const claim = vi.fn(async () => remainingClaims-- > 0 ? ({ id: 'metadata-pressure-task' } as any) : null);
     (runtime as any).queue = { claimSourceMetadataRefresh: claim, refillSourceMetadataEnrichment: vi.fn().mockResolvedValue(0) };
     (runtime as any).isRuntimeLeader = true;
+    (runtime as any).sourceMetadataPoolWaitStartedAt = Date.now() - 15_001;
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     let started!: () => void;
