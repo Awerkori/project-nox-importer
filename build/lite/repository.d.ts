@@ -298,12 +298,12 @@ export declare class LiteRepository {
      */
     crossSourceDiscoverySources(workId: string): Promise<string[]>;
     /**
-     * Admit one durable, whole-catalog cross-source discovery task at a time.
+     * Admit a tiny, durable whole-catalog cross-source discovery lane.
      * It is deliberately separate from V5's known-mapping refresh: each task
      * records every operational provider considered for its canonical work and
      * only creates a mapping after runtime identity verification.
      */
-    refillCrossSourceMetadataDiscovery(): Promise<number>;
+    refillCrossSourceMetadataDiscovery(maxPending?: number): Promise<number>;
     /**
      * Chapter media is expensive and a Reader chapter cannot be exposed without
      * a minimally valid work presentation.  Catalog checks this once per work
