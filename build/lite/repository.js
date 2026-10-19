@@ -239,6 +239,31 @@ export class LiteRepository {
               AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
             LIMIT 1`, [preferredSource.trim()])
                 : { rows: [] };
+            // The fair cursor can legitimately cross several fully-covered
+            // providers before reaching a source with historical V5 debt. Add one
+            // indexed backlog hint *after* the cursor slice: it fills otherwise
+            // idle seats but can never displace the normal rotating sources. The
+            // active-mapping EXISTS prevents a stale enrichment row from becoming a
+            // permanent preference after a mapping was retired.
+            const backlogPreferred = isCoverageV5
+                ? await client.query(`
+            SELECT status.source
+            FROM importer_lite_metadata_enrichment status
+            JOIN importer_sources s ON s.id=status.source
+            LEFT JOIN importer_lite_source_health health ON health.source=s.id
+            WHERE status.version<${METADATA_ALIAS_COVERAGE_V5_VERSION}
+              AND s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
+              AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+              AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+              AND EXISTS (
+                SELECT 1 FROM importer_work_mappings m
+                WHERE m.source=status.source AND m.source_work_id=status.source_work_id
+                  AND m.work_id IS NOT NULL
+                  AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+              )
+            ORDER BY status.updated_at,status.source,status.source_work_id
+            LIMIT 1`)
+                : { rows: [] };
             const sourceProbe = await client.query(`
         WITH after_cursor AS (
           ${eligibleSourceSelect(lastSource ? 's.id>$1::text' : '$1::text IS NULL')}
@@ -252,6 +277,7 @@ export class LiteRepository {
             const probeSources = [...new Set([
                     ...preferred.rows.map((row) => String(row.source)),
                     ...sourceProbe.rows.map((row) => String(row.source)),
+                    ...backlogPreferred.rows.map((row) => String(row.source)),
                 ])];
             if (!probeSources.length) {
                 await client.query('COMMIT');
