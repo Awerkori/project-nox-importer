@@ -283,6 +283,9 @@ export class LiteRepository {
       // to choose two. The two ordered index walks preserve the same circular
       // cursor semantics: take sources after the cursor, then wrap only when
       // the first walk did not fill this bounded horizon.
+      // Do not preflight mappings here: even an indexed EXISTS is multiplied
+      // by every provider under a contended YSQL cluster. The following
+      // per-source, index-backed candidate window is the authoritative check.
       const eligibleSourceSelect = (cursorPredicate: string): string => `
         SELECT s.id AS source
         FROM importer_sources s
@@ -290,12 +293,6 @@ export class LiteRepository {
         WHERE s.enabled=true AND ${cursorPredicate} AND ${sourceExecutionEligibilitySql('s')}
           AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
           AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
-          -- This remains an indexed existence check, but the ordered scan now
-          -- stops after the small probe horizon instead of checking all
-          -- configured providers.
-          AND EXISTS (SELECT 1 FROM importer_work_mappings m
-            WHERE m.source=s.id AND m.work_id IS NOT NULL
-              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE'))
         ORDER BY s.id LIMIT $2`;
       // A source that just completed a healthy refetch is known to have paid
       // the admission and adapter costs already. Keep it in this *single*
@@ -312,9 +309,6 @@ export class LiteRepository {
             WHERE s.id=$1 AND s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
               AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
               AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
-              AND EXISTS (SELECT 1 FROM importer_work_mappings m
-                WHERE m.source=s.id AND m.work_id IS NOT NULL
-                  AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE'))
             LIMIT 1`, [preferredSource.trim()])
         : { rows: [] as { source: string }[] };
       const sourceProbe = await client.query<{ source: string }>(`
