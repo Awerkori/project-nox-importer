@@ -23,9 +23,11 @@ const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK = 2;
 // Historical refetch owns one P2 seat while the importer is serving chapter
 // work. Looking across eight providers merely to fill that one seat made the
 // producer's six-tier candidate CTE the dominant YSQL workload. A durable
-// source cursor lets a two-source horizon cover every provider without
-// repeatedly scanning the catalogue.
-const SOURCE_METADATA_SOURCE_PROBE_LIMIT = 2;
+// source cursor lets a short horizon cover every provider without repeatedly
+// scanning the catalogue. V5 reserves one of four seats for a popular
+// aliasless work, so probing three cursor sources lets a healthy refill fill
+// all four seats instead of leaving one idle behind the old two-source cap.
+const SOURCE_METADATA_SOURCE_PROBE_LIMIT = 3;
 const METADATA_REPLAY_V4_ENABLED_KEY = 'metadata_replay_v4_enabled';
 // V4 replays evidence already stored in YSQL. Once it has exhausted that
 // finite input, this version marker switches the existing source-refetch lane
