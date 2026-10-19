@@ -868,6 +868,7 @@ export class ImporterLiteRuntime {
             this.logger.warn('Updated exclusive V4 metadata mode', next);
         }
         this.metadataReplayV4Exclusive = next;
+        this.sourceMetadataRefreshDeferredForV4 = next.enabled || (await this.queue.isStoredMetadataReplayV4Enabled());
     }
     /** One timer turn keeps normal metadata paths out of an exclusive replay. */
     async runMetadataTurn() {
@@ -882,11 +883,13 @@ export class ImporterLiteRuntime {
                 void this.refillStoredMetadataEnrichment();
             }
             else {
-                await this.refillStoredMetadataEnrichment();
-                await this.runStoredMetadataReplay();
+                if (this.sourceMetadataRefreshDeferredForV4) {
+                    await this.refillStoredMetadataEnrichment();
+                    await this.runStoredMetadataReplay();
+                }
                 await this.refillSourceMetadataEnrichment();
                 await this.refillCrossSourceMetadataDiscovery();
-                await Promise.all([this.runCrossSourceMetadataDiscovery(), this.runCrossSourceMetadataDiscovery()]);
+                await this.runCrossSourceMetadataDiscovery();
             }
         }
         catch (error) {
@@ -1102,7 +1105,7 @@ export class ImporterLiteRuntime {
             if (!task)
                 return;
             claimed = true;
-            await this.catalog(task, workerId);
+            await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
         }
         catch (error) {
             this.logger.warn('Cross-source metadata lane failed', { error: error?.message });
