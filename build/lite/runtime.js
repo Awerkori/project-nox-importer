@@ -211,6 +211,7 @@ export class ImporterLiteRuntime {
     metadataTurboMode = { enabled: false };
     lastMetadataTurboModeRefreshAt = 0;
     metadataReplayV4WorkTails = new Map();
+    sourcePoliciesCache = null;
     // The historical producer is intentionally low-rate. Persist its last
     // admission decision in the heartbeat so a guarded skip cannot look like a
     // silently stalled backlog after a native deploy.
@@ -2275,7 +2276,18 @@ export class ImporterLiteRuntime {
             });
             return;
         }
-        const policies = await Promise.all(sourceBatch.map(async (source) => [source, await this.queue.sourcePolicy(source)]));
+        const now = Date.now();
+        let policyMap;
+        if (this.sourcePoliciesCache && this.sourcePoliciesCache.expiresAt > now) {
+            policyMap = this.sourcePoliciesCache.map;
+        }
+        else {
+            policyMap = typeof this.queue.sourcePolicies === 'function'
+                ? await this.queue.sourcePolicies(sourceBatch)
+                : new Map(await Promise.all(sourceBatch.map(async (source) => [source, await this.queue.sourcePolicy(source)])));
+            this.sourcePoliciesCache = { map: policyMap, expiresAt: now + 5_000 };
+        }
+        const policies = sourceBatch.map((source) => [source, policyMap.get(source) || null]);
         const runnableSources = policies.filter(([, policy]) => policy?.runnable).map(([source]) => source);
         let outcome = { busy: false, attemptedSources: [],
             deferredSources: policies.filter(([, policy]) => !policy?.runnable).map(([source]) => source), attached: [] };

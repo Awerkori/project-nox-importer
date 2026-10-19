@@ -9,7 +9,7 @@ import type { SourceRegistry } from '../sources/registry.js';
 import type { StorageProvider } from '../storage/provider.js';
 import { canonicalChapterKey, chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { LiteExecutor } from './executor.js';
-import { LiteRepository, type EnqueueLiteTask } from './repository.js';
+import { LiteRepository, type EnqueueLiteTask, type LiteSourcePolicy } from './repository.js';
 import type { LiteTask } from './types.js';
 import { Logger } from '../core/logger.js';
 import { readImageBody } from '../core/bounded-body.js';
@@ -223,6 +223,7 @@ export class ImporterLiteRuntime {
   private metadataTurboMode = { enabled: false };
   private lastMetadataTurboModeRefreshAt = 0;
   private readonly metadataReplayV4WorkTails = new Map<string, Promise<void>>();
+  private sourcePoliciesCache: { map: Map<string, LiteSourcePolicy>; expiresAt: number } | null = null;
   // The historical producer is intentionally low-rate. Persist its last
   // admission decision in the heartbeat so a guarded skip cannot look like a
   // silently stalled backlog after a native deploy.
@@ -2291,7 +2292,17 @@ export class ImporterLiteRuntime {
       });
       return;
     }
-    const policies = await Promise.all(sourceBatch.map(async (source) => [source, await this.queue.sourcePolicy(source)] as const));
+    const now = Date.now();
+    let policyMap: Map<string, LiteSourcePolicy>;
+    if (this.sourcePoliciesCache && this.sourcePoliciesCache.expiresAt > now) {
+      policyMap = this.sourcePoliciesCache.map;
+    } else {
+      policyMap = typeof (this.queue as any).sourcePolicies === 'function'
+        ? await (this.queue as any).sourcePolicies(sourceBatch)
+        : new Map(await Promise.all(sourceBatch.map(async (source) => [source, await this.queue.sourcePolicy(source)] as const)));
+      this.sourcePoliciesCache = { map: policyMap, expiresAt: now + 5_000 };
+    }
+    const policies = sourceBatch.map((source) => [source, policyMap.get(source) || null] as const);
     const runnableSources = policies.filter(([, policy]) => policy?.runnable).map(([source]) => source);
     let outcome: CrossSourceMetadataResult = { busy: false, attemptedSources: [],
       deferredSources: policies.filter(([, policy]) => !policy?.runnable).map(([source]) => source), attached: [] };
