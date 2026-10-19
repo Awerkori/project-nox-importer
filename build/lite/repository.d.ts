@@ -175,6 +175,12 @@ export declare class LiteRepository {
     /** Source-backed metadata owns a single low-rate lane and never waits behind chapter claims. */
     claimSourceMetadataRefresh(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /**
+     * Whole-catalog alias discovery must not wait behind an unbounded chapter
+     * P1 reserve.  It owns one explicit, low-rate source-metadata lane; the
+     * normal task claim remains the authority for all chapter/catalog work.
+     */
+    claimCrossSourceMetadataDiscovery(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    /**
      * One first-pass catalog claim is kept independent from the chapter queue.
      * It is limited by the runtime to a single slot and only applies before a
      * canonical work exists, so a sustained P1 repair reserve cannot make new

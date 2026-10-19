@@ -1099,6 +1099,35 @@ export class LiteRepository {
   }
 
   /**
+   * Whole-catalog alias discovery must not wait behind an unbounded chapter
+   * P1 reserve.  It owns one explicit, low-rate source-metadata lane; the
+   * normal task claim remains the authority for all chapter/catalog work.
+   */
+  async claimCrossSourceMetadataDiscovery(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
+    const result = await this.sourceMetadataDb.query<Row>(`
+      WITH picked AS (
+        SELECT task.id
+        FROM importer_lite_tasks task
+        WHERE task.task_type='CATALOG'
+          AND task.payload ? 'metadataCrossSourceDiscovery'
+          AND (
+            (task.state IN ('READY','RETRY_WAIT') AND task.next_run_at<=now())
+            OR (task.state='RUNNING' AND task.lease_until<now())
+          )
+        ORDER BY task.next_run_at,task.id
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE importer_lite_tasks task
+      SET state='RUNNING',lease_owner=$1,lease_until=now()+$2::interval,
+          attempts=task.attempts+1,updated_at=now()
+      FROM picked
+      WHERE task.id=picked.id
+      RETURNING task.*`, [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
+    return result.rows[0] ? asTask(result.rows[0]) : null;
+  }
+
+  /**
    * One first-pass catalog claim is kept independent from the chapter queue.
    * It is limited by the runtime to a single slot and only applies before a
    * canonical work exists, so a sustained P1 repair reserve cannot make new
