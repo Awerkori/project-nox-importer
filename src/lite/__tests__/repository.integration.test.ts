@@ -606,6 +606,27 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual([{ work_id:ids.p1a }, { work_id:ids.p1b }]);
   });
 
+  it('keeps the popular discovery reservation after an unlinked pass finds its first mapping', async () => {
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000319','source-a','popular-linked',$1::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1b]);
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','complete')`);
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:`lite:metadata:cross-source:v5:${ids.p1a}`,
+      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:5,discoveryLane:'unlinked'} });
+    // The unlinked probe attached a provider after admission. It must retain
+    // its original reservation rather than displacing the popular lane.
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000320','source-a','newly-linked',$1::uuid,'p1-a','P1 A','SYNCED')`, [ids.p1a]);
+
+    expect(await repo.refillCrossSourceMetadataDiscovery()).toBe(1);
+    expect((await db.query(`SELECT work_id::text,payload->>'discoveryLane' AS lane
+      FROM importer_lite_tasks WHERE payload ? 'metadataCrossSourceDiscovery' ORDER BY work_id`)).rows)
+      .toEqual([{ work_id:ids.p1a, lane:'unlinked' }, { work_id:ids.p1b, lane:'popular' }]);
+  });
+
   it('claims cross-source coverage outside the generic P2 claim', async () => {
     await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id=$1`, [ids.p1a]);
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
