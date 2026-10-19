@@ -64,7 +64,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
     CREATE TABLE works (
       id uuid PRIMARY KEY, title text, slug text, cover_id uuid,
       published boolean NOT NULL DEFAULT false, latest_chapter_published_at timestamptz,
-      aliases text[] NOT NULL DEFAULT ARRAY[]::text[],
+      aliases text[] NOT NULL DEFAULT ARRAY[]::text[], views_total integer NOT NULL DEFAULT 0,
       author text, artist text, synopsis text, description text, kind text, year integer,
       updated_at timestamptz
     );
