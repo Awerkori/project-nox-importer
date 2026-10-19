@@ -321,6 +321,21 @@ export class ImporterLiteRuntime {
             await this.refillStoredMetadataEnrichment();
         }
         else {
+            // V5 has its own pool and must not wait for restart-time chapter
+            // housekeeping on the saturated main pool. Start its bounded producer
+            // before those optional scans; leadership, provider limits, memory and
+            // its own pool gates remain authoritative.
+            void (async () => {
+                try {
+                    await this.refillSourceMetadataEnrichment();
+                    await this.refillCrossSourceMetadataDiscovery();
+                    await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
+                    await Promise.all([this.runCrossSourceMetadataDiscovery(), this.runCrossSourceMetadataDiscovery()]);
+                }
+                catch (error) {
+                    this.logger.warn('Early V5 metadata startup failed', { error: error?.message });
+                }
+            })();
             await this.seedDiscovery();
             // A former runtime may have left every source observation due at once.
             // Stagger only discovery rows; executable catalog/chapter work remains
