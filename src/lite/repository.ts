@@ -1944,7 +1944,7 @@ export class LiteRepository {
         WHERE task.idempotency_key >= $1 AND task.idempotency_key < $2
           AND task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')`,
         [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`]);
-      const capacity = Math.max(1, Math.min(2, Math.trunc(maxPending)));
+      const capacity = Math.max(1, Math.min(24, Math.trunc(maxPending)));
       const pendingCount = Number(pending.rows[0]?.count || 0);
       if (pendingCount >= capacity) {
         await client.query('COMMIT');
@@ -2009,98 +2009,39 @@ export class LiteRepository {
       const existingWorkIdSet = new Set(existingDiscoveryTasks.rows.map((r) => r.work_id));
 
       const available = capacity - pendingCount;
-      const pendingPopular = Number(pending.rows[0]?.popular || 0);
-      const pendingUnlinked = pendingCount - pendingPopular;
-      const laneOrder: Array<'unlinked' | 'popular'> = [
-        ...(pendingUnlinked === 0 ? ['unlinked' as const] : []),
-        ...(pendingPopular === 0 ? ['popular' as const] : []),
-      ];
       const selected: Array<{ work_id: string; lane: 'unlinked' | 'popular' }> = [];
 
-      for (const lane of laneOrder) {
-        if (selected.length >= available) break;
+      if (available > 0) {
         const excludedArray = [...existingWorkIdSet];
-        if (lane === 'popular') {
-          const candidateBatch = await client.query<{ work_id: string }>(`
-            SELECT w.id::text AS work_id
-            FROM works w
-            WHERE w.published = true
-              AND ($1::uuid[] IS NULL OR NOT (w.id = ANY($1::uuid[])))
-            ORDER BY (COALESCE(cardinality(w.aliases), 0) = 0) DESC, w.views_total DESC
-            LIMIT 16
-          `, [excludedArray.length ? excludedArray : null]);
-          const candidateIds = candidateBatch.rows.map((r) => r.work_id);
-          if (candidateIds.length) {
-            const activeMappings = await client.query<{ work_id: string }>(`
-              SELECT DISTINCT m.work_id::text
-              FROM importer_work_mappings m
-              JOIN importer_sources s ON s.id=m.source
-              LEFT JOIN importer_lite_source_health h ON h.source=s.id
-              WHERE m.work_id = ANY($1::uuid[])
-                AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-                AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
-                AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-            `, [candidateIds]);
-            const activeMappingSet = new Set(activeMappings.rows.map((r) => r.work_id));
-            const matched = candidateIds.find((id) => activeMappingSet.has(id));
-            if (matched) {
-              selected.push({ work_id: matched, lane: 'popular' });
-              existingWorkIdSet.add(matched);
-            }
-          }
-        } else {
-          // Unlinked candidate: first probe the top batch for unlinked titles;
-          // if all top titles are mapped, select from zero-view unlinked catalog works.
-          const candidateBatch = await client.query<{ work_id: string }>(`
-            SELECT w.id::text AS work_id
-            FROM works w
-            WHERE w.published = true
-              AND ($1::uuid[] IS NULL OR NOT (w.id = ANY($1::uuid[])))
-            ORDER BY (COALESCE(cardinality(w.aliases), 0) = 0) DESC, w.views_total DESC
-            LIMIT 16
-          `, [excludedArray.length ? excludedArray : null]);
-          const candidateIds = candidateBatch.rows.map((r) => r.work_id);
-          let matchedUnlinked: string | null = null;
-          if (candidateIds.length) {
-            const activeMappings = await client.query<{ work_id: string }>(`
-              SELECT DISTINCT m.work_id::text
-              FROM importer_work_mappings m
-              JOIN importer_sources s ON s.id=m.source
-              LEFT JOIN importer_lite_source_health h ON h.source=s.id
-              WHERE m.work_id = ANY($1::uuid[])
-                AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-                AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
-                AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-            `, [candidateIds]);
-            const activeMappingSet = new Set(activeMappings.rows.map((r) => r.work_id));
-            matchedUnlinked = candidateIds.find((id) => !activeMappingSet.has(id)) || null;
-          }
-          if (!matchedUnlinked) {
-            const zeroViewBatch = await client.query<{ work_id: string }>(`
-              SELECT w.id::text AS work_id
-              FROM works w
-              WHERE w.published = true
-                AND w.views_total = 0
-                AND ($1::uuid[] IS NULL OR NOT (w.id = ANY($1::uuid[])))
-              ORDER BY (COALESCE(cardinality(w.aliases), 0) = 0) DESC, w.id
-              LIMIT 16
-            `, [excludedArray.length ? excludedArray : null]);
-            const zeroIds = zeroViewBatch.rows.map((r) => r.work_id);
-            if (zeroIds.length) {
-              const activeMappings = await client.query<{ work_id: string }>(`
-                SELECT DISTINCT m.work_id::text
-                FROM importer_work_mappings m
-                WHERE m.work_id = ANY($1::uuid[])
-                  AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-              `, [zeroIds]);
-              const activeMappingSet = new Set(activeMappings.rows.map((r) => r.work_id));
-              matchedUnlinked = zeroIds.find((id) => !activeMappingSet.has(id)) || null;
-            }
-          }
-          matchedUnlinked ||= candidateIds[0] || null;
-          if (matchedUnlinked) {
-            selected.push({ work_id: matchedUnlinked, lane: 'unlinked' });
-            existingWorkIdSet.add(matchedUnlinked);
+        const fetchLimit = Math.max(32, available * 3);
+        const candidateBatch = await client.query<{ work_id: string }>(`
+          SELECT w.id::text AS work_id
+          FROM works w
+          WHERE w.published = true
+            AND ($1::uuid[] IS NULL OR NOT (w.id = ANY($1::uuid[])))
+          ORDER BY (COALESCE(cardinality(w.aliases), 0) = 0) DESC, w.views_total DESC
+          LIMIT $2::int
+        `, [excludedArray.length ? excludedArray : null, fetchLimit]);
+
+        const candidateIds = candidateBatch.rows.map((r) => r.work_id);
+        if (candidateIds.length) {
+          const activeMappings = await client.query<{ work_id: string }>(`
+            SELECT DISTINCT m.work_id::text
+            FROM importer_work_mappings m
+            JOIN importer_sources s ON s.id=m.source
+            LEFT JOIN importer_lite_source_health h ON h.source=s.id
+            WHERE m.work_id = ANY($1::uuid[])
+              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+              AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+              AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+          `, [candidateIds]);
+          const activeMappingSet = new Set(activeMappings.rows.map((r) => r.work_id));
+
+          for (const id of candidateIds) {
+            if (selected.length >= available) break;
+            const lane = activeMappingSet.has(id) ? 'popular' : 'unlinked';
+            selected.push({ work_id: id, lane });
+            existingWorkIdSet.add(id);
           }
         }
       }

@@ -114,7 +114,7 @@ const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // A durable global task checkpoints several independent providers at once.
 // The shared source gate still caps aggregate external I/O, while batching
 // avoids spending one task turn per provider for a 43-source coverage pass.
-const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 3;
+const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 16;
 const CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS = 15_000;
 // The direct importer pool is intentionally tiny and short chapter commits
 // can produce two queued checkouts momentarily.  Treat only a persistent
@@ -893,12 +893,13 @@ export class ImporterLiteRuntime {
     if (!force && now - this.lastMetadataTurboModeRefreshAt < 5_000) return;
     this.lastMetadataTurboModeRefreshAt = now;
     const next = await this.queue.metadataTurboExclusiveMode();
-    if (next.enabled !== this.metadataTurboMode.enabled) {
+    if (force || next.enabled !== this.metadataTurboMode.enabled) {
       this.logger.warn('Updated metadata turbo mode', next);
       this.sourceMetadataLaneGate.setCapacity(next.enabled ? 16 : 4);
-      this.sourceMetadataGate.setCapacity(next.enabled ? 16 : 4);
+      this.sourceMetadataGate.setCapacity(next.enabled ? 24 : 4);
       this.sourceMetadataPersistenceGate.setCapacity(next.enabled ? 4 : 1);
-      this.crossSourceDiscoveryLaneGate.setCapacity(next.enabled ? 4 : 2);
+      this.crossSourceDiscoveryLaneGate.setCapacity(next.enabled ? 16 : 2);
+      this.crossSourceMetadataGate.setCapacity(next.enabled ? 16 : 2);
     }
     this.metadataTurboMode = next;
   }
@@ -1034,13 +1035,13 @@ export class ImporterLiteRuntime {
 
   /** Materialise one durable cross-source coverage task only after V4 releases its exclusive lane. */
   private async refillCrossSourceMetadataDiscovery(): Promise<void> {
-    const minInterval = this.metadataTurboMode.enabled ? 2_000 : CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS;
+    const minInterval = this.metadataTurboMode.enabled ? 1_000 : CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS;
     if (!this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4
       || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
       || Date.now() - this.lastCrossSourceDiscoveryRefillAt < minInterval) return;
     this.lastCrossSourceDiscoveryRefillAt = Date.now();
     try {
-      const admitted = await this.queue.refillCrossSourceMetadataDiscovery(this.metadataTurboMode.enabled ? 4 : 2);
+      const admitted = await this.queue.refillCrossSourceMetadataDiscovery(this.metadataTurboMode.enabled ? 16 : 2);
       if (admitted) this.logger.info('Admitted cross-source metadata coverage task', { admitted });
     } catch (error: any) {
       this.logger.warn('Cross-source metadata coverage refill failed', { error: error?.message });
@@ -1079,22 +1080,22 @@ export class ImporterLiteRuntime {
 
   /** Dedicated bounded workers give source refetch continuous progress without
    * consuming chapter workers or competing with P0/P1 task selection. */
-  private async runSourceMetadataRefresh(overrideWorkerId?: string): Promise<void> {
+  private async runSourceMetadataRefresh(overrideWorkerId?: string): Promise<boolean> {
     // Let in-flight requests finish, but do not start more background source
     // fetches under sustained *metadata-pool* pressure, while the site is
     // paused, or when RSS nears the container's 512 MiB boundary.
-    if (this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4) return;
+    if (this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4) return false;
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
     // See refillSourceMetadataEnrichment: only an intermittent isolated-pool
     // queue constrains this optional lane to one external request.
     const constrainedPool = sustainedPoolPressure;
     if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
-      || this.shouldPauseLowPriorityMetadata()) return;
+      || this.shouldPauseLowPriorityMetadata()) return false;
     // Backpressure reduces the dedicated lane from its tested two external
     // seats to one. Do not turn it fully off: that caused READY dwell and
     // made the very pause intended to protect YSQL hold durable work idle.
-    if (constrainedPool && this.sourceMetadataLaneGate.active >= 1) return;
-    if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire()) return;
+    if (constrainedPool && this.sourceMetadataLaneGate.active >= 1) return false;
+    if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire()) return false;
     let claimed = false;
     let completedSource: string | undefined;
     try {
@@ -1127,6 +1128,7 @@ export class ImporterLiteRuntime {
           .catch((error: any) => this.logger.warn('Source metadata replacement failed', { error: error?.message }));
       }
     }
+    return claimed;
   }
 
   /**
@@ -1135,16 +1137,16 @@ export class ImporterLiteRuntime {
    * limiter and one-work identity lock with V5, so this removes starvation
    * without increasing unsafe external or YSQL concurrency.
    */
-  private async runCrossSourceMetadataDiscovery(): Promise<void> {
+  private async runCrossSourceMetadataDiscovery(overrideWorkerId?: string): Promise<boolean> {
     if (this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4
       || !this.isRuntimeLeader || Date.now() < this.sitePausedUntil
       || this.lastSiteProbe.state === 'PAUSED' || this.shouldPauseLowPriorityMetadata()
-      || !this.crossSourceDiscoveryLaneGate.tryAcquire()) return;
+      || !this.crossSourceDiscoveryLaneGate.tryAcquire()) return false;
     let claimed = false;
     try {
-      const workerId = `${this.runtimeInstanceId}:cross-source-metadata`;
+      const workerId = overrideWorkerId || `${this.runtimeInstanceId}:cross-source-metadata`;
       const task = await this.queue.claimCrossSourceMetadataDiscovery(workerId, 90);
-      if (!task) return;
+      if (!task) return false;
       claimed = true;
       await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
     } catch (error: any) {
@@ -1154,10 +1156,12 @@ export class ImporterLiteRuntime {
       // A coverage task advances one provider per durable checkpoint.  Wake
       // its successor promptly, but never spin when no due task exists.
       if (claimed && this.isRuntimeLeader) {
-        const timer = setTimeout(() => void this.runCrossSourceMetadataDiscovery(), 300);
+        void this.refillCrossSourceMetadataDiscovery();
+        const timer = setTimeout(() => void this.runCrossSourceMetadataDiscovery(), 100);
         timer.unref();
       }
     }
+    return claimed;
   }
 
   /**
@@ -1602,10 +1606,26 @@ export class ImporterLiteRuntime {
           continue;
         }
         if (this.metadataTurboMode.enabled) {
-          telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'V5_TURBO');
-          this.setWorkerLiveness(workerId, 'FETCH');
-          await this.runSourceMetadataRefresh(workerId);
-          await sleep(50);
+          const preferDiscovery = (slotIndex % 2 === 1);
+          let didWork = false;
+          if (preferDiscovery) {
+            telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'DISCOVERY_TURBO');
+            this.setWorkerLiveness(workerId, 'FETCH');
+            didWork = await this.runCrossSourceMetadataDiscovery(workerId);
+            if (!didWork) {
+              telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'V5_TURBO');
+              didWork = await this.runSourceMetadataRefresh(workerId);
+            }
+          } else {
+            telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'V5_TURBO');
+            this.setWorkerLiveness(workerId, 'FETCH');
+            didWork = await this.runSourceMetadataRefresh(workerId);
+            if (!didWork) {
+              telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'DISCOVERY_TURBO');
+              didWork = await this.runCrossSourceMetadataDiscovery(workerId);
+            }
+          }
+          await sleep(didWork ? 25 : 150);
           continue;
         }
         if (this.shouldPauseChapterAdmission()) {
@@ -2269,14 +2289,14 @@ export class ImporterLiteRuntime {
         workId: target.id, originSource: '', title: target.title, slug: target.slug, aliases: target.aliases || [],
         author: target.author || undefined, artist: target.artist || undefined, synopsis: sanitizeSynopsis(target.synopsis) || undefined,
         kind: target.kind || undefined, year: target.year ?? undefined, sourceIds: runnableSources,
-        concurrency: Math.min(CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN, runnableSources.length),
+        concurrency: Math.min(8, runnableSources.length),
         allowFallbackDetailProbe: true,
       });
       outcome.deferredSources.push(...policies.filter(([, policy]) => !policy?.runnable).map(([source]) => source));
     }
     if (outcome.busy) {
       await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: 'CROSS_SOURCE_LANE_BUSY',
-        nextRunAt: new Date(Date.now() + 2_000) });
+        nextRunAt: new Date(Date.now() + 1_000) });
       return;
     }
     for (const source of sourceBatch) checked.add(source);
@@ -2291,7 +2311,7 @@ export class ImporterLiteRuntime {
     const addedAliases = outcome.attached.reduce((sum, item) => sum + item.aliasesAdded, 0);
     const addedTags = outcome.attached.reduce((sum, item) => sum + item.tagsAdded, 0);
     await this.queue.finish(task, workerId, {
-      state: 'RETRY_WAIT', reason: null, nextRunAt: new Date(Date.now() + 250), resetAttempts: true,
+      state: 'RETRY_WAIT', reason: null, nextRunAt: new Date(Date.now() + 100), resetAttempts: true,
       checkpoint: {
         metadataCrossSourceDiscovery: true, checkedSources: [...checked], deferredSources: [...deferred],
         matchedSources: matched.slice(0, 64), aliasesAdded: aliasesAdded + addedAliases, tagsAdded: tagsAdded + addedTags,
