@@ -169,11 +169,11 @@ export class ImporterLiteRuntime {
   private readonly claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
   private readonly historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
   private readonly metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
-  // The exclusive V4 campaign may merge three distinct canonical works. A
+  // The exclusive V4 campaign may merge four distinct canonical works. A
   // separate gate keeps normal operation strictly single-flight.
-  private readonly metadataReplayExclusiveGate = new AsyncSemaphore(3, 'lite_metadata_replay_exclusive');
+  private readonly metadataReplayExclusiveGate = new AsyncSemaphore(4, 'lite_metadata_replay_exclusive');
   private readonly metadataReplayV4RefillGate = new AsyncSemaphore(1, 'lite_metadata_replay_v4_refill');
-  private readonly metadataReplayV4PersistenceGate = new AsyncSemaphore(3, 'lite_metadata_replay_v4_persistence');
+  private readonly metadataReplayV4PersistenceGate = new AsyncSemaphore(4, 'lite_metadata_replay_v4_persistence');
   private readonly sourceMetadataRefillGate = new AsyncSemaphore(1, 'lite_source_metadata_refill');
   // Network waits are independent from YSQL work. Four source requests may
   // wait on distinct providers, while preparing a mapping and committing its
@@ -322,7 +322,7 @@ export class ImporterLiteRuntime {
       // exclusive campaign is active. Existing in-flight operations retain
       // their leases and settle before their worker sees the admission gate.
       await this.refillStoredMetadataEnrichment();
-      await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
+      await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
     } else {
       await this.seedDiscovery();
       // A former runtime may have left every source observation due at once.
@@ -593,7 +593,7 @@ export class ImporterLiteRuntime {
       // discovery, monitor, or source-refetch work. V4 reclaim is performed
       // by its own runner, so this still recovers an expired local lease.
       await this.refillStoredMetadataEnrichment();
-      await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
+      await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
       return;
     }
     const now = Date.now();
@@ -779,7 +779,7 @@ export class ImporterLiteRuntime {
       : Number(this.pool.waitingCount || 0) === 0
         ? STORED_METADATA_REPLAY_V4_IDLE_INTERVAL_MS
         : STORED_METADATA_REPLAY_V4_PRESSURED_INTERVAL_MS;
-    const capacity = this.metadataReplayV4Exclusive.enabled ? 3 : 1;
+    const capacity = this.metadataReplayV4Exclusive.enabled ? 4 : 1;
     let admitted = 0;
     // The repository intentionally inserts one cursor-selected mapping per
     // transaction. Fill each exclusive seat explicitly, still through
@@ -833,7 +833,7 @@ export class ImporterLiteRuntime {
       await this.refreshMetadataReplayV4ExclusiveMode();
       await this.refillStoredMetadataEnrichment();
       if (this.metadataReplayV4Exclusive.enabled) {
-        await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
+        await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
       } else {
         await this.runStoredMetadataReplay();
         await this.refillSourceMetadataEnrichment();

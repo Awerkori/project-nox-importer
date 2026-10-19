@@ -1074,23 +1074,25 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillStoredMetadataEnrichmentV4(2, 500)).toBe(0);
   });
 
-  it('admits three exclusive V4 tasks only for three distinct canonical works', async () => {
-    await db.query(`UPDATE works SET published=true WHERE id IN ($1::uuid,$2::uuid,$3::uuid)`, [ids.staff, ids.p1a, ids.p1b]);
-    await db.query(`INSERT INTO importer_sources(id) VALUES('source-c')`);
+  it('admits four exclusive V4 tasks only for four distinct canonical works', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id IN ($1::uuid,$2::uuid,$3::uuid,$4::uuid)`, [ids.staff, ids.p1a, ids.p1b, ids.publish]);
+    await db.query(`INSERT INTO importer_sources(id) VALUES('source-c'),('source-d')`);
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,metadata,sync_status)
       VALUES
-        ('00000000-0000-4000-8000-000000000138','source-a','triple-a',$1::uuid,'staff','Staff',$4::jsonb,'SYNCED'),
-        ('00000000-0000-4000-8000-000000000139','source-b','triple-b',$2::uuid,'p1-a','P1 A',$4::jsonb,'SYNCED'),
-        ('00000000-0000-4000-8000-000000000140','source-c','triple-c',$3::uuid,'p1-b','P1 B',$4::jsonb,'SYNCED')`,
-      [ids.staff, ids.p1a, ids.p1b, JSON.stringify({ tags: ['Ação'] })]);
+        ('00000000-0000-4000-8000-000000000138','source-a','triple-a',$1::uuid,'staff','Staff',$5::jsonb,'SYNCED'),
+        ('00000000-0000-4000-8000-000000000139','source-b','triple-b',$2::uuid,'p1-a','P1 A',$5::jsonb,'SYNCED'),
+        ('00000000-0000-4000-8000-000000000140','source-c','triple-c',$3::uuid,'p1-b','P1 B',$5::jsonb,'SYNCED'),
+        ('00000000-0000-4000-8000-000000000141','source-d','triple-d',$4::uuid,'publish','Publish',$5::jsonb,'SYNCED')`,
+      [ids.staff, ids.p1a, ids.p1b, ids.publish, JSON.stringify({ tags: ['Ação'] })]);
     await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','true')`);
 
-    expect(await repo.refillStoredMetadataEnrichmentV4(3, 500)).toBe(1);
-    expect(await repo.refillStoredMetadataEnrichmentV4(3, 500)).toBe(1);
-    expect(await repo.refillStoredMetadataEnrichmentV4(3, 500)).toBe(1);
+    expect(await repo.refillStoredMetadataEnrichmentV4(4, 500)).toBe(1);
+    expect(await repo.refillStoredMetadataEnrichmentV4(4, 500)).toBe(1);
+    expect(await repo.refillStoredMetadataEnrichmentV4(4, 500)).toBe(1);
+    expect(await repo.refillStoredMetadataEnrichmentV4(4, 500)).toBe(1);
     expect((await db.query(`SELECT count(DISTINCT work_id)::int AS count FROM importer_lite_tasks
-      WHERE idempotency_key LIKE 'lite:metadata:v4:%' AND state IN ('READY','RUNNING','RETRY_WAIT')`)).rows[0].count).toBe(3);
+      WHERE idempotency_key LIKE 'lite:metadata:v4:%' AND state IN ('READY','RUNNING','RETRY_WAIT')`)).rows[0].count).toBe(4);
   });
 
   it('prioritizes a real alias over empty or tag-only legacy metadata from the same source', async () => {
@@ -3971,7 +3973,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refillStoredMetadataEnrichment();
 
     expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
-    expect(v4).toHaveBeenCalledWith(3, 2_000, 12);
+    expect(v4).toHaveBeenCalledWith(4, 2_000, 12);
   });
 
   it('schedules the next exclusive V4 turn at its durable admission interval', () => {
@@ -3990,7 +3992,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     schedule.mockRestore();
   });
 
-  it('fills three exclusive V4 seats through one serialized producer', async () => {
+  it('fills four exclusive V4 seats through one serialized producer', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
@@ -3999,15 +4001,16 @@ describe('LiteRepository against the additive Lite migration', () => {
     (runtime as any).isRuntimeLeader = true;
     (runtime as any).metadataReplayV4Exclusive = { enabled: true, intervalMs: 1_000 };
     (runtime as any).queue.refillStoredMetadataEnrichment = vi.fn().mockResolvedValue(0);
-    const v4 = vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(1).mockResolvedValueOnce(1);
+    const v4 = vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(1).mockResolvedValueOnce(1).mockResolvedValueOnce(1);
     (runtime as any).queue.refillStoredMetadataEnrichmentV4 = v4;
 
     await (runtime as any).refillStoredMetadataEnrichment();
 
-    expect(v4).toHaveBeenCalledTimes(3);
-    expect(v4).toHaveBeenNthCalledWith(1, 3, 1_000, 12);
-    expect(v4).toHaveBeenNthCalledWith(2, 3, 1_000, 12);
-    expect(v4).toHaveBeenNthCalledWith(3, 3, 1_000, 12);
+    expect(v4).toHaveBeenCalledTimes(4);
+    expect(v4).toHaveBeenNthCalledWith(1, 4, 1_000, 12);
+    expect(v4).toHaveBeenNthCalledWith(2, 4, 1_000, 12);
+    expect(v4).toHaveBeenNthCalledWith(3, 4, 1_000, 12);
+    expect(v4).toHaveBeenNthCalledWith(4, 4, 1_000, 12);
   });
 
   it('continues a bounded exclusive V4 cursor probe without the normal producer throttle', async () => {
@@ -4026,7 +4029,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refillStoredMetadataEnrichment();
 
     expect(v4).toHaveBeenCalledTimes(2);
-    expect(v4).toHaveBeenCalledWith(3, 1_000, 12);
+    expect(v4).toHaveBeenCalledWith(4, 1_000, 12);
   });
 
   it('retains V4 ownership after boot when a due retry already occupies its durable seat', async () => {

@@ -8,7 +8,7 @@ export declare function getSqlFingerprint(queryArg: unknown): string;
 /**
  * Protected connections for low-priority historical metadata bookkeeping.
  * Normal operation admits one task; the explicit V4-exclusive campaign may
- * use three distinct-work merges without borrowing the public/chapter pool.
+ * use four distinct-work merges without borrowing the public/chapter pool.
  * One additional connection is reserved for the serialized durable producer,
  * so refilling a successor never waits behind every active merge.
  */

@@ -152,7 +152,7 @@ function yugabytePoolOptions(cfg, max, applicationName, connectionTimeoutMillis,
 /**
  * Protected connections for low-priority historical metadata bookkeeping.
  * Normal operation admits one task; the explicit V4-exclusive campaign may
- * use three distinct-work merges without borrowing the public/chapter pool.
+ * use four distinct-work merges without borrowing the public/chapter pool.
  * One additional connection is reserved for the serialized durable producer,
  * so refilling a successor never waits behind every active merge.
  */
@@ -161,7 +161,7 @@ export function createYugabyteMetadataPool() {
     // Yugabyte's default nested-loop plan issued one remote read per mapping;
     // prefer its batched variant only here, never on the chapter pool.
     const metadataSessionOptions = '-c enable_nestloop=off';
-    const metadataPool = new pg.Pool(yugabytePoolOptions(getConfig(), 4, 'project-nox-importer-metadata', 4_000, 12_000, metadataSessionOptions, false));
+    const metadataPool = new pg.Pool(yugabytePoolOptions(getConfig(), 5, 'project-nox-importer-metadata', 4_000, 12_000, metadataSessionOptions, false));
     metadataPool.on('error', (err) => {
         logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });
     });
