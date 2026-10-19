@@ -24,6 +24,7 @@ const sameWorkGapPriorityMigration = readFileSync(resolve(process.cwd(), 'migrat
 const sourceMetadataRefetchMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014180000_metadata_source_refetch.sql'), 'utf8');
 const sourceMetadataRefetchIndexesMigration = readFileSync(resolve(process.cwd(), 'migrations/20261014181500_metadata_source_refetch_indexes.sql'), 'utf8');
 const sourceMetadataRefetchClaimIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261016221500_metadata_refetch_claim_idx.sql'), 'utf8');
+const sourceMetadataExpiredLeaseClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261019110000_claim_expired_source_metadata_lease.sql'), 'utf8');
 const metadataProductMetricsMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015043000_metadata_product_activation_metrics.sql'), 'utf8');
 const sourceMetadataProbeCursorMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015060000_metadata_source_probe_cursor.sql'), 'utf8');
 const publicPresentationAdmissionMigration = readFileSync(resolve(process.cwd(), 'migrations/20261015194000_lite_public_presentation_admission.sql'), 'utf8');
@@ -138,6 +139,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(sourceMetadataRefetchMigration);
   await db.exec(sourceMetadataRefetchIndexesMigration);
   await db.exec(sourceMetadataRefetchClaimIndexMigration);
+  await db.exec(sourceMetadataExpiredLeaseClaimMigration);
   await db.exec(metadataProductMetricsMigration);
   await db.exec(sourceMetadataProbeCursorMigration);
   await db.exec(publicPresentationAdmissionMigration);
@@ -749,6 +751,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     const sourceTask = await repo.claimSourceMetadataRefresh('metadata-lane',90);
     expect(sourceTask).toMatchObject({ idempotencyKey:'source-metadata-dedicated',priority:'P2',state:'RUNNING' });
     expect((await repo.claim('chapter-worker',90))?.idempotencyKey).toBe('chapter-p1-remains-first');
+  });
+
+  it('reclaims an expired source-metadata lease after a rolling restart', async () => {
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:'source-metadata-expired-lease',payload:{source:'source-a',sourceWorkId:'stale-work',metadataSourceRefresh:true} });
+    await db.query(`UPDATE importer_lite_tasks
+      SET state='RUNNING',lease_owner='previous-runtime',lease_until=now()-interval '1 minute'
+      WHERE idempotency_key='source-metadata-expired-lease'`);
+
+    const task = await repo.claimSourceMetadataRefresh('replacement-runtime',90);
+    expect(task).toMatchObject({ idempotencyKey:'source-metadata-expired-lease',state:'RUNNING',leaseOwner:'replacement-runtime' });
   });
 
   it('uses the isolated P2 database seat for the historical source claim', async () => {
