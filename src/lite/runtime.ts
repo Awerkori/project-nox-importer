@@ -332,6 +332,11 @@ export class ImporterLiteRuntime {
     // Do this before taking the shared producer lease or creating a task. A
     // Lite process must fail closed against an old Reader schema, rather than
     // discover a numeric collision after it has downloaded/uploaded media.
+    // Use the isolated metadata connection here: during a rolling deploy the
+    // primary importer pool can still be draining an old claim/receipt. If
+    // this small read-only gate waits behind it, the successor cannot acquire
+    // the expired leadership lease and source-metadata campaigns stall even
+    // though their dedicated pool is healthy.
     await this.assertReaderCanonicalIdentitySchema();
     if (!(await this.waitForRuntimeLeadership())) return;
     await this.refreshMetadataReplayV4ExclusiveMode(true);
@@ -416,7 +421,8 @@ export class ImporterLiteRuntime {
 
   private async assertReaderCanonicalIdentitySchema(): Promise<void> {
     const required = ['canonical_chapter_key', 'display_number', 'chapter_order_key', 'chapter_kind', 'edition', 'language'];
-    const columns = await this.pool.query<{ column_name: string; is_nullable: string }>(
+    const schemaPool = this.sourceMetadataPool;
+    const columns = await schemaPool.query<{ column_name: string; is_nullable: string }>(
       `SELECT column_name,is_nullable
        FROM information_schema.columns
        WHERE table_schema='public' AND table_name='chapters'
@@ -425,14 +431,14 @@ export class ImporterLiteRuntime {
     const present = new Map(columns.rows.map((row) => [row.column_name, row.is_nullable]));
     const missing = required.filter((column) => !present.has(column));
     const numberNullable = present.get('number') === 'YES';
-    const canonicalIndex = await this.pool.query<{ exists: boolean }>(
+    const canonicalIndex = await schemaPool.query<{ exists: boolean }>(
       `SELECT EXISTS(
          SELECT 1 FROM pg_indexes
          WHERE schemaname='public' AND tablename='chapters'
            AND indexname='chapters_work_canonical_chapter_key_uq'
        ) AS exists`,
     );
-    const numericConstraint = await this.pool.query<{ exists: boolean }>(
+    const numericConstraint = await schemaPool.query<{ exists: boolean }>(
       `SELECT EXISTS(
          SELECT 1 FROM pg_indexes
          WHERE schemaname='public' AND tablename='chapters'
