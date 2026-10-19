@@ -354,8 +354,11 @@ export class ImporterLiteRuntime {
       void (async () => {
         try {
           await this.refillSourceMetadataEnrichment();
-          await this.refillCrossSourceMetadataDiscovery();
           await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
+          // Global discovery's admission uses the primary queue pool. It can
+          // wait behind a rolling deploy's chapter claims; do not strand
+          // already-durable V5 source tasks behind that unrelated refill.
+          await this.refillCrossSourceMetadataDiscovery();
           await Promise.all([this.runCrossSourceMetadataDiscovery(), this.runCrossSourceMetadataDiscovery()]);
         } catch (error: any) {
           this.logger.warn('Early V5 metadata startup failed', { error: error?.message });
