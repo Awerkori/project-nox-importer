@@ -181,8 +181,11 @@ export class ImporterLiteRuntime {
     sourceMetadataLaneGate = new AsyncSemaphore(4, 'lite_source_metadata_lane');
     sourceMetadataPersistenceGate = new AsyncSemaphore(1, 'lite_source_metadata_persistence');
     newWorkCatalogGate = new AsyncSemaphore(1, 'lite_new_work_catalog_lane');
-    crossSourceMetadataGate = new AsyncSemaphore(1, 'lite_cross_source_metadata');
-    crossSourceDiscoveryLaneGate = new AsyncSemaphore(1, 'lite_cross_source_discovery_lane');
+    // Two different canonical works may check one provider at a time under the
+    // shared host limiter. This doubles durable catalog coverage without
+    // allowing an unbounded source sweep or concurrent merge of one work.
+    crossSourceMetadataGate = new AsyncSemaphore(2, 'lite_cross_source_metadata');
+    crossSourceDiscoveryLaneGate = new AsyncSemaphore(2, 'lite_cross_source_discovery_lane');
     sourceMetadataPoolWaitStartedAt = 0;
     sourceAdmissionGate = new SourceAdmissionGate(10_000);
     lastMetadataEnrichmentAt = 0;
@@ -333,7 +336,7 @@ export class ImporterLiteRuntime {
             // Fill both already-approved external seats at boot. Each call remains
             // fenced by the dedicated source-metadata lane below.
             await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
-            await this.runCrossSourceMetadataDiscovery();
+            await Promise.all([this.runCrossSourceMetadataDiscovery(), this.runCrossSourceMetadataDiscovery()]);
             await this.runNewWorkCatalog();
             await this.runStoredMetadataReplay();
         }
@@ -855,7 +858,7 @@ export class ImporterLiteRuntime {
                 await this.runStoredMetadataReplay();
                 await this.refillSourceMetadataEnrichment();
                 await this.refillCrossSourceMetadataDiscovery();
-                await this.runCrossSourceMetadataDiscovery();
+                await Promise.all([this.runCrossSourceMetadataDiscovery(), this.runCrossSourceMetadataDiscovery()]);
             }
         }
         catch (error) {

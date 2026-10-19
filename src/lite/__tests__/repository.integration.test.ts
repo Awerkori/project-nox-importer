@@ -581,10 +581,13 @@ describe('LiteRepository against the additive Lite migration', () => {
       VALUES('00000000-0000-4000-8000-000000000316','source-a','already-linked',$1::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1b]);
     await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','complete')`);
 
-    expect(await repo.refillCrossSourceMetadataDiscovery()).toBe(1);
+    expect(await repo.refillCrossSourceMetadataDiscovery()).toBe(2);
     expect((await db.query(`SELECT work_id::text,payload->>'metadataCrossSourceDiscovery' AS coverage
-      FROM importer_lite_tasks WHERE payload ? 'metadataCrossSourceDiscovery'`)).rows)
-      .toEqual([{ work_id: ids.p1a, coverage:'true' }]);
+      FROM importer_lite_tasks WHERE payload ? 'metadataCrossSourceDiscovery' ORDER BY work_id`)).rows)
+      .toEqual([
+        { work_id: ids.p1a, coverage:'true' },
+        { work_id: ids.p1b, coverage:'true' },
+      ]);
   });
 
   it('claims cross-source coverage outside the generic P2 claim', async () => {

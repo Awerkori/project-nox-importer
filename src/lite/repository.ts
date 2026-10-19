@@ -1796,12 +1796,12 @@ export class LiteRepository {
   }
 
   /**
-   * Admit one durable, whole-catalog cross-source discovery task at a time.
+   * Admit a tiny, durable whole-catalog cross-source discovery lane.
    * It is deliberately separate from V5's known-mapping refresh: each task
    * records every operational provider considered for its canonical work and
    * only creates a mapping after runtime identity verification.
    */
-  async refillCrossSourceMetadataDiscovery(): Promise<number> {
+  async refillCrossSourceMetadataDiscovery(maxPending = 2): Promise<number> {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
@@ -1814,7 +1814,8 @@ export class LiteRepository {
         FROM importer_lite_tasks
         WHERE task_type='CATALOG' AND state IN ('READY','RUNNING','RETRY_WAIT')
           AND payload ? 'metadataCrossSourceDiscovery'`);
-      if (Number(pending.rows[0]?.count || 0) > 0) {
+      const capacity = Math.max(1, Math.min(2, Math.trunc(maxPending)));
+      if (Number(pending.rows[0]?.count || 0) >= capacity) {
         await client.query('COMMIT');
         return 0;
       }
@@ -1883,22 +1884,28 @@ export class LiteRepository {
           )
         ORDER BY (NOT EXISTS (SELECT 1 FROM active_mapping active WHERE active.work_id=w.id)) DESC,
           (COALESCE(array_length(w.aliases,1),0)=0) DESC,w.id
-        LIMIT 1`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX]);
-      const workId = candidate.rows[0]?.work_id;
-      if (!workId) {
+        LIMIT $2`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, capacity - Number(pending.rows[0]?.count || 0)]);
+      if (!candidate.rowCount) {
         await client.query('COMMIT');
         return 0;
       }
-      const inserted = await client.query<{ work_key: string }>(`INSERT INTO importer_lite_tasks
-        (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
-        VALUES('CATALOG',$1::uuid,$2,3,3,$3,now(),4,$4::jsonb,'{}'::jsonb,false)
-        ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
-        workId, `work:${workId}`, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}${workId}`,
-        JSON.stringify({ metadataCrossSourceDiscovery: true, metadataEnrichmentVersion: METADATA_ALIAS_COVERAGE_V5_VERSION }),
-      ]);
-      if (inserted.rowCount) await this.refreshReadyWork(client, inserted.rows[0].work_key);
+      let admitted = 0;
+      for (const row of candidate.rows) {
+        const workId = String(row.work_id);
+        const inserted = await client.query<{ work_key: string }>(`INSERT INTO importer_lite_tasks
+          (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
+          VALUES('CATALOG',$1::uuid,$2,3,3,$3,now(),4,$4::jsonb,'{}'::jsonb,false)
+          ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
+          workId, `work:${workId}`, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}${workId}`,
+          JSON.stringify({ metadataCrossSourceDiscovery: true, metadataEnrichmentVersion: METADATA_ALIAS_COVERAGE_V5_VERSION }),
+        ]);
+        if (inserted.rowCount) {
+          admitted += 1;
+          await this.refreshReadyWork(client, inserted.rows[0].work_key);
+        }
+      }
       await client.query('COMMIT');
-      return inserted.rowCount || 0;
+      return admitted;
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
       throw error;

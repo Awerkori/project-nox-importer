@@ -193,8 +193,11 @@ export class ImporterLiteRuntime {
   private readonly sourceMetadataLaneGate = new AsyncSemaphore(4, 'lite_source_metadata_lane');
   private readonly sourceMetadataPersistenceGate = new AsyncSemaphore(1, 'lite_source_metadata_persistence');
   private readonly newWorkCatalogGate = new AsyncSemaphore(1, 'lite_new_work_catalog_lane');
-  private readonly crossSourceMetadataGate = new AsyncSemaphore(1, 'lite_cross_source_metadata');
-  private readonly crossSourceDiscoveryLaneGate = new AsyncSemaphore(1, 'lite_cross_source_discovery_lane');
+  // Two different canonical works may check one provider at a time under the
+  // shared host limiter. This doubles durable catalog coverage without
+  // allowing an unbounded source sweep or concurrent merge of one work.
+  private readonly crossSourceMetadataGate = new AsyncSemaphore(2, 'lite_cross_source_metadata');
+  private readonly crossSourceDiscoveryLaneGate = new AsyncSemaphore(2, 'lite_cross_source_discovery_lane');
   private sourceMetadataPoolWaitStartedAt = 0;
   private readonly sourceAdmissionGate = new SourceAdmissionGate(10_000);
   private lastMetadataEnrichmentAt = 0;
@@ -350,7 +353,7 @@ export class ImporterLiteRuntime {
       // Fill both already-approved external seats at boot. Each call remains
       // fenced by the dedicated source-metadata lane below.
       await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
-      await this.runCrossSourceMetadataDiscovery();
+      await Promise.all([this.runCrossSourceMetadataDiscovery(), this.runCrossSourceMetadataDiscovery()]);
       await this.runNewWorkCatalog();
       await this.runStoredMetadataReplay();
     }
@@ -858,7 +861,7 @@ export class ImporterLiteRuntime {
         await this.runStoredMetadataReplay();
         await this.refillSourceMetadataEnrichment();
         await this.refillCrossSourceMetadataDiscovery();
-        await this.runCrossSourceMetadataDiscovery();
+        await Promise.all([this.runCrossSourceMetadataDiscovery(), this.runCrossSourceMetadataDiscovery()]);
       }
     } catch (error: any) {
       this.logger.warn('Metadata turn failed', { error: error?.message });
