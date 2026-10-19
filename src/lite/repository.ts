@@ -1819,9 +1819,9 @@ export class LiteRepository {
         await client.query('COMMIT');
         return 0;
       }
-      const pending = await client.query<{ count: string; linked: string }>(`SELECT
+      const pending = await client.query<{ count: string; popular: string }>(`SELECT
           count(*)::int AS count,
-          count(*) FILTER (WHERE EXISTS (
+          count(*) FILTER (WHERE COALESCE(task.payload->>'discoveryLane', CASE WHEN EXISTS (
             SELECT 1
             FROM importer_work_mappings m
             JOIN importer_sources s ON s.id=m.source
@@ -1830,7 +1830,7 @@ export class LiteRepository {
               AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
               AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
               AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-          ))::int AS linked
+          ) THEN 'popular' ELSE 'unlinked' END)='popular')::int AS popular
         FROM importer_lite_tasks task
         WHERE task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')
           AND task.payload ? 'metadataCrossSourceDiscovery'`);
@@ -1911,11 +1911,16 @@ export class LiteRepository {
           ORDER BY w.views_total DESC,w.id LIMIT 1`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, excludedWorkId]);
       };
       const available = capacity - pendingCount;
-      const pendingLinked = Number(pending.rows[0]?.linked || 0);
-      const pendingUnlinked = pendingCount - pendingLinked;
+      // A discovery task retains the lane in which it was admitted.  An
+      // unlinked work can legitimately attach its first source midway
+      // through coverage; recategorising that live task as popular would
+      // temporarily consume the popular reservation and defer high-read
+      // works. Legacy rows without a lane retain the evidence-based fallback.
+      const pendingPopular = Number(pending.rows[0]?.popular || 0);
+      const pendingUnlinked = pendingCount - pendingPopular;
       const laneOrder: Array<'unlinked' | 'popular'> = [
         ...(pendingUnlinked === 0 ? ['unlinked' as const] : []),
-        ...(pendingLinked === 0 ? ['popular' as const] : []),
+        ...(pendingPopular === 0 ? ['popular' as const] : []),
       ];
       const selected: Array<{ work_id: string; lane: 'unlinked' | 'popular' }> = [];
       for (const lane of laneOrder) {
