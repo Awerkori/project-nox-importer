@@ -34,6 +34,11 @@ const METADATA_REPLAY_V4_ENABLED_KEY = 'metadata_replay_v4_enabled';
 // turning an old NO_ALIASES classification into a permanent conclusion.
 const METADATA_ALIAS_COVERAGE_V5_VERSION = 5;
 const METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX = 'lite:metadata:cross-source:v5:';
+// A source that was temporarily unavailable is not evidence that a work has
+// no aliases.  Revisit it sparingly after the first catalog-wide pass, but
+// cap the recovery path so an external outage can never become an endless
+// metadata loop.
+const METADATA_CROSS_SOURCE_DEFERRED_RECHECK_LIMIT = 2;
 const METADATA_REPLAY_V4_EXCLUSIVE_MODE_KEY = 'metadata_replay_v4_exclusive_mode';
 const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
@@ -1646,6 +1651,48 @@ export class LiteRepository {
             if (Number(pending.rows[0]?.count || 0) > 0) {
                 await client.query('COMMIT');
                 return 0;
+            }
+            // A completed partial pass is intentionally not a terminal
+            // "no-aliases" decision: a cooldown or provider outage may clear later.
+            // Re-admit one due, bounded recheck before starting another work.  Its
+            // checkpoint is reset only for the unavailable providers, preserving
+            // all successful coverage evidence and avoiding a full repeat scan.
+            const deferred = await client.query(`
+        SELECT id::text,work_key,checkpoint
+        FROM importer_lite_tasks
+        WHERE task_type='CATALOG' AND state='DONE'
+          AND payload ? 'metadataCrossSourceDiscovery'
+          AND checkpoint->>'coverage'='CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED'
+          AND next_run_at<=now()
+          AND COALESCE(NULLIF(checkpoint->>'deferredRounds','')::int,0)<$1
+        ORDER BY next_run_at,id
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED`, [METADATA_CROSS_SOURCE_DEFERRED_RECHECK_LIMIT]);
+            const deferredTask = deferred.rows[0];
+            if (deferredTask) {
+                const checkpoint = deferredTask.checkpoint || {};
+                const deferredSources = Array.isArray(checkpoint.deferredSources)
+                    ? checkpoint.deferredSources.map((value) => String(value || '').trim()).filter(Boolean) : [];
+                const deferredSet = new Set(deferredSources);
+                if (deferredSet.size) {
+                    const checkedSources = Array.isArray(checkpoint.checkedSources)
+                        ? checkpoint.checkedSources.map((value) => String(value || '').trim()).filter((value) => value && !deferredSet.has(value)) : [];
+                    const nextCheckpoint = {
+                        ...checkpoint,
+                        coverage: 'CROSS_SOURCE_DEFERRED_RECHECK',
+                        checkedSources,
+                        deferredSources: [],
+                        deferredRounds: Number(checkpoint.deferredRounds || 0) + 1,
+                        resumedAt: new Date().toISOString(),
+                    };
+                    await client.query(`UPDATE importer_lite_tasks
+            SET state='READY',attempts=0,reason=NULL,next_run_at=now(),lease_owner=NULL,lease_until=NULL,
+                checkpoint=$2::jsonb,updated_at=now()
+            WHERE id=$1::uuid`, [deferredTask.id, JSON.stringify(nextCheckpoint)]);
+                    await this.refreshReadyWork(client, deferredTask.work_key);
+                    await client.query('COMMIT');
+                    return 1;
+                }
             }
             // The 162 aliasless works without an active mapping are the first
             // candidates, but the pass deliberately continues over the full public
