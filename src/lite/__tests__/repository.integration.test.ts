@@ -3992,21 +3992,26 @@ describe('LiteRepository against the additive Lite migration', () => {
     schedule.mockRestore();
   });
 
-  it('claims ready exclusive V4 work before running a producer refill', async () => {
+  it('claims ready exclusive V4 work before a non-blocking producer refill', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
     );
     const order: string[] = [];
+    let releaseProducer!: () => void;
     (runtime as any).metadataReplayV4Exclusive = { enabled: true, intervalMs: 1_000 };
     (runtime as any).refreshMetadataReplayV4ExclusiveMode = vi.fn().mockResolvedValue(undefined);
     (runtime as any).runStoredMetadataReplay = vi.fn(async () => { order.push('claim'); });
-    (runtime as any).refillStoredMetadataEnrichment = vi.fn(async () => { order.push('refill'); });
+    (runtime as any).refillStoredMetadataEnrichment = vi.fn(() => {
+      order.push('refill');
+      return new Promise<void>((resolve) => { releaseProducer = resolve; });
+    });
 
     await (runtime as any).runMetadataTurn();
 
     expect(order).toEqual(['claim', 'claim', 'claim', 'claim', 'refill']);
+    releaseProducer();
   });
 
   it('fills four exclusive V4 seats through one serialized producer', async () => {

@@ -593,7 +593,7 @@ export class ImporterLiteRuntime {
       // discovery, monitor, or source-refetch work. V4 reclaim is performed
       // by its own runner, so this still recovers an expired local lease.
       await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
-      await this.refillStoredMetadataEnrichment();
+      void this.refillStoredMetadataEnrichment();
       return;
     }
     const now = Date.now();
@@ -834,9 +834,10 @@ export class ImporterLiteRuntime {
       if (this.metadataReplayV4Exclusive.enabled) {
         await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
         // A source-cursor probe can take materially longer than a local
-        // merge. Claim all already-due V4 rows first, then refill the durable
-        // reserve; otherwise ready mappings sit idle behind producer scans.
-        await this.refillStoredMetadataEnrichment();
+        // merge. Claim all already-due V4 rows first and let the gate-fenced
+        // producer replenish in parallel; otherwise its serial scan leaves
+        // newly READY mappings idle before the next claim turn.
+        void this.refillStoredMetadataEnrichment();
       } else {
         await this.refillStoredMetadataEnrichment();
         await this.runStoredMetadataReplay();
