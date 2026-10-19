@@ -123,6 +123,7 @@ const SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT = 2;
 // after every completion. This is prefetch depth, not execution concurrency.
 const SOURCE_METADATA_CONSTRAINED_PREFETCH_DEPTH = 2;
 const SOURCE_RECOVERY_PROBE_INTERVAL_MS = 30_000;
+const CROSS_SOURCE_DEFERRED_RECHECK_INTERVAL_MS = 15 * 60_000;
 // UNKNOWN Telegram recovery is exceptional and requires a historical
 // uploads/media proof query. Keep it durable, but do not place that cold path
 // in every 30-second chapter recovery turn.
@@ -2089,13 +2090,18 @@ export class ImporterLiteRuntime {
         const aliasesAdded = Math.max(0, Number(task.checkpoint.aliasesAdded || 0));
         const tagsAdded = Math.max(0, Number(task.checkpoint.tagsAdded || 0));
         if (!source) {
+            const deferredRounds = Math.max(0, Number(task.checkpoint.deferredRounds || 0));
             await this.queue.finish(task, workerId, {
                 state: 'DONE', resetAttempts: true,
+                // This remains a partial result, not a synthetic NO_ALIASES verdict.
+                // The producer can reactivate it twice at a controlled cadence after
+                // external cooldowns clear; it never retries indefinitely.
+                nextRunAt: deferred.size ? new Date(Date.now() + CROSS_SOURCE_DEFERRED_RECHECK_INTERVAL_MS) : undefined,
                 checkpoint: {
                     metadataCrossSourceDiscovery: true,
                     coverage: deferred.size ? 'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED' : 'CROSS_SOURCE_PROBES_COMPLETE',
                     checkedSources: [...checked], deferredSources: [...deferred], matchedSources: matched,
-                    aliasesAdded, tagsAdded, completedAt: new Date().toISOString(),
+                    aliasesAdded, tagsAdded, deferredRounds, completedAt: new Date().toISOString(),
                 },
             });
             return;
@@ -2118,6 +2124,9 @@ export class ImporterLiteRuntime {
             return;
         }
         checked.add(source);
+        // A provider that became runnable has now received a fresh attempt.  Only
+        // retain it in the durable deferred set when this attempt fails again.
+        deferred.delete(source);
         for (const deferredSource of outcome.deferredSources)
             deferred.add(deferredSource);
         for (const attached of outcome.attached) {

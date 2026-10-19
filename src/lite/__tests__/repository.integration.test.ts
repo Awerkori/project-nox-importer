@@ -587,6 +587,23 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual([{ work_id: ids.p1a, coverage:'true' }]);
   });
 
+  it('reopens a bounded partial global-discovery pass only for deferred providers', async () => {
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id=$1`, [ids.p1a]);
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','complete')`);
+    await db.query(`INSERT INTO importer_lite_tasks
+      (id,task_type,work_id,work_key,priority,base_priority,idempotency_key,state,next_run_at,max_attempts,payload,checkpoint)
+      VALUES('00000000-0000-4000-8000-000000000318','CATALOG',$1::uuid,$2,3,3,$3,'DONE',now()-interval '1 minute',4,$4::jsonb,$5::jsonb)`, [
+      ids.p1a, `work:${ids.p1a}`, `lite:metadata:cross-source:v5:${ids.p1a}`,
+      JSON.stringify({ metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:5 }),
+      JSON.stringify({ coverage:'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED',checkedSources:['source-a','source-b'],deferredSources:['source-b'],deferredRounds:0 }),
+    ]);
+
+    expect(await repo.refillCrossSourceMetadataDiscovery()).toBe(1);
+    expect((await db.query(`SELECT state,checkpoint->'checkedSources' AS checked,checkpoint->>'deferredRounds' AS rounds
+      FROM importer_lite_tasks WHERE id='00000000-0000-4000-8000-000000000318'`)).rows)
+      .toEqual([{ state:'READY',checked:['source-a'],rounds:'1' }]);
+  });
+
   it('attaches only detail-confirmed cross-source metadata and persists its alias delta', async () => {
     await db.query(`UPDATE works SET published=true,aliases='{}'::text[],title='The Specific P1 A Work',slug='the-specific-p1-a-work' WHERE id=$1`, [ids.p1a]);
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
