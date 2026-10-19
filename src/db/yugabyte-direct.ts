@@ -173,7 +173,7 @@ export function createYugabyteMetadataPool(): pg.Pool {
   // prefer its batched variant only here, never on the chapter pool.
   const metadataSessionOptions = '-c enable_nestloop=off';
   const metadataPool = new pg.Pool(yugabytePoolOptions(
-    getConfig(), 5, 'project-nox-importer-metadata', 4_000, 12_000,
+    getConfig(), 10, 'project-nox-importer-metadata', 15_000, 15_000,
     metadataSessionOptions, false,
   ));
   metadataPool.on('error', (err) => {
