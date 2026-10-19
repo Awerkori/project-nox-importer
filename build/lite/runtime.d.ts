@@ -14,6 +14,7 @@ export declare class ImporterLiteRuntime {
     private readonly sourceMetadataPool;
     private stopped;
     private timers;
+    private metadataTurnTimer;
     private readonly queue;
     private readonly executor;
     private readonly dedupe;
@@ -90,6 +91,14 @@ export declare class ImporterLiteRuntime {
     start(): Promise<void>;
     private assertReaderCanonicalIdentitySchema;
     stop(): void;
+    /**
+     * The normal importer retains its two-second metadata cadence. During the
+     * explicit V4 campaign the durable one-second admission fence must not be
+     * hidden behind that slower timer: a completed local merge would otherwise
+     * leave all exclusive seats idle for up to another second. A recursive
+     * timeout also prevents timer overlap from accumulating producer probes.
+     */
+    private scheduleMetadataTurn;
     /**
      * The shared settings lease is the only cross-runtime coordination point.
      * It gates admission only: workers which already hold a task lease may
