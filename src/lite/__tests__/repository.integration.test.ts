@@ -648,7 +648,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     };
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, { sql: (text: string, values?: unknown[]) => db.query(text, values) },
-      { get: () => adapter } as unknown as SourceRegistry,
+      { get: (source: string) => source === 'source-a' ? adapter : undefined } as unknown as SourceRegistry,
       { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
       { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
         BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,

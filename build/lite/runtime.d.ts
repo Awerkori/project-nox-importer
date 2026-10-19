@@ -260,10 +260,10 @@ export declare class ImporterLiteRuntime {
     private discover;
     private catalog;
     /**
-     * One bounded probe of a work/provider pair.  The task keeps its source
-     * coverage in its checkpoint, so a restart cannot turn catalog-wide search
-     * into an unbounded in-memory sweep.  A rejected or unavailable provider is
-     * evidence, never a reason to attach a fuzzy match.
+     * A bounded batch of independent work/provider probes. The task keeps its
+     * source coverage in its checkpoint, so a restart cannot turn catalog-wide
+     * search into an unbounded in-memory sweep. A rejected or unavailable
+     * provider is evidence, never a reason to attach a fuzzy match.
      */
     private discoverCrossSourceMappings;
     /** Re-fetch explicit provider metadata for one existing mapping. The task is
