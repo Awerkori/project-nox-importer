@@ -1876,10 +1876,10 @@ export class LiteRepository {
           return 1;
         }
       }
-      // The 162 aliasless works without an active mapping are the first
-      // candidates, but the pass deliberately continues over the full public
-      // catalog: a pre-existing mapping is evidence, not proof of complete
-      // source coverage.
+      // Keep one probe for a work lacking active mappings, but reserve the
+      // second durable seat for the most-read aliasless public work. Otherwise
+      // the 162 unlinked works delay high-value confirmed mappings for an
+      // entire catalog lap. Both paths remain part of one full-catalog pass.
       const candidate = await client.query<{ work_id: string }>(`
         WITH active_mapping AS (
           SELECT DISTINCT m.work_id
@@ -1889,17 +1889,29 @@ export class LiteRepository {
           WHERE m.work_id IS NOT NULL AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
             AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
             AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+        ), unlinked AS (
+          SELECT w.id::text AS work_id,0 AS lane
+          FROM works w
+          WHERE w.published=true
+            AND NOT EXISTS (SELECT 1 FROM active_mapping active WHERE active.work_id=w.id)
+            AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks prior
+              WHERE prior.idempotency_key=$1 || w.id::text)
+          ORDER BY w.views_total DESC,w.id LIMIT 1
+        ), popular_aliasless AS (
+          SELECT w.id::text AS work_id,1 AS lane
+          FROM works w
+          WHERE w.published=true AND COALESCE(array_length(w.aliases,1),0)=0
+            AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks prior
+              WHERE prior.idempotency_key=$1 || w.id::text)
+            AND NOT EXISTS (SELECT 1 FROM unlinked selected WHERE selected.work_id=w.id::text)
+          ORDER BY w.views_total DESC,w.id LIMIT 1
         )
-        SELECT w.id::text AS work_id
-        FROM works w
-        WHERE w.published=true
-          AND NOT EXISTS (
-            SELECT 1 FROM importer_lite_tasks prior
-            WHERE prior.idempotency_key=$1 || w.id::text
-          )
-        ORDER BY (NOT EXISTS (SELECT 1 FROM active_mapping active WHERE active.work_id=w.id)) DESC,
-          (COALESCE(array_length(w.aliases,1),0)=0) DESC,w.id
-        LIMIT $2`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, capacity - Number(pending.rows[0]?.count || 0)]);
+        SELECT work_id FROM (
+          SELECT work_id,lane FROM unlinked
+          UNION ALL
+          SELECT work_id,lane FROM popular_aliasless
+        ) candidates
+        ORDER BY lane LIMIT $2`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, capacity - Number(pending.rows[0]?.count || 0)]);
       if (!candidate.rowCount) {
         await client.query('COMMIT');
         return 0;
