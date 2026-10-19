@@ -208,6 +208,8 @@ export class ImporterLiteRuntime {
     // exhausts its cursors, so a restart cannot strand chapter ingestion.
     metadataReplayV4Exclusive = { enabled: false, intervalMs: STORED_METADATA_REPLAY_V4_EXCLUSIVE_DEFAULT_INTERVAL_MS };
     lastMetadataReplayV4ExclusiveRefreshAt = 0;
+    metadataTurboMode = { enabled: false };
+    lastMetadataTurboModeRefreshAt = 0;
     metadataReplayV4WorkTails = new Map();
     // The historical producer is intentionally low-rate. Persist its last
     // admission decision in the heartbeat so a guarded skip cannot look like a
@@ -255,7 +257,7 @@ export class ImporterLiteRuntime {
      * idle time.  Only the independent site-health gate pauses new work.
      */
     shouldPauseChapterAdmission() {
-        return Date.now() < this.sitePausedUntil || this.metadataReplayV4Exclusive.enabled;
+        return Date.now() < this.sitePausedUntil || this.metadataReplayV4Exclusive.enabled || this.metadataTurboMode.enabled;
     }
     /**
      * Metadata is optional P2 work. Yield it before taking away an in-flight
@@ -273,7 +275,7 @@ export class ImporterLiteRuntime {
         // Source metadata is P2 and yields first, but a retained native RSS high
         // watermark must not freeze aliases/tags forever. Reduced mode keeps one
         // fetch/merge lane; critical mode accepts no new metadata work.
-        this.sourceMetadataLaneGate.setCapacity(snapshot.state === 'NORMAL' ? 4 : 1);
+        this.sourceMetadataLaneGate.setCapacity(snapshot.state === 'NORMAL' ? (this.metadataTurboMode.enabled ? 16 : 4) : 1);
         if (snapshot.state !== before) {
             const log = snapshot.state === 'NORMAL' ? this.logger.info.bind(this.logger) : this.logger.warn.bind(this.logger);
             log('Adjusted Lite page admission for memory pressure', snapshot);
@@ -870,11 +872,40 @@ export class ImporterLiteRuntime {
         this.metadataReplayV4Exclusive = next;
         this.sourceMetadataRefreshDeferredForV4 = next.enabled || (await this.queue.isStoredMetadataReplayV4Enabled());
     }
+    /** Refresh the durable turbo campaign switch without relying on process-local state. */
+    async refreshMetadataTurboMode(force = false) {
+        if (!this.isRuntimeLeader)
+            return;
+        const now = Date.now();
+        if (!force && now - this.lastMetadataTurboModeRefreshAt < 5_000)
+            return;
+        this.lastMetadataTurboModeRefreshAt = now;
+        const next = await this.queue.metadataTurboExclusiveMode();
+        if (next.enabled !== this.metadataTurboMode.enabled) {
+            this.logger.warn('Updated metadata turbo mode', next);
+            this.sourceMetadataLaneGate.setCapacity(next.enabled ? 16 : 4);
+            this.sourceMetadataGate.setCapacity(next.enabled ? 16 : 4);
+            this.sourceMetadataPersistenceGate.setCapacity(next.enabled ? 4 : 1);
+            this.crossSourceDiscoveryLaneGate.setCapacity(next.enabled ? 4 : 2);
+        }
+        this.metadataTurboMode = next;
+    }
     /** One timer turn keeps normal metadata paths out of an exclusive replay. */
     async runMetadataTurn() {
         try {
             await this.refreshMetadataReplayV4ExclusiveMode();
-            if (this.metadataReplayV4Exclusive.enabled) {
+            await this.refreshMetadataTurboMode();
+            if (this.metadataTurboMode.enabled) {
+                await Promise.all([
+                    this.runSourceMetadataRefresh(),
+                    this.runSourceMetadataRefresh(),
+                    this.runCrossSourceMetadataDiscovery(),
+                    this.runCrossSourceMetadataDiscovery(),
+                ]);
+                void this.refillSourceMetadataEnrichment(false, 0, undefined);
+                void this.refillCrossSourceMetadataDiscovery();
+            }
+            else if (this.metadataReplayV4Exclusive.enabled) {
                 await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
                 // A source-cursor probe can take materially longer than a local
                 // merge. Claim all already-due V4 rows first and let the gate-fenced
@@ -902,8 +933,9 @@ export class ImporterLiteRuntime {
      * sources; YSQL preparation and persistence remain gated below.
      */
     async refillSourceMetadataEnrichment(replaceCompletedTask = false, emptyProbeTurn = 0, preferredSource) {
+        const minInterval = this.metadataTurboMode.enabled ? 2_000 : SOURCE_METADATA_REFILL_INTERVAL_MS;
         if (!this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled
-            || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < SOURCE_METADATA_REFILL_INTERVAL_MS))
+            || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < minInterval))
             return;
         if (this.sourceMetadataRefreshDeferredForV4) {
             this.noteSourceMetadataProducer('DEFERRED_V4_BACKLOG');
@@ -947,8 +979,8 @@ export class ImporterLiteRuntime {
             // A YSQL cursor turn can take seconds while the public lane is busy;
             // without this one-item buffer, the worker sits idle between every
             // historical task even though no additional HTTP or merge is allowed.
-            const capacity = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PREFETCH_DEPTH : 4;
-            const probeLimit = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : undefined;
+            const capacity = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PREFETCH_DEPTH : (this.metadataTurboMode.enabled ? 24 : 4);
+            const probeLimit = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : (this.metadataTurboMode.enabled ? 24 : undefined);
             // Preserve the ordinary two-argument call shape when no source was
             // recently productive. Besides keeping the path minimal, this makes
             // the preference opt-in rather than part of every producer tick.
@@ -970,6 +1002,10 @@ export class ImporterLiteRuntime {
                 // durable P2 task READY while no source request is in flight. The
                 // runner still applies the same site/pool checks and bounded cap.
                 void this.runSourceMetadataRefresh();
+                if (this.metadataTurboMode.enabled) {
+                    void this.runSourceMetadataRefresh();
+                    void this.runSourceMetadataRefresh();
+                }
             }
         }
         catch (error) {
@@ -985,13 +1021,14 @@ export class ImporterLiteRuntime {
     }
     /** Materialise one durable cross-source coverage task only after V4 releases its exclusive lane. */
     async refillCrossSourceMetadataDiscovery() {
+        const minInterval = this.metadataTurboMode.enabled ? 2_000 : CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS;
         if (!this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4
             || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
-            || Date.now() - this.lastCrossSourceDiscoveryRefillAt < CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS)
+            || Date.now() - this.lastCrossSourceDiscoveryRefillAt < minInterval)
             return;
         this.lastCrossSourceDiscoveryRefillAt = Date.now();
         try {
-            const admitted = await this.queue.refillCrossSourceMetadataDiscovery();
+            const admitted = await this.queue.refillCrossSourceMetadataDiscovery(this.metadataTurboMode.enabled ? 4 : 2);
             if (admitted)
                 this.logger.info('Admitted cross-source metadata coverage task', { admitted });
         }
@@ -1031,7 +1068,7 @@ export class ImporterLiteRuntime {
     }
     /** Dedicated bounded workers give source refetch continuous progress without
      * consuming chapter workers or competing with P0/P1 task selection. */
-    async runSourceMetadataRefresh() {
+    async runSourceMetadataRefresh(overrideWorkerId) {
         // Let in-flight requests finish, but do not start more background source
         // fetches under sustained *metadata-pool* pressure, while the site is
         // paused, or when RSS nears the container's 512 MiB boundary.
@@ -1054,7 +1091,7 @@ export class ImporterLiteRuntime {
         let claimed = false;
         let completedSource;
         try {
-            const workerId = `${this.runtimeInstanceId}:source-metadata`;
+            const workerId = overrideWorkerId || `${this.runtimeInstanceId}:source-metadata`;
             const claimStartedAt = performance.now();
             const task = await this.queue.claimSourceMetadataRefresh(workerId, 90);
             if (task) {
@@ -1542,6 +1579,13 @@ export class ImporterLiteRuntime {
                 if (!this.isRuntimeLeader) {
                     telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'runtime-standby');
                     await sleep(250);
+                    continue;
+                }
+                if (this.metadataTurboMode.enabled) {
+                    telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'V5_TURBO');
+                    this.setWorkerLiveness(workerId, 'FETCH');
+                    await this.runSourceMetadataRefresh(workerId);
+                    await sleep(50);
                     continue;
                 }
                 if (this.shouldPauseChapterAdmission()) {

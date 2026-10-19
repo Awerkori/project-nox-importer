@@ -9,6 +9,7 @@ type Db = Pick<Pool, 'query' | 'connect'>;
  * retry.
  */
 export declare const DUPLICATE_CANONICAL_BATCH_REASON = "ON CONFLICT DO UPDATE command cannot affect row a second time";
+export declare const METADATA_TURBO_EXCLUSIVE_MODE_KEY = "metadata_turbo_exclusive_mode";
 export interface EnqueueLiteTask {
     taskType: LiteTaskType;
     workId?: string | null;
@@ -143,6 +144,12 @@ export declare class LiteRepository {
     }>;
     /** Completion is durable, idempotent and makes a restart resume normal work. */
     disableStoredMetadataReplayV4ExclusiveMode(): Promise<void>;
+    /** A persisted, reversible operator mode for the finite V5 metadata & alias campaign. */
+    metadataTurboExclusiveMode(): Promise<{
+        enabled: boolean;
+    }>;
+    setMetadataTurboExclusiveMode(enabled: boolean): Promise<void>;
+    disableMetadataTurboExclusiveMode(): Promise<void>;
     /**
      * Materialise only chapters already positively confirmed by a durable source
      * manifest.  Historical catalog tasks are useful for obtaining new
@@ -172,7 +179,7 @@ export declare class LiteRepository {
         insertedKeys: Set<string>;
     }>;
     claim(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
-    /** Source-backed metadata owns a single low-rate lane and never waits behind chapter claims. */
+    /** Source-backed metadata owns a dedicated fast lane and never waits behind chapter claims. */
     claimSourceMetadataRefresh(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /**
      * Whole-catalog alias discovery must not wait behind an unbounded chapter

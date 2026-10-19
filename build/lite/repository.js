@@ -42,6 +42,7 @@ const METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX = 'lite:metadata:cross-source:v5
 // metadata loop.
 const METADATA_CROSS_SOURCE_DEFERRED_RECHECK_LIMIT = 2;
 const METADATA_REPLAY_V4_EXCLUSIVE_MODE_KEY = 'metadata_replay_v4_exclusive_mode';
+export const METADATA_TURBO_EXCLUSIVE_MODE_KEY = 'metadata_turbo_exclusive_mode';
 const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
 const METADATA_REPLAY_V4_SOURCE_CURSOR_KEY = 'metadata_replay_v4_source_cursor';
@@ -113,9 +114,19 @@ export class LiteRepository {
             // Before that handoff, retain the old two-seat v3 behaviour unchanged.
             const replay = await client.query(`SELECT value FROM settings
         WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_ENABLED_KEY]);
+            const turbo = await client.query(`SELECT value FROM settings
+        WHERE key=$1 LIMIT 1`, [METADATA_TURBO_EXCLUSIVE_MODE_KEY]);
+            const isTurbo = process.env.METADATA_TURBO_MODE === 'true' || turbo.rows[0]?.value === 'true' || (() => {
+                try {
+                    return JSON.parse(turbo.rows[0]?.value || '{}')?.enabled === true;
+                }
+                catch {
+                    return false;
+                }
+            })();
             const coverageVersion = replay.rows[0]?.value === 'complete' ? METADATA_ALIAS_COVERAGE_V5_VERSION : 3;
             const isCoverageV5 = coverageVersion === METADATA_ALIAS_COVERAGE_V5_VERSION;
-            const ceiling = Math.max(1, Math.min(isCoverageV5 ? 4 : 2, maxPending));
+            const ceiling = Math.max(1, Math.min(isCoverageV5 ? (isTurbo ? 24 : 8) : 2, maxPending));
             const sourceTaskPrefix = `lite:metadata:source:v${coverageVersion}:`;
             const stateEligible = isCoverageV5
                 ? `(status.source IS NULL OR status.version<${METADATA_ALIAS_COVERAGE_V5_VERSION}
@@ -128,7 +139,9 @@ export class LiteRepository {
               AND COALESCE(status.next_retry_at,'-infinity'::timestamptz)<=now()))`;
             const pending = await client.query(`SELECT count(*)::int AS count
         FROM importer_lite_tasks
-        WHERE task_type='CATALOG' AND (state='READY'
+        WHERE task_type='CATALOG'
+          AND state IN ('READY','RUNNING','RETRY_WAIT')
+          AND (state='READY'
           -- A rolling deploy can leave the old owner in RUNNING until the
           -- generic reconciler receives a main-pool turn. That expired lease
           -- cannot execute and must not consume the one protected P2 seat.
@@ -875,6 +888,33 @@ export class LiteRepository {
             JSON.stringify({ enabled: false, completedAt: new Date().toISOString() }),
         ]);
     }
+    /** A persisted, reversible operator mode for the finite V5 metadata & alias campaign. */
+    async metadataTurboExclusiveMode() {
+        if (process.env.METADATA_TURBO_MODE === 'true') {
+            return { enabled: true };
+        }
+        const result = await this.sourceMetadataDb.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [METADATA_TURBO_EXCLUSIVE_MODE_KEY]);
+        const value = String(result.rows[0]?.value || 'false').trim();
+        if (value === 'true')
+            return { enabled: true };
+        try {
+            const parsed = JSON.parse(value);
+            return { enabled: parsed?.enabled === true };
+        }
+        catch {
+            return { enabled: false };
+        }
+    }
+    async setMetadataTurboExclusiveMode(enabled) {
+        await this.sourceMetadataDb.query(`INSERT INTO settings(key,value) VALUES($1,$2)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [
+            METADATA_TURBO_EXCLUSIVE_MODE_KEY,
+            JSON.stringify({ enabled, updatedAt: new Date().toISOString() }),
+        ]);
+    }
+    async disableMetadataTurboExclusiveMode() {
+        await this.setMetadataTurboExclusiveMode(false);
+    }
     /**
      * Materialise only chapters already positively confirmed by a durable source
      * manifest.  Historical catalog tasks are useful for obtaining new
@@ -1078,9 +1118,30 @@ export class LiteRepository {
         const result = await this.db.query('SELECT * FROM public.importer_lite_claim_task($1,$2::interval)', [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
         return result.rows[0] ? asTask(result.rows[0]) : null;
     }
-    /** Source-backed metadata owns a single low-rate lane and never waits behind chapter claims. */
+    /** Source-backed metadata owns a dedicated fast lane and never waits behind chapter claims. */
     async claimSourceMetadataRefresh(workerId, leaseSeconds) {
-        const result = await this.sourceMetadataDb.query('SELECT * FROM public.importer_lite_claim_source_metadata_task($1,$2::interval)', [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
+        const result = await this.sourceMetadataDb.query(`
+      WITH picked AS (
+        SELECT task.id
+        FROM importer_lite_tasks task
+        WHERE task.task_type='CATALOG'
+          AND task.state IN ('READY','RUNNING','RETRY_WAIT')
+          AND task.payload ? 'metadataSourceRefresh'
+          AND (
+            (task.state IN ('READY','RETRY_WAIT') AND task.next_run_at<=now())
+            OR (task.state='RUNNING' AND task.lease_until<now())
+          )
+        ORDER BY task.next_run_at,task.id
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE importer_lite_tasks task
+      SET state='RUNNING',lease_owner=$1,lease_until=now()+$2::interval,
+          attempts=task.attempts+1,updated_at=now()
+      FROM picked
+      WHERE task.id=picked.id
+      RETURNING task.*
+    `, [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
         return result.rows[0] ? asTask(result.rows[0]) : null;
     }
     /**
@@ -1865,9 +1926,8 @@ export class LiteRepository {
             SELECT w.id::text AS work_id
             FROM works w
             WHERE w.published = true
-              AND COALESCE(cardinality(w.aliases), 0) = 0
               AND ($1::uuid[] IS NULL OR NOT (w.id = ANY($1::uuid[])))
-            ORDER BY w.views_total DESC
+            ORDER BY (COALESCE(cardinality(w.aliases), 0) = 0) DESC, w.views_total DESC
             LIMIT 16
           `, [excludedArray.length ? excludedArray : null]);
                     const candidateIds = candidateBatch.rows.map((r) => r.work_id);
@@ -1897,9 +1957,8 @@ export class LiteRepository {
             SELECT w.id::text AS work_id
             FROM works w
             WHERE w.published = true
-              AND COALESCE(cardinality(w.aliases), 0) = 0
               AND ($1::uuid[] IS NULL OR NOT (w.id = ANY($1::uuid[])))
-            ORDER BY w.views_total DESC
+            ORDER BY (COALESCE(cardinality(w.aliases), 0) = 0) DESC, w.views_total DESC
             LIMIT 16
           `, [excludedArray.length ? excludedArray : null]);
                     const candidateIds = candidateBatch.rows.map((r) => r.work_id);
@@ -1919,22 +1978,28 @@ export class LiteRepository {
                         matchedUnlinked = candidateIds.find((id) => !activeMappingSet.has(id)) || null;
                     }
                     if (!matchedUnlinked) {
-                        const zeroViewUnlinked = await client.query(`
+                        const zeroViewBatch = await client.query(`
               SELECT w.id::text AS work_id
               FROM works w
               WHERE w.published = true
-                AND COALESCE(cardinality(w.aliases), 0) = 0
                 AND w.views_total = 0
                 AND ($1::uuid[] IS NULL OR NOT (w.id = ANY($1::uuid[])))
-                AND NOT EXISTS (
-                  SELECT 1 FROM importer_work_mappings m
-                  WHERE m.work_id = w.id
-                    AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-                )
-              LIMIT 1
+              ORDER BY (COALESCE(cardinality(w.aliases), 0) = 0) DESC, w.id
+              LIMIT 16
             `, [excludedArray.length ? excludedArray : null]);
-                        matchedUnlinked = zeroViewUnlinked.rows[0]?.work_id || null;
+                        const zeroIds = zeroViewBatch.rows.map((r) => r.work_id);
+                        if (zeroIds.length) {
+                            const activeMappings = await client.query(`
+                SELECT DISTINCT m.work_id::text
+                FROM importer_work_mappings m
+                WHERE m.work_id = ANY($1::uuid[])
+                  AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+              `, [zeroIds]);
+                            const activeMappingSet = new Set(activeMappings.rows.map((r) => r.work_id));
+                            matchedUnlinked = zeroIds.find((id) => !activeMappingSet.has(id)) || null;
+                        }
                     }
+                    matchedUnlinked ||= candidateIds[0] || null;
                     if (matchedUnlinked) {
                         selected.push({ work_id: matchedUnlinked, lane: 'unlinked' });
                         existingWorkIdSet.add(matchedUnlinked);
