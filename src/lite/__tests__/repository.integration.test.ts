@@ -3974,6 +3974,22 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(v4).toHaveBeenCalledWith(3, 2_000, 12);
   });
 
+  it('schedules the next exclusive V4 turn at its durable admission interval', () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).metadataReplayV4Exclusive = { enabled: true, intervalMs: 1_000 };
+    const schedule = vi.spyOn(globalThis, 'setTimeout');
+
+    (runtime as any).scheduleMetadataTurn();
+
+    expect(schedule).toHaveBeenLastCalledWith(expect.any(Function), 1_000);
+    runtime.stop();
+    schedule.mockRestore();
+  });
+
   it('fills three exclusive V4 seats through one serialized producer', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,

@@ -146,6 +146,7 @@ export class ImporterLiteRuntime {
     sourceMetadataPool;
     stopped = false;
     timers = [];
+    metadataTurnTimer = null;
     queue;
     executor;
     dedupe;
@@ -187,8 +188,8 @@ export class ImporterLiteRuntime {
     sourceMetadataPreferredSource = null;
     sourceMetadataPreferredSourceBurst = 0;
     // V4 is a finite, no-network campaign over metadata we already possess.
-    // It uses the same one-seat isolated pool as optional external re-fetches.
-    // Give it that seat until its durable setting says the campaign is done;
+    // It uses an isolated pool and defers optional external re-fetches until
+    // its durable setting says the campaign is done;
     // source re-fetch tasks stay durable and resume afterwards.
     sourceMetadataRefreshDeferredForV4 = false;
     // An operator may temporarily reserve importer capacity for the finite V4
@@ -355,13 +356,7 @@ export class ImporterLiteRuntime {
         const memoryTimer = setInterval(() => this.refreshMemoryPressure(), 1_000);
         memoryTimer.unref();
         this.timers.push(memoryTimer);
-        const metadataTimer = setInterval(() => {
-            if (!this.isRuntimeLeader)
-                return;
-            void this.runMetadataTurn();
-        }, STORED_METADATA_REPLAY_INTERVAL_MS);
-        metadataTimer.unref();
-        this.timers.push(metadataTimer);
+        this.scheduleMetadataTurn();
         const sourceMetadataTimer = setInterval(() => {
             if (!this.isRuntimeLeader)
                 return;
@@ -416,12 +411,35 @@ export class ImporterLiteRuntime {
     }
     stop() {
         this.stopped = true;
+        if (this.metadataTurnTimer)
+            clearTimeout(this.metadataTurnTimer);
+        this.metadataTurnTimer = null;
         for (const timer of this.timers)
             clearInterval(timer);
         this.timers = [];
         void this.releaseRuntimeLeadership();
         if (this.sourceMetadataPool !== this.pool)
             void this.sourceMetadataPool.end().catch(() => { });
+    }
+    /**
+     * The normal importer retains its two-second metadata cadence. During the
+     * explicit V4 campaign the durable one-second admission fence must not be
+     * hidden behind that slower timer: a completed local merge would otherwise
+     * leave all exclusive seats idle for up to another second. A recursive
+     * timeout also prevents timer overlap from accumulating producer probes.
+     */
+    scheduleMetadataTurn() {
+        if (this.stopped)
+            return;
+        const delayMs = this.metadataReplayV4Exclusive.enabled
+            ? Math.max(250, Math.min(STORED_METADATA_REPLAY_INTERVAL_MS, this.metadataReplayV4Exclusive.intervalMs))
+            : STORED_METADATA_REPLAY_INTERVAL_MS;
+        this.metadataTurnTimer = setTimeout(async () => {
+            if (this.isRuntimeLeader)
+                await this.runMetadataTurn();
+            this.scheduleMetadataTurn();
+        }, delayMs);
+        this.metadataTurnTimer.unref();
     }
     /**
      * The shared settings lease is the only cross-runtime coordination point.
