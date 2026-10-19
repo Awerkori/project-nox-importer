@@ -333,6 +333,7 @@ export class LiteRepository {
             SELECT status.source
             FROM importer_lite_metadata_enrichment status
             JOIN importer_sources s ON s.id=status.source
+            JOIN works w ON w.id=status.work_id AND w.published=true
             LEFT JOIN importer_lite_source_health health ON health.source=s.id
             WHERE status.version<${METADATA_ALIAS_COVERAGE_V5_VERSION}
               AND s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
@@ -360,9 +361,10 @@ export class LiteRepository {
         await client.query('COMMIT');
         return 0;
       }
+      const nextSourceCursor = sourceProbe.rows.at(-1)?.source || probeSources.at(-1)!;
       await client.query(`UPDATE importer_lite_metadata_source_cursor
         SET last_source=$2,updated_at=now() WHERE cursor_name=$1`,
-      ['source_refetch', probeSources.at(-1)!]);
+      ['source_refetch', nextSourceCursor]);
       // A single cross-source/LATERAL ranking query regularly crossed YSQL's
       // read timeout once its task history grew. Keep the same bounded
       // per-source cursor semantics, but issue one indexed source window at
