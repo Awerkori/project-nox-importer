@@ -69,12 +69,20 @@ export class GreenShitAdapter {
                         continue;
                     }
                 }
+                if (res.status === 404) {
+                    return null;
+                }
                 if (!res.ok) {
-                    throw new Error(`HTTP ${res.status} from ${url}`);
+                    const err = new Error(`HTTP ${res.status} from ${url}`);
+                    err.status = res.status;
+                    throw err;
                 }
                 return (await res.json());
             }
             catch (err) {
+                if (err?.status && err.status >= 400 && err.status < 500 && err.status !== 429) {
+                    throw err;
+                }
                 if (attempts >= maxAttempts)
                     throw err;
                 await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
@@ -122,6 +130,8 @@ export class GreenShitAdapter {
         const url = `${this.apiUrl}/obras/${sourceWorkId}`;
         try {
             const data = await this.fetchJson(url);
+            if (!data)
+                throw new Error(`Work ${sourceWorkId} not found (HTTP 404)`);
             const obra = data?.obra || data;
             const title = decodeHtmlEntities(obra.obr_nome || '').trim();
             const synopsis = obra.obr_descricao ? decodeHtmlEntities(stripHtml(obra.obr_descricao)).trim() : undefined;

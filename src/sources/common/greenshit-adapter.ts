@@ -93,12 +93,21 @@ export class GreenShitAdapter implements SourceAdapter {
           }
         }
 
+        if (res.status === 404) {
+          return null as T;
+        }
+
         if (!res.ok) {
-          throw new Error(`HTTP ${res.status} from ${url}`);
+          const err: any = new Error(`HTTP ${res.status} from ${url}`);
+          err.status = res.status;
+          throw err;
         }
 
         return (await res.json()) as T;
       } catch (err: any) {
+        if (err?.status && err.status >= 400 && err.status < 500 && err.status !== 429) {
+          throw err;
+        }
         if (attempts >= maxAttempts) throw err;
         await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
       }
@@ -156,6 +165,7 @@ export class GreenShitAdapter implements SourceAdapter {
 
     try {
       const data = await this.fetchJson(url);
+      if (!data) throw new Error(`Work ${sourceWorkId} not found (HTTP 404)`);
       const obra = data?.obra || data;
 
       const title = decodeHtmlEntities(obra.obr_nome || '').trim();
