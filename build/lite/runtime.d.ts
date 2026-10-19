@@ -50,6 +50,8 @@ export declare class ImporterLiteRuntime {
     private sourceMetadataRefreshDeferredForV4;
     private metadataReplayV4Exclusive;
     private lastMetadataReplayV4ExclusiveRefreshAt;
+    private metadataTurboMode;
+    private lastMetadataTurboModeRefreshAt;
     private readonly metadataReplayV4WorkTails;
     private sourceMetadataProducer;
     private lastSourceRecoveryProbeAt;
@@ -142,6 +144,8 @@ export declare class ImporterLiteRuntime {
     private refillStoredMetadataEnrichmentV4;
     /** Refresh the durable campaign switch without relying on process-local state. */
     private refreshMetadataReplayV4ExclusiveMode;
+    /** Refresh the durable turbo campaign switch without relying on process-local state. */
+    private refreshMetadataTurboMode;
     /** One timer turn keeps normal metadata paths out of an exclusive replay. */
     private runMetadataTurn;
     /** Source-backed historical metadata remains a P2 catalog task and shares
