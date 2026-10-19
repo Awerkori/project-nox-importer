@@ -321,9 +321,8 @@ export class ImporterLiteRuntime {
         // the expired leadership lease and source-metadata campaigns stall even
         // though their dedicated pool is healthy.
         await this.assertReaderCanonicalIdentitySchema();
-        if (!(await this.waitForRuntimeLeadership()))
-            return;
         await this.refreshMetadataReplayV4ExclusiveMode(true);
+        await this.refreshMetadataTurboMode(true);
         if (this.metadataReplayV4Exclusive.enabled) {
             // Do not create discovery/catalog/chapter work while a durable
             // exclusive campaign is active. Existing in-flight operations retain
@@ -621,6 +620,12 @@ export class ImporterLiteRuntime {
     }
     async runRecoveryTurn() {
         await this.refreshMetadataReplayV4ExclusiveMode();
+        await this.refreshMetadataTurboMode();
+        if (this.metadataTurboMode.enabled) {
+            // Turbo mode dedicates all worker and database resources to V5 and Global Discovery.
+            // Do not run P1 catalog refills, P1 manifests, or legacy replay.
+            return;
+        }
         if (this.metadataReplayV4Exclusive.enabled) {
             // The exclusive campaign must not periodically re-admit chapter,
             // discovery, monitor, or source-refetch work. V4 reclaim is performed
