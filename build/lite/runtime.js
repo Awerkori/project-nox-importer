@@ -1604,7 +1604,7 @@ export class ImporterLiteRuntime {
                     continue;
                 }
                 if (this.metadataTurboMode.enabled) {
-                    const preferDiscovery = (slotIndex % 3 !== 0);
+                    const preferDiscovery = (slotIndex % 3 === 0);
                     let didWork = false;
                     if (preferDiscovery) {
                         telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'DISCOVERY_TURBO');
