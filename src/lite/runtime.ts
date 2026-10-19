@@ -884,16 +884,14 @@ export class ImporterLiteRuntime {
       this.noteSourceMetadataProducer('DEFERRED_V4_BACKLOG');
       return;
     }
-    // P2 metadata must yield before chapter receipts/finalization queue on
-    // the deliberately small importer pool. Existing source requests drain
-    // safely; this only prevents a new producer query or HTTP task from
-    // creating another persistence contender under live P1 pressure.
+    // V5 uses its own direct YSQL pool. Main-pool claim waiters are therefore
+    // not evidence that a metadata fetch would contend with a chapter write;
+    // using them here left every external seat idle while workers merely
+    // waited to claim. Only pressure on the isolated metadata pool throttles
+    // its producer.
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
-    // A waiter is expected while ordinary chapter receipts use the shared
-    // three-client pool. Returning on every non-zero sample starved the
-    // history producer; yielding for a 15s "sustained" window still starved
-    // it when normal P1 writes made the count oscillate. Under any real
-    // queue, retain exactly one bounded P2 seat instead of zero or four.
+    // Under real metadata-pool contention retain exactly one bounded source
+    // seat instead of zero or four.
     const constrainedPool = sustainedPoolPressure || this.pool.waitingCount >= 2;
     if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED') {
       this.noteSourceMetadataProducer('SITE_PAUSED');
@@ -910,9 +908,9 @@ export class ImporterLiteRuntime {
     this.lastSourceMetadataRefillAt = Date.now();
     let advanceEmptyHorizon = false;
     try {
-      // A single local pool waiter is normal while chapter receipts drain. It
-      // is not evidence that the public site is under pressure, and holding a
-      // source fetch idle for it collapses the tested two-fetch lane to one.
+      // A main-pool waiter is normal while chapter receipts or claims drain.
+      // It is not evidence that this isolated source-metadata lane is under
+      // pressure, and must not collapse its fetch capacity to one.
       // The persistence gate below still permits just one YSQL merge/commit.
       // Under a real local queue, keep one small source request progressing
       // instead of dropping the lane to zero. It has no YSQL connection while
@@ -1005,14 +1003,12 @@ export class ImporterLiteRuntime {
    * consuming chapter workers or competing with P0/P1 task selection. */
   private async runSourceMetadataRefresh(): Promise<void> {
     // Let in-flight requests finish, but do not start more background source
-    // fetches under a sustained YSQL queue, while the site is paused, or when
-    // RSS nears the container's 512 MiB boundary. A single importer-pool
-    // waiter is normal under chapter load; the one-seat persistence gate
-    // below, rather than an idle network slot, protects YSQL in that case.
+    // fetches under sustained *metadata-pool* pressure, while the site is
+    // paused, or when RSS nears the container's 512 MiB boundary.
     if (this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4) return;
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
-    // See refillSourceMetadataEnrichment: an intermittent P1 queue still
-    // constrains this optional lane to one external request, not zero.
+    // See refillSourceMetadataEnrichment: only an intermittent isolated-pool
+    // queue constrains this optional lane to one external request.
     const constrainedPool = sustainedPoolPressure || this.pool.waitingCount >= 2;
     if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
       || this.shouldPauseLowPriorityMetadata()) return;
@@ -1319,7 +1315,7 @@ export class ImporterLiteRuntime {
   }
 
   private hasSustainedSourceMetadataPoolPressure(): boolean {
-    const waiters = this.pool.waitingCount;
+    const waiters = this.sourceMetadataPool.waitingCount;
     if (waiters <= 0) {
       this.sourceMetadataPoolWaitStartedAt = 0;
       return false;
@@ -1328,9 +1324,8 @@ export class ImporterLiteRuntime {
       this.sourceMetadataPoolWaitStartedAt ||= Date.now();
       return Date.now() - this.sourceMetadataPoolWaitStartedAt >= SOURCE_METADATA_POOL_PRESSURE_SUSTAIN_MS;
     }
-    // A lone direct-pool waiter is expected with five active chapter slots.
-    // It is neither a site signal nor enough reason to discard half of the
-    // already-tested metadata fetch capacity.
+    // A lone metadata-pool waiter is transient and the serialized persistence
+    // gate still bounds write pressure.
     this.sourceMetadataPoolWaitStartedAt = 0;
     return false;
   }
