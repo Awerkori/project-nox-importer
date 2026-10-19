@@ -126,7 +126,7 @@ export class LiteRepository {
             })();
             const coverageVersion = replay.rows[0]?.value === 'complete' ? METADATA_ALIAS_COVERAGE_V5_VERSION : 3;
             const isCoverageV5 = coverageVersion === METADATA_ALIAS_COVERAGE_V5_VERSION;
-            const ceiling = Math.max(1, Math.min(isCoverageV5 ? (isTurbo ? 24 : 8) : 2, maxPending));
+            const ceiling = Math.max(1, Math.min(isCoverageV5 ? (isTurbo ? 48 : 8) : 2, maxPending));
             const sourceTaskPrefix = `lite:metadata:source:v${coverageVersion}:`;
             const stateEligible = isCoverageV5
                 ? `(status.source IS NULL OR status.version<${METADATA_ALIAS_COVERAGE_V5_VERSION}
@@ -300,7 +300,7 @@ export class LiteRepository {
             // stalling every other V5 candidate behind it.
             const candidates = [];
             const candidateCapacity = admissionLimit - priorityCandidates.length;
-            const perSourceLimit = isTurbo ? Math.min(8, candidateCapacity) : 1;
+            const perSourceLimit = isTurbo ? Math.min(12, candidateCapacity) : 1;
             for (const source of probeSources) {
                 if (candidates.length >= candidateCapacity)
                     break;
@@ -1853,7 +1853,7 @@ export class LiteRepository {
         FROM importer_lite_tasks task
         WHERE task.idempotency_key >= $1 AND task.idempotency_key < $2
           AND task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`]);
-            const capacity = Math.max(1, Math.min(24, Math.trunc(maxPending)));
+            const capacity = Math.max(1, Math.min(32, Math.trunc(maxPending)));
             const pendingCount = Number(pending.rows[0]?.count || 0);
             if (pendingCount >= capacity) {
                 await client.query('COMMIT');
