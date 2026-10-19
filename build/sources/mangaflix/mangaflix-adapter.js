@@ -68,12 +68,17 @@ export class MangaFlixAdapter {
                 }
                 if (!response.ok) {
                     const errText = await response.text().catch(() => '');
-                    throw new Error(`MangaFlix request failed: HTTP ${response.status} - ${errText.slice(0, 200)}`);
+                    const error = new Error(`MangaFlix request failed: HTTP ${response.status} - ${errText.slice(0, 200)}`);
+                    error.status = response.status;
+                    throw error;
                 }
                 this.rateLimiter.recordSuccess(parsedUrl.host);
                 return (await response.json());
             }
             catch (err) {
+                if (err?.status && err.status >= 400 && err.status < 500 && err.status !== 429) {
+                    throw err;
+                }
                 if (attempts >= maxAttempts)
                     throw err;
                 await new Promise((r) => setTimeout(r, 1000 * attempts));
