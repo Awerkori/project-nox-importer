@@ -205,47 +205,39 @@ export class LiteRepository {
             }
             await client.query(`UPDATE importer_lite_metadata_source_cursor
         SET last_source=$2,updated_at=now() WHERE cursor_name=$1`, ['source_refetch', probeSources.at(-1)]);
-            const candidates = await client.query(`WITH source_turns AS (
-          SELECT probe.source,history.last_admitted_at,history.last_source_work_id,
-            EXISTS (SELECT 1 FROM importer_lite_tasks rich
-              WHERE rich.task_type='CATALOG' AND rich.state='DONE'
-                AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=probe.source
-                AND rich.checkpoint->>'aliasDelta' ~ '^[1-9][0-9]*$') AS alias_productive_source,
-            EXISTS (SELECT 1 FROM importer_lite_tasks rich
-              WHERE rich.task_type='CATALOG' AND rich.state='DONE'
-                AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=probe.source
-                AND rich.checkpoint->>'tagDelta' ~ '^[1-9][0-9]*$') AS tag_productive_source
-          FROM unnest($1::text[]) AS probe(source)
-          LEFT JOIN LATERAL (
-            SELECT task.created_at AS last_admitted_at,
-              task.payload->>'sourceWorkId' AS last_source_work_id
-            FROM importer_lite_tasks task
-            WHERE task.task_type='CATALOG' AND task.payload ? 'metadataSourceRefresh'
-              AND task.payload->>'source'=probe.source
-            ORDER BY task.created_at DESC
-            LIMIT 1
-          ) history ON true
-        ), candidate_rows AS (
-          -- Score only a fixed cursor window per source. A catalog-wide score
-          -- still made YSQL inspect every unclassified mapping (and timed out
-          -- on the single protected P2 connection). This keeps alias/tag
-          -- value priority while preserving a durable, fair source cursor.
-          SELECT turn.source,candidate.source_work_id,candidate.work_id,turn.last_admitted_at,
-            turn.alias_productive_source,turn.tag_productive_source,
-            COALESCE(cardinality(candidate.aliases),0)=0 AS selected_aliasless,
-            NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=candidate.work_id) AS selected_tagless,
-            candidate.cursor_turn
-          FROM source_turns turn
-          CROSS JOIN LATERAL (
-            WITH after_cursor AS (
-              SELECT m.source_work_id,m.work_id,w.aliases
+            // A single cross-source/LATERAL ranking query regularly crossed YSQL's
+            // read timeout once its task history grew. Keep the same bounded
+            // per-source cursor semantics, but issue one indexed source window at
+            // a time. A pathological provider is skipped by a savepoint instead of
+            // stalling every other V5 candidate behind it.
+            const admissionLimit = ceiling - Number(pending.rows[0]?.count || 0);
+            const candidates = [];
+            for (const source of probeSources) {
+                if (candidates.length >= admissionLimit)
+                    break;
+                await client.query('SAVEPOINT v5_source_candidate');
+                try {
+                    await client.query(`SET LOCAL statement_timeout = '2500ms'`);
+                    const candidate = await client.query(`
+            WITH history AS (
+              SELECT task.payload->>'sourceWorkId' AS last_source_work_id
+              FROM importer_lite_tasks task
+              WHERE task.task_type='CATALOG' AND task.payload ? 'metadataSourceRefresh'
+                AND task.payload->>'source'=$1
+              ORDER BY task.created_at DESC LIMIT 1
+            ), after_cursor AS (
+              SELECT m.source,m.source_work_id,m.work_id,
+                COALESCE(cardinality(w.aliases),0)=0 AS selected_aliasless,
+                NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=m.work_id) AS selected_tagless,
+                0 AS cursor_turn
               FROM importer_work_mappings m
               JOIN works w ON w.id=m.work_id AND w.published=true
               LEFT JOIN importer_lite_metadata_enrichment status
                 ON status.source=m.source AND status.source_work_id=m.source_work_id
-              WHERE m.source=turn.source AND m.work_id IS NOT NULL
+              LEFT JOIN history ON true
+              WHERE m.source=$1 AND m.work_id IS NOT NULL
                 AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-                AND (turn.last_source_work_id IS NULL OR m.source_work_id>turn.last_source_work_id)
+                AND (history.last_source_work_id IS NULL OR m.source_work_id>history.last_source_work_id)
                 AND ${stateEligible}
                 AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
                   WHERE task.idempotency_key IN (
@@ -254,14 +246,18 @@ export class LiteRepository {
                   ) AND task.state IN ('READY','RUNNING','RETRY_WAIT'))
               ORDER BY m.source_work_id LIMIT 32
             ), wrapped AS (
-              SELECT m.source_work_id,m.work_id,w.aliases
+              SELECT m.source,m.source_work_id,m.work_id,
+                COALESCE(cardinality(w.aliases),0)=0 AS selected_aliasless,
+                NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=m.work_id) AS selected_tagless,
+                1 AS cursor_turn
               FROM importer_work_mappings m
               JOIN works w ON w.id=m.work_id AND w.published=true
               LEFT JOIN importer_lite_metadata_enrichment status
                 ON status.source=m.source AND status.source_work_id=m.source_work_id
-              WHERE turn.last_source_work_id IS NOT NULL AND m.source=turn.source AND m.work_id IS NOT NULL
+              CROSS JOIN history
+              WHERE m.source=$1 AND m.work_id IS NOT NULL
                 AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-                AND m.source_work_id<=turn.last_source_work_id
+                AND m.source_work_id<=history.last_source_work_id
                 AND NOT EXISTS (SELECT 1 FROM after_cursor)
                 AND ${stateEligible}
                 AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
@@ -271,24 +267,24 @@ export class LiteRepository {
                   ) AND task.state IN ('READY','RUNNING','RETRY_WAIT'))
               ORDER BY m.source_work_id LIMIT 32
             )
-            SELECT source_work_id,work_id,aliases,0 AS cursor_turn FROM after_cursor
-            UNION ALL
-            SELECT source_work_id,work_id,aliases,1 AS cursor_turn FROM wrapped
-          ) candidate
-        ), per_source_candidate AS (
-          SELECT *,row_number() OVER (PARTITION BY source ORDER BY
-            selected_aliasless DESC,selected_tagless DESC,cursor_turn,source_work_id) AS source_rank
-          FROM candidate_rows
-        )
-        SELECT source,source_work_id,work_id FROM per_source_candidate WHERE source_rank=1
-        -- A mapping for a work with no aliases has higher product value than
-        -- a complementary source mapping for a work that already has aliases.
-        -- Within each tier, prefer providers that have actually added an
-        -- alias to a work. Merely returning aliases is insufficient: many
-        -- mappings already contain every title the source supplies.
-        ORDER BY selected_aliasless DESC,alias_productive_source DESC,
-          selected_tagless DESC,tag_productive_source DESC,last_admitted_at NULLS FIRST,source LIMIT $2`, [probeSources, ceiling - Number(pending.rows[0]?.count || 0)]);
-            for (const row of candidates.rows) {
+            SELECT source,source_work_id,work_id,selected_aliasless,selected_tagless
+            FROM (SELECT * FROM after_cursor UNION ALL SELECT * FROM wrapped) candidate
+            ORDER BY selected_aliasless DESC,selected_tagless DESC,cursor_turn,source_work_id LIMIT 1`, [source]);
+                    await client.query('RELEASE SAVEPOINT v5_source_candidate');
+                    if (candidate.rows[0])
+                        candidates.push(candidate.rows[0]);
+                }
+                catch {
+                    await client.query('ROLLBACK TO SAVEPOINT v5_source_candidate');
+                }
+                finally {
+                    await client.query(`SET LOCAL statement_timeout = '12000ms'`);
+                }
+            }
+            candidates.sort((left, right) => Number(right.selected_aliasless) - Number(left.selected_aliasless)
+                || Number(right.selected_tagless) - Number(left.selected_tagless));
+            const selectedCandidates = candidates.slice(0, admissionLimit);
+            for (const row of selectedCandidates) {
                 const source = String(row.source);
                 const sourceWorkId = String(row.source_work_id);
                 const workId = String(row.work_id);
@@ -307,7 +303,7 @@ export class LiteRepository {
                     await this.refreshReadyWork(client, String(task.work_key));
             }
             await client.query('COMMIT');
-            return candidates.rowCount || 0;
+            return selectedCandidates.length;
         }
         catch (error) {
             await client.query('ROLLBACK').catch(() => { });
