@@ -999,8 +999,8 @@ export class ImporterLiteRuntime {
       // A YSQL cursor turn can take seconds while the public lane is busy;
       // without this one-item buffer, the worker sits idle between every
       // historical task even though no additional HTTP or merge is allowed.
-      const capacity = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PREFETCH_DEPTH : (this.metadataTurboMode.enabled ? 24 : 4);
-      const probeLimit = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : (this.metadataTurboMode.enabled ? 24 : undefined);
+      const capacity = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PREFETCH_DEPTH : (this.metadataTurboMode.enabled ? 48 : 4);
+      const probeLimit = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : (this.metadataTurboMode.enabled ? 32 : undefined);
       // Preserve the ordinary two-argument call shape when no source was
       // recently productive. Besides keeping the path minimal, this makes
       // the preference opt-in rather than part of every producer tick.
@@ -1047,7 +1047,7 @@ export class ImporterLiteRuntime {
       || Date.now() - this.lastCrossSourceDiscoveryRefillAt < minInterval) return;
     this.lastCrossSourceDiscoveryRefillAt = Date.now();
     try {
-      const admitted = await this.queue.refillCrossSourceMetadataDiscovery(this.metadataTurboMode.enabled ? 16 : 2);
+      const admitted = await this.queue.refillCrossSourceMetadataDiscovery(this.metadataTurboMode.enabled ? 32 : 2);
       if (admitted) this.logger.info('Admitted cross-source metadata coverage task', { admitted });
     } catch (error: any) {
       this.logger.warn('Cross-source metadata coverage refill failed', { error: error?.message });
@@ -1286,7 +1286,7 @@ export class ImporterLiteRuntime {
             continue;
           }
           try {
-            const queryCandidates = [input.title, ...input.aliases.slice(0, 3)]
+            const queryCandidates = [input.title, ...input.aliases.slice(0, 1)]
               .map((value) => value.trim()).filter((value, index, values) => value.length >= 2 && values.indexOf(value) === index);
             let selected: { sourceWorkId: string; title: string; slug: string } | null = null;
             let summaryMatch: ReturnType<typeof matchWorkCandidate> | null = null;
@@ -1295,8 +1295,8 @@ export class ImporterLiteRuntime {
             let host = source;
             try { host = new URL(adapter.baseUrl).host || source; } catch { /* test doubles and invalid adapters are isolated by source id */ }
             for (const query of queryCandidates) {
+              await this.sourceRateLimiter.acquire(host, undefined, 60_000);
               const summaries = await this.sourceMetadataGate.runExclusive(async () => {
-                await this.sourceRateLimiter.acquire(host, undefined, 60_000);
                 return withTimeout(adapter.searchWorks(query), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_SEARCH_TIMEOUT');
               });
               for (const summary of summaries) {
@@ -1321,8 +1321,8 @@ export class ImporterLiteRuntime {
             selected ||= fallback;
             if (!selected) continue;
 
+            await this.sourceRateLimiter.acquire(host, undefined, 60_000);
             const details = await this.sourceMetadataGate.runExclusive(async () => {
-              await this.sourceRateLimiter.acquire(host, undefined, 60_000);
               return withTimeout(adapter.fetchWorkDetails(selected!.sourceWorkId), CROSS_SOURCE_METADATA_TIMEOUT_MS,
                 'CROSS_SOURCE_DETAILS_TIMEOUT');
             });
@@ -2271,8 +2271,14 @@ export class ImporterLiteRuntime {
     const deferred = new Set(normalizeList(task.checkpoint.deferredSources));
     const matched = Array.isArray(task.checkpoint.matchedSources) ? task.checkpoint.matchedSources.slice(0, 64) : [];
     const sources = await this.queue.crossSourceDiscoverySources(target.id);
-    const sourceBatch = sources.filter((candidate) => !checked.has(candidate))
-      .slice(0, CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN);
+    const uncheckedSources = sources.filter((candidate) => !checked.has(candidate));
+    const rotationOffset = uncheckedSources.length > 0
+      ? parseInt(target.id.replace(/-/g, '').slice(0, 4), 16) % uncheckedSources.length
+      : 0;
+    const rotatedSources = rotationOffset > 0
+      ? [...uncheckedSources.slice(rotationOffset), ...uncheckedSources.slice(0, rotationOffset)]
+      : uncheckedSources;
+    const sourceBatch = rotatedSources.slice(0, CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN);
     const aliasesAdded = Math.max(0, Number(task.checkpoint.aliasesAdded || 0));
     const tagsAdded = Math.max(0, Number(task.checkpoint.tagsAdded || 0));
     if (!sourceBatch.length) {
@@ -2460,8 +2466,8 @@ export class ImporterLiteRuntime {
         return;
       }
       const host = new URL(adapter.baseUrl).host;
+      await timePhase('rateLimitWaitMs', () => this.sourceRateLimiter.acquire(host, undefined, 60_000));
       const details = await this.sourceMetadataGate.runExclusive(async () => {
-        await timePhase('rateLimitWaitMs', () => this.sourceRateLimiter.acquire(host, undefined, 60_000));
         return timePhase('httpMs', () => withTimeout(adapter.fetchWorkDetails(sourceWorkId), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'METADATA_SOURCE_TIMEOUT'));
       });
       const raw = details.raw && typeof details.raw === 'object' ? details.raw : {};
