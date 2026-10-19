@@ -1734,7 +1734,11 @@ export class LiteRepository {
      * only creates a mapping after runtime identity verification.
      */
     async refillCrossSourceMetadataDiscovery(maxPending = 2) {
-        const client = await this.db.connect();
+        // Global coverage is an optional metadata lane. Its refiller writes only
+        // its own durable P2 tasks, so it must use the same isolated connection
+        // as its claimant instead of waiting behind chapter claims on the main
+        // pool and leaving both discovery seats empty.
+        const client = await this.sourceMetadataDb.connect();
         try {
             await client.query('BEGIN');
             const v4 = await client.query(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_ENABLED_KEY]);
