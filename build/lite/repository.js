@@ -148,27 +148,42 @@ export class LiteRepository {
                 try {
                     await client.query(`SET LOCAL statement_timeout = '2500ms'`);
                     const priority = await client.query(`
-            SELECT m.source,m.source_work_id,m.work_id,
+            WITH popular AS (
+              -- Read a small leading window through idx_works_published_views
+              -- before touching mappings. Ranking the full joined catalog was
+              -- slow enough to silently skip popular aliasless titles.
+              SELECT w.id,w.views_total
+              FROM works w
+              WHERE w.published=true AND COALESCE(cardinality(w.aliases),0)=0
+              ORDER BY w.views_total DESC LIMIT 128
+            ), candidates AS (
+              SELECT m.source,m.source_work_id,m.work_id,popular.views_total,
               true AS selected_aliasless,
               NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=m.work_id) AS selected_tagless
-            FROM works w
-            JOIN importer_work_mappings m ON m.work_id=w.id
-            JOIN importer_sources s ON s.id=m.source
-            LEFT JOIN importer_lite_source_health health ON health.source=s.id
-            LEFT JOIN importer_lite_metadata_enrichment status
-              ON status.source=m.source AND status.source_work_id=m.source_work_id
-            WHERE w.published=true AND COALESCE(cardinality(w.aliases),0)=0
-              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-              AND s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
-              AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-              AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
-              AND ${stateEligible}
-              AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
-                WHERE task.idempotency_key IN (
-                  'lite:metadata:source:v3:' || m.source || ':' || m.source_work_id,
-                  'lite:metadata:source:v5:' || m.source || ':' || m.source_work_id
-                ) AND task.state IN ('READY','RUNNING','RETRY_WAIT'))
-            ORDER BY w.views_total DESC,m.source,m.source_work_id LIMIT 1`);
+              FROM popular
+              CROSS JOIN LATERAL (
+                SELECT m.source,m.source_work_id,m.work_id
+                FROM importer_work_mappings m
+                JOIN importer_sources s ON s.id=m.source
+                LEFT JOIN importer_lite_source_health health ON health.source=s.id
+                LEFT JOIN importer_lite_metadata_enrichment status
+                  ON status.source=m.source AND status.source_work_id=m.source_work_id
+                WHERE m.work_id=popular.id
+                  AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+                  AND s.enabled=true AND ${sourceExecutionEligibilitySql('s')}
+                  AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+                  AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+                  AND ${stateEligible}
+                  AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
+                    WHERE task.idempotency_key IN (
+                      'lite:metadata:source:v3:' || m.source || ':' || m.source_work_id,
+                      'lite:metadata:source:v5:' || m.source || ':' || m.source_work_id
+                    ) AND task.state IN ('READY','RUNNING','RETRY_WAIT'))
+                ORDER BY m.source,m.source_work_id LIMIT 1
+              ) m
+            )
+            SELECT source,source_work_id,work_id,selected_aliasless,selected_tagless
+            FROM candidates ORDER BY views_total DESC,source,source_work_id LIMIT 1`);
                     await client.query('RELEASE SAVEPOINT v5_popular_alias_candidate');
                     if (priority.rows[0])
                         priorityCandidates.push(priority.rows[0]);
