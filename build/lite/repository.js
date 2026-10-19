@@ -299,57 +299,57 @@ export class LiteRepository {
             // a time. A pathological provider is skipped by a savepoint instead of
             // stalling every other V5 candidate behind it.
             const candidates = [];
+            const candidateCapacity = admissionLimit - priorityCandidates.length;
+            const perSourceLimit = isTurbo ? Math.min(8, candidateCapacity) : 1;
             for (const source of probeSources) {
-                if (candidates.length >= admissionLimit - priorityCandidates.length)
+                if (candidates.length >= candidateCapacity)
                     break;
+                const needed = Math.min(perSourceLimit, candidateCapacity - candidates.length);
                 await client.query('SAVEPOINT v5_source_candidate');
                 try {
-                    await client.query(`SET LOCAL statement_timeout = '2500ms'`);
-                    const candidate = await client.query(`
-            WITH history AS (
-              SELECT task.payload->>'sourceWorkId' AS last_source_work_id
-              FROM importer_lite_tasks task
-              WHERE task.task_type='CATALOG' AND task.payload ? 'metadataSourceRefresh'
-                AND task.payload->>'source'=$1
-              ORDER BY task.created_at DESC LIMIT 1
-            ), after_cursor AS (
+                    await client.query(`SET LOCAL statement_timeout = '6000ms'`);
+                    const hist = await client.query(`
+            SELECT task.payload->>'sourceWorkId' AS last_source_work_id
+            FROM importer_lite_tasks task
+            WHERE task.task_type='CATALOG' AND task.payload ? 'metadataSourceRefresh'
+              AND task.payload->>'source'=$1
+            ORDER BY task.created_at DESC LIMIT 1
+          `, [source]);
+                    const lastSourceWorkId = hist.rows[0]?.last_source_work_id || null;
+                    const fwd = await client.query(`
+            SELECT m.source,m.source_work_id,m.work_id,
+              COALESCE(cardinality(w.aliases),0)=0 AS selected_aliasless,
+              false AS selected_tagless
+            FROM importer_work_mappings m
+            JOIN works w ON w.id=m.work_id AND w.published=true
+            LEFT JOIN importer_lite_metadata_enrichment status
+              ON status.source=m.source AND status.source_work_id=m.source_work_id
+            WHERE m.source=$1 AND ($2::text IS NULL OR m.source_work_id > $2::text) AND m.work_id IS NOT NULL
+              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+              AND ${stateEligible}
+            ORDER BY m.source_work_id LIMIT $3
+          `, [source, lastSourceWorkId, needed]);
+                    for (const r of fwd.rows)
+                        candidates.push(r);
+                    if (candidates.length < candidateCapacity && fwd.rows.length < needed && lastSourceWorkId) {
+                        const wrapNeeded = Math.min(needed - fwd.rows.length, candidateCapacity - candidates.length);
+                        const wrap = await client.query(`
               SELECT m.source,m.source_work_id,m.work_id,
                 COALESCE(cardinality(w.aliases),0)=0 AS selected_aliasless,
-                NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=m.work_id) AS selected_tagless,
-                0 AS cursor_turn
+                false AS selected_tagless
               FROM importer_work_mappings m
               JOIN works w ON w.id=m.work_id AND w.published=true
               LEFT JOIN importer_lite_metadata_enrichment status
                 ON status.source=m.source AND status.source_work_id=m.source_work_id
-              LEFT JOIN history ON true
-              WHERE m.source=$1 AND m.work_id IS NOT NULL
+              WHERE m.source=$1 AND m.source_work_id <= $2 AND m.work_id IS NOT NULL
                 AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-                AND (history.last_source_work_id IS NULL OR m.source_work_id>history.last_source_work_id)
                 AND ${stateEligible}
-              ORDER BY m.source_work_id LIMIT 32
-            ), wrapped AS (
-              SELECT m.source,m.source_work_id,m.work_id,
-                COALESCE(cardinality(w.aliases),0)=0 AS selected_aliasless,
-                NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=m.work_id) AS selected_tagless,
-                1 AS cursor_turn
-              FROM importer_work_mappings m
-              JOIN works w ON w.id=m.work_id AND w.published=true
-              LEFT JOIN importer_lite_metadata_enrichment status
-                ON status.source=m.source AND status.source_work_id=m.source_work_id
-              CROSS JOIN history
-              WHERE m.source=$1 AND m.work_id IS NOT NULL
-                AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-                AND m.source_work_id<=history.last_source_work_id
-                AND NOT EXISTS (SELECT 1 FROM after_cursor)
-                AND ${stateEligible}
-              ORDER BY m.source_work_id LIMIT 32
-            )
-            SELECT source,source_work_id,work_id,selected_aliasless,selected_tagless
-            FROM (SELECT * FROM after_cursor UNION ALL SELECT * FROM wrapped) candidate
-            ORDER BY selected_aliasless DESC,selected_tagless DESC,cursor_turn,source_work_id LIMIT 1`, [source]);
+              ORDER BY m.source_work_id LIMIT $3
+            `, [source, lastSourceWorkId, wrapNeeded]);
+                        for (const r of wrap.rows)
+                            candidates.push(r);
+                    }
                     await client.query('RELEASE SAVEPOINT v5_source_candidate');
-                    if (candidate.rows[0])
-                        candidates.push(candidate.rows[0]);
                 }
                 catch {
                     await client.query('ROLLBACK TO SAVEPOINT v5_source_candidate');
@@ -404,10 +404,7 @@ export class LiteRepository {
                     workId, workKey, `${sourceTaskPrefix}${source}:${sourceWorkId}`,
                     JSON.stringify({ source, sourceWorkId, metadataSourceRefresh: true, metadataEnrichmentVersion: coverageVersion }),
                 ]);
-                for (const task of inserted.rows) {
-                    admitted += 1;
-                    await this.refreshReadyWork(client, String(task.work_key));
-                }
+                admitted += inserted.rowCount || 0;
             }
             await client.query('COMMIT');
             return admitted;
