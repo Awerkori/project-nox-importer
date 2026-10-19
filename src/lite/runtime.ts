@@ -956,10 +956,12 @@ export class ImporterLiteRuntime {
         : await this.queue.refillSourceMetadataEnrichment(capacity, probeLimit);
       this.noteSourceMetadataProducer(admitted ? 'ADMITTED' : 'NO_CANDIDATE', admitted);
       // Do not leave a healthy P2 seat idle for 15s merely because this
-      // bounded two-source horizon was exhausted. The durable source cursor
-      // advances transactionally in the producer; this continuation only
-      // examines the next small horizon and never raises concurrency.
-      advanceEmptyHorizon = admitted === 0 && emptyProbeTurn < SOURCE_METADATA_EMPTY_PROBE_TURNS;
+      // bounded source horizon found fewer candidates than its available
+      // seats. The durable cursor advances transactionally; this bounded
+      // continuation only examines the next small horizon and never raises
+      // execution concurrency. In particular, a partially productive
+      // horizon must not strand the remaining V5 slots.
+      advanceEmptyHorizon = admitted < capacity && emptyProbeTurn < SOURCE_METADATA_EMPTY_PROBE_TURNS;
       if (admitted) {
         this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
         // A producer tick that creates executable work must wake the dedicated
