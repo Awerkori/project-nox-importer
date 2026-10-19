@@ -114,7 +114,7 @@ const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // A durable global task checkpoints several independent providers at once.
 // The shared source gate still caps aggregate external I/O, while batching
 // avoids spending one task turn per provider for a 43-source coverage pass.
-const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 16;
+const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 48;
 const CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS = 15_000;
 // The direct importer pool is intentionally tiny and short chapter commits
 // can produce two queued checkouts momentarily.  Treat only a persistent
@@ -895,6 +895,10 @@ export class ImporterLiteRuntime {
     const next = await this.queue.metadataTurboExclusiveMode();
     if (force || next.enabled !== this.metadataTurboMode.enabled) {
       this.logger.warn('Updated metadata turbo mode', next);
+      if (next.enabled) {
+        this.sitePausedUntil = 0;
+        this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 0 };
+      }
       this.sourceMetadataLaneGate.setCapacity(next.enabled ? 16 : 4);
       this.sourceMetadataGate.setCapacity(next.enabled ? 24 : 4);
       this.sourceMetadataPersistenceGate.setCapacity(next.enabled ? 4 : 1);
@@ -965,7 +969,7 @@ export class ImporterLiteRuntime {
     // Under real metadata-pool contention retain exactly one bounded source
     // seat instead of zero or four.
     const constrainedPool = sustainedPoolPressure;
-    if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED') {
+    if (!this.metadataTurboMode.enabled && (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED')) {
       this.noteSourceMetadataProducer('SITE_PAUSED');
       return;
     }
@@ -1037,7 +1041,8 @@ export class ImporterLiteRuntime {
   private async refillCrossSourceMetadataDiscovery(): Promise<void> {
     const minInterval = this.metadataTurboMode.enabled ? 1_000 : CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS;
     if (!this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4
-      || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
+      || (!this.metadataTurboMode.enabled && (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'))
+      || this.shouldPauseLowPriorityMetadata()
       || Date.now() - this.lastCrossSourceDiscoveryRefillAt < minInterval) return;
     this.lastCrossSourceDiscoveryRefillAt = Date.now();
     try {
@@ -1089,7 +1094,7 @@ export class ImporterLiteRuntime {
     // See refillSourceMetadataEnrichment: only an intermittent isolated-pool
     // queue constrains this optional lane to one external request.
     const constrainedPool = sustainedPoolPressure;
-    if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
+    if ((!this.metadataTurboMode.enabled && (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'))
       || this.shouldPauseLowPriorityMetadata()) return false;
     // Backpressure reduces the dedicated lane from its tested two external
     // seats to one. Do not turn it fully off: that caused READY dwell and
@@ -1139,8 +1144,9 @@ export class ImporterLiteRuntime {
    */
   private async runCrossSourceMetadataDiscovery(overrideWorkerId?: string): Promise<boolean> {
     if (this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4
-      || !this.isRuntimeLeader || Date.now() < this.sitePausedUntil
-      || this.lastSiteProbe.state === 'PAUSED' || this.shouldPauseLowPriorityMetadata()
+      || !this.isRuntimeLeader
+      || (!this.metadataTurboMode.enabled && (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'))
+      || this.shouldPauseLowPriorityMetadata()
       || !this.crossSourceDiscoveryLaneGate.tryAcquire()) return false;
     let claimed = false;
     try {
@@ -1745,6 +1751,11 @@ export class ImporterLiteRuntime {
   }
 
   private async probeSharedResources(): Promise<void> {
+    if (this.metadataTurboMode.enabled) {
+      this.sitePausedUntil = 0;
+      this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 0 };
+      return;
+    }
     const first = await this.probeSiteHealth();
     if (first.healthy) {
       this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: first.latencyMs };
@@ -2289,7 +2300,7 @@ export class ImporterLiteRuntime {
         workId: target.id, originSource: '', title: target.title, slug: target.slug, aliases: target.aliases || [],
         author: target.author || undefined, artist: target.artist || undefined, synopsis: sanitizeSynopsis(target.synopsis) || undefined,
         kind: target.kind || undefined, year: target.year ?? undefined, sourceIds: runnableSources,
-        concurrency: Math.min(8, runnableSources.length),
+        concurrency: Math.min(this.metadataTurboMode.enabled ? 12 : 8, runnableSources.length),
         allowFallbackDetailProbe: true,
       });
       outcome.deferredSources.push(...policies.filter(([, policy]) => !policy?.runnable).map(([source]) => source));
@@ -2310,6 +2321,24 @@ export class ImporterLiteRuntime {
     }
     const addedAliases = outcome.attached.reduce((sum, item) => sum + item.aliasesAdded, 0);
     const addedTags = outcome.attached.reduce((sum, item) => sum + item.tagsAdded, 0);
+    const remainingSources = sources.filter((candidate) => !checked.has(candidate));
+    if (!remainingSources.length) {
+      const deferredRounds = Math.max(0, Number(task.checkpoint.deferredRounds || 0));
+      await this.queue.finish(task, workerId, {
+        state: 'DONE', resetAttempts: true,
+        nextRunAt: deferred.size ? new Date(Date.now() + CROSS_SOURCE_DEFERRED_RECHECK_INTERVAL_MS) : undefined,
+        checkpoint: {
+          metadataCrossSourceDiscovery: true,
+          coverage: deferred.size ? 'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED' : 'CROSS_SOURCE_PROBES_COMPLETE',
+          checkedSources: [...checked], deferredSources: [...deferred], matchedSources: matched.slice(0, 64),
+          aliasesAdded: aliasesAdded + addedAliases, tagsAdded: tagsAdded + addedTags,
+          deferredRounds, completedAt: new Date().toISOString(),
+          lastSource: sourceBatch.at(-1), checkedBatch: sourceBatch,
+          lastOutcome: outcome.attached.length ? 'MATCHED' : outcome.deferredSources.length ? 'DEFERRED' : 'NO_MATCH',
+        },
+      });
+      return;
+    }
     await this.queue.finish(task, workerId, {
       state: 'RETRY_WAIT', reason: null, nextRunAt: new Date(Date.now() + 100), resetAttempts: true,
       checkpoint: {
