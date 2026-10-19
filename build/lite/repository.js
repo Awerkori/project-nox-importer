@@ -1094,7 +1094,7 @@ export class LiteRepository {
         SELECT task.id
         FROM importer_lite_tasks task
         WHERE task.task_type='CATALOG'
-          AND task.payload ? 'metadataCrossSourceDiscovery'
+          AND task.idempotency_key >= $1 AND task.idempotency_key < $2
           AND (
             (task.state IN ('READY','RETRY_WAIT') AND task.next_run_at<=now())
             OR (task.state='RUNNING' AND task.lease_until<now())
@@ -1104,11 +1104,16 @@ export class LiteRepository {
         FOR UPDATE SKIP LOCKED
       )
       UPDATE importer_lite_tasks task
-      SET state='RUNNING',lease_owner=$1,lease_until=now()+$2::interval,
+      SET state='RUNNING',lease_owner=$3,lease_until=now()+$4::interval,
           attempts=task.attempts+1,updated_at=now()
       FROM picked
       WHERE task.id=picked.id
-      RETURNING task.*`, [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
+      RETURNING task.*`, [
+            METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX,
+            `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`,
+            workerId,
+            `${Math.max(30, leaseSeconds)} seconds`
+        ]);
         return result.rows[0] ? asTask(result.rows[0]) : null;
     }
     /**
@@ -1779,8 +1784,8 @@ export class LiteRepository {
               AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
           ) THEN 'popular' ELSE 'unlinked' END)='popular')::int AS popular
         FROM importer_lite_tasks task
-        WHERE task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')
-          AND task.payload ? 'metadataCrossSourceDiscovery'`);
+        WHERE task.idempotency_key >= $1 AND task.idempotency_key < $2
+          AND task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`]);
             const capacity = Math.max(1, Math.min(2, Math.trunc(maxPending)));
             const pendingCount = Number(pending.rows[0]?.count || 0);
             if (pendingCount >= capacity) {
@@ -1796,13 +1801,17 @@ export class LiteRepository {
         SELECT id::text,work_key,checkpoint
         FROM importer_lite_tasks
         WHERE task_type='CATALOG' AND state='DONE'
-          AND payload ? 'metadataCrossSourceDiscovery'
+          AND idempotency_key >= $1 AND idempotency_key < $2
           AND checkpoint->>'coverage'='CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED'
           AND next_run_at<=now()
-          AND COALESCE(NULLIF(checkpoint->>'deferredRounds','')::int,0)<$1
+          AND COALESCE(NULLIF(checkpoint->>'deferredRounds','')::int,0)<$3
         ORDER BY next_run_at,id
         LIMIT 1
-        FOR UPDATE SKIP LOCKED`, [METADATA_CROSS_SOURCE_DEFERRED_RECHECK_LIMIT]);
+        FOR UPDATE SKIP LOCKED`, [
+                METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX,
+                `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`,
+                METADATA_CROSS_SOURCE_DEFERRED_RECHECK_LIMIT
+            ]);
             const deferredTask = deferred.rows[0];
             if (deferredTask) {
                 const checkpoint = deferredTask.checkpoint || {};
@@ -1829,40 +1838,17 @@ export class LiteRepository {
                     return 1;
                 }
             }
-            // Keep one probe for a work lacking an operational mapping and one for
-            // a popular, confirmed mapping. Do not materialize the complete mapping
-            // set here: under YSQL pressure that CTE became the global campaign's
-            // bottleneck. Both queries use the published/views order and the narrow
-            // active-work index, then stop at one candidate.
-            const activeMappingForWork = (negated) => `${negated ? 'NOT ' : ''}EXISTS (
-        SELECT 1
-        FROM importer_work_mappings m
-        JOIN importer_sources s ON s.id=m.source
-        LEFT JOIN importer_lite_source_health h ON h.source=s.id
-        WHERE m.work_id=w.id
-          AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-          AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
-          AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-      )`;
-            const selectCandidate = async (lane, excludedWorkId) => {
-                const hasMapping = lane === 'popular';
-                return client.query(`
-          SELECT w.id::text AS work_id
-          FROM works w
-          WHERE w.published=true
-            AND COALESCE(array_length(w.aliases,1),0)=0
-            AND ($2::uuid IS NULL OR w.id<>$2::uuid)
-            AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks prior
-              WHERE prior.idempotency_key=$1 || w.id::text)
-            AND ${activeMappingForWork(!hasMapping)}
-          ORDER BY w.views_total DESC,w.id LIMIT 1`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, excludedWorkId]);
-            };
+            // Candidate selection: decouple candidate identification from task/mapping existence.
+            // Under YSQL, correlated subqueries across the 9,300-work catalog exceeded statement
+            // timeouts. We read candidate slices using the views index, check existing discovery
+            // tasks via the idempotency prefix index, and batch-validate active mappings.
+            const existingDiscoveryTasks = await client.query(`
+        SELECT work_id::text
+        FROM importer_lite_tasks
+        WHERE idempotency_key >= $1 AND idempotency_key < $2
+      `, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`]);
+            const existingWorkIdSet = new Set(existingDiscoveryTasks.rows.map((r) => r.work_id));
             const available = capacity - pendingCount;
-            // A discovery task retains the lane in which it was admitted.  An
-            // unlinked work can legitimately attach its first source midway
-            // through coverage; recategorising that live task as popular would
-            // temporarily consume the popular reservation and defer high-read
-            // works. Legacy rows without a lane retain the evidence-based fallback.
             const pendingPopular = Number(pending.rows[0]?.popular || 0);
             const pendingUnlinked = pendingCount - pendingPopular;
             const laneOrder = [
@@ -1873,9 +1859,87 @@ export class LiteRepository {
             for (const lane of laneOrder) {
                 if (selected.length >= available)
                     break;
-                const candidate = await selectCandidate(lane, selected[0]?.work_id || null);
-                if (candidate.rows[0])
-                    selected.push({ ...candidate.rows[0], lane });
+                const excludedArray = [...existingWorkIdSet];
+                if (lane === 'popular') {
+                    const candidateBatch = await client.query(`
+            SELECT w.id::text AS work_id
+            FROM works w
+            WHERE w.published = true
+              AND COALESCE(cardinality(w.aliases), 0) = 0
+              AND ($1::uuid[] IS NULL OR NOT (w.id = ANY($1::uuid[])))
+            ORDER BY w.views_total DESC
+            LIMIT 16
+          `, [excludedArray.length ? excludedArray : null]);
+                    const candidateIds = candidateBatch.rows.map((r) => r.work_id);
+                    if (candidateIds.length) {
+                        const activeMappings = await client.query(`
+              SELECT DISTINCT m.work_id::text
+              FROM importer_work_mappings m
+              JOIN importer_sources s ON s.id=m.source
+              LEFT JOIN importer_lite_source_health h ON h.source=s.id
+              WHERE m.work_id = ANY($1::uuid[])
+                AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+                AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+                AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+            `, [candidateIds]);
+                        const activeMappingSet = new Set(activeMappings.rows.map((r) => r.work_id));
+                        const matched = candidateIds.find((id) => activeMappingSet.has(id));
+                        if (matched) {
+                            selected.push({ work_id: matched, lane: 'popular' });
+                            existingWorkIdSet.add(matched);
+                        }
+                    }
+                }
+                else {
+                    // Unlinked candidate: first probe the top batch for unlinked titles;
+                    // if all top titles are mapped, select from zero-view unlinked catalog works.
+                    const candidateBatch = await client.query(`
+            SELECT w.id::text AS work_id
+            FROM works w
+            WHERE w.published = true
+              AND COALESCE(cardinality(w.aliases), 0) = 0
+              AND ($1::uuid[] IS NULL OR NOT (w.id = ANY($1::uuid[])))
+            ORDER BY w.views_total DESC
+            LIMIT 16
+          `, [excludedArray.length ? excludedArray : null]);
+                    const candidateIds = candidateBatch.rows.map((r) => r.work_id);
+                    let matchedUnlinked = null;
+                    if (candidateIds.length) {
+                        const activeMappings = await client.query(`
+              SELECT DISTINCT m.work_id::text
+              FROM importer_work_mappings m
+              JOIN importer_sources s ON s.id=m.source
+              LEFT JOIN importer_lite_source_health h ON h.source=s.id
+              WHERE m.work_id = ANY($1::uuid[])
+                AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+                AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+                AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+            `, [candidateIds]);
+                        const activeMappingSet = new Set(activeMappings.rows.map((r) => r.work_id));
+                        matchedUnlinked = candidateIds.find((id) => !activeMappingSet.has(id)) || null;
+                    }
+                    if (!matchedUnlinked) {
+                        const zeroViewUnlinked = await client.query(`
+              SELECT w.id::text AS work_id
+              FROM works w
+              WHERE w.published = true
+                AND COALESCE(cardinality(w.aliases), 0) = 0
+                AND w.views_total = 0
+                AND ($1::uuid[] IS NULL OR NOT (w.id = ANY($1::uuid[])))
+                AND NOT EXISTS (
+                  SELECT 1 FROM importer_work_mappings m
+                  WHERE m.work_id = w.id
+                    AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+                )
+              LIMIT 1
+            `, [excludedArray.length ? excludedArray : null]);
+                        matchedUnlinked = zeroViewUnlinked.rows[0]?.work_id || null;
+                    }
+                    if (matchedUnlinked) {
+                        selected.push({ work_id: matchedUnlinked, lane: 'unlinked' });
+                        existingWorkIdSet.add(matchedUnlinked);
+                    }
+                }
             }
             if (!selected.length) {
                 await client.query('COMMIT');
@@ -1886,7 +1950,7 @@ export class LiteRepository {
                 const workId = String(row.work_id);
                 const inserted = await client.query(`INSERT INTO importer_lite_tasks
           (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
-          VALUES('CATALOG',$1::uuid,$2,3,3,$3,now(),4,$4::jsonb,'{}'::jsonb,false)
+          VALUES('CATALOG',$1::uuid,$2,3,3,$3,now(),16,$4::jsonb,'{}'::jsonb,false)
           ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
                     workId, `work:${workId}`, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}${workId}`,
                     JSON.stringify({ metadataCrossSourceDiscovery: true, metadataEnrichmentVersion: METADATA_ALIAS_COVERAGE_V5_VERSION,
@@ -2199,23 +2263,23 @@ export class LiteRepository {
         try {
             await client.query('BEGIN');
             const leases = await client.query(`WITH picked AS (
-           SELECT id,work_key,attempts,max_attempts,task_type,monitoring FROM importer_lite_tasks WHERE state='RUNNING' AND lease_until<now()
+           SELECT id,work_key,attempts,max_attempts,task_type,monitoring,payload FROM importer_lite_tasks WHERE state='RUNNING' AND lease_until<now()
            ORDER BY lease_until LIMIT $1 FOR UPDATE SKIP LOCKED
          ) UPDATE importer_lite_tasks t SET
            state=CASE WHEN picked.attempts >= picked.max_attempts
-             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND picked.monitoring))
+             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND (picked.monitoring OR picked.payload ? 'metadataCrossSourceDiscovery')))
              THEN 'BLOCKED' ELSE 'RETRY_WAIT' END,
            lease_owner=NULL, lease_until=NULL,
            next_run_at=CASE WHEN picked.attempts >= picked.max_attempts
-             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND picked.monitoring))
+             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND (picked.monitoring OR picked.payload ? 'metadataCrossSourceDiscovery')))
              THEN t.next_run_at ELSE now() + interval '30 seconds' END,
            reason=CASE WHEN picked.attempts >= picked.max_attempts
-             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND picked.monitoring))
+             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND (picked.monitoring OR picked.payload ? 'metadataCrossSourceDiscovery')))
              THEN 'LEASE_EXPIRED_MAX_ATTEMPTS' ELSE 'LEASE_EXPIRED' END,
            updated_at=now()
          FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state`, [limit]);
             const retries = await client.query(`WITH picked AS (
-           SELECT id,work_key,attempts,max_attempts,task_type,monitoring FROM importer_lite_tasks
+           SELECT id,work_key,attempts,max_attempts,task_type,monitoring,payload FROM importer_lite_tasks
            WHERE state='RETRY_WAIT' AND next_run_at<=now()
              -- Explicit provider cooldown work is admitted only by the
              -- per-source pass below. A later 429 may extend health cooldown
@@ -2224,10 +2288,10 @@ export class LiteRepository {
            ORDER BY next_run_at LIMIT $1 FOR UPDATE SKIP LOCKED
          ) UPDATE importer_lite_tasks t SET
            state=CASE WHEN picked.attempts >= picked.max_attempts
-             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND picked.monitoring))
+             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND (picked.monitoring OR picked.payload ? 'metadataCrossSourceDiscovery')))
              THEN 'BLOCKED' ELSE 'READY' END,
            reason=CASE WHEN picked.attempts >= picked.max_attempts
-             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND picked.monitoring))
+             AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND (picked.monitoring OR picked.payload ? 'metadataCrossSourceDiscovery')))
              THEN 'MAX_ATTEMPTS_EXHAUSTED' ELSE t.reason END,
            updated_at=now()
          FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state`, [limit]);
