@@ -611,9 +611,11 @@ describe('LiteRepository against the additive Lite migration', () => {
       payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:5} });
     const task = await repo.claim('cross-source-worker', 120);
     const adapter = { id:'source-a',baseUrl:'https://source-a.example',
-      searchWorks:async () => [{ sourceWorkId:'cross-source-a',title:'The Specific P1 A Work',slug:'the-specific-p1-a-work' }],
-      fetchWorkDetails:async () => ({ sourceWorkId:'cross-source-a',title:'The Specific P1 A Work',slug:'the-specific-p1-a-work',
-        alternativeTitles:['P1 A English'],genres:[],raw:{} }),
+      // The search result is a different primary title.  The exact identity
+      // proof appears only in the source's explicit detail alias.
+      searchWorks:async () => [{ sourceWorkId:'cross-source-a',title:'O Trabalho P1 Específico',slug:'o-trabalho-p1-especifico' }],
+      fetchWorkDetails:async () => ({ sourceWorkId:'cross-source-a',title:'O Trabalho P1 Específico',slug:'o-trabalho-p1-especifico',
+        alternativeTitles:['The Specific P1 A Work','P1 A English'],genres:[],raw:{} }),
     };
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, { sql: (text: string, values?: unknown[]) => db.query(text, values) },

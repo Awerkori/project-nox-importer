@@ -1135,6 +1135,13 @@ export class ImporterLiteRuntime {
     sourceIds?: string[];
     /** Historical discovery is deliberately single-source per durable turn. */
     concurrency?: number;
+    /**
+     * A provider search may return a translated primary title while the
+     * identity proof is present only in its detail-page aliases.  The global
+     * coverage pass may fetch one ranked fallback result; onboarding keeps
+     * its existing no-extra-probe behaviour.
+     */
+    allowFallbackDetailProbe?: boolean;
   }): Promise<CrossSourceMetadataResult> {
     const result: CrossSourceMetadataResult = { busy: false, attemptedSources: [], deferredSources: [], attached: [] };
     if (!this.crossSourceMetadataGate.tryAcquire()) return { ...result, busy: true };
@@ -1161,6 +1168,8 @@ export class ImporterLiteRuntime {
               .map((value) => value.trim()).filter((value, index, values) => value.length >= 2 && values.indexOf(value) === index);
             let selected: { sourceWorkId: string; title: string; slug: string } | null = null;
             let summaryMatch: ReturnType<typeof matchWorkCandidate> | null = null;
+            let fallback: { sourceWorkId: string; title: string; slug: string } | null = null;
+            const seenSummaryIds = new Set<string>();
             let host = source;
             try { host = new URL(adapter.baseUrl).host || source; } catch { /* test doubles and invalid adapters are isolated by source id */ }
             for (const query of queryCandidates) {
@@ -1169,16 +1178,26 @@ export class ImporterLiteRuntime {
                 return withTimeout(adapter.searchWorks(query), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_SEARCH_TIMEOUT');
               });
               for (const summary of summaries) {
+                const summaryId = String(summary.sourceWorkId || '').trim();
+                if (!summaryId || seenSummaryIds.has(summaryId)) continue;
+                seenSummaryIds.add(summaryId);
                 const match = matchWorkCandidate(target, { title: summary.title, slug: summary.slug });
-                if (!match.matched || match.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE) continue;
-                selected = summary;
-                summaryMatch = match;
-                break;
+                if (match.matched && match.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE) {
+                  selected = summary;
+                  summaryMatch = match;
+                  break;
+                }
+                // Search ranking is only a discovery hint, never an identity
+                // decision.  A single fallback detail fetch lets an explicit
+                // original/English/Portuguese alias prove the match later;
+                // the strict detail gate below rejects every other result.
+                if (input.allowFallbackDetailProbe && !fallback) fallback = summary;
               }
               if (selected) break;
             }
             result.attemptedSources.push(source);
-            if (!selected || !summaryMatch) continue;
+            selected ||= fallback;
+            if (!selected) continue;
 
             const details = await this.sourceMetadataGate.runExclusive(async () => {
               await this.sourceRateLimiter.acquire(host, undefined, 60_000);
@@ -1207,7 +1226,7 @@ export class ImporterLiteRuntime {
               || (target.aliases || []).some((alias) => normalizeTitle(alias) === normalizeTitle(details.title));
             const titleIsSpecific = targetTitle.length >= 12 && targetTitle.split(/\s+/).filter(Boolean).length >= 2;
             const independentlyCorroborated = detailEvidence.autoMatch || explicitCrossAlias
-              || (titleIsSpecific && ['EXACT_TITLE', 'EXACT_SLUG'].includes(summaryMatch.matchMethod)
+              || (titleIsSpecific && summaryMatch && ['EXACT_TITLE', 'EXACT_SLUG'].includes(summaryMatch.matchMethod)
                 && ['EXACT_TITLE', 'EXACT_SLUG'].includes(detailMatch.matchMethod));
             if (!detailMatch.matched || detailMatch.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE
               || !independentlyCorroborated) {
@@ -2132,6 +2151,7 @@ export class ImporterLiteRuntime {
         workId: target.id, originSource: '', title: target.title, slug: target.slug, aliases: target.aliases || [],
         author: target.author || undefined, artist: target.artist || undefined, synopsis: sanitizeSynopsis(target.synopsis) || undefined,
         kind: target.kind || undefined, year: target.year || undefined, sourceIds: [source], concurrency: 1,
+        allowFallbackDetailProbe: true,
       });
     }
     if (outcome.busy) {
