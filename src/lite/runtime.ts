@@ -3,7 +3,7 @@ import { performance } from 'node:perf_hooks';
 import type { Pool } from 'pg';
 import { DeduplicationEngine } from '../core/deduplication.js';
 import { DirectSupabaseClient } from '../db/direct-supabase-client.js';
-import { matchWorkCandidate, type MatchCandidate } from '../core/matching.js';
+import { evaluateMetadataMatchEvidence, matchWorkCandidate, normalizeTitle, type MatchCandidate } from '../core/matching.js';
 import type { Config } from '../config.js';
 import type { SourceRegistry } from '../sources/registry.js';
 import type { StorageProvider } from '../storage/provider.js';
@@ -111,6 +111,7 @@ const CATALOG_TASK_LEASE_HEARTBEAT_MS = 30_000;
 const CROSS_SOURCE_METADATA_CONCURRENCY = 4;
 const CROSS_SOURCE_METADATA_TIMEOUT_MS = 8_000;
 const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
+const CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS = 15_000;
 // The direct importer pool is intentionally tiny and short chapter commits
 // can produce two queued checkouts momentarily.  Treat only a persistent
 // queue as pressure; an instantaneous sample must not strand network-only
@@ -145,6 +146,13 @@ type WorkerLiveness = {
   source: string | null;
   stage: 'CLAIM' | 'FETCH' | 'DOWNLOAD' | 'PUBLISH' | 'FINALIZE' | 'IDLE';
   since: string;
+};
+
+type CrossSourceMetadataResult = {
+  busy: boolean;
+  attemptedSources: string[];
+  deferredSources: string[];
+  attached: Array<{ source: string; sourceWorkId: string; aliasesAdded: number; tagsAdded: number }>;
 };
 
 /** One process, one executor pool, one bounded reconciler. */
@@ -190,6 +198,7 @@ export class ImporterLiteRuntime {
   private lastMetadataEnrichmentAt = 0;
   private lastMetadataReplayAt = 0;
   private lastSourceMetadataRefillAt = 0;
+  private lastCrossSourceDiscoveryRefillAt = 0;
   private sourceMetadataPreferredSource: string | null = null;
   private sourceMetadataPreferredSourceBurst = 0;
   // V4 is a finite, no-network campaign over metadata we already possess.
@@ -335,6 +344,7 @@ export class ImporterLiteRuntime {
       await this.refillManifestProvenP1Imports();
       await this.refillStoredMetadataEnrichment();
       await this.refillSourceMetadataEnrichment();
+      await this.refillCrossSourceMetadataDiscovery();
       // Fill both already-approved external seats at boot. Each call remains
       // fenced by the dedicated source-metadata lane below.
       await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
@@ -844,6 +854,7 @@ export class ImporterLiteRuntime {
         await this.refillStoredMetadataEnrichment();
         await this.runStoredMetadataReplay();
         await this.refillSourceMetadataEnrichment();
+        await this.refillCrossSourceMetadataDiscovery();
       }
     } catch (error: any) {
       this.logger.warn('Metadata turn failed', { error: error?.message });
@@ -936,6 +947,20 @@ export class ImporterLiteRuntime {
       if (advanceEmptyHorizon && this.isRuntimeLeader) {
         void Promise.resolve().then(() => this.refillSourceMetadataEnrichment(true, emptyProbeTurn + 1));
       }
+    }
+  }
+
+  /** Materialise one durable cross-source coverage task only after V4 releases its exclusive lane. */
+  private async refillCrossSourceMetadataDiscovery(): Promise<void> {
+    if (!this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4
+      || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
+      || Date.now() - this.lastCrossSourceDiscoveryRefillAt < CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS) return;
+    this.lastCrossSourceDiscoveryRefillAt = Date.now();
+    try {
+      const admitted = await this.queue.refillCrossSourceMetadataDiscovery();
+      if (admitted) this.logger.info('Admitted cross-source metadata coverage task', { admitted });
+    } catch (error: any) {
+      this.logger.warn('Cross-source metadata coverage refill failed', { error: error?.message });
     }
   }
 
@@ -1105,11 +1130,16 @@ export class ImporterLiteRuntime {
     synopsis?: string;
     kind?: string;
     year?: number;
-  }): Promise<void> {
-    if (!this.crossSourceMetadataGate.tryAcquire()) return;
+    /** Supplying sources is used by the durable whole-catalog campaign. */
+    sourceIds?: string[];
+    /** Historical discovery is deliberately single-source per durable turn. */
+    concurrency?: number;
+  }): Promise<CrossSourceMetadataResult> {
+    const result: CrossSourceMetadataResult = { busy: false, attemptedSources: [], deferredSources: [], attached: [] };
+    if (!this.crossSourceMetadataGate.tryAcquire()) return { ...result, busy: true };
     try {
-      const sourceIds = await this.queue.complementaryCatalogSources(input.workId, input.originSource);
-      if (!sourceIds.length) return;
+      const sourceIds = input.sourceIds || await this.queue.complementaryCatalogSources(input.workId, input.originSource);
+      if (!sourceIds.length) return result;
       const target: MatchCandidate = {
         title: input.title, slug: input.slug, aliases: input.aliases,
         author: input.author, artist: input.artist, synopsis: input.synopsis,
@@ -1121,24 +1151,39 @@ export class ImporterLiteRuntime {
           const source = sourceIds[cursor++];
           if (!source) return;
           const adapter = this.registry.get(source);
-          if (!adapter) continue;
+          if (!adapter) {
+            result.deferredSources.push(source);
+            continue;
+          }
           try {
             const queryCandidates = [input.title, ...input.aliases.slice(0, 3)]
               .map((value) => value.trim()).filter((value, index, values) => value.length >= 2 && values.indexOf(value) === index);
             let selected: { sourceWorkId: string; title: string; slug: string } | null = null;
+            let summaryMatch: ReturnType<typeof matchWorkCandidate> | null = null;
+            let host = source;
+            try { host = new URL(adapter.baseUrl).host || source; } catch { /* test doubles and invalid adapters are isolated by source id */ }
             for (const query of queryCandidates) {
-              const summaries = await withTimeout(adapter.searchWorks(query), CROSS_SOURCE_METADATA_TIMEOUT_MS,
-                'CROSS_SOURCE_SEARCH_TIMEOUT');
-              selected = summaries.find((summary) => {
+              const summaries = await this.sourceMetadataGate.runExclusive(async () => {
+                await this.sourceRateLimiter.acquire(host, undefined, 60_000);
+                return withTimeout(adapter.searchWorks(query), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_SEARCH_TIMEOUT');
+              });
+              for (const summary of summaries) {
                 const match = matchWorkCandidate(target, { title: summary.title, slug: summary.slug });
-                return match.matched && match.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE;
-              }) || null;
+                if (!match.matched || match.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE) continue;
+                selected = summary;
+                summaryMatch = match;
+                break;
+              }
               if (selected) break;
             }
-            if (!selected) continue;
+            result.attemptedSources.push(source);
+            if (!selected || !summaryMatch) continue;
 
-            const details = await withTimeout(adapter.fetchWorkDetails(selected.sourceWorkId), CROSS_SOURCE_METADATA_TIMEOUT_MS,
-              'CROSS_SOURCE_DETAILS_TIMEOUT');
+            const details = await this.sourceMetadataGate.runExclusive(async () => {
+              await this.sourceRateLimiter.acquire(host, undefined, 60_000);
+              return withTimeout(adapter.fetchWorkDetails(selected!.sourceWorkId), CROSS_SOURCE_METADATA_TIMEOUT_MS,
+                'CROSS_SOURCE_DETAILS_TIMEOUT');
+            });
             const rawDetails = details.raw && typeof details.raw === 'object' ? details.raw : {};
             const sourceMetadata: Record<string, unknown> = {
               ...rawDetails,
@@ -1151,7 +1196,20 @@ export class ImporterLiteRuntime {
               author: details.author, artist: details.artist, synopsis: sanitizeSynopsis(details.synopsis) || undefined,
               kind: details.kind, year: details.year,
             });
-            if (!detailMatch.matched || detailMatch.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE) {
+            const detailEvidence = evaluateMetadataMatchEvidence(target, {
+              title: details.title, slug: details.slug, aliases: extracted.aliases,
+              author: details.author, artist: details.artist, synopsis: sanitizeSynopsis(details.synopsis) || undefined,
+              kind: details.kind, year: details.year,
+            });
+            const targetTitle = normalizeTitle(target.title);
+            const explicitCrossAlias = extracted.aliases.some((alias) => normalizeTitle(alias) === targetTitle)
+              || (target.aliases || []).some((alias) => normalizeTitle(alias) === normalizeTitle(details.title));
+            const titleIsSpecific = targetTitle.length >= 12 && targetTitle.split(/\s+/).filter(Boolean).length >= 2;
+            const independentlyCorroborated = detailEvidence.autoMatch || explicitCrossAlias
+              || (titleIsSpecific && ['EXACT_TITLE', 'EXACT_SLUG'].includes(summaryMatch.matchMethod)
+                && ['EXACT_TITLE', 'EXACT_SLUG'].includes(detailMatch.matchMethod));
+            if (!detailMatch.matched || detailMatch.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE
+              || !independentlyCorroborated) {
               this.logger.info('Rejected complementary metadata candidate after detail verification', {
                 workId: input.workId, source, sourceWorkId: selected.sourceWorkId,
                 confidence: detailMatch.confidenceScore, method: detailMatch.matchMethod,
@@ -1170,15 +1228,18 @@ export class ImporterLiteRuntime {
                 rawMetadata: sourceMetadata,
               }, input.workId, source);
               if (attached.workId !== input.workId) return;
+              const aliasesAdded = Math.max(0, Number(attached.metadataDelta?.aliasesAdded || 0));
+              const tagsAdded = Math.max(0, Number(attached.metadataDelta?.tagsAdded || 0));
               await this.queue.recordSourceMetadataEnrichment({
                 source, sourceWorkId: details.sourceWorkId, workId: input.workId,
                 aliasesState: extracted.aliasesState, tagsState: extracted.tagsState,
-                aliasesAdded: Math.max(0, Number(attached.metadataDelta?.aliasesAdded || 0)),
-                tagsAdded: Math.max(0, Number(attached.metadataDelta?.tagsAdded || 0)),
+                aliasesAdded, tagsAdded,
                 error: extracted.parserError ? 'EXPLICIT_SOURCE_METADATA_NOT_PARSED' : null,
-                rawMetadata: sourceMetadata,
+                rawMetadata: sourceMetadata, version: 5,
               });
+              result.attached.push({ source, sourceWorkId: details.sourceWorkId, aliasesAdded, tagsAdded });
             });
+            await this.queue.recordSourceSuccess(source);
             this.logger.info('Attached complementary source metadata during new-work onboarding', {
               workId: input.workId, source, sourceWorkId: details.sourceWorkId,
               aliases: extracted.aliases.length, tags: extracted.genres.length,
@@ -1189,10 +1250,12 @@ export class ImporterLiteRuntime {
             this.logger.debug('Complementary source metadata probe skipped', {
               workId: input.workId, source, error: error?.message,
             });
+            result.deferredSources.push(source);
           }
         }
       };
-      await Promise.all(Array.from({ length: Math.min(CROSS_SOURCE_METADATA_CONCURRENCY, sourceIds.length) }, () => probe()));
+      await Promise.all(Array.from({ length: Math.min(Math.max(1, input.concurrency || CROSS_SOURCE_METADATA_CONCURRENCY), sourceIds.length) }, () => probe()));
+      return result;
     } finally {
       this.crossSourceMetadataGate.release();
     }
@@ -1779,6 +1842,9 @@ export class ImporterLiteRuntime {
 
   private async catalog(task: LiteTask, workerId: string, metadataTimings?: Record<string, number | null>): Promise<void> {
     const source = String(task.payload.source || ''); const sourceWorkId = String(task.payload.sourceWorkId || '');
+    if (task.payload.metadataCrossSourceDiscovery) {
+      return this.withCatalogLeaseHeartbeat(task, workerId, () => this.discoverCrossSourceMappings(task, workerId));
+    }
     if (task.payload.metadataEnrichment) return this.enrichStoredMappingMetadata(task, workerId, source, sourceWorkId);
     if (task.payload.metadataSourceRefresh) return this.refreshMappingMetadataFromSource(task, workerId, source, sourceWorkId, metadataTimings);
     const adapter = this.registry.get(source);
@@ -2007,6 +2073,82 @@ export class ImporterLiteRuntime {
         priority: monitorRetry ? 'P2' : undefined, monitoring: monitorRetry || undefined,
         checkpoint: monitorRetry ? { monitorFailures: Number(task.checkpoint.monitorFailures || 0) + 1 } : undefined });
     }
+  }
+
+  /**
+   * One bounded probe of a work/provider pair.  The task keeps its source
+   * coverage in its checkpoint, so a restart cannot turn catalog-wide search
+   * into an unbounded in-memory sweep.  A rejected or unavailable provider is
+   * evidence, never a reason to attach a fuzzy match.
+   */
+  private async discoverCrossSourceMappings(task: LiteTask, workerId: string): Promise<void> {
+    if (!task.workId) {
+      await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CROSS_SOURCE_WORK_MISSING' });
+      return;
+    }
+    const work = await this.pool.query<{
+      id: string; title: string; slug: string; aliases: string[]; author: string | null; artist: string | null;
+      synopsis: string | null; kind: string | null; year: number | null;
+    }>(`SELECT id::text,title,slug,aliases,author,artist,COALESCE(synopsis,description) AS synopsis,kind,year
+      FROM works WHERE id=$1::uuid AND published=true LIMIT 1`, [task.workId]);
+    const target = work.rows[0];
+    if (!target) {
+      await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CROSS_SOURCE_WORK_NOT_PUBLIC' });
+      return;
+    }
+    const normalizeList = (value: unknown): string[] => Array.isArray(value)
+      ? [...new Set(value.map((entry) => String(entry || '').trim()).filter(Boolean))].slice(0, 64) : [];
+    const checked = new Set(normalizeList(task.checkpoint.checkedSources));
+    const deferred = new Set(normalizeList(task.checkpoint.deferredSources));
+    const matched = Array.isArray(task.checkpoint.matchedSources) ? task.checkpoint.matchedSources.slice(0, 64) : [];
+    const sources = await this.queue.crossSourceDiscoverySources(target.id);
+    const source = sources.find((candidate) => !checked.has(candidate));
+    const aliasesAdded = Math.max(0, Number(task.checkpoint.aliasesAdded || 0));
+    const tagsAdded = Math.max(0, Number(task.checkpoint.tagsAdded || 0));
+    if (!source) {
+      await this.queue.finish(task, workerId, {
+        state: 'DONE', resetAttempts: true,
+        checkpoint: {
+          metadataCrossSourceDiscovery: true,
+          coverage: deferred.size ? 'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED' : 'CROSS_SOURCE_PROBES_COMPLETE',
+          checkedSources: [...checked], deferredSources: [...deferred], matchedSources: matched,
+          aliasesAdded, tagsAdded, completedAt: new Date().toISOString(),
+        },
+      });
+      return;
+    }
+    const policy = await this.queue.sourcePolicy(source);
+    let outcome: CrossSourceMetadataResult;
+    if (!policy?.runnable) {
+      outcome = { busy: false, attemptedSources: [], deferredSources: [source], attached: [] };
+    } else {
+      outcome = await this.enrichNewWorkFromComplementarySources({
+        workId: target.id, originSource: '', title: target.title, slug: target.slug, aliases: target.aliases || [],
+        author: target.author || undefined, artist: target.artist || undefined, synopsis: sanitizeSynopsis(target.synopsis) || undefined,
+        kind: target.kind || undefined, year: target.year || undefined, sourceIds: [source], concurrency: 1,
+      });
+    }
+    if (outcome.busy) {
+      await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: 'CROSS_SOURCE_LANE_BUSY',
+        nextRunAt: new Date(Date.now() + 2_000) });
+      return;
+    }
+    checked.add(source);
+    for (const deferredSource of outcome.deferredSources) deferred.add(deferredSource);
+    for (const attached of outcome.attached) {
+      matched.push({ source: attached.source, sourceWorkId: attached.sourceWorkId,
+        aliasesAdded: attached.aliasesAdded, tagsAdded: attached.tagsAdded });
+    }
+    const addedAliases = outcome.attached.reduce((sum, item) => sum + item.aliasesAdded, 0);
+    const addedTags = outcome.attached.reduce((sum, item) => sum + item.tagsAdded, 0);
+    await this.queue.finish(task, workerId, {
+      state: 'RETRY_WAIT', reason: null, nextRunAt: new Date(Date.now() + 250), resetAttempts: true,
+      checkpoint: {
+        metadataCrossSourceDiscovery: true, checkedSources: [...checked], deferredSources: [...deferred],
+        matchedSources: matched.slice(0, 64), aliasesAdded: aliasesAdded + addedAliases, tagsAdded: tagsAdded + addedTags,
+        lastSource: source, lastOutcome: outcome.attached.length ? 'MATCHED' : outcome.deferredSources.length ? 'DEFERRED' : 'NO_MATCH',
+      },
+    });
   }
 
   /** Re-fetch explicit provider metadata for one existing mapping. The task is

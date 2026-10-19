@@ -65,6 +65,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
       id uuid PRIMARY KEY, title text, slug text, cover_id uuid,
       published boolean NOT NULL DEFAULT false, latest_chapter_published_at timestamptz,
       aliases text[] NOT NULL DEFAULT ARRAY[]::text[],
+      author text, artist text, synopsis text, description text, kind text, year integer,
       updated_at timestamptz
     );
     CREATE TABLE chapters (
@@ -571,6 +572,54 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT idempotency_key,payload->>'metadataEnrichmentVersion' AS version
       FROM importer_lite_tasks WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows)
       .toEqual([{ idempotency_key:'lite:metadata:source:v5:source-a:v5-recheck', version:'5' }]);
+  });
+
+  it('starts durable global discovery after V4 and prioritizes an aliasless work without an active mapping', async () => {
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000316','source-a','already-linked',$1::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1b]);
+    await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','complete')`);
+
+    expect(await repo.refillCrossSourceMetadataDiscovery()).toBe(1);
+    expect((await db.query(`SELECT work_id::text,payload->>'metadataCrossSourceDiscovery' AS coverage
+      FROM importer_lite_tasks WHERE payload ? 'metadataCrossSourceDiscovery'`)).rows)
+      .toEqual([{ work_id: ids.p1a, coverage:'true' }]);
+  });
+
+  it('attaches only detail-confirmed cross-source metadata and persists its alias delta', async () => {
+    await db.query(`UPDATE works SET published=true,aliases='{}'::text[],title='The Specific P1 A Work',slug='the-specific-p1-a-work' WHERE id=$1`, [ids.p1a]);
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:`lite:metadata:cross-source:v5:${ids.p1a}`,
+      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:5} });
+    const task = await repo.claim('cross-source-worker', 120);
+    const adapter = { id:'source-a',baseUrl:'https://source-a.example',
+      searchWorks:async () => [{ sourceWorkId:'cross-source-a',title:'The Specific P1 A Work',slug:'the-specific-p1-a-work' }],
+      fetchWorkDetails:async () => ({ sourceWorkId:'cross-source-a',title:'The Specific P1 A Work',slug:'the-specific-p1-a-work',
+        alternativeTitles:['P1 A English'],genres:[],raw:{} }),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, { sql: (text: string, values?: unknown[]) => db.query(text, values) },
+      { get: () => adapter } as unknown as SourceRegistry,
+      { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000 } as any,
+    );
+    (runtime as any).dedupe = {
+      attachVerifiedMapping: async (candidate: any, workId: string, source: string) => {
+        await db.query(`INSERT INTO importer_work_mappings
+          (id,source,source_work_id,work_id,source_slug,source_title,sync_status,metadata)
+          VALUES('00000000-0000-4000-8000-000000000317',$1,$2,$3::uuid,$4,$5,'SYNCED',$6::jsonb)`,
+        [source,candidate.sourceWorkId,workId,candidate.slug,candidate.title,JSON.stringify(candidate.rawMetadata)]);
+        await db.query(`UPDATE works SET aliases=ARRAY['P1 A English']::text[] WHERE id=$1::uuid`, [workId]);
+        return { workId, status:'EXISTING_MAPPING', metadataDelta:{ aliasesAdded:1, tagsAdded:0 } };
+      },
+    };
+    await (runtime as any).catalog(task,'cross-source-worker');
+
+    expect((await db.query(`SELECT aliases FROM works WHERE id=$1`, [ids.p1a])).rows[0].aliases).toContain('P1 A English');
+    expect((await db.query(`SELECT work_id::text FROM importer_work_mappings
+      WHERE source='source-a' AND source_work_id='cross-source-a'`)).rows).toEqual([{ work_id:ids.p1a }]);
   });
 
   it('persists aliases found by a V5 external recheck', async () => {

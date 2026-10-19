@@ -39,6 +39,7 @@ const METADATA_REPLAY_V4_ENABLED_KEY = 'metadata_replay_v4_enabled';
 // the marker on the durable enrichment row makes coverage measurable without
 // turning an old NO_ALIASES classification into a permanent conclusion.
 const METADATA_ALIAS_COVERAGE_V5_VERSION = 5;
+const METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX = 'lite:metadata:cross-source:v5:';
 const METADATA_REPLAY_V4_EXCLUSIVE_MODE_KEY = 'metadata_replay_v4_exclusive_mode';
 const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
@@ -1703,6 +1704,96 @@ export class LiteRepository {
         )
       ORDER BY s.id`, [workId, originSource]);
     return result.rows.map((row) => String(row.source));
+  }
+
+  /**
+   * A coverage pass must not assume that the mappings already attached to a
+   * canonical work are exhaustive.  Return every still-operational provider
+   * that has no mapping for this work, including a temporarily cooled one so
+   * its outcome can be recorded as deferred rather than silently skipped.
+   */
+  async crossSourceDiscoverySources(workId: string): Promise<string[]> {
+    const result = await this.db.query<{ source: string }>(`
+      SELECT s.id AS source
+      FROM importer_sources s
+      LEFT JOIN importer_lite_source_health health ON health.source=s.id
+      WHERE s.enabled=true
+        AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING','COOLDOWN')
+        AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+        AND NOT EXISTS (
+          SELECT 1 FROM importer_work_mappings mapping
+          WHERE mapping.work_id=$1::uuid AND mapping.source=s.id
+        )
+      ORDER BY s.id`, [workId]);
+    return result.rows.map((row) => String(row.source));
+  }
+
+  /**
+   * Admit one durable, whole-catalog cross-source discovery task at a time.
+   * It is deliberately separate from V5's known-mapping refresh: each task
+   * records every operational provider considered for its canonical work and
+   * only creates a mapping after runtime identity verification.
+   */
+  async refillCrossSourceMetadataDiscovery(): Promise<number> {
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const v4 = await client.query<{ value: string }>(`SELECT value FROM settings WHERE key=$1 LIMIT 1`, [METADATA_REPLAY_V4_ENABLED_KEY]);
+      if (v4.rows[0]?.value !== 'complete') {
+        await client.query('COMMIT');
+        return 0;
+      }
+      const pending = await client.query<{ count: string }>(`SELECT count(*)::int AS count
+        FROM importer_lite_tasks
+        WHERE task_type='CATALOG' AND state IN ('READY','RUNNING','RETRY_WAIT')
+          AND payload ? 'metadataCrossSourceDiscovery'`);
+      if (Number(pending.rows[0]?.count || 0) > 0) {
+        await client.query('COMMIT');
+        return 0;
+      }
+      // The 162 aliasless works without an active mapping are the first
+      // candidates, but the pass deliberately continues over the full public
+      // catalog: a pre-existing mapping is evidence, not proof of complete
+      // source coverage.
+      const candidate = await client.query<{ work_id: string }>(`
+        WITH active_mapping AS (
+          SELECT DISTINCT m.work_id
+          FROM importer_work_mappings m
+          JOIN importer_sources s ON s.id=m.source
+          LEFT JOIN importer_lite_source_health h ON h.source=s.id
+          WHERE m.work_id IS NOT NULL AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+            AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+            AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+        )
+        SELECT w.id::text AS work_id
+        FROM works w
+        WHERE w.published=true
+          AND NOT EXISTS (
+            SELECT 1 FROM importer_lite_tasks prior
+            WHERE prior.idempotency_key=$1 || w.id::text
+          )
+        ORDER BY (NOT EXISTS (SELECT 1 FROM active_mapping active WHERE active.work_id=w.id)) DESC,
+          (COALESCE(array_length(w.aliases,1),0)=0) DESC,w.id
+        LIMIT 1`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX]);
+      const workId = candidate.rows[0]?.work_id;
+      if (!workId) {
+        await client.query('COMMIT');
+        return 0;
+      }
+      const inserted = await client.query<{ work_key: string }>(`INSERT INTO importer_lite_tasks
+        (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
+        VALUES('CATALOG',$1::uuid,$2,3,3,$3,now(),4,$4::jsonb,'{}'::jsonb,false)
+        ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
+        workId, `work:${workId}`, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}${workId}`,
+        JSON.stringify({ metadataCrossSourceDiscovery: true, metadataEnrichmentVersion: METADATA_ALIAS_COVERAGE_V5_VERSION }),
+      ]);
+      if (inserted.rowCount) await this.refreshReadyWork(client, inserted.rows[0].work_key);
+      await client.query('COMMIT');
+      return inserted.rowCount || 0;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
   }
 
   /**

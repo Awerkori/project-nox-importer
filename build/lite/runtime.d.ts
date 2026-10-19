@@ -43,6 +43,7 @@ export declare class ImporterLiteRuntime {
     private lastMetadataEnrichmentAt;
     private lastMetadataReplayAt;
     private lastSourceMetadataRefillAt;
+    private lastCrossSourceDiscoveryRefillAt;
     private sourceMetadataPreferredSource;
     private sourceMetadataPreferredSourceBurst;
     private sourceMetadataRefreshDeferredForV4;
@@ -148,6 +149,8 @@ export declare class ImporterLiteRuntime {
      * sources; YSQL preparation and persistence remain gated below.
      */
     private refillSourceMetadataEnrichment;
+    /** Materialise one durable cross-source coverage task only after V4 releases its exclusive lane. */
+    private refillCrossSourceMetadataDiscovery;
     private noteSourceMetadataProducer;
     /**
      * Keep at most a few consecutive selections on a proven productive source.
@@ -248,6 +251,13 @@ export declare class ImporterLiteRuntime {
     private handle;
     private discover;
     private catalog;
+    /**
+     * One bounded probe of a work/provider pair.  The task keeps its source
+     * coverage in its checkpoint, so a restart cannot turn catalog-wide search
+     * into an unbounded in-memory sweep.  A rejected or unavailable provider is
+     * evidence, never a reason to attach a fuzzy match.
+     */
+    private discoverCrossSourceMappings;
     /** Re-fetch explicit provider metadata for one existing mapping. The task is
      * P2, single-flight, host rate limited, and only calls fetchWorkDetails (no
      * manifest/page discovery). A retryable provider failure is durably marked
