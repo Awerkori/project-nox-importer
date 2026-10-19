@@ -900,10 +900,10 @@ export class ImporterLiteRuntime {
                 this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 0 };
             }
             this.sourceMetadataLaneGate.setCapacity(next.enabled ? 16 : 4);
-            this.sourceMetadataGate.setCapacity(next.enabled ? 24 : 4);
-            this.sourceMetadataPersistenceGate.setCapacity(next.enabled ? 4 : 1);
-            this.crossSourceDiscoveryLaneGate.setCapacity(next.enabled ? 16 : 2);
-            this.crossSourceMetadataGate.setCapacity(next.enabled ? 16 : 2);
+            this.sourceMetadataGate.setCapacity(next.enabled ? 28 : 4);
+            this.sourceMetadataPersistenceGate.setCapacity(next.enabled ? 6 : 1);
+            this.crossSourceDiscoveryLaneGate.setCapacity(next.enabled ? 20 : 2);
+            this.crossSourceMetadataGate.setCapacity(next.enabled ? 20 : 2);
         }
         this.metadataTurboMode = next;
     }
@@ -1604,7 +1604,7 @@ export class ImporterLiteRuntime {
                     continue;
                 }
                 if (this.metadataTurboMode.enabled) {
-                    const preferDiscovery = (slotIndex % 2 === 1);
+                    const preferDiscovery = (slotIndex % 3 !== 0);
                     let didWork = false;
                     if (preferDiscovery) {
                         telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'DISCOVERY_TURBO');
