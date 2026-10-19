@@ -91,10 +91,11 @@ describe('Tag Normalization', () => {
 
     const [statement] = sql.mock.calls[1];
     expect(statement).toContain('known_tags AS');
+    expect(statement).toContain('known_by_slug AS');
+    expect(statement).toContain('known_by_name AS');
     expect(statement).toContain('missing_tags AS');
     expect(statement).toContain("SELECT name,slug,'GENRE' FROM missing_tags");
-    expect(statement).toContain('ON CONFLICT DO NOTHING');
-    expect(statement).toContain("lower(regexp_replace(btrim(supplied.name),'\\s+',' ','g'))");
+    expect(statement).toContain('ON CONFLICT (slug) DO UPDATE');
   });
 
   it('keeps explicit detailed adult taxonomy distinct from the generic adult rating', () => {

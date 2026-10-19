@@ -97,6 +97,8 @@ export class ManhastroAdapter implements SourceAdapter {
         return JSON.parse(cleaned) as T;
       } catch (err: any) {
         if (err?.status === 429) throw err;
+        if (err?.name === 'AbortError' || err?.name === 'TimeoutError' || err?.message?.includes('aborted')) throw err;
+        if (err?.status && err.status >= 400 && err.status < 500) throw err;
         if (attempts >= maxAttempts) throw err;
         await new Promise((r) => setTimeout(r, 1000 * attempts));
       }
