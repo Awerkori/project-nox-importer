@@ -242,10 +242,10 @@ export class LiteRepository {
                 AND (turn.last_source_work_id IS NULL OR m.source_work_id>turn.last_source_work_id)
                 AND ${stateEligible}
                 AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
-                  WHERE task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')
-                    AND task.payload ? 'metadataSourceRefresh'
-                    AND task.payload->>'source'=m.source
-                    AND task.payload->>'sourceWorkId'=m.source_work_id)
+                  WHERE task.idempotency_key IN (
+                    'lite:metadata:source:v3:' || m.source || ':' || m.source_work_id,
+                    'lite:metadata:source:v5:' || m.source || ':' || m.source_work_id
+                  ) AND task.state IN ('READY','RUNNING','RETRY_WAIT'))
               ORDER BY m.source_work_id LIMIT 32
             ), wrapped AS (
               SELECT m.source_work_id,m.work_id,w.aliases
@@ -259,10 +259,10 @@ export class LiteRepository {
                 AND NOT EXISTS (SELECT 1 FROM after_cursor)
                 AND ${stateEligible}
                 AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
-                  WHERE task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')
-                    AND task.payload ? 'metadataSourceRefresh'
-                    AND task.payload->>'source'=m.source
-                    AND task.payload->>'sourceWorkId'=m.source_work_id)
+                  WHERE task.idempotency_key IN (
+                    'lite:metadata:source:v3:' || m.source || ':' || m.source_work_id,
+                    'lite:metadata:source:v5:' || m.source || ':' || m.source_work_id
+                  ) AND task.state IN ('READY','RUNNING','RETRY_WAIT'))
               ORDER BY m.source_work_id LIMIT 32
             )
             SELECT source_work_id,work_id,aliases,0 AS cursor_turn FROM after_cursor
