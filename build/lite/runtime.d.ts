@@ -53,6 +53,7 @@ export declare class ImporterLiteRuntime {
     private metadataTurboMode;
     private lastMetadataTurboModeRefreshAt;
     private readonly metadataReplayV4WorkTails;
+    private sourcePoliciesCache;
     private sourceMetadataProducer;
     private lastSourceRecoveryProbeAt;
     private lastUploadOutcomeRecoveryAt;

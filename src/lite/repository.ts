@@ -1826,40 +1826,50 @@ export class LiteRepository {
    * a catalog or discovery slot.
    */
   async sourcePolicy(source: string): Promise<LiteSourcePolicy | null> {
-    const result = await this.db.query<Row>(`SELECT s.enabled,s.status,s.sync_interval_minutes,
+    const map = await this.sourcePolicies([source]);
+    return map.get(source) || null;
+  }
+
+  /**
+   * Batch read operational policies for multiple sources in a single query.
+   * Replaces N+1 sourcePolicy roundtrips during whole-catalog cross-source discovery.
+   */
+  async sourcePolicies(sources: string[]): Promise<Map<string, LiteSourcePolicy>> {
+    const normalized = [...new Set(sources.map((s) => String(s || '').trim()).filter(Boolean))];
+    if (!normalized.length) return new Map();
+    const result = await this.db.query<Row>(`SELECT s.id,s.enabled,s.status,s.sync_interval_minutes,
         COALESCE((to_jsonb(s)->>'catalog_discovery_enabled')::boolean,true) AS catalog_discovery_enabled,
         COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true) AS chapter_ingestion_enabled,
         s.cooldown_until AS source_cooldown,h.health,h.cooldown_until AS health_cooldown
       FROM importer_sources s
       LEFT JOIN importer_lite_source_health h ON h.source=s.id
-      WHERE s.id=$1`, [source]);
-    const row = result.rows[0];
-    if (!row) return null;
-    const sourceCooldown = row.source_cooldown ? new Date(row.source_cooldown) : null;
-    const healthCooldown = row.health_cooldown ? new Date(row.health_cooldown) : null;
-    const cooldownUntil = [sourceCooldown, healthCooldown]
-      .filter((value): value is Date => Boolean(value && Number.isFinite(value.getTime())))
-      .sort((a, b) => b.getTime() - a.getTime())[0] || null;
-    const status = String(row.status || 'ACTIVE').toUpperCase();
-    const health = String(row.health || 'HEALTHY').toUpperCase();
-    // COOLDOWN is temporary only when it has a durable deadline.  Once that
-    // deadline passes it must resume; otherwise a source can remain invisible
-    // to P2 forever after a restart.  A cooldown without a deadline, and
-    // PAUSED/DISABLED, remain explicit operator actions.
-    const expiredAdministrativeCooldown = status === 'COOLDOWN' && Boolean(sourceCooldown && sourceCooldown <= new Date());
-    const administrativelyActive = row.enabled === true &&
-      (['ACTIVE', 'DEGRADED', 'RECOVERING'].includes(status) || expiredAdministrativeCooldown);
-    const healthAllowed = !['BROKEN', 'DISABLED'].includes(health);
-    const runnable = administrativelyActive && healthAllowed && (!cooldownUntil || cooldownUntil <= new Date());
-    const minutes = Number(row.sync_interval_minutes);
-    return {
-      enabled: row.enabled === true,
-      status, health, cooldownUntil,
-      syncIntervalMs: Math.max(5, Math.min(24 * 60, Number.isFinite(minutes) ? minutes : 30)) * 60_000,
-      catalogDiscoveryEnabled: row.catalog_discovery_enabled !== false,
-      chapterIngestionEnabled: row.chapter_ingestion_enabled !== false,
-      runnable,
-    };
+      WHERE s.id = ANY($1::text[])`, [normalized]);
+    const map = new Map<string, LiteSourcePolicy>();
+    const now = new Date();
+    for (const row of result.rows) {
+      const sourceCooldown = row.source_cooldown ? new Date(row.source_cooldown) : null;
+      const healthCooldown = row.health_cooldown ? new Date(row.health_cooldown) : null;
+      const cooldownUntil = [sourceCooldown, healthCooldown]
+        .filter((value): value is Date => Boolean(value && Number.isFinite(value.getTime())))
+        .sort((a, b) => b.getTime() - a.getTime())[0] || null;
+      const status = String(row.status || 'ACTIVE').toUpperCase();
+      const health = String(row.health || 'HEALTHY').toUpperCase();
+      const expiredAdministrativeCooldown = status === 'COOLDOWN' && Boolean(sourceCooldown && sourceCooldown <= now);
+      const administrativelyActive = row.enabled === true &&
+        (['ACTIVE', 'DEGRADED', 'RECOVERING'].includes(status) || expiredAdministrativeCooldown);
+      const healthAllowed = !['BROKEN', 'DISABLED'].includes(health);
+      const runnable = administrativelyActive && healthAllowed && (!cooldownUntil || cooldownUntil <= now);
+      const minutes = Number(row.sync_interval_minutes);
+      map.set(String(row.id), {
+        enabled: row.enabled === true,
+        status, health, cooldownUntil,
+        syncIntervalMs: Math.max(5, Math.min(24 * 60, Number.isFinite(minutes) ? minutes : 30)) * 60_000,
+        catalogDiscoveryEnabled: row.catalog_discovery_enabled !== false,
+        chapterIngestionEnabled: row.chapter_ingestion_enabled !== false,
+        runnable,
+      });
+    }
+    return map;
   }
 
   /**

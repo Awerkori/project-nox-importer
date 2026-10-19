@@ -291,6 +291,11 @@ export declare class LiteRepository {
      */
     sourcePolicy(source: string): Promise<LiteSourcePolicy | null>;
     /**
+     * Batch read operational policies for multiple sources in a single query.
+     * Replaces N+1 sourcePolicy roundtrips during whole-catalog cross-source discovery.
+     */
+    sourcePolicies(sources: string[]): Promise<Map<string, LiteSourcePolicy>>;
+    /**
      * Sources that can safely be queried while a newly-created work is still in
      * its initial catalog pass.  This is intentionally one indexed set query:
      * onboarding must not turn a complementary-alias lookup into an N+1 policy
