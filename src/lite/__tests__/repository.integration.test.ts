@@ -32,6 +32,7 @@ const presentableUnpublishedAdmissionMigration = readFileSync(resolve(process.cw
 const newWorkCatalogLaneMigration = readFileSync(resolve(process.cwd(), 'migrations/20261016070000_lite_new_work_catalog_lane.sql'), 'utf8');
 const runnableNewWorkCatalogLaneMigration = readFileSync(resolve(process.cwd(), 'migrations/20261016074500_lite_new_work_catalog_runnable_source.sql'), 'utf8');
 const fairReadyWorkClaimIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261018213000_lite_ready_work_fair_claim_idx.sql'), 'utf8');
+const v4ActiveWorkIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261019021500_lite_v4_active_work_index.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -144,6 +145,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(newWorkCatalogLaneMigration);
   await db.exec(runnableNewWorkCatalogLaneMigration);
   await db.exec(fairReadyWorkClaimIndexMigration);
+  await db.exec(v4ActiveWorkIndexMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
