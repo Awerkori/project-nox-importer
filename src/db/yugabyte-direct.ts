@@ -173,11 +173,16 @@ export function createYugabyteMetadataPool(): pg.Pool {
   // prefer its batched variant only here, never on the chapter pool.
   const metadataSessionOptions = '-c enable_nestloop=off';
   const metadataPool = new pg.Pool(yugabytePoolOptions(
-    getConfig(), 10, 'project-nox-importer-metadata', 15_000, 15_000,
+    getConfig(), 5, 'project-nox-importer-metadata', 15_000, 15_000,
     metadataSessionOptions, false,
   ));
   metadataPool.on('error', (err) => {
     logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });
+  });
+  metadataPool.on('connect', (client) => {
+    client.on('error', (err) => {
+      logger.warn('Suppressed unexpected error on active metadata client', { error: err.message });
+    });
   });
   return metadataPool;
 }
@@ -199,6 +204,9 @@ export function getYugabytePool(): pg.Pool {
   });
 
   pool.on('connect', (client) => {
+    client.on('error', (err) => {
+      logger.warn('Suppressed unexpected error on active direct client', { error: err.message });
+    });
     const query = client.query.bind(client) as any;
     let transactionStarted = 0;
     (client as any).query = (...args: any[]) => {

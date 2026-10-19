@@ -161,9 +161,14 @@ export function createYugabyteMetadataPool() {
     // Yugabyte's default nested-loop plan issued one remote read per mapping;
     // prefer its batched variant only here, never on the chapter pool.
     const metadataSessionOptions = '-c enable_nestloop=off';
-    const metadataPool = new pg.Pool(yugabytePoolOptions(getConfig(), 10, 'project-nox-importer-metadata', 15_000, 15_000, metadataSessionOptions, false));
+    const metadataPool = new pg.Pool(yugabytePoolOptions(getConfig(), 5, 'project-nox-importer-metadata', 15_000, 15_000, metadataSessionOptions, false));
     metadataPool.on('error', (err) => {
         logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });
+    });
+    metadataPool.on('connect', (client) => {
+        client.on('error', (err) => {
+            logger.warn('Suppressed unexpected error on active metadata client', { error: err.message });
+        });
     });
     return metadataPool;
 }
@@ -176,6 +181,9 @@ export function getYugabytePool() {
         logger.error('Unexpected error on idle direct Yugabyte client', { error: err.message });
     });
     pool.on('connect', (client) => {
+        client.on('error', (err) => {
+            logger.warn('Suppressed unexpected error on active direct client', { error: err.message });
+        });
         const query = client.query.bind(client);
         let transactionStarted = 0;
         client.query = (...args) => {
