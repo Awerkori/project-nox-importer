@@ -107,6 +107,10 @@ const CATALOG_TASK_LEASE_HEARTBEAT_MS = 30_000;
 const CROSS_SOURCE_METADATA_CONCURRENCY = 4;
 const CROSS_SOURCE_METADATA_TIMEOUT_MS = 8_000;
 const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
+// A durable global task checkpoints several independent providers at once.
+// The shared source gate still caps aggregate external I/O, while batching
+// avoids spending one task turn per provider for a 43-source coverage pass.
+const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 3;
 const CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS = 15_000;
 // The direct importer pool is intentionally tiny and short chapter commits
 // can produce two queued checkouts momentarily.  Treat only a persistent
@@ -2126,10 +2130,10 @@ export class ImporterLiteRuntime {
         }
     }
     /**
-     * One bounded probe of a work/provider pair.  The task keeps its source
-     * coverage in its checkpoint, so a restart cannot turn catalog-wide search
-     * into an unbounded in-memory sweep.  A rejected or unavailable provider is
-     * evidence, never a reason to attach a fuzzy match.
+     * A bounded batch of independent work/provider probes. The task keeps its
+     * source coverage in its checkpoint, so a restart cannot turn catalog-wide
+     * search into an unbounded in-memory sweep. A rejected or unavailable
+     * provider is evidence, never a reason to attach a fuzzy match.
      */
     async discoverCrossSourceMappings(task, workerId) {
         if (!task.workId) {
@@ -2149,10 +2153,11 @@ export class ImporterLiteRuntime {
         const deferred = new Set(normalizeList(task.checkpoint.deferredSources));
         const matched = Array.isArray(task.checkpoint.matchedSources) ? task.checkpoint.matchedSources.slice(0, 64) : [];
         const sources = await this.queue.crossSourceDiscoverySources(target.id);
-        const source = sources.find((candidate) => !checked.has(candidate));
+        const sourceBatch = sources.filter((candidate) => !checked.has(candidate))
+            .slice(0, CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN);
         const aliasesAdded = Math.max(0, Number(task.checkpoint.aliasesAdded || 0));
         const tagsAdded = Math.max(0, Number(task.checkpoint.tagsAdded || 0));
-        if (!source) {
+        if (!sourceBatch.length) {
             const deferredRounds = Math.max(0, Number(task.checkpoint.deferredRounds || 0));
             await this.queue.finish(task, workerId, {
                 state: 'DONE', resetAttempts: true,
@@ -2169,28 +2174,31 @@ export class ImporterLiteRuntime {
             });
             return;
         }
-        const policy = await this.queue.sourcePolicy(source);
-        let outcome;
-        if (!policy?.runnable) {
-            outcome = { busy: false, attemptedSources: [], deferredSources: [source], attached: [] };
-        }
-        else {
+        const policies = await Promise.all(sourceBatch.map(async (source) => [source, await this.queue.sourcePolicy(source)]));
+        const runnableSources = policies.filter(([, policy]) => policy?.runnable).map(([source]) => source);
+        let outcome = { busy: false, attemptedSources: [],
+            deferredSources: policies.filter(([, policy]) => !policy?.runnable).map(([source]) => source), attached: [] };
+        if (runnableSources.length) {
             outcome = await this.enrichNewWorkFromComplementarySources({
                 workId: target.id, originSource: '', title: target.title, slug: target.slug, aliases: target.aliases || [],
                 author: target.author || undefined, artist: target.artist || undefined, synopsis: sanitizeSynopsis(target.synopsis) || undefined,
-                kind: target.kind || undefined, year: target.year || undefined, sourceIds: [source], concurrency: 1,
+                kind: target.kind || undefined, year: target.year ?? undefined, sourceIds: runnableSources,
+                concurrency: Math.min(CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN, runnableSources.length),
                 allowFallbackDetailProbe: true,
             });
+            outcome.deferredSources.push(...policies.filter(([, policy]) => !policy?.runnable).map(([source]) => source));
         }
         if (outcome.busy) {
             await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: 'CROSS_SOURCE_LANE_BUSY',
                 nextRunAt: new Date(Date.now() + 2_000) });
             return;
         }
-        checked.add(source);
+        for (const source of sourceBatch)
+            checked.add(source);
         // A provider that became runnable has now received a fresh attempt.  Only
         // retain it in the durable deferred set when this attempt fails again.
-        deferred.delete(source);
+        for (const source of sourceBatch)
+            deferred.delete(source);
         for (const deferredSource of outcome.deferredSources)
             deferred.add(deferredSource);
         for (const attached of outcome.attached) {
@@ -2204,7 +2212,8 @@ export class ImporterLiteRuntime {
             checkpoint: {
                 metadataCrossSourceDiscovery: true, checkedSources: [...checked], deferredSources: [...deferred],
                 matchedSources: matched.slice(0, 64), aliasesAdded: aliasesAdded + addedAliases, tagsAdded: tagsAdded + addedTags,
-                lastSource: source, lastOutcome: outcome.attached.length ? 'MATCHED' : outcome.deferredSources.length ? 'DEFERRED' : 'NO_MATCH',
+                lastSource: sourceBatch.at(-1), checkedBatch: sourceBatch,
+                lastOutcome: outcome.attached.length ? 'MATCHED' : outcome.deferredSources.length ? 'DEFERRED' : 'NO_MATCH',
             },
         });
     }
