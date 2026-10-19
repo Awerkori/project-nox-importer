@@ -67,7 +67,7 @@ const STORED_METADATA_REPLAY_V4_IDLE_INTERVAL_MS = 5_000;
 const STORED_METADATA_REPLAY_V4_PRESSURED_INTERVAL_MS = 20_000;
 const STORED_METADATA_REPLAY_V4_EXCLUSIVE_DEFAULT_INTERVAL_MS = 2_000;
 const STORED_METADATA_REPLAY_V4_EXCLUSIVE_REFRESH_MS = 5_000;
-const STORED_METADATA_REPLAY_V4_EXCLUSIVE_SOURCE_WINDOWS_PER_TURN = 1;
+const STORED_METADATA_REPLAY_V4_EXCLUSIVE_SOURCE_WINDOWS_PER_TURN = 12;
 // A v4 merge performs several local, idempotent YSQL operations.  During
 // observed production contention each operation may consume the database
 // timeout budget, so the normal 45-second claim lease can expire while its

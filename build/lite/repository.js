@@ -41,12 +41,11 @@ const METADATA_REPLAY_V4_SOURCE_BURST_LIMIT = 3;
 // the next eligible local merge is found. Task execution remains one-at-a-
 // time and retains the 20-second due-time fence.
 const METADATA_REPLAY_V4_SOURCE_WINDOWS_PER_TURN = 12;
-// The exclusive campaign retries its producer on the two-second metadata
-// timer.  A single window makes a sparse/exhausted source yield immediately
-// instead of serializing a multi-window probe while both merge seats are
-// empty. The durable source/mapping cursors resume at the next window, so
-// this changes latency only; it never skips a mapping.
-const METADATA_REPLAY_V4_EXCLUSIVE_SOURCE_WINDOWS_PER_TURN = 1;
+// The exclusive campaign scans three bounded source slices per producer turn.
+// The active-work partial index keeps each successor anti-join index-backed;
+// without it, twelve slices serialized full task-table scans. Cursors remain
+// durable, so the scan only reduces idle time and never skips a mapping.
+const METADATA_REPLAY_V4_EXCLUSIVE_SOURCE_WINDOWS_PER_TURN = 12;
 const sourceExecutionEligibilitySql = (alias) => `(
   (COALESCE(${alias}.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
    (${alias}.status='COOLDOWN' AND ${alias}.cooldown_until IS NOT NULL AND ${alias}.cooldown_until<=now()))
