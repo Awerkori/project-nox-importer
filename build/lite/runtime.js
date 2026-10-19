@@ -901,7 +901,7 @@ export class ImporterLiteRuntime {
         const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
         // Under real metadata-pool contention retain exactly one bounded source
         // seat instead of zero or four.
-        const constrainedPool = sustainedPoolPressure || this.pool.waitingCount >= 2;
+        const constrainedPool = sustainedPoolPressure;
         if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED') {
             this.noteSourceMetadataProducer('SITE_PAUSED');
             return;
@@ -1022,7 +1022,7 @@ export class ImporterLiteRuntime {
         const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
         // See refillSourceMetadataEnrichment: only an intermittent isolated-pool
         // queue constrains this optional lane to one external request.
-        const constrainedPool = sustainedPoolPressure || this.pool.waitingCount >= 2;
+        const constrainedPool = sustainedPoolPressure;
         if (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
             || this.shouldPauseLowPriorityMetadata())
             return;
