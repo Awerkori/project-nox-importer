@@ -513,8 +513,12 @@ export class ImporterLiteRuntime {
         if (this.runtimeLeadershipTimer)
             return;
         this.runtimeLeadershipTimer = setInterval(async () => {
-            if (!this.isRuntimeLeader || this.runtimeLeadershipRenewing || this.stopped)
+            if (this.runtimeLeadershipRenewing || this.stopped)
                 return;
+            if (!this.isRuntimeLeader) {
+                await this.tryAcquireRuntimeLeadership();
+                return;
+            }
             this.runtimeLeadershipRenewing = true;
             this.leaseRenewStartedAt = new Date().toISOString();
             try {
