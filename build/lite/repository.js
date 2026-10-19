@@ -1859,51 +1859,56 @@ export class LiteRepository {
                 await client.query('COMMIT');
                 return 0;
             }
-            // A completed partial pass is intentionally not a terminal
-            // "no-aliases" decision: a cooldown or provider outage may clear later.
-            // Re-admit one due, bounded recheck before starting another work.  Its
-            // checkpoint is reset only for the unavailable providers, preserving
-            // all successful coverage evidence and avoiding a full repeat scan.
-            const deferred = await client.query(`
-        SELECT id::text,work_key,checkpoint
-        FROM importer_lite_tasks
-        WHERE task_type='CATALOG' AND state='DONE'
-          AND idempotency_key >= $1 AND idempotency_key < $2
-          AND checkpoint->>'coverage'='CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED'
-          AND next_run_at<=now()
-          AND COALESCE(NULLIF(checkpoint->>'deferredRounds','')::int,0)<$3
-        ORDER BY next_run_at,id
-        LIMIT 1
-        FOR UPDATE SKIP LOCKED`, [
-                METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX,
-                `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`,
-                METADATA_CROSS_SOURCE_DEFERRED_RECHECK_LIMIT
-            ]);
-            const deferredTask = deferred.rows[0];
-            if (deferredTask) {
-                const checkpoint = deferredTask.checkpoint || {};
-                const deferredSources = Array.isArray(checkpoint.deferredSources)
-                    ? checkpoint.deferredSources.map((value) => String(value || '').trim()).filter(Boolean) : [];
-                const deferredSet = new Set(deferredSources);
-                if (deferredSet.size) {
-                    const checkedSources = Array.isArray(checkpoint.checkedSources)
-                        ? checkpoint.checkedSources.map((value) => String(value || '').trim()).filter((value) => value && !deferredSet.has(value)) : [];
-                    const nextCheckpoint = {
-                        ...checkpoint,
-                        coverage: 'CROSS_SOURCE_DEFERRED_RECHECK',
-                        checkedSources,
-                        deferredSources: [],
-                        deferredRounds: Number(checkpoint.deferredRounds || 0) + 1,
-                        resumedAt: new Date().toISOString(),
-                    };
-                    await client.query(`UPDATE importer_lite_tasks
-            SET state='READY',attempts=0,reason=NULL,next_run_at=now(),lease_owner=NULL,lease_until=NULL,
-                checkpoint=$2::jsonb,updated_at=now()
-            WHERE id=$1::uuid`, [deferredTask.id, JSON.stringify(nextCheckpoint)]);
-                    await this.refreshReadyWork(client, deferredTask.work_key);
-                    await client.query('COMMIT');
-                    return 1;
+            const available = capacity - pendingCount;
+            let admittedDeferred = 0;
+            // Re-admit due deferred tasks in batch up to available capacity (capped at 16 per turn).
+            const deferredLimit = Math.min(available, 16);
+            if (deferredLimit > 0) {
+                const deferred = await client.query(`
+          SELECT id::text,work_key,checkpoint
+          FROM importer_lite_tasks
+          WHERE task_type='CATALOG' AND state='DONE'
+            AND idempotency_key >= $1 AND idempotency_key < $2
+            AND checkpoint->>'coverage'='CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED'
+            AND next_run_at<=now()
+            AND COALESCE(NULLIF(checkpoint->>'deferredRounds','')::int,0)<$3
+          ORDER BY next_run_at,id
+          LIMIT $4
+          FOR UPDATE SKIP LOCKED`, [
+                    METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX,
+                    `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`,
+                    METADATA_CROSS_SOURCE_DEFERRED_RECHECK_LIMIT,
+                    deferredLimit
+                ]);
+                for (const deferredTask of deferred.rows) {
+                    const checkpoint = deferredTask.checkpoint || {};
+                    const deferredSources = Array.isArray(checkpoint.deferredSources)
+                        ? checkpoint.deferredSources.map((value) => String(value || '').trim()).filter(Boolean) : [];
+                    const deferredSet = new Set(deferredSources);
+                    if (deferredSet.size) {
+                        const checkedSources = Array.isArray(checkpoint.checkedSources)
+                            ? checkpoint.checkedSources.map((value) => String(value || '').trim()).filter((value) => value && !deferredSet.has(value)) : [];
+                        const nextCheckpoint = {
+                            ...checkpoint,
+                            coverage: 'CROSS_SOURCE_DEFERRED_RECHECK',
+                            checkedSources,
+                            deferredSources: [],
+                            deferredRounds: Number(checkpoint.deferredRounds || 0) + 1,
+                            resumedAt: new Date().toISOString(),
+                        };
+                        await client.query(`UPDATE importer_lite_tasks
+              SET state='READY',attempts=0,reason=NULL,next_run_at=now(),lease_owner=NULL,lease_until=NULL,
+                  checkpoint=$2::jsonb,updated_at=now()
+              WHERE id=$1::uuid`, [deferredTask.id, JSON.stringify(nextCheckpoint)]);
+                        await this.refreshReadyWork(client, deferredTask.work_key);
+                        admittedDeferred += 1;
+                    }
                 }
+            }
+            const remainingAvailable = available - admittedDeferred;
+            if (remainingAvailable <= 0) {
+                await client.query('COMMIT');
+                return admittedDeferred;
             }
             // Candidate selection: decouple candidate identification from task/mapping existence.
             // Under YSQL, correlated subqueries across the 9,300-work catalog exceeded statement
@@ -1915,11 +1920,10 @@ export class LiteRepository {
         WHERE idempotency_key >= $1 AND idempotency_key < $2
       `, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`]);
             const existingWorkIdSet = new Set(existingDiscoveryTasks.rows.map((r) => r.work_id));
-            const available = capacity - pendingCount;
             const selected = [];
-            if (available > 0) {
+            if (remainingAvailable > 0) {
                 const excludedArray = [...existingWorkIdSet];
-                const fetchLimit = Math.max(32, available * 3);
+                const fetchLimit = Math.max(32, remainingAvailable * 3);
                 const candidateBatch = await client.query(`
           SELECT w.id::text AS work_id
           FROM works w
@@ -1942,7 +1946,7 @@ export class LiteRepository {
           `, [candidateIds]);
                     const activeMappingSet = new Set(activeMappings.rows.map((r) => r.work_id));
                     for (const id of candidateIds) {
-                        if (selected.length >= available)
+                        if (selected.length >= remainingAvailable)
                             break;
                         const lane = activeMappingSet.has(id) ? 'popular' : 'unlinked';
                         selected.push({ work_id: id, lane });
@@ -1952,7 +1956,7 @@ export class LiteRepository {
             }
             if (!selected.length) {
                 await client.query('COMMIT');
-                return 0;
+                return admittedDeferred;
             }
             let admitted = 0;
             for (const row of selected) {
@@ -1971,7 +1975,7 @@ export class LiteRepository {
                 }
             }
             await client.query('COMMIT');
-            return admitted;
+            return admittedDeferred + admitted;
         }
         catch (error) {
             await client.query('ROLLBACK').catch(() => { });
