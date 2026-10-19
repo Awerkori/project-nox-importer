@@ -321,6 +321,8 @@ export class ImporterLiteRuntime {
         // the expired leadership lease and source-metadata campaigns stall even
         // though their dedicated pool is healthy.
         await this.assertReaderCanonicalIdentitySchema();
+        if (!(await this.waitForRuntimeLeadership()))
+            return;
         await this.refreshMetadataReplayV4ExclusiveMode(true);
         await this.refreshMetadataTurboMode(true);
         if (this.metadataReplayV4Exclusive.enabled) {
