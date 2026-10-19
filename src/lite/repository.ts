@@ -387,11 +387,6 @@ export class LiteRepository {
                 AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
                 AND (history.last_source_work_id IS NULL OR m.source_work_id>history.last_source_work_id)
                 AND ${stateEligible}
-                AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
-                  WHERE task.idempotency_key IN (
-                    'lite:metadata:source:v3:' || m.source || ':' || m.source_work_id,
-                    'lite:metadata:source:v5:' || m.source || ':' || m.source_work_id
-                  ) AND task.state IN ('READY','RUNNING','RETRY_WAIT'))
               ORDER BY m.source_work_id LIMIT 32
             ), wrapped AS (
               SELECT m.source,m.source_work_id,m.work_id,
@@ -408,11 +403,6 @@ export class LiteRepository {
                 AND m.source_work_id<=history.last_source_work_id
                 AND NOT EXISTS (SELECT 1 FROM after_cursor)
                 AND ${stateEligible}
-                AND NOT EXISTS (SELECT 1 FROM importer_lite_tasks task
-                  WHERE task.idempotency_key IN (
-                    'lite:metadata:source:v3:' || m.source || ':' || m.source_work_id,
-                    'lite:metadata:source:v5:' || m.source || ':' || m.source_work_id
-                  ) AND task.state IN ('READY','RUNNING','RETRY_WAIT'))
               ORDER BY m.source_work_id LIMIT 32
             )
             SELECT source,source_work_id,work_id,selected_aliasless,selected_tagless
@@ -432,7 +422,36 @@ export class LiteRepository {
         [...priorityCandidates, ...candidates].map((candidate) => [`${candidate.source}:${candidate.source_work_id}`, candidate]),
       ).values()].slice(0, admissionLimit);
 
-      for (const row of selectedCandidates) {
+      // Candidate windows are deliberately source-indexed.  Correlating an
+      // active-task lookup for every mapping in those windows made YSQL scan
+      // the queue until its 2.5 s guard expired, despite viable V5 debt.
+      // The idempotency index makes one bounded lookup for this tiny admitted
+      // batch both faster and equivalent: active v3/v5 siblings are excluded
+      // before INSERT, and the unique key remains the final race-safe fence.
+      const candidateTaskKeys = selectedCandidates.flatMap((candidate) => {
+        const source = String(candidate.source);
+        const sourceWorkId = String(candidate.source_work_id);
+        return [
+          `lite:metadata:source:v3:${source}:${sourceWorkId}`,
+          `lite:metadata:source:v5:${source}:${sourceWorkId}`,
+        ];
+      });
+      const activeCandidateKeys = candidateTaskKeys.length
+        ? await client.query<{ idempotency_key: string }>(`SELECT idempotency_key
+            FROM importer_lite_tasks
+            WHERE idempotency_key=ANY($1::text[])
+              AND state IN ('READY','RUNNING','RETRY_WAIT')`, [candidateTaskKeys])
+        : { rows: [] as { idempotency_key: string }[] };
+      const activeCandidateKeySet = new Set(activeCandidateKeys.rows.map((row) => row.idempotency_key));
+      const insertableCandidates = selectedCandidates.filter((candidate) => {
+        const source = String(candidate.source);
+        const sourceWorkId = String(candidate.source_work_id);
+        return !activeCandidateKeySet.has(`lite:metadata:source:v3:${source}:${sourceWorkId}`)
+          && !activeCandidateKeySet.has(`lite:metadata:source:v5:${source}:${sourceWorkId}`);
+      });
+
+      let admitted = 0;
+      for (const row of insertableCandidates) {
         const source = String(row.source);
         const sourceWorkId = String(row.source_work_id);
         const workId = String(row.work_id);
@@ -447,10 +466,13 @@ export class LiteRepository {
           workId, workKey, `${sourceTaskPrefix}${source}:${sourceWorkId}`,
           JSON.stringify({ source, sourceWorkId, metadataSourceRefresh: true, metadataEnrichmentVersion: coverageVersion }),
         ]);
-        for (const task of inserted.rows) await this.refreshReadyWork(client, String(task.work_key));
+        for (const task of inserted.rows) {
+          admitted += 1;
+          await this.refreshReadyWork(client, String(task.work_key));
+        }
       }
       await client.query('COMMIT');
-      return selectedCandidates.length;
+      return admitted;
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
       throw error;
