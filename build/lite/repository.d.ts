@@ -285,6 +285,20 @@ export declare class LiteRepository {
      */
     complementaryCatalogSources(workId: string, originSource: string): Promise<string[]>;
     /**
+     * A coverage pass must not assume that the mappings already attached to a
+     * canonical work are exhaustive.  Return every still-operational provider
+     * that has no mapping for this work, including a temporarily cooled one so
+     * its outcome can be recorded as deferred rather than silently skipped.
+     */
+    crossSourceDiscoverySources(workId: string): Promise<string[]>;
+    /**
+     * Admit one durable, whole-catalog cross-source discovery task at a time.
+     * It is deliberately separate from V5's known-mapping refresh: each task
+     * records every operational provider considered for its canonical work and
+     * only creates a mapping after runtime identity verification.
+     */
+    refillCrossSourceMetadataDiscovery(): Promise<number>;
+    /**
      * Chapter media is expensive and a Reader chapter cannot be exposed without
      * a minimally valid work presentation.  Catalog checks this once per work
      * snapshot, never on the page or chapter hot path, so a missing cover does
