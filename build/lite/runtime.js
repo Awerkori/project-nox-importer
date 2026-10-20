@@ -418,7 +418,9 @@ export class ImporterLiteRuntime {
         metricsTimer.unref();
         this.timers.push(metricsTimer);
         await this.probeSharedResources();
-        await this.emitOperationalSnapshot();
+        await this.emitOperationalSnapshot().catch((err) => {
+            this.logger.warn('Initial operational snapshot deferred', { error: err?.message });
+        });
     }
     async assertReaderCanonicalIdentitySchema() {
         const required = ['canonical_chapter_key', 'display_number', 'chapter_order_key', 'chapter_kind', 'edition', 'language'];

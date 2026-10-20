@@ -423,7 +423,9 @@ export class ImporterLiteRuntime {
     const metricsTimer = setInterval(() => void this.emitOperationalSnapshot().catch(() => {}), 60_000);
     metricsTimer.unref(); this.timers.push(metricsTimer);
     await this.probeSharedResources();
-    await this.emitOperationalSnapshot();
+    await this.emitOperationalSnapshot().catch((err: any) => {
+      this.logger.warn('Initial operational snapshot deferred', { error: err?.message });
+    });
   }
 
   private async assertReaderCanonicalIdentitySchema(): Promise<void> {
