@@ -257,6 +257,9 @@ export class ManhastroAdapter {
             });
         }
         catch (err) {
+            if (err?.status === 429 || err?.message?.includes('timeout') || err?.message?.includes('HTTP 5')) {
+                throw err;
+            }
             this.logger.warn(`Search failed on Manhastro for query "${query}"`, { error: err?.message });
             return [];
         }

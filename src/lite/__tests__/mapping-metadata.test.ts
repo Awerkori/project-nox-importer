@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyExplicitSourceMetadata, extractStoredMappingMetadata, isProviderDisplayTitleAlias } from '../mapping-metadata.js';
+import { buildDiscoveryQueryCandidates, classifyExplicitSourceMetadata, extractStoredMappingMetadata, isProviderDisplayTitleAlias } from '../mapping-metadata.js';
 
 describe('stored mapping metadata enrichment', () => {
   it('accepts a display title stored as a slug but rejects machine fallbacks', () => {
@@ -80,5 +80,26 @@ describe('stored mapping metadata enrichment', () => {
     expect(classifyExplicitSourceMetadata({ aliases: { unsupported: 'Native title' } }, 'Primary')).toMatchObject({
       aliasesState: 'PARSER_ERROR', tagsState: 'NO_TAGS', parserError: true,
     });
+  });
+
+  it('builds bounded query candidates with primary phrase extraction and aliases', () => {
+    // Punctuated title with 0 aliases
+    const candidatesA = buildDiscoveryQueryCandidates('Summon The Demon, For I Am The Abyss', []);
+    expect(candidatesA).toEqual([
+      'Summon The Demon, For I Am The Abyss',
+      'Summon The Demon',
+    ]);
+
+    // Title with multiple aliases, capped at 5 and deduplicated
+    const candidatesB = buildDiscoveryQueryCandidates('One Piece', [
+      'Um Pedaço', 'One Piece', 'OP', 'Wan Pīsu', 'Un Trésor', 'Extra Ignored'
+    ]);
+    expect(candidatesB).toEqual([
+      'One Piece',
+      'Um Pedaço',
+      'OP',
+      'Wan Pīsu',
+      'Un Trésor',
+    ]);
   });
 });

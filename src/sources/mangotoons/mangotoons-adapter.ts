@@ -292,6 +292,9 @@ export class MangoToonsAdapter implements SourceAdapter {
         updatedAt: w.atualizada_em || w.criada_em || undefined,
       }));
     } catch (err: any) {
+      if (err?.status === 429 || err?.message?.includes('timeout') || err?.message?.includes('HTTP 5')) {
+        throw err;
+      }
       this.logger.warn(`Search failed on MangoToons for query "${query}"`, { error: err?.message });
       return [];
     }

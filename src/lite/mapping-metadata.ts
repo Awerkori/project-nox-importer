@@ -146,3 +146,38 @@ export function classifyExplicitSourceMetadata(raw: unknown, primaryTitle: strin
     parserError: aliasesParserError || tagsParserError,
   };
 }
+
+/**
+ * Generate a bounded list of search query candidates for cross-source discovery.
+ * Includes the primary title, the main title clause if punctuated (e.g. "Title, Subtitle" -> "Title"),
+ * and up to 4 distinct aliases, deduplicated and capped at 5 total queries.
+ */
+export function buildDiscoveryQueryCandidates(title: string, aliases: string[] = []): string[] {
+  const candidateList: string[] = [];
+  const cleanTitle = (title || '').trim();
+  if (cleanTitle.length >= 2) candidateList.push(cleanTitle);
+
+  // Extract primary title clause if punctuation indicates a subtitle
+  const titleParts = cleanTitle.split(/[,:;\-–—|]/).map((p) => p.trim()).filter(Boolean);
+  if (titleParts.length > 1 && titleParts[0].length >= 8 && titleParts[0].split(/\s+/).length >= 2) {
+    candidateList.push(titleParts[0]);
+  }
+
+  for (const alias of aliases || []) {
+    if (alias && typeof alias === 'string' && alias.trim().length >= 2) {
+      candidateList.push(alias.trim());
+    }
+  }
+
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  for (const cand of candidateList) {
+    const norm = cand.toLowerCase();
+    if (!seen.has(norm) && cand.length >= 2) {
+      seen.add(norm);
+      candidates.push(cand);
+      if (candidates.length >= 5) break;
+    }
+  }
+  return candidates;
+}

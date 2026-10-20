@@ -201,8 +201,8 @@ export class NexusAdapter {
         const clean = query.replace(/[?,()\*"]/g, ' ').replace(/\s+/g, ' ').trim();
         if (!clean)
             return [];
-        const enc = encodeURIComponent(clean);
-        const url = `${this.apiUrl}/works?or=(title.ilike.*${enc}*,slug.ilike.*${enc}*,alternative_title.ilike.*${enc}*)&select=id,title,slug,cover_url,updated_at&limit=20`;
+        const words = clean.split(/\s+/).filter(Boolean).map(encodeURIComponent).join('*');
+        const url = `${this.apiUrl}/works?or=(title.ilike.*${words}*,slug.ilike.*${words}*,alternative_title.ilike.*${words}*)&select=id,title,slug,cover_url,updated_at&limit=20`;
         try {
             const rows = await this.request(url);
             return (rows || []).map((w) => ({
@@ -214,6 +214,9 @@ export class NexusAdapter {
             }));
         }
         catch (err) {
+            if (err?.status === 429 || err?.message?.includes('timeout') || err?.message?.includes('HTTP 5')) {
+                throw err;
+            }
             this.logger.warn(`Search failed on Nexus for query "${query}"`, { error: err?.message });
             return [];
         }
