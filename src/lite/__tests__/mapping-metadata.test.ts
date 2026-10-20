@@ -127,4 +127,31 @@ describe('stored mapping metadata enrichment', () => {
     expect(classified.aliasesState).toBe('ENRICHED');
     expect(classified.parserError).toBe(false);
   });
+
+  it('protects compound titles from comma-shredding and rejects genre/numeric placeholders', () => {
+    const raw = {
+      alternative_title: 'Summon The Demon, For I Am The Abyss',
+      sinonimos: 'Black, Yet Pure White',
+      alt_names: ['Hello, Fluffy Griffin!', '+18', 'Adulto', '10803', 'Drama'],
+    };
+
+    const extracted = extractStoredMappingMetadata(raw, 'Example Work');
+    expect(extracted.aliases).toContain('Summon The Demon, For I Am The Abyss');
+    expect(extracted.aliases).not.toContain('Summon The Demon');
+    expect(extracted.aliases).not.toContain('For I Am The Abyss');
+
+    expect(extracted.aliases).toContain('Black, Yet Pure White');
+    expect(extracted.aliases).not.toContain('Black');
+    expect(extracted.aliases).not.toContain('Yet Pure White');
+
+    expect(extracted.aliases).toContain('Hello, Fluffy Griffin!');
+    expect(extracted.aliases).not.toContain('Hello');
+    expect(extracted.aliases).not.toContain('Fluffy Griffin!');
+
+    // Numeric and genre placeholders must be completely rejected
+    expect(extracted.aliases).not.toContain('+18');
+    expect(extracted.aliases).not.toContain('Adulto');
+    expect(extracted.aliases).not.toContain('10803');
+    expect(extracted.aliases).not.toContain('Drama');
+  });
 });
