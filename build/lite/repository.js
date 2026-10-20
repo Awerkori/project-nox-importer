@@ -1853,8 +1853,8 @@ export class LiteRepository {
               AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
           ) THEN 'popular' ELSE 'unlinked' END)='popular')::int AS popular
         FROM importer_lite_tasks task
-        WHERE task.idempotency_key >= $1 AND task.idempotency_key < $2
-          AND task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')`, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`]);
+        WHERE task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')
+          AND task.payload ? 'metadataCrossSourceDiscovery'`);
             const capacity = Math.max(1, Math.min(32, Math.trunc(maxPending)));
             const pendingCount = Number(pending.rows[0]?.count || 0);
             if (pendingCount >= capacity) {
@@ -1870,15 +1870,13 @@ export class LiteRepository {
           SELECT id::text,work_key,checkpoint
           FROM importer_lite_tasks
           WHERE task_type='CATALOG' AND state='DONE'
-            AND idempotency_key >= $1 AND idempotency_key < $2
+            AND payload ? 'metadataCrossSourceDiscovery'
             AND checkpoint->>'coverage'='CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED'
             AND next_run_at<=now()
-            AND COALESCE(NULLIF(checkpoint->>'deferredRounds','')::int,0)<$3
+            AND COALESCE(NULLIF(checkpoint->>'deferredRounds','')::int,0)<$1
           ORDER BY next_run_at,id
-          LIMIT $4
+          LIMIT $2
           FOR UPDATE SKIP LOCKED`, [
-                    METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX,
-                    `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`,
                     METADATA_CROSS_SOURCE_DEFERRED_RECHECK_LIMIT,
                     deferredLimit
                 ]);
