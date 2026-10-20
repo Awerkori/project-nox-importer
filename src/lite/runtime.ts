@@ -1000,8 +1000,8 @@ export class ImporterLiteRuntime {
       // A YSQL cursor turn can take seconds while the public lane is busy;
       // without this one-item buffer, the worker sits idle between every
       // historical task even though no additional HTTP or merge is allowed.
-      const capacity = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PREFETCH_DEPTH : (this.metadataTurboMode.enabled ? 48 : 4);
-      const probeLimit = constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : (this.metadataTurboMode.enabled ? 32 : undefined);
+      const capacity = !this.metadataTurboMode.enabled && constrainedPool ? SOURCE_METADATA_CONSTRAINED_PREFETCH_DEPTH : (this.metadataTurboMode.enabled ? 48 : 4);
+      const probeLimit = !this.metadataTurboMode.enabled && constrainedPool ? SOURCE_METADATA_CONSTRAINED_PROBE_LIMIT : (this.metadataTurboMode.enabled ? 32 : undefined);
       // Preserve the ordinary two-argument call shape when no source was
       // recently productive. Besides keeping the path minimal, this makes
       // the preference opt-in rather than part of every producer tick.
@@ -1101,7 +1101,8 @@ export class ImporterLiteRuntime {
     // Backpressure reduces the dedicated lane from its tested two external
     // seats to one. Do not turn it fully off: that caused READY dwell and
     // made the very pause intended to protect YSQL hold durable work idle.
-    if (constrainedPool && this.sourceMetadataLaneGate.active >= 1) return false;
+    const maxActive = !this.metadataTurboMode.enabled && constrainedPool ? 1 : 6;
+    if (this.sourceMetadataLaneGate.active >= maxActive) return false;
     if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire()) return false;
     let claimed = false;
     let completedSource: string | undefined;
@@ -1614,7 +1615,7 @@ export class ImporterLiteRuntime {
           continue;
         }
         if (this.metadataTurboMode.enabled) {
-          const preferDiscovery = (slotIndex % 3 === 0);
+          const preferDiscovery = (slotIndex % 2 === 0);
           let didWork = false;
           if (preferDiscovery) {
             telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'DISCOVERY_TURBO');
@@ -2528,6 +2529,7 @@ export class ImporterLiteRuntime {
       reportTiming('DONE');
     } catch (error: any) {
       const message = String(error?.message || 'METADATA_SOURCE_FETCH_FAILED').slice(0,500);
+      const isInternalDbError = /timeout exceeded when trying to connect|connection slots are reserved|Client has encountered a connection error|connection terminated|ECONNREFUSED|ENOTFOUND/i.test(message);
       // Source anti-bot/login HTML can be parsed as a title by an adapter and
       // then rejected by the editorial guard. That is an external block, not
       // a parser defect; retain it with bounded retry instead of terminally
@@ -2540,15 +2542,15 @@ export class ImporterLiteRuntime {
       // in the task checkpoint; otherwise a 404/challenge retries every two
       // minutes forever and repeatedly occupies one of the tiny metadata
       // admission slots.
-      const sourceExternalFailureCount = Math.max(0, Number(task.checkpoint.sourceExternalFailureCount) || 0) + 1;
+      const sourceExternalFailureCount = isInternalDbError ? 0 : Math.max(0, Number(task.checkpoint.sourceExternalFailureCount) || 0) + 1;
       const retryDelay = Math.min(6 * 60 * 60_000, 60_000 * 2 ** Math.min(sourceExternalFailureCount, 8));
-      if (mappingWorkId && !persistenceFailure) await timePhase('metadataPersistCommitMs', () => this.sourceMetadataPersistenceGate.runExclusive(() => this.queue.recordSourceMetadataEnrichment({
+      if (mappingWorkId && !persistenceFailure && !isInternalDbError) await timePhase('metadataPersistCommitMs', () => this.sourceMetadataPersistenceGate.runExclusive(() => this.queue.recordSourceMetadataEnrichment({
         source, sourceWorkId, workId: mappingWorkId,
         aliasesState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED',
         tagsState: parserFailure ? 'PARSER_ERROR' : 'EXTERNAL_BLOCKED', error: message,
         nextRetryAt: parserFailure ? null : new Date(Date.now() + retryDelay), version: metadataVersion,
       })));
-      if (!parserFailure && !persistenceFailure) await timePhase('sourceHealthPersistMs', () => this.queue.recordSourceFailure(source, error));
+      if (!parserFailure && !persistenceFailure && !isInternalDbError) await timePhase('sourceHealthPersistMs', () => this.queue.recordSourceFailure(source, error));
       const checkpointTiming = { ...timings, totalBeforeFinalizeMs: Math.round(performance.now() - totalStartedAt) };
       const finalizeStartedAt = performance.now();
       await this.queue.finish(task, workerId, parserFailure
@@ -2556,6 +2558,10 @@ export class ImporterLiteRuntime {
         : persistenceFailure
           ? { state: 'RETRY_WAIT', reason: 'METADATA_ALIAS_PERSISTENCE_FAILED',
               nextRunAt: new Date(Date.now() + Math.min(5 * 60_000, retryDelay)), resetAttempts: true,
+              checkpoint: { metadataTiming: checkpointTiming } }
+        : isInternalDbError
+          ? { state: 'RETRY_WAIT', reason: `INTERNAL_DB_PRESSURE:${message}`,
+              nextRunAt: new Date(Date.now() + 3_000), resetAttempts: true,
               checkpoint: { metadataTiming: checkpointTiming } }
         : metadataVersion >= 5 && sourceExternalFailureCount >= 4
           ? { state: 'BLOCKED', reason: `METADATA_SOURCE_EXTERNAL_RETRY_EXHAUSTED:${message}`,
