@@ -163,11 +163,20 @@ export class MangaThemesiaAdapter {
             kind = 'WEBTOON';
         // Alternative Titles
         let alternativeTitles = [];
-        const altMatch = html.match(/class="(?:alter|alternative|wd-full)"[^>]*>([\s\S]*?)<\/(?:span|div)>/i) ||
-            html.match(/(?:alternative|alternativo|other\s*names?)[^<]*<\/(?:b|strong|span)>[\s\S]*?<span>([\s\S]*?)<\/span>/i);
+        const altMatch = html.match(/class="(?:alter|alternative)"[^>]*>([\s\S]*?)<\/(?:span|div)>/i) ||
+            html.match(/(?:alternative|alternativo|t[ií]tulos?\s*alternativos?|nomes?\s*alternativos?|outros?\s*nomes?|other\s*names?|sin[oô]nimos?)[^<]*<\/(?:b|strong|span|h[1-6])>[\s\S]*?<span>([\s\S]*?)<\/span>/i) ||
+            html.match(/class="wd-full"[^>]*>[\s\S]*?<b>\s*(?:alternative|alternativo|t[ií]tulos?\s*alternativos?|nomes?\s*alternativos?|outros?\s*nomes?|other\s*names?|sin[oô]nimos?)[^<]*<\/b>([\s\S]*?)<\/(?:span|div)>/i);
         if (altMatch) {
             const rawAlt = stripHtml(altMatch[1]);
-            alternativeTitles = rawAlt.split(/[,;\/\n\r]+/).map(s => decodeHtmlEntities(s.trim())).filter(s => s.length > 1);
+            const normalizedRaw = rawAlt.replace(/<br\s*\/?>/gi, '\n');
+            const lines = normalizedRaw.includes('\n')
+                ? normalizedRaw.split(/[\r\n]+/)
+                : normalizedRaw.includes(';')
+                    ? normalizedRaw.split(/;+/)
+                    : normalizedRaw.includes(' / ')
+                        ? normalizedRaw.split(/\s+\/\s+/)
+                        : normalizedRaw.split(/[,;/\n\r]+/);
+            alternativeTitles = lines.map(s => decodeHtmlEntities(stripHtml(s).trim())).filter(s => s.length > 1);
         }
         return {
             sourceWorkId,

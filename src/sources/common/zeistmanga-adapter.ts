@@ -238,6 +238,23 @@ export class ZeistMangaAdapter implements SourceAdapter {
         }
       }
 
+      // Alternative Titles
+      let alternativeTitles: string[] = [];
+      const altMatch = html.match(/(?:alter(?:native)?|outros?\s+nomes?|sin[oô]nimos?|t[ií]tulos?\s*alternativos?)[^<:]*[:<\/][^>]*>([\s\S]*?)<\/(?:span|div|p|dd|li)>/i)
+        || html.match(/class=["'][^"']*(?:alter|alternative)[^"']*["'][^>]*>([\s\S]*?)<\//i);
+      if (altMatch) {
+        const rawAlt = stripHtml(altMatch[1]);
+        const normalizedRaw = rawAlt.replace(/<br\s*\/?>/gi, '\n');
+        const lines = normalizedRaw.includes('\n')
+          ? normalizedRaw.split(/[\r\n]+/)
+          : normalizedRaw.includes(';')
+            ? rawAlt.split(/;+/)
+            : normalizedRaw.includes(' / ')
+              ? rawAlt.split(/\s+\/\s+/)
+              : rawAlt.split(/[,;\/\n\r]+/);
+        alternativeTitles = lines.map(s => decodeHtmlEntities(s.trim())).filter(s => s.length > 1);
+      }
+
       return {
         sourceWorkId,
         title,
@@ -245,6 +262,7 @@ export class ZeistMangaAdapter implements SourceAdapter {
         coverUrl: coverUrl || null,
         synopsis,
         genres: genres.length > 0 ? genres : undefined,
+        alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
         status: 'ONGOING',
       };
     } catch (err: any) {

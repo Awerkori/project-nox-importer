@@ -248,21 +248,52 @@ export class DeduplicationEngine {
         }
         const { data: existingMapping, error: existingError } = await this.supabase
             .from('importer_work_mappings')
-            .select('id, work_id')
+            .select('id, work_id, metadata')
             .eq('source', source)
             .eq('source_work_id', candidate.sourceWorkId)
             .maybeSingle();
         if (existingError)
             throw new Error(`MAPPING_LOOKUP_FAILED:${existingError.message}`);
         if (existingMapping?.work_id && existingMapping.work_id !== workId) {
-            return {
-                workId: null,
-                mappingId: String(existingMapping.id || ''),
-                status: 'AMBIGUOUS',
-                slug: this.sanitizeSlug(candidate.slug || candidate.title),
-                reason: 'CROSS_SOURCE_MAPPING_OWNED_BY_ANOTHER_WORK',
-            };
+            const { data: existingWork } = await this.supabase
+                .from('works')
+                .select('id, published')
+                .eq('id', existingMapping.work_id)
+                .maybeSingle();
+            const isOrphanStub = !existingWork || existingWork.published === false;
+            if (isOrphanStub) {
+                this.logger.info('Reassigning mapping from unpublished stub to verified canonical work', {
+                    workId,
+                    previousWorkId: existingMapping.work_id,
+                    source,
+                    sourceWorkId: candidate.sourceWorkId,
+                });
+                if (existingMapping.work_id) {
+                    try {
+                        await this.supabase
+                            .from('chapters')
+                            .update({ work_id: workId })
+                            .eq('work_id', existingMapping.work_id);
+                    }
+                    catch (err) {
+                        this.logger.warn('Failed to migrate chapters from unpublished stub', { error: err?.message });
+                    }
+                }
+            }
+            else {
+                return {
+                    workId: null,
+                    mappingId: String(existingMapping.id || ''),
+                    status: 'AMBIGUOUS',
+                    slug: this.sanitizeSlug(candidate.slug || candidate.title),
+                    reason: 'CROSS_SOURCE_MAPPING_OWNED_BY_ANOTHER_WORK',
+                };
+            }
         }
+        const mergedMetadata = {
+            ...(existingMapping?.metadata || {}),
+            ...(candidate.rawMetadata || {}),
+        };
         const now = new Date().toISOString();
         const { data: mapping, error: mappingError } = await this.supabase
             .from('importer_work_mappings')
@@ -273,7 +304,7 @@ export class DeduplicationEngine {
             source_slug: this.sanitizeSlug(candidate.slug || candidate.title),
             source_title: candidate.title,
             sync_status: 'SYNCED',
-            metadata: candidate.rawMetadata || {},
+            metadata: mergedMetadata,
             last_synced_at: now,
         }, { onConflict: 'source,source_work_id' })
             .select()

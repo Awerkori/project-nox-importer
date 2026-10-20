@@ -136,6 +136,13 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
     const work = await this.work(sourceWorkId);
     const title = String(work.nome || work.title || sourceWorkId);
     const status = String(work.status_nome || '').toLowerCase();
+    const rawAlt = work.titulo_alternativo || work.titulos_alternativos || work.nome_alternativo || work.alternative_titles || work.alternativeTitles || work.aliases;
+    let alternativeTitles: string[] | undefined;
+    if (Array.isArray(rawAlt)) {
+      alternativeTitles = rawAlt.map(String).map((s: string) => s.trim()).filter(Boolean);
+    } else if (typeof rawAlt === 'string' && rawAlt.trim().length > 0) {
+      alternativeTitles = rawAlt.split(/[,;\/\n\r]+/).map((s: string) => s.trim()).filter(Boolean);
+    }
     return {
       sourceWorkId: String(work.id || sourceWorkId),
       title,
@@ -147,6 +154,7 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
           : status.includes('hiato') || status.includes('paus') ? 'HIATUS'
             : status.includes('cancel') ? 'CANCELLED' : 'UNKNOWN',
       genres: (work.tags || []).map((tag: any) => typeof tag === 'string' ? tag : tag.nome || tag.name).filter(Boolean),
+      alternativeTitles: alternativeTitles && alternativeTitles.length > 0 ? alternativeTitles : undefined,
       raw: work,
     };
   }
