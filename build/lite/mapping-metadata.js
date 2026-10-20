@@ -54,6 +54,8 @@ function explicitJsonArray(value) {
         return null;
     }
 }
+const CLAUSE_CONTINUATION_REGEX = /^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por)\b/i;
+const INTERJECTION_PREFIXES = new Set(['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá']);
 function splitDelimitedTitles(text) {
     const trimmed = text.trim();
     if (trimmed.length < 2)
@@ -70,7 +72,15 @@ function splitDelimitedTitles(text) {
     if (/, /.test(trimmed)) {
         const parts = trimmed.split(/,\s+/).map((s) => s.trim()).filter(Boolean);
         if (parts.length > 1) {
-            return parts;
+            // If the first part is an interjection (e.g. "Hello, Fluffy Griffin!"), or any subsequent part
+            // is a clause continuation (e.g. "For I Am The Abyss", "Yet Pure White", "so I ..."),
+            // or starts with a lowercase letter or has length < 3, it is a single grammatical title.
+            const firstWord = parts[0].toLowerCase().replace(/[^a-z]/g, '');
+            const isGrammaticalTitle = INTERJECTION_PREFIXES.has(firstWord)
+                || parts.some((p, i) => i > 0 && (CLAUSE_CONTINUATION_REGEX.test(p) || /^[a-z]/.test(p) || p.length < 3));
+            if (!isGrammaticalTitle) {
+                return parts;
+            }
         }
     }
     return [trimmed];

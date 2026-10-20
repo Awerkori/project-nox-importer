@@ -212,7 +212,7 @@ export class MangaThemesiaAdapter implements SourceAdapter {
           ? normalizedRaw.split(/;+/)
           : normalizedRaw.includes(' / ')
             ? normalizedRaw.split(/\s+\/\s+/)
-            : normalizedRaw.split(/[,;/\n\r]+/);
+            : [normalizedRaw];
       alternativeTitles = lines.map(s => decodeHtmlEntities(stripHtml(s).trim())).filter(s => s.length > 1);
     }
 

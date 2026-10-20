@@ -134,7 +134,19 @@ export class ImperioDaBritanniaAdapter {
             alternativeTitles = rawAlt.map(String).map((s) => s.trim()).filter(Boolean);
         }
         else if (typeof rawAlt === 'string' && rawAlt.trim().length > 0) {
-            alternativeTitles = rawAlt.split(/[,;\/\n\r]+/).map((s) => s.trim()).filter(Boolean);
+            const trimmed = rawAlt.trim();
+            if (/[\r\n]+/.test(trimmed)) {
+                alternativeTitles = trimmed.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
+            }
+            else if (/;+/.test(trimmed)) {
+                alternativeTitles = trimmed.split(/;+/).map((s) => s.trim()).filter(Boolean);
+            }
+            else if (/\s+\/\s+/.test(trimmed)) {
+                alternativeTitles = trimmed.split(/\s+\/\s+/).map((s) => s.trim()).filter(Boolean);
+            }
+            else {
+                alternativeTitles = [trimmed];
+            }
         }
         return {
             sourceWorkId: String(work.id || sourceWorkId),
