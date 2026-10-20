@@ -102,4 +102,29 @@ describe('stored mapping metadata enrichment', () => {
       'Un Trésor',
     ]);
   });
+
+  it('splits delimited alternative titles from raw strings and extracts new Portuguese and Asian title fields', () => {
+    const raw = {
+      nome_alternativo: 'God of Martial Arts, Jueshi Wushen, Peerless Martial God',
+      sinonimos: 'Infinite Leveling: Murim; Unlimited Level-ups in Murim',
+      japanese_title: 'ワンピース',
+      titulo_coreano: '무한 레벨업 in 무림',
+      alt_names: ['The Eunuch Regains His Manhood in His Second Life', '2회차 환관이 남성을 되찾음'],
+    };
+
+    const extracted = extractStoredMappingMetadata(raw, 'Deus das Artes Marciais');
+    expect(extracted.aliases).toContain('God of Martial Arts');
+    expect(extracted.aliases).toContain('Jueshi Wushen');
+    expect(extracted.aliases).toContain('Peerless Martial God');
+    expect(extracted.aliases).toContain('Infinite Leveling: Murim');
+    expect(extracted.aliases).toContain('Unlimited Level-ups in Murim');
+    expect(extracted.aliases).toContain('ワンピース');
+    expect(extracted.aliases).toContain('무한 레벨업 in 무림');
+    expect(extracted.aliases).toContain('The Eunuch Regains His Manhood in His Second Life');
+    expect(extracted.aliases).toContain('2회차 환관이 남성을 되찾음');
+
+    const classified = classifyExplicitSourceMetadata(raw, 'Deus das Artes Marciais');
+    expect(classified.aliasesState).toBe('ENRICHED');
+    expect(classified.parserError).toBe(false);
+  });
 });

@@ -292,11 +292,20 @@ export class MadaraAdapter implements SourceAdapter {
 
     // Alternative Titles
     let alternativeTitles: string[] = [];
-    const altRegex = /(?:outro\(s\)\s*nome\(s\)|alternative\s*(?:titles?)?|alt\s*name|other\s*names?|nomes\s*alternativos)[^<]*<\/(?:h[345]|div|span|strong|b)>[\s\S]*?<div[^>]*class="[^"]*summary-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
-    const altMatch = html.match(altRegex);
+    const altRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)[^<]*<\/(?:h[1-6]|div|span|strong|b|p)>[\s\S]*?<div[^>]*class="[^"]*summary-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
+    const fallbackAltRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)\s*:\s*([^<\n\r]+)/i;
+    const altMatch = html.match(altRegex) || html.match(fallbackAltRegex);
     if (altMatch) {
       const rawAlt = stripHtml(altMatch[1]);
-      alternativeTitles = rawAlt.split(/[,;\/\n\r]+/).map(s => decodeHtmlEntities(s.trim())).filter(s => s.length > 1);
+      const normalizedRaw = rawAlt.replace(/<br\s*\/?>/gi, '\n');
+      const lines = normalizedRaw.includes('\n')
+        ? normalizedRaw.split(/[\r\n]+/)
+        : normalizedRaw.includes(';')
+          ? normalizedRaw.split(/;+/)
+          : normalizedRaw.includes(' / ')
+            ? normalizedRaw.split(/\s+\/\s+/)
+            : normalizedRaw.split(/[,;/\n\r]+/);
+      alternativeTitles = lines.map(s => decodeHtmlEntities(stripHtml(s).trim())).filter(s => s.length > 1);
     }
 
     return {

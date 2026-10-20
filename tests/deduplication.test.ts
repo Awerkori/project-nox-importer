@@ -473,4 +473,92 @@ describe('DeduplicationEngine', () => {
     // Must NOT bind to the main story!
     expect(res.workId).not.toBe(mainId);
   });
+
+  it('attachVerifiedMapping reassigns mapping from unpublished stub to verified published canonical work and merges aliases', async () => {
+    // 1. Create unpublished stub with mapping
+    const stubRes = await db.query(`
+      insert into public.works (title, slug, kind, status, published)
+      values ('O Deus das Artes Marciais', 'o-deus-das-artes-marciais', 'MANHWA', 'ONGOING', false)
+      returning id
+    `);
+    const stubId = (stubRes.rows[0] as any).id;
+
+    await db.query(`
+      insert into importer_work_mappings (source, source_work_id, work_id, source_title, source_slug, sync_status, metadata)
+      values ('manhastro', '13348', $1, 'O Deus das Artes Marciais', 'o-deus-das-artes-marciais', 'SYNCED', '{"genres":["Ação"]}'::jsonb)
+    `, [stubId]);
+
+    // 2. Create canonical published work
+    const canonicalRes = await db.query(`
+      insert into public.works (title, slug, kind, status, published, aliases)
+      values ('Deus das Artes Marciais', 'deus-das-artes-marciais', 'MANHWA', 'ONGOING', true, '{}'::text[])
+      returning id
+    `);
+    const canonicalId = (canonicalRes.rows[0] as any).id;
+
+    // 3. Attach candidate to canonical work
+    const result = await engine.attachVerifiedMapping({
+      source: 'manhastro',
+      sourceWorkId: '13348',
+      title: 'O Deus das Artes Marciais',
+      slug: 'o-deus-das-artes-marciais',
+      aliases: ['God of Martial Arts', 'Jueshi Wushen'],
+      genres: ['Ação', 'Artes Marciais'],
+      rawMetadata: {
+        titulo_alternative: ['God of Martial Arts', 'Jueshi Wushen'],
+      },
+    }, canonicalId, 'manhastro');
+
+    expect(result.status).toBe('EXISTING_MAPPING');
+    expect(result.workId).toBe(canonicalId);
+
+    // Verify mapping is now reassigned in DB
+    const mappingCheck = await db.query(`
+      select work_id, sync_status from importer_work_mappings where source = 'manhastro' and source_work_id = '13348'
+    `);
+    expect((mappingCheck.rows[0] as any).work_id).toBe(canonicalId);
+
+    // Verify canonical work got the aliases
+    const workCheck = await db.query(`
+      select aliases from public.works where id = $1
+    `, [canonicalId]);
+    const aliases = (workCheck.rows[0] as any).aliases;
+    expect(aliases).toContain('God of Martial Arts');
+    expect(aliases).toContain('Jueshi Wushen');
+  });
+
+  it('attachVerifiedMapping flags AMBIGUOUS when mapping is owned by another published work', async () => {
+    // 1. Create first published work
+    const pub1Res = await db.query(`
+      insert into public.works (title, slug, kind, status, published)
+      values ('Another Published Series', 'another-published-series', 'MANHWA', 'ONGOING', true)
+      returning id
+    `);
+    const pub1Id = (pub1Res.rows[0] as any).id;
+
+    await db.query(`
+      insert into importer_work_mappings (source, source_work_id, work_id, source_title, source_slug, sync_status)
+      values ('nexus', 'nx-series-999', $1, 'Another Published Series', 'another-published-series', 'SYNCED')
+    `, [pub1Id]);
+
+    // 2. Create second published work
+    const pub2Res = await db.query(`
+      insert into public.works (title, slug, kind, status, published)
+      values ('Yet Another Series', 'yet-another-series', 'MANHWA', 'ONGOING', true)
+      returning id
+    `);
+    const pub2Id = (pub2Res.rows[0] as any).id;
+
+    // 3. Attempt to attach mapping already owned by pub1 to pub2
+    const result = await engine.attachVerifiedMapping({
+      source: 'nexus',
+      sourceWorkId: 'nx-series-999',
+      title: 'Another Published Series',
+      slug: 'another-published-series',
+    }, pub2Id, 'nexus');
+
+    expect(result.status).toBe('AMBIGUOUS');
+    expect(result.workId).toBeNull();
+    expect(result.reason).toBe('CROSS_SOURCE_MAPPING_OWNED_BY_ANOTHER_WORK');
+  });
 });

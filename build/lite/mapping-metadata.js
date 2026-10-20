@@ -22,13 +22,15 @@ export const STORED_MAPPING_ALIAS_FIELDS = [
     'aliases', 'alternativeNames', 'alternative_names', 'otherNames', 'other_names', 'alsoKnownAs', 'also_known_as',
     'originalTitle', 'original_title', 'nativeTitle', 'native_title', 'nativeName', 'native_name',
     'englishTitle', 'english_title', 'romanizedTitle', 'romanized_title', 'romajiTitle', 'romaji_title',
-    // These are provider-declared fields from the two Portuguese APIs already
-    // persisted in mapping metadata.  They are not inferred from a page title:
-    // `titulo_alternative` is Manhastro's explicit list and
-    // `titulo_alternativo` is MangoToons' explicit list.
+    'japaneseTitle', 'japanese_title', 'koreanTitle', 'korean_title', 'chineseTitle', 'chinese_title',
+    'altName', 'alt_name', 'altNames', 'alt_names', 'altTitle', 'alt_title', 'altTitles', 'alt_titles',
+    'synonyms', 'sinonimos', 'sinônimos', 'sinonimo', 'sinônimo',
+    // These are provider-declared fields from Portuguese APIs and scans:
     'titulo_alternative', 'titulo_alternativo', 'titulos_alternativos',
+    'nome_alternativo', 'nomes_alternativos', 'outros_nomes', 'outro_nome',
     'titulo_original', 'nome_original', 'titulo_nativo', 'nome_nativo',
     'titulo_ingles', 'titulo_em_ingles', 'titulo_romanizado', 'romaji',
+    'titulo_japones', 'titulo_japonês', 'titulo_coreano', 'titulo_chines', 'titulo_chinês',
 ];
 export const STORED_MAPPING_TAG_FIELDS = [
     'genres', 'genre', 'tags', 'tag', 'categories',
@@ -52,13 +54,43 @@ function explicitJsonArray(value) {
         return null;
     }
 }
+function splitDelimitedTitles(text) {
+    const trimmed = text.trim();
+    if (trimmed.length < 2)
+        return [];
+    if (/[\r\n]/.test(trimmed)) {
+        return trimmed.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
+    }
+    if (/;/.test(trimmed)) {
+        return trimmed.split(/;+/).map((s) => s.trim()).filter(Boolean);
+    }
+    if (/\s+\/\s+/.test(trimmed)) {
+        return trimmed.split(/\s+\/\s+/).map((s) => s.trim()).filter(Boolean);
+    }
+    if (/, /.test(trimmed)) {
+        const parts = trimmed.split(/,\s+/).map((s) => s.trim()).filter(Boolean);
+        if (parts.length > 1) {
+            return parts;
+        }
+    }
+    return [trimmed];
+}
 function asTextList(value, objectKeys = [], depth = 0) {
+    const isOriginallyArray = Array.isArray(value);
     const encodedArray = typeof value === 'string' && depth < 2 ? explicitJsonArray(value) : null;
     const values = Array.isArray(value) ? value : (encodedArray ?? (value == null ? [] : [value]));
     return values.flatMap((entry) => {
         if (typeof entry === 'string') {
             const nested = depth < 2 ? explicitJsonArray(entry) : null;
-            return nested ? asTextList(nested, objectKeys, depth + 1) : [entry];
+            if (nested)
+                return asTextList(nested, objectKeys, depth + 1);
+            if (isOriginallyArray) {
+                if (/[\r\n;]|\s+\/\s+/.test(entry)) {
+                    return entry.split(/[\r\n;]+|\s+\/\s+/).map((s) => s.trim()).filter(Boolean);
+                }
+                return [entry.trim()];
+            }
+            return splitDelimitedTitles(entry);
         }
         if (!entry || typeof entry !== 'object')
             return [];
@@ -92,11 +124,13 @@ function hasExplicitValue(metadata, fieldPattern) {
 export function extractStoredMappingMetadata(raw, primaryTitle) {
     const metadata = raw && typeof raw === 'object' ? raw : {};
     const aliases = STORED_MAPPING_ALIAS_FIELDS.flatMap((field) => asTextList(metadata[field], [
-        'title', 'name', 'value', 'alternativeTitle', 'alternative_title', 'nativeTitle', 'native_title',
+        'title', 'name', 'value', 'nome', 'titulo', 'valor',
+        'alternativeTitle', 'alternative_title', 'nativeTitle', 'native_title',
         'englishTitle', 'english_title', 'romanizedTitle', 'romanized_title',
         'titulo_alternative', 'titulo_alternativo', 'titulo_original',
         'nome_original', 'titulo_nativo', 'nome_nativo', 'titulo_ingles',
         'titulo_em_ingles', 'titulo_romanizado', 'romaji',
+        'nome_alternativo', 'sinonimo', 'sinonimos',
     ]));
     // Legacy Portuguese adapters persisted tag records with `nome`; accept it
     // alongside the common English keys so the no-network replay can recover
@@ -120,7 +154,7 @@ export function classifyExplicitSourceMetadata(raw, primaryTitle) {
     const parsedAliasEvidence = extracted.aliases.length > 0
         ? extracted.aliases
         : extractStoredMappingMetadata(metadata, '').aliases;
-    const rawAliasEvidence = hasExplicitValue(metadata, /^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title|titulo.?alternative|titulos?.?alternativos?|titulo.?original|nome.?original|titulo.?nativo|nome.?nativo|titulo.?(em.)?ingles|titulo.?romanizado|romaji)$/i);
+    const rawAliasEvidence = hasExplicitValue(metadata, /^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title|titulo.?alternative|titulos?.?alternativos?|titulo.?original|nome.?original|titulo.?nativo|nome.?nativo|titulo.?(em.)?ingles|titulo.?romanizado|romaji|nome.?alternativo|nomes?.?alternativos?|outros?.?nomes?|outro.?nome|alt.?(names?|titles?)|synonyms?|sin[oô]nimos?|japanese.?title|korean.?title|chinese.?title|titulo.?(japones|japonês|coreano|chines|chinês))$/i);
     const rawTagEvidence = hasExplicitValue(metadata, /^(genres?|tags?|categories|generos?|categorias?)$/i);
     const aliasesParserError = rawAliasEvidence && parsedAliasEvidence.length === 0;
     const tagsParserError = rawTagEvidence && extracted.genres.length === 0;
