@@ -311,6 +311,9 @@ export class MangaFlixAdapter implements SourceAdapter {
         updatedAt: new Date().toISOString(),
       }));
     } catch (err: any) {
+      if (err?.status === 429 || err?.message?.includes('timeout') || err?.message?.includes('HTTP 5')) {
+        throw err;
+      }
       this.logger.warn(`Search failed on MangaFlix for query "${query}"`, { error: err?.message });
       return [];
     }

@@ -14,7 +14,7 @@ import { HostRateLimiter } from '../core/rate-limiter.js';
 import { telemetryCollector } from '../core/telemetry-collector.js';
 import { SourceAdmissionGate } from '../core/source-admission-gate.js';
 import { sanitizeSynopsis } from './metadata.js';
-import { classifyExplicitSourceMetadata, extractStoredMappingMetadata, isProviderDisplayTitleAlias } from './mapping-metadata.js';
+import { buildDiscoveryQueryCandidates, classifyExplicitSourceMetadata, extractStoredMappingMetadata, isProviderDisplayTitleAlias } from './mapping-metadata.js';
 import { mergeAlternativeTitles } from '../core/alternative-titles.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
 import { LiteMemoryPressureGuard } from './memory-pressure.js';
@@ -1284,8 +1284,7 @@ export class ImporterLiteRuntime {
                         continue;
                     }
                     try {
-                        const queryCandidates = [input.title, ...input.aliases.slice(0, 1)]
-                            .map((value) => value.trim()).filter((value, index, values) => value.length >= 2 && values.indexOf(value) === index);
+                        const queryCandidates = buildDiscoveryQueryCandidates(target.title, target.aliases);
                         let selected = null;
                         let summaryMatch = null;
                         let fallback = null;
@@ -1302,7 +1301,7 @@ export class ImporterLiteRuntime {
                             });
                             for (const summary of summaries) {
                                 const summaryId = String(summary.sourceWorkId || '').trim();
-                                if (!summaryId || seenSummaryIds.has(summaryId))
+                                if (!summaryId || summaryId === 'feed' || summary.slug === 'feed' || seenSummaryIds.has(summaryId))
                                     continue;
                                 seenSummaryIds.add(summaryId);
                                 const match = matchWorkCandidate(target, { title: summary.title, slug: summary.slug });
@@ -1363,9 +1362,12 @@ export class ImporterLiteRuntime {
                         }
                         await this.sourceMetadataPersistenceGate.runExclusive(async () => {
                             const rawContentRating = String(rawDetails.contentRating || rawDetails.content_rating || '').toUpperCase();
+                            const providerAliases = isProviderDisplayTitleAlias(details.title, details.slug, target.title)
+                                ? Array.from(new Set([details.title, ...extracted.aliases]))
+                                : extracted.aliases;
                             const attached = await this.dedupe.attachVerifiedMapping({
                                 source, sourceWorkId: details.sourceWorkId, title: details.title, slug: details.slug,
-                                aliases: extracted.aliases, genres: extracted.genres, author: details.author, artist: details.artist,
+                                aliases: providerAliases, genres: extracted.genres, author: details.author, artist: details.artist,
                                 synopsis: sanitizeSynopsis(details.synopsis) || undefined, kind: details.kind, status: details.status,
                                 year: details.year, ageRating: details.ageRating,
                                 contentRating: rawContentRating === 'ADULT_18' || Number(details.ageRating || 0) >= 18 ? 'ADULT_18' : undefined,
@@ -1373,6 +1375,10 @@ export class ImporterLiteRuntime {
                             }, input.workId, source);
                             if (attached.workId !== input.workId)
                                 return;
+                            target.aliases ||= [];
+                            const freshAliases = providerAliases.filter((a) => !target.aliases.includes(a));
+                            if (freshAliases.length)
+                                target.aliases.push(...freshAliases);
                             const aliasesAdded = Math.max(0, Number(attached.metadataDelta?.aliasesAdded || 0));
                             const tagsAdded = Math.max(0, Number(attached.metadataDelta?.tagsAdded || 0));
                             await this.queue.recordSourceMetadataEnrichment({

@@ -28,3 +28,9 @@ export declare function classifyExplicitSourceMetadata(raw: unknown, primaryTitl
     tagsState: 'ENRICHED' | 'NO_TAGS' | 'PARSER_ERROR';
     parserError: boolean;
 };
+/**
+ * Generate a bounded list of search query candidates for cross-source discovery.
+ * Includes the primary title, the main title clause if punctuated (e.g. "Title, Subtitle" -> "Title"),
+ * and up to 4 distinct aliases, deduplicated and capped at 5 total queries.
+ */
+export declare function buildDiscoveryQueryCandidates(title: string, aliases?: string[]): string[];
