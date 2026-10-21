@@ -142,14 +142,26 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
       alternativeTitles = rawAlt.map(String).map((s: string) => s.trim()).filter(Boolean);
     } else if (typeof rawAlt === 'string' && rawAlt.trim().length > 0) {
       const trimmed = rawAlt.trim();
-      if (/[\r\n]+/.test(trimmed)) {
-        alternativeTitles = trimmed.split(/[\r\n]+/).map((s: string) => s.trim()).filter(Boolean);
-      } else if (/;+/.test(trimmed)) {
-        alternativeTitles = trimmed.split(/;+/).map((s: string) => s.trim()).filter(Boolean);
-      } else if (/\s+\/\s+/.test(trimmed)) {
-        alternativeTitles = trimmed.split(/\s+\/\s+/).map((s: string) => s.trim()).filter(Boolean);
-      } else {
-        alternativeTitles = [trimmed];
+      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (Array.isArray(parsed)) {
+            alternativeTitles = parsed.map(String).map((s: string) => s.trim()).filter(Boolean);
+          }
+        } catch {
+          // Fallback to text delimiters below
+        }
+      }
+      if (!alternativeTitles || alternativeTitles.length === 0) {
+        if (/[\r\n]+/.test(trimmed)) {
+          alternativeTitles = trimmed.split(/[\r\n]+/).map((s: string) => s.trim()).filter(Boolean);
+        } else if (/;+/.test(trimmed)) {
+          alternativeTitles = trimmed.split(/;+/).map((s: string) => s.trim()).filter(Boolean);
+        } else if (/\s+\/\s+/.test(trimmed)) {
+          alternativeTitles = trimmed.split(/\s+\/\s+/).map((s: string) => s.trim()).filter(Boolean);
+        } else {
+          alternativeTitles = [trimmed];
+        }
       }
     }
     return {

@@ -214,11 +214,25 @@ export class HipercoolAdapter implements SourceAdapter {
 
     const genres: string[] = (series.genres || []).map((g: any) => (typeof g === 'string' ? g : g.name)).filter(Boolean);
     const rawAlt = series.alternativeTitles ?? series.alternative_titles ?? series.aliases;
-    const alternativeTitles: string[] = Array.isArray(rawAlt)
-      ? rawAlt.map((a: any) => typeof a === 'string' ? a.trim() : String(a?.title || a?.name || '').trim()).filter(Boolean)
-      : typeof rawAlt === 'string' && rawAlt.trim().length > 0
-        ? rawAlt.split(/[\r\n;]+|\s+\/\s+/).map((s: string) => s.trim()).filter(Boolean)
-        : [];
+    let alternativeTitles: string[] = [];
+    if (Array.isArray(rawAlt)) {
+      alternativeTitles = rawAlt.map((a: any) => typeof a === 'string' ? a.trim() : String(a?.title || a?.name || '').trim()).filter(Boolean);
+    } else if (typeof rawAlt === 'string' && rawAlt.trim().length > 0) {
+      const trimmed = rawAlt.trim();
+      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (Array.isArray(parsed)) {
+            alternativeTitles = parsed.map((a: any) => typeof a === 'string' ? a.trim() : String(a?.title || a?.name || '').trim()).filter(Boolean);
+          }
+        } catch {
+          // Fallback to text delimiters below
+        }
+      }
+      if (alternativeTitles.length === 0) {
+        alternativeTitles = trimmed.split(/[\r\n;]+|\s+\/\s+/).map((s: string) => s.trim()).filter(Boolean);
+      }
+    }
 
     let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
     const rawType = (series.type || '').toUpperCase();
