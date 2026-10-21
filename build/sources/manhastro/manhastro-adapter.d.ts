@@ -6,10 +6,16 @@ export declare class ManhastroAdapter implements SourceAdapter {
     readonly id = "manhastro";
     readonly name = "Manhastro";
     readonly baseUrl = "https://manhastro.net";
-    readonly probeUrl = "https://api2.manhastro.net/lancamentos?p=1";
+    readonly probeUrl = "https://api.manhastro.net/lancamentos?p=1";
     private apiUrl;
     private logger;
+    private catalogItems;
+    private catalogByNormalizedTitle;
+    private catalogBySlug;
+    private catalogById;
+    private catalogLoaded;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
+    private ensureCatalogLoaded;
     private get headers();
     private request;
     fetchUpdatedWorks(cursor?: string | null, options?: {
@@ -21,5 +27,6 @@ export declare class ManhastroAdapter implements SourceAdapter {
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
+    private searchCatalog;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
 }
