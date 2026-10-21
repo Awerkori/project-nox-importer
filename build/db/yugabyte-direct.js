@@ -161,7 +161,7 @@ export function createYugabyteMetadataPool() {
     // Yugabyte's default nested-loop plan issued one remote read per mapping;
     // prefer its batched variant only here, never on the chapter pool.
     const metadataSessionOptions = '-c enable_nestloop=off';
-    const metadataPool = new pg.Pool(yugabytePoolOptions(getConfig(), 4, 'project-nox-importer-metadata', 30_000, 15_000, metadataSessionOptions, false));
+    const metadataPool = new pg.Pool(yugabytePoolOptions(getConfig(), 4, 'project-nox-importer-metadata', 30_000, 15_000, metadataSessionOptions, true));
     metadataPool.on('error', (err) => {
         logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });
     });
