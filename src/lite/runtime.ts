@@ -2403,7 +2403,9 @@ export class ImporterLiteRuntime {
         }
         if (harvestedFromMappings.length > 0) {
           const mergedSeed = mergeAlternativeTitles(seedAliases, harvestedFromMappings, target.title);
-          if (mergedSeed.length > seedAliases.length) {
+          const seedChanged = mergedSeed.length !== seedAliases.length
+            || mergedSeed.some((a, i) => a !== seedAliases[i]);
+          if (seedChanged) {
             await this.pool.query(`UPDATE works SET aliases=$2::text[],updated_at=now() WHERE id=$1::uuid`, [target.id, mergedSeed]);
             seedAliases = mergedSeed;
           }

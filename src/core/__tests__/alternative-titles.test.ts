@@ -72,5 +72,12 @@ describe('alternative title metadata', () => {
       'Kakushite! Makina-san!!',
       'かくして! マキナさん!!',
     ]);
+
+    expect(cleanAlternativeTitle('Média 5 / 5 do total de 5 votos')).toBeNull();
+    expect(cleanAlternativeTitle('Heroine App Média 4.8')).toBeNull();
+    expect(cleanAlternativeTitle('35 votos')).toBeNull();
+    expect(cleanAlternativeTitle('@import url(https://fonts.googleapis.com)')).toBeNull();
+    expect(cleanAlternativeTitle('border-top-width: 1px')).toBeNull();
+    expect(cleanAlternativeTitle('https://example.com/obra/test')).toBeNull();
   });
 });

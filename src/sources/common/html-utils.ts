@@ -41,7 +41,12 @@ export function decodeHtmlEntities(str: string): string {
 }
 
 export function stripHtml(str: string): string {
-  return decodeHtmlEntities(str.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+  return decodeHtmlEntities(
+    str
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<[^>]*>/g, ' ')
+  ).replace(/\s+/g, ' ').trim();
 }
 
 export function extractChapterNumber(str: string): number {

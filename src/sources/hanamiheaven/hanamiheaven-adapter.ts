@@ -219,9 +219,10 @@ export class HanamiHeavenAdapter implements SourceAdapter {
     }
 
     let alternativeTitles: string[] = [];
-    const altRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|nomes?\s+associados?|associados?|alternativos?|t[ií]tulos?\s+originais?|t[ií]tulo\s+original|nome\s+original|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)[^<]*<\/(?:h[1-6]|div|span|strong|b|p)>[\s\S]*?<div[^>]*class="[^"]*summary-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
+    const titleAltMatch = html.match(/<div[^>]*class="[^"]*title_alternative_name[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+    const altRegex = /(?:summary-heading|post-content_item)[\s\S]*?(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|nomes?\s+associados?|associados?|alternativos?|t[ií]tulos?\s+originais?|t[ií]tulo\s+original|nome\s+original|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)[\s\S]*?<div[^>]*class="[^"]*summary-content(?!\s*vote-details)[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
     const fallbackAltRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|nomes?\s+associados?|associados?|alternativos?|t[ií]tulos?\s+originais?|t[ií]tulo\s+original|nome\s+original|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)\s*:\s*([^<\n\r]+)/i;
-    const altMatch = html.match(altRegex) || html.match(fallbackAltRegex);
+    const altMatch = titleAltMatch || html.match(altRegex) || html.match(fallbackAltRegex);
     if (altMatch) {
       const normalizedRaw = altMatch[1].replace(/<br\s*\/?>/gi, '\n');
       const rawAlt = stripHtml(normalizedRaw);
