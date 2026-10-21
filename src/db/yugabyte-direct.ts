@@ -174,7 +174,7 @@ export function createYugabyteMetadataPool(): pg.Pool {
   const metadataSessionOptions = '-c enable_nestloop=off';
   const metadataPool = new pg.Pool(yugabytePoolOptions(
     getConfig(), 4, 'project-nox-importer-metadata', 30_000, 15_000,
-    metadataSessionOptions, true,
+    metadataSessionOptions, false,
   ));
   metadataPool.on('error', (err) => {
     logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });
