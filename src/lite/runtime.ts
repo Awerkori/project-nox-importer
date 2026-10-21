@@ -220,7 +220,13 @@ export class ImporterLiteRuntime {
   // exhausts its cursors, so a restart cannot strand chapter ingestion.
   private metadataReplayV4Exclusive = { enabled: false, intervalMs: STORED_METADATA_REPLAY_V4_EXCLUSIVE_DEFAULT_INTERVAL_MS };
   private lastMetadataReplayV4ExclusiveRefreshAt = 0;
-  private metadataTurboMode = { enabled: false };
+  private metadataTurboMode: {
+    enabled: boolean;
+    discoveryConcurrency?: number;
+    searchConcurrency?: number;
+    metadataGateCapacity?: number;
+    persistenceCapacity?: number;
+  } = { enabled: false };
   private lastMetadataTurboModeRefreshAt = 0;
   private readonly metadataReplayV4WorkTails = new Map<string, Promise<void>>();
   private sourcePoliciesCache: { map: Map<string, LiteSourcePolicy>; expiresAt: number } | null = null;
@@ -896,18 +902,30 @@ export class ImporterLiteRuntime {
     if (!force && now - this.lastMetadataTurboModeRefreshAt < 5_000) return;
     this.lastMetadataTurboModeRefreshAt = now;
     const next = await this.queue.metadataTurboExclusiveMode();
-    if (force || next.enabled !== this.metadataTurboMode.enabled) {
+    const hasConfigChanged = force
+      || next.enabled !== this.metadataTurboMode.enabled
+      || next.discoveryConcurrency !== this.metadataTurboMode.discoveryConcurrency
+      || next.searchConcurrency !== this.metadataTurboMode.searchConcurrency
+      || next.metadataGateCapacity !== this.metadataTurboMode.metadataGateCapacity
+      || next.persistenceCapacity !== this.metadataTurboMode.persistenceCapacity;
+
+    if (hasConfigChanged) {
       this.logger.warn('Updated metadata turbo mode', next);
       if (next.enabled) {
         this.sitePausedUntil = 0;
         this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 0 };
       }
-      this.sourceMetadataLaneGate.setCapacity(next.enabled ? 3 : 2);
-      this.sourceMetadataGate.setCapacity(next.enabled ? 4 : 2);
-      this.sourceMetadataPreparationGate.setCapacity(next.enabled ? 3 : 1);
-      this.sourceMetadataPersistenceGate.setCapacity(next.enabled ? 2 : 1);
-      this.crossSourceDiscoveryLaneGate.setCapacity(next.enabled ? 3 : 2);
-      this.crossSourceMetadataGate.setCapacity(next.enabled ? 4 : 2);
+      const discoveryCap = next.enabled ? (next.discoveryConcurrency ?? 12) : 2;
+      const searchCap = next.enabled ? (next.searchConcurrency ?? 24) : 2;
+      const metadataCap = next.enabled ? (next.metadataGateCapacity ?? Math.max(discoveryCap + 4, 16)) : 2;
+      const persistenceCap = next.enabled ? (next.persistenceCapacity ?? 4) : 1;
+
+      this.sourceMetadataLaneGate.setCapacity(next.enabled ? 6 : 2);
+      this.sourceMetadataGate.setCapacity(searchCap);
+      this.sourceMetadataPreparationGate.setCapacity(next.enabled ? 4 : 1);
+      this.sourceMetadataPersistenceGate.setCapacity(persistenceCap);
+      this.crossSourceDiscoveryLaneGate.setCapacity(discoveryCap);
+      this.crossSourceMetadataGate.setCapacity(metadataCap);
     }
     this.metadataTurboMode = next;
   }
@@ -919,10 +937,12 @@ export class ImporterLiteRuntime {
       await this.refreshMetadataTurboMode();
       if (this.metadataTurboMode.enabled) {
         await Promise.all([
-          this.runSourceMetadataRefresh(),
-          this.runSourceMetadataRefresh(),
           this.runCrossSourceMetadataDiscovery(),
           this.runCrossSourceMetadataDiscovery(),
+          this.runCrossSourceMetadataDiscovery(),
+          this.runCrossSourceMetadataDiscovery(),
+          this.runSourceMetadataRefresh(),
+          this.runSourceMetadataRefresh(),
         ]);
         void this.refillSourceMetadataEnrichment(false, 0, undefined);
         void this.refillCrossSourceMetadataDiscovery();
@@ -1655,26 +1675,14 @@ export class ImporterLiteRuntime {
           continue;
         }
         if (this.metadataTurboMode.enabled) {
-          const preferDiscovery = (slotIndex % 2 === 0);
-          let didWork = false;
-          if (preferDiscovery) {
-            telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'DISCOVERY_TURBO');
-            this.setWorkerLiveness(workerId, 'FETCH');
-            didWork = await this.runCrossSourceMetadataDiscovery(workerId);
-            if (!didWork) {
-              telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'V5_TURBO');
-              didWork = await this.runSourceMetadataRefresh(workerId);
-            }
-          } else {
+          telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'DISCOVERY_TURBO');
+          this.setWorkerLiveness(workerId, 'FETCH');
+          let didWork = await this.runCrossSourceMetadataDiscovery(workerId);
+          if (!didWork) {
             telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'V5_TURBO');
-            this.setWorkerLiveness(workerId, 'FETCH');
             didWork = await this.runSourceMetadataRefresh(workerId);
-            if (!didWork) {
-              telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'DISCOVERY_TURBO');
-              didWork = await this.runCrossSourceMetadataDiscovery(workerId);
-            }
           }
-          await sleep(didWork ? 25 : 150);
+          await sleep(didWork ? 25 : 100);
           continue;
         }
         if (this.shouldPauseChapterAdmission()) {
