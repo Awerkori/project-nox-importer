@@ -901,12 +901,12 @@ export class ImporterLiteRuntime {
                 this.sitePausedUntil = 0;
                 this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 0 };
             }
-            this.sourceMetadataLaneGate.setCapacity(next.enabled ? 6 : 4);
-            this.sourceMetadataGate.setCapacity(next.enabled ? 8 : 4);
-            this.sourceMetadataPreparationGate.setCapacity(next.enabled ? 6 : 1);
-            this.sourceMetadataPersistenceGate.setCapacity(next.enabled ? 4 : 1);
-            this.crossSourceDiscoveryLaneGate.setCapacity(next.enabled ? 6 : 2);
-            this.crossSourceMetadataGate.setCapacity(next.enabled ? 8 : 2);
+            this.sourceMetadataLaneGate.setCapacity(next.enabled ? 3 : 2);
+            this.sourceMetadataGate.setCapacity(next.enabled ? 4 : 2);
+            this.sourceMetadataPreparationGate.setCapacity(next.enabled ? 3 : 1);
+            this.sourceMetadataPersistenceGate.setCapacity(next.enabled ? 2 : 1);
+            this.crossSourceDiscoveryLaneGate.setCapacity(next.enabled ? 3 : 2);
+            this.crossSourceMetadataGate.setCapacity(next.enabled ? 4 : 2);
         }
         this.metadataTurboMode = next;
     }
