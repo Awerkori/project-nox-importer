@@ -1,6 +1,31 @@
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
+
+interface ManhastroCatalogItem {
+  id: string;
+  t: string;
+  tb?: string;
+  alt?: string[];
+  slug: string;
+  gen?: string[];
+  st?: string;
+  cat?: string;
+  img?: string | null;
+  desc?: string | null;
+}
+
+function normalizeText(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
 
 function slugify(text: string): string {
   return text
@@ -29,17 +54,57 @@ export class ManhastroAdapter implements SourceAdapter {
   readonly id = 'manhastro';
   readonly name = 'Manhastro';
   readonly baseUrl = 'https://manhastro.net';
-  readonly probeUrl = 'https://api2.manhastro.net/lancamentos?p=1';
+  readonly probeUrl = 'https://api.manhastro.net/lancamentos?p=1';
 
-  private apiUrl = 'https://api2.manhastro.net';
+  private apiUrl = 'https://api.manhastro.net';
   private logger = new Logger('ManhastroAdapter');
+
+  private catalogItems: ManhastroCatalogItem[] = [];
+  private catalogByNormalizedTitle = new Map<string, ManhastroCatalogItem[]>();
+  private catalogBySlug = new Map<string, ManhastroCatalogItem>();
+  private catalogById = new Map<string, ManhastroCatalogItem>();
+  private catalogLoaded = false;
 
   constructor(
     private rateLimiter: HostRateLimiter = new HostRateLimiter(2.0),
     private transport: typeof fetch = fetch
   ) {
-    this.rateLimiter.setHostRate('api2.manhastro.net', 2.0, 4, 4.0);
+    this.rateLimiter.setHostRate('api.manhastro.net', 2.0, 4, 4.0);
     this.rateLimiter.setHostRate('albums.manhastro.net', 8.0, 16, 16.0);
+  }
+
+  private ensureCatalogLoaded(): boolean {
+    if (this.catalogLoaded) return true;
+    try {
+      const currentDir = typeof __dirname !== 'undefined'
+        ? __dirname
+        : path.dirname(fileURLToPath(import.meta.url));
+      const catalogPath = path.resolve(currentDir, 'manhastro-catalog.json');
+      if (fs.existsSync(catalogPath)) {
+        const raw = fs.readFileSync(catalogPath, 'utf8');
+        this.catalogItems = JSON.parse(raw);
+        for (const item of this.catalogItems) {
+          this.catalogById.set(item.id, item);
+          if (item.slug) this.catalogBySlug.set(item.slug, item);
+
+          const titles = [item.t, item.tb, ...(item.alt || [])].filter(Boolean) as string[];
+          for (const title of titles) {
+            const norm = normalizeText(title);
+            if (norm) {
+              const list = this.catalogByNormalizedTitle.get(norm) || [];
+              list.push(item);
+              this.catalogByNormalizedTitle.set(norm, list);
+            }
+          }
+        }
+        this.catalogLoaded = true;
+        this.logger.info(`Loaded Manhastro local catalog index with ${this.catalogItems.length} works`);
+        return true;
+      }
+    } catch (err: any) {
+      this.logger.warn('Failed to load local Manhastro catalog cache', { error: err?.message });
+    }
+    return false;
   }
 
   private get headers(): HeadersInit {
@@ -196,6 +261,45 @@ export class ManhastroAdapter implements SourceAdapter {
   }
 
   async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+    if (this.ensureCatalogLoaded()) {
+      const cached = this.catalogById.get(sourceWorkId);
+      if (cached) {
+        const title = cached.tb?.trim() || cached.t.trim();
+        const alternativeTitles = Array.from(new Set([
+          cached.t.trim(),
+          cached.tb?.trim(),
+          ...(cached.alt || [])
+        ].filter((c): c is string => Boolean(c && c !== title))));
+
+        let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
+        const cat = (cached.cat || '').toLowerCase();
+        if (cat.includes('manhwa')) kind = 'MANHWA';
+        else if (cat.includes('manhua')) kind = 'MANHUA';
+        else if (cat.includes('webtoon')) kind = 'WEBTOON';
+
+        let status: SourceWorkDetails['status'] = 'UNKNOWN';
+        const st = (cached.st || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (st.includes('completed') || st.includes('completo')) status = 'COMPLETED';
+        else if (st.includes('hiat')) status = 'HIATUS';
+        else if (st.includes('cancel')) status = 'CANCELLED';
+        else if (st.includes('ongo') || st.includes('andamento') || st.includes('releasing') || st.includes('ativo') || st.includes('lanc')) status = 'ONGOING';
+
+        return {
+          sourceWorkId: cached.id,
+          title,
+          slug: cached.slug || slugify(title),
+          coverUrl: cached.img ? (cached.img.startsWith('http') ? cached.img : `https://${cached.img}`) : null,
+          synopsis: cached.desc || '',
+          kind,
+          status,
+          language: 'pt-BR',
+          genres: cached.gen || [],
+          alternativeTitles,
+          raw: cached,
+        };
+      }
+    }
+
     const url = `${this.apiUrl}/dados?manga_id=${sourceWorkId}`;
     const response = await this.request<{
       success: boolean;
@@ -313,11 +417,86 @@ export class ManhastroAdapter implements SourceAdapter {
       .filter((u) => u.startsWith('http://') || u.startsWith('https://'));
   }
 
+  private searchCatalog(query: string): SourceWorkSummary[] {
+    const norm = normalizeText(query);
+    const slug = slugify(query);
+
+    const matches: ManhastroCatalogItem[] = [];
+    const seen = new Set<string>();
+
+    // 1. Exact slug match
+    const bySlug = this.catalogBySlug.get(slug);
+    if (bySlug && !seen.has(bySlug.id)) {
+      matches.push(bySlug);
+      seen.add(bySlug.id);
+    }
+
+    // 2. Exact normalized title or alias match
+    const exact = this.catalogByNormalizedTitle.get(norm) || [];
+    for (const item of exact) {
+      if (!seen.has(item.id)) {
+        matches.push(item);
+        seen.add(item.id);
+      }
+    }
+
+    // 3. Substring matching if query is specific enough (>= 4 chars) and few exact matches
+    if (matches.length < 5 && norm.length >= 4) {
+      for (const item of this.catalogItems) {
+        if (seen.has(item.id)) continue;
+        const itemNorm = normalizeText(item.t);
+        const itemNormBr = item.tb ? normalizeText(item.tb) : '';
+        let matched =
+          (itemNorm.length >= 4 && (itemNorm.includes(norm) || norm.includes(itemNorm))) ||
+          (itemNormBr.length >= 4 && (itemNormBr.includes(norm) || norm.includes(itemNormBr)));
+
+        if (!matched && item.alt && item.alt.length > 0) {
+          for (const altTitle of item.alt) {
+            const altNorm = normalizeText(altTitle);
+            if (altNorm.length >= 4 && (altNorm.includes(norm) || norm.includes(altNorm))) {
+              matched = true;
+              break;
+            }
+          }
+        }
+
+        if (matched) {
+          matches.push(item);
+          seen.add(item.id);
+          if (matches.length >= 10) break;
+        }
+      }
+    }
+
+    return matches.map((item) => {
+      const title = item.tb || item.t;
+      const cover = item.img
+        ? item.img.startsWith('http')
+          ? item.img
+          : `https://${item.img}`
+        : null;
+
+      return {
+        sourceWorkId: item.id,
+        title,
+        slug: item.slug || slugify(title),
+        coverUrl: cover,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  }
+
   async searchWorks(query: string): Promise<SourceWorkSummary[]> {
     const clean = query.trim();
     if (!clean) return [];
 
-    const url = `${this.apiUrl}/dados?nome=${encodeURIComponent(clean)}`;
+    // 1. High-speed zero-network in-memory search over the complete catalog
+    if (this.ensureCatalogLoaded()) {
+      return this.searchCatalog(clean);
+    }
+
+    // 2. Fallback: live API only if local catalog failed to load
+    const url = `${this.apiUrl}/dados?nome=${encodeURIComponent(clean)}&limit=10&sort=views&order=desc`;
 
     try {
       const response = await this.request<{
@@ -329,7 +508,7 @@ export class ManhastroAdapter implements SourceAdapter {
           imagem?: string | null;
           ultimo_capitulo?: string;
         }>;
-      }>(url);
+      }>(url, { signal: AbortSignal.timeout(5_000) });
 
       const items = response.data || [];
       return items.map((item) => {
@@ -349,10 +528,10 @@ export class ManhastroAdapter implements SourceAdapter {
         };
       });
     } catch (err: any) {
-      if (err?.status === 429 || err?.message?.includes('timeout') || err?.message?.includes('HTTP 5')) {
+      if (err?.status === 429) {
         throw err;
       }
-      this.logger.warn(`Search failed on Manhastro for query "${query}"`, { error: err?.message });
+      this.logger.debug(`Search returned no results or timed out on Manhastro for query "${query}"`, { error: err?.message });
       return [];
     }
   }

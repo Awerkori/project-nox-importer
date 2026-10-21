@@ -1,7 +1,21 @@
-import { readFileSync, writeFileSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, readdirSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { createHash } from 'crypto';
 import { join } from 'path';
 import { execFileSync } from 'node:child_process';
+
+// Copy assets required at runtime
+try {
+  const manhastroSrc = join(process.cwd(), 'src/sources/manhastro/manhastro-catalog.json');
+  const manhastroDestDir = join(process.cwd(), 'build/sources/manhastro');
+  const manhastroDest = join(manhastroDestDir, 'manhastro-catalog.json');
+  if (existsSync(manhastroSrc)) {
+    if (!existsSync(manhastroDestDir)) mkdirSync(manhastroDestDir, { recursive: true });
+    copyFileSync(manhastroSrc, manhastroDest);
+    console.log('Copied manhastro-catalog.json to build/sources/manhastro/');
+  }
+} catch (err) {
+  console.warn('Failed to copy manhastro-catalog.json:', err.message);
+}
 
 // read build/index.js to generate an artifact hash
 try {
