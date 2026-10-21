@@ -901,12 +901,12 @@ export class ImporterLiteRuntime {
                 this.sitePausedUntil = 0;
                 this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 0 };
             }
-            this.sourceMetadataLaneGate.setCapacity(next.enabled ? 16 : 4);
-            this.sourceMetadataGate.setCapacity(next.enabled ? 28 : 4);
-            this.sourceMetadataPreparationGate.setCapacity(next.enabled ? 12 : 1);
-            this.sourceMetadataPersistenceGate.setCapacity(next.enabled ? 6 : 1);
-            this.crossSourceDiscoveryLaneGate.setCapacity(next.enabled ? 20 : 2);
-            this.crossSourceMetadataGate.setCapacity(next.enabled ? 20 : 2);
+            this.sourceMetadataLaneGate.setCapacity(next.enabled ? 6 : 4);
+            this.sourceMetadataGate.setCapacity(next.enabled ? 8 : 4);
+            this.sourceMetadataPreparationGate.setCapacity(next.enabled ? 6 : 1);
+            this.sourceMetadataPersistenceGate.setCapacity(next.enabled ? 4 : 1);
+            this.crossSourceDiscoveryLaneGate.setCapacity(next.enabled ? 6 : 2);
+            this.crossSourceMetadataGate.setCapacity(next.enabled ? 8 : 2);
         }
         this.metadataTurboMode = next;
     }
@@ -1122,7 +1122,9 @@ export class ImporterLiteRuntime {
                 // Do not wait for this request's HTTP phase before filling the other
                 // approved seat. The lane and fetch gates make this a hard maximum of
                 // four network-only operations; it only removes timer-created idle time.
-                void this.runSourceMetadataRefresh();
+                if (!this.metadataTurboMode.enabled) {
+                    void this.runSourceMetadataRefresh();
+                }
                 await this.catalog(task, workerId, {
                     claimSqlMs: Math.round(performance.now() - claimStartedAt),
                     queueDwellMs: task.createdAt ? Math.max(0, Date.now() - task.createdAt.getTime()) : null,
@@ -1139,9 +1141,12 @@ export class ImporterLiteRuntime {
             // frees its durable replacement instead of waiting for the 15 s timer.
             if (claimed && this.isRuntimeLeader) {
                 const preferredSource = this.nextPreferredSourceMetadataSource(completedSource);
-                void this.refillSourceMetadataEnrichment(true, 0, preferredSource)
-                    .then(() => this.runSourceMetadataRefresh())
-                    .catch((error) => this.logger.warn('Source metadata replacement failed', { error: error?.message }));
+                const refillPromise = this.refillSourceMetadataEnrichment(true, 0, preferredSource);
+                if (!this.metadataTurboMode.enabled) {
+                    void refillPromise
+                        .then(() => this.runSourceMetadataRefresh())
+                        .catch((error) => this.logger.warn('Source metadata replacement failed', { error: error?.message }));
+                }
             }
         }
         return claimed;
@@ -1177,8 +1182,10 @@ export class ImporterLiteRuntime {
             // its successor promptly, but never spin when no due task exists.
             if (claimed && this.isRuntimeLeader) {
                 void this.refillCrossSourceMetadataDiscovery();
-                const timer = setTimeout(() => void this.runCrossSourceMetadataDiscovery(), 100);
-                timer.unref();
+                if (!this.metadataTurboMode.enabled) {
+                    const timer = setTimeout(() => void this.runCrossSourceMetadataDiscovery(), 100);
+                    timer.unref();
+                }
             }
         }
         return claimed;
