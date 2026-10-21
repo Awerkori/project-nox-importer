@@ -909,10 +909,10 @@ export class ImporterLiteRuntime {
                 this.sitePausedUntil = 0;
                 this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 0 };
             }
-            const discoveryCap = next.enabled ? (next.discoveryConcurrency ?? 12) : 2;
-            const searchCap = next.enabled ? (next.searchConcurrency ?? 24) : 2;
-            const metadataCap = next.enabled ? (next.metadataGateCapacity ?? Math.max(discoveryCap + 4, 16)) : 2;
-            const persistenceCap = next.enabled ? (next.persistenceCapacity ?? 4) : 1;
+            const discoveryCap = next.enabled ? (next.discoveryConcurrency ?? 24) : 2;
+            const searchCap = next.enabled ? (next.searchConcurrency ?? 128) : 2;
+            const metadataCap = next.enabled ? (next.metadataGateCapacity ?? Math.max(discoveryCap + 8, 48)) : 2;
+            const persistenceCap = next.enabled ? (next.persistenceCapacity ?? 6) : 1;
             this.sourceMetadataLaneGate.setCapacity(next.enabled ? 6 : 2);
             this.sourceMetadataGate.setCapacity(searchCap);
             this.sourceMetadataPreparationGate.setCapacity(next.enabled ? 4 : 1);
@@ -933,10 +933,9 @@ export class ImporterLiteRuntime {
                     this.runCrossSourceMetadataDiscovery(),
                     this.runCrossSourceMetadataDiscovery(),
                     this.runCrossSourceMetadataDiscovery(),
-                    this.runSourceMetadataRefresh(),
-                    this.runSourceMetadataRefresh(),
+                    this.runCrossSourceMetadataDiscovery(),
+                    this.runCrossSourceMetadataDiscovery(),
                 ]);
-                void this.refillSourceMetadataEnrichment(false, 0, undefined);
                 void this.refillCrossSourceMetadataDiscovery();
             }
             else if (this.metadataReplayV4Exclusive.enabled) {
@@ -1660,12 +1659,8 @@ export class ImporterLiteRuntime {
                 if (this.metadataTurboMode.enabled) {
                     telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'DISCOVERY_TURBO');
                     this.setWorkerLiveness(workerId, 'FETCH');
-                    let didWork = await this.runCrossSourceMetadataDiscovery(workerId);
-                    if (!didWork) {
-                        telemetryCollector.setSlotState(slotIndex, 'ACTIVE_SOURCE', 'V5_TURBO');
-                        didWork = await this.runSourceMetadataRefresh(workerId);
-                    }
-                    await sleep(didWork ? 25 : 100);
+                    const didWork = await this.runCrossSourceMetadataDiscovery(workerId);
+                    await sleep(didWork ? 15 : 50);
                     continue;
                 }
                 if (this.shouldPauseChapterAdmission()) {
@@ -2374,7 +2369,7 @@ export class ImporterLiteRuntime {
                 workId: target.id, originSource: '', title: target.title, slug: target.slug, aliases: seedAliases,
                 author: target.author || undefined, artist: target.artist || undefined, synopsis: sanitizeSynopsis(target.synopsis) || undefined,
                 kind: target.kind || undefined, year: target.year ?? undefined, sourceIds: runnableSources,
-                concurrency: Math.min(this.metadataTurboMode.enabled ? 12 : 8, runnableSources.length),
+                concurrency: Math.min(this.metadataTurboMode.enabled ? 48 : 8, runnableSources.length),
                 allowFallbackDetailProbe: true,
                 knownMappings,
             });
