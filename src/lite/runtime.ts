@@ -39,6 +39,16 @@ const withTimeout = async <T>(operation: Promise<T>, timeoutMs: number, code: st
     if (timer) clearTimeout(timer);
   }
 };
+
+const QUERY_TOKEN_STOP_WORDS = new Set([
+  'the', 'and', 'for', 'you', 'with', 'from', 'que', 'com', 'para', 'uma', 'dos', 'das', 'manga', 'manhwa', 'manhua', 'comic', 'scan'
+]);
+
+function hasQueryTokenOverlap(candidateTitle: string, candidateSlug: string, query: string): boolean {
+  const normCand = `${candidateTitle} ${candidateSlug}`.toLowerCase();
+  const words = query.toLowerCase().split(/[\s:,\-_./+]+/).filter((w) => w.length >= 3 && !QUERY_TOKEN_STOP_WORDS.has(w));
+  return words.some((w) => normCand.includes(w));
+}
 const rankForSource = (source: string) => source === 'mangaflix' ? 10 : source === 'manhastro' ? 20 : 100;
 // Deliberately shared with the legacy runtime.  This fences a rolling
 // cutover: Lite must stand by while v1 owns the producer lease (and vice
@@ -945,6 +955,8 @@ export class ImporterLiteRuntime {
           this.runCrossSourceMetadataDiscovery(),
           this.runCrossSourceMetadataDiscovery(),
           this.runCrossSourceMetadataDiscovery(),
+          this.runCrossSourceMetadataDiscovery(),
+          this.runCrossSourceMetadataDiscovery(),
         ]);
         void this.refillCrossSourceMetadataDiscovery();
       } else if (this.metadataReplayV4Exclusive.enabled) {
@@ -1193,11 +1205,10 @@ export class ImporterLiteRuntime {
       // A coverage task advances one provider per durable checkpoint.  Wake
       // its successor promptly, but never spin when no due task exists.
       if (claimed && this.isRuntimeLeader) {
-        if (!this.metadataTurboMode.enabled) {
-          void this.refillCrossSourceMetadataDiscovery();
-          const timer = setTimeout(() => void this.runCrossSourceMetadataDiscovery(), 100);
-          timer.unref();
-        }
+        void this.refillCrossSourceMetadataDiscovery();
+        const delay = this.metadataTurboMode.enabled ? 25 : 100;
+        const timer = setTimeout(() => void this.runCrossSourceMetadataDiscovery(), delay);
+        timer.unref();
       }
     }
     return claimed;
@@ -1356,7 +1367,15 @@ export class ImporterLiteRuntime {
                   // decision.  A single fallback detail fetch lets an explicit
                   // original/English/Portuguese alias prove the match later;
                   // the strict detail gate below rejects every other result.
-                  if (input.allowFallbackDetailProbe && !fallback) fallback = summary;
+                  // Only probe fallback if candidate has positive confidence score, token overlap,
+                  // or is an alias-indexed catalog (e.g. mangadex, anilist, mangaupdates).
+                  if (input.allowFallbackDetailProbe && !fallback) {
+                    const isIndexedSource = source === 'mangadex' || source === 'mangaupdates' || source === 'anilist';
+                    const hasTokenOverlap = hasQueryTokenOverlap(summary.title, summary.slug, query);
+                    if (isIndexedSource || match.confidenceScore > 0 || hasTokenOverlap) {
+                      fallback = summary;
+                    }
+                  }
                 }
                 if (selected) break;
               }
