@@ -898,17 +898,23 @@ export class LiteRepository {
             return { enabled: true };
         try {
             const parsed = JSON.parse(value);
-            return { enabled: parsed?.enabled === true };
+            return {
+                enabled: parsed?.enabled === true,
+                discoveryConcurrency: typeof parsed?.discoveryConcurrency === 'number' ? parsed.discoveryConcurrency : undefined,
+                searchConcurrency: typeof parsed?.searchConcurrency === 'number' ? parsed.searchConcurrency : undefined,
+                metadataGateCapacity: typeof parsed?.metadataGateCapacity === 'number' ? parsed.metadataGateCapacity : undefined,
+                persistenceCapacity: typeof parsed?.persistenceCapacity === 'number' ? parsed.persistenceCapacity : undefined,
+            };
         }
         catch {
             return { enabled: false };
         }
     }
-    async setMetadataTurboExclusiveMode(enabled) {
+    async setMetadataTurboExclusiveMode(enabled, options) {
         await this.sourceMetadataDb.query(`INSERT INTO settings(key,value) VALUES($1,$2)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [
             METADATA_TURBO_EXCLUSIVE_MODE_KEY,
-            JSON.stringify({ enabled, updatedAt: new Date().toISOString() }),
+            JSON.stringify({ enabled, ...options, updatedAt: new Date().toISOString() }),
         ]);
     }
     async disableMetadataTurboExclusiveMode() {

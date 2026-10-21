@@ -147,8 +147,17 @@ export declare class LiteRepository {
     /** A persisted, reversible operator mode for the finite V5 metadata & alias campaign. */
     metadataTurboExclusiveMode(): Promise<{
         enabled: boolean;
+        discoveryConcurrency?: number;
+        searchConcurrency?: number;
+        metadataGateCapacity?: number;
+        persistenceCapacity?: number;
     }>;
-    setMetadataTurboExclusiveMode(enabled: boolean): Promise<void>;
+    setMetadataTurboExclusiveMode(enabled: boolean, options?: {
+        discoveryConcurrency?: number;
+        searchConcurrency?: number;
+        metadataGateCapacity?: number;
+        persistenceCapacity?: number;
+    }): Promise<void>;
     disableMetadataTurboExclusiveMode(): Promise<void>;
     /**
      * Materialise only chapters already positively confirmed by a durable source
