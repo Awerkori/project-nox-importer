@@ -196,6 +196,30 @@ export class MangaWorkAdapter implements SourceAdapter {
     else if (lowerGenres.includes('manhua')) kind = 'MANHUA';
     else if (lowerGenres.includes('webtoon')) kind = 'WEBTOON';
 
+    const alternativeTitles: string[] = [];
+
+    // Check HTML for alternative titles in common MangaWork classes
+    const altHtmlMatch = html.match(/(?:itemprop="alternateName"|class="[^"]*(?:alternative|alter-name|other-name)[^"]*")[^>]*>([\s\S]*?)<\/(?:div|span|p)>/i);
+    if (altHtmlMatch) {
+      const parsed = stripHtml(decodeHtmlEntities(altHtmlMatch[1])).split(/[\r\n;]+|\s+\/\s+/).map(s => s.trim()).filter(Boolean);
+      alternativeTitles.push(...parsed);
+    }
+
+    // Compound title in title itself
+    const parenMatch = title.match(/^(.*?)\s*[\(\[](.*?)[\)\]]$/);
+    if (parenMatch) {
+      const alt = parenMatch[2].trim();
+      if (alt.length >= 2 && !/^(official|colorido|doujinshi|raw|novel|oneshot)$/i.test(alt)) {
+        alternativeTitles.push(alt);
+      }
+    }
+    const parts = title.split(/\s*[-–—/|]\s*/);
+    if (parts.length === 2 && parts[0].length >= 3 && parts[1].length >= 3) {
+      if (!/^(capitulo|completo|volume|scan|novel|official)/i.test(parts[1])) {
+        alternativeTitles.push(parts[1]);
+      }
+    }
+
     return {
       sourceWorkId,
       title,
@@ -205,6 +229,7 @@ export class MangaWorkAdapter implements SourceAdapter {
       genres,
       kind,
       status: 'ONGOING',
+      alternativeTitles: alternativeTitles.length ? alternativeTitles : undefined,
     };
   }
 

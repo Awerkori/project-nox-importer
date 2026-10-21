@@ -213,6 +213,12 @@ export class HipercoolAdapter implements SourceAdapter {
     const artist = series.artist || undefined;
 
     const genres: string[] = (series.genres || []).map((g: any) => (typeof g === 'string' ? g : g.name)).filter(Boolean);
+    const rawAlt = series.alternativeTitles ?? series.alternative_titles ?? series.aliases;
+    const alternativeTitles: string[] = Array.isArray(rawAlt)
+      ? rawAlt.map((a: any) => typeof a === 'string' ? a.trim() : String(a?.title || a?.name || '').trim()).filter(Boolean)
+      : typeof rawAlt === 'string' && rawAlt.trim().length > 0
+        ? rawAlt.split(/[\r\n;]+|\s+\/\s+/).map((s: string) => s.trim()).filter(Boolean)
+        : [];
 
     let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
     const rawType = (series.type || '').toUpperCase();
@@ -236,6 +242,7 @@ export class HipercoolAdapter implements SourceAdapter {
       status,
       ageRating: 18,
       genres,
+      alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
       raw: series,
     };
   }

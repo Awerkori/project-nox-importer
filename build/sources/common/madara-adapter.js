@@ -250,20 +250,20 @@ export class MadaraAdapter {
         const genres = genreMatches.map((m) => stripHtml(m[1])).filter(Boolean);
         // Alternative Titles
         let alternativeTitles = [];
-        const altRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)[^<]*<\/(?:h[1-6]|div|span|strong|b|p)>[\s\S]*?<div[^>]*class="[^"]*summary-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
-        const fallbackAltRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)\s*:\s*([^<\n\r]+)/i;
+        const altRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|nomes?\s+associados?|associados?|alternativos?|t[ií]tulos?\s+originais?|t[ií]tulo\s+original|nome\s+original|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)[^<]*<\/(?:h[1-6]|div|span|strong|b|p)>[\s\S]*?<div[^>]*class="[^"]*summary-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
+        const fallbackAltRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|nomes?\s+associados?|associados?|alternativos?|t[ií]tulos?\s+originais?|t[ií]tulo\s+original|nome\s+original|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)\s*:\s*([^<\n\r]+)/i;
         const altMatch = html.match(altRegex) || html.match(fallbackAltRegex);
         if (altMatch) {
-            const rawAlt = stripHtml(altMatch[1]);
-            const normalizedRaw = rawAlt.replace(/<br\s*\/?>/gi, '\n');
-            const lines = normalizedRaw.includes('\n')
-                ? normalizedRaw.split(/[\r\n]+/)
-                : normalizedRaw.includes(';')
-                    ? normalizedRaw.split(/;+/)
-                    : normalizedRaw.includes(' / ')
-                        ? normalizedRaw.split(/\s+\/\s+/)
-                        : [normalizedRaw];
-            alternativeTitles = lines.map(s => decodeHtmlEntities(stripHtml(s).trim())).filter(s => s.length > 1);
+            const normalizedRaw = altMatch[1].replace(/<br\s*\/?>/gi, '\n');
+            const rawAlt = stripHtml(normalizedRaw);
+            const lines = rawAlt.includes('\n')
+                ? rawAlt.split(/[\r\n]+/)
+                : rawAlt.includes(';')
+                    ? rawAlt.split(/;+/)
+                    : rawAlt.includes(' / ')
+                        ? rawAlt.split(/\s+\/\s+/)
+                        : [rawAlt];
+            alternativeTitles = lines.map(s => decodeHtmlEntities(stripHtml(s).trim())).filter(s => s.length >= 1 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
         }
         return {
             sourceWorkId,

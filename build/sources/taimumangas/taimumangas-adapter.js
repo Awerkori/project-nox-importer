@@ -1,6 +1,6 @@
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
-import { slugify } from '../common/html-utils.js';
+import { slugify, decodeHtmlEntities } from '../common/html-utils.js';
 export class TaimuMangasAdapter {
     rateLimiter;
     transport;
@@ -105,17 +105,38 @@ export class TaimuMangasAdapter {
             status = 'HIATUS';
         else if (s === 'cancelled' || s === 'cancelado')
             status = 'CANCELLED';
+        const rawTitle = decodeHtmlEntities(data.title || '').trim();
+        let primaryTitle = rawTitle;
+        const alternativeTitles = [];
+        const parenMatch = rawTitle.match(/^(.*?)\s*[\(\[](.*?)[\)\]]$/);
+        if (parenMatch) {
+            const base = parenMatch[1].trim();
+            const alt = parenMatch[2].trim();
+            if (alt.length >= 2 && !/^(official|colorido|doujinshi|raw|novel|oneshot)$/i.test(alt)) {
+                alternativeTitles.push(alt);
+                if (base.length >= 2)
+                    primaryTitle = base;
+            }
+        }
+        const parts = rawTitle.split(/\s*[-–—/|]\s*/);
+        if (parts.length === 2 && parts[0].length >= 3 && parts[1].length >= 3) {
+            if (!/^(capitulo|completo|volume|scan|novel|official)/i.test(parts[1])) {
+                alternativeTitles.push(parts[1]);
+            }
+        }
         return {
             sourceWorkId: data.identifier,
-            slug: slugify(data.title),
-            title: data.title,
+            slug: slugify(primaryTitle),
+            title: primaryTitle,
             coverUrl: data.cover || null,
-            synopsis: data.synopsis || undefined,
+            synopsis: data.synopsis ? decodeHtmlEntities(data.synopsis) : undefined,
             author: data.authors?.map((a) => a.name).join(', ') || undefined,
             artist: data.artists?.map((a) => a.name).join(', ') || undefined,
             genres: data.genres?.map((g) => g.name).filter(Boolean),
             status,
             ageRating: data.adult ? 18 : 0,
+            alternativeTitles: alternativeTitles.length ? alternativeTitles : undefined,
+            raw: data,
         };
     }
     async fetchChapters(sourceWorkId) {

@@ -42,8 +42,8 @@ export function validateEditorialTitle(rawTitle) {
         return { valid: false, reason: 'Title is empty or not a string' };
     }
     const clean = decodeHtmlEntities(rawTitle).trim();
-    if (clean.length < 2) {
-        return { valid: false, reason: `Title is too short (${clean.length} chars)` };
+    if (clean.length < 1 || /^[\s\[\]\(\)\{\}\-_.,:;!?/'"\\|~+*#@$%^&=>`<´]+$/u.test(clean)) {
+        return { valid: false, reason: `Title is empty or punctuation-only (${clean.length} chars)` };
     }
     if (clean.length > 250) {
         return { valid: false, reason: `Title exceeds maximum length (${clean.length} chars)` };
@@ -257,7 +257,7 @@ export class DeduplicationEngine {
         if (existingMapping?.work_id && existingMapping.work_id !== workId) {
             const { data: existingWork } = await this.supabase
                 .from('works')
-                .select('id, published')
+                .select('id, title, aliases, published')
                 .eq('id', existingMapping.work_id)
                 .maybeSingle();
             const isOrphanStub = !existingWork || existingWork.published === false;
@@ -281,12 +281,53 @@ export class DeduplicationEngine {
                 }
             }
             else {
+                // Both works are published canonical works pointing to the same external work.
+                // Bidirectionally converge aliases between both works without destructive chapter movement.
+                const { data: targetWork } = await this.supabase
+                    .from('works')
+                    .select('id, title, aliases')
+                    .eq('id', workId)
+                    .maybeSingle();
+                const workATitle = existingWork?.title || candidate.title;
+                const workBTitle = targetWork?.title || candidate.title;
+                const workAAliases = Array.isArray(existingWork?.aliases) ? existingWork.aliases : [];
+                const workBAliases = Array.isArray(targetWork?.aliases) ? targetWork.aliases : [];
+                const candAliases = Array.isArray(candidate.aliases) ? candidate.aliases : [];
+                const allCandidatePool = [
+                    ...workAAliases,
+                    ...workBAliases,
+                    ...candAliases,
+                    workATitle,
+                    workBTitle,
+                    candidate.title,
+                ];
+                const mergedForA = mergeAlternativeTitles(workAAliases, allCandidatePool, workATitle);
+                const mergedForB = mergeAlternativeTitles(workBAliases, allCandidatePool, workBTitle);
+                let aliasesAddedToB = 0;
+                if (mergedForA.length > workAAliases.length) {
+                    await this.supabase.from('works').update({ aliases: mergedForA }).eq('id', existingMapping.work_id);
+                }
+                if (mergedForB.length > workBAliases.length) {
+                    aliasesAddedToB = mergedForB.length - workBAliases.length;
+                    await this.supabase.from('works').update({ aliases: mergedForB }).eq('id', workId);
+                }
+                this.logger.info('Bidirectionally merged aliases between published works owning cross-source mapping', {
+                    source,
+                    sourceWorkId: candidate.sourceWorkId,
+                    workA: existingMapping.work_id,
+                    workB: workId,
+                    aliasesAddedToB,
+                });
                 return {
-                    workId: null,
+                    workId: existingMapping.work_id,
                     mappingId: String(existingMapping.id || ''),
-                    status: 'AMBIGUOUS',
+                    status: 'EXISTING_MAPPING',
                     slug: this.sanitizeSlug(candidate.slug || candidate.title),
-                    reason: 'CROSS_SOURCE_MAPPING_OWNED_BY_ANOTHER_WORK',
+                    reason: 'CROSS_SOURCE_MAPPING_OWNED_BY_ANOTHER_WORK_ALIASED',
+                    metadataDelta: {
+                        aliasesAdded: aliasesAddedToB,
+                        tagsAdded: 0,
+                    },
                 };
             }
         }

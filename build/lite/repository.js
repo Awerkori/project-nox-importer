@@ -1796,6 +1796,10 @@ export class LiteRepository {
         AND NOT EXISTS (
           SELECT 1 FROM importer_work_mappings mapping
           WHERE mapping.work_id=$1::uuid AND mapping.source=s.id
+            AND (
+              (jsonb_typeof(mapping.metadata->'alternativeTitles') = 'array' AND jsonb_array_length(mapping.metadata->'alternativeTitles') > 0)
+              OR (jsonb_typeof(mapping.metadata->'titulo_alternative') = 'array' AND jsonb_array_length(mapping.metadata->'titulo_alternative') > 0)
+            )
         )
       ORDER BY s.id`, [workId, originSource]);
         return result.rows.map((row) => String(row.source));
@@ -1817,6 +1821,10 @@ export class LiteRepository {
         AND NOT EXISTS (
           SELECT 1 FROM importer_work_mappings mapping
           WHERE mapping.work_id=$1::uuid AND mapping.source=s.id
+            AND (
+              (jsonb_typeof(mapping.metadata->'alternativeTitles') = 'array' AND jsonb_array_length(mapping.metadata->'alternativeTitles') > 0)
+              OR (jsonb_typeof(mapping.metadata->'titulo_alternative') = 'array' AND jsonb_array_length(mapping.metadata->'titulo_alternative') > 0)
+            )
         )
       ORDER BY s.id`, [workId]);
         return result.rows.map((row) => String(row.source));

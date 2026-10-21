@@ -76,4 +76,62 @@ describe('work matching safety', () => {
       { ...base, title: 'Tower Hero' },
     ).autoMatch).toBe(false);
   });
+
+  it('preserves Japanese Kana dakuten, Kanji, Hangul, and Hanzi in normalizeTitle and matches across CJK aliases', () => {
+    expect(normalizeTitle('ブリーチ')).toBe('ブリーチ');
+    expect(normalizeTitle('나 혼자만 레벨업')).toBe('나 혼자만 레벨업');
+    expect(normalizeTitle('百炼成神')).toBe('百炼成神');
+
+    expect(matchWorkCandidate(
+      { title: 'Bleach', aliases: ['ブリーチ'] },
+      { title: 'BLEACH', aliases: ['ブリーチ', '死神'] },
+    ).matched).toBe(true);
+
+    expect(matchWorkCandidate(
+      { title: 'X' },
+      { title: 'X' },
+    ).matched).toBe(true);
+
+    expect(matchWorkCandidate(
+      { title: '86', aliases: ['86: Eighty-Six'] },
+      { title: '86: Eighty-Six' },
+    ).matched).toBe(true);
+  });
+
+  it('rejects false positive merges between parent works and distinct sequels, spin-offs, or editions', () => {
+    expect(matchWorkCandidate(
+      { title: 'Dragon Ball' },
+      { title: 'Dragon Ball Super' },
+    ).matched).toBe(false);
+
+    expect(matchWorkCandidate(
+      { title: 'Dragon Ball' },
+      { title: 'Dragon Ball Z' },
+    ).matched).toBe(false);
+
+    expect(matchWorkCandidate(
+      { title: 'Naruto' },
+      { title: 'Naruto Shippuden' },
+    ).matched).toBe(false);
+
+    expect(matchWorkCandidate(
+      { title: 'Naruto' },
+      { title: 'Boruto: Naruto Next Generations' },
+    ).matched).toBe(false);
+
+    expect(matchWorkCandidate(
+      { title: 'Boku no Hero Academia' },
+      { title: 'Boku no Hero Academia: Vigilantes' },
+    ).matched).toBe(false);
+
+    expect(matchWorkCandidate(
+      { title: 'Tokyo Ghoul' },
+      { title: 'Tokyo Ghoul:re' },
+    ).matched).toBe(false);
+
+    expect(matchWorkCandidate(
+      { title: 'The Breaker' },
+      { title: 'The Breaker: New Waves' },
+    ).matched).toBe(false);
+  });
 });

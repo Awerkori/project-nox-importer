@@ -20,10 +20,11 @@ interface ManhastroCatalogItem {
 
 function normalizeText(text: string): string {
   return text
-    .normalize('NFD')
+    .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
+    .normalize('NFC')
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
 }
 
@@ -261,8 +262,11 @@ export class ManhastroAdapter implements SourceAdapter {
   }
 
   async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+    if (!sourceWorkId || sourceWorkId === 'undefined' || sourceWorkId === 'null') {
+      throw new Error(`Invalid Manhastro sourceWorkId: ${sourceWorkId}`);
+    }
     if (this.ensureCatalogLoaded()) {
-      const cached = this.catalogById.get(sourceWorkId);
+      const cached = this.catalogById.get(String(sourceWorkId)) || this.catalogBySlug.get(String(sourceWorkId));
       if (cached) {
         const title = cached.tb?.trim() || cached.t.trim();
         const alternativeTitles = Array.from(new Set([
@@ -317,7 +321,7 @@ export class ManhastroAdapter implements SourceAdapter {
       }>;
     }>(url);
 
-    const item = response.data?.[0];
+    const item = (response.data || []).find((entry) => String(entry.manga_id) === String(sourceWorkId));
     if (!item) throw new Error(`Work not found on Manhastro: ${sourceWorkId}`);
 
     const title = item.titulo_brasil?.trim() || item.titulo.trim();

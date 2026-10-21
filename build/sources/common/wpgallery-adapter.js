@@ -5,7 +5,7 @@ const cleanMetadataValue = (value) => {
     if (typeof value !== 'string')
         return null;
     const cleaned = decodeHtmlEntities(stripHtml(value)).normalize('NFKC').replace(/\s+/g, ' ').trim();
-    return cleaned.length >= 2 && cleaned.length <= 250 ? cleaned : null;
+    return cleaned.length >= 1 && cleaned.length <= 250 ? cleaned : null;
 };
 const metadataValues = (value) => {
     const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[\n;|]+/) : [];

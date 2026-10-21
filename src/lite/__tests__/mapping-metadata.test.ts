@@ -154,4 +154,26 @@ describe('stored mapping metadata enrichment', () => {
     expect(extracted.aliases).not.toContain('10803');
     expect(extracted.aliases).not.toContain('Drama');
   });
+
+  it('extracts GreenShit obr_outros_nomes, short/numeric/CJK comma-separated aliases, and single-letter discovery queries', () => {
+    const raw = {
+      obr_outros_nomes: 'Bleach, 死神, ブリーチ',
+      alt: ['86', '86: Eighty-Six', '7 Seeds', 'X'],
+      obr_titulo_alternativo: 'Boku no Hero Academia (My Hero Academia)',
+    };
+    const extracted = extractStoredMappingMetadata(raw, 'Primary Work');
+    expect(extracted.aliases).toEqual([
+      '86',
+      '86: Eighty-Six',
+      '7 Seeds',
+      'X',
+      'Bleach',
+      '死神',
+      'ブリーチ',
+      'Boku no Hero Academia (My Hero Academia)',
+    ]);
+
+    expect(buildDiscoveryQueryCandidates('X', ['CLAMP X'])).toEqual(['X', 'CLAMP X']);
+    expect(buildDiscoveryQueryCandidates('86', ['86: Eighty-Six'])).toEqual(['86', '86: Eighty-Six']);
+  });
 });

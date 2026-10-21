@@ -173,7 +173,7 @@ export class NexusAdapter implements SourceAdapter {
     const alternativeTitles: string[] = [];
     if (row.alternative_title && typeof row.alternative_title === 'string') {
       const trimmed = row.alternative_title.trim();
-      if (trimmed.length > 1) {
+      if (trimmed.length >= 1) {
         if (/[\r\n]+/.test(trimmed)) {
           alternativeTitles.push(...trimmed.split(/[\r\n]+/).map((s: string) => s.trim()).filter(Boolean));
         } else if (/;+/.test(trimmed)) {

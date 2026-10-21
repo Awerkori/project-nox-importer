@@ -21,8 +21,9 @@ function explicitAlternativeTitles(value: unknown, primaryTitle: string): string
   const values = Array.isArray(value) ? value : [value];
   const aliases = values
     .filter((entry): entry is string => typeof entry === 'string')
+    .flatMap((entry) => entry.split(/[\r\n;]+|\s+\/\s+/))
     .map((entry) => entry.normalize('NFKC').replace(/\s+/g, ' ').trim())
-    .filter((entry) => entry.length >= 2 && entry !== primaryTitle);
+    .filter((entry) => entry.length >= 1 && entry !== primaryTitle);
   return [...new Map(aliases.map((entry) => [entry.toLocaleLowerCase(), entry])).values()];
 }
 
@@ -200,7 +201,7 @@ export class MangoToonsAdapter implements SourceAdapter {
 
     const genres: string[] = (w.tags || []).map((t: any) => typeof t === 'string' ? t : t.nome || t.name).filter(Boolean);
     const alternativeTitles = explicitAlternativeTitles(
-      w.titulo_alternativo ?? w.titulo_alternative ?? w.alternative_titles ?? w.alternativeTitles,
+      w.titulo_alternativo ?? w.titulos_alternativos ?? w.titulo_alternative ?? w.nome_alternativo ?? w.outros_nomes ?? w.obr_outros_nomes ?? w.alternative_titles ?? w.alternativeTitles,
       title,
     );
 

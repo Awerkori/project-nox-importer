@@ -204,7 +204,7 @@ export class ZeistMangaAdapter {
                         : normalizedRaw.includes(' / ')
                             ? rawAlt.split(/\s+\/\s+/)
                             : rawAlt.split(/[,;\/\n\r]+/);
-                alternativeTitles = lines.map(s => decodeHtmlEntities(s.trim())).filter(s => s.length > 1);
+                alternativeTitles = lines.map(s => decodeHtmlEntities(s.trim())).filter(s => s.length >= 1 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
             }
             return {
                 sourceWorkId,

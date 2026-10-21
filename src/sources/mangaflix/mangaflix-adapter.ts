@@ -1,6 +1,7 @@
 import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
+import { decodeHtmlEntities } from '../common/html-utils.js';
 
 function slugify(text: string): string {
   return text
@@ -203,7 +204,6 @@ export class MangaFlixAdapter implements SourceAdapter {
   }
 
   private toWorkDetails(data: MangaFlixWorkPayload): SourceWorkDetails {
-
     let kind: SourceWorkDetails['kind'] = 'UNKNOWN';
     const ct = (data.content_type || '').toLowerCase();
     if (ct.includes('manhwa')) kind = 'MANHWA';
@@ -212,17 +212,41 @@ export class MangaFlixAdapter implements SourceAdapter {
 
     const author = data.chapters?.[0]?.owners?.[0]?.name;
 
+    const rawTitle = decodeHtmlEntities(data.name || '').trim();
+    let primaryTitle = rawTitle;
+    const alternativeTitles: string[] = [];
+
+    // Extract alternative titles from parenthetical notation, e.g. "Beck (BECK: Mongolian Chop Squad)"
+    const parenMatch = rawTitle.match(/^(.*?)\s*[\(\[](.*?)[\)\]]$/);
+    if (parenMatch) {
+      const base = parenMatch[1].trim();
+      const alt = parenMatch[2].trim();
+      if (alt.length >= 2 && !/^(official|colorido|doujinshi|raw|novel|oneshot|edição colorida)$/i.test(alt)) {
+        alternativeTitles.push(alt);
+        if (base.length >= 2) primaryTitle = base;
+      }
+    }
+
+    // Extract alternative titles from separator notation, e.g. "Title - Alt Title"
+    const parts = rawTitle.split(/\s*[-–—/|]\s*/);
+    if (parts.length === 2 && parts[0].length >= 3 && parts[1].length >= 3) {
+      if (!/^(capitulo|completo|volume|scan|novel|official)/i.test(parts[1])) {
+        alternativeTitles.push(parts[1]);
+      }
+    }
+
     return {
       sourceWorkId: data._id,
-      title: data.name,
-      slug: slugify(data.name),
+      title: primaryTitle,
+      slug: slugify(primaryTitle),
       coverUrl: data.poster?.default_url || null,
-      synopsis: data.description || '',
+      synopsis: data.description ? decodeHtmlEntities(data.description) : '',
       author,
       kind,
       status: 'ONGOING',
       language: 'pt-BR',
       genres: data.genres?.map((g) => g.name) || [],
+      alternativeTitles: alternativeTitles.length ? alternativeTitles : undefined,
       raw: data,
     };
   }

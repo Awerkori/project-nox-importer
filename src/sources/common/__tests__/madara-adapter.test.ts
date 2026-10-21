@@ -24,4 +24,21 @@ describe('MadaraAdapter chapter ownership', () => {
     expect(adapter.isChapterOwnedByWork('solo-leveling',
       'https://source.example/manga/one-piece/capitulo-1/')).toBe(false);
   });
+
+  it('extracts alternative titles from standard PT-BR Madara Alternativo / Associados labels and preserves short/CJK aliases', async () => {
+    const html = `
+      <div class="post-title"><h1>Bleach</h1></div>
+      <div class="post-content_item">
+        <div class="summary-heading"><h5>Alternativo</h5></div>
+        <div class="summary-content">ブリーチ; 死神; X; 86</div>
+      </div>
+    `;
+    const adapter = new MadaraAdapter(
+      { id: 'madara-test', name: 'Madara Test', baseUrl: 'https://source.example' },
+      undefined,
+      (async () => new Response(html, { status: 200, headers: { 'content-type': 'text/html' } })) as any,
+    );
+    const details = await adapter.fetchWorkDetails('bleach');
+    expect(details.alternativeTitles).toEqual(['ブリーチ', '死神', 'X', '86']);
+  });
 });

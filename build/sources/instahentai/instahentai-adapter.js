@@ -118,6 +118,22 @@ export class InstaHentaiAdapter {
             if (g && !genres.includes(g))
                 genres.push(g);
         }
+        let alternativeTitles = [];
+        const altRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|nomes?\s+associados?|associados?|alternativos?|t[ií]tulos?\s+originais?|t[ií]tulo\s+original|nome\s+original|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)[^<]*<\/(?:h[1-6]|div|span|strong|b|p)>[\s\S]*?<div[^>]*class="[^"]*summary-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
+        const fallbackAltRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|nomes?\s+associados?|associados?|alternativos?|t[ií]tulos?\s+originais?|t[ií]tulo\s+original|nome\s+original|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)\s*:\s*([^<\n\r]+)/i;
+        const altMatch = html.match(altRegex) || html.match(fallbackAltRegex) || html.match(/class="(?:alter|alternative)"[^>]*>([\s\S]*?)<\/(?:span|div)>/i);
+        if (altMatch) {
+            const normalizedRaw = altMatch[1].replace(/<br\s*\/?>/gi, '\n');
+            const rawAlt = stripHtml(normalizedRaw);
+            const lines = rawAlt.includes('\n')
+                ? rawAlt.split(/[\r\n]+/)
+                : rawAlt.includes(';')
+                    ? rawAlt.split(/;+/)
+                    : rawAlt.includes(' / ')
+                        ? rawAlt.split(/\s+\/\s+/)
+                        : [rawAlt];
+            alternativeTitles = lines.map((s) => decodeHtmlEntities(stripHtml(s).trim())).filter((s) => s.length >= 1 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
+        }
         return {
             sourceWorkId: slug,
             title,
@@ -130,7 +146,8 @@ export class InstaHentaiAdapter {
             status: 'ONGOING',
             ageRating: 18,
             genres,
-            raw: { sourceWorkId: slug },
+            alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
+            raw: { sourceWorkId: slug, ...(alternativeTitles.length > 0 ? { alternativeTitles } : {}) },
         };
     }
     async fetchChapters(sourceWorkId) {

@@ -1275,6 +1275,8 @@ export class ImporterLiteRuntime {
      * its existing no-extra-probe behaviour.
      */
     allowFallbackDetailProbe?: boolean;
+    /** Known confirmed mappings for this work so mapped sources can be fetched directly by ID. */
+    knownMappings?: Map<string, { sourceWorkId: string; sourceTitle?: string; sourceSlug?: string }>;
   }): Promise<CrossSourceMetadataResult> {
     const result: CrossSourceMetadataResult = { busy: false, attemptedSources: [], deferredSources: [], attached: [] };
     if (!this.crossSourceMetadataGate.tryAcquire()) return { ...result, busy: true };
@@ -1297,38 +1299,49 @@ export class ImporterLiteRuntime {
             continue;
           }
           try {
-            const queryCandidates = buildDiscoveryQueryCandidates(target.title, target.aliases);
-            let selected: { sourceWorkId: string; title: string; slug: string } | null = null;
-            let summaryMatch: ReturnType<typeof matchWorkCandidate> | null = null;
-            let fallback: { sourceWorkId: string; title: string; slug: string } | null = null;
-            const seenSummaryIds = new Set<string>();
             let host = source;
             try { host = new URL(adapter.baseUrl).host || source; } catch { /* test doubles and invalid adapters are isolated by source id */ }
-            for (const query of queryCandidates) {
-              await this.sourceRateLimiter.acquire(host, undefined, 60_000);
-              const summaries = await this.sourceMetadataGate.runExclusive(async () => {
-                return withTimeout(adapter.searchWorks(query), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_SEARCH_TIMEOUT');
-              });
-              for (const summary of summaries) {
-                const summaryId = String(summary.sourceWorkId || '').trim();
-                if (!summaryId || summaryId === 'feed' || summary.slug === 'feed' || seenSummaryIds.has(summaryId)) continue;
-                seenSummaryIds.add(summaryId);
-                const match = matchWorkCandidate(target, { title: summary.title, slug: summary.slug });
-                if (match.matched && match.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE) {
-                  selected = summary;
-                  summaryMatch = match;
-                  break;
+            const knownMapping = input.knownMappings?.get(source);
+            let selected: { sourceWorkId: string; title: string; slug: string } | null = knownMapping
+              ? {
+                  sourceWorkId: knownMapping.sourceWorkId,
+                  title: knownMapping.sourceTitle || target.title,
+                  slug: knownMapping.sourceSlug || target.slug || '',
                 }
-                // Search ranking is only a discovery hint, never an identity
-                // decision.  A single fallback detail fetch lets an explicit
-                // original/English/Portuguese alias prove the match later;
-                // the strict detail gate below rejects every other result.
-                if (input.allowFallbackDetailProbe && !fallback) fallback = summary;
+              : null;
+            let summaryMatch: ReturnType<typeof matchWorkCandidate> | null = null;
+            const isKnownWorkMapping = Boolean(knownMapping);
+
+            if (!selected) {
+              const queryCandidates = buildDiscoveryQueryCandidates(target.title, target.aliases);
+              let fallback: { sourceWorkId: string; title: string; slug: string } | null = null;
+              const seenSummaryIds = new Set<string>();
+              for (const query of queryCandidates) {
+                await this.sourceRateLimiter.acquire(host, undefined, 60_000);
+                const summaries = await this.sourceMetadataGate.runExclusive(async () => {
+                  return withTimeout(adapter.searchWorks(query), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_SEARCH_TIMEOUT');
+                });
+                for (const summary of summaries) {
+                  const summaryId = String(summary.sourceWorkId || '').trim();
+                  if (!summaryId || summaryId === 'feed' || summary.slug === 'feed' || seenSummaryIds.has(summaryId)) continue;
+                  seenSummaryIds.add(summaryId);
+                  const match = matchWorkCandidate(target, { title: summary.title, slug: summary.slug });
+                  if (match.matched && match.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE) {
+                    selected = summary;
+                    summaryMatch = match;
+                    break;
+                  }
+                  // Search ranking is only a discovery hint, never an identity
+                  // decision.  A single fallback detail fetch lets an explicit
+                  // original/English/Portuguese alias prove the match later;
+                  // the strict detail gate below rejects every other result.
+                  if (input.allowFallbackDetailProbe && !fallback) fallback = summary;
+                }
+                if (selected) break;
               }
-              if (selected) break;
+              selected ||= fallback;
             }
             result.attemptedSources.push(source);
-            selected ||= fallback;
             if (!selected) continue;
 
             await this.sourceRateLimiter.acquire(host, undefined, 60_000);
@@ -1354,13 +1367,25 @@ export class ImporterLiteRuntime {
               kind: details.kind, year: details.year,
             });
             const targetTitle = normalizeTitle(target.title);
-            const explicitCrossAlias = extracted.aliases.some((alias) => normalizeTitle(alias) === targetTitle)
-              || (target.aliases || []).some((alias) => normalizeTitle(alias) === normalizeTitle(details.title));
-            const titleIsSpecific = targetTitle.length >= 12 && targetTitle.split(/\s+/).filter(Boolean).length >= 2;
-            const independentlyCorroborated = detailEvidence.autoMatch || explicitCrossAlias
-              || (titleIsSpecific && summaryMatch && ['EXACT_TITLE', 'EXACT_SLUG'].includes(summaryMatch.matchMethod)
-                && ['EXACT_TITLE', 'EXACT_SLUG'].includes(detailMatch.matchMethod));
-            if (!detailMatch.matched || detailMatch.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE
+            const detailTitle = normalizeTitle(details.title);
+            const isGenericWord = /^(manga|manhwa|manhua|webtoon|comic|novel|feed|scan)$/i.test(targetTitle);
+            const explicitCrossAlias = Boolean(targetTitle && extracted.aliases.some((alias) => {
+              const normAlias = normalizeTitle(alias);
+              return Boolean(normAlias && normAlias === targetTitle);
+            })) || Boolean(detailTitle && (target.aliases || []).some((alias) => {
+              const normAlias = normalizeTitle(alias);
+              return Boolean(normAlias && normAlias === detailTitle);
+            })) || extracted.aliases.some((alias) => (target.aliases || []).some((ta) => {
+              const na = normalizeTitle(alias);
+              const nta = normalizeTitle(ta);
+              return Boolean(na && nta && na === nta && !/^(manga|manhwa|manhua|webtoon|comic|novel|feed|scan)$/i.test(na));
+            }));
+            const titleIsSpecific = (targetTitle.length >= 1 && !isGenericWord);
+            const exactBoth = (summaryMatch ? ['EXACT_TITLE', 'EXACT_SLUG'].includes(summaryMatch.matchMethod) : true)
+              && ['EXACT_TITLE', 'EXACT_SLUG'].includes(detailMatch.matchMethod);
+            const independentlyCorroborated = isKnownWorkMapping || detailEvidence.autoMatch || explicitCrossAlias
+              || (titleIsSpecific && exactBoth);
+            if ((!isKnownWorkMapping && (!detailMatch.matched || detailMatch.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE))
               || !independentlyCorroborated) {
               this.logger.info('Rejected complementary metadata candidate after detail verification', {
                 workId: input.workId, source, sourceWorkId: selected.sourceWorkId,
@@ -1382,15 +1407,16 @@ export class ImporterLiteRuntime {
                 contentRating: rawContentRating === 'ADULT_18' || Number(details.ageRating || 0) >= 18 ? 'ADULT_18' : undefined,
                 rawMetadata: sourceMetadata,
               }, input.workId, source);
-              if (attached.workId !== input.workId) return;
+              if (attached.workId !== input.workId && attached.reason !== 'CROSS_SOURCE_MAPPING_OWNED_BY_ANOTHER_WORK_ALIASED') return;
               target.aliases ||= [];
               const freshAliases = providerAliases.filter((a) => !target.aliases!.includes(a));
               if (freshAliases.length) target.aliases.push(...freshAliases);
               const aliasesAdded = Math.max(0, Number(attached.metadataDelta?.aliasesAdded || 0));
               const tagsAdded = Math.max(0, Number(attached.metadataDelta?.tagsAdded || 0));
               await this.queue.recordSourceMetadataEnrichment({
-                source, sourceWorkId: details.sourceWorkId, workId: input.workId,
-                aliasesState: extracted.aliasesState, tagsState: extracted.tagsState,
+                source, sourceWorkId: details.sourceWorkId, workId: attached.workId || input.workId,
+                aliasesState: (extracted.aliasesState === 'NO_ALIASES' && aliasesAdded > 0) ? 'ENRICHED' : extracted.aliasesState,
+                tagsState: extracted.tagsState,
                 aliasesAdded, tagsAdded,
                 error: extracted.parserError ? 'EXPLICIT_SOURCE_METADATA_NOT_PARSED' : null,
                 rawMetadata: sourceMetadata, version: 5,
@@ -2329,12 +2355,45 @@ export class ImporterLiteRuntime {
     let outcome: CrossSourceMetadataResult = { busy: false, attemptedSources: [],
       deferredSources: policies.filter(([, policy]) => !policy?.runnable).map(([source]) => source), attached: [] };
     if (runnableSources.length) {
+      const knownMappings = new Map<string, { sourceWorkId: string; sourceTitle?: string; sourceSlug?: string }>();
+      let seedAliases = Array.isArray(target.aliases) ? [...target.aliases] : [];
+      try {
+        const existingMappings = await this.pool.query<{
+          source: string; source_work_id: string; source_title: string | null; source_slug: string | null; metadata: unknown;
+        }>(`SELECT source,source_work_id,source_title,source_slug,metadata
+            FROM importer_work_mappings WHERE work_id=$1::uuid`, [target.id]);
+        const harvestedFromMappings: string[] = [];
+        for (const m of existingMappings.rows || []) {
+          if (m.source && m.source_work_id) {
+            knownMappings.set(String(m.source), {
+              sourceWorkId: String(m.source_work_id),
+              sourceTitle: m.source_title || undefined,
+              sourceSlug: m.source_slug || undefined,
+            });
+          }
+          const stored = extractStoredMappingMetadata(m.metadata, target.title);
+          harvestedFromMappings.push(...stored.aliases);
+          if (isProviderDisplayTitleAlias(m.source_title, m.source_slug, target.title)) {
+            harvestedFromMappings.push(String(m.source_title));
+          }
+        }
+        if (harvestedFromMappings.length > 0) {
+          const mergedSeed = mergeAlternativeTitles(seedAliases, harvestedFromMappings, target.title);
+          if (mergedSeed.length > seedAliases.length) {
+            await this.pool.query(`UPDATE works SET aliases=$2::text[],updated_at=now() WHERE id=$1::uuid`, [target.id, mergedSeed]);
+            seedAliases = mergedSeed;
+          }
+        }
+      } catch {
+        // Test doubles without importer_work_mappings query support fall back cleanly
+      }
       outcome = await this.enrichNewWorkFromComplementarySources({
-        workId: target.id, originSource: '', title: target.title, slug: target.slug, aliases: target.aliases || [],
+        workId: target.id, originSource: '', title: target.title, slug: target.slug, aliases: seedAliases,
         author: target.author || undefined, artist: target.artist || undefined, synopsis: sanitizeSynopsis(target.synopsis) || undefined,
         kind: target.kind || undefined, year: target.year ?? undefined, sourceIds: runnableSources,
         concurrency: Math.min(this.metadataTurboMode.enabled ? 12 : 8, runnableSources.length),
         allowFallbackDetailProbe: true,
+        knownMappings,
       });
       outcome.deferredSources.push(...policies.filter(([, policy]) => !policy?.runnable).map(([source]) => source));
     }
