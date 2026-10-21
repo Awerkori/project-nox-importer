@@ -1,6 +1,7 @@
 import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
+import { cleanAlternativeTitle } from '../../core/alternative-titles.js';
 import { slugify, decodeHtmlEntities, stripHtml, extractChapterNumber } from './html-utils.js';
 
 function htmlAttribute(tag: string, name: string): string | undefined {
@@ -240,8 +241,11 @@ export class ZeistMangaAdapter implements SourceAdapter {
 
       // Alternative Titles
       let alternativeTitles: string[] = [];
-      const altMatch = html.match(/(?:alter(?:native)?|outros?\s+nomes?|sin[oô]nimos?|t[ií]tulos?\s*alternativos?)[^<:]*[:<\/][^>]*>([\s\S]*?)<\/(?:span|div|p|dd|li)>/i)
-        || html.match(/class=["'][^"']*(?:alter|alternative)[^"']*["'][^>]*>([\s\S]*?)<\//i);
+      const cleanHtml = html
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ');
+      const altMatch = cleanHtml.match(/(?:alter(?:native)?|outros?\s+nomes?|sin[oô]nimos?|t[ií]tulos?\s*alternativos?)[^<:]*[:<\/][^>]*>([\s\S]*?)<\/(?:span|div|p|dd|li)>/i)
+        || cleanHtml.match(/class=["'][^"']*(?:alter|alternative)[^"']*["'][^>]*>([\s\S]*?)<\//i);
       if (altMatch) {
         const rawAlt = stripHtml(altMatch[1]);
         const normalizedRaw = rawAlt.replace(/<br\s*\/?>/gi, '\n');
@@ -252,7 +256,9 @@ export class ZeistMangaAdapter implements SourceAdapter {
             : normalizedRaw.includes(' / ')
               ? rawAlt.split(/\s+\/\s+/)
               : rawAlt.split(/[,;\/\n\r]+/);
-        alternativeTitles = lines.map(s => decodeHtmlEntities(s.trim())).filter(s => s.length >= 1 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
+        alternativeTitles = lines
+          .map((s) => cleanAlternativeTitle(s))
+          .filter((s): s is string => typeof s === 'string' && s.length > 0 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
       }
 
       return {

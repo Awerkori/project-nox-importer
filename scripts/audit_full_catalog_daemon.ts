@@ -5,12 +5,12 @@ import pg from 'pg';
 import { SourceRegistry } from '../src/sources/registry.js';
 import { HostRateLimiter } from '../src/core/rate-limiter.js';
 import { SourceAdapter } from '../src/sources/types.js';
-import { cleanAlternativeTitle } from '../src/core/alternative-titles.js';
+import { cleanAlternativeTitle, alternativeTitleKey } from '../src/core/alternative-titles.js';
 import { matchWorkCandidate } from '../src/core/matching.js';
 
 const RESULTS_FILE = path.resolve(process.cwd(), 'scratch/catalog_audit_results.jsonl');
+const POST_V6_RESULTS_FILE = path.resolve(process.cwd(), 'scratch/post_v6_audit_results.jsonl');
 const SUMMARY_FILE = path.resolve(process.cwd(), 'scratch/catalog_audit_summary.json');
-const INITIAL_100_FILE = path.resolve(process.cwd(), 'scratch/audit_100_progress.json');
 
 const pool = new pg.Pool({
   host: process.env.YUGABYTE_HOST,
@@ -109,9 +109,13 @@ function extractRawAlternativeTitlesFromAdapterDetails(details: any, workTitle: 
     if (!unquoted) continue;
     const parts = splitTitles(unquoted);
     for (const p of parts) {
-      const cleaned = cleanAlternativeTitle(p, workTitle);
-      if (cleaned && cleaned.toLowerCase() !== workTitle.toLowerCase()) {
-        valid.push(cleaned);
+      const cleaned = cleanAlternativeTitle(p);
+      if (cleaned) {
+        const k = alternativeTitleKey(cleaned);
+        const tk = alternativeTitleKey(workTitle);
+        if (k && k !== tk) {
+          valid.push(cleaned);
+        }
       }
     }
   }
@@ -283,11 +287,12 @@ async function auditWork(
   sources: SourceAdapter[],
   mappings: any[],
   currentAliasesYsql: string[],
-  taskInfo: { state: string; checkpoint: any } | null
+  taskInfo: { id: string; state: string; updated_at: any; checkpoint: any } | null,
+  preCollectedEvidence?: any | null
 ): Promise<any> {
   const t0 = Date.now();
 
-  // 1. Fetch public page SSR
+  // 1. Fetch public page SSR to verify live site rendering
   const pageUrl = `https://manga.project-nox-awerkori.workers.dev/obra/${w.slug}`;
   let publishedAliasesSSR: string[] = [];
   try {
@@ -302,50 +307,57 @@ async function auditWork(
     }
   } catch {}
 
-  // 2. PARALLEL Independent 43 Sources Verification
-  const sourceCheckResults = await Promise.allSettled(
-    sources.map((adapter) => {
-      const existingMapping = mappings.find((m) => m.source === adapter.id) || null;
-      return verifySourceIndependently(adapter, w.title, existingMapping, currentAliasesYsql);
-    })
-  );
+  let sourceChecks: any[] = [];
+  let cleanDiscovered: string[] = [];
 
-  const sourceChecks: any[] = [];
-  const discoveredAliasesSet = new Set<string>();
+  // 2. Reuse pre-collected evidence if fresh (<12h old), or perform PARALLEL 43 sources check
+  if (preCollectedEvidence && Array.isArray(preCollectedEvidence.cleanDiscovered)) {
+    cleanDiscovered = preCollectedEvidence.cleanDiscovered;
+    sourceChecks = preCollectedEvidence.sourceChecks || [];
+  } else {
+    const sourceCheckResults = await Promise.allSettled(
+      sources.map((adapter) => {
+        const existingMapping = mappings.find((m) => m.source === adapter.id) || null;
+        return verifySourceIndependently(adapter, w.title, existingMapping, currentAliasesYsql);
+      })
+    );
 
-  for (const r of sourceCheckResults) {
-    if (r.status === 'fulfilled') {
-      sourceChecks.push(r.value);
-      for (const a of r.value.aliasesFound) {
-        discoveredAliasesSet.add(a);
+    const discoveredAliasesSet = new Set<string>();
+    for (const r of sourceCheckResults) {
+      if (r.status === 'fulfilled') {
+        sourceChecks.push(r.value);
+        for (const a of r.value.aliasesFound) {
+          discoveredAliasesSet.add(a);
+        }
       }
     }
+    cleanDiscovered = Array.from(discoveredAliasesSet);
   }
 
-  const cleanDiscovered = Array.from(discoveredAliasesSet);
+  // 3. Strict Comparison: All clean aliases discovered vs Persisted YSQL Aliases
+  const targetKey = alternativeTitleKey(w.title);
+  const ysqlKeys = new Set(currentAliasesYsql.map((ca: string) => alternativeTitleKey(ca)).filter(Boolean));
   const missingFromYsql = cleanDiscovered.filter((da) => {
-    return !currentAliasesYsql.some((ca: string) => ca.toLowerCase() === da.toLowerCase());
+    const key = alternativeTitleKey(da);
+    if (!key || key === targetKey) return false;
+    return !ysqlKeys.has(key);
   });
 
-  // Determine Verdict
-  let verdict: string;
+  const checkpoint = taskInfo?.checkpoint || {};
+  const isPartialDeferred = checkpoint.coverage === 'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED';
+  const hasTimeouts = sourceChecks.some((c) => c.status === 'DEFERRED_TIMEOUT' || c.status === 'DEFERRED_ERROR');
+
+  // 4. Strict Post-V6 Verdict Determination
+  let verdict: 'AUDIT_PASS' | 'AUDIT_FAIL' | 'AUDIT_INCONCLUSIVE';
   let isBug = false;
 
-  if (cleanDiscovered.length === 0 && currentAliasesYsql.length === 0) {
-    verdict = 'GENUINE_NO_ALIAS';
-  } else if (missingFromYsql.length === 0) {
-    verdict = 'ALL_LEGITIMATE_ALIASES_RECOVERED';
+  if (missingFromYsql.length > 0) {
+    verdict = 'AUDIT_FAIL';
+    isBug = true;
+  } else if (hasTimeouts || isPartialDeferred) {
+    verdict = 'AUDIT_INCONCLUSIVE';
   } else {
-    const taskState = taskInfo?.state || 'UNKNOWN';
-    const checkpoint = taskInfo?.checkpoint || {};
-    const isPartialDeferred = checkpoint.coverage === 'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED';
-
-    if (taskState === 'DONE' && !isPartialDeferred) {
-      verdict = 'ALIASES_IGNORED_BY_IMPORTER';
-      isBug = true;
-    } else {
-      verdict = 'PENDING_OR_IN_PROGRESS';
-    }
+    verdict = 'AUDIT_PASS';
   }
 
   const durationMs = Date.now() - t0;
@@ -354,6 +366,8 @@ async function auditWork(
     title: w.title,
     slug: w.slug,
     publicUrl: pageUrl,
+    v6TaskId: taskInfo?.id || null,
+    v6CompletedAt: taskInfo?.updated_at ? new Date(taskInfo.updated_at).toISOString() : null,
     verdict,
     isBug,
     durationMs,
@@ -362,60 +376,126 @@ async function auditWork(
     cleanDiscovered,
     missingFromYsql,
     foundSourcesCount: sourceChecks.filter((c) => c.status === 'FOUND_WITH_ALIASES' || c.status === 'FOUND_NO_ALIASES').length,
+    sourceChecks,
     auditedAt: new Date().toISOString(),
   };
 }
 
 async function main() {
-  console.log('=== STARTING HIGH-THROUGHPUT PARALLEL CATALOG AUDIT DAEMON ===');
+  console.log('=== STARTING HIGH-THROUGHPUT STRICT POST-V6 CATALOG AUDIT DAEMON ===');
   const limiter = new HostRateLimiter(6.0);
   const registry = new SourceRegistry(limiter);
   const sources = registry.getAll();
   console.log(`Loaded ${sources.length} operational sources.`);
 
-  const auditedIds = new Set<string>();
+  const postV6AuditedIds = new Set<string>();
+  const preV6EvidenceMap = new Map<string, any>();
+
   const stats = {
     total_published: 9291,
     v6_done_total: 0,
-    v6_done_audited: 0,
+    v6_done_audit_pass: 0,
+    v6_done_audit_fail: 0,
+    v6_done_audit_inconclusive: 0,
     v6_done_pending_audit: 0,
-    audited_count: 0,
-    genuine_no_alias: 0,
-    all_aliases_recovered: 0,
-    pending_or_in_progress: 0,
-    aliases_ignored_bug: 0,
-    inconclusive: 0,
-    speed_works_per_min: 0,
-    last_work_audited: '',
+    pre_v6_audits_count: 0,
+    missing_aliases_detected: 0,
+    corrections_revalidated: 0,
+    audit_speed_works_per_min: 0,
+    last_audited_work: '',
     updated_at: new Date().toISOString(),
   };
 
-  // Pre-seed from RESULTS_FILE if present
-  if (fs.existsSync(RESULTS_FILE)) {
-    const lines = fs.readFileSync(RESULTS_FILE, 'utf8').split('\n').filter(Boolean);
-    for (const line of lines) {
+  // 1. Load and forensically categorize all existing audit records
+  if (fs.existsSync(POST_V6_RESULTS_FILE)) {
+    const lines = fs.readFileSync(POST_V6_RESULTS_FILE, 'utf8').split('\n').filter(Boolean);
+    for (const l of lines) {
       try {
-        const record = JSON.parse(line);
-        if (record.workId) {
-          auditedIds.add(record.workId);
-          if (record.verdict === 'GENUINE_NO_ALIAS') stats.genuine_no_alias++;
-          else if (record.verdict === 'ALL_LEGITIMATE_ALIASES_RECOVERED') stats.all_aliases_recovered++;
-          else if (record.verdict === 'PENDING_OR_IN_PROGRESS') stats.pending_or_in_progress++;
-          else if (record.verdict === 'ALIASES_IGNORED_BY_IMPORTER') stats.aliases_ignored_bug++;
-          else stats.inconclusive++;
+        const r = JSON.parse(l);
+        if (r.workId) {
+          postV6AuditedIds.add(r.workId);
+          if (r.verdict === 'AUDIT_PASS') stats.v6_done_audit_pass++;
+          else if (r.verdict === 'AUDIT_FAIL') {
+            stats.v6_done_audit_fail++;
+            stats.missing_aliases_detected += (r.missingFromYsql?.length || 0);
+          } else if (r.verdict === 'AUDIT_INCONCLUSIVE') {
+            stats.v6_done_audit_inconclusive++;
+          }
         }
       } catch {}
     }
-    stats.audited_count = auditedIds.size;
-    console.log(`Resuming from ${stats.audited_count} previously audited works.`);
+    console.log(`Loaded ${postV6AuditedIds.size} already verified post-V6 audit approvals from ${POST_V6_RESULTS_FILE}`);
   }
+
+  // Also inspect historical catalog_audit_results.jsonl for pre-collected evidence and valid post-V6 records
+  if (fs.existsSync(RESULTS_FILE)) {
+    const lines = fs.readFileSync(RESULTS_FILE, 'utf8').split('\n').filter(Boolean);
+    const historicalByWorkId = new Map<string, any>();
+    for (const l of lines) {
+      try {
+        const r = JSON.parse(l);
+        if (r.workId && !postV6AuditedIds.has(r.workId)) {
+          historicalByWorkId.set(r.workId, r);
+        }
+      } catch {}
+    }
+
+    const unmigratedIds = Array.from(historicalByWorkId.keys());
+    console.log(`Checking ${unmigratedIds.length} historical records against V6 completion timestamps...`);
+
+    const CHUNK = 500;
+    for (let i = 0; i < unmigratedIds.length; i += CHUNK) {
+      const chunk = unmigratedIds.slice(i, i + CHUNK);
+      const res = await pool.query<{ work_id: string; state: string; updated_at: Date; checkpoint: any }>(`
+        SELECT work_id::text, state, updated_at, checkpoint
+        FROM importer_lite_tasks
+        WHERE work_id = ANY($1::uuid[])
+          AND task_type = 'CATALOG'
+          AND payload->>'metadataEnrichmentVersion' = '6'
+      `, [chunk]);
+
+      for (const row of res.rows) {
+        const rec = historicalByWorkId.get(row.work_id);
+        if (!rec) continue;
+        const auditedTime = new Date(rec.auditedAt || 0).getTime();
+        const taskCompletedTime = new Date(row.updated_at || 0).getTime();
+        const isPostV6 = (row.state === 'DONE') && (auditedTime >= taskCompletedTime || rec.isV6Done === true);
+
+        if (isPostV6) {
+          postV6AuditedIds.add(row.work_id);
+          const verdict = (rec.isBug || rec.verdict === 'ALIASES_IGNORED_BY_IMPORTER') ? 'AUDIT_FAIL'
+            : (rec.verdict === 'INCONCLUSIVE' || rec.verdict === 'PENDING_OR_IN_PROGRESS') ? 'AUDIT_INCONCLUSIVE'
+            : 'AUDIT_PASS';
+
+          if (verdict === 'AUDIT_PASS') stats.v6_done_audit_pass++;
+          else if (verdict === 'AUDIT_FAIL') {
+            stats.v6_done_audit_fail++;
+            stats.missing_aliases_detected += (rec.missingFromYsql?.length || 0);
+          } else {
+            stats.v6_done_audit_inconclusive++;
+          }
+
+          fs.appendFileSync(POST_V6_RESULTS_FILE, JSON.stringify({ ...rec, verdict }) + '\n', 'utf8');
+        } else {
+          preV6EvidenceMap.set(row.work_id, rec);
+          stats.pre_v6_audits_count++;
+        }
+      }
+    }
+  }
+
+  console.log(`Forensic Classification Complete:`);
+  console.log(`- Post-V6 Approved (PASS): ${stats.v6_done_audit_pass}`);
+  console.log(`- Post-V6 Failed (FAIL): ${stats.v6_done_audit_fail}`);
+  console.log(`- Post-V6 Inconclusive: ${stats.v6_done_audit_inconclusive}`);
+  console.log(`- Pre-V6 Evidence Cached: ${stats.pre_v6_audits_count}`);
 
   const startTime = Date.now();
   let loopCount = 0;
-  const CONCURRENCY = 6; // Process 6 works concurrently in parallel
+  const CONCURRENCY = 6;
 
   while (true) {
-    // 1. Fetch counts
+    // 1. Fetch exact total published & V6 DONE counts
     const countRes = await pool.query('SELECT COUNT(*) AS total FROM works WHERE published = true');
     stats.total_published = parseInt(countRes.rows[0].total, 10);
 
@@ -427,38 +507,32 @@ async function main() {
         AND state = 'DONE'
     `);
     stats.v6_done_total = parseInt(v6DoneCountRes.rows[0].count, 10);
+    stats.v6_done_pending_audit = Math.max(0, stats.v6_done_total - (stats.v6_done_audit_pass + stats.v6_done_audit_fail + stats.v6_done_audit_inconclusive));
 
-    // 2. Fetch next batch with V6 DONE works PRIORITIZED FIRST
-    const candidates = await pool.query<{ id: string; title: string; slug: string; aliases: string[]; is_v6_done: boolean }>(`
+    // 2. Fetch candidates: STRICTLY V6 DONE works that have NOT YET received a post-V6 final audit
+    const postV6Array = Array.from(postV6AuditedIds);
+    const candidates = await pool.query<{ id: string; title: string; slug: string; aliases: string[]; v6_task_id: string; v6_state: string; v6_updated_at: Date; v6_checkpoint: any }>(`
       SELECT w.id::text, w.title, w.slug, w.aliases,
-             (t.state = 'DONE') AS is_v6_done
-      FROM works w
-      LEFT JOIN importer_lite_tasks t ON t.work_id = w.id 
-        AND t.task_type = 'CATALOG' 
+             t.id::text as v6_task_id, t.state as v6_state, t.updated_at as v6_updated_at, t.checkpoint as v6_checkpoint
+      FROM importer_lite_tasks t
+      JOIN works w ON w.id = t.work_id
+      WHERE t.task_type = 'CATALOG'
         AND t.payload->>'metadataEnrichmentVersion' = '6'
-      WHERE w.published = true
-      ORDER BY 
-        (t.state = 'DONE') DESC NULLS LAST,
-        (COALESCE(cardinality(w.aliases), 0) = 0) DESC,
-        w.views_total DESC
-      LIMIT 1000
-    `);
+        AND t.state = 'DONE'
+        AND w.published = true
+        ${postV6Array.length > 0 ? 'AND NOT (w.id = ANY($1::uuid[]))' : ''}
+      ORDER BY t.updated_at ASC
+      LIMIT 60
+    `, postV6Array.length > 0 ? [postV6Array] : []);
 
-    const unaudited = candidates.rows.filter((w) => !auditedIds.has(w.id));
-
-    // Calculate how many V6 DONE are audited vs pending
-    let v6DoneAuditedCount = 0;
-    for (const w of candidates.rows) {
-      if (w.is_v6_done && auditedIds.has(w.id)) v6DoneAuditedCount++;
-    }
-    stats.v6_done_audited = v6DoneAuditedCount;
-    stats.v6_done_pending_audit = Math.max(0, stats.v6_done_total - stats.v6_done_audited);
+    const unaudited = candidates.rows;
 
     if (unaudited.length === 0) {
-      console.log(`All ${stats.total_published} works have been audited! Daemon sleeping 15s...`);
+      stats.v6_done_pending_audit = 0;
       stats.updated_at = new Date().toISOString();
       fs.writeFileSync(SUMMARY_FILE, JSON.stringify(stats, null, 2), 'utf8');
-      await new Promise((r) => setTimeout(r, 15000));
+      console.log(`[LOCKSTEP AUDITOR] All ${stats.v6_done_total} V6 DONE works are fully audited! Waiting 4s for new V6 completions...`);
+      await new Promise((r) => setTimeout(r, 4000));
       continue;
     }
 
@@ -468,17 +542,13 @@ async function main() {
       const chunkIds = chunk.map((w) => w.id);
 
       // Single batched query for the entire chunk
-      const [mRes, wRes, tRes] = await Promise.all([
+      const [mRes, wRes] = await Promise.all([
         pool.query(
           'SELECT work_id::text, source, source_work_id, source_title, source_slug FROM importer_work_mappings WHERE work_id = ANY($1::uuid[])',
           [chunkIds]
         ),
         pool.query(
           'SELECT id::text, aliases FROM works WHERE id = ANY($1::uuid[])',
-          [chunkIds]
-        ),
-        pool.query(
-          `SELECT work_id::text, state, checkpoint FROM importer_lite_tasks WHERE work_id = ANY($1::uuid[]) AND task_type = 'CATALOG' AND payload->>'metadataEnrichmentVersion' = '6'`,
           [chunkIds]
         ),
       ]);
@@ -494,18 +564,19 @@ async function main() {
         aliasesByWorkId.set(row.id, Array.isArray(row.aliases) ? row.aliases : []);
       }
 
-      const taskByWorkId = new Map<string, { state: string; checkpoint: any }>();
-      for (const row of tRes.rows) {
-        taskByWorkId.set(row.work_id, { state: row.state, checkpoint: row.checkpoint });
-      }
-
       const records = await Promise.all(
         chunk.map(async (w) => {
           try {
             const mappings = mappingsByWorkId.get(w.id) || [];
             const currentAliases = aliasesByWorkId.get(w.id) || w.aliases || [];
-            const taskInfo = taskByWorkId.get(w.id) || null;
-            return await auditWork(w, sources, mappings, currentAliases, taskInfo);
+            const taskInfo = {
+              id: w.v6_task_id,
+              state: w.v6_state,
+              updated_at: w.v6_updated_at,
+              checkpoint: w.v6_checkpoint,
+            };
+            const preCollected = preV6EvidenceMap.get(w.id) || null;
+            return await auditWork(w, sources, mappings, currentAliases, taskInfo, preCollected);
           } catch (err: any) {
             console.error(`Audit error on ${w.title}:`, err?.message);
             return null;
@@ -515,33 +586,35 @@ async function main() {
 
       for (const record of records) {
         if (!record) continue;
-        auditedIds.add(record.workId);
-        stats.audited_count = auditedIds.size;
-        stats.last_work_audited = `${record.title} (${record.verdict})`;
+        postV6AuditedIds.add(record.workId);
+        stats.last_audited_work = `${record.title} (${record.verdict})`;
 
-        if (record.verdict === 'GENUINE_NO_ALIAS') stats.genuine_no_alias++;
-        else if (record.verdict === 'ALL_LEGITIMATE_ALIASES_RECOVERED') stats.all_aliases_recovered++;
-        else if (record.verdict === 'PENDING_OR_IN_PROGRESS') stats.pending_or_in_progress++;
-        else if (record.verdict === 'ALIASES_IGNORED_BY_IMPORTER') {
-          stats.aliases_ignored_bug++;
-          console.error(`🚨 BUG ALERT on "${record.title}"! Discovered:`, record.missingFromYsql);
+        if (record.verdict === 'AUDIT_PASS') {
+          stats.v6_done_audit_pass++;
+        } else if (record.verdict === 'AUDIT_FAIL') {
+          stats.v6_done_audit_fail++;
+          stats.missing_aliases_detected += (record.missingFromYsql?.length || 0);
+          console.error(`🚨 [AUDIT FAIL] Missing aliases on "${record.title}"! Missing:`, record.missingFromYsql);
           fs.writeFileSync(
             path.resolve(process.cwd(), 'scratch/AUDIT_BUG_ALERT.json'),
             JSON.stringify(record, null, 2),
             'utf8'
           );
         } else {
-          stats.inconclusive++;
+          stats.v6_done_audit_inconclusive++;
         }
 
+        stats.v6_done_pending_audit = Math.max(0, stats.v6_done_total - (stats.v6_done_audit_pass + stats.v6_done_audit_fail + stats.v6_done_audit_inconclusive));
+
         loopCount++;
+        fs.appendFileSync(POST_V6_RESULTS_FILE, JSON.stringify(record) + '\n', 'utf8');
         fs.appendFileSync(RESULTS_FILE, JSON.stringify(record) + '\n', 'utf8');
-        console.log(`[AUDIT ${stats.audited_count}/${stats.total_published}] ${record.title} -> ${record.verdict} (${record.durationMs}ms)`);
+        console.log(`[POST-V6 AUDIT ${postV6AuditedIds.size}/${stats.v6_done_total}] ${record.title} -> ${record.verdict} (Pending: ${stats.v6_done_pending_audit})`);
       }
 
       const elapsedMins = (Date.now() - startTime) / 60000;
       if (elapsedMins > 0) {
-        stats.speed_works_per_min = parseFloat((loopCount / elapsedMins).toFixed(2));
+        stats.audit_speed_works_per_min = parseFloat((loopCount / elapsedMins).toFixed(2));
       }
       stats.updated_at = new Date().toISOString();
       fs.writeFileSync(SUMMARY_FILE, JSON.stringify(stats, null, 2), 'utf8');

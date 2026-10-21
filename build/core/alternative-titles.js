@@ -29,6 +29,14 @@ export function cleanAlternativeTitle(value) {
     // while preserving legitimate short numeric titles like "86".
     if (/^(?:\+\d+\+?|\d+\+|\d{3,}|0)$/u.test(decoded))
         return null;
+    // Discard star rating widgets or vote summaries mistakenly ingested from themes
+    if (/\b(?:m[eé]dia\s+\d|\d+(?:[.,]\d+)?\s+do\s+total\s+de\s+\d+\s+votos|\bvotos?\b|\brating\b|\bavalia[çc][aã]o\b)/i.test(decoded))
+        return null;
+    // Discard CSS rules, stylesheet code fragments, and direct URLs
+    if (/[{}@]|var\(|calc\(|!important|\b(?:rgb|rgba|border|background|color|padding|margin|font)-/i.test(decoded))
+        return null;
+    if (/^https?:\/\//i.test(decoded))
+        return null;
     // Discard isolated genres or metadata placeholders mistakenly ingested as aliases
     if (GENRE_OR_TAXONOMY_WORDS.has(decoded.toLocaleLowerCase()))
         return null;
