@@ -1284,7 +1284,7 @@ export class LiteRepository {
             (task.state IN ('READY','RETRY_WAIT') AND task.next_run_at<=now())
             OR (task.state='RUNNING' AND task.lease_until<now())
           )
-        ORDER BY task.next_run_at,task.id
+        ORDER BY task.idempotency_key
         LIMIT 1
         FOR UPDATE SKIP LOCKED
       )
@@ -1974,21 +1974,17 @@ export class LiteRepository {
         await client.query('COMMIT');
         return 0;
       }
-      const pending = await client.query<{ count: string; popular: string }>(`SELECT
-          count(*)::int AS count,
-          count(*) FILTER (WHERE COALESCE(task.payload->>'discoveryLane', CASE WHEN EXISTS (
-            SELECT 1
-            FROM importer_work_mappings m
-            JOIN importer_sources s ON s.id=m.source
-            LEFT JOIN importer_lite_source_health h ON h.source=s.id
-            WHERE m.work_id=task.work_id
-              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-              AND s.enabled=true AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
-              AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-          ) THEN 'popular' ELSE 'unlinked' END)='popular')::int AS popular
-        FROM importer_lite_tasks task
-        WHERE task.task_type='CATALOG' AND task.state IN ('READY','RUNNING','RETRY_WAIT')
-          AND task.payload ? 'metadataCrossSourceDiscovery'`);
+      const pending = await client.query<{ count: string }>(`
+        SELECT count(*)::int AS count
+        FROM (
+          SELECT 1
+          FROM importer_lite_tasks task
+          WHERE task.task_type='CATALOG'
+            AND task.idempotency_key >= $1 AND task.idempotency_key < $2
+            AND task.state IN ('READY','RUNNING','RETRY_WAIT')
+          LIMIT 33
+        ) q
+      `, [METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V5_PREFIX}~`]);
       const capacity = Math.max(1, Math.min(32, Math.trunc(maxPending)));
       const pendingCount = Number(pending.rows[0]?.count || 0);
       if (pendingCount >= capacity) {

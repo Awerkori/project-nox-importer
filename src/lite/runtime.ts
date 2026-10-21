@@ -1192,8 +1192,8 @@ export class ImporterLiteRuntime {
       // A coverage task advances one provider per durable checkpoint.  Wake
       // its successor promptly, but never spin when no due task exists.
       if (claimed && this.isRuntimeLeader) {
-        void this.refillCrossSourceMetadataDiscovery();
         if (!this.metadataTurboMode.enabled) {
+          void this.refillCrossSourceMetadataDiscovery();
           const timer = setTimeout(() => void this.runCrossSourceMetadataDiscovery(), 100);
           timer.unref();
         }
