@@ -492,9 +492,11 @@ export class ImporterLiteRuntime {
    */
   private scheduleMetadataTurn(): void {
     if (this.stopped) return;
-    const delayMs = this.metadataReplayV4Exclusive.enabled
-      ? Math.max(250, Math.min(STORED_METADATA_REPLAY_INTERVAL_MS, this.metadataReplayV4Exclusive.intervalMs))
-      : STORED_METADATA_REPLAY_INTERVAL_MS;
+    const delayMs = this.metadataTurboMode.enabled
+      ? 250
+      : (this.metadataReplayV4Exclusive.enabled
+        ? Math.max(250, Math.min(STORED_METADATA_REPLAY_INTERVAL_MS, this.metadataReplayV4Exclusive.intervalMs))
+        : STORED_METADATA_REPLAY_INTERVAL_MS);
     this.metadataTurnTimer = setTimeout(() => {
       this.scheduleMetadataTurn();
       if (this.isRuntimeLeader) void this.runMetadataTurn();
@@ -1439,7 +1441,7 @@ export class ImporterLiteRuntime {
                 tagsState: extracted.tagsState,
                 aliasesAdded, tagsAdded,
                 error: extracted.parserError ? 'EXPLICIT_SOURCE_METADATA_NOT_PARSED' : null,
-                rawMetadata: sourceMetadata, version: 5,
+                rawMetadata: sourceMetadata, version: 6,
               });
               result.attached.push({ source, sourceWorkId: details.sourceWorkId, aliasesAdded, tagsAdded });
             });
@@ -1451,7 +1453,7 @@ export class ImporterLiteRuntime {
           } catch (error: any) {
             // Provider failures are external and must never turn an otherwise
             // complete new work into a permanently blocked onboarding task.
-            this.logger.debug('Complementary source metadata probe skipped', {
+            this.logger.warn('Complementary source metadata probe skipped', {
               workId: input.workId, source, error: error?.message,
             });
             result.deferredSources.push(source);
