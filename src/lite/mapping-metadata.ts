@@ -197,7 +197,7 @@ export function buildDiscoveryQueryCandidates(title: string, aliases: string[] =
   if (cleanTitle.length >= 1) candidateList.push(cleanTitle);
 
   // Extract primary title clause if punctuation indicates a subtitle
-  const titleParts = cleanTitle.split(/[,:;\-–—|/()]/).map((p) => p.trim()).filter(Boolean);
+  const titleParts = cleanTitle.split(/(?:,\s*|[:;|/()]|\s+[-–—]\s+)/).map((p) => p.trim()).filter(Boolean);
   if (titleParts.length > 1 && titleParts[0].length >= 2) {
     candidateList.push(titleParts[0]);
   }

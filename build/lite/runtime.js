@@ -105,7 +105,7 @@ const CATALOG_TASK_LEASE_HEARTBEAT_MS = 30_000;
 // are simply left to their normal future discovery instead of blocking the
 // work's first publication indefinitely.
 const CROSS_SOURCE_METADATA_CONCURRENCY = 4;
-const CROSS_SOURCE_METADATA_TIMEOUT_MS = 8_000;
+const CROSS_SOURCE_METADATA_TIMEOUT_MS = 5_000;
 const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // A durable global task checkpoints several independent providers at once.
 // The shared source gate still caps aggregate external I/O, while batching
