@@ -146,10 +146,12 @@ export function getCanonicalSynonyms(text: string): string[] {
 export function normalizeTitle(text: string): string {
   if (!text) return '';
 
-  // 1. Remove diacritics / accents
+  // 1. Remove Latin diacritics / accents, then re-compose NFC so Japanese Kana
+  // dakuten/handakuten (e.g. ブ, パ) and Korean Hangul syllables stay intact as \p{L}
   let normalized = text
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
+    .normalize('NFC')
     .toLowerCase();
 
   // 2. Replace punctuation, brackets, special symbols with spaces
@@ -207,7 +209,77 @@ export function isNovel(text: string, kind?: string): boolean {
  * Checks whether text indicates a spin-off, side story, or gaiden
  */
 export function extractSpinOff(text: string): boolean {
-  return /\b(side story|gaiden|spin-off|spinoff|extra story|hist[oó]ria paralela|hist[oó]ria extra|historia paralela|historia extra)\b/i.test(text.toLowerCase());
+  return /\b(side story|gaiden|spin-off|spinoff|extra story|hist[oó]ria paralela|hist[oó]ria extra|historia paralela|historia extra|vigilantes|team-up missions|team up missions|anthology|antologia|4-koma|4koma|yonkoma|reboot|one-shot|oneshot)\b/i.test(text.toLowerCase());
+}
+
+const SEQUEL_OR_EDITION_MARKERS = new Set([
+  'super', 'z', 'gt', 'kai', 'daima',
+  'shippuden', 'shippuuden', 'boruto',
+  'vigilantes', 're', 'darkness',
+  'zero', 'apocrypha', 'omega', 'brotherhood',
+  'reboot', 'byakuya', 'remake', 'sequel', 'prequel',
+  '2', '3', '4', '5', '6', '7', '8', '9',
+  'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii',
+]);
+
+const SEQUEL_OR_EDITION_PHRASES = [
+  'next generations',
+  'lost canvas',
+  'next dimension',
+  'new waves',
+  'eternal force',
+  'four knights',
+  'team up missions',
+];
+
+/**
+ * Detects whether two titles share a base work name but one carries a distinct
+ * sequel, prequel, spin-off or edition qualifier absent from the other
+ * (e.g. "Dragon Ball" vs "Dragon Ball Super", "Naruto" vs "Naruto Shippuden",
+ * "Tokyo Ghoul" vs "Tokyo Ghoul:re", "Boku no Hero Academia" vs "Boku no Hero Academia: Vigilantes").
+ */
+export function hasSequelOrEditionConflict(titleA: string, titleB: string): string | null {
+  const normA = normalizeTitle(titleA);
+  const normB = normalizeTitle(titleB);
+  if (!normA || !normB || normA === normB) return null;
+
+  // Allow explicitly curated canonical synonym groups (e.g. Troublesome Sister 2 variants)
+  const synonymsA = getCanonicalSynonyms(titleA).map(normalizeTitle);
+  if (synonymsA.includes(normB)) return null;
+
+  const wordsA = normA.split(/\s+/).filter(Boolean);
+  const wordsB = normB.split(/\s+/).filter(Boolean);
+  if (wordsA.length === 0 || wordsB.length === 0) return null;
+
+  const setA = new Set(wordsA);
+  const setB = new Set(wordsB);
+  let shared = 0;
+  for (const w of setA) {
+    if (setB.has(w)) shared++;
+  }
+  const minSize = Math.min(setA.size, setB.size);
+  if (minSize === 0 || shared / minSize < 0.5) return null;
+
+  for (const phrase of SEQUEL_OR_EDITION_PHRASES) {
+    const inA = normA.includes(phrase);
+    const inB = normB.includes(phrase);
+    if (inA !== inB) {
+      return `Sequel/edition conflict: "${phrase}"`;
+    }
+  }
+
+  for (const w of setA) {
+    if (!setB.has(w) && SEQUEL_OR_EDITION_MARKERS.has(w)) {
+      return `Sequel/edition conflict: "${w}"`;
+    }
+  }
+  for (const w of setB) {
+    if (!setA.has(w) && SEQUEL_OR_EDITION_MARKERS.has(w)) {
+      return `Sequel/edition conflict: "${w}"`;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -325,7 +397,8 @@ export function evaluateMetadataMatchEvidence(target: MatchCandidate, candidate:
       const candidateSeason = extractSeason(candidate.title);
       return targetSeason !== candidateSeason && Boolean(targetSeason || candidateSeason);
     })() ||
-    extractSpinOff(target.title) !== extractSpinOff(candidate.title);
+    extractSpinOff(target.title) !== extractSpinOff(candidate.title) ||
+    Boolean(hasSequelOrEditionConflict(target.title, candidate.title));
   const targetAuthor = normalizedCreator(target.author);
   const candidateAuthor = normalizedCreator(candidate.author);
   const targetArtist = normalizedCreator(target.artist);
@@ -382,7 +455,7 @@ export function matchWorkCandidate(target: MatchCandidate, candidate: MatchCandi
     }
   }
 
-  // Safety Guard 3: Spin-off / Side Story mismatch
+  // Safety Guard 3: Spin-off / Side Story / Sequel / Edition mismatch
   const targetSpin = extractSpinOff(target.title);
   const candSpin = extractSpinOff(candidate.title);
   if (targetSpin !== candSpin) {
@@ -391,6 +464,16 @@ export function matchWorkCandidate(target: MatchCandidate, candidate: MatchCandi
       confidenceScore: 0.0,
       matchMethod: 'NO_MATCH',
       reason: 'Spin-off / Side story mismatch',
+    };
+  }
+
+  const sequelConflict = hasSequelOrEditionConflict(target.title, candidate.title);
+  if (sequelConflict) {
+    return {
+      matched: false,
+      confidenceScore: 0.0,
+      matchMethod: 'NO_MATCH',
+      reason: sequelConflict,
     };
   }
 

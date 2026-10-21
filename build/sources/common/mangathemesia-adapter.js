@@ -176,7 +176,7 @@ export class MangaThemesiaAdapter {
                     : normalizedRaw.includes(' / ')
                         ? normalizedRaw.split(/\s+\/\s+/)
                         : [normalizedRaw];
-            alternativeTitles = lines.map(s => decodeHtmlEntities(stripHtml(s).trim())).filter(s => s.length > 1);
+            alternativeTitles = lines.map(s => decodeHtmlEntities(stripHtml(s).trim())).filter(s => s.length >= 1 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
         }
         return {
             sourceWorkId,

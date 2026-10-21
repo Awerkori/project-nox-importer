@@ -1,3 +1,4 @@
+import { decodeHtmlEntities } from '../sources/common/html-utils.js';
 const GENRE_OR_TAXONOMY_WORDS = new Set([
     'adulto', 'drama', 'fantasia', 'historico', 'histórico', 'josei', 'manhwa', 'manga',
     'manhua', 'romance', 'smut', 'shounen', 'shoujo', 'seinen', 'yaoi', 'yuri', 'ecchi',
@@ -12,16 +13,26 @@ const GENRE_OR_TAXONOMY_WORDS = new Set([
 export function cleanAlternativeTitle(value) {
     if (typeof value !== 'string')
         return null;
-    const title = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
-    if (title.length < 2 || title.length > 250)
+    const decoded = decodeHtmlEntities(value)
+        .normalize('NFKC')
+        .replace(/\s+/gu, ' ')
+        .replace(/^[,;:\s]+|[,;:\s]+$/gu, '')
+        .trim();
+    if (decoded.length < 1 || decoded.length > 250)
         return null;
-    // Discard pure numeric IDs, chapters, volumes or age ratings like "+18", "18+", "10803", "873"
-    if (/^\+?\d+\+?$/u.test(title))
+    // Discard brackets, punctuation-only, or garbage fragments like "[]", "[ ]", "shot)", "-"
+    if (/^[\s\[\]\(\)\{\}\-_.,:;!?/'"\\|~+*#@$%^&=>`<´]+$/u.test(decoded))
+        return null;
+    if (/^(shot|one-shot|oneshot|colorido|raw|novel|doujinshi)\)?$/i.test(decoded))
+        return null;
+    // Discard age ratings ("+18", "18+"), zero, or 3+ digit numeric machine IDs ("10803", "873"),
+    // while preserving legitimate short numeric titles like "86".
+    if (/^(?:\+\d+\+?|\d+\+|\d{3,}|0)$/u.test(decoded))
         return null;
     // Discard isolated genres or metadata placeholders mistakenly ingested as aliases
-    if (GENRE_OR_TAXONOMY_WORDS.has(title.toLocaleLowerCase()))
+    if (GENRE_OR_TAXONOMY_WORDS.has(decoded.toLocaleLowerCase()))
         return null;
-    return title;
+    return decoded;
 }
 /**
  * Comparison-only key. It intentionally does not transliterate or translate
@@ -39,16 +50,26 @@ export function alternativeTitleKey(value) {
         .replace(/\s+/gu, ' ')
         .trim();
 }
+const CLAUSE_CONTINUATION_REGEX = /^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por)\b/i;
+const INTERJECTION_PREFIXES = new Set(['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá']);
 function extractPunctuatedClauses(title) {
     const clauses = new Set();
-    if (!title || typeof title !== 'string')
+    if (!title || typeof title !== 'string' || !title.includes(','))
         return clauses;
-    const parts = title.split(/[,:;\-–—|]/).map((p) => p.trim()).filter(Boolean);
+    // Only forbid comma-split fragments of a single grammatical sentence title
+    // (e.g. "Summon The Demon, For I Am The Abyss" or "Hello, Fluffy Griffin!").
+    // Never forbid legitimate subtitles or independent titles separated by ':', '-', ';', or '|'.
+    const parts = title.split(/,\s*/).map((p) => p.trim()).filter(Boolean);
     if (parts.length > 1) {
-        for (const part of parts) {
-            const key = alternativeTitleKey(part);
-            if (key)
-                clauses.add(key);
+        const firstWord = parts[0].toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
+        const isGrammaticalTitle = INTERJECTION_PREFIXES.has(firstWord)
+            || parts.some((p, i) => i > 0 && (CLAUSE_CONTINUATION_REGEX.test(p) || /^[a-z]/.test(p)));
+        if (isGrammaticalTitle) {
+            for (const part of parts) {
+                const key = alternativeTitleKey(part);
+                if (key)
+                    clauses.add(key);
+            }
         }
     }
     return clauses;
@@ -60,9 +81,9 @@ export function mergeAlternativeTitles(existing, incoming, primaryTitle, max = 5
     const primaryKey = alternativeTitleKey(primaryTitle);
     const rawPrimaryTitle = typeof primaryTitle === 'string' ? primaryTitle : '';
     const forbiddenSubClauses = extractPunctuatedClauses(rawPrimaryTitle);
-    // First pass: identify full titles in existing and incoming to prevent fragments
+    // First pass: identify grammatical comma-sentence titles in existing and incoming to prevent half-sentence fragments
     for (const raw of [...(existing || []), ...(incoming || [])]) {
-        if (typeof raw === 'string' && (raw.includes(',') || raw.includes(';') || raw.includes(' - '))) {
+        if (typeof raw === 'string' && raw.includes(',')) {
             const clauses = extractPunctuatedClauses(raw);
             for (const c of clauses)
                 forbiddenSubClauses.add(c);

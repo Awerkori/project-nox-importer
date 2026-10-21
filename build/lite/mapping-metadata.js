@@ -1,4 +1,5 @@
 import { alternativeTitleKey, cleanAlternativeTitle, mergeAlternativeTitles } from '../core/alternative-titles.js';
+import { decodeHtmlEntities } from '../sources/common/html-utils.js';
 const SOURCE_TITLE_PLACEHOLDERS = new Set(['unknown', 'n/a', 'none', 'null', 'undefined', 'untitled', 'sem titulo', 'sem título']);
 /**
  * A mapping title is first-party evidence only after its mapping is attached
@@ -11,7 +12,7 @@ export function isProviderDisplayTitleAlias(sourceTitle, sourceSlug, primaryTitl
     if (!title || alternativeTitleKey(title) === alternativeTitleKey(primaryTitle))
         return false;
     const folded = title.toLocaleLowerCase();
-    if (SOURCE_TITLE_PLACEHOLDERS.has(folded) || /^\d+$/u.test(title))
+    if (SOURCE_TITLE_PLACEHOLDERS.has(folded) || /^(?:\+\d+\+?|\d+\+|\d{3,}|0)$/u.test(title))
         return false;
     const slug = cleanAlternativeTitle(sourceSlug);
     return alternativeTitleKey(title) !== alternativeTitleKey(slug)
@@ -23,11 +24,12 @@ export const STORED_MAPPING_ALIAS_FIELDS = [
     'originalTitle', 'original_title', 'nativeTitle', 'native_title', 'nativeName', 'native_name',
     'englishTitle', 'english_title', 'romanizedTitle', 'romanized_title', 'romajiTitle', 'romaji_title',
     'japaneseTitle', 'japanese_title', 'koreanTitle', 'korean_title', 'chineseTitle', 'chinese_title',
-    'altName', 'alt_name', 'altNames', 'alt_names', 'altTitle', 'alt_title', 'altTitles', 'alt_titles',
+    'altName', 'alt_name', 'altNames', 'alt_names', 'altTitle', 'alt_title', 'altTitles', 'alt_titles', 'alt',
     'synonyms', 'sinonimos', 'sinônimos', 'sinonimo', 'sinônimo',
     // These are provider-declared fields from Portuguese APIs and scans:
     'titulo_alternative', 'titulo_alternativo', 'titulos_alternativos',
     'nome_alternativo', 'nomes_alternativos', 'outros_nomes', 'outro_nome',
+    'obr_outros_nomes', 'obr_nome_alternativo', 'obr_titulo_alternativo',
     'titulo_original', 'nome_original', 'titulo_nativo', 'nome_nativo',
     'titulo_ingles', 'titulo_em_ingles', 'titulo_romanizado', 'romaji',
     'titulo_japones', 'titulo_japonês', 'titulo_coreano', 'titulo_chines', 'titulo_chinês',
@@ -58,7 +60,7 @@ const CLAUSE_CONTINUATION_REGEX = /^(?:for|and|or|so|because|but|yet|too|also|wi
 const INTERJECTION_PREFIXES = new Set(['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá']);
 function splitDelimitedTitles(text) {
     const trimmed = text.trim();
-    if (trimmed.length < 2)
+    if (trimmed.length < 1)
         return [];
     if (/[\r\n]/.test(trimmed)) {
         return trimmed.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
@@ -74,10 +76,10 @@ function splitDelimitedTitles(text) {
         if (parts.length > 1) {
             // If the first part is an interjection (e.g. "Hello, Fluffy Griffin!"), or any subsequent part
             // is a clause continuation (e.g. "For I Am The Abyss", "Yet Pure White", "so I ..."),
-            // or starts with a lowercase letter or has length < 3, it is a single grammatical title.
-            const firstWord = parts[0].toLowerCase().replace(/[^a-z]/g, '');
+            // or starts with a lowercase letter, it is a single grammatical title.
+            const firstWord = parts[0].toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
             const isGrammaticalTitle = INTERJECTION_PREFIXES.has(firstWord)
-                || parts.some((p, i) => i > 0 && (CLAUSE_CONTINUATION_REGEX.test(p) || /^[a-z]/.test(p) || p.length < 3));
+                || parts.some((p, i) => i > 0 && (CLAUSE_CONTINUATION_REGEX.test(p) || /^[a-z]/.test(p)));
             if (!isGrammaticalTitle) {
                 return parts;
             }
@@ -86,7 +88,6 @@ function splitDelimitedTitles(text) {
     return [trimmed];
 }
 function asTextList(value, objectKeys = [], depth = 0) {
-    const isOriginallyArray = Array.isArray(value);
     const encodedArray = typeof value === 'string' && depth < 2 ? explicitJsonArray(value) : null;
     const values = Array.isArray(value) ? value : (encodedArray ?? (value == null ? [] : [value]));
     return values.flatMap((entry) => {
@@ -94,12 +95,6 @@ function asTextList(value, objectKeys = [], depth = 0) {
             const nested = depth < 2 ? explicitJsonArray(entry) : null;
             if (nested)
                 return asTextList(nested, objectKeys, depth + 1);
-            if (isOriginallyArray) {
-                if (/[\r\n;]|\s+\/\s+/.test(entry)) {
-                    return entry.split(/[\r\n;]+|\s+\/\s+/).map((s) => s.trim()).filter(Boolean);
-                }
-                return [entry.trim()];
-            }
             return splitDelimitedTitles(entry);
         }
         if (!entry || typeof entry !== 'object')
@@ -164,7 +159,7 @@ export function classifyExplicitSourceMetadata(raw, primaryTitle) {
     const parsedAliasEvidence = extracted.aliases.length > 0
         ? extracted.aliases
         : extractStoredMappingMetadata(metadata, '').aliases;
-    const rawAliasEvidence = hasExplicitValue(metadata, /^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title|titulo.?alternative|titulos?.?alternativos?|titulo.?original|nome.?original|titulo.?nativo|nome.?nativo|titulo.?(em.)?ingles|titulo.?romanizado|romaji|nome.?alternativo|nomes?.?alternativos?|outros?.?nomes?|outro.?nome|alt.?(names?|titles?)|synonyms?|sin[oô]nimos?|japanese.?title|korean.?title|chinese.?title|titulo.?(japones|japonês|coreano|chines|chinês))$/i);
+    const rawAliasEvidence = hasExplicitValue(metadata, /^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title|titulo.?alternative|titulos?.?alternativos?|titulo.?original|nome.?original|titulo.?nativo|nome.?nativo|titulo.?(em.)?ingles|titulo.?romanizado|romaji|nome.?alternativo|nomes?.?alternativos?|outros?.?nomes?|outro.?nome|obr.?outros?.?nomes?|obr.?nome.?alternativo|obr.?titulo.?alternativo|alt|alt.?(names?|titles?)|synonyms?|sin[oô]nimos?|japanese.?title|korean.?title|chinese.?title|titulo.?(japones|japonês|coreano|chines|chinês))$/i);
     const rawTagEvidence = hasExplicitValue(metadata, /^(genres?|tags?|categories|generos?|categorias?)$/i);
     const aliasesParserError = rawAliasEvidence && parsedAliasEvidence.length === 0;
     const tagsParserError = rawTagEvidence && extracted.genres.length === 0;
@@ -182,24 +177,27 @@ export function classifyExplicitSourceMetadata(raw, primaryTitle) {
  */
 export function buildDiscoveryQueryCandidates(title, aliases = []) {
     const candidateList = [];
-    const cleanTitle = (title || '').trim();
-    if (cleanTitle.length >= 2)
+    const cleanTitle = decodeHtmlEntities(title || '').trim();
+    if (cleanTitle.length >= 1)
         candidateList.push(cleanTitle);
     // Extract primary title clause if punctuation indicates a subtitle
-    const titleParts = cleanTitle.split(/[,:;\-–—|]/).map((p) => p.trim()).filter(Boolean);
-    if (titleParts.length > 1 && titleParts[0].length >= 8 && titleParts[0].split(/\s+/).length >= 2) {
+    const titleParts = cleanTitle.split(/[,:;\-–—|/()]/).map((p) => p.trim()).filter(Boolean);
+    if (titleParts.length > 1 && titleParts[0].length >= 2) {
         candidateList.push(titleParts[0]);
     }
     for (const alias of aliases || []) {
-        if (alias && typeof alias === 'string' && alias.trim().length >= 2) {
-            candidateList.push(alias.trim());
+        if (alias && typeof alias === 'string') {
+            const decoded = decodeHtmlEntities(alias).trim();
+            if (decoded.length >= 1) {
+                candidateList.push(decoded);
+            }
         }
     }
     const seen = new Set();
     const candidates = [];
     for (const cand of candidateList) {
         const norm = cand.toLowerCase();
-        if (!seen.has(norm) && cand.length >= 2) {
+        if (!seen.has(norm) && cand.length >= 1) {
             seen.add(norm);
             candidates.push(cand);
             if (candidates.length >= 5)

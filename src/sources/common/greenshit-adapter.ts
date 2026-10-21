@@ -183,6 +183,21 @@ export class GreenShitAdapter implements SourceAdapter {
         }
       }
 
+      const rawAlt = obra.obr_outros_nomes ?? obra.outros_nomes ?? obra.obr_nome_alternativo ?? obra.obr_titulo_alternativo ?? obra.titulo_alternativo ?? obra.alternativeTitles;
+      let alternativeTitles: string[] = [];
+      if (Array.isArray(rawAlt)) {
+        alternativeTitles = rawAlt
+          .flatMap((entry: any) => typeof entry === 'string' ? entry.split(/[\r\n;]+|\s+\/\s+/) : [String(entry?.nome || entry?.title || '')])
+          .map((s: string) => decodeHtmlEntities(stripHtml(s)).trim())
+          .filter(Boolean);
+      } else if (typeof rawAlt === 'string' && rawAlt.trim().length > 0) {
+        const cleaned = decodeHtmlEntities(stripHtml(rawAlt.replace(/<br\s*\/?>/gi, '\n'))).trim();
+        alternativeTitles = (cleaned.includes('\n') ? cleaned.split(/[\r\n]+/)
+          : cleaned.includes(';') ? cleaned.split(/;+/)
+          : cleaned.includes(' / ') ? cleaned.split(/\s+\/\s+/)
+          : [cleaned]).map((s) => s.trim()).filter(Boolean);
+      }
+
       return {
         sourceWorkId,
         title,
@@ -190,6 +205,7 @@ export class GreenShitAdapter implements SourceAdapter {
         coverUrl,
         synopsis,
         genres: genres.length > 0 ? genres : undefined,
+        alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
         status: obra.obr_status === 12 ? 'COMPLETED' : 'UNKNOWN',
         raw: obra,
       };

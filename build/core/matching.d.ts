@@ -61,6 +61,13 @@ export declare function isNovel(text: string, kind?: string): boolean;
  */
 export declare function extractSpinOff(text: string): boolean;
 /**
+ * Detects whether two titles share a base work name but one carries a distinct
+ * sequel, prequel, spin-off or edition qualifier absent from the other
+ * (e.g. "Dragon Ball" vs "Dragon Ball Super", "Naruto" vs "Naruto Shippuden",
+ * "Tokyo Ghoul" vs "Tokyo Ghoul:re", "Boku no Hero Academia" vs "Boku no Hero Academia: Vigilantes").
+ */
+export declare function hasSequelOrEditionConflict(titleA: string, titleB: string): string | null;
+/**
  * Computes Sørensen-Dice coefficient between two strings based on bigrams.
  */
 export declare function diceSimilarity(str1: string, str2: string): number;
