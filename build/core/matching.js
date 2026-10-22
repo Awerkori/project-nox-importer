@@ -375,6 +375,17 @@ export function matchWorkCandidate(target, candidate) {
             reason: 'Format mismatch: Novel vs Comic',
         };
     }
+    // Safety Guard 1b: Image / Photo pack rejection
+    const targetIsPack = /^(?:pack|pacote)\s+de\s+(?:imagens|fotos|cosplay|artes?)\b/i.test(target.title);
+    const candIsPack = /^(?:pack|pacote)\s+de\s+(?:imagens|fotos|cosplay|artes?)\b/i.test(candidate.title);
+    if (targetIsPack !== candIsPack) {
+        return {
+            matched: false,
+            confidenceScore: 0.0,
+            matchMethod: 'NO_MATCH',
+            reason: 'Format mismatch: Image pack vs Comic',
+        };
+    }
     // Safety Guard 2: Season mismatch
     const targetSeason = extractSeason(target.title);
     const candSeason = extractSeason(candidate.title);
@@ -552,6 +563,11 @@ export function matchWorkCandidate(target, candidate) {
         if (parts.length > 1) {
             for (const part of parts) {
                 if (part === candidate.title)
+                    continue;
+                // Do not split inside unclosed parentheses (e.g. "Pack de Imagens (Hero Academia / Mirko)")
+                const openParens = (part.match(/\(/g) || []).length;
+                const closeParens = (part.match(/\)/g) || []).length;
+                if (openParens !== closeParens)
                     continue;
                 const subMatch = matchWorkCandidate(target, { ...candidate, title: part });
                 if (subMatch.matched && subMatch.confidenceScore >= 0.85) {
