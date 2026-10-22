@@ -281,8 +281,11 @@ export class GreenShitAdapter implements SourceAdapter {
         coverUrl: item.obr_imagem ? `${this.cdnUrl}/scans/${this.scanId}/obras/${item.obr_id}/${item.obr_imagem}` : null,
       }));
     } catch (err: any) {
+      if (err?.status === 404 || err?.status === 400) {
+        return [];
+      }
       this.logger.error(`searchWorks failed for query "${query}": ${err.message}`);
-      return [];
+      throw err;
     }
   }
 

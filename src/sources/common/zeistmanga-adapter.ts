@@ -85,11 +85,16 @@ export class ZeistMangaAdapter implements SourceAdapter {
         }
 
         if (!res.ok) {
-          throw new Error(`HTTP ${res.status} from ${url}`);
+          const err: any = new Error(`HTTP ${res.status} from ${url}`);
+          err.status = res.status;
+          throw err;
         }
 
         return (await res.json()) as T;
       } catch (err: any) {
+        if (err?.status && err.status >= 400 && err.status < 500 && err.status !== 429) {
+          throw err;
+        }
         if (attempts >= maxAttempts) throw err;
         await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
       }
@@ -462,8 +467,11 @@ export class ZeistMangaAdapter implements SourceAdapter {
         };
       });
     } catch (err: any) {
+      if (err?.status === 404 || err?.status === 400) {
+        return [];
+      }
       this.logger.error(`searchWorks failed for query "${query}": ${err.message}`);
-      return [];
+      throw err;
     }
   }
 

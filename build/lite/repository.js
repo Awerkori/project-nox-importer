@@ -35,7 +35,7 @@ const METADATA_REPLAY_V4_ENABLED_KEY = 'metadata_replay_v4_enabled';
 // the marker on the durable enrichment row makes coverage measurable without
 // turning an old NO_ALIASES classification into a permanent conclusion.
 const METADATA_ALIAS_COVERAGE_V5_VERSION = 5;
-const METADATA_CROSS_SOURCE_DISCOVERY_V6_PREFIX = 'lite:metadata:cross-source:v6:';
+const METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX = 'lite:metadata:cross-source:v7:';
 // A source that was temporarily unavailable is not evidence that a work has
 // no aliases.  Revisit it sparingly after the first catalog-wide pass, but
 // cap the recovery path so an external outage can never become an endless
@@ -1175,8 +1175,8 @@ export class LiteRepository {
       FROM picked
       WHERE task.id=picked.id
       RETURNING task.*`, [
-            METADATA_CROSS_SOURCE_DISCOVERY_V6_PREFIX,
-            `${METADATA_CROSS_SOURCE_DISCOVERY_V6_PREFIX}~`,
+            METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX,
+            `${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}~`,
             workerId,
             `${Math.max(30, leaseSeconds)} seconds`
         ]);
@@ -1826,7 +1826,10 @@ export class LiteRepository {
         AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
         AND NOT EXISTS (
           SELECT 1 FROM importer_work_mappings mapping
+          JOIN importer_lite_metadata_enrichment status
+            ON status.source=mapping.source AND status.source_work_id=mapping.source_work_id
           WHERE mapping.work_id=$1::uuid AND mapping.source=s.id
+            AND status.version >= 7
             AND (
               (jsonb_typeof(mapping.metadata->'alternativeTitles') = 'array' AND jsonb_array_length(mapping.metadata->'alternativeTitles') > 0)
               OR (jsonb_typeof(mapping.metadata->'titulo_alternative') = 'array' AND jsonb_array_length(mapping.metadata->'titulo_alternative') > 0)
@@ -1864,7 +1867,7 @@ export class LiteRepository {
             AND task.state IN ('READY','RUNNING','RETRY_WAIT')
           LIMIT 33
         ) q
-      `, [METADATA_CROSS_SOURCE_DISCOVERY_V6_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V6_PREFIX}~`]);
+      `, [METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}~`]);
             const capacity = Math.max(1, Math.min(32, Math.trunc(maxPending)));
             const pendingCount = Number(pending.rows[0]?.count || 0);
             if (pendingCount >= capacity) {
@@ -1880,6 +1883,7 @@ export class LiteRepository {
           SELECT id::text,work_key,checkpoint
           FROM importer_lite_tasks
           WHERE task_type='CATALOG' AND state='DONE'
+            AND idempotency_key >= $3 AND idempotency_key < $4
             AND payload ? 'metadataCrossSourceDiscovery'
             AND checkpoint->>'coverage'='CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED'
             AND next_run_at<=now()
@@ -1888,7 +1892,9 @@ export class LiteRepository {
           LIMIT $2
           FOR UPDATE SKIP LOCKED`, [
                     METADATA_CROSS_SOURCE_DEFERRED_RECHECK_LIMIT,
-                    deferredLimit
+                    deferredLimit,
+                    METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX,
+                    `${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}~`
                 ]);
                 for (const deferredTask of deferred.rows) {
                     const checkpoint = deferredTask.checkpoint || {};
@@ -1928,7 +1934,7 @@ export class LiteRepository {
         SELECT work_id::text
         FROM importer_lite_tasks
         WHERE idempotency_key >= $1 AND idempotency_key < $2
-      `, [METADATA_CROSS_SOURCE_DISCOVERY_V6_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V6_PREFIX}~`]);
+      `, [METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}~`]);
             const existingWorkIdSet = new Set(existingDiscoveryTasks.rows.map((r) => r.work_id));
             const selected = [];
             if (remainingAvailable > 0) {
@@ -1975,8 +1981,8 @@ export class LiteRepository {
           (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
           VALUES('CATALOG',$1::uuid,$2,3,3,$3,now(),16,$4::jsonb,'{}'::jsonb,false)
           ON CONFLICT(idempotency_key) DO NOTHING RETURNING work_key`, [
-                    workId, `work:${workId}`, `${METADATA_CROSS_SOURCE_DISCOVERY_V6_PREFIX}${workId}`,
-                    JSON.stringify({ metadataCrossSourceDiscovery: true, metadataEnrichmentVersion: 6,
+                    workId, `work:${workId}`, `${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}${workId}`,
+                    JSON.stringify({ metadataCrossSourceDiscovery: true, metadataEnrichmentVersion: 7,
                         discoveryLane: row.lane }),
                 ]);
                 if (inserted.rowCount) {

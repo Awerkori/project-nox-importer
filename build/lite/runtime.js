@@ -113,7 +113,7 @@ const CATALOG_TASK_LEASE_HEARTBEAT_MS = 30_000;
 // are simply left to their normal future discovery instead of blocking the
 // work's first publication indefinitely.
 const CROSS_SOURCE_METADATA_CONCURRENCY = 4;
-const CROSS_SOURCE_METADATA_TIMEOUT_MS = 5_000;
+const CROSS_SOURCE_METADATA_TIMEOUT_MS = 10_000;
 const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // A durable global task checkpoints several independent providers at once.
 // The shared source gate still caps aggregate external I/O, while batching
@@ -1445,7 +1445,7 @@ export class ImporterLiteRuntime {
                                 tagsState: extracted.tagsState,
                                 aliasesAdded, tagsAdded,
                                 error: extracted.parserError ? 'EXPLICIT_SOURCE_METADATA_NOT_PARSED' : null,
-                                rawMetadata: sourceMetadata, version: 6,
+                                rawMetadata: sourceMetadata, version: 7,
                             });
                             result.attached.push({ source, sourceWorkId: details.sourceWorkId, aliasesAdded, tagsAdded });
                         });
@@ -2415,6 +2415,25 @@ export class ImporterLiteRuntime {
         const remainingSources = sources.filter((candidate) => !checked.has(candidate));
         if (!remainingSources.length) {
             const deferredRounds = Math.max(0, Number(task.checkpoint.deferredRounds || 0));
+            const runnableDeferred = [...deferred].filter((s) => s !== 'brscans' && runnableSources.includes(s) && Boolean(this.registry.get(s)));
+            if (runnableDeferred.length > 0 && deferredRounds < 2) {
+                for (const s of runnableDeferred)
+                    checked.delete(s);
+                await this.queue.finish(task, workerId, {
+                    state: 'RETRY_WAIT', reason: 'CROSS_SOURCE_DEFERRED_OPERATIONAL_RETRY',
+                    nextRunAt: new Date(Date.now() + 5_000), resetAttempts: true,
+                    checkpoint: {
+                        metadataCrossSourceDiscovery: true,
+                        coverage: 'CROSS_SOURCE_DEFERRED_RECHECK',
+                        checkedSources: [...checked], deferredSources: [...deferred], matchedSources: matched.slice(0, 64),
+                        aliasesAdded: aliasesAdded + addedAliases, tagsAdded: tagsAdded + addedTags,
+                        deferredRounds: deferredRounds + 1,
+                        lastSource: sourceBatch.at(-1), checkedBatch: sourceBatch,
+                        lastOutcome: outcome.attached.length ? 'MATCHED' : 'DEFERRED',
+                    },
+                });
+                return;
+            }
             await this.queue.finish(task, workerId, {
                 state: 'DONE', resetAttempts: true,
                 nextRunAt: deferred.size ? new Date(Date.now() + CROSS_SOURCE_DEFERRED_RECHECK_INTERVAL_MS) : undefined,

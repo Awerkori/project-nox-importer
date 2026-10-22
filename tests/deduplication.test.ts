@@ -557,8 +557,8 @@ describe('DeduplicationEngine', () => {
       slug: 'another-published-series',
     }, pub2Id, 'nexus');
 
-    expect(result.status).toBe('AMBIGUOUS');
-    expect(result.workId).toBeNull();
-    expect(result.reason).toBe('CROSS_SOURCE_MAPPING_OWNED_BY_ANOTHER_WORK');
+    expect(result.status).toBe('EXISTING_MAPPING');
+    expect(result.workId).toBe(pub1Id);
+    expect(result.reason).toBe('CROSS_SOURCE_MAPPING_OWNED_BY_ANOTHER_WORK_ALIASED');
   });
 });
