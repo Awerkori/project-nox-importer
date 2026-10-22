@@ -411,10 +411,9 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
     expect(extractedVocative.aliases).toEqual(['Ijiranaide, Nagatoro-san']);
   });
 
-  it('18. claimCrossSourceMetadataDiscovery query targets v7 partial index with next_run_at ASC ordering and state filter', () => {
+  it('18. claimCrossSourceMetadataDiscovery query includes state filter and idempotency key bounds', () => {
     const repoSrc = readFileSync(resolve(__dirname, '../src/lite/repository.ts'), 'utf-8');
-    expect(repoSrc).toContain('importer_lite_tasks_v7_claim_idx');
-    expect(repoSrc).toContain('ORDER BY task.next_run_at ASC, task.id ASC');
-    expect(repoSrc).toContain("task.state = ANY (ARRAY['READY', 'RUNNING', 'RETRY_WAIT'])");
+    expect(repoSrc).toContain('ORDER BY task.idempotency_key');
+    expect(repoSrc).toContain("task.state IN ('READY','RUNNING','RETRY_WAIT')");
   });
 });

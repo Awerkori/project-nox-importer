@@ -1275,18 +1275,17 @@ export class LiteRepository {
    */
   async claimCrossSourceMetadataDiscovery(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
     const result = await this.sourceMetadataDb.query<Row>(`
-      /*+ IndexScan(task importer_lite_tasks_v7_claim_idx) */
       WITH picked AS (
         SELECT task.id
         FROM importer_lite_tasks task
         WHERE task.task_type='CATALOG'
-          AND task.state = ANY (ARRAY['READY', 'RUNNING', 'RETRY_WAIT'])
+          AND task.state IN ('READY','RUNNING','RETRY_WAIT')
           AND task.idempotency_key >= $1 AND task.idempotency_key < $2
           AND (
             (task.state IN ('READY','RETRY_WAIT') AND task.next_run_at<=now())
             OR (task.state='RUNNING' AND task.lease_until<now())
           )
-        ORDER BY task.next_run_at ASC, task.id ASC
+        ORDER BY task.idempotency_key
         LIMIT 1
         FOR UPDATE SKIP LOCKED
       )
