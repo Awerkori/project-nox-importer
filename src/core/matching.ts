@@ -474,6 +474,19 @@ export function matchWorkCandidate(target: MatchCandidate, candidate: MatchCandi
     };
   }
 
+  // Safety Guard 1c: Adult Parody / Hentai / Doujin vs Mainstream Comic rejection
+  const ADULT_PARODY_REGEX = /\b(?:hentai|porno|pornô|doujin(?:shi)?)\b/i;
+  const targetIsAdultParody = ADULT_PARODY_REGEX.test(target.title);
+  const candIsAdultParody = ADULT_PARODY_REGEX.test(candidate.title);
+  if (targetIsAdultParody !== candIsAdultParody) {
+    return {
+      matched: false,
+      confidenceScore: 0.0,
+      matchMethod: 'NO_MATCH',
+      reason: 'Content mismatch: Adult parody/hentai vs Mainstream work',
+    };
+  }
+
   // Safety Guard 2: Season mismatch
   const targetSeason = extractSeason(target.title);
   const candSeason = extractSeason(candidate.title);
