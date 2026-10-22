@@ -1,7 +1,20 @@
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { SourceAdapter, SourceChapterSummary, SourceWorkDetails, SourceWorkSummary } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { decryptMangoPayload } from '../mangotoons/mangotoons-decryptor.js';
+
+function normalizeText(text: string): string {
+  return text
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .normalize('NFC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
 
 const BASE_URL = 'https://imperiodabritannia.net';
 const API_URL = 'https://api.imperiodabritannia.net/api';
@@ -42,12 +55,51 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
   private tokenFetchedAt = 0;
   private readonly logger = new Logger('ImperioDaBritanniaAdapter');
 
+  private catalogItems: any[] = [];
+  private catalogByNormalizedTitle = new Map<string, any[]>();
+  private catalogBySlug = new Map<string, any>();
+  private catalogById = new Map<string, any>();
+  private catalogLoaded = false;
+
   constructor(
-    private readonly rateLimiter: HostRateLimiter = new HostRateLimiter(1),
+    private readonly rateLimiter: HostRateLimiter = new HostRateLimiter(4),
     private readonly transport: typeof fetch = fetch,
   ) {
-    this.rateLimiter.setHostRate(new URL(API_URL).host, 1, 2, 2);
+    this.rateLimiter.setHostRate(new URL(API_URL).host, 4, 8, 8);
     this.rateLimiter.setHostRate(new URL(CDN_URL).host, 4, 8, 8);
+  }
+
+  private ensureCatalogLoaded(): boolean {
+    if (this.catalogLoaded) return true;
+    try {
+      const currentDir = typeof __dirname !== 'undefined'
+        ? __dirname
+        : path.dirname(fileURLToPath(import.meta.url));
+      const catalogPath = path.resolve(currentDir, 'imperiodabritannia-catalog.json');
+      if (fs.existsSync(catalogPath)) {
+        const raw = fs.readFileSync(catalogPath, 'utf8');
+        this.catalogItems = JSON.parse(raw);
+        for (const item of this.catalogItems) {
+          this.catalogById.set(String(item.id), item);
+          if (item.slug) this.catalogBySlug.set(String(item.slug), item);
+          const titles = [item.nome, item.title, item.titulo_alternativo, item.titulos_alternativos].filter(Boolean) as string[];
+          for (const title of titles) {
+            const norm = normalizeText(String(title));
+            if (norm) {
+              const list = this.catalogByNormalizedTitle.get(norm) || [];
+              list.push(item);
+              this.catalogByNormalizedTitle.set(norm, list);
+            }
+          }
+        }
+        this.catalogLoaded = true;
+        this.logger.info(`Loaded ImperioDaBritannia local catalog index with ${this.catalogItems.length} works`);
+        return true;
+      }
+    } catch (err: any) {
+      this.logger.warn('Failed to load local ImperioDaBritannia catalog cache', { error: err?.message });
+    }
+    return false;
   }
 
   private async refreshApiToken(force = false): Promise<string | null> {
@@ -120,7 +172,52 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
     return { works, nextCursor: response.pagination?.hasNextPage ? String(page + 1) : null };
   }
 
+  private searchCatalog(query: string): SourceWorkSummary[] {
+    const norm = normalizeText(query);
+    const slug = slugify(query);
+    const matches: any[] = [];
+    const seen = new Set<string>();
+
+    const bySlug = this.catalogBySlug.get(slug);
+    if (bySlug && !seen.has(String(bySlug.id))) {
+      matches.push(bySlug);
+      seen.add(String(bySlug.id));
+    }
+
+    const exact = this.catalogByNormalizedTitle.get(norm) || [];
+    for (const item of exact) {
+      if (!seen.has(String(item.id))) {
+        matches.push(item);
+        seen.add(String(item.id));
+      }
+    }
+
+    if (matches.length < 5 && norm.length >= 4) {
+      for (const item of this.catalogItems) {
+        const idStr = String(item.id);
+        if (seen.has(idStr)) continue;
+        const itemNorm = normalizeText(String(item.nome || item.title || ''));
+        const altNorm = item.titulo_alternativo ? normalizeText(String(item.titulo_alternativo)) : '';
+        const matched =
+          (itemNorm.length >= 4 && (itemNorm.includes(norm) || norm.includes(itemNorm))) ||
+          (altNorm.length >= 4 && (altNorm.includes(norm) || norm.includes(altNorm)));
+        if (matched) {
+          matches.push(item);
+          seen.add(idStr);
+          if (matches.length >= 10) break;
+        }
+      }
+    }
+
+    return matches.map((work: any) => this.toSummary(work));
+  }
+
   async searchWorks(query: string): Promise<SourceWorkSummary[]> {
+    const clean = query.trim();
+    if (!clean) return [];
+    if (this.transport === fetch && this.ensureCatalogLoaded()) {
+      return this.searchCatalog(clean);
+    }
     const response = await this.request(`/obras?pagina=1&limite=20&busca=${encodeURIComponent(query)}`);
     return (response.obras || response.dados || response.data || [])
       .filter((work: any) => work?.id)
@@ -128,6 +225,10 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
   }
 
   private async work(sourceWorkId: string): Promise<any> {
+    if (this.transport === fetch && this.ensureCatalogLoaded()) {
+      const cached = this.catalogById.get(String(sourceWorkId)) || this.catalogBySlug.get(String(sourceWorkId));
+      if (cached) return cached;
+    }
     const response = await this.request(`/obras/${encodeURIComponent(sourceWorkId)}`);
     return response.obra || response.dados || response.data || response;
   }

@@ -18,7 +18,13 @@ export declare class NexusAdapter implements SourceAdapter {
     private apiUrl;
     private functionsUrl;
     private logger;
+    private catalogItems;
+    private catalogByNormalizedTitle;
+    private catalogBySlug;
+    private catalogById;
+    private catalogLoaded;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
+    private ensureCatalogLoaded;
     private get headers();
     private request;
     fetchUpdatedWorks(cursor?: string | null, options?: {
@@ -30,5 +36,6 @@ export declare class NexusAdapter implements SourceAdapter {
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string): Promise<string[]>;
+    private searchCatalog;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
 }

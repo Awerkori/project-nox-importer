@@ -699,7 +699,7 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
 
 async function main() {
   console.log('=== STARTING HIGH-THROUGHPUT STRICT POST-V7 CATALOG AUDIT DAEMON ===');
-  const limiter = new HostRateLimiter(6.0);
+  const limiter = new HostRateLimiter(8.0);
   const registry = new SourceRegistry(limiter);
   const sources = registry.getAll();
   console.log(`Loaded ${sources.length} total sources (42 operational + 1 externally unavailable: brscans).`);
@@ -748,7 +748,7 @@ async function main() {
 
   const startTime = Date.now();
   let loopCount = 0;
-  const CONCURRENCY = 6;
+  const CONCURRENCY = 12;
 
   while (true) {
     try {

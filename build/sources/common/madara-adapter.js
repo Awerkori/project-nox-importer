@@ -35,7 +35,7 @@ export class MadaraAdapter {
         this.mangaSubString = options.mangaSubString || 'manga';
         this.logger = new Logger(`MadaraAdapter:${this.id}`);
         const host = new URL(this.baseUrl).host;
-        const rps = options.rateLimitRps || 3.0;
+        const rps = options.rateLimitRps || 4.5;
         this.rateLimiter.setHostRate(host, rps, Math.ceil(rps * 2), rps * 2);
     }
     get headers() {
@@ -79,7 +79,7 @@ export class MadaraAdapter {
             catch (err) {
                 if (attempts >= maxAttempts)
                     throw err;
-                await new Promise((r) => setTimeout(r, 1000 * attempts));
+                await new Promise((r) => setTimeout(r, 600 * attempts));
             }
         }
         throw new Error(`Failed to fetch ${url} after ${maxAttempts} attempts`);

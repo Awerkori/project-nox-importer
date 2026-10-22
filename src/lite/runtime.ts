@@ -119,7 +119,7 @@ const CATALOG_TASK_LEASE_HEARTBEAT_MS = 30_000;
 // are simply left to their normal future discovery instead of blocking the
 // work's first publication indefinitely.
 const CROSS_SOURCE_METADATA_CONCURRENCY = 4;
-const CROSS_SOURCE_METADATA_TIMEOUT_MS = 10_000;
+const CROSS_SOURCE_METADATA_TIMEOUT_MS = 15_000;
 const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // A durable global task checkpoints several independent providers at once.
 // The shared source gate still caps aggregate external I/O, while batching
@@ -948,16 +948,9 @@ export class ImporterLiteRuntime {
       await this.refreshMetadataReplayV4ExclusiveMode();
       await this.refreshMetadataTurboMode();
       if (this.metadataTurboMode.enabled) {
-        await Promise.all([
-          this.runCrossSourceMetadataDiscovery(),
-          this.runCrossSourceMetadataDiscovery(),
-          this.runCrossSourceMetadataDiscovery(),
-          this.runCrossSourceMetadataDiscovery(),
-          this.runCrossSourceMetadataDiscovery(),
-          this.runCrossSourceMetadataDiscovery(),
-          this.runCrossSourceMetadataDiscovery(),
-          this.runCrossSourceMetadataDiscovery(),
-        ]);
+        await Promise.all(
+          Array.from({ length: 16 }, () => this.runCrossSourceMetadataDiscovery())
+        );
         void this.refillCrossSourceMetadataDiscovery();
       } else if (this.metadataReplayV4Exclusive.enabled) {
         await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
@@ -991,7 +984,7 @@ export class ImporterLiteRuntime {
     preferredSource?: string,
   ): Promise<void> {
     const minInterval = this.metadataTurboMode.enabled ? 2_000 : SOURCE_METADATA_REFILL_INTERVAL_MS;
-    if (!this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled
+    if (!this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled || this.metadataTurboMode.enabled
       || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < minInterval)) return;
     if (this.sourceMetadataRefreshDeferredForV4) {
       this.noteSourceMetadataProducer('DEFERRED_V4_BACKLOG');
@@ -1126,7 +1119,7 @@ export class ImporterLiteRuntime {
     // Let in-flight requests finish, but do not start more background source
     // fetches under sustained *metadata-pool* pressure, while the site is
     // paused, or when RSS nears the container's 512 MiB boundary.
-    if (this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4) return false;
+    if (this.metadataReplayV4Exclusive.enabled || this.metadataTurboMode.enabled || this.sourceMetadataRefreshDeferredForV4) return false;
     const sustainedPoolPressure = this.hasSustainedSourceMetadataPoolPressure();
     // See refillSourceMetadataEnrichment: only an intermittent isolated-pool
     // queue constrains this optional lane to one external request.
@@ -1349,7 +1342,9 @@ export class ImporterLiteRuntime {
               let fallback: { sourceWorkId: string; title: string; slug: string } | null = null;
               const seenSummaryIds = new Set<string>();
               for (const query of queryCandidates) {
-                await this.sourceRateLimiter.acquire(host, undefined, 60_000);
+                if (!this.metadataTurboMode.enabled) {
+                  await this.sourceRateLimiter.acquire(host, undefined, 60_000);
+                }
                 const summaries = await this.sourceMetadataGate.runExclusive(async () => {
                   return withTimeout(adapter.searchWorks(query), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_SEARCH_TIMEOUT');
                 });
@@ -1384,7 +1379,9 @@ export class ImporterLiteRuntime {
             result.attemptedSources.push(source);
             if (!selected) continue;
 
-            await this.sourceRateLimiter.acquire(host, undefined, 60_000);
+            if (!this.metadataTurboMode.enabled) {
+              await this.sourceRateLimiter.acquire(host, undefined, 60_000);
+            }
             const details = await this.sourceMetadataGate.runExclusive(async () => {
               return withTimeout(adapter.fetchWorkDetails(selected!.sourceWorkId), CROSS_SOURCE_METADATA_TIMEOUT_MS,
                 'CROSS_SOURCE_DETAILS_TIMEOUT');
@@ -2450,11 +2447,11 @@ export class ImporterLiteRuntime {
       const runnableDeferred = [...deferred].filter(
         (s) => s !== 'brscans' && policyMap.get(s)?.runnable !== false && Boolean(this.registry.get(s))
       );
-      if (runnableDeferred.length > 0 && deferredRounds < 2) {
+      if (runnableDeferred.length > 0 && deferredRounds < 1) {
         for (const s of runnableDeferred) checked.delete(s);
         await this.queue.finish(task, workerId, {
           state: 'RETRY_WAIT', reason: 'CROSS_SOURCE_DEFERRED_OPERATIONAL_RETRY',
-          nextRunAt: new Date(Date.now() + 5_000), resetAttempts: true,
+          nextRunAt: new Date(Date.now() + 1_500), resetAttempts: true,
           checkpoint: {
             metadataCrossSourceDiscovery: true,
             coverage: 'CROSS_SOURCE_DEFERRED_RECHECK',

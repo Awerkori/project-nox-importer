@@ -80,7 +80,7 @@ export class WpGalleryAdapter implements SourceAdapter {
     this.logger = new Logger(`WpGalleryAdapter:${this.id}`);
 
     const host = new URL(this.baseUrl).host;
-    const rps = options.rateLimitRps || 2.0;
+    const rps = options.rateLimitRps || 4.0;
     this.rateLimiter.setHostRate(host, rps, Math.ceil(rps * 2), rps * 2);
   }
 
@@ -124,11 +124,11 @@ export class WpGalleryAdapter implements SourceAdapter {
 
         return (await res.json()) as T;
       } catch (err: any) {
-        if (err?.status && err.status >= 400 && err.status < 500 && err.status !== 429) {
+        if ((err?.status && err.status >= 400 && err.status < 500 && err.status !== 429) || err?.name === 'SyntaxError') {
           throw err;
         }
         if (attempts >= maxAttempts) throw err;
-        await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
+        await new Promise((resolve) => setTimeout(resolve, 600 * attempts));
       }
     }
     throw new Error(`Failed to fetch JSON from ${url}`);
