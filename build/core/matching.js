@@ -457,6 +457,30 @@ export function matchWorkCandidate(target, candidate) {
             reason: 'Matched known canonical synonym group (e.g. translation variant)',
         };
     }
+    // Subtitle concatenation match: candidate starts with target title and remainder matches an alias
+    if (normCand.startsWith(normTarget) && normTarget.length >= 10) {
+        const remainder = normCand.slice(normTarget.length).replace(/^[\s:–—\-]+/, '').trim();
+        if (remainder.length >= 6 && targetAliases.some((a) => a.length >= 6 && (remainder.includes(a) || a.includes(remainder)))) {
+            return {
+                matched: true,
+                confidenceScore: 0.96,
+                matchMethod: 'ALIAS_EXACT',
+                reason: 'Candidate concatenated target title with known alias phrase',
+            };
+        }
+    }
+    // Vice versa: target starts with candidate title and remainder matches a candidate alias
+    if (normTarget.startsWith(normCand) && normCand.length >= 10) {
+        const remainder = normTarget.slice(normCand.length).replace(/^[\s:–—\-]+/, '').trim();
+        if (remainder.length >= 6 && candAliases.some((a) => a.length >= 6 && (remainder.includes(a) || a.includes(remainder)))) {
+            return {
+                matched: true,
+                confidenceScore: 0.96,
+                matchMethod: 'ALIAS_EXACT',
+                reason: 'Target concatenated candidate title with known alias phrase',
+            };
+        }
+    }
     // Check cross-alias matches
     for (const alias of targetAliases) {
         if (alias === normCand ||
