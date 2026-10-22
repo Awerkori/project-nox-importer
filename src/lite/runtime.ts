@@ -2475,7 +2475,7 @@ export class ImporterLiteRuntime {
         for (const s of runnableDeferred) checked.delete(s);
         await this.queue.finish(task, workerId, {
           state: 'RETRY_WAIT', reason: 'CROSS_SOURCE_DEFERRED_OPERATIONAL_RETRY',
-          nextRunAt: new Date(Date.now() - 3600_000), resetAttempts: true,
+          nextRunAt: new Date('2026-10-22T00:00:00Z'), resetAttempts: true,
           checkpoint: {
             metadataCrossSourceDiscovery: true,
             coverage: 'CROSS_SOURCE_DEFERRED_RECHECK',
