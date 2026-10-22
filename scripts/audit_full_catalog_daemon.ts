@@ -348,7 +348,7 @@ export async function verifySourceIndependently(
         const targetKeys = new Set([workTitle, ...knownAliases].map((t) => alternativeTitleKey(t)).filter(Boolean));
         const hasExactAliasIntersection = allExtractedTitles.some((t) => {
           const k = alternativeTitleKey(t);
-          if (!k || k.length < 8 || /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|love|hello|alone|baby|oneshot|manga|comic)$/i.test(k)) return false;
+          if (!k || k.length < 8 || /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|na\s*verdade|actually|in\s*fact|turns\s*out|love|hello|alone|baby|oneshot|manga|comic)$/i.test(k)) return false;
           return Boolean(targetKeys.has(k));
         });
         if ((!detailMatch.matched || detailMatch.confidenceScore < 0.75) && !hasExactAliasIntersection) {
@@ -519,6 +519,14 @@ const FORBIDDEN_WORDS = new Set([
   'hentai', 'raw', 'scan', 'oneshot', 'one-shot', 'primal'
 ]);
 
+const normKey = (s: string) => s
+  .replace(/⁄/g, '/')
+  .replace(/[½]/g, '1/2')
+  .replace(/[\-–—_~]/g, ' ')
+  .toLowerCase()
+  .replace(/[^a-z0-9\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/gi, '')
+  .trim();
+
 function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: string[]): { isLegitimate: boolean; cleaned?: string; reason?: string } {
   let raw = cand.trim();
   if (/console\.log|add_main_gen|function\(|window\.|<script|document\.|style=|font-|margin-|padding-|rgba?\(|calc\(|!important|src:url|woff2|grid-template|fill:#|display=swap|indexOf|media\$thumbnail/i.test(raw)) {
@@ -565,14 +573,6 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
   if (cleaned.length < 2 && !isCJK) {
     return { isLegitimate: false, reason: 'Too short (< 2 chars non-CJK)' };
   }
-
-  const normKey = (s: string) => s
-    .replace(/⁄/g, '/')
-    .replace(/[½]/g, '1/2')
-    .replace(/[\-–—_~]/g, ' ')
-    .toLowerCase()
-    .replace(/[^a-z0-9\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/gi, '')
-    .trim();
 
   if (normKey(cleaned) === normKey(workTitle)) {
     return { isLegitimate: false, reason: 'Punctuation/spacing/unicode variation of primary title' };
@@ -668,8 +668,12 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
     if (ysqlKeys.has(key)) return false;
     if (titleSubParts.has(key)) return false;
     if (targetLower.includes(cleaned.toLowerCase().trim())) return false;
+    const nkCleaned = normKey(cleaned);
     for (const ca of currentAliasesYsql) {
       if (ca.toLowerCase().includes(cleaned.toLowerCase().trim())) return false;
+      const nkCa = normKey(ca);
+      if (nkCa === nkCleaned) return false;
+      if (nkCleaned.length >= 10 && (nkCa.includes(nkCleaned) || nkCleaned.includes(nkCa))) return false;
     }
     return true;
   });
