@@ -113,7 +113,7 @@ const CATALOG_TASK_LEASE_HEARTBEAT_MS = 30_000;
 // are simply left to their normal future discovery instead of blocking the
 // work's first publication indefinitely.
 const CROSS_SOURCE_METADATA_CONCURRENCY = 4;
-const CROSS_SOURCE_METADATA_TIMEOUT_MS = 15_000;
+const CROSS_SOURCE_METADATA_TIMEOUT_MS = 20_000;
 const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // A durable global task checkpoints several independent providers at once.
 // The shared source gate still caps aggregate external I/O, while batching
@@ -936,7 +936,8 @@ export class ImporterLiteRuntime {
             await this.refreshMetadataReplayV4ExclusiveMode();
             await this.refreshMetadataTurboMode();
             if (this.metadataTurboMode.enabled) {
-                await Promise.all(Array.from({ length: 16 }, () => this.runCrossSourceMetadataDiscovery()));
+                const concurrency = Math.max(16, this.metadataTurboMode.discoveryConcurrency ?? 24);
+                await Promise.all(Array.from({ length: concurrency }, () => this.runCrossSourceMetadataDiscovery()));
                 void this.refillCrossSourceMetadataDiscovery();
             }
             else if (this.metadataReplayV4Exclusive.enabled) {
@@ -1401,10 +1402,13 @@ export class ImporterLiteRuntime {
                             return Boolean(na && nta && na === nta && !/^(manga|manhwa|manhua|webtoon|comic|novel|feed|scan)$/i.test(na));
                         }));
                         const titleIsSpecific = (targetTitle.length >= 1 && !isGenericWord);
-                        const exactBoth = (summaryMatch ? ['EXACT_TITLE', 'EXACT_SLUG'].includes(summaryMatch.matchMethod) : true)
-                            && ['EXACT_TITLE', 'EXACT_SLUG'].includes(detailMatch.matchMethod);
+                        const isHighConfidenceMatch = detailMatch.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE
+                            && (summaryMatch ? summaryMatch.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE : true);
+                        const exactOrHighConfidence = ((summaryMatch ? ['EXACT_TITLE', 'EXACT_SLUG'].includes(summaryMatch.matchMethod) : true)
+                            && ['EXACT_TITLE', 'EXACT_SLUG'].includes(detailMatch.matchMethod))
+                            || isHighConfidenceMatch;
                         const independentlyCorroborated = isKnownWorkMapping || detailEvidence.autoMatch || explicitCrossAlias
-                            || (titleIsSpecific && exactBoth);
+                            || (titleIsSpecific && exactOrHighConfidence);
                         if ((!isKnownWorkMapping && (!detailMatch.matched || detailMatch.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE))
                             || !independentlyCorroborated) {
                             this.logger.info('Rejected complementary metadata candidate after detail verification', {

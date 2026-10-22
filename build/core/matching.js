@@ -503,6 +503,23 @@ export function matchWorkCandidate(target, candidate) {
             };
         }
     }
+    // Composite candidate titles separated by '|', '//', or ' / ' (e.g. "Natsuyasumi! | Summer Break!")
+    if (candidate.title && (/\||\/\/|\s\/\s/.test(candidate.title))) {
+        const parts = candidate.title.split(/\s*(?:\||\/\/|\s\/\s)\s*/).map((s) => s.trim()).filter(Boolean);
+        if (parts.length > 1) {
+            for (const part of parts) {
+                if (part === candidate.title)
+                    continue;
+                const subMatch = matchWorkCandidate(target, { ...candidate, title: part });
+                if (subMatch.matched && subMatch.confidenceScore >= 0.85) {
+                    return {
+                        ...subMatch,
+                        reason: `Matched title sub-clause "${part}" in composite "${candidate.title}"`,
+                    };
+                }
+            }
+        }
+    }
     return {
         matched: false,
         confidenceScore: 0.0,

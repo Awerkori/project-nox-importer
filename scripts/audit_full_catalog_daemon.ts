@@ -595,6 +595,15 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
   if (normKey(workTitle).startsWith(normKey(cleaned)) && normKey(cleaned).length >= 8) {
     return { isLegitimate: false, reason: 'Chopped prefix fragment of primary title' };
   }
+  const prefixSlice = normKey(workTitle).slice(0, normKey(cleaned).length);
+  if (normKey(cleaned).length >= 25 && prefixSlice.length >= 25 && diceSimilarity(prefixSlice, normKey(cleaned)) > 0.88) {
+    return { isLegitimate: false, reason: 'Chopped prefix fragment of primary title with minor transliteration difference' };
+  }
+
+  // Interjection or clause prefix alone (e.g. "Ijirimakutte")
+  if (/^(?:ijirimakutte|ijiranaide|uzaki|komi)\b/i.test(cleaned) && normKey(workTitle).includes(normKey(cleaned))) {
+    return { isLegitimate: false, reason: 'Interjection/vocative prefix alone' };
+  }
 
   for (const ca of currentAliases) {
     if (normKey(cleaned) === normKey(ca)) {

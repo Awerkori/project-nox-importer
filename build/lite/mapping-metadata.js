@@ -58,7 +58,7 @@ function explicitJsonArray(value) {
     }
 }
 const CLAUSE_CONTINUATION_REGEX = /^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por)\b/i;
-const VOCATIVE_HONORIFIC_REGEX = /-(?:san|kun|chan|sama|sensei|senpai|dono)\b/i;
+const VOCATIVE_NAME_REGEX = /^[a-zA-Z\u00C0-\u017F\s]{1,25}-(?:san|kun|chan|sama|sensei|senpai|dono)[!?.]*$/i;
 const INTERJECTION_PREFIXES = new Set(['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá', 'ijiranaide', 'ijirimakutte', 'uzaki', 'komi']);
 function splitDelimitedTitles(text) {
     const trimmed = text.trim();
@@ -70,19 +70,17 @@ function splitDelimitedTitles(text) {
     if (/;/.test(trimmed)) {
         return trimmed.split(/;+/).map((s) => s.trim()).filter(Boolean);
     }
-    if (/\s+\/\s+/.test(trimmed)) {
-        return trimmed.split(/\s+\/\s+/).map((s) => s.trim()).filter(Boolean);
+    if (/\s+\/\s+|\s*\/\/\s*|\|/.test(trimmed)) {
+        return trimmed.split(/\s*(?:\/|\/\/|\|)\s*/).map((s) => s.trim()).filter(Boolean);
     }
-    if (/, /.test(trimmed)) {
-        const parts = trimmed.split(/,\s+/).map((s) => s.trim()).filter(Boolean);
+    if (/,/.test(trimmed)) {
+        const parts = trimmed.split(/,\s*/).map((s) => s.trim()).filter(Boolean);
         if (parts.length > 1) {
-            // If the first part is an interjection (e.g. "Hello, Fluffy Griffin!"), or any subsequent part
-            // is a clause continuation (e.g. "For I Am The Abyss", "Yet Pure White", "so I ..."),
-            // or starts with a lowercase letter, or contains a vocative honorific, it is a single grammatical title.
             const firstWord = parts[0].toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
-            const isGrammaticalTitle = INTERJECTION_PREFIXES.has(firstWord)
-                || VOCATIVE_HONORIFIC_REGEX.test(trimmed)
-                || parts.some((p, i) => i > 0 && (CLAUSE_CONTINUATION_REGEX.test(p) || /^[a-z]/.test(p)));
+            const isVocative = VOCATIVE_NAME_REGEX.test(parts[0]) || VOCATIVE_NAME_REGEX.test(parts[1]);
+            const isInterjection = INTERJECTION_PREFIXES.has(firstWord);
+            const isClauseContinuation = parts.some((p, i) => i > 0 && (CLAUSE_CONTINUATION_REGEX.test(p) || /^[a-z]/.test(p)));
+            const isGrammaticalTitle = isInterjection || isVocative || isClauseContinuation;
             if (!isGrammaticalTitle) {
                 return parts;
             }
