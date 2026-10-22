@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { HostRateLimiter } from '../src/core/rate-limiter.js';
 import { WpGalleryAdapter } from '../src/sources/common/wpgallery-adapter.js';
 import { ZeistMangaAdapter } from '../src/sources/common/zeistmanga-adapter.js';
@@ -21,6 +24,7 @@ import {
 } from '../scripts/audit_full_catalog_daemon.js';
 
 describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
+  const __dirname = dirname(fileURLToPath(import.meta.url));
   const limiter = new HostRateLimiter(100);
 
   it('1. Adapter returning timeout -> auditor classifies as DEFERRED_TIMEOUT, never NOT_FOUND', async () => {
@@ -405,5 +409,12 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
     };
     const extractedVocative = classifyExplicitSourceMetadata(metaWithVocative, 'Don\'t Toy with Me, Miss Nagatoro');
     expect(extractedVocative.aliases).toEqual(['Ijiranaide, Nagatoro-san']);
+  });
+
+  it('18. claimCrossSourceMetadataDiscovery query targets v7 partial index with next_run_at ASC ordering and state filter', () => {
+    const repoSrc = readFileSync(resolve(__dirname, '../src/lite/repository.ts'), 'utf-8');
+    expect(repoSrc).toContain('importer_lite_tasks_v7_claim_idx');
+    expect(repoSrc).toContain('ORDER BY task.next_run_at ASC, task.id ASC');
+    expect(repoSrc).toContain("task.state = ANY (ARRAY['READY', 'RUNNING', 'RETRY_WAIT'])");
   });
 });
