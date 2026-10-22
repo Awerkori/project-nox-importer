@@ -161,4 +161,16 @@ describe('work matching safety', () => {
       { title: 'Natsuyasumi! | Summer Break!' },
     ).matched).toBe(true);
   });
+
+  it('matches candidate title that concatenates target title with known alias phrase', () => {
+    expect(matchWorkCandidate(
+      {
+        title: 'A Dona de Casa Shizuka Tachibana',
+        aliases: ['Que Pediu A Doação da Minha Porra', 'Não Entende De Nada!'],
+      },
+      {
+        title: 'A Dona de Casa Shizuka Tachibana Que Pediu A Doação da Minha Porra Não Entende De Nada!',
+      },
+    ).matched).toBe(true);
+  });
 });

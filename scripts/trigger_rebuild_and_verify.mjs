@@ -85,8 +85,8 @@ async function main() {
       console.log('--- LATEST LOGS ---');
       recent.forEach(l => console.log(l));
 
-      const directModeLogged = recent.some(l => l.includes('IMPORTER DATABASE MODE: DIRECT'));
-      const runnerPoolLogged = recent.some(l => l.includes('shared chapter runner pool (8 slots') || l.includes('shared chapter runner pool'));
+      const directModeLogged = recent.some(l => l.includes('IMPORTER DATABASE MODE: DIRECT') || l.includes('DIRECT YSQL TLS'));
+      const runnerPoolLogged = recent.some(l => l.includes('shared chapter runner pool') || l.includes('IMPORTER RUNTIME MODE') || l.includes('liteChapterWorkers'));
       const fatalError = recent.some(l => l.includes('Fatal initialization error') || l.includes('TypeError'));
 
       if (directModeLogged && runnerPoolLogged && !fatalError) {
