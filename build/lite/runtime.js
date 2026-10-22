@@ -1337,7 +1337,7 @@ export class ImporterLiteRuntime {
                                         continue;
                                     seenSummaryIds.add(summaryId);
                                     const match = matchWorkCandidate(target, { title: summary.title, slug: summary.slug });
-                                    if (match.matched && match.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE) {
+                                    if (match.matched && (match.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE || (match.matchMethod === 'FUZZY_HIGH' && match.confidenceScore >= 0.85))) {
                                         selected = summary;
                                         summaryMatch = match;
                                         break;
@@ -1404,14 +1404,15 @@ export class ImporterLiteRuntime {
                             return Boolean(na && nta && na === nta && !/^(manga|manhwa|manhua|webtoon|comic|novel|feed|scan)$/i.test(na));
                         }));
                         const titleIsSpecific = (targetTitle.length >= 1 && !isGenericWord);
-                        const isHighConfidenceMatch = detailMatch.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE
-                            && (summaryMatch ? summaryMatch.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE : true);
+                        const isHighConfidenceMatch = (detailMatch.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE
+                            || (detailMatch.matchMethod === 'FUZZY_HIGH' && detailMatch.confidenceScore >= 0.85))
+                            && (summaryMatch ? (summaryMatch.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE || summaryMatch.matchMethod === 'FUZZY_HIGH') : true);
                         const exactOrHighConfidence = ((summaryMatch ? ['EXACT_TITLE', 'EXACT_SLUG'].includes(summaryMatch.matchMethod) : true)
                             && ['EXACT_TITLE', 'EXACT_SLUG'].includes(detailMatch.matchMethod))
                             || isHighConfidenceMatch;
                         const independentlyCorroborated = isKnownWorkMapping || detailEvidence.autoMatch || explicitCrossAlias
                             || (titleIsSpecific && exactOrHighConfidence);
-                        if ((!isKnownWorkMapping && (!detailMatch.matched || detailMatch.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE))
+                        if ((!isKnownWorkMapping && (!detailMatch.matched || (detailMatch.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE && (detailMatch.matchMethod !== 'FUZZY_HIGH' || detailMatch.confidenceScore < 0.85))))
                             || !independentlyCorroborated) {
                             this.logger.info('Rejected complementary metadata candidate after detail verification', {
                                 workId: input.workId, source, sourceWorkId: selected.sourceWorkId,
