@@ -785,6 +785,7 @@ async function main() {
     campaign_version: 7,
     total_published: 9291,
     v7_done_total: 0,
+    v7_audited_total: 0,
     v7_done_audit_pass: 0,
     v7_done_audit_fail: 0,
     v7_done_audit_inconclusive: 0,
@@ -795,6 +796,16 @@ async function main() {
     last_audited_work: '',
     updated_at: new Date().toISOString(),
   };
+
+  function syncStats(statsObj: typeof stats, map: Map<string, any>) {
+    const allAudited = Array.from(map.values());
+    statsObj.v7_done_audit_pass = allAudited.filter((r) => r.verdict === 'AUDIT_PASS').length;
+    statsObj.v7_done_audit_fail = allAudited.filter((r) => r.verdict === 'AUDIT_FAIL').length;
+    statsObj.v7_done_audit_inconclusive = allAudited.filter((r) => r.verdict === 'AUDIT_INCONCLUSIVE').length;
+    statsObj.v7_audited_total = allAudited.length;
+    statsObj.v7_done_pending_audit = Math.max(0, statsObj.v7_done_total - statsObj.v7_audited_total);
+    statsObj.updated_at = new Date().toISOString();
+  }
 
   // 1. Load existing V7 audit records ONLY (zero reuse of V6 approvals or pre-V6 caches)
   const latestPostV7Map = new Map<string, any>();
@@ -887,12 +898,13 @@ async function main() {
 
       const unaudited = candidates.rows;
 
-      // --- FLUXO B: Parallel Revalidation Queue for AUDIT_INCONCLUSIVE and AUDIT_FAIL works ---
+      // --- FLUXO B: Parallel Turbo Revalidation Queue for AUDIT_INCONCLUSIVE and AUDIT_FAIL works ---
       const now = Date.now();
       const allCands = Array.from(latestPostV7Map.values());
       const failCands = allCands.filter((r) => r.verdict === 'AUDIT_FAIL' && (now - new Date(r.revalidatedAt || r.auditedAt || 0).getTime()) > 30 * 1000);
       const incCands = allCands.filter((r) => r.verdict === 'AUDIT_INCONCLUSIVE' && (now - new Date(r.revalidatedAt || r.auditedAt || 0).getTime()) > 2 * 60 * 1000);
-      const revalidationCandidates = [...failCands, ...incCands].slice(0, 4);
+      const batchSize = unaudited.length === 0 ? 16 : 8;
+      const revalidationCandidates = [...failCands, ...incCands].slice(0, batchSize);
 
       if (revalidationCandidates.length > 0) {
         console.log(`[FLUXO B REVALIDATION] Re-auditing ${revalidationCandidates.length} works (INCONCLUSIVE/FAIL)...`);
@@ -922,42 +934,38 @@ async function main() {
           });
         }
 
-        for (const candidate of revalidationCandidates) {
-          const w = worksById.get(candidate.workId);
-          if (!w) continue;
-          const mappings = mappingsByWorkId.get(candidate.workId) || [];
-          const currentAliases = Array.isArray(w.aliases) ? w.aliases : [];
-          const taskInfo = tasksById.get(candidate.workId) || null;
-          try {
-            const freshRecord = await auditWork(w, sources, mappings, currentAliases, taskInfo, candidate);
-            if (freshRecord) {
-              freshRecord.revalidationAttempts = (candidate.revalidationAttempts || 0) + 1;
-              freshRecord.revalidatedAt = new Date().toISOString();
-              const oldVerdict = latestPostV7Map.get(candidate.workId)?.verdict;
-              if (oldVerdict === 'AUDIT_INCONCLUSIVE') stats.v7_done_audit_inconclusive--;
-              else if (oldVerdict === 'AUDIT_FAIL') stats.v7_done_audit_fail--;
-              else if (oldVerdict === 'AUDIT_PASS') stats.v7_done_audit_pass--;
+        const REVAL_CONCURRENCY = 4;
+        for (let i = 0; i < revalidationCandidates.length; i += REVAL_CONCURRENCY) {
+          const revalChunk = revalidationCandidates.slice(i, i + REVAL_CONCURRENCY);
+          await Promise.all(revalChunk.map(async (candidate) => {
+            const w = worksById.get(candidate.workId);
+            if (!w) return;
+            const mappings = mappingsByWorkId.get(candidate.workId) || [];
+            const currentAliases = Array.isArray(w.aliases) ? w.aliases : [];
+            const taskInfo = tasksById.get(candidate.workId) || null;
+            try {
+              const freshRecord = await auditWork(w, sources, mappings, currentAliases, taskInfo, candidate);
+              if (freshRecord) {
+                freshRecord.revalidationAttempts = (candidate.revalidationAttempts || 0) + 1;
+                freshRecord.revalidatedAt = new Date().toISOString();
+                const oldVerdict = latestPostV7Map.get(candidate.workId)?.verdict;
 
-              if (freshRecord.verdict === 'AUDIT_PASS') stats.v7_done_audit_pass++;
-              else if (freshRecord.verdict === 'AUDIT_FAIL') stats.v7_done_audit_fail++;
-              else stats.v7_done_audit_inconclusive++;
-
-              latestPostV7Map.set(candidate.workId, freshRecord);
-              fs.appendFileSync(POST_V7_RESULTS_FILE, JSON.stringify(freshRecord) + '\n', 'utf8');
-              fs.appendFileSync(RESULTS_FILE, JSON.stringify(freshRecord) + '\n', 'utf8');
-              console.log(`[REVALIDATED] ${w.title}: ${oldVerdict} -> ${freshRecord.verdict}`);
+                latestPostV7Map.set(candidate.workId, freshRecord);
+                fs.appendFileSync(POST_V7_RESULTS_FILE, JSON.stringify(freshRecord) + '\n', 'utf8');
+                fs.appendFileSync(RESULTS_FILE, JSON.stringify(freshRecord) + '\n', 'utf8');
+                console.log(`[REVALIDATED] ${w.title}: ${oldVerdict} -> ${freshRecord.verdict}`);
+              }
+            } catch (e: any) {
+              console.warn(`[REVALIDATION ERROR] ${w.title}:`, e?.message);
             }
-          } catch (e: any) {
-            console.warn(`[REVALIDATION ERROR] ${w.title}:`, e?.message);
-          }
+          }));
         }
-        stats.updated_at = new Date().toISOString();
+        syncStats(stats, latestPostV7Map);
         fs.writeFileSync(SUMMARY_FILE, JSON.stringify(stats, null, 2), 'utf8');
       }
 
       if (unaudited.length === 0) {
-        stats.v7_done_pending_audit = 0;
-        stats.updated_at = new Date().toISOString();
+        syncStats(stats, latestPostV7Map);
         fs.writeFileSync(SUMMARY_FILE, JSON.stringify(stats, null, 2), 'utf8');
         if (revalidationCandidates.length === 0) {
           console.log(`[LOCKSTEP AUDITOR V7] All ${stats.v7_done_total} V7 DONE works fully audited & no revalidation pending! Waiting 3s...`);
@@ -1046,7 +1054,7 @@ async function main() {
         if (elapsedMins > 0) {
           stats.audit_speed_works_per_min = parseFloat((loopCount / elapsedMins).toFixed(2));
         }
-        stats.updated_at = new Date().toISOString();
+        syncStats(stats, latestPostV7Map);
         fs.writeFileSync(SUMMARY_FILE, JSON.stringify(stats, null, 2), 'utf8');
       }
     } catch (loopErr: any) {
