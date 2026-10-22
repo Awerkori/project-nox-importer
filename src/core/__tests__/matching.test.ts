@@ -191,4 +191,16 @@ describe('work matching safety', () => {
       { title: "Pixiu's Eatery, No Way Out", aliases: ["Pixiu's Eatery, No Way Out"] },
     ).matched).toBe(false);
   });
+
+  it('rejects matching comic works against image/photo packs and avoids splitting slashes inside parentheses', () => {
+    expect(matchWorkCandidate(
+      { title: 'Mirko', aliases: ['Mirko | Boku no Hero Academia | Hentai'] },
+      { title: 'Pack de Imagens (Hero Academia / Mirko)' },
+    ).matched).toBe(false);
+
+    expect(matchWorkCandidate(
+      { title: 'Hero Academia' },
+      { title: 'Pacote de Fotos (Hero Academia / Mirko)' },
+    ).matched).toBe(false);
+  });
 });

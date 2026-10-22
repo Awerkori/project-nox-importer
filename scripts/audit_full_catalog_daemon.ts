@@ -75,9 +75,9 @@ export function extractRawAlternativeTitlesFromAdapterDetails(details: any, work
   const raw = details.raw || {};
   const rawFields = [
     'alternativeTitles', 'altTitles', 'other_titles', 'alternative_titles',
-    'titulo_alternativo', 'outros_titulos', 'sinonimos', 'obr_outros_nomes',
-    'obr_nome_alternativo', 'obr_titulo_alternativo', 't', 'tb', 'alt',
-    'titulo_alternative', 'titulo_brasil'
+    'titulo_alternativo', 'titulos_alternativos', 'outros_titulos', 'sinonimos',
+    'obr_outros_nomes', 'obr_nome_alternativo', 'obr_titulo_alternativo', 'alt',
+    'titulo_alternative'
   ];
 
   for (const f of rawFields) {
@@ -105,18 +105,21 @@ export function extractRawAlternativeTitlesFromAdapterDetails(details: any, work
   }
 
   const titleCandidates: string[] = [];
-  if (details.title && typeof details.title === 'string') {
-    if (!/^v[íi]deo\s+/i.test(details.title)) {
-      const rawTitle = details.title.replace(/^[\s\["'`]+|[\s\]"'`]+$/g, '').trim();
-      if (rawTitle) {
-        // details.title is NEVER a comma-separated list of alternative titles.
-        // It is the single canonical title on that adapter. Split ONLY by explicit multi-title delimiters (|, //, ;, \r\n).
-        if (/[\r\n]/.test(rawTitle)) {
-          titleCandidates.push(...rawTitle.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean));
-        } else if (/\s*\|\s*|\s*\/\/\s*|;+/.test(rawTitle)) {
-          titleCandidates.push(...rawTitle.split(/\s*\|\s*|\s*\/\/\s*|;+/).map((s) => s.trim()).filter(Boolean));
-        } else {
-          titleCandidates.push(rawTitle);
+  // Primary titles and Brazilian titles are single titles, never comma-separated lists of aliases
+  for (const tField of [details.title, raw.tb, raw.titulo_brasil]) {
+    if (tField && typeof tField === 'string') {
+      if (!/^v[íi]deo\s+/i.test(tField)) {
+        const rawTitle = tField.replace(/^[\s\["'`]+|[\s\]"'`]+$/g, '').trim();
+        if (rawTitle) {
+          // details.title/tb is NEVER a comma-separated list of alternative titles.
+          // It is the single canonical title on that adapter. Split ONLY by explicit multi-title delimiters (|, //, ;, \r\n).
+          if (/[\r\n]/.test(rawTitle)) {
+            titleCandidates.push(...rawTitle.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean));
+          } else if (/\s*\|\s*|\s*\/\/\s*|;+/.test(rawTitle)) {
+            titleCandidates.push(...rawTitle.split(/\s*\|\s*|\s*\/\/\s*|;+/).map((s) => s.trim()).filter(Boolean));
+          } else {
+            titleCandidates.push(rawTitle);
+          }
         }
       }
     }
@@ -563,6 +566,9 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
   }
   if (/\\u[0-9a-f]{4}|",\s*"|^\s*["\]\}]|\b(?:slug|sourceWorkId|alternativeTitles)\b/i.test(raw)) {
     return { isLegitimate: false, reason: 'Raw JSON or serialized object fragment' };
+  }
+  if (/^(?:pack|pacote)\s+de\s+(?:imagens|fotos|cosplay|artes?)\b/i.test(raw)) {
+    return { isLegitimate: false, reason: 'Image/photo pack metadata snippet' };
   }
 
   let cleaned = raw;
