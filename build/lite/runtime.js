@@ -1351,9 +1351,10 @@ export class ImporterLiteRuntime {
                                     if (input.allowFallbackDetailProbe && !fallback) {
                                         const isIndexedSource = source === 'mangadex' || source === 'mangaupdates' || source === 'anilist'
                                             || source === 'manhastro' || source === 'nexus' || source === 'imperiodabritannia' || source === 'hipercool'
-                                            || source === 'mangaflix' || source === 'mangotoons';
+                                            || source === 'mangaflix' || source === 'mangotoons' || source === 'tankouhentai' || source === 'mangalivreto'
+                                            || source === 'mangaonlinetv';
                                         const hasTokenOverlap = hasQueryTokenOverlap(summary.title, summary.slug, query);
-                                        if (isIndexedSource || match.confidenceScore > 0 || hasTokenOverlap) {
+                                        if (isIndexedSource || match.confidenceScore > 0 || hasTokenOverlap || summaries.length <= 3) {
                                             fallback = summary;
                                         }
                                     }
