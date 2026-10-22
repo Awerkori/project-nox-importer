@@ -198,8 +198,9 @@ const SEQUEL_OR_EDITION_MARKERS = new Set([
     'vigilantes', 're', 'darkness',
     'zero', 'apocrypha', 'omega', 'brotherhood',
     'reboot', 'byakuya', 'remake', 'sequel', 'prequel',
-    '2', '3', '4', '5', '6', '7', '8', '9',
-    'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii',
+    'animacao', 'animation', 'anime',
+    '1', '2', '3', '4', '5', '6', '7', '8', '9',
+    'i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii',
 ]);
 const SEQUEL_OR_EDITION_PHRASES = [
     'next generations',
@@ -209,6 +210,7 @@ const SEQUEL_OR_EDITION_PHRASES = [
     'eternal force',
     'four knights',
     'team up missions',
+    'live action',
 ];
 /**
  * Detects whether two titles share a base work name but one carries a distinct
