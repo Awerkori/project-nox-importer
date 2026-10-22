@@ -2,7 +2,10 @@ import fsSync from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'node:child_process';
+import dns from 'node:dns';
 import WebSocket from 'ws';
+// Ensure IPv4 is prioritized for external DNS queries on Discloud containers
+dns.setDefaultResultOrder?.('ipv4first');
 import { ImporterGatewayClient } from './core/gateway-client.js';
 import { GatewaySupabaseClient } from './core/gateway-supabase.js';
 import { DirectSupabaseClient } from './db/direct-supabase-client.js';
