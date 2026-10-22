@@ -113,7 +113,7 @@ const CATALOG_TASK_LEASE_HEARTBEAT_MS = 30_000;
 // are simply left to their normal future discovery instead of blocking the
 // work's first publication indefinitely.
 const CROSS_SOURCE_METADATA_CONCURRENCY = 4;
-const CROSS_SOURCE_METADATA_TIMEOUT_MS = 8_000;
+const CROSS_SOURCE_METADATA_TIMEOUT_MS = 15_000;
 const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // A durable global task checkpoints several independent providers at once.
 // The shared source gate still caps aggregate external I/O, while batching
@@ -1424,7 +1424,8 @@ export class ImporterLiteRuntime {
                             const providerAliases = isProviderDisplayTitleAlias(details.title, details.slug, target.title)
                                 ? Array.from(new Set([details.title, ...extracted.aliases]))
                                 : extracted.aliases;
-                            const attached = await this.dedupe.attachVerifiedMapping({
+                            const dedupeEngine = this.historicalMetadataDedupe || this.dedupe;
+                            const attached = await dedupeEngine.attachVerifiedMapping({
                                 source, sourceWorkId: details.sourceWorkId, title: details.title, slug: details.slug,
                                 aliases: providerAliases, genres: extracted.genres, author: details.author, artist: details.artist,
                                 synopsis: sanitizeSynopsis(details.synopsis) || undefined, kind: details.kind, status: details.status,
@@ -2295,7 +2296,7 @@ export class ImporterLiteRuntime {
             await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CROSS_SOURCE_WORK_MISSING' });
             return;
         }
-        const work = await this.pool.query(`SELECT id::text,title,slug,aliases,author,artist,COALESCE(synopsis,description) AS synopsis,kind,year
+        const work = await (this.sourceMetadataPool || this.pool).query(`SELECT id::text,title,slug,aliases,author,artist,COALESCE(synopsis,description) AS synopsis,kind,year
       FROM works WHERE id=$1::uuid AND published=true LIMIT 1`, [task.workId]);
         const target = work.rows[0];
         if (!target) {
@@ -2357,7 +2358,7 @@ export class ImporterLiteRuntime {
             const knownMappings = new Map();
             let seedAliases = Array.isArray(target.aliases) ? [...target.aliases] : [];
             try {
-                const existingMappings = await this.pool.query(`SELECT source,source_work_id,source_title,source_slug,metadata
+                const existingMappings = await (this.sourceMetadataPool || this.pool).query(`SELECT source,source_work_id,source_title,source_slug,metadata
             FROM importer_work_mappings WHERE work_id=$1::uuid`, [target.id]);
                 const harvestedFromMappings = [];
                 for (const m of existingMappings.rows || []) {
@@ -2379,7 +2380,7 @@ export class ImporterLiteRuntime {
                     const seedChanged = mergedSeed.length !== seedAliases.length
                         || mergedSeed.some((a, i) => a !== seedAliases[i]);
                     if (seedChanged) {
-                        await this.pool.query(`UPDATE works SET aliases=$2::text[],updated_at=now() WHERE id=$1::uuid`, [target.id, mergedSeed]);
+                        await (this.sourceMetadataPool || this.pool).query(`UPDATE works SET aliases=$2::text[],updated_at=now() WHERE id=$1::uuid`, [target.id, mergedSeed]);
                         seedAliases = mergedSeed;
                     }
                 }
@@ -2691,7 +2692,7 @@ export class ImporterLiteRuntime {
                     timings[name] = Math.round(performance.now() - startedAt);
                 }
             };
-            const mapping = await phase('mappingLoadMs', () => (isV4 ? this.sourceMetadataPool : this.pool).query(`SELECT m.work_id::text,m.source_title,m.source_slug,w.title AS work_title,m.metadata
+            const mapping = await phase('mappingLoadMs', () => (this.sourceMetadataPool || this.pool).query(`SELECT m.work_id::text,m.source_title,m.source_slug,w.title AS work_title,m.metadata
          FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
          WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`, [source, sourceWorkId]));
             const row = mapping.rows[0];

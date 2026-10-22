@@ -425,7 +425,7 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
     expect(indexSrc).toContain("dns.setDefaultResultOrder?.('ipv4first')");
 
     const runtimeSrc = readFileSync(resolve(__dirname, '../src/lite/runtime.ts'), 'utf-8');
-    expect(runtimeSrc).toContain('CROSS_SOURCE_METADATA_TIMEOUT_MS = 8_000;');
+    expect(runtimeSrc).toContain('CROSS_SOURCE_METADATA_TIMEOUT_MS = 15_000;');
     expect(runtimeSrc).toContain('Math.min(this.metadataTurboMode.enabled ? 12 : 8, runnableSources.length)');
   });
 
@@ -434,5 +434,13 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
     expect(runtimeSrc).toContain('staggerOffset');
     expect(runtimeSrc).toContain('new HostRateLimiter(5.0)');
     expect(runtimeSrc).toContain('this.metadataTurboMode.enabled ? 15_000 : 60_000');
+  });
+
+  it('21. finish() routes V7 metadata tasks to sourceMetadataDb and skips chapter ready-work refresh', () => {
+    const repoSrc = readFileSync(resolve(__dirname, '../src/lite/repository.ts'), 'utf-8');
+    expect(repoSrc).toContain('isMetadataTask');
+    expect(repoSrc).toContain('task.payload?.metadataEnrichmentVersion === 7');
+    expect(repoSrc).toContain('isMetadataTask ? this.sourceMetadataDb : this.db');
+    expect(repoSrc).toContain('if (result.rowCount === 1 && !isMetadataTask)');
   });
 });
