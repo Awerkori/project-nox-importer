@@ -6,7 +6,7 @@ import { SourceRegistry } from '../src/sources/registry.js';
 import { HostRateLimiter } from '../src/core/rate-limiter.js';
 import { SourceAdapter } from '../src/sources/types.js';
 import { cleanAlternativeTitle, alternativeTitleKey } from '../src/core/alternative-titles.js';
-import { matchWorkCandidate } from '../src/core/matching.js';
+import { matchWorkCandidate, diceSimilarity } from '../src/core/matching.js';
 import { buildDiscoveryQueryCandidates } from '../src/lite/mapping-metadata.js';
 
 const RESULTS_FILE = path.resolve(process.cwd(), 'scratch/catalog_audit_v7_results.jsonl');
@@ -362,6 +362,18 @@ export async function verifySourceIndependently(
           };
         }
       }
+      const candTitle = details.title || candidateToProbe.title;
+      if (/\b(?:novel|webnovel|light novel)\b/i.test(candTitle) && !/\b(?:novel|webnovel|light novel)\b/i.test(workTitle)) {
+        return {
+          sourceId,
+          status: 'NOT_FOUND',
+          sourceWorkId: null,
+          sourceTitle: null,
+          aliasesFound: [],
+          evidence: `Rejected format mismatch: candidate "${candTitle}" is a novel but target "${workTitle}" is a comic`,
+          checkedAt,
+        };
+      }
       const workTitleKey = alternativeTitleKey(workTitle);
       const rawAliases = allExtractedTitles.filter((a) => alternativeTitleKey(a) !== workTitleKey);
       return {
@@ -608,6 +620,14 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
   for (const ca of currentAliases) {
     if (normKey(cleaned) === normKey(ca)) {
       return { isLegitimate: false, reason: 'Already in YSQL aliases' };
+    }
+    const caSubParts = ca.split(/\s*(?:\||\/\/|\s\/\s)\s*/).filter(Boolean);
+    if (caSubParts.length > 1) {
+      for (const sub of caSubParts) {
+        if (normKey(cleaned) === normKey(sub)) {
+          return { isLegitimate: false, reason: 'Already in YSQL composite alias clause' };
+        }
+      }
     }
   }
 
