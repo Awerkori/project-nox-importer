@@ -104,9 +104,21 @@ export function extractRawAlternativeTitlesFromAdapterDetails(details: any, work
     }
   }
 
+  const titleCandidates: string[] = [];
   if (details.title && typeof details.title === 'string') {
     if (!/^v[íi]deo\s+/i.test(details.title)) {
-      candidates.push(details.title);
+      const rawTitle = details.title.replace(/^[\s\["'`]+|[\s\]"'`]+$/g, '').trim();
+      if (rawTitle) {
+        // details.title is NEVER a comma-separated list of alternative titles.
+        // It is the single canonical title on that adapter. Split ONLY by explicit multi-title delimiters (|, //, ;, \r\n).
+        if (/[\r\n]/.test(rawTitle)) {
+          titleCandidates.push(...rawTitle.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean));
+        } else if (/\s*\|\s*|\s*\/\/\s*|;+/.test(rawTitle)) {
+          titleCandidates.push(...rawTitle.split(/\s*\|\s*|\s*\/\/\s*|;+/).map((s) => s.trim()).filter(Boolean));
+        } else {
+          titleCandidates.push(rawTitle);
+        }
+      }
     }
   }
 
@@ -134,6 +146,20 @@ export function extractRawAlternativeTitlesFromAdapterDetails(details: any, work
   }
 
   const valid: string[] = [];
+
+  for (const t of titleCandidates) {
+    const cleaned = cleanAlternativeTitle(t);
+    if (cleaned) {
+      if (/[;{}]|font-|px\b|rem\b|rgb\(|var\(|@import|overflow/i.test(cleaned)) continue;
+      if (/^\(?---?teste/i.test(cleaned)) continue;
+      const k = alternativeTitleKey(cleaned);
+      const tk = alternativeTitleKey(workTitle);
+      if (k && k !== tk) {
+        valid.push(cleaned);
+      }
+    }
+  }
+
   for (const cand of candidates) {
     if (!cand || typeof cand !== 'string') continue;
     const unquoted = cand.replace(/^[\s\["'`]+|[\s\]"'`]+$/g, '').trim();
