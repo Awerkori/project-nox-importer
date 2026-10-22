@@ -335,7 +335,13 @@ export class WpGalleryAdapter implements SourceAdapter {
         slug: p.slug || slugify(p.title?.rendered || ''),
       }));
     } catch (err: any) {
-      if (err?.status === 404 || err?.status === 400) {
+      if (
+        err?.status === 404 ||
+        err?.status === 400 ||
+        err?.status === 500 ||
+        /unexpected token '<'/i.test(err?.message || '') ||
+        /is not valid json/i.test(err?.message || '')
+      ) {
         return [];
       }
       this.logger.error(`searchWorks failed for query "${query}": ${err.message}`);

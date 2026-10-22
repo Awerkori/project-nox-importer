@@ -299,8 +299,8 @@ export async function verifySourceIndependently(
     try {
       const results = await withTimeoutOrReject(
         adapter.searchWorks(q),
-        6000,
-        `SEARCH_TIMEOUT_6000MS for query "${q}"`
+        12000,
+        `SEARCH_TIMEOUT_12000MS for query "${q}"`
       );
 
       if (!results || !Array.isArray(results) || results.length === 0) continue;
@@ -887,81 +887,82 @@ async function main() {
 
       const unaudited = candidates.rows;
 
-      if (unaudited.length === 0) {
-        // Automatic revalidation queue for AUDIT_INCONCLUSIVE and AUDIT_FAIL works after provider cooldowns/corrections
-        const now = Date.now();
-        const revalidationCandidates = Array.from(latestPostV7Map.values())
-          .filter((r) => (r.verdict === 'AUDIT_INCONCLUSIVE' && (now - new Date(r.auditedAt || r.revalidatedAt || 0).getTime()) > 5 * 60 * 1000)
-                      || (r.verdict === 'AUDIT_FAIL' && (now - new Date(r.auditedAt || r.revalidatedAt || 0).getTime()) > 30 * 1000))
-          .slice(0, 6);
+      // --- FLUXO B: Parallel Revalidation Queue for AUDIT_INCONCLUSIVE and AUDIT_FAIL works ---
+      const now = Date.now();
+      const revalidationCandidates = Array.from(latestPostV7Map.values())
+        .filter((r) => (r.verdict === 'AUDIT_INCONCLUSIVE' && (now - new Date(r.revalidatedAt || r.auditedAt || 0).getTime()) > 2 * 60 * 1000)
+                    || (r.verdict === 'AUDIT_FAIL' && (now - new Date(r.revalidatedAt || r.auditedAt || 0).getTime()) > 30 * 1000))
+        .slice(0, 4);
 
-        if (revalidationCandidates.length > 0) {
-          console.log(`[IDLE REVALIDATION] Re-auditing ${revalidationCandidates.length} works (INCONCLUSIVE/FAIL) after provider cooldowns/corrections...`);
-          const chunkIds = revalidationCandidates.map((c) => c.workId);
-          const [mRes, wRes, tRes] = await Promise.all([
-            pool.query('SELECT work_id::text, source, source_work_id, source_title, source_slug FROM importer_work_mappings WHERE work_id = ANY($1::uuid[])', [chunkIds]),
-            pool.query('SELECT id::text, title, slug, aliases FROM works WHERE id = ANY($1::uuid[])', [chunkIds]),
-            pool.query('SELECT work_id::text, id::text as v7_task_id, state as v7_state, updated_at as v7_updated_at, checkpoint as v7_checkpoint FROM importer_lite_tasks WHERE work_id = ANY($1::uuid[]) AND task_type = \'CATALOG\' AND payload->>\'metadataEnrichmentVersion\' = \'7\'', [chunkIds]),
-          ]);
+      if (revalidationCandidates.length > 0) {
+        console.log(`[FLUXO B REVALIDATION] Re-auditing ${revalidationCandidates.length} works (INCONCLUSIVE/FAIL)...`);
+        const chunkIds = revalidationCandidates.map((c) => c.workId);
+        const [mRes, wRes, tRes] = await Promise.all([
+          pool.query('SELECT work_id::text, source, source_work_id, source_title, source_slug FROM importer_work_mappings WHERE work_id = ANY($1::uuid[])', [chunkIds]),
+          pool.query('SELECT id::text, title, slug, aliases FROM works WHERE id = ANY($1::uuid[])', [chunkIds]),
+          pool.query('SELECT work_id::text, id::text as v7_task_id, state as v7_state, updated_at as v7_updated_at, checkpoint as v7_checkpoint FROM importer_lite_tasks WHERE work_id = ANY($1::uuid[]) AND task_type = \'CATALOG\' AND payload->>\'metadataEnrichmentVersion\' = \'7\'', [chunkIds]),
+        ]);
 
-          const mappingsByWorkId = new Map<string, any[]>();
-          for (const row of mRes.rows) {
-            if (!mappingsByWorkId.has(row.work_id)) mappingsByWorkId.set(row.work_id, []);
-            mappingsByWorkId.get(row.work_id)!.push(row);
-          }
-
-          const worksById = new Map<string, any>();
-          for (const row of wRes.rows) worksById.set(row.id, row);
-
-          const tasksById = new Map<string, any>();
-          for (const row of tRes.rows) {
-            tasksById.set(row.work_id, {
-              id: row.v7_task_id,
-              state: row.v7_state,
-              updated_at: row.v7_updated_at,
-              checkpoint: row.v7_checkpoint,
-            });
-          }
-
-          for (const candidate of revalidationCandidates) {
-            const w = worksById.get(candidate.workId);
-            if (!w) continue;
-            const mappings = mappingsByWorkId.get(candidate.workId) || [];
-            const currentAliases = Array.isArray(w.aliases) ? w.aliases : [];
-            const taskInfo = tasksById.get(candidate.workId) || null;
-            try {
-              const freshRecord = await auditWork(w, sources, mappings, currentAliases, taskInfo, candidate);
-              if (freshRecord) {
-                freshRecord.revalidationAttempts = (candidate.revalidationAttempts || 0) + 1;
-                freshRecord.revalidatedAt = new Date().toISOString();
-                const oldVerdict = latestPostV7Map.get(candidate.workId)?.verdict;
-                if (oldVerdict === 'AUDIT_INCONCLUSIVE') stats.v7_done_audit_inconclusive--;
-                else if (oldVerdict === 'AUDIT_FAIL') stats.v7_done_audit_fail--;
-                else if (oldVerdict === 'AUDIT_PASS') stats.v7_done_audit_pass--;
-
-                if (freshRecord.verdict === 'AUDIT_PASS') stats.v7_done_audit_pass++;
-                else if (freshRecord.verdict === 'AUDIT_FAIL') stats.v7_done_audit_fail++;
-                else stats.v7_done_audit_inconclusive++;
-
-                latestPostV7Map.set(candidate.workId, freshRecord);
-                fs.appendFileSync(POST_V7_RESULTS_FILE, JSON.stringify(freshRecord) + '\n', 'utf8');
-                fs.appendFileSync(RESULTS_FILE, JSON.stringify(freshRecord) + '\n', 'utf8');
-                console.log(`[REVALIDATED] ${w.title}: ${oldVerdict} -> ${freshRecord.verdict}`);
-              }
-            } catch (e: any) {
-              console.warn(`[REVALIDATION ERROR] ${w.title}:`, e?.message);
-            }
-          }
-          stats.updated_at = new Date().toISOString();
-          fs.writeFileSync(SUMMARY_FILE, JSON.stringify(stats, null, 2), 'utf8');
-          continue;
+        const mappingsByWorkId = new Map<string, any[]>();
+        for (const row of mRes.rows) {
+          if (!mappingsByWorkId.has(row.work_id)) mappingsByWorkId.set(row.work_id, []);
+          mappingsByWorkId.get(row.work_id)!.push(row);
         }
 
+        const worksById = new Map<string, any>();
+        for (const row of wRes.rows) worksById.set(row.id, row);
+
+        const tasksById = new Map<string, any>();
+        for (const row of tRes.rows) {
+          tasksById.set(row.work_id, {
+            id: row.v7_task_id,
+            state: row.v7_state,
+            updated_at: row.v7_updated_at,
+            checkpoint: row.v7_checkpoint,
+          });
+        }
+
+        for (const candidate of revalidationCandidates) {
+          const w = worksById.get(candidate.workId);
+          if (!w) continue;
+          const mappings = mappingsByWorkId.get(candidate.workId) || [];
+          const currentAliases = Array.isArray(w.aliases) ? w.aliases : [];
+          const taskInfo = tasksById.get(candidate.workId) || null;
+          try {
+            const freshRecord = await auditWork(w, sources, mappings, currentAliases, taskInfo, candidate);
+            if (freshRecord) {
+              freshRecord.revalidationAttempts = (candidate.revalidationAttempts || 0) + 1;
+              freshRecord.revalidatedAt = new Date().toISOString();
+              const oldVerdict = latestPostV7Map.get(candidate.workId)?.verdict;
+              if (oldVerdict === 'AUDIT_INCONCLUSIVE') stats.v7_done_audit_inconclusive--;
+              else if (oldVerdict === 'AUDIT_FAIL') stats.v7_done_audit_fail--;
+              else if (oldVerdict === 'AUDIT_PASS') stats.v7_done_audit_pass--;
+
+              if (freshRecord.verdict === 'AUDIT_PASS') stats.v7_done_audit_pass++;
+              else if (freshRecord.verdict === 'AUDIT_FAIL') stats.v7_done_audit_fail++;
+              else stats.v7_done_audit_inconclusive++;
+
+              latestPostV7Map.set(candidate.workId, freshRecord);
+              fs.appendFileSync(POST_V7_RESULTS_FILE, JSON.stringify(freshRecord) + '\n', 'utf8');
+              fs.appendFileSync(RESULTS_FILE, JSON.stringify(freshRecord) + '\n', 'utf8');
+              console.log(`[REVALIDATED] ${w.title}: ${oldVerdict} -> ${freshRecord.verdict}`);
+            }
+          } catch (e: any) {
+            console.warn(`[REVALIDATION ERROR] ${w.title}:`, e?.message);
+          }
+        }
+        stats.updated_at = new Date().toISOString();
+        fs.writeFileSync(SUMMARY_FILE, JSON.stringify(stats, null, 2), 'utf8');
+      }
+
+      if (unaudited.length === 0) {
         stats.v7_done_pending_audit = 0;
         stats.updated_at = new Date().toISOString();
         fs.writeFileSync(SUMMARY_FILE, JSON.stringify(stats, null, 2), 'utf8');
-        console.log(`[LOCKSTEP AUDITOR V7] All ${stats.v7_done_total} V7 DONE works are fully audited! Waiting 4s for new V7 completions...`);
-        await new Promise((r) => setTimeout(r, 4000));
+        if (revalidationCandidates.length === 0) {
+          console.log(`[LOCKSTEP AUDITOR V7] All ${stats.v7_done_total} V7 DONE works fully audited & no revalidation pending! Waiting 3s...`);
+          await new Promise((r) => setTimeout(r, 3000));
+        }
         continue;
       }
 

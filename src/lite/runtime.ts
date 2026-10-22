@@ -1339,7 +1339,7 @@ export class ImporterLiteRuntime {
             const isKnownWorkMapping = Boolean(knownMapping);
 
             if (!selected) {
-              const queryCandidates = buildDiscoveryQueryCandidates(target.title, target.aliases);
+              const queryCandidates = buildDiscoveryQueryCandidates(target.title, target.aliases).slice(0, 3);
               let fallback: { sourceWorkId: string; title: string; slug: string } | null = null;
               const seenSummaryIds = new Set<string>();
               for (const query of queryCandidates) {
@@ -2455,7 +2455,7 @@ export class ImporterLiteRuntime {
       const runnableDeferred = [...deferred].filter(
         (s) => s !== 'brscans' && policyMap.get(s)?.runnable !== false && Boolean(this.registry.get(s))
       );
-      if (runnableDeferred.length > 0 && deferredRounds < 1) {
+      if (runnableDeferred.length > 0 && deferredRounds < 1 && checked.size < 38) {
         for (const s of runnableDeferred) checked.delete(s);
         await this.queue.finish(task, workerId, {
           state: 'RETRY_WAIT', reason: 'CROSS_SOURCE_DEFERRED_OPERATIONAL_RETRY',
