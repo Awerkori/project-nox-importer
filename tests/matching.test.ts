@@ -90,6 +90,29 @@ describe('Cross-Provider Matching Engine', () => {
     expect(res3.reason).toContain('Adult parody/hentai');
   });
 
+  it('rejects matches between different parts/volumes or format adaptations', () => {
+    const res1 = matchWorkCandidate(
+      { title: 'Series Title – 1' },
+      { title: 'Series Title' }
+    );
+    expect(res1.matched).toBe(false);
+    expect(res1.reason).toContain('Sequel/edition conflict');
+
+    const res2 = matchWorkCandidate(
+      { title: 'Series Title ~ Animação' },
+      { title: 'Series Title' }
+    );
+    expect(res2.matched).toBe(false);
+    expect(res2.reason).toContain('Sequel/edition conflict');
+
+    const res3 = matchWorkCandidate(
+      { title: 'Series Title Live Action' },
+      { title: 'Series Title' }
+    );
+    expect(res3.matched).toBe(false);
+    expect(res3.reason).toContain('Sequel/edition conflict');
+  });
+
   it('fuzzy matches high-similarity titles', () => {
     const res = matchWorkCandidate(
       { title: 'Regressor Instruction Manual' },
