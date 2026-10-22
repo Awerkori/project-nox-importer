@@ -1937,7 +1937,7 @@ export class LiteRepository {
    * its outcome can be recorded as deferred rather than silently skipped.
    */
   async crossSourceDiscoverySources(workId: string): Promise<string[]> {
-    const result = await this.db.query<{ source: string }>(`
+    const result = await this.sourceMetadataDb.query<{ source: string }>(`
       SELECT s.id AS source
       FROM importer_sources s
       LEFT JOIN importer_lite_source_health health ON health.source=s.id
@@ -2259,7 +2259,11 @@ export class LiteRepository {
     /** A healthy recurring observation starts a fresh bounded failure window. */
     resetAttempts?: boolean;
   }): Promise<boolean> {
-    const client = await (task.payload?.metadataEnrichmentVersion === 4 ? this.sourceMetadataDb : this.db).connect();
+    const isMetadataTask = task.payload?.metadataEnrichmentVersion === 4
+      || task.payload?.metadataEnrichmentVersion === 7
+      || Boolean(task.payload?.metadataCrossSourceDiscovery)
+      || Boolean(task.payload?.metadataSourceRefresh);
+    const client = await (isMetadataTask ? this.sourceMetadataDb : this.db).connect();
     try {
       await client.query('BEGIN');
       const result = await client.query(
@@ -2279,10 +2283,10 @@ export class LiteRepository {
          WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`,
         [task.id, workerId, outcome.state, outcome.reason || null, outcome.nextRunAt || null, JSON.stringify(outcome.checkpoint || {}), outcome.priority === undefined ? null : LITE_PRIORITY_RANK[outcome.priority], outcome.monitoring === undefined ? null : outcome.monitoring, outcome.workId || null, Boolean(outcome.resetAttempts)],
       );
-      // The V4 lane claims its own durable tasks and never needs a generic
+      // Metadata campaigns claim their own tasks and never need a generic
       // ready-work projection. Skipping that projection removes a costly
       // cross-table refresh per mapping without changing chapter scheduling.
-      if (result.rowCount === 1 && task.payload?.metadataEnrichmentVersion !== 4) {
+      if (result.rowCount === 1 && !isMetadataTask) {
         await this.refreshReadyWork(client, task.workKey);
       }
       await client.query('COMMIT');
