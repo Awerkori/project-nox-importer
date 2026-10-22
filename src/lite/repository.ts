@@ -1276,25 +1276,25 @@ export class LiteRepository {
   async claimCrossSourceMetadataDiscovery(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
     const result = await this.sourceMetadataDb.query<Row>(`
       WITH picked AS (
-        SELECT task.id
-        FROM importer_lite_tasks task
-        WHERE task.task_type='CATALOG'
-          AND task.state IN ('READY','RUNNING','RETRY_WAIT')
-          AND task.idempotency_key >= $1 AND task.idempotency_key < $2
+        SELECT /*+ IndexScan(t importer_lite_tasks_v7_claim_idx) */ t.id
+        FROM importer_lite_tasks t
+        WHERE t.task_type='CATALOG'
+          AND t.state = ANY (ARRAY['READY', 'RUNNING', 'RETRY_WAIT'])
+          AND t.idempotency_key >= $1 AND t.idempotency_key < $2
           AND (
-            (task.state IN ('READY','RETRY_WAIT') AND task.next_run_at<=now())
-            OR (task.state='RUNNING' AND task.lease_until<now())
+            (t.state IN ('READY','RETRY_WAIT') AND t.next_run_at<=now())
+            OR (t.state='RUNNING' AND t.lease_until<now())
           )
-        ORDER BY task.idempotency_key
+        ORDER BY t.next_run_at ASC, t.id ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
       )
-      UPDATE importer_lite_tasks task
+      UPDATE importer_lite_tasks target
       SET state='RUNNING',lease_owner=$3,lease_until=now()+$4::interval,
-          attempts=task.attempts+1,updated_at=now()
+          attempts=target.attempts+1,updated_at=now()
       FROM picked
-      WHERE task.id=picked.id
-      RETURNING task.*`, [
+      WHERE target.id=picked.id
+      RETURNING target.*`, [
         METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX,
         `${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}~`,
         workerId,

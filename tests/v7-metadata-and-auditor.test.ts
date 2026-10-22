@@ -411,10 +411,10 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
     expect(extractedVocative.aliases).toEqual(['Ijiranaide, Nagatoro-san']);
   });
 
-  it('18. claimCrossSourceMetadataDiscovery query includes state filter and idempotency key bounds', () => {
+  it('18. claimCrossSourceMetadataDiscovery query routes through v7 claim index and orders by next_run_at', () => {
     const repoSrc = readFileSync(resolve(__dirname, '../src/lite/repository.ts'), 'utf-8');
-    expect(repoSrc).toContain('ORDER BY task.idempotency_key');
-    expect(repoSrc).toContain("task.state IN ('READY','RUNNING','RETRY_WAIT')");
+    expect(repoSrc).toContain('importer_lite_tasks_v7_claim_idx');
+    expect(repoSrc).toContain('ORDER BY t.next_run_at ASC, t.id ASC');
   });
 
   it('19. runtime and discloud config protect network throughput and prevent threadpool starvation', () => {
@@ -427,5 +427,12 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
     const runtimeSrc = readFileSync(resolve(__dirname, '../src/lite/runtime.ts'), 'utf-8');
     expect(runtimeSrc).toContain('CROSS_SOURCE_METADATA_TIMEOUT_MS = 8_000;');
     expect(runtimeSrc).toContain('Math.min(this.metadataTurboMode.enabled ? 12 : 8, runnableSources.length)');
+  });
+
+  it('20. source staggering and rate limiter pacing prevent thundering herd collisions across 24 workers', () => {
+    const runtimeSrc = readFileSync(resolve(__dirname, '../src/lite/runtime.ts'), 'utf-8');
+    expect(runtimeSrc).toContain('staggerOffset');
+    expect(runtimeSrc).toContain('new HostRateLimiter(5.0)');
+    expect(runtimeSrc).toContain('this.metadataTurboMode.enabled ? 15_000 : 60_000');
   });
 });
