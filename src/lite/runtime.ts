@@ -1366,7 +1366,9 @@ export class ImporterLiteRuntime {
                   // Only probe fallback if candidate has positive confidence score, token overlap,
                   // or is an alias-indexed catalog (e.g. mangadex, anilist, mangaupdates).
                   if (input.allowFallbackDetailProbe && !fallback) {
-                    const isIndexedSource = source === 'mangadex' || source === 'mangaupdates' || source === 'anilist';
+                    const isIndexedSource = source === 'mangadex' || source === 'mangaupdates' || source === 'anilist'
+                      || source === 'manhastro' || source === 'nexus' || source === 'imperiodabritannia' || source === 'hipercool'
+                      || source === 'mangaflix' || source === 'mangotoons';
                     const hasTokenOverlap = hasQueryTokenOverlap(summary.title, summary.slug, query);
                     if (isIndexedSource || match.confidenceScore > 0 || hasTokenOverlap) {
                       fallback = summary;
