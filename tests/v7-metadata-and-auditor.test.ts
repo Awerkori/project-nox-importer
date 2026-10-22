@@ -425,7 +425,7 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
     expect(indexSrc).toContain("dns.setDefaultResultOrder?.('ipv4first')");
 
     const runtimeSrc = readFileSync(resolve(__dirname, '../src/lite/runtime.ts'), 'utf-8');
-    expect(runtimeSrc).toContain('CROSS_SOURCE_METADATA_TIMEOUT_MS = 15_000;');
+    expect(runtimeSrc).toContain('CROSS_SOURCE_METADATA_TIMEOUT_MS = 7_500;');
     expect(runtimeSrc).toContain('Math.min(this.metadataTurboMode.enabled ? 12 : 8, runnableSources.length)');
   });
 
@@ -442,5 +442,16 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
     expect(repoSrc).toContain('task.payload?.metadataEnrichmentVersion === 7');
     expect(repoSrc).toContain('isMetadataTask ? this.sourceMetadataDb : this.db');
     expect(repoSrc).toContain('if (result.rowCount === 1 && !isMetadataTask)');
+  });
+
+  it('22. pool balancing and RETRY_WAIT head-of-queue priority prevent pool starvation and task backlog', () => {
+    const repoSrc = readFileSync(resolve(__dirname, '../src/lite/repository.ts'), 'utf-8');
+    expect(repoSrc).toContain('((this.sourceMetadataDb as any).waitingCount || 0) > 0');
+    expect(repoSrc).toContain('((this.db as any).idleCount || 0) > 0');
+
+    const runtimeSrc = readFileSync(resolve(__dirname, '../src/lite/runtime.ts'), 'utf-8');
+    expect(runtimeSrc).toContain('getAvailablePool');
+    expect(runtimeSrc).toContain('Date.now() - 3600_000');
+    expect(runtimeSrc).toContain('Math.min(next.persistenceCapacity ?? 4, 4)');
   });
 });
