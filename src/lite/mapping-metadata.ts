@@ -216,7 +216,8 @@ export function buildDiscoveryQueryCandidates(title: string, aliases: string[] =
   for (const alias of aliases || []) {
     if (alias && typeof alias === 'string') {
       const decoded = decodeHtmlEntities(alias).trim();
-      if (decoded.length >= 1) {
+      const isGeneric = /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|na\s*verdade|actually|in\s*fact|turns\s*out|love|hello|alone|baby|oneshot|manga|comic|primal|scan|raw)$/i.test(decoded);
+      if (decoded.length >= 1 && (!isGeneric || cleanTitle.toLowerCase().includes(decoded.toLowerCase()))) {
         candidateList.push(decoded);
       }
     }
