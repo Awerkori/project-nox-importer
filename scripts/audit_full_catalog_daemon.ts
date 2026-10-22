@@ -889,10 +889,10 @@ async function main() {
 
       // --- FLUXO B: Parallel Revalidation Queue for AUDIT_INCONCLUSIVE and AUDIT_FAIL works ---
       const now = Date.now();
-      const revalidationCandidates = Array.from(latestPostV7Map.values())
-        .filter((r) => (r.verdict === 'AUDIT_INCONCLUSIVE' && (now - new Date(r.revalidatedAt || r.auditedAt || 0).getTime()) > 2 * 60 * 1000)
-                    || (r.verdict === 'AUDIT_FAIL' && (now - new Date(r.revalidatedAt || r.auditedAt || 0).getTime()) > 30 * 1000))
-        .slice(0, 4);
+      const allCands = Array.from(latestPostV7Map.values());
+      const failCands = allCands.filter((r) => r.verdict === 'AUDIT_FAIL' && (now - new Date(r.revalidatedAt || r.auditedAt || 0).getTime()) > 30 * 1000);
+      const incCands = allCands.filter((r) => r.verdict === 'AUDIT_INCONCLUSIVE' && (now - new Date(r.revalidatedAt || r.auditedAt || 0).getTime()) > 2 * 60 * 1000);
+      const revalidationCandidates = [...failCands, ...incCands].slice(0, 4);
 
       if (revalidationCandidates.length > 0) {
         console.log(`[FLUXO B REVALIDATION] Re-auditing ${revalidationCandidates.length} works (INCONCLUSIVE/FAIL)...`);
