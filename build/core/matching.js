@@ -460,25 +460,42 @@ export function matchWorkCandidate(target, candidate) {
     // Check cross-alias matches
     for (const alias of targetAliases) {
         if (alias === normCand ||
-            candAliases.includes(alias) ||
             alias.replace(/\s+/g, '') === normCand.replace(/\s+/g, '')) {
-            return {
-                matched: true,
-                confidenceScore: 0.95,
-                matchMethod: 'ALIAS_EXACT',
-                reason: `Matched alias "${alias}"`,
-            };
+            const isGeneric = /^(?:sorry|desculpa|perdao|love|hello|alone|baby|oneshot|manga|comic)$/i.test(alias);
+            if (!isGeneric || normTarget.includes(alias) || alias.length >= 8) {
+                return {
+                    matched: true,
+                    confidenceScore: 0.95,
+                    matchMethod: 'ALIAS_EXACT',
+                    reason: `Matched alias "${alias}"`,
+                };
+            }
+        }
+        if (candAliases.includes(alias)) {
+            const isGeneric = /^(?:sorry|desculpa|perdao|love|hello|alone|baby|oneshot|manga|comic|action|drama|fantasy|romance)$/i.test(alias);
+            const isSubstantial = alias.length >= 8 && (alias.includes(' ') || alias.length >= 12);
+            if (isSubstantial && !isGeneric) {
+                return {
+                    matched: true,
+                    confidenceScore: 0.95,
+                    matchMethod: 'ALIAS_EXACT',
+                    reason: `Matched shared substantial alias "${alias}"`,
+                };
+            }
         }
     }
     for (const alias of candAliases) {
         if (alias === normTarget ||
             alias.replace(/\s+/g, '') === normTarget.replace(/\s+/g, '')) {
-            return {
-                matched: true,
-                confidenceScore: 0.95,
-                matchMethod: 'ALIAS_EXACT',
-                reason: `Matched candidate alias "${alias}"`,
-            };
+            const isGeneric = /^(?:sorry|desculpa|perdao|love|hello|alone|baby|oneshot|manga|comic)$/i.test(alias);
+            if (!isGeneric || normCand.includes(alias) || alias.length >= 8) {
+                return {
+                    matched: true,
+                    confidenceScore: 0.95,
+                    matchMethod: 'ALIAS_EXACT',
+                    reason: `Matched candidate alias "${alias}"`,
+                };
+            }
         }
     }
     // High-Confidence Fuzzy Matching
