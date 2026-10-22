@@ -416,4 +416,16 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
     expect(repoSrc).toContain('ORDER BY task.idempotency_key');
     expect(repoSrc).toContain("task.state IN ('READY','RUNNING','RETRY_WAIT')");
   });
+
+  it('19. runtime and discloud config protect network throughput and prevent threadpool starvation', () => {
+    const discloudCfg = readFileSync(resolve(__dirname, '../discloud.config'), 'utf-8');
+    expect(discloudCfg).toContain('UV_THREADPOOL_SIZE=64');
+
+    const indexSrc = readFileSync(resolve(__dirname, '../src/index.ts'), 'utf-8');
+    expect(indexSrc).toContain("dns.setDefaultResultOrder?.('ipv4first')");
+
+    const runtimeSrc = readFileSync(resolve(__dirname, '../src/lite/runtime.ts'), 'utf-8');
+    expect(runtimeSrc).toContain('CROSS_SOURCE_METADATA_TIMEOUT_MS = 8_000;');
+    expect(runtimeSrc).toContain('Math.min(this.metadataTurboMode.enabled ? 12 : 8, runnableSources.length)');
+  });
 });
