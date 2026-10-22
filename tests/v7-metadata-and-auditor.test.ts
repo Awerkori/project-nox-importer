@@ -13,6 +13,7 @@ import {
   classifyExplicitSourceMetadata,
 } from '../src/lite/mapping-metadata.js';
 import { cleanAlternativeTitle, mergeAlternativeTitles } from '../src/core/alternative-titles.js';
+import { matchWorkCandidate } from '../src/core/matching.js';
 import {
   verifySourceIndependently,
   auditWork,
@@ -380,5 +381,29 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
       'Only I Level Up',
       'I Alone Level Up',
     ]);
+  });
+
+  it('16. Composite candidate titles separated by pipe | match target work and recognize aliases', () => {
+    const target = { title: 'Summer Break', slug: 'summer-break' };
+    const cand = { title: 'Natsuyasumi! | Summer Break!', slug: 'natsuyasumi-summer-break' };
+
+    const match = matchWorkCandidate(target, cand);
+    expect(match.matched).toBe(true);
+    expect(match.confidenceScore).toBeGreaterThanOrEqual(0.95);
+  });
+
+  it('17. Comma delimited titles without spaces are split while single titles with vocative -san are preserved', () => {
+    const metaWithComma = {
+      alternativeTitles: "Itou-kun Doesn't Know About Love,Itou kun wa Koi wo Shiranai",
+    };
+    const extractedComma = classifyExplicitSourceMetadata(metaWithComma, 'Itou-kun: O Estudante Misterioso');
+    expect(extractedComma.aliases).toContain("Itou-kun Doesn't Know About Love");
+    expect(extractedComma.aliases).toContain('Itou kun wa Koi wo Shiranai');
+
+    const metaWithVocative = {
+      alternativeTitles: 'Ijiranaide, Nagatoro-san',
+    };
+    const extractedVocative = classifyExplicitSourceMetadata(metaWithVocative, 'Don\'t Toy with Me, Miss Nagatoro');
+    expect(extractedVocative.aliases).toEqual(['Ijiranaide, Nagatoro-san']);
   });
 });
