@@ -1343,9 +1343,8 @@ export class ImporterLiteRuntime {
               let fallback: { sourceWorkId: string; title: string; slug: string } | null = null;
               const seenSummaryIds = new Set<string>();
               for (const query of queryCandidates) {
-                if (!this.metadataTurboMode.enabled) {
-                  await this.sourceRateLimiter.acquire(host, undefined, 60_000);
-                }
+                const rateLimitTimeout = this.metadataTurboMode.enabled ? 5_000 : 60_000;
+                await this.sourceRateLimiter.acquire(host, undefined, rateLimitTimeout);
                 const summaries = await this.sourceMetadataGate.runExclusive(async () => {
                   return withTimeout(adapter.searchWorks(query), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_SEARCH_TIMEOUT');
                 });
@@ -1383,9 +1382,8 @@ export class ImporterLiteRuntime {
             result.attemptedSources.push(source);
             if (!selected) continue;
 
-            if (!this.metadataTurboMode.enabled) {
-              await this.sourceRateLimiter.acquire(host, undefined, 60_000);
-            }
+            const rateLimitTimeout = this.metadataTurboMode.enabled ? 5_000 : 60_000;
+            await this.sourceRateLimiter.acquire(host, undefined, rateLimitTimeout);
             const details = await this.sourceMetadataGate.runExclusive(async () => {
               return withTimeout(adapter.fetchWorkDetails(selected!.sourceWorkId), CROSS_SOURCE_METADATA_TIMEOUT_MS,
                 'CROSS_SOURCE_DETAILS_TIMEOUT');

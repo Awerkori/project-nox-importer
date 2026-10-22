@@ -172,8 +172,10 @@ export function createYugabyteMetadataPool(): pg.Pool {
   // Yugabyte's default nested-loop plan issued one remote read per mapping;
   // prefer its batched variant only here, never on the chapter pool.
   const metadataSessionOptions = '-c enable_nestloop=off';
+  const cfg = getConfig();
+  const poolMax = parseInt(process.env.METADATA_DB_POOL_MAX || '8', 10);
   const metadataPool = new pg.Pool(yugabytePoolOptions(
-    getConfig(), 4, 'project-nox-importer-metadata', 30_000, 15_000,
+    cfg, poolMax, 'project-nox-importer-metadata', 30_000, 15_000,
     metadataSessionOptions, false,
   ));
   metadataPool.on('error', (err) => {
