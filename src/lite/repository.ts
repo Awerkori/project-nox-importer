@@ -1274,7 +1274,10 @@ export class LiteRepository {
    * normal task claim remains the authority for all chapter/catalog work.
    */
   async claimCrossSourceMetadataDiscovery(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
-    const result = await this.sourceMetadataDb.query<Row>(`
+    const dbToUse = (this.sourceMetadataDb && this.sourceMetadataDb !== this.db && ((this.sourceMetadataDb as any).waitingCount || 0) > 0 && ((this.db as any).idleCount || 0) > 0)
+      ? this.db
+      : this.sourceMetadataDb;
+    const result = await dbToUse.query<Row>(`
       WITH picked AS (
         SELECT /*+ IndexScan(t importer_lite_tasks_v7_claim_idx) */ t.id
         FROM importer_lite_tasks t
@@ -1937,7 +1940,10 @@ export class LiteRepository {
    * its outcome can be recorded as deferred rather than silently skipped.
    */
   async crossSourceDiscoverySources(workId: string): Promise<string[]> {
-    const result = await this.sourceMetadataDb.query<{ source: string }>(`
+    const dbToUse = (this.sourceMetadataDb && this.sourceMetadataDb !== this.db && ((this.sourceMetadataDb as any).waitingCount || 0) > 0 && ((this.db as any).idleCount || 0) > 0)
+      ? this.db
+      : this.sourceMetadataDb;
+    const result = await dbToUse.query<{ source: string }>(`
       SELECT s.id AS source
       FROM importer_sources s
       LEFT JOIN importer_lite_source_health health ON health.source=s.id
@@ -2263,7 +2269,10 @@ export class LiteRepository {
       || task.payload?.metadataEnrichmentVersion === 7
       || Boolean(task.payload?.metadataCrossSourceDiscovery)
       || Boolean(task.payload?.metadataSourceRefresh);
-    const client = await (isMetadataTask ? this.sourceMetadataDb : this.db).connect();
+    const dbToUse = (this.sourceMetadataDb && this.sourceMetadataDb !== this.db && ((this.sourceMetadataDb as any).waitingCount || 0) > 0 && ((this.db as any).idleCount || 0) > 0)
+      ? this.db
+      : (isMetadataTask ? this.sourceMetadataDb : this.db);
+    const client = await dbToUse.connect();
     try {
       await client.query('BEGIN');
       const result = await client.query(

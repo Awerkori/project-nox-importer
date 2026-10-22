@@ -119,7 +119,7 @@ const CATALOG_TASK_LEASE_HEARTBEAT_MS = 30_000;
 // are simply left to their normal future discovery instead of blocking the
 // work's first publication indefinitely.
 const CROSS_SOURCE_METADATA_CONCURRENCY = 4;
-const CROSS_SOURCE_METADATA_TIMEOUT_MS = 15_000;
+const CROSS_SOURCE_METADATA_TIMEOUT_MS = 7_500;
 const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // A durable global task checkpoints several independent providers at once.
 // The shared source gate still caps aggregate external I/O, while batching
@@ -345,6 +345,14 @@ export class ImporterLiteRuntime {
       // historical merge. The main catalog client remains the typed client
       // used for onboarding/full-work deduplication.
       : new DeduplicationEngine(new DirectSupabaseClient(sourceMetadataPool) as any);
+  }
+
+  private getAvailablePool(): Pool {
+    if (!this.sourceMetadataPool || this.sourceMetadataPool === this.pool) return this.pool;
+    if (this.sourceMetadataPool.waitingCount > 0 && this.pool.idleCount > 0) {
+      return this.pool;
+    }
+    return this.sourceMetadataPool;
   }
 
   async start(): Promise<void> {
@@ -930,7 +938,7 @@ export class ImporterLiteRuntime {
       const discoveryCap = next.enabled ? (next.discoveryConcurrency ?? 24) : 2;
       const searchCap = next.enabled ? (next.searchConcurrency ?? 128) : 2;
       const metadataCap = next.enabled ? (next.metadataGateCapacity ?? Math.max(discoveryCap + 8, 48)) : 2;
-      const persistenceCap = next.enabled ? (next.persistenceCapacity ?? 6) : 1;
+      const persistenceCap = next.enabled ? Math.min(next.persistenceCapacity ?? 4, 4) : 1;
 
       this.sourceMetadataLaneGate.setCapacity(next.enabled ? 6 : 2);
       this.sourceMetadataGate.setCapacity(searchCap);
@@ -2325,7 +2333,7 @@ export class ImporterLiteRuntime {
       await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CROSS_SOURCE_WORK_MISSING' });
       return;
     }
-    const work = await (this.sourceMetadataPool || this.pool).query<{
+    const work = await this.getAvailablePool().query<{
       id: string; title: string; slug: string; aliases: string[]; author: string | null; artist: string | null;
       synopsis: string | null; kind: string | null; year: number | null;
     }>(`SELECT id::text,title,slug,aliases,author,artist,COALESCE(synopsis,description) AS synopsis,kind,year
@@ -2391,7 +2399,7 @@ export class ImporterLiteRuntime {
       const knownMappings = new Map<string, { sourceWorkId: string; sourceTitle?: string; sourceSlug?: string }>();
       let seedAliases = Array.isArray(target.aliases) ? [...target.aliases] : [];
       try {
-        const existingMappings = await (this.sourceMetadataPool || this.pool).query<{
+        const existingMappings = await this.getAvailablePool().query<{
           source: string; source_work_id: string; source_title: string | null; source_slug: string | null; metadata: unknown;
         }>(`SELECT source,source_work_id,source_title,source_slug,metadata
             FROM importer_work_mappings WHERE work_id=$1::uuid`, [target.id]);
@@ -2415,7 +2423,7 @@ export class ImporterLiteRuntime {
           const seedChanged = mergedSeed.length !== seedAliases.length
             || mergedSeed.some((a, i) => a !== seedAliases[i]);
           if (seedChanged) {
-            await (this.sourceMetadataPool || this.pool).query(`UPDATE works SET aliases=$2::text[],updated_at=now() WHERE id=$1::uuid`, [target.id, mergedSeed]);
+            await this.getAvailablePool().query(`UPDATE works SET aliases=$2::text[],updated_at=now() WHERE id=$1::uuid`, [target.id, mergedSeed]);
             seedAliases = mergedSeed;
           }
         }
@@ -2463,11 +2471,11 @@ export class ImporterLiteRuntime {
       const runnableDeferred = [...deferred].filter(
         (s) => s !== 'brscans' && policyMap.get(s)?.runnable !== false && Boolean(this.registry.get(s))
       );
-      if (runnableDeferred.length > 0 && deferredRounds < 1) {
+      if (runnableDeferred.length > 0 && deferredRounds < 1 && (runnableDeferred.length > 2 || checked.size < 38)) {
         for (const s of runnableDeferred) checked.delete(s);
         await this.queue.finish(task, workerId, {
           state: 'RETRY_WAIT', reason: 'CROSS_SOURCE_DEFERRED_OPERATIONAL_RETRY',
-          nextRunAt: new Date(Date.now() + 1_500), resetAttempts: true,
+          nextRunAt: new Date(Date.now() - 3600_000), resetAttempts: true,
           checkpoint: {
             metadataCrossSourceDiscovery: true,
             coverage: 'CROSS_SOURCE_DEFERRED_RECHECK',
@@ -2725,7 +2733,7 @@ export class ImporterLiteRuntime {
         try { return await operation(); }
         finally { timings[name] = Math.round(performance.now() - startedAt); }
       };
-      const mapping = await phase('mappingLoadMs', () => (this.sourceMetadataPool || this.pool).query<{ work_id: string; source_title: string; source_slug: string; work_title: string; metadata: unknown }>(
+      const mapping = await phase('mappingLoadMs', () => this.getAvailablePool().query<{ work_id: string; source_title: string; source_slug: string; work_title: string; metadata: unknown }>(
         `SELECT m.work_id::text,m.source_title,m.source_slug,w.title AS work_title,m.metadata
          FROM importer_work_mappings m JOIN works w ON w.id=m.work_id
          WHERE m.source=$1 AND m.source_work_id=$2 AND m.work_id IS NOT NULL LIMIT 1`,

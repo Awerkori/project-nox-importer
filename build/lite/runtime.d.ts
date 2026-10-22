@@ -93,6 +93,7 @@ export declare class ImporterLiteRuntime {
     private shouldPauseLowPriorityMetadata;
     private refreshMemoryPressure;
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter, sourceMetadataPool?: Pool);
+    private getAvailablePool;
     start(): Promise<void>;
     private assertReaderCanonicalIdentitySchema;
     stop(): void;

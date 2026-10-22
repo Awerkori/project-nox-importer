@@ -24,7 +24,7 @@ export class BRScansAdapter {
         await this.rateLimiter.acquire(host);
         const response = await this.transport(url, {
             headers: { Accept: 'application/json', Referer: `${this.baseUrl}/` },
-            signal: AbortSignal.timeout(15_000),
+            signal: AbortSignal.timeout(3_000),
         });
         if (!response.ok)
             throw new Error(`BRScans HTTP ${response.status} for ${path}`);

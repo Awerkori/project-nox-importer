@@ -125,7 +125,7 @@ export function extractRawAlternativeTitlesFromAdapterDetails(details: any, work
     }
   }
 
-  const CLAUSE_CONTINUATION = /^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por)\b/i;
+  const CLAUSE_CONTINUATION = /^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por|ent[aã]o)\b/i;
   const VOCATIVE_HONORIFIC = /-(?:san|kun|chan|sama|sensei|senpai|dono)\b/i;
   const INTERJECTIONS = new Set(['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá', 'ijiranaide', 'ijirimakutte', 'uzaki', 'komi']);
 
@@ -450,7 +450,7 @@ export async function verifySourceIndependently(
 }
 
 export async function auditWork(
-  w: { id: string; title: string; slug: string; aliases: string[] },
+  w: { id: string; title: string; slug: string; aliases: string[]; author?: string | null },
   sources: SourceAdapter[],
   mappings: any[],
   currentAliasesYsql: string[],
@@ -556,7 +556,7 @@ const normKey = (s: string) => s
   .replace(/[^a-z0-9\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/gi, '')
   .trim();
 
-function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: string[]): { isLegitimate: boolean; cleaned?: string; reason?: string } {
+function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: string[], author?: string | null): { isLegitimate: boolean; cleaned?: string; reason?: string } {
   let raw = cand.trim();
   if (/console\.log|add_main_gen|function\(|window\.|<script|document\.|style=|font-|margin-|padding-|rgba?\(|calc\(|!important|src:url|woff2|grid-template|fill:#|display=swap|indexOf|media\$thumbnail/i.test(raw)) {
     return { isLegitimate: false, reason: 'Script/CSS code snippet from CMS theme' };
@@ -619,6 +619,24 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
     return { isLegitimate: false, reason: 'Minor typo or spelling variation of existing alias in YSQL' };
   }
 
+  // Author or artist name mistaken as alternative title (e.g. "Parque Seongho (박성호)")
+  if (author && typeof author === 'string') {
+    const normAuthor = normKey(author);
+    if (normAuthor && (normCleaned === normAuthor || levenshteinSimilarity(normCleaned, normAuthor) >= 0.85)) {
+      return { isLegitimate: false, reason: 'Author name mistaken as alternative title' };
+    }
+    const authorHangul = author.match(/[\uac00-\ud7af]+/g)?.join('') || '';
+    const cleanedHangul = cleaned.match(/[\uac00-\ud7af]+/g)?.join('') || '';
+    if (authorHangul && cleanedHangul && authorHangul === cleanedHangul) {
+      return { isLegitimate: false, reason: 'Author name hangul match' };
+    }
+  }
+
+  // Sub-clause fragment of primary title (e.g. "Então Eu A Fodi Loucamente" or "Uma Garota Perseguidora Peituda Se Declarou A Mim")
+  if (normKey(workTitle).includes(normCleaned) && normCleaned.length >= 8) {
+    return { isLegitimate: false, reason: 'Sub-clause fragment of primary title' };
+  }
+
   // Doujinshi parent franchise rejection
   const DOUJIN_FRANCHISES = ['boku no hero academia', 'heroaca', 'mha', 'bnha', 'my hero academia', 'naruto', 'one piece', 'bleach', 'dragon ball', 'genshin impact', 'fate grand order', 'touhou'];
   if (DOUJIN_FRANCHISES.some((f) => normKey(f) === normKey(cleaned)) && normKey(workTitle) !== normKey(cleaned)) {
@@ -677,7 +695,7 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
 }
 
   const missingFromYsql = cleanDiscovered.filter((da) => {
-    const res = cleanCandidateTitle(w.title, da, currentAliasesYsql);
+    const res = cleanCandidateTitle(w.title, da, currentAliasesYsql, w.author);
     if (!res.isLegitimate || !res.cleaned) return false;
 
     const cleaned = cleanAlternativeTitle(res.cleaned);
@@ -882,8 +900,8 @@ async function main() {
 
       // 2. Fetch candidates: STRICTLY V7 DONE works that have NOT YET received a post-V7 final audit
       const postV7Array = Array.from(postV7AuditedIds);
-      const candidates = await pool.query<{ id: string; title: string; slug: string; aliases: string[]; v7_task_id: string; v7_state: string; v7_updated_at: Date; v7_checkpoint: any }>(`
-        SELECT w.id::text, w.title, w.slug, w.aliases,
+      const candidates = await pool.query<{ id: string; title: string; slug: string; aliases: string[]; author: string | null; v7_task_id: string; v7_state: string; v7_updated_at: Date; v7_checkpoint: any }>(`
+        SELECT w.id::text, w.title, w.slug, w.aliases, w.author,
                t.id::text as v7_task_id, t.state as v7_state, t.updated_at as v7_updated_at, t.checkpoint as v7_checkpoint
         FROM importer_lite_tasks t
         JOIN works w ON w.id = t.work_id
@@ -911,7 +929,7 @@ async function main() {
         const chunkIds = revalidationCandidates.map((c) => c.workId);
         const [mRes, wRes, tRes] = await Promise.all([
           pool.query('SELECT work_id::text, source, source_work_id, source_title, source_slug FROM importer_work_mappings WHERE work_id = ANY($1::uuid[])', [chunkIds]),
-          pool.query('SELECT id::text, title, slug, aliases FROM works WHERE id = ANY($1::uuid[])', [chunkIds]),
+          pool.query('SELECT id::text, title, slug, aliases, author FROM works WHERE id = ANY($1::uuid[])', [chunkIds]),
           pool.query('SELECT work_id::text, id::text as v7_task_id, state as v7_state, updated_at as v7_updated_at, checkpoint as v7_checkpoint FROM importer_lite_tasks WHERE work_id = ANY($1::uuid[]) AND task_type = \'CATALOG\' AND payload->>\'metadataEnrichmentVersion\' = \'7\'', [chunkIds]),
         ]);
 
