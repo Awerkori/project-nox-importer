@@ -856,14 +856,15 @@ async function main() {
       const unaudited = candidates.rows;
 
       if (unaudited.length === 0) {
-        // Automatic revalidation queue for AUDIT_INCONCLUSIVE works after provider cooldowns
+        // Automatic revalidation queue for AUDIT_INCONCLUSIVE and AUDIT_FAIL works after provider cooldowns/corrections
         const now = Date.now();
         const revalidationCandidates = Array.from(latestPostV7Map.values())
-          .filter((r) => r.verdict === 'AUDIT_INCONCLUSIVE' && (now - new Date(r.auditedAt || r.revalidatedAt || 0).getTime()) > 5 * 60 * 1000)
+          .filter((r) => (r.verdict === 'AUDIT_INCONCLUSIVE' && (now - new Date(r.auditedAt || r.revalidatedAt || 0).getTime()) > 5 * 60 * 1000)
+                      || (r.verdict === 'AUDIT_FAIL' && (now - new Date(r.auditedAt || r.revalidatedAt || 0).getTime()) > 30 * 1000))
           .slice(0, 6);
 
         if (revalidationCandidates.length > 0) {
-          console.log(`[IDLE REVALIDATION] Re-auditing ${revalidationCandidates.length} AUDIT_INCONCLUSIVE works after provider cooldowns...`);
+          console.log(`[IDLE REVALIDATION] Re-auditing ${revalidationCandidates.length} works (INCONCLUSIVE/FAIL) after provider cooldowns/corrections...`);
           const chunkIds = revalidationCandidates.map((c) => c.workId);
           const [mRes, wRes, tRes] = await Promise.all([
             pool.query('SELECT work_id::text, source, source_work_id, source_title, source_slug FROM importer_work_mappings WHERE work_id = ANY($1::uuid[])', [chunkIds]),
