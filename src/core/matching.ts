@@ -241,9 +241,8 @@ const SEQUEL_OR_EDITION_MARKERS = new Set([
   'vigilantes', 're', 'darkness',
   'zero', 'apocrypha', 'omega', 'brotherhood',
   'reboot', 'byakuya', 'remake', 'sequel', 'prequel',
-  'animacao', 'animation', 'anime',
-  '1', '2', '3', '4', '5', '6', '7', '8', '9',
-  'i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii',
+  '2', '3', '4', '5', '6', '7', '8', '9',
+  'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii',
 ]);
 
 const SEQUEL_OR_EDITION_PHRASES = [
@@ -257,6 +256,9 @@ const SEQUEL_OR_EDITION_PHRASES = [
   'live action',
 ];
 
+const DELIMITED_PART_ONE_REGEX = /(?:[-–—:]|\b(?:part|parte|vol|volume|season|temporada))\s*(?:1|i)\b|\s+(?:1|i)$/i;
+const ADAPTATION_FORMAT_REGEX = /(?:[-–—~:]|\b(?:vers[aã]o|formato))\s*(?:anima[cç][aã]o|animation|anime|live\s*action)\b|\[(?:anime|anima[cç][aã]o|live\s*action)\]/i;
+
 /**
  * Detects whether two titles share a base work name but one carries a distinct
  * sequel, prequel, spin-off or edition qualifier absent from the other
@@ -267,6 +269,20 @@ export function hasSequelOrEditionConflict(titleA: string, titleB: string): stri
   const normA = normalizeTitle(titleA);
   const normB = normalizeTitle(titleB);
   if (!normA || !normB || normA === normB) return null;
+
+  // Dedicated delimited Part/Volume 1 check (avoids false conflicts on mid-title numbers)
+  const aPart1 = DELIMITED_PART_ONE_REGEX.test(titleA);
+  const bPart1 = DELIMITED_PART_ONE_REGEX.test(titleB);
+  if (aPart1 !== bPart1) {
+    return 'Sequel/edition conflict: "Part/Volume 1"';
+  }
+
+  // Dedicated format adaptation check (e.g. "~ Animação", "[Anime]", "Live Action")
+  const aAdapt = ADAPTATION_FORMAT_REGEX.test(titleA);
+  const bAdapt = ADAPTATION_FORMAT_REGEX.test(titleB);
+  if (aAdapt !== bAdapt) {
+    return 'Sequel/edition conflict: "Format adaptation"';
+  }
 
   // Allow explicitly curated canonical synonym groups (e.g. Troublesome Sister 2 variants)
   const synonymsA = getCanonicalSynonyms(titleA).map(normalizeTitle);
