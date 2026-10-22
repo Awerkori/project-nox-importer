@@ -6,7 +6,7 @@ import { SourceRegistry } from '../src/sources/registry.js';
 import { HostRateLimiter } from '../src/core/rate-limiter.js';
 import { SourceAdapter } from '../src/sources/types.js';
 import { cleanAlternativeTitle, alternativeTitleKey } from '../src/core/alternative-titles.js';
-import { matchWorkCandidate, diceSimilarity } from '../src/core/matching.js';
+import { matchWorkCandidate, diceSimilarity, levenshteinSimilarity } from '../src/core/matching.js';
 import { buildDiscoveryQueryCandidates } from '../src/lite/mapping-metadata.js';
 
 const RESULTS_FILE = path.resolve(process.cwd(), 'scratch/catalog_audit_v7_results.jsonl');
@@ -348,7 +348,7 @@ export async function verifySourceIndependently(
         const targetKeys = new Set([workTitle, ...knownAliases].map((t) => alternativeTitleKey(t)).filter(Boolean));
         const hasExactAliasIntersection = allExtractedTitles.some((t) => {
           const k = alternativeTitleKey(t);
-          if (!k || k.length < 8 || /^(?:sorry|desculpa|perdao|love|hello|alone|baby|oneshot|manga|comic)$/i.test(k)) return false;
+          if (!k || k.length < 8 || /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|love|hello|alone|baby|oneshot|manga|comic)$/i.test(k)) return false;
           return Boolean(targetKeys.has(k));
         });
         if ((!detailMatch.matched || detailMatch.confidenceScore < 0.75) && !hasExactAliasIntersection) {
@@ -576,6 +576,15 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
 
   if (normKey(cleaned) === normKey(workTitle)) {
     return { isLegitimate: false, reason: 'Punctuation/spacing/unicode variation of primary title' };
+  }
+
+  // Minor typo or spelling variation of an already existing alias in YSQL (e.g. "Papel e Eesoura" vs "Papel e Tesoura")
+  const normCleaned = normKey(cleaned);
+  if (normCleaned.length >= 8 && currentAliases.some((ca) => {
+    const nk = normKey(ca);
+    return nk.length >= 8 && levenshteinSimilarity(nk, normCleaned) >= 0.88;
+  })) {
+    return { isLegitimate: false, reason: 'Minor typo or spelling variation of existing alias in YSQL' };
   }
 
   // Doujinshi parent franchise rejection

@@ -148,6 +148,12 @@ describe('work matching safety', () => {
       { title: 'Sorry' },
     ).matched).toBe(false);
 
+    // Two unrelated works sharing the generic conversational phrase "Por Favor"
+    expect(matchWorkCandidate(
+      { title: 'Por Favor, Me Leia', aliases: ['Por Favor', 'Please Read Me'] },
+      { title: 'Por Favor, Olhe para a Jasmine', aliases: ['Por Favor', 'Please Look at Me'] },
+    ).matched).toBe(false);
+
     // But substantial, specific shared aliases must still match
     expect(matchWorkCandidate(
       { title: 'Ataque dos Titãs', aliases: ['Shingeki no Kyojin'] },

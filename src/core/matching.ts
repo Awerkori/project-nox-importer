@@ -567,7 +567,7 @@ export function matchWorkCandidate(target: MatchCandidate, candidate: MatchCandi
       alias === normCand ||
       alias.replace(/\s+/g, '') === normCand.replace(/\s+/g, '')
     ) {
-      const isGeneric = /^(?:sorry|desculpa|perdao|love|hello|alone|baby|oneshot|manga|comic)$/i.test(alias);
+      const isGeneric = /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|love|hello|alone|baby|oneshot|manga|comic)$/i.test(alias);
       if (!isGeneric || normTarget.includes(alias) || alias.length >= 8) {
         return {
           matched: true,
@@ -579,7 +579,7 @@ export function matchWorkCandidate(target: MatchCandidate, candidate: MatchCandi
     }
 
     if (candAliases.includes(alias)) {
-      const isGeneric = /^(?:sorry|desculpa|perdao|love|hello|alone|baby|oneshot|manga|comic|action|drama|fantasy|romance)$/i.test(alias);
+      const isGeneric = /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|love|hello|alone|baby|oneshot|manga|comic|action|drama|fantasy|romance)$/i.test(alias);
       const isSubstantial = alias.length >= 8 && (alias.includes(' ') || alias.length >= 12);
       if (isSubstantial && !isGeneric) {
         return {
@@ -597,7 +597,7 @@ export function matchWorkCandidate(target: MatchCandidate, candidate: MatchCandi
       alias === normTarget ||
       alias.replace(/\s+/g, '') === normTarget.replace(/\s+/g, '')
     ) {
-      const isGeneric = /^(?:sorry|desculpa|perdao|love|hello|alone|baby|oneshot|manga|comic)$/i.test(alias);
+      const isGeneric = /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|love|hello|alone|baby|oneshot|manga|comic)$/i.test(alias);
       if (!isGeneric || normCand.includes(alias) || alias.length >= 8) {
         return {
           matched: true,
