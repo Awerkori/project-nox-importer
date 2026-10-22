@@ -111,7 +111,8 @@ export function extractRawAlternativeTitlesFromAdapterDetails(details: any, work
   }
 
   const CLAUSE_CONTINUATION = /^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por)\b/i;
-  const INTERJECTIONS = new Set(['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá']);
+  const VOCATIVE_HONORIFIC = /-(?:san|kun|chan|sama|sensei|senpai|dono)\b/i;
+  const INTERJECTIONS = new Set(['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá', 'ijiranaide', 'ijirimakutte', 'uzaki', 'komi']);
 
   function splitTitles(text: string): string[] {
     const trimmed = text.trim();
@@ -123,7 +124,9 @@ export function extractRawAlternativeTitlesFromAdapterDetails(details: any, work
       const parts = trimmed.split(/,\s+/).map(s => s.trim()).filter(Boolean);
       if (parts.length > 1) {
         const firstWord = parts[0].toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
-        const isGrammatical = INTERJECTIONS.has(firstWord) || parts.some((p, i) => i > 0 && (CLAUSE_CONTINUATION.test(p) || /^[a-z]/.test(p)));
+        const isGrammatical = INTERJECTIONS.has(firstWord)
+          || VOCATIVE_HONORIFIC.test(trimmed)
+          || parts.some((p, i) => i > 0 && (CLAUSE_CONTINUATION.test(p) || /^[a-z]/.test(p)));
         if (!isGrammatical) return parts;
       }
     }
@@ -139,7 +142,7 @@ export function extractRawAlternativeTitlesFromAdapterDetails(details: any, work
     for (const p of parts) {
       const cleaned = cleanAlternativeTitle(p);
       if (cleaned) {
-        if (/[:;{}]|font-|px\b|rem\b|rgb\(|var\(|@import|overflow/i.test(cleaned)) continue;
+        if (/[;{}]|font-|px\b|rem\b|rgb\(|var\(|@import|overflow/i.test(cleaned)) continue;
         if (/^\(?---?teste/i.test(cleaned)) continue;
         const k = alternativeTitleKey(cleaned);
         const tk = alternativeTitleKey(workTitle);
@@ -261,6 +264,7 @@ export async function verifySourceIndependently(
 
   const searchQueries = buildDiscoveryQueryCandidates(workTitle, knownAliases).slice(0, 4);
   let foundMatch: any = null;
+  let fallbackCandidate: any = null;
 
   for (const q of searchQueries) {
     try {
@@ -282,6 +286,9 @@ export async function verifySourceIndependently(
         if (matchRes.matched && matchRes.confidenceScore >= 0.75) {
           foundMatch = item;
           break;
+        }
+        if (!fallbackCandidate) {
+          fallbackCandidate = item;
         }
       }
 
@@ -310,7 +317,8 @@ export async function verifySourceIndependently(
     }
   }
 
-  if (!foundMatch) {
+  const candidateToProbe = foundMatch || fallbackCandidate;
+  if (!candidateToProbe) {
     return {
       sourceId,
       status: 'NOT_FOUND',
@@ -324,30 +332,55 @@ export async function verifySourceIndependently(
 
   try {
     const details = await withTimeoutOrReject(
-      adapter.fetchWorkDetails(foundMatch.sourceWorkId),
+      adapter.fetchWorkDetails(candidateToProbe.sourceWorkId),
       8000,
-      `DETAILS_TIMEOUT_8000MS for id "${foundMatch.sourceWorkId}"`
+      `DETAILS_TIMEOUT_8000MS for id "${candidateToProbe.sourceWorkId}"`
     );
 
     if (details) {
-      const rawAliases = extractRawAlternativeTitlesFromAdapterDetails(details, workTitle);
+      const allExtractedTitles = extractRawAlternativeTitlesFromAdapterDetails(details, '');
+      if (!foundMatch) {
+        // Fallback candidate must prove identity via detail-page title or alternativeTitles
+        const detailMatch = matchWorkCandidate(
+          { title: workTitle, slug: '', aliases: knownAliases },
+          { title: details.title || candidateToProbe.title, slug: details.slug || candidateToProbe.slug, aliases: allExtractedTitles }
+        );
+        const targetKeys = new Set([workTitle, ...knownAliases].map((t) => alternativeTitleKey(t)).filter(Boolean));
+        const hasExactAliasIntersection = allExtractedTitles.some((t) => {
+          const k = alternativeTitleKey(t);
+          return Boolean(k && targetKeys.has(k));
+        });
+        if ((!detailMatch.matched || detailMatch.confidenceScore < 0.75) && !hasExactAliasIntersection) {
+          return {
+            sourceId,
+            status: 'NOT_FOUND',
+            sourceWorkId: null,
+            sourceTitle: null,
+            aliasesFound: [],
+            evidence: `Not found after searching ${JSON.stringify(searchQueries)} (fallback "${candidateToProbe.title}" rejected on details)`,
+            checkedAt,
+          };
+        }
+      }
+      const workTitleKey = alternativeTitleKey(workTitle);
+      const rawAliases = allExtractedTitles.filter((a) => alternativeTitleKey(a) !== workTitleKey);
       return {
         sourceId,
         status: rawAliases.length > 0 ? 'FOUND_WITH_ALIASES' : 'FOUND_NO_ALIASES',
-        sourceWorkId: foundMatch.sourceWorkId,
-        sourceTitle: details.title || foundMatch.title,
+        sourceWorkId: candidateToProbe.sourceWorkId,
+        sourceTitle: details.title || candidateToProbe.title,
         aliasesFound: rawAliases,
-        evidence: `Found via search "${foundMatch.title}" (${foundMatch.sourceWorkId}): ${rawAliases.length} aliases`,
+        evidence: `Found via search "${candidateToProbe.title}" (${candidateToProbe.sourceWorkId}): ${rawAliases.length} aliases`,
         checkedAt,
       };
     }
     return {
       sourceId,
       status: 'DEFERRED_ERROR',
-      sourceWorkId: foundMatch.sourceWorkId,
-      sourceTitle: foundMatch.title,
+      sourceWorkId: candidateToProbe.sourceWorkId,
+      sourceTitle: candidateToProbe.title,
       aliasesFound: [],
-      evidence: `Empty details returned for ${foundMatch.sourceWorkId}`,
+      evidence: `Empty details returned for ${candidateToProbe.sourceWorkId}`,
       checkedAt,
     };
   } catch (err: any) {
@@ -355,18 +388,18 @@ export async function verifySourceIndependently(
       return {
         sourceId,
         status: 'DEFERRED_TIMEOUT',
-        sourceWorkId: foundMatch.sourceWorkId,
-        sourceTitle: foundMatch.title,
+        sourceWorkId: candidateToProbe.sourceWorkId,
+        sourceTitle: candidateToProbe.title,
         aliasesFound: [],
-        evidence: `Details timed out (>8s) after search match for ${foundMatch.sourceWorkId}: ${err?.message}`,
+        evidence: `Details timed out (>8s) after search match for ${candidateToProbe.sourceWorkId}: ${err?.message}`,
         checkedAt,
       };
     }
     return {
       sourceId,
       status: 'DEFERRED_ERROR',
-      sourceWorkId: foundMatch.sourceWorkId,
-      sourceTitle: foundMatch.title,
+      sourceWorkId: candidateToProbe.sourceWorkId,
+      sourceTitle: candidateToProbe.title,
       aliasesFound: [],
       evidence: `Error fetching details: ${err?.message}`,
       checkedAt,
@@ -578,12 +611,12 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
 
     const cleaned = cleanAlternativeTitle(res.cleaned);
     if (!cleaned) return false;
-    if (/[:;{}]|font-|px\b|rem\b|rgb\(|var\(|@import|overflow/i.test(cleaned)) return false;
+    if (/[;{}]|font-|px\b|rem\b|rgb\(|var\(|@import|overflow/i.test(cleaned)) return false;
     if (/^\(?---?teste/i.test(cleaned)) return false;
 
-    // Discard doujinshi / sequel spin-offs where work title itself does not contain that marker
-    const isDoujinOrSequel = /\b(?:comic|shokubai|extra|part\s*\d|part\d|\bvol\b|\bvol\.\b|\b[2-9]\b|season\s*\d|live\s*action)\b/i.test(cleaned)
-      && !/\b(?:comic|shokubai|extra|part\s*\d|part\d|\bvol\b|\bvol\.\b|\b[2-9]\b|season\s*\d|live\s*action)\b/i.test(w.title);
+    // Discard doujinshi / sequel / novel spin-offs where work title itself does not contain that marker
+    const isDoujinOrSequel = /\b(?:comic|shokubai|extra|part\s*\d|part\d|\bvol\b|\bvol\.\b|\b[2-9]\b|season\s*\d|live\s*action|novel)\b/i.test(cleaned)
+      && !/\b(?:comic|shokubai|extra|part\s*\d|part\d|\bvol\b|\bvol\.\b|\b[2-9]\b|season\s*\d|live\s*action|novel)\b/i.test(w.title);
     if (isDoujinOrSequel) return false;
 
     // Discard minor article-only differences
@@ -603,8 +636,11 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
   });
 
   const checkpoint = taskInfo?.checkpoint || {};
-  const isPartialDeferred = checkpoint.coverage === 'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED';
-  const deferredSources = new Set<string>(Array.isArray(checkpoint.deferredSources) ? checkpoint.deferredSources : []);
+  const deferredSources = new Set<string>(
+    (Array.isArray(checkpoint.deferredSources) ? checkpoint.deferredSources : [])
+      .filter((s: string) => s !== 'brscans')
+  );
+  const isPartialDeferred = deferredSources.size > 0;
   const operationalProblems = sourceChecks.filter((c) => c.sourceId !== 'brscans' && (c.status === 'DEFERRED_TIMEOUT' || c.status === 'DEFERRED_ERROR'));
   const hasTimeouts = operationalProblems.length > 0;
 
@@ -613,12 +649,21 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
   let isBug = false;
 
   if (missingFromYsql.length > 0) {
-    if (isPartialDeferred || deferredSources.size > 0 || hasTimeouts) {
-      verdict = 'AUDIT_INCONCLUSIVE';
-      isBug = false;
-    } else {
+    const missingFromCheckedV7Source = missingFromYsql.some((missingAlias) => {
+      const mKey = alternativeTitleKey(missingAlias);
+      return sourceChecks.some((c) => {
+        if (c.status !== 'FOUND_WITH_ALIASES' || !Array.isArray(c.aliasesFound)) return false;
+        const hasAlias = c.aliasesFound.some((af: string) => alternativeTitleKey(af) === mKey);
+        return hasAlias && !deferredSources.has(c.sourceId);
+      });
+    });
+
+    if (missingFromCheckedV7Source) {
       verdict = 'AUDIT_FAIL';
       isBug = true;
+    } else {
+      verdict = 'AUDIT_INCONCLUSIVE';
+      isBug = false;
     }
   } else if (hasTimeouts) {
     verdict = 'AUDIT_INCONCLUSIVE';
@@ -720,23 +765,22 @@ async function main() {
       `);
       stats.v7_done_total = parseInt(v7DoneCountRes.rows[0].count, 10);
 
-      // Check if any already-audited V7 work was reprocessed (task updated_at > record.v7CompletedAt)
+      // Check if any already-audited V7 work was reopened or reprocessed (state !== 'DONE' or task updated_at > record.v7CompletedAt)
       if (postV7AuditedIds.size > 0) {
         const auditedArray = Array.from(postV7AuditedIds);
-        const reprocessedRes = await pool.query<{ work_id: string; updated_at: Date }>(`
-          SELECT work_id::text, updated_at
+        const reprocessedRes = await pool.query<{ work_id: string; state: string; updated_at: Date }>(`
+          SELECT work_id::text, state, updated_at
           FROM importer_lite_tasks
           WHERE task_type = 'CATALOG'
             AND payload->>'metadataEnrichmentVersion' = '7'
-            AND state = 'DONE'
             AND work_id = ANY($1::uuid[])
         `, [auditedArray]);
         for (const row of reprocessedRes.rows) {
           const prev = latestPostV7Map.get(row.work_id);
-          if (prev && prev.v7CompletedAt) {
+          if (prev) {
             const taskTime = new Date(row.updated_at).getTime();
-            const auditedTaskTime = new Date(prev.v7CompletedAt).getTime();
-            if (taskTime > auditedTaskTime + 1000) {
+            const auditedTaskTime = prev.v7CompletedAt ? new Date(prev.v7CompletedAt).getTime() : 0;
+            if (row.state !== 'DONE' || taskTime > auditedTaskTime + 1000) {
               postV7AuditedIds.delete(row.work_id);
               latestPostV7Map.delete(row.work_id);
               if (prev.verdict === 'AUDIT_PASS') stats.v7_done_audit_pass--;
