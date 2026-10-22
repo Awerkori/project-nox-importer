@@ -569,7 +569,7 @@ export function matchWorkCandidate(target: MatchCandidate, candidate: MatchCandi
     ) {
       const isGeneric = /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|na\s*verdade|actually|in\s*fact|turns\s*out|love|hello|alone|baby|oneshot|manga|comic|primal|scan|raw)$/i.test(alias);
       const isSingleShortWord = !alias.includes(' ') && alias.length < 8;
-      if (!isGeneric && !isSingleShortWord || normTarget.includes(alias)) {
+      if (!isGeneric && !isSingleShortWord || normTarget === alias) {
         return {
           matched: true,
           confidenceScore: 0.95,
@@ -600,7 +600,7 @@ export function matchWorkCandidate(target: MatchCandidate, candidate: MatchCandi
     ) {
       const isGeneric = /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|na\s*verdade|actually|in\s*fact|turns\s*out|love|hello|alone|baby|oneshot|manga|comic|primal|scan|raw)$/i.test(alias);
       const isSingleShortWord = !alias.includes(' ') && alias.length < 8;
-      if (!isGeneric && !isSingleShortWord || normCand.includes(alias)) {
+      if (!isGeneric && !isSingleShortWord || normCand === alias) {
         return {
           matched: true,
           confidenceScore: 0.95,

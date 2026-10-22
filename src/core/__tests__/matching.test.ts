@@ -179,4 +179,16 @@ describe('work matching safety', () => {
       },
     ).matched).toBe(true);
   });
+
+  it('rejects matching candidate with different base title against target when candidate merely contains target as a comma-separated subclause without declared aliases', () => {
+    expect(matchWorkCandidate(
+      { title: 'No Way Out!' },
+      { title: "Pixiu's Eatery, No Way Out" },
+    ).matched).toBe(false);
+
+    expect(matchWorkCandidate(
+      { title: 'No Way Out' },
+      { title: "Pixiu's Eatery, No Way Out", aliases: ["Pixiu's Eatery, No Way Out"] },
+    ).matched).toBe(false);
+  });
 });
