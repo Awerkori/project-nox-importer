@@ -67,6 +67,29 @@ describe('Cross-Provider Matching Engine', () => {
     expect(res.reason).toContain('Spin-off');
   });
 
+  it('rejects matches between adult parody/hentai and mainstream comic', () => {
+    const res1 = matchWorkCandidate(
+      { title: 'Bocchi the Rock Hentai' },
+      { title: 'Bocchi the Rock!' }
+    );
+    expect(res1.matched).toBe(false);
+    expect(res1.reason).toContain('Adult parody/hentai');
+
+    const res2 = matchWorkCandidate(
+      { title: 'Sousou no Frieren' },
+      { title: 'Sousou no Frieren Hentai' }
+    );
+    expect(res2.matched).toBe(false);
+    expect(res2.reason).toContain('Adult parody/hentai');
+
+    const res3 = matchWorkCandidate(
+      { title: 'A Filha de Oshi no Ko (Doujinshi)' },
+      { title: 'Oshi no Ko' }
+    );
+    expect(res3.matched).toBe(false);
+    expect(res3.reason).toContain('Adult parody/hentai');
+  });
+
   it('fuzzy matches high-similarity titles', () => {
     const res = matchWorkCandidate(
       { title: 'Regressor Instruction Manual' },
