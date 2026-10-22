@@ -4,17 +4,23 @@ import { join } from 'path';
 import { execFileSync } from 'node:child_process';
 
 // Copy assets required at runtime
-try {
-  const manhastroSrc = join(process.cwd(), 'src/sources/manhastro/manhastro-catalog.json');
-  const manhastroDestDir = join(process.cwd(), 'build/sources/manhastro');
-  const manhastroDest = join(manhastroDestDir, 'manhastro-catalog.json');
-  if (existsSync(manhastroSrc)) {
-    if (!existsSync(manhastroDestDir)) mkdirSync(manhastroDestDir, { recursive: true });
-    copyFileSync(manhastroSrc, manhastroDest);
-    console.log('Copied manhastro-catalog.json to build/sources/manhastro/');
+for (const [srcRel, destDirRel, fileName] of [
+  ['src/sources/manhastro/manhastro-catalog.json', 'build/sources/manhastro', 'manhastro-catalog.json'],
+  ['src/sources/nexus/nexus-catalog.json', 'build/sources/nexus', 'nexus-catalog.json'],
+  ['src/sources/imperiodabritannia/imperiodabritannia-catalog.json', 'build/sources/imperiodabritannia', 'imperiodabritannia-catalog.json'],
+]) {
+  try {
+    const srcPath = join(process.cwd(), srcRel);
+    const destDir = join(process.cwd(), destDirRel);
+    const destPath = join(destDir, fileName);
+    if (existsSync(srcPath)) {
+      if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
+      copyFileSync(srcPath, destPath);
+      console.log(`Copied ${fileName} to ${destDirRel}/`);
+    }
+  } catch (err) {
+    console.warn(`Failed to copy ${fileName}:`, err.message);
   }
-} catch (err) {
-  console.warn('Failed to copy manhastro-catalog.json:', err.message);
 }
 
 // read build/index.js to generate an artifact hash

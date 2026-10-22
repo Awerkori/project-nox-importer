@@ -281,6 +281,7 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
     await expect(gs.searchWorks('test')).rejects.toThrow('HTTP 502');
 
     const nexus = new NexusAdapter(limiter);
+    vi.spyOn(nexus as any, 'ensureCatalogLoaded').mockReturnValue(false);
     vi.spyOn(nexus as any, 'request').mockRejectedValue(new Error('fetch failed'));
     await expect(nexus.searchWorks('test')).rejects.toThrow('fetch failed');
 
