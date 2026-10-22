@@ -180,6 +180,21 @@ export class NexusAdapter implements SourceAdapter {
           alternativeTitles.push(...trimmed.split(/;+/).map((s: string) => s.trim()).filter(Boolean));
         } else if (/\s+\/\s+/.test(trimmed)) {
           alternativeTitles.push(...trimmed.split(/\s+\/\s+/).map((s: string) => s.trim()).filter(Boolean));
+        } else if (/,\s+/.test(trimmed)) {
+          const parts = trimmed.split(/,\s+/).map((s: string) => s.trim()).filter(Boolean);
+          const firstWord = (parts[0] || '').toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
+          const isInterjection = ['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá', 'yes', 'no'].includes(firstWord);
+          const isContinuation = parts.some(
+            (p: string, idx: number) =>
+              idx > 0 &&
+              (/^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por)\b/i.test(p) ||
+                /^[a-z]/.test(p))
+          );
+          if (parts.length > 1 && !isInterjection && !isContinuation) {
+            alternativeTitles.push(...parts);
+          } else {
+            alternativeTitles.push(trimmed);
+          }
         } else {
           alternativeTitles.push(trimmed);
         }
@@ -264,11 +279,11 @@ export class NexusAdapter implements SourceAdapter {
         updatedAt: w.updated_at,
       }));
     } catch (err: any) {
-      if (err?.status === 429 || err?.message?.includes('timeout') || err?.message?.includes('HTTP 5')) {
-        throw err;
+      if (err?.status === 404 || err?.status === 400 || err?.message?.includes('HTTP 404') || err?.message?.includes('HTTP 400')) {
+        return [];
       }
       this.logger.warn(`Search failed on Nexus for query "${query}"`, { error: err?.message });
-      return [];
+      throw err;
     }
   }
 }

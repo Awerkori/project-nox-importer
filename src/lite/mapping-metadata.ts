@@ -1,4 +1,5 @@
 import { alternativeTitleKey, cleanAlternativeTitle, mergeAlternativeTitles } from '../core/alternative-titles.js';
+import { getCanonicalSynonyms } from '../core/matching.js';
 import { decodeHtmlEntities } from '../sources/common/html-utils.js';
 
 type RawRecord = Record<string, unknown>;
@@ -189,17 +190,27 @@ export function classifyExplicitSourceMetadata(raw: unknown, primaryTitle: strin
 /**
  * Generate a bounded list of search query candidates for cross-source discovery.
  * Includes the primary title, the main title clause if punctuated (e.g. "Title, Subtitle" -> "Title"),
- * and up to 4 distinct aliases, deduplicated and capped at 5 total queries.
+ * canonical synonym variations, and up to 4 distinct aliases, deduplicated and capped at 5 total queries.
  */
 export function buildDiscoveryQueryCandidates(title: string, aliases: string[] = []): string[] {
   const candidateList: string[] = [];
   const cleanTitle = decodeHtmlEntities(title || '').trim();
   if (cleanTitle.length >= 1) candidateList.push(cleanTitle);
 
-  // Extract primary title clause if punctuation indicates a subtitle
+  // Extract primary title clause if punctuation indicates a subtitle (excluding interjection prefixes)
   const titleParts = cleanTitle.split(/(?:,\s*|[:;|/()]|\s+[-–—]\s+)/).map((p) => p.trim()).filter(Boolean);
   if (titleParts.length > 1 && titleParts[0].length >= 2) {
-    candidateList.push(titleParts[0]);
+    const firstWord = titleParts[0].toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
+    if (!INTERJECTION_PREFIXES.has(firstWord)) {
+      candidateList.push(titleParts[0]);
+    }
+  }
+
+  // Include canonical synonym variations (e.g. "Step-mother" <-> "Madrasta", Roman numerals)
+  for (const syn of getCanonicalSynonyms(cleanTitle)) {
+    if (syn && syn.trim().length >= 2) {
+      candidateList.push(syn.trim());
+    }
   }
 
   for (const alias of aliases || []) {

@@ -599,8 +599,8 @@ describe('LiteRepository against the additive Lite migration', () => {
       VALUES('00000000-0000-4000-8000-000000000317','source-a','linked-popular',$1::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1b]);
     await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','complete')`);
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
-      idempotencyKey:`lite:metadata:cross-source:v6:${ids.p1a}`,
-      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:6} });
+      idempotencyKey:`lite:metadata:cross-source:v7:${ids.p1a}`,
+      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:7} });
 
     expect(await repo.refillCrossSourceMetadataDiscovery()).toBe(1);
     expect((await db.query(`SELECT work_id::text FROM importer_lite_tasks
@@ -615,8 +615,8 @@ describe('LiteRepository against the additive Lite migration', () => {
       VALUES('00000000-0000-4000-8000-000000000319','source-a','popular-linked',$1::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1b]);
     await db.query(`INSERT INTO settings(key,value) VALUES('metadata_replay_v4_enabled','complete')`);
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
-      idempotencyKey:`lite:metadata:cross-source:v6:${ids.p1a}`,
-      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:6,discoveryLane:'unlinked'} });
+      idempotencyKey:`lite:metadata:cross-source:v7:${ids.p1a}`,
+      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:7,discoveryLane:'unlinked'} });
     // The unlinked probe attached a provider after admission. It must retain
     // its original reservation rather than displacing the popular lane.
     await db.query(`INSERT INTO importer_work_mappings
@@ -632,8 +632,8 @@ describe('LiteRepository against the additive Lite migration', () => {
   it('claims cross-source coverage outside the generic P2 claim', async () => {
     await db.query(`UPDATE works SET published=true,aliases='{}'::text[] WHERE id=$1`, [ids.p1a]);
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
-      idempotencyKey:`lite:metadata:cross-source:v6:${ids.p1a}`,
-      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:6} });
+      idempotencyKey:`lite:metadata:cross-source:v7:${ids.p1a}`,
+      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:7} });
 
     const task = await repo.claimCrossSourceMetadataDiscovery('cross-source-worker', 90);
     expect(task).toMatchObject({ workId:ids.p1a,state:'RUNNING',payload:{metadataCrossSourceDiscovery:true} });
@@ -645,8 +645,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`INSERT INTO importer_lite_tasks
       (id,task_type,work_id,work_key,priority,base_priority,idempotency_key,state,next_run_at,max_attempts,payload,checkpoint)
       VALUES('00000000-0000-4000-8000-000000000318','CATALOG',$1::uuid,$2,3,3,$3,'DONE',now()-interval '1 minute',4,$4::jsonb,$5::jsonb)`, [
-      ids.p1a, `work:${ids.p1a}`, `lite:metadata:cross-source:v6:${ids.p1a}`,
-      JSON.stringify({ metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:6 }),
+      ids.p1a, `work:${ids.p1a}`, `lite:metadata:cross-source:v7:${ids.p1a}`,
+      JSON.stringify({ metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:7 }),
       JSON.stringify({ coverage:'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED',checkedSources:['source-a','source-b'],deferredSources:['source-b'],deferredRounds:0 }),
     ]);
 
@@ -659,8 +659,8 @@ describe('LiteRepository against the additive Lite migration', () => {
   it('attaches only detail-confirmed cross-source metadata and persists its alias delta', async () => {
     await db.query(`UPDATE works SET published=true,aliases='{}'::text[],title='The Specific P1 A Work',slug='the-specific-p1-a-work' WHERE id=$1`, [ids.p1a]);
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
-      idempotencyKey:`lite:metadata:cross-source:v6:${ids.p1a}`,
-      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:6} });
+      idempotencyKey:`lite:metadata:cross-source:v7:${ids.p1a}`,
+      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:7} });
     const task = await repo.claim('cross-source-worker', 120);
     const adapter = { id:'source-a',baseUrl:'https://source-a.example',
       // The search result is a different primary title.  The exact identity

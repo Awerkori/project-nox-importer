@@ -239,8 +239,11 @@ export class GreenShitAdapter {
             }));
         }
         catch (err) {
+            if (err?.status === 404 || err?.status === 400) {
+                return [];
+            }
             this.logger.error(`searchWorks failed for query "${query}": ${err.message}`);
-            return [];
+            throw err;
         }
     }
     getImageHeaders() {

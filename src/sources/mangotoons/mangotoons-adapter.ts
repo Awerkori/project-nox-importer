@@ -293,11 +293,11 @@ export class MangoToonsAdapter implements SourceAdapter {
         updatedAt: w.atualizada_em || w.criada_em || undefined,
       }));
     } catch (err: any) {
-      if (err?.status === 429 || err?.message?.includes('timeout') || err?.message?.includes('HTTP 5')) {
-        throw err;
+      if (err?.status === 404 || err?.status === 400 || err?.message?.includes('HTTP 404') || err?.message?.includes('HTTP 400')) {
+        return [];
       }
       this.logger.warn(`Search failed on MangoToons for query "${query}"`, { error: err?.message });
-      return [];
+      throw err;
     }
   }
 }

@@ -335,11 +335,11 @@ export class MangaFlixAdapter implements SourceAdapter {
         updatedAt: new Date().toISOString(),
       }));
     } catch (err: any) {
-      if (err?.status === 429 || err?.message?.includes('timeout') || err?.message?.includes('HTTP 5')) {
-        throw err;
+      if (err?.status === 404 || err?.status === 400 || err?.message?.includes('HTTP 404') || err?.message?.includes('HTTP 400')) {
+        return [];
       }
       this.logger.warn(`Search failed on MangaFlix for query "${query}"`, { error: err?.message });
-      return [];
+      throw err;
     }
   }
 }

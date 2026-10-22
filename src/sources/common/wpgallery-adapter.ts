@@ -117,11 +117,16 @@ export class WpGalleryAdapter implements SourceAdapter {
         }
 
         if (!res.ok) {
-          throw new Error(`HTTP ${res.status} from ${url}`);
+          const err: any = new Error(`HTTP ${res.status} from ${url}`);
+          err.status = res.status;
+          throw err;
         }
 
         return (await res.json()) as T;
       } catch (err: any) {
+        if (err?.status && err.status >= 400 && err.status < 500 && err.status !== 429) {
+          throw err;
+        }
         if (attempts >= maxAttempts) throw err;
         await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
       }
@@ -323,14 +328,18 @@ export class WpGalleryAdapter implements SourceAdapter {
 
     try {
       const posts = await this.fetchJson<any[]>(url);
+      if (!Array.isArray(posts)) return [];
       return posts.map((p: any) => ({
         sourceWorkId: String(p.id),
         title: decodeHtmlEntities(stripHtml(p.title?.rendered || '')).trim(),
         slug: p.slug || slugify(p.title?.rendered || ''),
       }));
     } catch (err: any) {
+      if (err?.status === 404 || err?.status === 400) {
+        return [];
+      }
       this.logger.error(`searchWorks failed for query "${query}": ${err.message}`);
-      return [];
+      throw err;
     }
   }
 

@@ -444,22 +444,39 @@ export class MadaraAdapter {
     async searchWorks(query) {
         const url = `${this.baseUrl}/?s=${encodeURIComponent(query)}&post_type=wp-manga`;
         const html = await this.fetchHtml(url);
-        const works = [];
-        const seenSlugs = new Set();
+        const bySlug = new Map();
         const regex = new RegExp(`href="([^"]*(?:\\/${this.mangaSubString}\\/|\\/obra\\/|\\/projeto\\/)([^"\\/?#]+)\\/?)"[^>]*>([^<]+)?`, 'gi');
         let match;
         while ((match = regex.exec(html)) !== null) {
             const rawSlug = match[2].trim();
-            if (!rawSlug || rawSlug === this.mangaSubString || seenSlugs.has(rawSlug))
+            if (!rawSlug || rawSlug === this.mangaSubString || rawSlug === 'feed' || rawSlug === 'page' || rawSlug === 'order')
                 continue;
-            seenSlugs.add(rawSlug);
-            works.push({
-                sourceWorkId: rawSlug,
-                slug: slugify(rawSlug),
-                title: decodeHtmlEntities(match[3]?.trim() || rawSlug),
-            });
+            let candidateTitle = decodeHtmlEntities(match[3]?.trim() || '');
+            if (!candidateTitle) {
+                const chunkStart = Math.max(0, match.index - 300);
+                const chunkEnd = Math.min(html.length, match.index + 400);
+                const chunk = html.slice(chunkStart, chunkEnd);
+                const titleMatch = chunk.match(/class="[^"]*post-title[^"]*"[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i) ||
+                    chunk.match(/<h[345][^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i) ||
+                    chunk.match(/title="([^"]+)"/i) ||
+                    chunk.match(/alt="([^"]+)"/i);
+                if (titleMatch?.[1]?.trim()) {
+                    candidateTitle = decodeHtmlEntities(titleMatch[1].trim());
+                }
+            }
+            const title = candidateTitle || rawSlug;
+            if (title.toLowerCase() === 'feed')
+                continue;
+            const existing = bySlug.get(rawSlug);
+            if (!existing || (existing.title === rawSlug && title !== rawSlug)) {
+                bySlug.set(rawSlug, {
+                    sourceWorkId: rawSlug,
+                    slug: slugify(rawSlug),
+                    title,
+                });
+            }
         }
-        return works;
+        return Array.from(bySlug.values());
     }
     getImageHeaders(url) {
         return {
