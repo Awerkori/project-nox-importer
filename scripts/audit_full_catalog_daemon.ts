@@ -376,7 +376,7 @@ export async function verifySourceIndependently(
       const targetKeys = new Set([workTitle, ...knownAliases].map((t) => alternativeTitleKey(t)).filter(Boolean));
       const hasExactAliasIntersection = allExtractedTitles.some((t) => {
         const k = alternativeTitleKey(t);
-        if (!k || k.length < 8 || /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|na\s*verdade|actually|in\s*fact|turns\s*out|love|hello|alone|baby|oneshot|manga|comic|primal|scan|raw)$/i.test(k)) return false;
+        if (!k || k.length < 12 || /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|na\s*verdade|actually|in\s*fact|turns\s*out|love|hello|alone|baby|oneshot|manga|comic|primal|scan|raw|isn\s*t\s*it|is\s*it\s*not|right)\b/i.test(k)) return false;
         return Boolean(targetKeys.has(k));
       });
       if ((!detailMatch.matched || detailMatch.confidenceScore < 0.75) && !hasExactAliasIntersection) {
