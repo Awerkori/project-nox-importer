@@ -1,5 +1,25 @@
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
+function normalizeText(text) {
+    return text
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .normalize('NFC')
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+        .trim();
+}
+function slugify(text) {
+    return text
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
 const ANON_KEY = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJzdXBhYmFzZSIsImlhdCI6MTc4NzgwMjAwMCwiZXhwIjo0OTQzNDc1NjAwLCJyb2xlIjoiYW5vbiJ9.Cnl8Jw2DeKe84OAkmJYfO33xlcZsw0TC2Nw_il0tpRs';
 export class NexusAdapter {
     rateLimiter;
@@ -19,11 +39,51 @@ export class NexusAdapter {
     apiUrl = 'https://supabase.nexusmangas.com/rest/v1';
     functionsUrl = 'https://supabase.nexusmangas.com/functions/v1';
     logger = new Logger('NexusAdapter');
-    constructor(rateLimiter = new HostRateLimiter(2.0), transport = fetch) {
+    catalogItems = [];
+    catalogByNormalizedTitle = new Map();
+    catalogBySlug = new Map();
+    catalogById = new Map();
+    catalogLoaded = false;
+    constructor(rateLimiter = new HostRateLimiter(4.0), transport = fetch) {
         this.rateLimiter = rateLimiter;
         this.transport = transport;
-        this.rateLimiter.setHostRate('supabase.nexusmangas.com', 2.0, 4, 4.0);
+        this.rateLimiter.setHostRate('supabase.nexusmangas.com', 4.0, 8, 8.0);
         this.rateLimiter.setHostRate('cdn.nexusmangas.com', 8.0, 16, 16.0);
+    }
+    ensureCatalogLoaded() {
+        if (this.catalogLoaded)
+            return true;
+        try {
+            const currentDir = typeof __dirname !== 'undefined'
+                ? __dirname
+                : path.dirname(fileURLToPath(import.meta.url));
+            const catalogPath = path.resolve(currentDir, 'nexus-catalog.json');
+            if (fs.existsSync(catalogPath)) {
+                const raw = fs.readFileSync(catalogPath, 'utf8');
+                this.catalogItems = JSON.parse(raw);
+                for (const item of this.catalogItems) {
+                    this.catalogById.set(String(item.id), item);
+                    if (item.slug)
+                        this.catalogBySlug.set(String(item.slug), item);
+                    const titles = [item.title, item.alternative_title].filter(Boolean);
+                    for (const title of titles) {
+                        const norm = normalizeText(title);
+                        if (norm) {
+                            const list = this.catalogByNormalizedTitle.get(norm) || [];
+                            list.push(item);
+                            this.catalogByNormalizedTitle.set(norm, list);
+                        }
+                    }
+                }
+                this.catalogLoaded = true;
+                this.logger.info(`Loaded Nexus local catalog index with ${this.catalogItems.length} works`);
+                return true;
+            }
+        }
+        catch (err) {
+            this.logger.warn('Failed to load local Nexus catalog cache', { error: err?.message });
+        }
+        return false;
     }
     get headers() {
         return {
@@ -109,9 +169,15 @@ export class NexusAdapter {
         return { works: summaries, nextCursor };
     }
     async fetchWorkDetails(sourceWorkId) {
-        const url = `${this.apiUrl}/works?id=eq.${sourceWorkId}&select=id,title,slug,cover_url,description,alternative_title,status,type,content_rating,release_year,author,artist,work_genres(genre:genres(name))`;
-        const rows = await this.request(url);
-        const row = rows?.[0];
+        let row;
+        if (this.transport === fetch && this.ensureCatalogLoaded()) {
+            row = this.catalogById.get(String(sourceWorkId)) || this.catalogBySlug.get(String(sourceWorkId));
+        }
+        if (!row) {
+            const url = `${this.apiUrl}/works?id=eq.${sourceWorkId}&select=id,title,slug,cover_url,description,alternative_title,status,type,content_rating,release_year,author,artist,work_genres(genre:genres(name))`;
+            const rows = await this.request(url);
+            row = rows?.[0];
+        }
         if (!row) {
             throw new Error(`Work not found on Nexus: ${sourceWorkId}`);
         }
@@ -222,10 +288,54 @@ export class NexusAdapter {
         }
         return res.chapter.pages;
     }
+    searchCatalog(query) {
+        const norm = normalizeText(query);
+        const slug = slugify(query);
+        const matches = [];
+        const seen = new Set();
+        const bySlug = this.catalogBySlug.get(slug);
+        if (bySlug && !seen.has(bySlug.id)) {
+            matches.push(bySlug);
+            seen.add(bySlug.id);
+        }
+        const exact = this.catalogByNormalizedTitle.get(norm) || [];
+        for (const item of exact) {
+            if (!seen.has(item.id)) {
+                matches.push(item);
+                seen.add(item.id);
+            }
+        }
+        if (matches.length < 5 && norm.length >= 4) {
+            for (const item of this.catalogItems) {
+                if (seen.has(item.id))
+                    continue;
+                const itemNorm = normalizeText(item.title || '');
+                const altNorm = item.alternative_title ? normalizeText(item.alternative_title) : '';
+                const matched = (itemNorm.length >= 4 && (itemNorm.includes(norm) || norm.includes(itemNorm))) ||
+                    (altNorm.length >= 4 && (altNorm.includes(norm) || norm.includes(altNorm)));
+                if (matched) {
+                    matches.push(item);
+                    seen.add(item.id);
+                    if (matches.length >= 10)
+                        break;
+                }
+            }
+        }
+        return matches.map((w) => ({
+            sourceWorkId: w.id,
+            title: w.title,
+            slug: w.slug,
+            coverUrl: w.cover_url || null,
+            updatedAt: w.updated_at,
+        }));
+    }
     async searchWorks(query) {
         const clean = query.replace(/[?,()\*"]/g, ' ').replace(/\s+/g, ' ').trim();
         if (!clean)
             return [];
+        if (this.transport === fetch && this.ensureCatalogLoaded()) {
+            return this.searchCatalog(clean);
+        }
         const words = clean.split(/\s+/).filter(Boolean).map(encodeURIComponent).join('*');
         const url = `${this.apiUrl}/works?or=(title.ilike.*${words}*,slug.ilike.*${words}*,alternative_title.ilike.*${words}*)&select=id,title,slug,cover_url,updated_at&limit=20`;
         try {

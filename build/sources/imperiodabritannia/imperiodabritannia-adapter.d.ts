@@ -23,7 +23,13 @@ export declare class ImperioDaBritanniaAdapter implements SourceAdapter {
     private apiToken;
     private tokenFetchedAt;
     private readonly logger;
+    private catalogItems;
+    private catalogByNormalizedTitle;
+    private catalogBySlug;
+    private catalogById;
+    private catalogLoaded;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
+    private ensureCatalogLoaded;
     private refreshApiToken;
     private request;
     private toSummary;
@@ -33,6 +39,7 @@ export declare class ImperioDaBritanniaAdapter implements SourceAdapter {
         works: SourceWorkSummary[];
         nextCursor: string | null;
     }>;
+    private searchCatalog;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
     private work;
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
