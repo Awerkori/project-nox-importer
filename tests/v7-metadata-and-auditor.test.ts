@@ -313,7 +313,7 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
         id: '00000000-0000-4000-8000-000000000099',
         state: 'DONE',
         updated_at: new Date().toISOString(),
-        checkpoint: { coverage: 'CROSS_SOURCE_PROBES_COMPLETE', deferredSources: [] },
+        checkpoint: { coverage: 'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED', deferredSources: ['brscans'] },
       };
 
       // Case A: One operational source times out -> AUDIT_INCONCLUSIVE (never AUDIT_PASS!)

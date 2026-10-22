@@ -5,6 +5,7 @@ const GENRE_OR_TAXONOMY_WORDS = new Set([
   'manhua', 'romance', 'smut', 'shounen', 'shoujo', 'seinen', 'yaoi', 'yuri', 'ecchi',
   'action', 'adventure', 'comedy', 'mystery', 'supernatural', 'tragedy', 'horror', 'sci-fi',
   'slice of life', 'unknown', 'n/a', 'none', 'null', 'undefined', 'untitled', 'sem titulo', 'sem título',
+  'san', 'kun', 'chan', 'sama', 'sensei', 'senpai', 'dono',
 ]);
 
 /**
@@ -28,8 +29,10 @@ export function cleanAlternativeTitle(value: unknown): string | null {
   if (/^(?:\+\d+\+?|\d+\+|\d{3,}|0)$/u.test(decoded)) return null;
   // Discard star rating widgets or vote summaries mistakenly ingested from themes
   if (/\b(?:m[eé]dia\s+\d|\d+(?:[.,]\d+)?\s+do\s+total\s+de\s+\d+\s+votos|\d+(?:[.,]\d+)?\s+de\s+5(?:\s+estrelas)?|\bvotos?\b|\brating\b|\bavalia[çc][aã]o\b)/i.test(decoded)) return null;
-  // Discard CSS rules, stylesheet code fragments, and direct URLs
-  if (/[{}@]|var\(|calc\(|!important|\b(?:rgb|rgba|border|background|color|padding|margin|font)-/i.test(decoded)) return null;
+  // Discard CSS rules, stylesheet custom properties, CSS units/colors, comments, and direct URLs
+  if (
+    /[{}@]|\/\*|\*\/|^--|var\(|calc\(|oklch\(|repeat\(auto-fill|!important|\b(?:rgb|rgba|hsl|hsla|border|background|color|padding|margin|font|line-height|overflow|grid-gap)[-(:\s]|\b\d+(?:\.\d+)?(?:px|rem|em|vh|vw)\b|^#[0-9a-f]{3,8}\)?$|^\d+(?:\.\d+)?\)$/i.test(decoded)
+  ) return null;
   if (/^https?:\/\//i.test(decoded)) return null;
   // Discard isolated genres or metadata placeholders mistakenly ingested as aliases
   if (GENRE_OR_TAXONOMY_WORDS.has(decoded.toLocaleLowerCase())) return null;
@@ -53,18 +56,20 @@ export function alternativeTitleKey(value: unknown): string {
 }
 
 const CLAUSE_CONTINUATION_REGEX = /^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por)\b/i;
-const INTERJECTION_PREFIXES = new Set(['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá']);
+const VOCATIVE_HONORIFIC_REGEX = /-(?:san|kun|chan|sama|sensei|senpai|dono)\b/i;
+const INTERJECTION_PREFIXES = new Set(['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá', 'ijiranaide', 'ijirimakutte', 'uzaki', 'komi']);
 
 function extractPunctuatedClauses(title: string | null | undefined): Set<string> {
   const clauses = new Set<string>();
   if (!title || typeof title !== 'string' || !title.includes(',')) return clauses;
   // Only forbid comma-split fragments of a single grammatical sentence title
-  // (e.g. "Summon The Demon, For I Am The Abyss" or "Hello, Fluffy Griffin!").
+  // (e.g. "Summon The Demon, For I Am The Abyss" or "Hello, Fluffy Griffin!" or "Ijiranaide, Nagatoro-san").
   // Never forbid legitimate subtitles or independent titles separated by ':', '-', ';', or '|'.
   const parts = title.split(/,\s*/).map((p) => p.trim()).filter(Boolean);
   if (parts.length > 1) {
     const firstWord = parts[0].toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
     const isGrammaticalTitle = INTERJECTION_PREFIXES.has(firstWord)
+      || VOCATIVE_HONORIFIC_REGEX.test(title)
       || parts.some((p, i) => i > 0 && (CLAUSE_CONTINUATION_REGEX.test(p) || /^[a-z]/.test(p)));
     if (isGrammaticalTitle) {
       for (const part of parts) {

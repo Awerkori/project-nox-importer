@@ -2336,13 +2336,16 @@ export class ImporterLiteRuntime {
         }
         const now = Date.now();
         let policyMap;
-        if (this.sourcePoliciesCache && this.sourcePoliciesCache.expiresAt > now) {
+        if (this.sourcePoliciesCache &&
+            this.sourcePoliciesCache.expiresAt > now &&
+            sourceBatch.every((s) => this.sourcePoliciesCache.map.has(s))) {
             policyMap = this.sourcePoliciesCache.map;
         }
         else {
+            const allSourcesToFetch = [...new Set([...sources, ...sourceBatch])];
             policyMap = typeof this.queue.sourcePolicies === 'function'
-                ? await this.queue.sourcePolicies(sourceBatch)
-                : new Map(await Promise.all(sourceBatch.map(async (source) => [source, await this.queue.sourcePolicy(source)])));
+                ? await this.queue.sourcePolicies(allSourcesToFetch)
+                : new Map(await Promise.all(allSourcesToFetch.map(async (source) => [source, await this.queue.sourcePolicy(source)])));
             this.sourcePoliciesCache = { map: policyMap, expiresAt: now + 5_000 };
         }
         const policies = sourceBatch.map((source) => [source, policyMap.get(source) || null]);
@@ -2415,7 +2418,7 @@ export class ImporterLiteRuntime {
         const remainingSources = sources.filter((candidate) => !checked.has(candidate));
         if (!remainingSources.length) {
             const deferredRounds = Math.max(0, Number(task.checkpoint.deferredRounds || 0));
-            const runnableDeferred = [...deferred].filter((s) => s !== 'brscans' && runnableSources.includes(s) && Boolean(this.registry.get(s)));
+            const runnableDeferred = [...deferred].filter((s) => s !== 'brscans' && policyMap.get(s)?.runnable !== false && Boolean(this.registry.get(s)));
             if (runnableDeferred.length > 0 && deferredRounds < 2) {
                 for (const s of runnableDeferred)
                     checked.delete(s);
