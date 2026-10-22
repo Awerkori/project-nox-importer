@@ -134,4 +134,31 @@ describe('work matching safety', () => {
       { title: 'The Breaker: New Waves' },
     ).matched).toBe(false);
   });
+
+  it('rejects cross-matching between unrelated works sharing only ultra-short or generic conversational aliases', () => {
+    // Two works sharing the generic single word alias "Sorry"
+    expect(matchWorkCandidate(
+      { title: 'Desculpa, Eu Gosto de Você', aliases: ['Sorry', 'I like you'] },
+      { title: 'Sorry, Did You Wait for Me?', aliases: ['Sorry', 'Perdão'] },
+    ).matched).toBe(false);
+
+    // Candidate title matching a generic single word alias when target title is completely unrelated
+    expect(matchWorkCandidate(
+      { title: 'Desculpa, Eu Gosto de Você', aliases: ['Sorry'] },
+      { title: 'Sorry' },
+    ).matched).toBe(false);
+
+    // But substantial, specific shared aliases must still match
+    expect(matchWorkCandidate(
+      { title: 'Ataque dos Titãs', aliases: ['Shingeki no Kyojin'] },
+      { title: 'Attack on Titan', aliases: ['Shingeki no Kyojin'] },
+    ).matched).toBe(true);
+  });
+
+  it('matches composite candidate titles containing sub-clause variants', () => {
+    expect(matchWorkCandidate(
+      { title: 'Summer Break' },
+      { title: 'Natsuyasumi! | Summer Break!' },
+    ).matched).toBe(true);
+  });
 });

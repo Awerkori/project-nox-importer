@@ -348,7 +348,8 @@ export async function verifySourceIndependently(
         const targetKeys = new Set([workTitle, ...knownAliases].map((t) => alternativeTitleKey(t)).filter(Boolean));
         const hasExactAliasIntersection = allExtractedTitles.some((t) => {
           const k = alternativeTitleKey(t);
-          return Boolean(k && targetKeys.has(k));
+          if (!k || k.length < 8 || /^(?:sorry|desculpa|perdao|love|hello|alone|baby|oneshot|manga|comic)$/i.test(k)) return false;
+          return Boolean(targetKeys.has(k));
         });
         if ((!detailMatch.matched || detailMatch.confidenceScore < 0.75) && !hasExactAliasIntersection) {
           return {
