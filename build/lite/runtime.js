@@ -1321,7 +1321,7 @@ export class ImporterLiteRuntime {
                         let summaryMatch = null;
                         const isKnownWorkMapping = Boolean(knownMapping);
                         if (!selected) {
-                            const queryCandidates = buildDiscoveryQueryCandidates(target.title, target.aliases).slice(0, 3);
+                            const queryCandidates = buildDiscoveryQueryCandidates(target.title, target.aliases);
                             let fallback = null;
                             const seenSummaryIds = new Set();
                             for (const query of queryCandidates) {
@@ -2422,7 +2422,7 @@ export class ImporterLiteRuntime {
         if (!remainingSources.length) {
             const deferredRounds = Math.max(0, Number(task.checkpoint.deferredRounds || 0));
             const runnableDeferred = [...deferred].filter((s) => s !== 'brscans' && policyMap.get(s)?.runnable !== false && Boolean(this.registry.get(s)));
-            if (runnableDeferred.length > 0 && deferredRounds < 1 && checked.size < 38) {
+            if (runnableDeferred.length > 0 && deferredRounds < 1) {
                 for (const s of runnableDeferred)
                     checked.delete(s);
                 await this.queue.finish(task, workerId, {
