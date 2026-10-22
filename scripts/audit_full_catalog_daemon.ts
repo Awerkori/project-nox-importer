@@ -368,29 +368,27 @@ export async function verifySourceIndependently(
 
     if (details) {
       const allExtractedTitles = extractRawAlternativeTitlesFromAdapterDetails(details, '');
-      if (!foundMatch) {
-        // Fallback candidate must prove identity via detail-page title or alternativeTitles
-        const detailMatch = matchWorkCandidate(
-          { title: workTitle, slug: '', aliases: knownAliases },
-          { title: details.title || candidateToProbe.title, slug: details.slug || candidateToProbe.slug, aliases: allExtractedTitles }
-        );
-        const targetKeys = new Set([workTitle, ...knownAliases].map((t) => alternativeTitleKey(t)).filter(Boolean));
-        const hasExactAliasIntersection = allExtractedTitles.some((t) => {
-          const k = alternativeTitleKey(t);
-          if (!k || k.length < 8 || /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|na\s*verdade|actually|in\s*fact|turns\s*out|love|hello|alone|baby|oneshot|manga|comic|primal|scan|raw)$/i.test(k)) return false;
-          return Boolean(targetKeys.has(k));
-        });
-        if ((!detailMatch.matched || detailMatch.confidenceScore < 0.75) && !hasExactAliasIntersection) {
-          return {
-            sourceId,
-            status: 'NOT_FOUND',
-            sourceWorkId: null,
-            sourceTitle: null,
-            aliasesFound: [],
-            evidence: `Not found after searching ${JSON.stringify(searchQueries)} (fallback "${candidateToProbe.title}" rejected on details)`,
-            checkedAt,
-          };
-        }
+      // All candidates must prove identity via detail-page title or alternativeTitles
+      const detailMatch = matchWorkCandidate(
+        { title: workTitle, slug: '', aliases: knownAliases },
+        { title: details.title || candidateToProbe.title, slug: details.slug || candidateToProbe.slug, aliases: allExtractedTitles }
+      );
+      const targetKeys = new Set([workTitle, ...knownAliases].map((t) => alternativeTitleKey(t)).filter(Boolean));
+      const hasExactAliasIntersection = allExtractedTitles.some((t) => {
+        const k = alternativeTitleKey(t);
+        if (!k || k.length < 8 || /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|na\s*verdade|actually|in\s*fact|turns\s*out|love|hello|alone|baby|oneshot|manga|comic|primal|scan|raw)$/i.test(k)) return false;
+        return Boolean(targetKeys.has(k));
+      });
+      if ((!detailMatch.matched || detailMatch.confidenceScore < 0.75) && !hasExactAliasIntersection) {
+        return {
+          sourceId,
+          status: 'NOT_FOUND',
+          sourceWorkId: null,
+          sourceTitle: null,
+          aliasesFound: [],
+          evidence: `Not found after searching ${JSON.stringify(searchQueries)} (candidate "${candidateToProbe.title}" / details "${details.title}" rejected on details)`,
+          checkedAt,
+        };
       }
       const candTitle = details.title || candidateToProbe.title;
       if (/\b(?:novel|webnovel|light novel)\b/i.test(candTitle) && !/\b(?:novel|webnovel|light novel)\b/i.test(workTitle)) {
@@ -599,6 +597,10 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
   // Broken synopsis sentence fragments
   if (/^(?:A\s+Mãe\s+Ex-Delinquente|Acaba\s+se\s+Envolvendo)\b/i.test(cleaned)) {
     return { isLegitimate: false, reason: 'Broken synopsis sentence clause' };
+  }
+
+  if (/^(?:Eu\s+Não\s+Quero\s+Ser\s+Amada|I\s+Don't\s+Want\s+to\s+Be\s+Loved)\b/i.test(cleaned) && !/amad[ao]/i.test(workTitle)) {
+    return { isLegitimate: false, reason: 'Unrelated manhwa title matched via corrupted source alt field' };
   }
 
   const isCJK = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/.test(cleaned);
@@ -848,6 +850,8 @@ async function main() {
       }
     }
     console.log(`Loaded ${postV7AuditedIds.size} unique verified post-V7 audit records from ${POST_V7_RESULTS_FILE}`);
+    syncStats(stats, latestPostV7Map);
+    fs.writeFileSync(SUMMARY_FILE, JSON.stringify(stats, null, 2), 'utf8');
   }
 
   const startTime = Date.now();
