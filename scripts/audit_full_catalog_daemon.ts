@@ -478,7 +478,11 @@ export async function auditWork(
   // 2. Reuse proven V7 source checks only from current V7 revalidation pass, probe all unverified sources
   const provenChecksBySource = new Map<string, any>();
   if (preCollectedEvidence && preCollectedEvidence.campaignVersion === 7 && Array.isArray(preCollectedEvidence.sourceChecks)) {
+    const isPreviousFail = preCollectedEvidence.verdict === 'AUDIT_FAIL';
     for (const c of preCollectedEvidence.sourceChecks) {
+      if (isPreviousFail && c.status === 'FOUND_WITH_ALIASES') {
+        continue; // Always re-probe sources that previously flagged missing aliases
+      }
       if (c.status === 'FOUND_WITH_ALIASES' || c.status === 'FOUND_NO_ALIASES' || c.status === 'NOT_FOUND') {
         provenChecksBySource.set(c.sourceId, c);
       }
