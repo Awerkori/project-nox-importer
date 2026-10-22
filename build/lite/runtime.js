@@ -291,7 +291,7 @@ export class ImporterLiteRuntime {
         }
         return snapshot;
     }
-    constructor(pool, catalogClient, registry, storage, config, sourceRateLimiter = new HostRateLimiter(2), sourceMetadataPool = pool) {
+    constructor(pool, catalogClient, registry, storage, config, sourceRateLimiter = new HostRateLimiter(5.0), sourceMetadataPool = pool) {
         this.pool = pool;
         this.catalogClient = catalogClient;
         this.registry = registry;
@@ -1325,7 +1325,7 @@ export class ImporterLiteRuntime {
                             let fallback = null;
                             const seenSummaryIds = new Set();
                             for (const query of queryCandidates) {
-                                const rateLimitTimeout = this.metadataTurboMode.enabled ? 5_000 : 60_000;
+                                const rateLimitTimeout = this.metadataTurboMode.enabled ? 15_000 : 60_000;
                                 await this.sourceRateLimiter.acquire(host, undefined, rateLimitTimeout);
                                 const summaries = await this.sourceMetadataGate.runExclusive(async () => {
                                     return withTimeout(adapter.searchWorks(query), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_SEARCH_TIMEOUT');
@@ -1366,7 +1366,7 @@ export class ImporterLiteRuntime {
                         result.attemptedSources.push(source);
                         if (!selected)
                             continue;
-                        const rateLimitTimeout = this.metadataTurboMode.enabled ? 5_000 : 60_000;
+                        const rateLimitTimeout = this.metadataTurboMode.enabled ? 15_000 : 60_000;
                         await this.sourceRateLimiter.acquire(host, undefined, rateLimitTimeout);
                         const details = await this.sourceMetadataGate.runExclusive(async () => {
                             return withTimeout(adapter.fetchWorkDetails(selected.sourceWorkId), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_DETAILS_TIMEOUT');
@@ -2387,10 +2387,17 @@ export class ImporterLiteRuntime {
             catch {
                 // Test doubles without importer_work_mappings query support fall back cleanly
             }
+            // Stagger source probe order deterministically per work ID to prevent concurrent workers
+            // from colliding on the exact same host in alphabetical order.
+            const staggerOffset = Math.abs(target.id.split('').reduce((acc, c) => ((acc << 5) - acc) + c.charCodeAt(0) | 0, 0)) % runnableSources.length;
+            const staggeredSources = [
+                ...runnableSources.slice(staggerOffset),
+                ...runnableSources.slice(0, staggerOffset)
+            ];
             outcome = await this.enrichNewWorkFromComplementarySources({
                 workId: target.id, originSource: '', title: target.title, slug: target.slug, aliases: seedAliases,
                 author: target.author || undefined, artist: target.artist || undefined, synopsis: sanitizeSynopsis(target.synopsis) || undefined,
-                kind: target.kind || undefined, year: target.year ?? undefined, sourceIds: runnableSources,
+                kind: target.kind || undefined, year: target.year ?? undefined, sourceIds: staggeredSources,
                 concurrency: Math.min(this.metadataTurboMode.enabled ? 12 : 8, runnableSources.length),
                 allowFallbackDetailProbe: true,
                 knownMappings,
