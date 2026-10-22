@@ -45,6 +45,11 @@ export declare function getCanonicalSynonyms(text: string): string[];
  */
 export declare function normalizeTitle(text: string): string;
 /**
+ * Returns a sorted key of content words, ignoring functional grammatical articles and prepositions.
+ * Used to match inverted title phrasing (e.g. "The Witches of Eden" vs "Eden of Witches").
+ */
+export declare function significantTokenKey(text: string): string | null;
+/**
  * Converts a title to a standardized URL-friendly slug.
  */
 export declare function slugifyTitle(text: string): string;

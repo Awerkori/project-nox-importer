@@ -203,4 +203,21 @@ describe('work matching safety', () => {
       { title: 'Pacote de Fotos (Hero Academia / Mirko)' },
     ).matched).toBe(false);
   });
+
+  it('matches inverted title phrasing with identical content words across titles and aliases', () => {
+    expect(matchWorkCandidate(
+      { title: 'The Witches of Eden' },
+      { title: 'Eden of Witches' },
+    ).matched).toBe(true);
+
+    expect(matchWorkCandidate(
+      { title: 'Bruxas de Éden', aliases: ['The Witches of Eden'] },
+      { title: 'Eden of Witches' },
+    ).matched).toBe(true);
+
+    expect(matchWorkCandidate(
+      { title: 'The Witches of Eden' },
+      { title: 'The Witches of Salem' },
+    ).matched).toBe(false);
+  });
 });

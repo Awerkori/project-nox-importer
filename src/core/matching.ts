@@ -167,6 +167,29 @@ export function normalizeTitle(text: string): string {
   return tokens.join(' ');
 }
 
+const FUNCTIONAL_STOP_WORDS = new Set([
+  'the', 'a', 'an', 'of', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'from', 'and', 'or',
+  'o', 'os', 'as', 'um', 'uma', 'de', 'da', 'do', 'dos', 'das', 'em', 'no', 'na', 'nos', 'nas', 'por', 'com', 'e', 'ou',
+]);
+
+/**
+ * Returns a sorted key of content words, ignoring functional grammatical articles and prepositions.
+ * Used to match inverted title phrasing (e.g. "The Witches of Eden" vs "Eden of Witches").
+ */
+export function significantTokenKey(text: string): string | null {
+  if (!text) return null;
+  const tokens = text
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\s]/gi, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length > 0 && !FUNCTIONAL_STOP_WORDS.has(t));
+  if (tokens.length < 2) return null;
+  tokens.sort();
+  return tokens.join(' ');
+}
+
 /**
  * Converts a title to a standardized URL-friendly slug.
  */
@@ -516,6 +539,18 @@ export function matchWorkCandidate(target: MatchCandidate, candidate: MatchCandi
     };
   }
 
+  // Inverted title phrasing with identical content words (e.g. "The Witches of Eden" vs "Eden of Witches")
+  const sigTarget = significantTokenKey(normTarget);
+  const sigCand = significantTokenKey(normCand);
+  if (sigTarget && sigCand && sigTarget === sigCand) {
+    return {
+      matched: true,
+      confidenceScore: 0.96,
+      matchMethod: 'EXACT_TITLE',
+      reason: 'Inverted title phrasing with identical content words',
+    };
+  }
+
   // Exact slug match
   const slugTarget = target.slug ? slugifyTitle(target.slug) : slugifyTitle(target.title);
   const slugCand = candidate.slug ? slugifyTitle(candidate.slug) : slugifyTitle(candidate.title);
@@ -575,9 +610,11 @@ export function matchWorkCandidate(target: MatchCandidate, candidate: MatchCandi
 
   // Check cross-alias matches
   for (const alias of targetAliases) {
+    const sigAlias = significantTokenKey(alias);
     if (
       alias === normCand ||
-      alias.replace(/\s+/g, '') === normCand.replace(/\s+/g, '')
+      alias.replace(/\s+/g, '') === normCand.replace(/\s+/g, '') ||
+      (sigAlias && sigCand && sigAlias === sigCand)
     ) {
       const isGeneric = /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|na\s*verdade|actually|in\s*fact|turns\s*out|love|hello|alone|baby|oneshot|manga|comic|primal|scan|raw)$/i.test(alias);
       const isSingleShortWord = !alias.includes(' ') && alias.length < 8;
@@ -606,9 +643,11 @@ export function matchWorkCandidate(target: MatchCandidate, candidate: MatchCandi
   }
 
   for (const alias of candAliases) {
+    const sigAlias = significantTokenKey(alias);
     if (
       alias === normTarget ||
-      alias.replace(/\s+/g, '') === normTarget.replace(/\s+/g, '')
+      alias.replace(/\s+/g, '') === normTarget.replace(/\s+/g, '') ||
+      (sigAlias && sigTarget && sigAlias === sigTarget)
     ) {
       const isGeneric = /^(?:sorry|desculpa|perdao|por\s*favor|please|onegai|obrigad[ao]|thanks?|thank\s*you|na\s*verdade|actually|in\s*fact|turns\s*out|love|hello|alone|baby|oneshot|manga|comic|primal|scan|raw)$/i.test(alias);
       const isSingleShortWord = !alias.includes(' ') && alias.length < 8;
