@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
+import { extractStoredMappingMetadata } from '../../lite/mapping-metadata.js';
 
 interface ManhastroCatalogItem {
   id: string;
@@ -88,7 +89,9 @@ export class ManhastroAdapter implements SourceAdapter {
           this.catalogById.set(item.id, item);
           if (item.slug) this.catalogBySlug.set(item.slug, item);
 
-          const titles = [item.t, item.tb, ...(item.alt || [])].filter(Boolean) as string[];
+          const primary = item.tb?.trim() || item.t.trim();
+          const parsedAlts = item.alt?.length ? extractStoredMappingMetadata({ alternativeTitles: item.alt }, primary).aliases : [];
+          const titles = [item.t, item.tb, ...parsedAlts].filter(Boolean) as string[];
           for (const title of titles) {
             const norm = normalizeText(title);
             if (norm) {
@@ -269,10 +272,11 @@ export class ManhastroAdapter implements SourceAdapter {
       const cached = this.catalogById.get(String(sourceWorkId)) || this.catalogBySlug.get(String(sourceWorkId));
       if (cached) {
         const title = cached.tb?.trim() || cached.t.trim();
+        const parsedAlts = cached.alt?.length ? extractStoredMappingMetadata({ alternativeTitles: cached.alt }, title).aliases : [];
         const alternativeTitles = Array.from(new Set([
           cached.t.trim(),
           cached.tb?.trim(),
-          ...(cached.alt || [])
+          ...parsedAlts
         ].filter((c): c is string => Boolean(c && c !== title))));
 
         let kind: SourceWorkDetails['kind'] = 'UNKNOWN';

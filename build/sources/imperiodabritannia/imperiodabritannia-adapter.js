@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { decryptMangoPayload } from '../mangotoons/mangotoons-decryptor.js';
+import { extractStoredMappingMetadata } from '../../lite/mapping-metadata.js';
 function normalizeText(text) {
     return text
         .normalize('NFKD')
@@ -75,7 +76,14 @@ export class ImperioDaBritanniaAdapter {
                     this.catalogById.set(String(item.id), item);
                     if (item.slug)
                         this.catalogBySlug.set(String(item.slug), item);
-                    const titles = [item.nome, item.title, item.titulo_alternativo, item.titulos_alternativos].filter(Boolean);
+                    const primary = String(item.nome || item.title || '').trim();
+                    const parsedAlts = (item.titulo_alternativo || item.titulos_alternativos)
+                        ? extractStoredMappingMetadata({
+                            titulo_alternativo: item.titulo_alternativo,
+                            titulos_alternativos: item.titulos_alternativos,
+                        }, primary).aliases
+                        : [];
+                    const titles = [item.nome, item.title, ...parsedAlts].filter(Boolean);
                     for (const title of titles) {
                         const norm = normalizeText(String(title));
                         if (norm) {

@@ -6,6 +6,8 @@ const GENRE_OR_TAXONOMY_WORDS = new Set([
   'action', 'adventure', 'comedy', 'mystery', 'supernatural', 'tragedy', 'horror', 'sci-fi',
   'slice of life', 'unknown', 'n/a', 'none', 'null', 'undefined', 'untitled', 'sem titulo', 'sem título',
   'san', 'kun', 'chan', 'sama', 'sensei', 'senpai', 'dono',
+  'erotico', 'erótico', 'psicologico', 'psicológico', 'fim da temporada', 'vida cotidiana',
+  'official colored', 'hq colorida digital', 'digital colored comics', 'team argo',
 ]);
 
 /**
@@ -56,8 +58,12 @@ export function alternativeTitleKey(value: unknown): string {
 }
 
 const CLAUSE_CONTINUATION_REGEX = /^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por)\b/i;
-const VOCATIVE_HONORIFIC_REGEX = /-(?:san|kun|chan|sama|sensei|senpai|dono)\b/i;
-const INTERJECTION_PREFIXES = new Set(['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá', 'ijiranaide', 'ijirimakutte', 'uzaki', 'komi']);
+const VOCATIVE_HONORIFIC_REGEX = /(?:-(?:san|kun|chan|sama|sensei|senpai|dono)\b|\b(?:your\s+(?:grace|highness|majesty)|vossa\s+(?:gra[çc]a|alteza|majestade)|duque|duke|milady|my\s+lord|meu\s+senhor)[!?.]*$)/i;
+const INTERJECTION_PREFIXES = new Set([
+  'hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'goodbye', 'sayonara', 'adeus', 'ola', 'olá',
+  'mom', 'mae', 'mãe', 'dad', 'pai', 'wait', 'espere', 'sorry', 'desculpa', 'perdao', 'perdão',
+  'please', 'onegai', 'ijiranaide', 'ijirimakutte', 'uzaki', 'komi',
+]);
 
 function extractPunctuatedClauses(title: string | null | undefined): Set<string> {
   const clauses = new Set<string>();
@@ -65,7 +71,7 @@ function extractPunctuatedClauses(title: string | null | undefined): Set<string>
   // Only forbid comma-split fragments of a single grammatical sentence title
   // (e.g. "Summon The Demon, For I Am The Abyss" or "Hello, Fluffy Griffin!" or "Ijiranaide, Nagatoro-san").
   // Never forbid legitimate subtitles or independent titles separated by ':', '-', ';', or '|'.
-  const parts = title.split(/,\s*/).map((p) => p.trim()).filter(Boolean);
+  const parts = title.split(/(?<!\d),(?!\d{3})\s*/).map((p) => p.trim()).filter(Boolean);
   if (parts.length > 1) {
     const firstWord = parts[0].toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
     const isGrammaticalTitle = INTERJECTION_PREFIXES.has(firstWord)
