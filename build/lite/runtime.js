@@ -2730,7 +2730,7 @@ export class ImporterLiteRuntime {
             // not expose a separate alternative-title field. Keep the comparison
             // and Unicode-safe de-duplication in the shared merge helper; this is
             // deliberately not a new cross-work matching signal.
-            const sourceTitleAlias = isV4 && isProviderDisplayTitleAlias(row.source_title, row.source_slug, primaryTitle)
+            const sourceTitleAlias = isProviderDisplayTitleAlias(row.source_title, row.source_slug, primaryTitle)
                 ? [row.source_title]
                 : [];
             const aliases = mergeAlternativeTitles(extracted.aliases, sourceTitleAlias, primaryTitle);
@@ -2741,12 +2741,12 @@ export class ImporterLiteRuntime {
             const resolve = () => (isV4 ? this.historicalMetadataDedupe : this.dedupe).resolveWork({
                 source, sourceWorkId,
                 // `mergeKnownMappedWork` considers its candidate title as source
-                // evidence.  V4 has already admitted that title separately through
+                // evidence. All versions now admit that title separately through
                 // isProviderDisplayTitleAlias above, so passing a machine fallback
                 // here would bypass the guard and turn a slug or numeric API id into
-                // a public alias.  The canonical title is neutral to the additive
+                // a public alias. The canonical title is neutral to the additive
                 // merge while all approved source-title evidence remains in aliases.
-                title: isV4 ? primaryTitle : (row.source_title || row.work_title),
+                title: primaryTitle,
                 slug: row.source_slug || row.work_title,
                 aliases,
                 genres: extracted.genres,

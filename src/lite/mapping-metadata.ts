@@ -54,20 +54,35 @@ export const STORED_MAPPING_TAG_FIELDS = [
 function explicitJsonArray(value: string): unknown[] | null {
   const text = value.trim();
   // Some legacy mappings retained an adapter's explicit JSON array as a JSON
-  // string. Decode only a bounded, syntactically valid array; prose and JSON
-  // objects remain ineligible for historical enrichment.
+  // string or Python single-quoted list literal. Decode only a bounded,
+  // syntactically valid array; prose and JSON objects remain ineligible.
   if (text.length < 2 || text.length > 32_000 || !text.startsWith('[') || !text.endsWith(']')) return null;
   try {
     const parsed = JSON.parse(text);
     return Array.isArray(parsed) ? parsed : null;
   } catch {
+    // Handle Python-style list literals such as "['Title A', \"Title B's\"]"
+    if (text.startsWith("['") || text.startsWith('["')) {
+      const items: string[] = [];
+      const itemRegex = /'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)"/g;
+      let match: RegExpExecArray | null;
+      while ((match = itemRegex.exec(text)) !== null) {
+        const val = (match[1] ?? match[2] ?? '').replace(/\\(['"\\])/g, '$1').trim();
+        if (val) items.push(val);
+      }
+      if (items.length > 0) return items;
+    }
     return null;
   }
 }
 
 const CLAUSE_CONTINUATION_REGEX = /^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por)\b/i;
-const VOCATIVE_NAME_REGEX = /^[a-zA-Z\u00C0-\u017F\s]{1,25}-(?:san|kun|chan|sama|sensei|senpai|dono)[!?.]*$/i;
-const INTERJECTION_PREFIXES = new Set(['hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'ola', 'olá', 'ijiranaide', 'ijirimakutte', 'uzaki', 'komi']);
+const VOCATIVE_NAME_REGEX = /(?:^[a-zA-Z\u00C0-\u017F\s]{1,25}-(?:san|kun|chan|sama|sensei|senpai|dono)[!?.]*$|\b(?:your\s+(?:grace|highness|majesty)|vossa\s+(?:gra[çc]a|alteza|majestade)|duque|duke|milady|my\s+lord|meu\s+senhor)[!?.]*$)/i;
+const INTERJECTION_PREFIXES = new Set([
+  'hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'goodbye', 'sayonara', 'adeus', 'ola', 'olá',
+  'mom', 'mae', 'mãe', 'dad', 'pai', 'wait', 'espere', 'sorry', 'desculpa', 'perdao', 'perdão',
+  'please', 'onegai', 'ijiranaide', 'ijirimakutte', 'uzaki', 'komi',
+]);
 
 function splitDelimitedTitles(text: string): string[] {
   const trimmed = text.trim();
@@ -81,17 +96,30 @@ function splitDelimitedTitles(text: string): string[] {
   if (/\s+\/\s+|\s*\/\/\s*|\|/.test(trimmed)) {
     return trimmed.split(/\s*(?:\/|\/\/|\|)\s*/).map((s) => s.trim()).filter(Boolean);
   }
-  if (/,/.test(trimmed)) {
-    const parts = trimmed.split(/,\s*/).map((s) => s.trim()).filter(Boolean);
+  if (/(?<!\d),(?!\d{3})/.test(trimmed)) {
+    const parts = trimmed.split(/(?<!\d),(?!\d{3})\s*/).map((s) => s.trim()).filter(Boolean);
     if (parts.length > 1) {
-      const firstWord = parts[0].toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
-      const isVocative = VOCATIVE_NAME_REGEX.test(parts[0]) || VOCATIVE_NAME_REGEX.test(parts[1]);
-      const isInterjection = INTERJECTION_PREFIXES.has(firstWord);
-      const isClauseContinuation = parts.some((p, i) => i > 0 && (CLAUSE_CONTINUATION_REGEX.test(p) || /^[a-z]/.test(p)));
-      const isGrammaticalTitle = isInterjection || isVocative || isClauseContinuation;
-      if (!isGrammaticalTitle) {
-        return parts;
+      const mergedParts: string[] = [];
+      for (let i = 0; i < parts.length; i++) {
+        const current = parts[i];
+        const next = parts[i + 1];
+        if (next !== undefined) {
+          const firstWord = current.toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
+          const isPairGrammatical =
+            INTERJECTION_PREFIXES.has(firstWord) ||
+            VOCATIVE_NAME_REGEX.test(current) ||
+            VOCATIVE_NAME_REGEX.test(next) ||
+            CLAUSE_CONTINUATION_REGEX.test(next) ||
+            /^[a-z]/.test(next);
+          if (isPairGrammatical) {
+            mergedParts.push(`${current}, ${next}`);
+            i++;
+            continue;
+          }
+        }
+        mergedParts.push(current);
       }
+      return mergedParts;
     }
   }
   return [trimmed];

@@ -5,6 +5,7 @@ import { SourceAdapter, SourceChapterSummary, SourceWorkDetails, SourceWorkSumma
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { decryptMangoPayload } from '../mangotoons/mangotoons-decryptor.js';
+import { extractStoredMappingMetadata } from '../../lite/mapping-metadata.js';
 
 function normalizeText(text: string): string {
   return text
@@ -82,7 +83,14 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
         for (const item of this.catalogItems) {
           this.catalogById.set(String(item.id), item);
           if (item.slug) this.catalogBySlug.set(String(item.slug), item);
-          const titles = [item.nome, item.title, item.titulo_alternativo, item.titulos_alternativos].filter(Boolean) as string[];
+          const primary = String(item.nome || item.title || '').trim();
+          const parsedAlts = (item.titulo_alternativo || item.titulos_alternativos)
+            ? extractStoredMappingMetadata({
+                titulo_alternativo: item.titulo_alternativo,
+                titulos_alternativos: item.titulos_alternativos,
+              }, primary).aliases
+            : [];
+          const titles = [item.nome, item.title, ...parsedAlts].filter(Boolean) as string[];
           for (const title of titles) {
             const norm = normalizeText(String(title));
             if (norm) {

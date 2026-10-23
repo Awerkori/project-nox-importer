@@ -176,4 +176,25 @@ describe('stored mapping metadata enrichment', () => {
     expect(buildDiscoveryQueryCandidates('X', ['CLAMP X'])).toEqual(['X', 'CLAMP X']);
     expect(buildDiscoveryQueryCandidates('86', ['86: Eighty-Six'])).toEqual(['86', '86: Eighty-Six']);
   });
+
+  it('decodes Python-style single-quoted list literals and preserves thousands commas and royal vocatives', () => {
+    const raw = {
+      alternativeTitles: [
+        "['カッコウの許嫁', 'A Couple of Cuckoos', \"Cuckoo's Fiancee\"]",
+        '66,666 Years: Advent of the Dark Mage, Reincarnated Into A Warlock 66,666 Years Later',
+        'Shall We Bathe, Your Grace?, Vamos Tomar Banho, Vossa Alteza?',
+      ],
+    };
+    const extracted = extractStoredMappingMetadata(raw, 'Example');
+    expect(extracted.aliases).toContain('カッコウの許嫁');
+    expect(extracted.aliases).toContain('A Couple of Cuckoos');
+    expect(extracted.aliases).toContain("Cuckoo's Fiancee");
+    expect(extracted.aliases).toContain('66,666 Years: Advent of the Dark Mage');
+    expect(extracted.aliases).toContain('Reincarnated Into A Warlock 66,666 Years Later');
+    expect(extracted.aliases).not.toContain('66');
+    expect(extracted.aliases).toContain('Shall We Bathe, Your Grace?');
+    expect(extracted.aliases).toContain('Vamos Tomar Banho, Vossa Alteza?');
+    expect(extracted.aliases).not.toContain('Your Grace?');
+    expect(extracted.aliases).not.toContain('Vossa Alteza?');
+  });
 });

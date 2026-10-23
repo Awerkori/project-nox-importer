@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
+import { extractStoredMappingMetadata } from '../../lite/mapping-metadata.js';
 
 function normalizeText(text: string): string {
   return text
@@ -73,7 +74,10 @@ export class NexusAdapter implements SourceAdapter {
         for (const item of this.catalogItems) {
           this.catalogById.set(String(item.id), item);
           if (item.slug) this.catalogBySlug.set(String(item.slug), item);
-          const titles = [item.title, item.alternative_title].filter(Boolean) as string[];
+          const parsedAlts = item.alternative_title
+            ? extractStoredMappingMetadata({ alternative_title: item.alternative_title }, item.title || '').aliases
+            : [];
+          const titles = [item.title, ...parsedAlts].filter(Boolean) as string[];
           for (const title of titles) {
             const norm = normalizeText(title);
             if (norm) {
