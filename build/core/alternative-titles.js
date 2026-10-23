@@ -35,8 +35,10 @@ export function cleanAlternativeTitle(value) {
     // Discard star rating widgets or vote summaries mistakenly ingested from themes
     if (/\b(?:m[eé]dia\s+\d|\d+(?:[.,]\d+)?\s+do\s+total\s+de\s+\d+\s+votos|\d+(?:[.,]\d+)?\s+de\s+5(?:\s+estrelas)?|\bvotos?\b|\brating\b|\bavalia[çc][aã]o\b)/i.test(decoded))
         return null;
-    // Discard CSS rules, stylesheet custom properties, CSS units/colors, comments, and direct URLs
-    if (/[{}@]|\/\*|\*\/|^--|var\(|calc\(|oklch\(|repeat\(auto-fill|!important|\b(?:rgb|rgba|hsl|hsla|border|background|color|padding|margin|font|line-height|overflow|grid-gap)[-(:\s]|\b\d+(?:\.\d+)?(?:px|rem|em|vh|vw)\b|^#[0-9a-f]{3,8}\)?$|^\d+(?:\.\d+)?\)$/i.test(decoded))
+    // Discard CSS rules, stylesheet custom properties, CSS units/colors, JS snippets, comments, and direct URLs
+    if (/[{}@=]|\/\*|\*\/|^--|var\(|calc\(|oklch\(|repeat\(auto-fill|!important|\b(?:rgb|rgba|hsl|hsla|border|background|color|padding|margin|font|line-height|overflow|grid|width|height|display|position|transition|transform|opacity|z-index|float|text-align|text-transform|min-width|max-height|flex-direction|aspect-ratio|place-content|scrollbar-width|object-fit|mask-image|left|right|top|bottom)[-(:\s]|\b\d+(?:\.\d+)?(?:px|rem|em|vh|vw|ms|fr|%)\b|^#[0-9a-f]{3,8}\b|^\d+(?:\.\d+)?\)$|^[.#][a-z_-]|\b(?:googleapis|googleusercontent|blogblog|iconify|document\.getElementById|new\s+Array|new\s+URL|filterGenre|noThumbnail|resizeImage|_config\.arr)\b|^(?:img|b)$/i.test(decoded) ||
+        /^['"].*['"]\]?$/.test(decoded) ||
+        /^san\s+(?:is|ga)\b/i.test(decoded))
         return null;
     if (/^https?:\/\//i.test(decoded))
         return null;
