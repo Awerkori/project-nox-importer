@@ -93,8 +93,8 @@ function splitDelimitedTitles(text: string): string[] {
   if (/;/.test(trimmed)) {
     return trimmed.split(/;+/).map((s) => s.trim()).filter(Boolean);
   }
-  if (/\s+\/\s+|\s*\/\/\s*|\|/.test(trimmed)) {
-    return trimmed.split(/\s*(?:\/|\/\/|\|)\s*/).map((s) => s.trim()).filter(Boolean);
+  if (/\s+\/\s+|\s+\/\/\s+|\|/.test(trimmed)) {
+    return trimmed.split(/\s+(?:\/|\/\/)\s+|\s*\|\s*/).map((s) => s.trim()).filter(Boolean);
   }
   if (/(?<!\d),(?!\d{3})/.test(trimmed)) {
     const parts = trimmed.split(/(?<!\d),(?!\d{3})\s*/).map((s) => s.trim()).filter(Boolean);

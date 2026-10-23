@@ -197,4 +197,21 @@ describe('stored mapping metadata enrichment', () => {
     expect(extracted.aliases).not.toContain('Your Grace?');
     expect(extracted.aliases).not.toContain('Vossa Alteza?');
   });
+
+  it('preserves English titles containing Top/Right while rejecting @font-face and positional CSS rules', () => {
+    const raw = {
+      alternativeTitles: [
+        "The Game's Top Troll",
+        'Top Tier Providence: Secretly Cultivate for a Thousand Years',
+        'src:url(//fonts.gstatic.com/s/poppins/v20/pxiEyp8kv8JHgFVrJJbecnFHGPezSQ.woff2)format("woff2")',
+        'unicode-range:U+0900-097F',
+        'top: 0',
+      ],
+    };
+    const extracted = extractStoredMappingMetadata(raw, 'Primary');
+    expect(extracted.aliases).toEqual([
+      "The Game's Top Troll",
+      'Top Tier Providence: Secretly Cultivate for a Thousand Years',
+    ]);
+  });
 });

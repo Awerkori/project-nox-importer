@@ -4,6 +4,7 @@ const GENRE_OR_TAXONOMY_WORDS = new Set([
   'adulto', 'drama', 'fantasia', 'historico', 'histórico', 'josei', 'manhwa', 'manga',
   'manhua', 'romance', 'smut', 'shounen', 'shoujo', 'seinen', 'yaoi', 'yuri', 'ecchi',
   'action', 'adventure', 'comedy', 'mystery', 'supernatural', 'tragedy', 'horror', 'sci-fi',
+  'aventura', 'mecha', 'updating', 'xem phim', 'galax scans', 'hen', 'san.',
   'slice of life', 'unknown', 'n/a', 'none', 'null', 'undefined', 'untitled', 'sem titulo', 'sem título',
   'san', 'kun', 'chan', 'sama', 'sensei', 'senpai', 'dono',
   'erotico', 'erótico', 'psicologico', 'psicológico', 'fim da temporada', 'vida cotidiana',
@@ -33,9 +34,9 @@ export function cleanAlternativeTitle(value: unknown): string | null {
   if (/\b(?:m[eé]dia\s+\d|\d+(?:[.,]\d+)?\s+do\s+total\s+de\s+\d+\s+votos|\d+(?:[.,]\d+)?\s+de\s+5(?:\s+estrelas)?|\bvotos?\b|\brating\b|\bavalia[çc][aã]o\b)/i.test(decoded)) return null;
   // Discard CSS rules, stylesheet custom properties, CSS units/colors, JS snippets, comments, and direct URLs
   if (
-    /[{}@=]|\/\*|\*\/|^--|var\(|calc\(|oklch\(|repeat\(auto-fill|!important|\b(?:rgb|rgba|hsl|hsla|border|background|color|padding|margin|font|line-height|overflow|grid|width|height|display|position|transition|transform|opacity|z-index|float|text-align|text-transform|min-width|max-height|flex-direction|aspect-ratio|place-content|scrollbar-width|object-fit|mask-image|left|right|top|bottom)[-(:\s]|\b\d+(?:\.\d+)?(?:px|rem|em|vh|vw|ms|fr|%)\b|^#[0-9a-f]{3,8}\b|^\d+(?:\.\d+)?\)$|^[.#][a-z_-]|\b(?:googleapis|googleusercontent|blogblog|iconify|document\.getElementById|new\s+Array|new\s+URL|filterGenre|noThumbnail|resizeImage|_config\.arr)\b|^(?:img|b)$/i.test(decoded) ||
+    /[{}@=]|\/\*|\*\/|^--|-->|var\(|calc\(|oklch\(|repeat\(auto-fill|!important|\b(?:rgb|rgba|hsl|hsla|border|background|color|padding|margin|font|line-height|overflow|grid|width|height|display|position|transition|transform|opacity|z-index|float|text-align|text-transform|min-width|max-height|flex-direction|aspect-ratio|place-content|scrollbar-width|object-fit|mask-image|src|unicode-range|fill|align-self|align-items|white-space|flex-grow|initial-value|inherits|animation)\s*[:(]|\b(?:top|left|right|bottom)\s*:\s*[-0-9]|\b\d+(?:\.\d+)?(?:px|rem|em|vh|vw|ms|fr|%)\b|^#[0-9a-f]{3,8}\b|^\d+(?:\.\d+)?\)$|^[.#][a-z_-]|\b(?:googleapis|googleusercontent|gstatic|blogblog|iconify|document\.getElementById|new\s+Array|new\s+URL|filterGenre|noThumbnail|resizeImage|_config\.arr)\b|^(?:img|b|-1)$/i.test(decoded) ||
     /^['"].*['"]\]?$/.test(decoded) ||
-    /^san\s+(?:is|ga)\b/i.test(decoded)
+    /^san\s+(?:is|ga|wa)\b/i.test(decoded)
   ) return null;
   if (/^https?:\/\//i.test(decoded)) return null;
   // Discard isolated genres or metadata placeholders mistakenly ingested as aliases
