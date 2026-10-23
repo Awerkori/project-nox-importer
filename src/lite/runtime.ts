@@ -2465,6 +2465,15 @@ export class ImporterLiteRuntime {
     }
     const addedAliases = outcome.attached.reduce((sum, item) => sum + item.aliasesAdded, 0);
     const addedTags = outcome.attached.reduce((sum, item) => sum + item.tagsAdded, 0);
+    const aliasDiscoveryRounds = Math.max(0, Number(task.checkpoint.aliasDiscoveryRounds || 0));
+    if (addedAliases > 0 && aliasDiscoveryRounds < 2) {
+      const matchedSourceSet = new Set(matched.map((m: any) => m.source));
+      for (const s of [...checked]) {
+        if (!matchedSourceSet.has(s) && s !== 'brscans') {
+          checked.delete(s);
+        }
+      }
+    }
     const remainingSources = sources.filter((candidate) => !checked.has(candidate));
     if (!remainingSources.length) {
       const deferredRounds = Math.max(0, Number(task.checkpoint.deferredRounds || 0));
@@ -2481,6 +2490,7 @@ export class ImporterLiteRuntime {
             coverage: 'CROSS_SOURCE_DEFERRED_RECHECK',
             checkedSources: [...checked], deferredSources: [...deferred], matchedSources: matched.slice(0, 64),
             aliasesAdded: aliasesAdded + addedAliases, tagsAdded: tagsAdded + addedTags,
+            aliasDiscoveryRounds: aliasDiscoveryRounds + (addedAliases > 0 ? 1 : 0),
             deferredRounds: deferredRounds + 1,
             lastSource: sourceBatch.at(-1), checkedBatch: sourceBatch,
             lastOutcome: outcome.attached.length ? 'MATCHED' : 'DEFERRED',
@@ -2496,6 +2506,7 @@ export class ImporterLiteRuntime {
           coverage: deferred.size ? 'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED' : 'CROSS_SOURCE_PROBES_COMPLETE',
           checkedSources: [...checked], deferredSources: [...deferred], matchedSources: matched.slice(0, 64),
           aliasesAdded: aliasesAdded + addedAliases, tagsAdded: tagsAdded + addedTags,
+          aliasDiscoveryRounds: aliasDiscoveryRounds + (addedAliases > 0 ? 1 : 0),
           deferredRounds, completedAt: new Date().toISOString(),
           lastSource: sourceBatch.at(-1), checkedBatch: sourceBatch,
           lastOutcome: outcome.attached.length ? 'MATCHED' : outcome.deferredSources.length ? 'DEFERRED' : 'NO_MATCH',
@@ -2504,10 +2515,13 @@ export class ImporterLiteRuntime {
       return;
     }
     await this.queue.finish(task, workerId, {
-      state: 'RETRY_WAIT', reason: null, nextRunAt: new Date(Date.now() + 100), resetAttempts: true,
+      state: 'RETRY_WAIT', reason: null,
+      nextRunAt: addedAliases > 0 ? new Date('2026-10-22T00:00:00Z') : new Date(Date.now() + 100),
+      resetAttempts: true,
       checkpoint: {
         metadataCrossSourceDiscovery: true, checkedSources: [...checked], deferredSources: [...deferred],
         matchedSources: matched.slice(0, 64), aliasesAdded: aliasesAdded + addedAliases, tagsAdded: tagsAdded + addedTags,
+        aliasDiscoveryRounds: aliasDiscoveryRounds + (addedAliases > 0 ? 1 : 0),
         lastSource: sourceBatch.at(-1), checkedBatch: sourceBatch,
         lastOutcome: outcome.attached.length ? 'MATCHED' : outcome.deferredSources.length ? 'DEFERRED' : 'NO_MATCH',
       },
