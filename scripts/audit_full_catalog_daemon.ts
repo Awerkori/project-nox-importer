@@ -307,6 +307,9 @@ export async function verifySourceIndependently(
 
       for (const item of results) {
         if (!item || item.title?.toLowerCase() === 'feed' || item.slug === 'feed' || item.sourceWorkId === 'feed') continue;
+        if (/^\d+$/.test(workTitle.trim()) && item.title && item.title.trim() !== workTitle.trim()) {
+          continue;
+        }
         const matchRes = matchWorkCandidate(
           { title: workTitle, slug: '', aliases: knownAliases },
           { title: item.title, slug: item.slug }
@@ -612,6 +615,10 @@ function cleanCandidateTitle(workTitle: string, cand: string, currentAliases: st
     return { isLegitimate: false, reason: 'Too short (< 2 chars non-CJK)' };
   }
 
+  if (/^\d+$/.test(workTitle.trim()) && !/^\d+$/.test(cleaned.trim())) {
+    return { isLegitimate: false, reason: 'Pure numeric title collision with publication year/date suffix' };
+  }
+
   if (normKey(cleaned) === normKey(workTitle)) {
     return { isLegitimate: false, reason: 'Punctuation/spacing/unicode variation of primary title' };
   }
@@ -879,14 +886,12 @@ async function main() {
 
       // Check if any already-audited V7 work was reopened or reprocessed (state !== 'DONE' or task updated_at > record.v7CompletedAt)
       if (postV7AuditedIds.size > 0) {
-        const auditedArray = Array.from(postV7AuditedIds);
         const reprocessedRes = await pool.query<{ work_id: string; state: string; updated_at: Date }>(`
           SELECT work_id::text, state, updated_at
           FROM importer_lite_tasks
           WHERE task_type = 'CATALOG'
             AND payload->>'metadataEnrichmentVersion' = '7'
-            AND work_id = ANY($1::uuid[])
-        `, [auditedArray]);
+        `);
         for (const row of reprocessedRes.rows) {
           const prev = latestPostV7Map.get(row.work_id);
           if (prev) {
@@ -907,7 +912,6 @@ async function main() {
       stats.v7_done_pending_audit = Math.max(0, stats.v7_done_total - (stats.v7_done_audit_pass + stats.v7_done_audit_fail + stats.v7_done_audit_inconclusive));
 
       // 2. Fetch candidates: STRICTLY V7 DONE works that have NOT YET received a post-V7 final audit
-      const postV7Array = Array.from(postV7AuditedIds);
       const candidates = await pool.query<{ id: string; title: string; slug: string; aliases: string[]; author: string | null; v7_task_id: string; v7_state: string; v7_updated_at: Date; v7_checkpoint: any }>(`
         SELECT w.id::text, w.title, w.slug, w.aliases, w.author,
                t.id::text as v7_task_id, t.state as v7_state, t.updated_at as v7_updated_at, t.checkpoint as v7_checkpoint
@@ -917,12 +921,11 @@ async function main() {
           AND t.payload->>'metadataEnrichmentVersion' = '7'
           AND t.state = 'DONE'
           AND w.published = true
-          ${postV7Array.length > 0 ? 'AND NOT (w.id = ANY($1::uuid[]))' : ''}
         ORDER BY t.updated_at ASC
-        LIMIT 60
-      `, postV7Array.length > 0 ? [postV7Array] : []);
+        LIMIT 300
+      `);
 
-      const unaudited = candidates.rows;
+      const unaudited = candidates.rows.filter((c) => !postV7AuditedIds.has(c.id)).slice(0, 60);
 
       // --- FLUXO B: Parallel Turbo Revalidation Queue for AUDIT_INCONCLUSIVE and AUDIT_FAIL works ---
       const now = Date.now();
