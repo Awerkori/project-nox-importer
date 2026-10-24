@@ -2532,15 +2532,16 @@ export class ImporterLiteRuntime {
       // or after the source repairs an incomplete listing. Only its newest
       // normal chapter is a P0 release; earlier positively listed chapters
       // enter P1 together so the importer cannot keep moving the gap forward.
-      const newestManifestNormalOrder = snapshot.chapters
+      const normalOrderKeys = snapshot.chapters
         .map((chapter) => chapterOrderKey({
           displayNumber: chapter.displayNumber || String(chapter.number),
           title: chapter.title || '',
           kind: chapterKind({ displayNumber: chapter.displayNumber || String(chapter.number), title: chapter.title || '' }),
         }))
         .filter((orderKey) => orderKey.startsWith('n|'))
-        .sort()
-        .at(-1) || null;
+        .sort();
+      const newestManifestNormalOrder = normalOrderKeys.at(-1) || null;
+      const oldestManifestNormalOrder = normalOrderKeys[0] || null;
       const manifestSourceIds = [...new Set(snapshot.chapters
         .map((chapter) => String(chapter.sourceChapterId || ''))
         .filter(Boolean))];
@@ -2571,7 +2572,12 @@ export class ImporterLiteRuntime {
         const orderKey = chapterOrderKey({ displayNumber, title: chapter.title, kind: chapterKindValue });
         const historicalRepair = p0Monitoring && orderKey.startsWith('n|') && Boolean(knownNormalOrder && orderKey <= knownNormalOrder);
         const isNewestManifestRelease = !orderKey.startsWith('n|') || orderKey === newestManifestNormalOrder;
-        const chapterPriority = p0Monitoring && !historicalRepair && isNewestManifestRelease ? 'P0' : 'P1';
+        const isNewWorkOpeningRelease = resolved.status === 'NEW_WORK' && (
+          oldestManifestNormalOrder
+            ? orderKey === oldestManifestNormalOrder
+            : sourceChapterIds.size === 1
+        );
+        const chapterPriority = ((p0Monitoring && !historicalRepair && isNewestManifestRelease) || isNewWorkOpeningRelease) ? 'P0' : 'P1';
         sourceRows.push({ workId: resolved.workId, chapterKey, source, sourceWorkId, sourceChapterId: chapter.sourceChapterId,
           language, edition, orderKey, sourceRank: rankForSource(source) });
         const legacyChapterId = legacyPublished.get(String(chapter.sourceChapterId))
