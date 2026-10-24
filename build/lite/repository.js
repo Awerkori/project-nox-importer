@@ -1230,6 +1230,59 @@ export class LiteRepository {
         return result.rows[0] ? asTask(result.rows[0]) : null;
     }
     /**
+     * Claims one due DISCOVER task independent of P1 chapter reserve so active
+     * sources continuously feed the unmapped NEW_WORK onboarding lane without
+     * waiting for the entire historical chapter backlog to drain.
+     */
+    async claimDueDiscovery(workerId, leaseSeconds) {
+        const result = await this.db.query(`
+      WITH picked AS (
+        SELECT task.id
+        FROM importer_lite_tasks task
+        JOIN importer_sources source ON source.id=task.payload->>'source'
+        LEFT JOIN importer_lite_source_health health ON health.source=source.id
+        WHERE task.task_type='DISCOVER'
+          AND (
+            (task.state IN ('READY','RETRY_WAIT') AND task.next_run_at<=now())
+            OR (task.state='RUNNING' AND task.lease_until<now())
+          )
+          AND source.enabled=true
+          AND COALESCE((to_jsonb(source)->>'catalog_discovery_enabled')::boolean,true)
+          AND (COALESCE(source.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
+            OR (source.status='COOLDOWN' AND source.cooldown_until IS NOT NULL AND source.cooldown_until<=now()))
+          AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+          AND (source.cooldown_until IS NULL OR source.cooldown_until<=now())
+          AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
+        ORDER BY task.next_run_at,task.updated_at,task.id
+        LIMIT 1 FOR UPDATE OF task SKIP LOCKED
+      )
+      UPDATE importer_lite_tasks task
+      SET state='RUNNING',lease_owner=$1,lease_until=now()+$2::interval,
+        attempts=task.attempts+1,updated_at=now()
+      FROM picked
+      WHERE task.id=picked.id
+      RETURNING task.*`, [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
+        return result.rows[0] ? asTask(result.rows[0]) : null;
+    }
+    /**
+     * Look up already-mapped source_work_id -> work_id in one indexed batch so
+     * discovery only enqueues unmapped CATALOG tasks (work_id IS NULL) for
+     * genuinely new works.
+     */
+    async existingSourceWorkMappings(source, sourceWorkIds) {
+        const ids = [...new Set(sourceWorkIds.map((id) => String(id || '').trim()).filter(Boolean))];
+        if (!source || !ids.length)
+            return new Map();
+        const result = await this.db.query(`SELECT source_work_id, work_id::text AS work_id
+       FROM importer_work_mappings
+       WHERE source=$1 AND source_work_id=ANY($2::text[]) AND work_id IS NOT NULL`, [source, ids]);
+        const map = new Map();
+        for (const row of result.rows) {
+            map.set(String(row.source_work_id), String(row.work_id));
+        }
+        return map;
+    }
+    /**
      * Extend a live task lease without changing its owner or state.  Catalog
      * work deliberately performs provider HTTP outside a transaction and a new
      * work can also make a bounded complementary-source pass, so its wall time
@@ -2055,6 +2108,7 @@ export class LiteRepository {
             checkedSources,
             deferredSources,
             matchedSources: input.attached.slice(0, 64),
+            ...(input.sourceProbes ? { sourceProbes: input.sourceProbes } : {}),
             aliasesAdded,
             tagsAdded,
             deferredRounds: 0,

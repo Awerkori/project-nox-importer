@@ -205,10 +205,10 @@ export class ImporterLiteRuntime {
     sourceMetadataLaneGate = new AsyncSemaphore(4, 'lite_source_metadata_lane');
     sourceMetadataPersistenceGate = new AsyncSemaphore(1, 'lite_source_metadata_persistence');
     newWorkCatalogGate = new AsyncSemaphore(1, 'lite_new_work_catalog_lane');
-    // Two different canonical works may check one provider at a time under the
-    // shared host limiter. This doubles durable catalog coverage without
-    // allowing an unbounded source sweep or concurrent merge of one work.
-    crossSourceMetadataGate = new AsyncSemaphore(2, 'lite_cross_source_metadata');
+    lastNewWorkDiscoveryAt = 0;
+    // Reserve 3 permits (2 for background V7 discovery + 1 for NEW_WORK onboarding)
+    // so background V7 tasks can never starve a newly created work's onboarding pass.
+    crossSourceMetadataGate = new AsyncSemaphore(3, 'lite_cross_source_metadata');
     crossSourceDiscoveryLaneGate = new AsyncSemaphore(2, 'lite_cross_source_discovery_lane');
     sourceMetadataPoolWaitStartedAt = 0;
     sourceAdmissionGate = new SourceAdmissionGate(10_000);
@@ -940,10 +940,10 @@ export class ImporterLiteRuntime {
                 this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 0 };
             }
             const discoveryCap = next.enabled ? (next.discoveryConcurrency ?? 24) : 2;
-            const searchCap = next.enabled ? (next.searchConcurrency ?? 128) : 2;
-            const metadataCap = next.enabled ? (next.metadataGateCapacity ?? Math.max(discoveryCap + 8, 48)) : 2;
+            const searchCap = next.enabled ? (next.searchConcurrency ?? 128) : 4;
+            const metadataCap = next.enabled ? (next.metadataGateCapacity ?? Math.max(discoveryCap + 8, 48)) : 3;
             const persistenceCap = next.enabled ? Math.min(next.persistenceCapacity ?? 4, 4) : 1;
-            this.sourceMetadataLaneGate.setCapacity(next.enabled ? 6 : 2);
+            this.sourceMetadataLaneGate.setCapacity(next.enabled ? 6 : 4);
             this.sourceMetadataGate.setCapacity(searchCap);
             this.sourceMetadataPreparationGate.setCapacity(next.enabled ? 4 : 1);
             this.sourceMetadataPersistenceGate.setCapacity(persistenceCap);
@@ -1373,8 +1373,18 @@ export class ImporterLiteRuntime {
         try {
             const workerId = `${this.runtimeInstanceId}:new-work-catalog`;
             const task = await this.queue.claimNewWorkCatalog(workerId, CATALOG_TASK_LEASE_SECONDS);
-            if (task)
+            if (task) {
                 await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
+                return;
+            }
+            if (typeof this.queue.claimDueDiscovery === 'function' &&
+                Date.now() - this.lastNewWorkDiscoveryAt >= 15_000) {
+                this.lastNewWorkDiscoveryAt = Date.now();
+                const discoveryTask = await this.queue.claimDueDiscovery(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS || CATALOG_TASK_LEASE_SECONDS);
+                if (discoveryTask) {
+                    await this.discover(discoveryTask, workerId);
+                }
+            }
         }
         catch (error) {
             this.logger.warn('New-work catalog lane failed', { error: error?.message });
@@ -1392,7 +1402,14 @@ export class ImporterLiteRuntime {
      * metadata-backfill task is created here.
      */
     async enrichNewWorkFromComplementarySources(input) {
-        const result = { busy: false, attemptedSources: [], deferredSources: [], attached: [] };
+        const result = {
+            busy: false,
+            attemptedSources: [],
+            deferredSources: [],
+            attached: [],
+            discoveredAliases: [],
+            sourceProbes: {},
+        };
         if (!this.crossSourceMetadataGate.tryAcquire())
             return { ...result, busy: true };
         try {
@@ -1400,7 +1417,7 @@ export class ImporterLiteRuntime {
             if (!sourceIds.length)
                 return result;
             const target = {
-                title: input.title, slug: input.slug, aliases: input.aliases,
+                title: input.title, slug: input.slug, aliases: [...(input.aliases || [])],
                 author: input.author, artist: input.artist, synopsis: input.synopsis,
                 kind: input.kind, year: input.year,
             };
@@ -1413,8 +1430,16 @@ export class ImporterLiteRuntime {
                     const adapter = this.registry.get(source);
                     if (!adapter) {
                         result.deferredSources.push(source);
+                        result.sourceProbes[source] = {
+                            outcome: 'ADAPTER_MISSING',
+                            queries: [],
+                            candidateCount: 0,
+                        };
                         continue;
                     }
+                    const queriesExecuted = [];
+                    let candidateCount = 0;
+                    let topCandidateTitle = null;
                     try {
                         let host = source;
                         try {
@@ -1436,11 +1461,16 @@ export class ImporterLiteRuntime {
                             let fallback = null;
                             const seenSummaryIds = new Set();
                             for (const query of queryCandidates) {
+                                queriesExecuted.push(query);
                                 const rateLimitTimeout = this.metadataTurboMode.enabled ? 15_000 : 60_000;
                                 await this.sourceRateLimiter.acquire(host, undefined, rateLimitTimeout);
                                 const summaries = await this.sourceMetadataGate.runExclusive(async () => {
                                     return withTimeout(adapter.searchWorks(query), CROSS_SOURCE_METADATA_TIMEOUT_MS, 'CROSS_SOURCE_SEARCH_TIMEOUT');
                                 });
+                                candidateCount += summaries.length;
+                                if (!topCandidateTitle && summaries[0]?.title) {
+                                    topCandidateTitle = summaries[0].title;
+                                }
                                 for (const summary of summaries) {
                                     const summaryId = String(summary.sourceWorkId || '').trim();
                                     if (!summaryId || summaryId === 'feed' || summary.slug === 'feed' || seenSummaryIds.has(summaryId))
@@ -1475,8 +1505,15 @@ export class ImporterLiteRuntime {
                             selected ||= fallback;
                         }
                         result.attemptedSources.push(source);
-                        if (!selected)
+                        if (!selected) {
+                            result.sourceProbes[source] = {
+                                outcome: 'NOT_FOUND',
+                                queries: queriesExecuted,
+                                candidateCount,
+                                topCandidateTitle,
+                            };
                             continue;
+                        }
                         const rateLimitTimeout = this.metadataTurboMode.enabled ? 15_000 : 60_000;
                         await this.sourceRateLimiter.acquire(host, undefined, rateLimitTimeout);
                         const details = await this.sourceMetadataGate.runExclusive(async () => {
@@ -1528,6 +1565,16 @@ export class ImporterLiteRuntime {
                                 workId: input.workId, source, sourceWorkId: selected.sourceWorkId,
                                 confidence: detailMatch.confidenceScore, method: detailMatch.matchMethod,
                             });
+                            result.sourceProbes[source] = {
+                                outcome: 'REJECTED_AMBIGUOUS',
+                                queries: queriesExecuted,
+                                candidateCount,
+                                sourceWorkId: details.sourceWorkId,
+                                primaryTitle: details.title,
+                                alternativeTitles: extracted.aliases.slice(0, 12),
+                                confidence: detailMatch.confidenceScore,
+                                matchMethod: detailMatch.matchMethod,
+                            };
                             continue;
                         }
                         await this.sourceMetadataPersistenceGate.runExclusive(async () => {
@@ -1551,8 +1598,13 @@ export class ImporterLiteRuntime {
                                 return;
                             target.aliases ||= [];
                             const freshAliases = providerAliases.filter((a) => !target.aliases.includes(a));
-                            if (freshAliases.length)
+                            if (freshAliases.length) {
                                 target.aliases.push(...freshAliases);
+                                for (const fa of freshAliases) {
+                                    if (!result.discoveredAliases.includes(fa))
+                                        result.discoveredAliases.push(fa);
+                                }
+                            }
                             const aliasesAdded = Math.max(0, Number(attached.metadataDelta?.aliasesAdded || 0));
                             const tagsAdded = Math.max(0, Number(attached.metadataDelta?.tagsAdded || 0));
                             await this.queue.recordSourceMetadataEnrichment({
@@ -1564,6 +1616,18 @@ export class ImporterLiteRuntime {
                                 rawMetadata: sourceMetadata, version: 7,
                             });
                             result.attached.push({ source, sourceWorkId: details.sourceWorkId, aliasesAdded, tagsAdded });
+                            result.sourceProbes[source] = {
+                                outcome: aliasesAdded > 0 ? 'MATCHED_ENRICHED' : 'MATCHED_NO_NEW_ALIASES',
+                                queries: queriesExecuted,
+                                candidateCount,
+                                sourceWorkId: details.sourceWorkId,
+                                primaryTitle: details.title,
+                                alternativeTitles: providerAliases.slice(0, 15),
+                                aliasesAdded,
+                                tagsAdded,
+                                confidence: detailMatch.confidenceScore,
+                                matchMethod: detailMatch.matchMethod,
+                            };
                         });
                         await this.queue.recordSourceSuccess(source);
                         this.logger.info('Attached complementary source metadata during new-work onboarding', {
@@ -1578,6 +1642,12 @@ export class ImporterLiteRuntime {
                             workId: input.workId, source, error: error?.message,
                         });
                         result.deferredSources.push(source);
+                        result.sourceProbes[source] = {
+                            outcome: 'DEFERRED_EXTERNAL_ERROR',
+                            queries: queriesExecuted,
+                            candidateCount,
+                            error: String(error?.message || 'UNKNOWN_ERROR'),
+                        };
                     }
                 }
             };
@@ -2149,11 +2219,47 @@ export class ImporterLiteRuntime {
             return;
         }
         try {
-            const page = await withTimeout(adapter.fetchUpdatedWorks(String(task.checkpoint.cursor || '') || null, { mode: 'maintenance' }), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'DISCOVERY_SOURCE_TIMEOUT');
+            const cursor = String(task.checkpoint.cursor || '') || null;
+            const page = await withTimeout(adapter.fetchUpdatedWorks(cursor, { mode: 'maintenance' }), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'DISCOVERY_SOURCE_TIMEOUT');
+            let candidateWorks = page.works.slice(0, 100);
+            if (cursor) {
+                try {
+                    const frontPage = await withTimeout(adapter.fetchUpdatedWorks(null, { mode: 'maintenance' }), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'DISCOVERY_SOURCE_TIMEOUT');
+                    const seenIds = new Set();
+                    candidateWorks = [...frontPage.works.slice(0, 50), ...candidateWorks].filter((w) => {
+                        const id = String(w.sourceWorkId || '');
+                        if (!id || seenIds.has(id))
+                            return false;
+                        seenIds.add(id);
+                        return true;
+                    }).slice(0, 100);
+                }
+                catch {
+                    // Best-effort front-page check when advancing a deep cursor
+                }
+            }
             await this.queue.recordSourceSuccess(source);
-            for (const work of page.works.slice(0, 100)) {
-                await this.queue.enqueue({ taskType: 'CATALOG', workKey: `source:${source}:${work.sourceWorkId}`, priority: 'P2',
-                    idempotencyKey: `lite:catalog:${source}:${work.sourceWorkId}`, payload: { source, sourceWorkId: work.sourceWorkId } });
+            const existingMappings = typeof this.queue.existingSourceWorkMappings === 'function'
+                ? await this.queue.existingSourceWorkMappings(source, candidateWorks.map((w) => w.sourceWorkId))
+                : new Map();
+            const catalogInputs = candidateWorks.map((work) => {
+                const mappedWorkId = existingMappings.get(String(work.sourceWorkId));
+                return {
+                    taskType: 'CATALOG',
+                    workId: mappedWorkId || undefined,
+                    workKey: mappedWorkId ? `work:${mappedWorkId}` : `source:${source}:${work.sourceWorkId}`,
+                    priority: 'P2',
+                    idempotencyKey: `lite:catalog:${source}:${work.sourceWorkId}`,
+                    payload: { source, sourceWorkId: work.sourceWorkId },
+                };
+            });
+            if (catalogInputs.length > 1 && typeof this.queue.enqueueMany === 'function') {
+                await this.queue.enqueueMany(catalogInputs);
+            }
+            else {
+                for (const item of catalogInputs) {
+                    await this.queue.enqueue(item);
+                }
             }
             // The durable task itself holds the cursor; no new cursor rows or sweep.
             // A cursor asks for a later small batch, not an immediate unbounded
@@ -2306,6 +2412,7 @@ export class ImporterLiteRuntime {
                         attemptedSources: complementaryOutcome.attemptedSources,
                         deferredSources: complementaryOutcome.deferredSources,
                         attached: complementaryOutcome.attached,
+                        sourceProbes: complementaryOutcome.sourceProbes,
                     }).catch((error) => {
                         this.logger.warn('Failed to persist onboarding cross-source V7 record', {
                             workId: resolved.workId, error: error?.message,
@@ -2313,10 +2420,39 @@ export class ImporterLiteRuntime {
                     });
                 }
                 const complementaryAddedAliases = complementaryOutcome.attached.reduce((sum, item) => sum + (item.aliasesAdded || 0), 0);
-                if (complementaryAddedAliases > 0 &&
+                for (const extra of complementaryOutcome.discoveredAliases || []) {
+                    if (!onboardingAliases.includes(extra))
+                        onboardingAliases.push(extra);
+                }
+                if ((complementaryAddedAliases > 0 || (complementaryOutcome.discoveredAliases?.length || 0) > 0) &&
                     initialNotFoundAliasOnly.length > 0 &&
                     (process.env.NODE_ENV !== 'test' || this.enableOnboardingAliasOnlyInTest)) {
-                    this.triggerAsyncAliasOnlyEnrichment(resolved.workId);
+                    try {
+                        const wave2Target = {
+                            id: resolved.workId,
+                            title: snapshot.details.title,
+                            slug: snapshot.details.slug,
+                            aliases: onboardingAliases,
+                            author: snapshot.details.author ?? null,
+                            artist: snapshot.details.artist ?? null,
+                            kind: snapshot.details.kind ?? null,
+                            year: snapshot.details.year ?? null,
+                            ageRating: snapshot.details.ageRating ?? null,
+                            contentRating: rawContentRating === 'ADULT_18' || Number(snapshot.details.ageRating || 0) >= 18 ? 'ADULT_18' : null,
+                        };
+                        const wave2Outcome = await this.aliasOnlyService.enrichWork(wave2Target, initialNotFoundAliasOnly);
+                        await this.aliasOnlyRepo.persistBatchResults('runtime_onboarding_v1', [{
+                                target: wave2Target,
+                                priorityBucket: 1,
+                                result: wave2Outcome,
+                            }]);
+                    }
+                    catch (error) {
+                        this.logger.warn('Wave 2 onboarding ALIAS_ONLY pass deferred to background turn', {
+                            workId: resolved.workId, error: error?.message,
+                        });
+                        this.triggerAsyncAliasOnlyEnrichment(resolved.workId);
+                    }
                 }
             }
             const language = String(snapshot.details.language || snapshot.details.raw?.language || 'pt-BR');

@@ -204,6 +204,18 @@ export declare class LiteRepository {
      */
     claimNewWorkCatalog(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /**
+     * Claims one due DISCOVER task independent of P1 chapter reserve so active
+     * sources continuously feed the unmapped NEW_WORK onboarding lane without
+     * waiting for the entire historical chapter backlog to drain.
+     */
+    claimDueDiscovery(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    /**
+     * Look up already-mapped source_work_id -> work_id in one indexed batch so
+     * discovery only enqueues unmapped CATALOG tasks (work_id IS NULL) for
+     * genuinely new works.
+     */
+    existingSourceWorkMappings(source: string, sourceWorkIds: string[]): Promise<Map<string, string>>;
+    /**
      * Extend a live task lease without changing its owner or state.  Catalog
      * work deliberately performs provider HTTP outside a transaction and a new
      * work can also make a bounded complementary-source pass, so its wall time
@@ -342,6 +354,7 @@ export declare class LiteRepository {
             aliasesAdded: number;
             tagsAdded: number;
         }>;
+        sourceProbes?: Record<string, unknown>;
     }): Promise<void>;
     /**
      * Chapter media is expensive and a Reader chapter cannot be exposed without
