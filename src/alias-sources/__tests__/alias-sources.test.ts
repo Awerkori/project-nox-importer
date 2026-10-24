@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ALIAS_ONLY_SOURCE_IDS,
   AliasOnlyEnrichmentService,
-  ComixAliasSource,
+  AliasOnlyRepository,
   MangaBallAliasSource,
   MangaDexAliasSource,
   MangaFireAliasSource,
@@ -21,14 +22,7 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
   });
 }
 
-function htmlResponse(html: string, status = 200): Response {
-  return new Response(html, {
-    status,
-    headers: { 'content-type': 'text/html; charset=utf-8' },
-  });
-}
-
-describe('ALIAS_ONLY 4-Source Suite (MangaDex, MangaFire, MangaBall, Comix)', () => {
+describe('ALIAS_ONLY 3-Source Suite (MangaDex, MangaFire, MangaBall)', () => {
   it('adapts MangaDex search & detail responses, extracting primary title + localized altTitles (PT-BR, EN, CJK, Romaji) and filtering non-target scripts', async () => {
     const mockFetch: typeof fetch = async (input) => {
       const url = String(input);
@@ -179,72 +173,8 @@ describe('ALIAS_ONLY 4-Source Suite (MangaDex, MangaFire, MangaBall, Comix)', ()
     expect(res.candidates[0].aliases.map((a) => a.title)).toContain('O Único Fazendeiro da Torre');
   });
 
-  it('extracts Comix SSR initial-data on /title/<hid> and trips circuit breaker cleanly on 403 missing_token without blocking other sources', async () => {
-    let apiCalls = 0;
-    const mockFetch: typeof fetch = async (input) => {
-      const url = String(input);
-      if (url === 'https://comix.to/') {
-        const ssr = {
-          page: 'home',
-          queries: {
-            '["manga","top"]': [
-              {
-                id: 78317,
-                hid: 'z0l20',
-                title: "God-level Assassin, I'm the Shadow",
-                altTitles: ["God-level Assassin, I'm the Shadow", '网游：神级刺客，我即是暗影'],
-                type: 'manhua',
-                originalLanguage: 'zh',
-                year: 2025,
-                contentRating: 'safe',
-              },
-            ],
-          },
-        };
-        return htmlResponse(`<html><body><script id="initial-data">${JSON.stringify(ssr)}</script></body></html>`);
-      }
-      if (url.includes('/title/z0l20')) {
-        const detail = {
-          page: 'manga',
-          queries: {
-            '["manga","detail","z0l20"]': {
-              id: 78317,
-              hid: 'z0l20',
-              title: "God-level Assassin, I'm the Shadow",
-              altTitles: ['Shadow God Assassin', '网游：神级刺客，我即是暗影'],
-              type: 'manhua',
-              year: 2025,
-              links: { md: 'https://mangadex.org/title/b3bb2a04-f9b0-4f28-b56e-ea723aefe2e6' },
-            },
-          },
-        };
-        return htmlResponse(`<html><body><script id="initial-data">${JSON.stringify(detail)}</script></body></html>`);
-      }
-      if (url.includes('/api/v1/manga')) {
-        apiCalls++;
-        return jsonResponse({ message: 'Missing token.', code: 'missing_token' }, 403);
-      }
-      return jsonResponse({}, 404);
-    };
-
-    const comix = new ComixAliasSource({ fetchImpl: mockFetch, minIntervalMs: 0 });
-    // SSR hit succeeds
-    const ssrHit = await comix.searchWorks("God-level Assassin, I'm the Shadow");
-    expect(ssrHit.ok).toBe(true);
-    expect(ssrHit.candidates[0].sourceWorkId).toBe('z0l20');
-
-    // Direct detail SSR succeeds
-    const det = await comix.fetchWorkAliases('z0l20');
-    expect(det.ok).toBe(true);
-    expect(det.candidate?.links?.mangadexId).toBe('b3bb2a04-f9b0-4f28-b56e-ea723aefe2e6');
-
-    // Uncached API search trips circuit breaker on first 403 and does NOT repeat API calls
-    const miss1 = await comix.searchWorks('Unknown Title Alpha');
-    const miss2 = await comix.searchWorks('Unknown Title Beta');
-    expect(miss1.ok).toBe(false);
-    expect(miss1.errorCode).toBe('COMIX_SEARCH_API_TOKEN_RESTRICTED');
-    expect(miss2.ok).toBe(false);
-    expect(apiCalls).toBe(1);
+  it('confirms active ALIAS_ONLY_SOURCE_IDS contains strictly MangaBall, MangaDex, and MangaFire (Comix removed)', () => {
+    expect(ALIAS_ONLY_SOURCE_IDS).toEqual(['mangaball', 'mangadex', 'mangafire']);
   });
 
   it('rejects false positives (sequels, novels, safe vs explicit porn, uncorroborated generic homonyms) while confirming legitimate variants', () => {
@@ -443,18 +373,8 @@ describe('ALIAS_ONLY 4-Source Suite (MangaDex, MangaFire, MangaBall, Comix)', ()
       },
     });
 
-    // Comix simulates complete network outage / timeout
-    const cx = new ComixAliasSource({
-      minIntervalMs: 0,
-      maxRetries: 0,
-      timeoutMs: 50,
-      fetchImpl: async () => {
-        throw new Error('AbortError: Request timed out');
-      },
-    });
-
     const service = new AliasOnlyEnrichmentService({
-      adapters: { mangadex: md, mangaball: mb, mangafire: mf, comix: cx },
+      adapters: { mangadex: md, mangaball: mb, mangafire: mf },
     });
 
     const ptOnlyWork: NoxWorkAliasTarget = {
@@ -464,16 +384,9 @@ describe('ALIAS_ONLY 4-Source Suite (MangaDex, MangaFire, MangaBall, Comix)', ()
       aliases: [],
     };
 
-    // Default active sources exclude Comix (disabled due to external API/WAF block)
-    const defaultResult = await service.enrichWork(ptOnlyWork);
-    expect(defaultResult.confirmedSources).toEqual(expect.arrayContaining(['mangaball', 'mangadex', 'mangafire']));
-    expect(defaultResult.errorSources).toEqual([]);
-    expect((defaultResult.perSource.comix.evidence as any)?.skipped).toBe(true);
-
-    // Even if Comix is explicitly requested via onlySources and fails, healthy sources succeed
-    const result = await service.enrichWork(ptOnlyWork, ['mangaball', 'mangadex', 'mangafire', 'comix']);
+    const result = await service.enrichWork(ptOnlyWork);
     expect(result.confirmedSources).toEqual(expect.arrayContaining(['mangaball', 'mangadex', 'mangafire']));
-    expect(result.errorSources).toEqual(['comix']);
+    expect(result.errorSources).toEqual([]);
     expect(result.addedAliases).toEqual(
       expect.arrayContaining([
         'The Top Dungeon Farmer',
@@ -483,5 +396,39 @@ describe('ALIAS_ONLY 4-Source Suite (MangaDex, MangaFire, MangaBall, Comix)', ()
         '나혼자 탑에서 농사',
       ]),
     );
+  });
+
+  it('selects newly created works via immediateWorkIds even while published = false before chapter publication completes', async () => {
+    const mockPool = {
+      query: async (sql: string, params?: any[]) => {
+        if (sql.includes('WHERE w.id = ANY($1::uuid[])')) {
+          expect(params?.[0]).toEqual(['a3da533f-23d4-4e00-aee5-c2dde4d8429a']);
+          return {
+            rows: [
+              {
+                id: 'a3da533f-23d4-4e00-aee5-c2dde4d8429a',
+                title: 'Hirotta Kinpatsu Gal ni Furimawasareru Kurashi mo, Angai Warukunai no Kamoshirenai',
+                slug: 'hirotta-kinpatsu-gal-ni-furimawasareru-kurashi-mo-angai-warukunai-no-kamoshirenai',
+                aliases: ['拾った金髪ギャルに振り回される暮らしも、案外悪くないのかもしれない'],
+                author: null,
+                artist: null,
+                kind: 'manga',
+                year: 2024,
+                age_rating: 18,
+                content_rating: 'ADULT_18',
+              },
+            ],
+          };
+        }
+        return { rows: [] };
+      },
+    } as any;
+
+    const repo = new AliasOnlyRepository(mockPool);
+    (repo as any).schemaReady = true;
+    const due = await repo.findDueWorksForRuntimeEnrichment(3, ['a3da533f-23d4-4e00-aee5-c2dde4d8429a']);
+    expect(due).toHaveLength(1);
+    expect(due[0].target.id).toBe('a3da533f-23d4-4e00-aee5-c2dde4d8429a');
+    expect(due[0].reason).toBe('NEW_WORK');
   });
 });

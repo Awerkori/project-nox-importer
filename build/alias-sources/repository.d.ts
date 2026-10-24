@@ -36,11 +36,12 @@ export declare class AliasOnlyRepository {
     }>;
     /**
      * Used by the permanent ImporterLiteRuntime background loop to pick up:
-     * 1. Newly published works that have never passed through the 4 ALIAS_ONLY sources,
+     * 0. Explicit immediate work IDs queued during NEW_WORK onboarding (even while `published = false`),
+     * 1. Newly published works that have never passed through the 3 ALIAS_ONLY sources,
      * 2. Bounded transient retries (`SOURCE_ERROR` with `attempts <= 3` and `next_retry_at <= now()`),
      * 3. Lightweight 14-day periodic rechecks for zero-alias works (`next_recheck_at <= now()`).
      */
-    findDueWorksForRuntimeEnrichment(limit?: number): Promise<Array<{
+    findDueWorksForRuntimeEnrichment(limit?: number, immediateWorkIds?: readonly string[]): Promise<Array<{
         target: NoxWorkAliasTarget;
         priorityBucket: number;
         onlySources?: AliasSourceId[];

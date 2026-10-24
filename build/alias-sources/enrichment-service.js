@@ -1,7 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { cleanAlternativeTitle } from '../core/alternative-titles.js';
 import { normalizeTitle } from '../core/matching.js';
-import { ComixAliasSource } from './comix-alias-source.js';
 import { computeMergedWorkAliases, evaluateSourceCandidates, isPortugueseAlias, sanitizeCandidateAliases, } from './identity-verifier.js';
 import { MangaBallAliasSource } from './mangaball-alias-source.js';
 import { MangaDexAliasSource } from './mangadex-alias-source.js';
@@ -73,7 +72,6 @@ export class AliasOnlyEnrichmentService {
             mangaball: options.adapters?.mangaball ?? new MangaBallAliasSource(),
             mangadex: options.adapters?.mangadex ?? new MangaDexAliasSource(),
             mangafire: options.adapters?.mangafire ?? new MangaFireAliasSource(),
-            comix: options.adapters?.comix ?? new ComixAliasSource(),
         };
         this.maxQueriesPerSource = options.maxQueriesPerSource ?? 2;
         this.mangaFireMaxDetailProbes = options.mangaFireMaxDetailProbes ?? 2;
@@ -83,7 +81,6 @@ export class AliasOnlyEnrichmentService {
             mangadex: this.adapters.mangadex.getHealthSnapshot(),
             mangafire: this.adapters.mangafire.getHealthSnapshot(),
             mangaball: this.adapters.mangaball.getHealthSnapshot(),
-            comix: this.adapters.comix.getHealthSnapshot(),
         };
     }
     /**
@@ -273,10 +270,10 @@ export class AliasOnlyEnrichmentService {
         };
     }
     /**
-     * Enriches a single Nox work across all 4 ALIAS_ONLY sources:
+     * Enriches a single Nox work across all 3 ALIAS_ONLY sources:
      * - Wave 1 queries MangaBall + MangaDex in parallel (highest multi-language & PT-BR recall, 1-call detail).
      * - Propagates any confirmed persistent IDs (`mangadexId`, `malId`, `anilistId`) and newly discovered
-     *   English/Romaji/CJK titles into Wave 2 (`MangaFire` + `Comix`, plus direct UUID follow-up on `MangaDex`
+     *   English/Romaji/CJK titles into Wave 2 (`MangaFire`, plus direct UUID follow-up on `MangaDex`
      *   if Wave 1 MangaBall revealed `mangadexId` while MangaDex text search missed a PT-BR-only title!).
      */
     async enrichWork(nox, onlySources) {
@@ -336,9 +333,9 @@ export class AliasOnlyEnrichmentService {
                 }
             }
         }
-        // Wave 2: MangaFire + Comix in parallel, enriched with Wave-1 confirmed titles & external IDs!
+        // Wave 2: MangaFire enriched with Wave-1 confirmed titles & external IDs!
         const wave2Queries = buildEfficientSearchQueries(nox.title, nox.aliases, corroborated.confirmedTitles, this.maxQueriesPerSource);
-        const wave2Ids = ['mangafire', 'comix'].filter((s) => activeSources.has(s));
+        const wave2Ids = ['mangafire'].filter((s) => activeSources.has(s));
         const wave2Outcomes = await Promise.all(wave2Ids.map(async (sourceId) => {
             const res = await this.probeSingleSource(sourceId, nox, wave2Queries, corroborated);
             return { sourceId, res };
@@ -348,11 +345,11 @@ export class AliasOnlyEnrichmentService {
             perSourcePersistable[sourceId] = res.persistableAliases;
         }
         // Fill defaults for any non-requested source
-        const allOrder = ['mangadex', 'mangafire', 'mangaball', 'comix'];
+        const allOrder = ['mangadex', 'mangafire', 'mangaball'];
         const perSource = {};
         // Compute per-source attribution AND combined merge in deterministic priority order:
-        // MangaDex (explicit language tags) -> MangaBall -> MangaFire -> Comix
-        const attributionOrder = ['mangadex', 'mangaball', 'mangafire', 'comix'];
+        // MangaDex (explicit language tags) -> MangaBall -> MangaFire
+        const attributionOrder = ['mangadex', 'mangaball', 'mangafire'];
         let runningAliases = Array.isArray(nox.aliases) ? [...nox.aliases] : [];
         const allIncoming = [];
         for (const src of attributionOrder) {

@@ -3695,6 +3695,8 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('complements a new work from a second healthy source during onboarding without a retroactive task', async () => {
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS catalog_discovery_enabled boolean NOT NULL DEFAULT true`);
+    await db.query(`UPDATE importer_sources SET catalog_discovery_enabled=false WHERE id='source-b'`);
     await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:solo', priority: 'P2',
       idempotencyKey: 'new-work-cross-source', payload: { source: 'source-a', sourceWorkId: 'solo' } });
     const task = await repo.claim('cross-source-catalog', 120);
@@ -3746,6 +3748,13 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(complementary.rows[0]).toMatchObject({ aliases_state: 'ENRICHED', tags_state: 'ENRICHED', aliases_added: 1, tags_added: 1 });
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
       WHERE payload ? 'metadataSourceRefresh' AND payload->>'source'='source-b'`)).rows[0].count).toBe(0);
+    const onboardingV7 = await db.query(`SELECT state,checkpoint->>'coverage' AS coverage,checkpoint->'checkedSources' AS checked
+      FROM importer_lite_tasks WHERE idempotency_key=$1`, [`lite:metadata:cross-source:v7:${ids.p1a}`]);
+    expect(onboardingV7.rows[0]).toMatchObject({
+      state: 'DONE',
+      coverage: 'CROSS_SOURCE_PROBES_COMPLETE',
+      checked: ['source-a', 'source-b'],
+    });
   });
 
   it('enriches explicit historical mapping aliases and tags without calling the source adapter', async () => {

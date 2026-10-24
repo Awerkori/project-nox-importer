@@ -959,8 +959,14 @@ export class ImporterLiteRuntime {
             await this.refreshMetadataTurboMode();
             if (this.metadataTurboMode.enabled) {
                 const concurrency = Math.max(16, this.metadataTurboMode.discoveryConcurrency ?? 24);
-                await Promise.all(Array.from({ length: concurrency }, () => this.runCrossSourceMetadataDiscovery()));
-                void this.refillCrossSourceMetadataDiscovery();
+                const claimed = await Promise.all(Array.from({ length: concurrency }, () => this.runCrossSourceMetadataDiscovery()));
+                const admitted = await this.refillCrossSourceMetadataDiscovery();
+                void this.runAliasOnlyEnrichmentTurn();
+                if (!claimed.some(Boolean) && !admitted) {
+                    await this.queue.disableMetadataTurboExclusiveMode();
+                    await this.refreshMetadataTurboMode(true);
+                    this.logger.info('Metadata turbo exclusive mode completed all due V7 tasks; normal metadata mode restored');
+                }
             }
             else if (this.metadataReplayV4Exclusive.enabled) {
                 await Promise.all([this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay(), this.runStoredMetadataReplay()]);
@@ -1016,7 +1022,8 @@ export class ImporterLiteRuntime {
             return 0;
         try {
             this.lastAliasOnlyTurnAt = Date.now();
-            const due = await this.aliasOnlyRepo.findDueWorksForRuntimeEnrichment(3);
+            const immediateIds = [...this.pendingImmediateAliasWorkIds];
+            const due = await this.aliasOnlyRepo.findDueWorksForRuntimeEnrichment(3, immediateIds);
             for (const item of due) {
                 this.pendingImmediateAliasWorkIds.delete(item.target.id);
             }
@@ -1163,15 +1170,17 @@ export class ImporterLiteRuntime {
             || (!this.metadataTurboMode.enabled && (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'))
             || this.shouldPauseLowPriorityMetadata()
             || Date.now() - this.lastCrossSourceDiscoveryRefillAt < minInterval)
-            return;
+            return 0;
         this.lastCrossSourceDiscoveryRefillAt = Date.now();
         try {
             const admitted = await this.queue.refillCrossSourceMetadataDiscovery(this.metadataTurboMode.enabled ? 32 : 2);
             if (admitted)
                 this.logger.info('Admitted cross-source metadata coverage task', { admitted });
+            return admitted;
         }
         catch (error) {
             this.logger.warn('Cross-source metadata coverage refill failed', { error: error?.message });
+            return 0;
         }
     }
     noteSourceMetadataProducer(outcome, admitted = 0, error = null) {
@@ -1523,10 +1532,13 @@ export class ImporterLiteRuntime {
                         }
                         await this.sourceMetadataPersistenceGate.runExclusive(async () => {
                             const rawContentRating = String(rawDetails.contentRating || rawDetails.content_rating || '').toUpperCase();
-                            const providerAliases = isProviderDisplayTitleAlias(details.title, details.slug, target.title)
+                            const alreadyInTargetAliases = (target.aliases || []).some((a) => normalizeTitle(a) === normalizeTitle(details.title));
+                            const providerAliases = (!alreadyInTargetAliases && isProviderDisplayTitleAlias(details.title, details.slug, target.title))
                                 ? Array.from(new Set([details.title, ...extracted.aliases]))
                                 : extracted.aliases;
-                            const dedupeEngine = this.historicalMetadataDedupe || this.dedupe;
+                            const dedupeEngine = typeof this.dedupe?.attachVerifiedMapping === 'function'
+                                ? this.dedupe
+                                : (this.historicalMetadataDedupe || this.dedupe);
                             const attached = await dedupeEngine.attachVerifiedMapping({
                                 source, sourceWorkId: details.sourceWorkId, title: details.title, slug: details.slug,
                                 aliases: providerAliases, genres: extracted.genres, author: details.author, artist: details.artist,
@@ -2242,12 +2254,70 @@ export class ImporterLiteRuntime {
             // future retroactive sweep.  Existing mappings already take the normal
             // append-only merge path above when they arrive later.
             if (resolved.status === 'NEW_WORK') {
-                await this.enrichNewWorkFromComplementarySources({
+                const onboardingAliases = [...sourceMetadataClassification.aliases];
+                let initialNotFoundAliasOnly = [];
+                if (process.env.NODE_ENV !== 'test' || this.enableOnboardingAliasOnlyInTest) {
+                    try {
+                        const aliasOnlyTarget = {
+                            id: resolved.workId,
+                            title: snapshot.details.title,
+                            slug: snapshot.details.slug,
+                            aliases: onboardingAliases,
+                            author: snapshot.details.author ?? null,
+                            artist: snapshot.details.artist ?? null,
+                            kind: snapshot.details.kind ?? null,
+                            year: snapshot.details.year ?? null,
+                            ageRating: snapshot.details.ageRating ?? null,
+                            contentRating: rawContentRating === 'ADULT_18' || Number(snapshot.details.ageRating || 0) >= 18 ? 'ADULT_18' : null,
+                        };
+                        const aliasOnlyOutcome = await this.aliasOnlyService.enrichWork(aliasOnlyTarget);
+                        await this.aliasOnlyRepo.persistBatchResults('runtime_onboarding_v1', [{
+                                target: aliasOnlyTarget,
+                                priorityBucket: 1,
+                                result: aliasOnlyOutcome,
+                            }]);
+                        for (const added of aliasOnlyOutcome.addedAliases) {
+                            if (!onboardingAliases.includes(added))
+                                onboardingAliases.push(added);
+                        }
+                        initialNotFoundAliasOnly = ['mangadex', 'mangafire', 'mangaball'].filter((src) => aliasOnlyOutcome.perSource[src]?.status === 'NOT_FOUND');
+                    }
+                    catch (error) {
+                        this.logger.warn('Onboarding ALIAS_ONLY pass deferred to background turn', {
+                            workId: resolved.workId, error: error?.message,
+                        });
+                        this.triggerAsyncAliasOnlyEnrichment(resolved.workId);
+                    }
+                }
+                else {
+                    this.triggerAsyncAliasOnlyEnrichment(resolved.workId);
+                }
+                const complementaryOutcome = await this.enrichNewWorkFromComplementarySources({
                     workId: resolved.workId, originSource: source, title: snapshot.details.title, slug: snapshot.details.slug,
-                    aliases: sourceMetadataClassification.aliases, author: snapshot.details.author, artist: snapshot.details.artist,
+                    aliases: onboardingAliases, author: snapshot.details.author, artist: snapshot.details.artist,
                     synopsis: sanitizeSynopsis(snapshot.details.synopsis) || undefined, kind: snapshot.details.kind, year: snapshot.details.year,
+                    allowFallbackDetailProbe: true,
                 });
-                this.triggerAsyncAliasOnlyEnrichment(resolved.workId);
+                if (typeof this.queue.recordOnboardingCrossSourceDiscovery === 'function') {
+                    await this.queue.recordOnboardingCrossSourceDiscovery({
+                        workId: resolved.workId,
+                        originSource: source,
+                        busy: complementaryOutcome.busy,
+                        attemptedSources: complementaryOutcome.attemptedSources,
+                        deferredSources: complementaryOutcome.deferredSources,
+                        attached: complementaryOutcome.attached,
+                    }).catch((error) => {
+                        this.logger.warn('Failed to persist onboarding cross-source V7 record', {
+                            workId: resolved.workId, error: error?.message,
+                        });
+                    });
+                }
+                const complementaryAddedAliases = complementaryOutcome.attached.reduce((sum, item) => sum + (item.aliasesAdded || 0), 0);
+                if (complementaryAddedAliases > 0 &&
+                    initialNotFoundAliasOnly.length > 0 &&
+                    (process.env.NODE_ENV !== 'test' || this.enableOnboardingAliasOnlyInTest)) {
+                    this.triggerAsyncAliasOnlyEnrichment(resolved.workId);
+                }
             }
             const language = String(snapshot.details.language || snapshot.details.raw?.language || 'pt-BR');
             const edition = String(snapshot.details.edition || snapshot.details.raw?.edition || 'default');
@@ -2410,7 +2480,10 @@ export class ImporterLiteRuntime {
             return;
         }
         const work = await this.getAvailablePool().query(`SELECT id::text,title,slug,aliases,author,artist,COALESCE(synopsis,description) AS synopsis,kind,year
-      FROM works WHERE id=$1::uuid AND published=true LIMIT 1`, [task.workId]);
+      FROM works
+      WHERE id=$1::uuid
+        AND (published=true OR EXISTS (SELECT 1 FROM importer_work_mappings m WHERE m.work_id=works.id))
+      LIMIT 1`, [task.workId]);
         const target = work.rows[0];
         if (!target) {
             await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CROSS_SOURCE_WORK_NOT_PUBLIC' });
@@ -2537,6 +2610,9 @@ export class ImporterLiteRuntime {
         }
         const addedAliases = outcome.attached.reduce((sum, item) => sum + item.aliasesAdded, 0);
         const addedTags = outcome.attached.reduce((sum, item) => sum + item.tagsAdded, 0);
+        if (addedAliases > 0) {
+            this.triggerAsyncAliasOnlyEnrichment(target.id);
+        }
         const aliasDiscoveryRounds = Math.max(0, Number(task.checkpoint.aliasDiscoveryRounds || 0));
         if (addedAliases > 0 && aliasDiscoveryRounds < 2) {
             const matchedSourceSet = new Set(matched.map((m) => m.source));

@@ -1,9 +1,7 @@
-export type AliasSourceId = 'mangadex' | 'mangafire' | 'mangaball' | 'comix';
+export type AliasSourceId = 'mangadex' | 'mangafire' | 'mangaball';
 
 /**
- * Active ALIAS_ONLY sources used in permanent runtime enrichment and new retroactive runs.
- * Comix ('comix') is excluded from active polling due to external API token/WAF restrictions,
- * while remaining in `AliasSourceId` to preserve historical audit and rollback records.
+ * Active ALIAS_ONLY sources used in permanent runtime enrichment and retroactive runs.
  */
 export const ALIAS_ONLY_SOURCE_IDS: readonly AliasSourceId[] = [
   'mangaball',
