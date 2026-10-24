@@ -326,6 +326,24 @@ export declare class LiteRepository {
      */
     refillCrossSourceMetadataDiscovery(maxPending?: number): Promise<number>;
     /**
+     * Persist the durable cross-source V7 coverage matrix produced during NEW_WORK
+     * onboarding so every new work has an auditable 43-source verification record,
+     * and any deferred or gate-busy sources are automatically re-probed.
+     */
+    recordOnboardingCrossSourceDiscovery(input: {
+        workId: string;
+        originSource: string;
+        busy: boolean;
+        attemptedSources: string[];
+        deferredSources: string[];
+        attached: Array<{
+            source: string;
+            sourceWorkId: string;
+            aliasesAdded: number;
+            tagsAdded: number;
+        }>;
+    }): Promise<void>;
+    /**
      * Chapter media is expensive and a Reader chapter cannot be exposed without
      * a minimally valid work presentation.  Catalog checks this once per work
      * snapshot, never on the page or chapter hot path, so a missing cover does

@@ -1800,7 +1800,6 @@ export class LiteRepository {
       WHERE s.id<>$2
         AND s.enabled=true
         AND ${sourceExecutionEligibilitySql('s')}
-        AND COALESCE((to_jsonb(s)->>'catalog_discovery_enabled')::boolean,true)
         AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
         AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
         AND NOT EXISTS (
@@ -1865,22 +1864,20 @@ export class LiteRepository {
                 return 0;
             }
             const pending = await client.query(`
-        SELECT count(*)::int AS count
-        FROM (
-          SELECT 1
-          FROM importer_lite_tasks task
-          WHERE task.task_type='CATALOG'
-            AND task.idempotency_key >= $1 AND task.idempotency_key < $2
-            AND task.state IN ('READY','RUNNING','RETRY_WAIT')
-          LIMIT 33
-        ) q
+        SELECT task.work_id::text AS work_id, task.payload->>'discoveryLane' AS lane
+        FROM importer_lite_tasks task
+        WHERE task.task_type='CATALOG'
+          AND task.idempotency_key >= $1 AND task.idempotency_key < $2
+          AND task.state IN ('READY','RUNNING','RETRY_WAIT')
+        LIMIT 33
       `, [METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}~`]);
             const capacity = Math.max(1, Math.min(32, Math.trunc(maxPending)));
-            const pendingCount = Number(pending.rows[0]?.count || 0);
+            const pendingCount = pending.rows.length;
             if (pendingCount >= capacity) {
                 await client.query('COMMIT');
                 return 0;
             }
+            const hasActiveUnlinked = pending.rows.some((r) => r.lane === 'unlinked' || !r.lane);
             const available = capacity - pendingCount;
             let admittedDeferred = 0;
             // Re-admit due deferred tasks in batch up to available capacity (capped at 16 per turn).
@@ -1933,30 +1930,43 @@ export class LiteRepository {
                 await client.query('COMMIT');
                 return admittedDeferred;
             }
-            // Candidate selection: decouple candidate identification from task/mapping existence.
-            // Under YSQL, correlated subqueries across the 9,300-work catalog exceeded statement
-            // timeouts. We read candidate slices using the views index, check existing discovery
-            // tasks via the idempotency prefix index, and batch-validate active mappings.
-            const existingDiscoveryTasks = await client.query(`
-        SELECT work_id::text
-        FROM importer_lite_tasks
-        WHERE idempotency_key >= $1 AND idempotency_key < $2
-      `, [METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX, `${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}~`]);
-            const existingWorkIdSet = new Set(existingDiscoveryTasks.rows.map((r) => r.work_id));
-            const selected = [];
-            if (remainingAvailable > 0) {
-                const excludedArray = [...existingWorkIdSet];
-                const fetchLimit = Math.max(32, remainingAvailable * 3);
-                const candidateBatch = await client.query(`
-          SELECT w.id::text AS work_id
+            // Fast indexed window scan via idx_works_published_updated (published ASC, updated_at DESC)
+            // plus any newly mapped onboarding works whose chapters are still importing (published = false).
+            // This avoids scanning all 9,300 historical V7 task rows on every producer tick.
+            const candidateBatch = await client.query(`
+        (
+          SELECT w.id::text AS work_id,
+                 (COALESCE(cardinality(w.aliases), 0) = 0) AS no_aliases,
+                 COALESCE(w.views_total, 0)::int AS views_total
           FROM works w
           WHERE w.published = true
-            AND ($1::uuid[] IS NULL OR NOT (w.id = ANY($1::uuid[])))
-          ORDER BY (COALESCE(cardinality(w.aliases), 0) = 0) DESC, w.views_total DESC
-          LIMIT $2::int
-        `, [excludedArray.length ? excludedArray : null, fetchLimit]);
-                const candidateIds = candidateBatch.rows.map((r) => r.work_id);
-                if (candidateIds.length) {
+          ORDER BY w.updated_at DESC
+          LIMIT 256
+        )
+        UNION ALL
+        (
+          SELECT w.id::text AS work_id,
+                 (COALESCE(cardinality(w.aliases), 0) = 0) AS no_aliases,
+                 COALESCE(w.views_total, 0)::int AS views_total
+          FROM works w
+          WHERE w.published = false
+            AND EXISTS (SELECT 1 FROM importer_work_mappings m WHERE m.work_id = w.id)
+          ORDER BY w.updated_at DESC
+          LIMIT 32
+        )
+      `);
+            const selected = [];
+            if (candidateBatch.rows.length > 0) {
+                const candidateKeys = candidateBatch.rows.map((r) => `${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}${r.work_id}`);
+                const existingDiscoveryTasks = await client.query(`
+          SELECT idempotency_key
+          FROM importer_lite_tasks
+          WHERE idempotency_key = ANY($1::text[])
+        `, [candidateKeys]);
+                const existingKeySet = new Set(existingDiscoveryTasks.rows.map((r) => r.idempotency_key));
+                const missingCandidates = candidateBatch.rows.filter((r) => !existingKeySet.has(`${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}${r.work_id}`));
+                if (missingCandidates.length > 0) {
+                    const candidateIds = [...new Set(missingCandidates.map((r) => r.work_id))];
                     const activeMappings = await client.query(`
             SELECT DISTINCT m.work_id::text
             FROM importer_work_mappings m
@@ -1968,12 +1978,27 @@ export class LiteRepository {
               AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
           `, [candidateIds]);
                     const activeMappingSet = new Set(activeMappings.rows.map((r) => r.work_id));
-                    for (const id of candidateIds) {
+                    const sortedCandidates = [...missingCandidates].sort((a, b) => {
+                        if (a.no_aliases !== b.no_aliases)
+                            return a.no_aliases ? -1 : 1;
+                        const aLinked = activeMappingSet.has(a.work_id);
+                        const bLinked = activeMappingSet.has(b.work_id);
+                        if (aLinked !== bLinked) {
+                            return hasActiveUnlinked ? (aLinked ? -1 : 1) : (aLinked ? 1 : -1);
+                        }
+                        if (b.views_total !== a.views_total)
+                            return b.views_total - a.views_total;
+                        return a.work_id.localeCompare(b.work_id);
+                    });
+                    const seenSelected = new Set();
+                    for (const cand of sortedCandidates) {
                         if (selected.length >= remainingAvailable)
                             break;
-                        const lane = activeMappingSet.has(id) ? 'popular' : 'unlinked';
-                        selected.push({ work_id: id, lane });
-                        existingWorkIdSet.add(id);
+                        if (seenSelected.has(cand.work_id))
+                            continue;
+                        seenSelected.add(cand.work_id);
+                        const lane = activeMappingSet.has(cand.work_id) ? 'popular' : 'unlinked';
+                        selected.push({ work_id: cand.work_id, lane });
                     }
                 }
             }
@@ -2007,6 +2032,55 @@ export class LiteRepository {
         finally {
             client.release();
         }
+    }
+    /**
+     * Persist the durable cross-source V7 coverage matrix produced during NEW_WORK
+     * onboarding so every new work has an auditable 43-source verification record,
+     * and any deferred or gate-busy sources are automatically re-probed.
+     */
+    async recordOnboardingCrossSourceDiscovery(input) {
+        const checkedSources = [...new Set([input.originSource, ...input.attemptedSources, ...input.deferredSources].filter(Boolean))];
+        const deferredSources = [...new Set(input.deferredSources.filter(Boolean))];
+        const aliasesAdded = input.attached.reduce((sum, item) => sum + Math.max(0, item.aliasesAdded || 0), 0);
+        const tagsAdded = input.attached.reduce((sum, item) => sum + Math.max(0, item.tagsAdded || 0), 0);
+        const state = input.busy ? 'RETRY_WAIT' : 'DONE';
+        const nextRunOffsetSeconds = input.busy ? 5 : (deferredSources.length > 0 ? 900 : 0);
+        const checkpoint = {
+            metadataCrossSourceDiscovery: true,
+            coverage: input.busy
+                ? 'CROSS_SOURCE_ONBOARDING_BUSY_RETRY'
+                : deferredSources.length > 0
+                    ? 'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED'
+                    : 'CROSS_SOURCE_PROBES_COMPLETE',
+            checkedSources,
+            deferredSources,
+            matchedSources: input.attached.slice(0, 64),
+            aliasesAdded,
+            tagsAdded,
+            deferredRounds: 0,
+            completedAt: new Date().toISOString(),
+        };
+        const payload = {
+            metadataCrossSourceDiscovery: true,
+            metadataEnrichmentVersion: 7,
+            discoveryLane: 'popular',
+        };
+        await this.sourceMetadataDb.query(`INSERT INTO importer_lite_tasks
+        (task_type,work_id,work_key,priority,base_priority,idempotency_key,state,next_run_at,max_attempts,payload,checkpoint,monitoring)
+       VALUES('CATALOG',$1::uuid,$2,3,3,$3,$4,now()+($5::text || ' seconds')::interval,16,$6::jsonb,$7::jsonb,false)
+       ON CONFLICT(idempotency_key) DO UPDATE SET
+         checkpoint = EXCLUDED.checkpoint,
+         state = CASE WHEN importer_lite_tasks.state = 'DONE' THEN EXCLUDED.state ELSE importer_lite_tasks.state END,
+         next_run_at = CASE WHEN importer_lite_tasks.state = 'DONE' THEN EXCLUDED.next_run_at ELSE importer_lite_tasks.next_run_at END,
+         updated_at = now()`, [
+            input.workId,
+            `work:${input.workId}`,
+            `${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}${input.workId}`,
+            state,
+            String(nextRunOffsetSeconds),
+            JSON.stringify(payload),
+            JSON.stringify(checkpoint),
+        ]);
     }
     /**
      * Chapter media is expensive and a Reader chapter cannot be exposed without

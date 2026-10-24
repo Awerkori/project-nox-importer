@@ -225,7 +225,7 @@ export class AliasOnlyRepository {
                         }
                     }
                 }
-                const sources = ['mangadex', 'mangafire', 'mangaball', 'comix'];
+                const sources = ['mangadex', 'mangafire', 'mangaball'];
                 for (const src of sources) {
                     const rec = result.perSource[src];
                     if (!rec || rec.evidence?.skipped)
@@ -459,42 +459,83 @@ export class AliasOnlyRepository {
     }
     /**
      * Used by the permanent ImporterLiteRuntime background loop to pick up:
-     * 1. Newly published works that have never passed through the 4 ALIAS_ONLY sources,
+     * 0. Explicit immediate work IDs queued during NEW_WORK onboarding (even while `published = false`),
+     * 1. Newly published works that have never passed through the 3 ALIAS_ONLY sources,
      * 2. Bounded transient retries (`SOURCE_ERROR` with `attempts <= 3` and `next_retry_at <= now()`),
      * 3. Lightweight 14-day periodic rechecks for zero-alias works (`next_recheck_at <= now()`).
      */
-    async findDueWorksForRuntimeEnrichment(limit = 4) {
+    async findDueWorksForRuntimeEnrichment(limit = 4, immediateWorkIds = []) {
         await this.ensureSchema();
         const out = [];
         const seen = new Set();
-        // 1. Brand-new published works without checkpoint (highest priority for new onboarding!)
-        const newRes = await this.pool.query(`
-      SELECT w.id, w.title, w.slug, w.aliases, w.author, w.artist, w.kind, w.year, w.age_rating, w.content_rating
+        // 0. Explicit immediate works queued by NEW_WORK onboarding or cross-source alias discovery
+        const immediateIds = [...new Set(immediateWorkIds.map((id) => String(id || '').trim()).filter(Boolean))].slice(0, limit);
+        if (immediateIds.length > 0) {
+            const immRes = await this.pool.query(`
+        SELECT w.id, w.title, w.slug, w.aliases, w.author, w.artist, w.kind, w.year, w.age_rating, w.content_rating
+        FROM public.works w
+        WHERE w.id = ANY($1::uuid[])
+        `, [immediateIds]);
+            for (const r of immRes.rows) {
+                const aliases = Array.isArray(r.aliases) ? r.aliases : [];
+                seen.add(r.id);
+                out.push({
+                    target: {
+                        id: r.id,
+                        title: r.title,
+                        slug: r.slug,
+                        aliases,
+                        author: r.author,
+                        artist: r.artist,
+                        kind: r.kind,
+                        year: r.year,
+                        ageRating: r.age_rating,
+                        contentRating: r.content_rating,
+                    },
+                    priorityBucket: classifyWorkPriorityBucket({ title: r.title, aliases }),
+                    reason: 'NEW_WORK',
+                });
+            }
+            if (out.length >= limit)
+                return out;
+        }
+        // 1. Brand-new published works without checkpoint (indexed via idx_works_published_updated)
+        const remainingForNew = Math.max(1, limit - out.length);
+        const recentRes = await this.pool.query(`
+      SELECT w.id, w.title, w.slug, w.aliases, w.author, w.artist, w.kind, w.year, w.age_rating, w.content_rating, w.created_at
       FROM public.works w
-      LEFT JOIN public.alias_only_work_checkpoint c ON c.work_id = w.id
-      WHERE w.published = true AND c.work_id IS NULL
-      ORDER BY w.created_at DESC
-      LIMIT $1
-      `, [limit]);
-        for (const r of newRes.rows) {
-            const aliases = Array.isArray(r.aliases) ? r.aliases : [];
-            seen.add(r.id);
-            out.push({
-                target: {
-                    id: r.id,
-                    title: r.title,
-                    slug: r.slug,
-                    aliases,
-                    author: r.author,
-                    artist: r.artist,
-                    kind: r.kind,
-                    year: r.year,
-                    ageRating: r.age_rating,
-                    contentRating: r.content_rating,
-                },
-                priorityBucket: classifyWorkPriorityBucket({ title: r.title, aliases }),
-                reason: 'NEW_WORK',
-            });
+      WHERE w.published = true
+      ORDER BY w.updated_at DESC
+      LIMIT 64
+      `);
+        if (recentRes.rows.length > 0) {
+            const recentIds = recentRes.rows.map((r) => r.id);
+            const cpRes = await this.pool.query(`SELECT work_id::text FROM public.alias_only_work_checkpoint WHERE work_id = ANY($1::uuid[])`, [recentIds]);
+            const checkpointedSet = new Set(cpRes.rows.map((r) => r.work_id));
+            const missingNew = recentRes.rows
+                .filter((r) => !checkpointedSet.has(r.id) && !seen.has(r.id))
+                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                .slice(0, remainingForNew);
+            for (const r of missingNew) {
+                const aliases = Array.isArray(r.aliases) ? r.aliases : [];
+                seen.add(r.id);
+                out.push({
+                    target: {
+                        id: r.id,
+                        title: r.title,
+                        slug: r.slug,
+                        aliases,
+                        author: r.author,
+                        artist: r.artist,
+                        kind: r.kind,
+                        year: r.year,
+                        ageRating: r.age_rating,
+                        contentRating: r.content_rating,
+                    },
+                    priorityBucket: classifyWorkPriorityBucket({ title: r.title, aliases }),
+                    reason: 'NEW_WORK',
+                });
+            }
         }
         if (out.length >= limit)
             return out;

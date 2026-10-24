@@ -6,7 +6,6 @@ import { createYugabyteMetadataPool } from '../src/db/yugabyte-direct.js';
 import {
   AliasOnlyEnrichmentService,
   AliasOnlyRepository,
-  ComixAliasSource,
   MangaBallAliasSource,
   MangaDexAliasSource,
   MangaFireAliasSource,
@@ -72,7 +71,6 @@ function emptySourceCounters(): Record<AliasSourceId, SourceRunCounters> {
     mangadex: mk(),
     mangafire: mk(),
     mangaball: mk(),
-    comix: mk(),
   };
 }
 
@@ -109,9 +107,6 @@ async function main(): Promise<void> {
           maxConcurrent: 6,
           minIntervalMs: opts.mbIntervalMs,
           cacheMaxEntries: 16_000,
-        }),
-        comix: new ComixAliasSource({
-          cacheMaxEntries: 8_000,
         }),
       },
     });
