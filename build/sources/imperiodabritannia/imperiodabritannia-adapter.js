@@ -242,10 +242,12 @@ export class ImperioDaBritanniaAdapter {
         }
         else if (typeof rawAlt === 'string' && rawAlt.trim().length > 0) {
             const trimmed = rawAlt.trim();
+            let parsedJsonArray = false;
             if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
                 try {
                     const parsed = JSON.parse(trimmed);
                     if (Array.isArray(parsed)) {
+                        parsedJsonArray = true;
                         alternativeTitles = parsed.map(String).map((s) => s.trim()).filter(Boolean);
                     }
                 }
@@ -253,7 +255,7 @@ export class ImperioDaBritanniaAdapter {
                     // Fallback to text delimiters below
                 }
             }
-            if (!alternativeTitles || alternativeTitles.length === 0) {
+            if (!parsedJsonArray && (!alternativeTitles || alternativeTitles.length === 0)) {
                 if (/[\r\n]+/.test(trimmed)) {
                     alternativeTitles = trimmed.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
                 }

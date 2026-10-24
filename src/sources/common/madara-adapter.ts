@@ -232,7 +232,8 @@ export class MadaraAdapter implements SourceAdapter {
                        html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
     let title = sourceWorkId;
     if (titleMatch) {
-      title = stripHtml(titleMatch[1]).replace(/^Manga\s*-\s*/i, '').trim();
+      const cleanedTitleHtml = titleMatch[1].replace(/<span[^>]*class="[^"]*manga-title-badges[^"]*"[^>]*>[\s\S]*?<\/span>/gi, ' ');
+      title = stripHtml(cleanedTitleHtml).replace(/^Manga\s*-\s*/i, '').trim();
     }
 
     // Cover: Prioritize data-src in summary_image, fallback to og:image/twitter:image, fallback to non-placeholder src
@@ -269,12 +270,14 @@ export class MadaraAdapter implements SourceAdapter {
     const synopsis = synopsisMatch ? stripHtml(synopsisMatch[1]) : undefined;
 
     // Author
-    const authorMatch = html.match(/class="[^"]*author-content[^"]*"[\s\S]*?<a[^>]*>([^<]+)<\/a>/i);
-    const author = authorMatch ? stripHtml(authorMatch[1]) : undefined;
+    const authorMatch = html.match(/class="[^"]*author-content[^"]*"[\s\S]*?<a[^>]*>([^<]+)<\/a>/i) ||
+                        html.match(/<span[^>]*class="[^"]*attr-label[^"]*"[^>]*>\s*AUTOR(?:ES)?\s*<\/span>\s*<span[^>]*class="[^"]*attr-value[^"]*"[^>]*>([^<]+)<\/span>/i);
+    const author = authorMatch && !/^[-—]+$/.test(authorMatch[1].trim()) ? stripHtml(authorMatch[1]) : undefined;
 
     // Artist
-    const artistMatch = html.match(/class="[^"]*artist-content[^"]*"[\s\S]*?<a[^>]*>([^<]+)<\/a>/i);
-    const artist = artistMatch ? stripHtml(artistMatch[1]) : undefined;
+    const artistMatch = html.match(/class="[^"]*artist-content[^"]*"[\s\S]*?<a[^>]*>([^<]+)<\/a>/i) ||
+                        html.match(/<span[^>]*class="[^"]*attr-label[^"]*"[^>]*>\s*ARTISTAS?\s*<\/span>\s*<span[^>]*class="[^"]*attr-value[^"]*"[^>]*>([^<]+)<\/span>/i);
+    const artist = artistMatch && !/^[-—]+$/.test(artistMatch[1].trim()) ? stripHtml(artistMatch[1]) : undefined;
 
     // Status
     let status: SourceWorkDetails['status'] = 'UNKNOWN';
@@ -292,8 +295,8 @@ export class MadaraAdapter implements SourceAdapter {
 
     // Alternative Titles
     let alternativeTitles: string[] = [];
-    const altRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|nomes?\s+associados?|associados?|alternativos?|t[ií]tulos?\s+originais?|t[ií]tulo\s+original|nome\s+original|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)[^<]*<\/(?:h[1-6]|div|span|strong|b|p)>[\s\S]*?<div[^>]*class="[^"]*summary-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
-    const fallbackAltRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativo\(s\)|t[ií]tulos?\s+alternativos?|nome\(s\)\s*alternativo\(s\)|nomes?\s+alternativos?|nomes?\s+associados?|associados?|alternativos?|t[ií]tulos?\s+originais?|t[ií]tulo\s+original|nome\s+original|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)\s*:\s*([^<\n\r]+)/i;
+    const altRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativ[ao]\(s\)|t[ií]tulos?\s+alternativ[ao]s?|nome\(s\)\s*alternativ[ao]\(s\)|nomes?\s+alternativ[ao]s?|nomes?\s+associados?|associados?|alternativ[ao]s?|t[ií]tulos?\s+originais?|t[ií]tulo\s+original|nome\s+original|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)[^<]*<\/(?:h[1-6]|div|span|strong|b|p)>[\s\S]*?<(?:div|span)[^>]*class="[^"]*(?:summary-content|attr-value)[^"]*"[^>]*>([\s\S]*?)<\/(?:div|span)>/i;
+    const fallbackAltRegex = /(?:outro\(s\)\s*nome\(s\)|outros?\s+nomes?|t[ií]tulo\(s\)\s*alternativ[ao]\(s\)|t[ií]tulos?\s+alternativ[ao]s?|nome\(s\)\s*alternativ[ao]\(s\)|nomes?\s+alternativ[ao]s?|nomes?\s+associados?|associados?|alternativ[ao]s?|t[ií]tulos?\s+originais?|t[ií]tulo\s+original|nome\s+original|sin[oô]nimos?|alternative\s*(?:titles?|names?)?|alt\s*names?|other\s*names?)\s*:\s*([^<\n\r]+)/i;
     const altMatch = html.match(altRegex) || html.match(fallbackAltRegex);
     if (altMatch) {
       const normalizedRaw = altMatch[1].replace(/<br\s*\/?>/gi, '\n');

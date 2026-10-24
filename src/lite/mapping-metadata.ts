@@ -43,6 +43,8 @@ export const STORED_MAPPING_ALIAS_FIELDS = [
   'titulo_ingles', 'titulo_em_ingles', 'titulo_romanizado', 'romaji',
   'titulo_japones', 'titulo_japonês', 'titulo_coreano', 'titulo_chines', 'titulo_chinês',
 ];
+
+const SINGLE_VALUE_PROVIDER_TITLE_FIELDS = ['titulo', 'titulo_brasil', 't', 'tb'] as const;
 export const STORED_MAPPING_TAG_FIELDS = [
   'genres', 'genre', 'tags', 'tag', 'categories',
   // The same APIs expose their source taxonomy under Portuguese names.  A
@@ -76,17 +78,45 @@ function explicitJsonArray(value: string): unknown[] | null {
   }
 }
 
-const CLAUSE_CONTINUATION_REGEX = /^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por)\b/i;
-const VOCATIVE_NAME_REGEX = /(?:^[a-zA-Z\u00C0-\u017F\s]{1,25}-(?:san|kun|chan|sama|sensei|senpai|dono)[!?.]*$|\b(?:your\s+(?:grace|highness|majesty)|vossa\s+(?:gra[çc]a|alteza|majestade)|duque|duke|milady|my\s+lord|meu\s+senhor)[!?.]*$)/i;
+const CLAUSE_CONTINUATION_REGEX = /^(?:for|and|or|so|because|but|yet|too|also|with|without|nor|mas|e|ou|pois|porque|com|sem|para|por|why|how|when|where|who|what|don't|can't|won't|isn't|aren't|right|let's|i|i'm|i'll|i've|i'd|you|you're|you'll|we|we're|he|she|it|it's|my|his|her|their|eu|você|voce|nós|nos|ele|ela|meu|minha|seu|sua|então|entao|agora|only|even|still|already|never|always|once|again|novamente|alone|não\s+[eé]|nao\s+[eé])\b/i;
+const SUBORDINATE_START_REGEX = /^(?:when|while|after|before|since|although|though|even\s+though|if|unless|until|despite|due\s+to|without|with|in|on|at|for|by|from|to|quando|enquanto|depois|ap[oó]s|antes|desde|embora|mesmo|se|sem|com|em|no|na|nos|nas|para|por|contanto)\b/i;
+const VOCATIVE_NAME_REGEX = /(?:^[a-zA-Z\u00C0-\u017F\s]{1,25}-(?:san|kun|chan|sama|sensei|senpai|dono)[!?.]*$|\b(?:your\s+(?:grace|highness|majesty)|vossa\s+(?:gra[çc]a|alteza|majestade)|duque|duke|duquesa|duchess|margrave|milady|my\s+lord|meu\s+senhor|husband|marido|sweetheart|querid[ao]|miss\s+\w+|mr\.?\s+\w+|senhor(?:a)?\s+\w+|irm[aã]o?|senior\s+sister|immortal\s+fairy|fada)[!?.]*$)/i;
 const INTERJECTION_PREFIXES = new Set([
-  'hello', 'oh', 'ah', 'hey', 'dear', 'bye', 'goodbye', 'sayonara', 'adeus', 'ola', 'olá',
+  'hello', 'oh', 'ah', 'hey', 'dear', 'darling', 'honey', 'baby', 'babe', 'bye', 'goodbye', 'sayonara', 'adeus', 'ola', 'olá',
   'mom', 'mae', 'mãe', 'dad', 'pai', 'wait', 'espere', 'sorry', 'desculpa', 'perdao', 'perdão',
-  'please', 'onegai', 'ijiranaide', 'ijirimakutte', 'uzaki', 'komi',
+  'please', 'onegai', 'ganbare', 'ijiranaide', 'ijirimakutte', 'uzaki', 'komi', 'hyung', 'oppa', 'noona', 'unnie',
+  'querido', 'querida', 'amor', 'mestre', 'master', 'like',
 ]);
+
+function hasPairParallelTitleWordOverlap(a: string, b: string): boolean {
+  const stopWords = new Set(['para', 'como', 'mais', 'pela', 'pelo', 'uma', 'with', 'from', 'that', 'this', 'into', 'over', 'your', 'mine']);
+  const wordsA = a.toLowerCase().replace(/[^a-z\u00C0-\u017F0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const wordsB = b.toLowerCase().replace(/[^a-z\u00C0-\u017F0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  if (wordsA.length < 2 || wordsB.length < 2) return false;
+  const sigB = new Set(wordsB.filter((w) => w.length >= 4 && !stopWords.has(w)));
+  return sigB.size > 0 && wordsA.some((w) => w.length >= 4 && !stopWords.has(w) && sigB.has(w));
+}
+
+function scriptSignature(s: string): string {
+  const sig = [];
+  if (/[a-zA-Z\u00C0-\u017F]/.test(s)) sig.push('L');
+  if (/[\u3040-\u30ff]/.test(s)) sig.push('J');
+  if (/[\u3400-\u4dbf\u4e00-\u9fff]/.test(s)) sig.push('C');
+  if (/[\uac00-\ud7af]/.test(s)) sig.push('K');
+  if (/[\u0400-\u04ff]/.test(s)) sig.push('R');
+  if (/[\u0e00-\u0e7f]/.test(s)) sig.push('T');
+  return sig.join('') || 'O';
+}
 
 function splitDelimitedTitles(text: string): string[] {
   const trimmed = text.trim();
   if (trimmed.length < 1) return [];
+  // Reject CSS/JS/HTML stylesheet dumps whole before splitting on `;` or `,`
+  if (
+    /[{}@]|cubic-bezier|border-box|linear-gradient|Array\.prototype|this\.getFeed|max-results|disqusShortname|filterStatus|font-family|font-weight|background-repeat|counter\(section\)|\[x-cloak\]|\b(?:overflow-[xy]|margin-(?:left|right|top|bottom)|padding-(?:left|right|top|bottom)|font-size|line-height|background-size|border-radius|z-index|transition|transform)\s*:/i.test(trimmed)
+  ) {
+    return [];
+  }
   if (/[\r\n]/.test(trimmed)) {
     return trimmed.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
   }
@@ -96,33 +126,59 @@ function splitDelimitedTitles(text: string): string[] {
   if (/\s+\/\s+|\s+\/\/\s+|\|/.test(trimmed)) {
     return trimmed.split(/\s+(?:\/|\/\/)\s+|\s*\|\s*/).map((s) => s.trim()).filter(Boolean);
   }
-  if (/(?<!\d),(?!\d{3})/.test(trimmed)) {
-    const parts = trimmed.split(/(?<!\d),(?!\d{3})\s*/).map((s) => s.trim()).filter(Boolean);
-    if (parts.length > 1) {
-      const mergedParts: string[] = [];
-      for (let i = 0; i < parts.length; i++) {
-        const current = parts[i];
+  // Step 1: Always split on unspaced commas (not inside numbers like 10,000) or malformed quote-comma-quote `","`
+  const unspacedSplit = trimmed
+    .split(/(?:"\s*,\s*"|(?<!\d),(?![\s\d]))/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  // Step 2: For each segment, split on spaced commas `, ` unless the adjacent parts form a single grammatical sentence.
+  return unspacedSplit.flatMap((segment) => {
+    if (!/,(?!\d{3}\b)\s+/.test(segment)) return [segment];
+    const parts = segment.split(/,(?!\d{3}\b)\s+/).map((s) => s.trim()).filter(Boolean);
+    if (parts.length <= 1) return [segment];
+
+    const mergedParts: string[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      let current = parts[i];
+      while (i + 1 < parts.length) {
         const next = parts[i + 1];
-        if (next !== undefined) {
-          const firstWord = current.toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
-          const isPairGrammatical =
+        const sigCurr = scriptSignature(current);
+        const sigNext = scriptSignature(next);
+        const bothSameScript = sigCurr === sigNext && sigCurr.includes('L');
+        const firstWord = current.toLowerCase().replace(/[^a-z\u00C0-\u017F]/g, '');
+        const isSameStemSpelling =
+          alternativeTitleKey(current) === alternativeTitleKey(next) ||
+          current.toLowerCase().replace(/-(?:san|kun|chan|sama|sensei|senpai|dono)\b/i, '').trim() ===
+            next.toLowerCase().replace(/\s+(?:san|kun|chan|sama|sensei|senpai|dono)\b/i, '').trim();
+
+        const isPairGrammatical =
+          bothSameScript &&
+          !isSameStemSpelling &&
+          !hasPairParallelTitleWordOverlap(current, next) &&
+          Boolean(cleanAlternativeTitle(current)) &&
+          Boolean(cleanAlternativeTitle(next)) &&
+          (
             INTERJECTION_PREFIXES.has(firstWord) ||
-            VOCATIVE_NAME_REGEX.test(current) ||
+            /^por\s+favor\b/i.test(current) ||
+            SUBORDINATE_START_REGEX.test(current) ||
             VOCATIVE_NAME_REGEX.test(next) ||
+            (VOCATIVE_NAME_REGEX.test(current) && (CLAUSE_CONTINUATION_REGEX.test(next) || /[!?]$/.test(next))) ||
             CLAUSE_CONTINUATION_REGEX.test(next) ||
-            /^[a-z]/.test(next);
-          if (isPairGrammatical) {
-            mergedParts.push(`${current}, ${next}`);
-            i++;
-            continue;
-          }
+            /^[a-z\u00E0-\u00FC]/.test(next) ||
+            (i + 2 < parts.length && CLAUSE_CONTINUATION_REGEX.test(parts[i + 2]))
+          );
+
+        if (!isPairGrammatical) {
+          break;
         }
-        mergedParts.push(current);
+        current = `${current}, ${next}`;
+        i++;
       }
-      return mergedParts;
+      mergedParts.push(current);
     }
-  }
-  return [trimmed];
+    return mergedParts;
+  });
 }
 
 function asTextList(value: unknown, objectKeys: string[] = [], depth = 0): string[] {
@@ -164,15 +220,21 @@ export function extractStoredMappingMetadata(raw: unknown, primaryTitle: string)
   genres: string[];
 } {
   const metadata = raw && typeof raw === 'object' ? raw as RawRecord : {};
-  const aliases = STORED_MAPPING_ALIAS_FIELDS.flatMap((field) => asTextList(metadata[field], [
-    'title', 'name', 'value', 'nome', 'titulo', 'valor',
-    'alternativeTitle', 'alternative_title', 'nativeTitle', 'native_title',
-    'englishTitle', 'english_title', 'romanizedTitle', 'romanized_title',
-    'titulo_alternative', 'titulo_alternativo', 'titulo_original',
-    'nome_original', 'titulo_nativo', 'nome_nativo', 'titulo_ingles',
-    'titulo_em_ingles', 'titulo_romanizado', 'romaji',
-    'nome_alternativo', 'sinonimo', 'sinonimos',
-  ]));
+  const aliases = [
+    ...STORED_MAPPING_ALIAS_FIELDS.flatMap((field) => asTextList(metadata[field], [
+      'title', 'name', 'value', 'nome', 'titulo', 'valor',
+      'alternativeTitle', 'alternative_title', 'nativeTitle', 'native_title',
+      'englishTitle', 'english_title', 'romanizedTitle', 'romanized_title',
+      'titulo_alternative', 'titulo_alternativo', 'titulo_original',
+      'nome_original', 'titulo_nativo', 'nome_nativo', 'titulo_ingles',
+      'titulo_em_ingles', 'titulo_romanizado', 'romaji',
+      'nome_alternativo', 'sinonimo', 'sinonimos',
+    ])),
+    ...SINGLE_VALUE_PROVIDER_TITLE_FIELDS.flatMap((field) => {
+      const val = metadata[field];
+      return typeof val === 'string' && val.trim() ? [val.trim()] : [];
+    }),
+  ];
   // Legacy Portuguese adapters persisted tag records with `nome`; accept it
   // alongside the common English keys so the no-network replay can recover
   // metadata already stored in YSQL.
