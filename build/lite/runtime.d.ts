@@ -3,6 +3,12 @@ import type { Config } from '../config.js';
 import type { SourceRegistry } from '../sources/registry.js';
 import type { StorageProvider } from '../storage/provider.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
+export type ComplementaryCoverCandidate = {
+    source: string;
+    sourceWorkId: string;
+    coverUrl: string;
+    isBrazilianSource: boolean;
+};
 /** One process, one executor pool, one bounded reconciler. */
 export declare class ImporterLiteRuntime {
     private readonly pool;

@@ -10,9 +10,26 @@ const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const TESSDATA_DIR = path.join(__dirname, 'tessdata');
-const SCANLATOR_NOISE_REGEX = /(?:traduzido\s+por|tradu[çc][aã]o|edi[çc][aã]o|revis[aã]o|raw|cleaner|typesetter|qc|leia\s+em|visite|dispon[íi]vel\s+em|scan|scanlator|scans|fansub|projeto|equipe|discord|site|\.com|\.br|\.net|\.org|instagram|twitter|apoie|doar|chave\s+pix|pix|patreon|catarse|manga\s*plus|leitor|leiamangas|leronline|direitos\s+reservados)/i;
-const CHAPTER_VOLUME_NOISE_REGEX = /^(?:vol\.?\s*\d+|cap\.?\s*\d+|cap[íi]tulo\s*\d+|epis[óo]dio\s*\d+|parte\s*\d+|\+18|\+16|livre|adulto)$/i;
-const COMMON_SLOGAN_REGEX = /(?:uma\s+hist[óo]ria\s+de|a\s+jornada\s+de|todos\s+os\s+direitos|leia\s+mais\s+em)/i;
+const SCANLATOR_NOISE_REGEX = /(?:traduzid[oa]|tradu[çc][aã]o|edi[çc][aã]o|revis[aã]o|revisor|raw|cleaner|typesetter|qc|leia\s+em|visite|acess[ea]|dispon[íi]vel\s+em|scan\w*|fansub|projeto|equipe|discord|site|\.com|\.br|\.net|\.org|instagram|twitter|telegram|apoie|doar|chave\s+pix|pix|patreon|catarse|manga\s*plus|leitor|leiamangas|leronline|direitos|reservados?|obra\s+feita\s+por|cap[íi]tulo\s+gr[áa]tis|todos\s+os\s+cr[ée]ditos|leia\s+de\s+gra[çc]a|marca\s+d'?\s*[aá]gua|watermark|recrutamento|aberto|vagas)/i;
+const CHAPTER_VOLUME_NOISE_REGEX = /^(?:vol\.?\s*\d+|cap\.?\s*\d+|cap[íi]tulo\s*\d+|epis[óo]dio\s*\d+|parte\s*\d+|\+18|\+16|\+14|livre|adulto|completo|fim|extra|pr[óo]logo|one[- ]?shot)$/i;
+const COMMON_SLOGAN_REGEX = /(?:uma\s+hist[óo]ria\s+de|a\s+jornada\s+de|a\s+vingan[çc]a\s+de|o\s+in[íi]cio\s+de|breve\s+nos|em\s+breve|novos\s+cap[íi]tulos|lan[çc]amentos?\s+semanais?|n[aã]o\s+perca|acompanhe\s+aqui|leia\s+mais|hist[óo]ria\s+original|autor\s*:|artista\s*:|arte\s*:|roteiro\s*:)/i;
+const GENERIC_COVER_WORD_REGEX = /^(?:manga|manhwa|manhua|webtoon|hq|quadrinho|comic|hentai|novel|volume|livro)$/i;
+const MAX_COVER_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
+let tesseractChecked = false;
+let tesseractAvailable = false;
+async function checkTesseractBinary() {
+    if (tesseractChecked)
+        return tesseractAvailable;
+    try {
+        await execFileAsync('tesseract', ['--version'], { timeout: 3_000 });
+        tesseractAvailable = true;
+    }
+    catch {
+        tesseractAvailable = false;
+    }
+    tesseractChecked = true;
+    return tesseractAvailable;
+}
 function cleanCoverLine(raw) {
     return raw
         .replace(/[«»"“”„]/g, '')
@@ -28,14 +45,48 @@ export async function inspectCoverForPtBrTitle(target) {
     const t0 = performance.now();
     const rawLines = [];
     const filteredCandidates = [];
+    const tesseractOk = await checkTesseractBinary();
+    if (!tesseractOk) {
+        return {
+            inspected: false,
+            foundPtBrTitle: false,
+            detectedTitle: null,
+            confidence: 0,
+            evidence: {
+                source: target.source,
+                coverUrl: target.coverUrl,
+                rawLines: [],
+                filteredCandidates: [],
+                durationMs: Math.round(performance.now() - t0),
+                reason: 'TESSERACT_BINARY_UNAVAILABLE',
+            },
+        };
+    }
     let buf = target.coverBuffer || null;
     if (!buf && target.coverUrl) {
         try {
             const res = await fetch(target.coverUrl, {
                 headers: target.headers || { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-                signal: AbortSignal.timeout(15_000),
+                signal: AbortSignal.timeout(8_000),
             });
             if (res.ok) {
+                const contentLength = Number(res.headers.get('content-length') || 0);
+                if (contentLength > MAX_COVER_IMAGE_BYTES) {
+                    return {
+                        inspected: false,
+                        foundPtBrTitle: false,
+                        detectedTitle: null,
+                        confidence: 0,
+                        evidence: {
+                            source: target.source,
+                            coverUrl: target.coverUrl,
+                            rawLines: [],
+                            filteredCandidates: [],
+                            durationMs: Math.round(performance.now() - t0),
+                            reason: 'IMAGE_EXCEEDS_MAX_SIZE',
+                        },
+                    };
+                }
                 buf = Buffer.from(await res.arrayBuffer());
             }
         }
@@ -72,15 +123,35 @@ export async function inspectCoverForPtBrTitle(target) {
             },
         };
     }
+    if (buf.length > MAX_COVER_IMAGE_BYTES) {
+        return {
+            inspected: false,
+            foundPtBrTitle: false,
+            detectedTitle: null,
+            confidence: 0,
+            evidence: {
+                source: target.source,
+                coverUrl: target.coverUrl,
+                rawLines: [],
+                filteredCandidates: [],
+                durationMs: Math.round(performance.now() - t0),
+                reason: 'IMAGE_EXCEEDS_MAX_SIZE',
+            },
+        };
+    }
     const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
     const tmpImg = path.join('/tmp', `nox_vis_${sha256.slice(0, 12)}_${Date.now()}.png`);
     const tmpOut = path.join('/tmp', `nox_vis_out_${sha256.slice(0, 12)}_${Date.now()}`);
     try {
         fs.writeFileSync(tmpImg, buf);
         // Run Tesseract with custom traineddata if available, otherwise system tessdata
-        const tessdataArgs = fs.existsSync(path.join(TESSDATA_DIR, 'por.traineddata'))
+        const hasPor = fs.existsSync(path.join(TESSDATA_DIR, 'por.traineddata'));
+        const hasEng = fs.existsSync(path.join(TESSDATA_DIR, 'eng.traineddata'));
+        const tessdataArgs = (hasPor && hasEng)
             ? ['--tessdata-dir', TESSDATA_DIR, '-l', 'por+eng']
-            : ['-l', 'eng+spa'];
+            : hasPor
+                ? ['--tessdata-dir', TESSDATA_DIR, '-l', 'por']
+                : ['-l', 'eng+spa'];
         // 1. First pass: PSM 11 (sparse text, typical for cover art titles)
         await execFileAsync('tesseract', [
             tmpImg,
@@ -88,7 +159,7 @@ export async function inspectCoverForPtBrTitle(target) {
             ...tessdataArgs,
             '--psm',
             '11',
-        ], { timeout: 12_000 });
+        ], { timeout: 8_000 });
         if (fs.existsSync(tmpOut + '.txt')) {
             const text1 = fs.readFileSync(tmpOut + '.txt', 'utf8');
             for (const line of text1.split('\n')) {
@@ -108,7 +179,7 @@ export async function inspectCoverForPtBrTitle(target) {
                     ...tessdataArgs,
                     '--psm',
                     '3',
-                ], { timeout: 12_000 });
+                ], { timeout: 8_000 });
                 if (fs.existsSync(tmpOut2 + '.txt')) {
                     const text2 = fs.readFileSync(tmpOut2 + '.txt', 'utf8');
                     for (const line of text2.split('\n')) {
@@ -117,7 +188,10 @@ export async function inspectCoverForPtBrTitle(target) {
                             rawLines.push(cleaned);
                         }
                     }
-                    fs.unlinkSync(tmpOut2 + '.txt');
+                    try {
+                        fs.unlinkSync(tmpOut2 + '.txt');
+                    }
+                    catch { }
                 }
             }
             catch {
@@ -143,10 +217,21 @@ export async function inspectCoverForPtBrTitle(target) {
         };
     }
     finally {
-        if (fs.existsSync(tmpImg))
-            fs.unlinkSync(tmpImg);
-        if (fs.existsSync(tmpOut + '.txt'))
-            fs.unlinkSync(tmpOut + '.txt');
+        try {
+            if (fs.existsSync(tmpImg))
+                fs.unlinkSync(tmpImg);
+        }
+        catch { }
+        try {
+            if (fs.existsSync(tmpOut + '.txt'))
+                fs.unlinkSync(tmpOut + '.txt');
+        }
+        catch { }
+        try {
+            if (fs.existsSync(tmpOut + '_p3.txt'))
+                fs.unlinkSync(tmpOut + '_p3.txt');
+        }
+        catch { }
     }
     // Filter out scanlator watermarks and credits
     const cleanLines = rawLines.filter((l) => !SCANLATOR_NOISE_REGEX.test(l) &&
@@ -178,10 +263,18 @@ export async function inspectCoverForPtBrTitle(target) {
     const scored = [];
     for (const rawCand of filteredCandidates) {
         // Anti-hallucination: reject raw OCR candidate chunks with garbage symbols or noise
-        if (/[|=%_<>{}~^\\/`*#$@]/.test(rawCand))
+        if (/[|=%_<>{}~^\\/`*#$@©®™§±×÷•]/.test(rawCand))
             continue;
         const cleaned = cleanPtBrCandidateTitle(rawCand);
-        if (!cleaned || cleaned.length < 4 || cleaned.length > 150)
+        if (!cleaned || cleaned.length < 4 || cleaned.length > 120)
+            continue;
+        // Must not be a generic cover word (e.g. manga, manhwa, webtoon)
+        if (GENERIC_COVER_WORD_REGEX.test(cleaned))
+            continue;
+        // Must not match author or artist name
+        if (target.author && cleanPtBrCandidateTitle(target.author)?.toLowerCase() === cleaned.toLowerCase())
+            continue;
+        if (target.artist && cleanPtBrCandidateTitle(target.artist)?.toLowerCase() === cleaned.toLowerCase())
             continue;
         // Must be valid PT-BR
         if (!isPtBrTitle(cleaned))
@@ -190,7 +283,7 @@ export async function inspectCoverForPtBrTitle(target) {
         if (isConsecratedProperTitle(cleaned))
             continue;
         const words = cleaned.toLowerCase().replace(/[^\p{L}\s]/gu, ' ').split(/\s+/).filter(Boolean);
-        if (words.length < 2 || words.length > 12)
+        if (words.length < 2 || words.length > 10)
             continue;
         // Anti-hallucination: check repetitive tokens (e.g. "a a", "pe pa", "e e")
         let repetitive = false;
@@ -206,13 +299,13 @@ export async function inspectCoverForPtBrTitle(target) {
         const substantivePtWords = words.filter((w) => w.length >= 4 && isPortugueseWord(w));
         if (substantivePtWords.length === 0)
             continue;
-        // Anti-hallucination: ratio of single-character tokens must be low (<= 25%)
+        // Anti-hallucination: ratio of single-character tokens must be low (<= 20%)
         const singleCharWords = words.filter((w) => w.length <= 1);
-        if (singleCharWords.length / words.length > 0.25)
+        if (singleCharWords.length / words.length > 0.20)
             continue;
-        // Anti-hallucination: ratio of valid PT words must be >= 60%
+        // Anti-hallucination: ratio of valid PT words must be >= 70%
         const validPtWords = words.filter((w) => isPortugueseWord(w));
-        if (validPtWords.length / words.length < 0.60)
+        if (validPtWords.length / words.length < 0.70)
             continue;
         const candKey = alternativeTitleKey(cleaned);
         if (!candKey || candKey === currentKey)
@@ -240,7 +333,7 @@ export async function inspectCoverForPtBrTitle(target) {
     scored.sort((a, b) => b.confidence - a.confidence || b.title.length - a.title.length);
     const best = scored[0] || null;
     const durationMs = Math.round(performance.now() - t0);
-    if (best && best.confidence >= 0.70) {
+    if (best && best.confidence >= 0.75) {
         return {
             inspected: true,
             foundPtBrTitle: true,

@@ -8,6 +8,8 @@ for (const [srcRel, destDirRel, fileName] of [
   ['src/sources/manhastro/manhastro-catalog.json', 'build/sources/manhastro', 'manhastro-catalog.json'],
   ['src/sources/nexus/nexus-catalog.json', 'build/sources/nexus', 'nexus-catalog.json'],
   ['src/sources/imperiodabritannia/imperiodabritannia-catalog.json', 'build/sources/imperiodabritannia', 'imperiodabritannia-catalog.json'],
+  ['src/core/tessdata/por.traineddata', 'build/core/tessdata', 'por.traineddata'],
+  ['src/core/tessdata/eng.traineddata', 'build/core/tessdata', 'eng.traineddata'],
 ]) {
   try {
     const srcPath = join(process.cwd(), srcRel);
