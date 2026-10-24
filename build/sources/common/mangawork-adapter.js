@@ -174,7 +174,7 @@ export class MangaWorkAdapter {
                 alternativeTitles.push(alt);
             }
         }
-        const parts = title.split(/\s*[-–—/|]\s*/);
+        const parts = title.split(/\s+[-–—]\s+|\s*[/|]\s*/);
         if (parts.length === 2 && parts[0].length >= 3 && parts[1].length >= 3) {
             if (!/^(capitulo|completo|volume|scan|novel|official)/i.test(parts[1])) {
                 alternativeTitles.push(parts[1]);

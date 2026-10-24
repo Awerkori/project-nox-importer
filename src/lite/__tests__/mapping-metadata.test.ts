@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { cleanAlternativeTitle, mergeAlternativeTitles } from '../../core/alternative-titles.js';
 import { buildDiscoveryQueryCandidates, classifyExplicitSourceMetadata, extractStoredMappingMetadata, isProviderDisplayTitleAlias } from '../mapping-metadata.js';
 
 describe('stored mapping metadata enrichment', () => {
@@ -212,6 +213,33 @@ describe('stored mapping metadata enrichment', () => {
     expect(extracted.aliases).toEqual([
       "The Game's Top Troll",
       'Top Tier Providence: Secretly Cultivate for a Thousand Years',
+    ]);
+  });
+
+  it('expands multi-script comma-concatenated and double-slash alias strings while rejecting machine slugs and Atualizando', () => {
+    expect(cleanAlternativeTitle('sobrevivendo-como-a-esposa-de-um-assassino-em-serie')).toBeNull();
+    expect(cleanAlternativeTitle('Atualizando')).toBeNull();
+    expect(cleanAlternativeTitle('Spider-Man: Fake Red')).toBe('Spider-Man: Fake Red');
+
+    const merged = mergeAlternativeTitles(
+      [
+        '네버엔딩달링, 永恒恋人, Never Ending Darling',
+        '因果の魚,因果の魚',
+        'Ex Patrocinador // 엑스 스폰서 // Ex Sponsor',
+        'sobrevivendo-como-a-esposa-de-um-assassino-em-serie',
+        'Atualizando',
+      ],
+      ['Never Ending Darling'],
+      'Ex Patrocinador'
+    );
+
+    expect(merged).toEqual([
+      '네버엔딩달링',
+      '永恒恋人',
+      'Never Ending Darling',
+      '因果の魚',
+      '엑스 스폰서',
+      'Ex Sponsor',
     ]);
   });
 });

@@ -19,6 +19,12 @@ export declare class ImporterLiteRuntime {
     private readonly executor;
     private readonly dedupe;
     private readonly historicalMetadataDedupe;
+    private readonly aliasOnlyService;
+    private readonly aliasOnlyRepo;
+    private readonly aliasOnlyGate;
+    private readonly pendingImmediateAliasWorkIds;
+    private lastAliasOnlyTurnAt;
+    private aliasOnlyTelemetry;
     private readonly logger;
     private readonly downloads;
     private readonly bufferedPages;
@@ -150,6 +156,14 @@ export declare class ImporterLiteRuntime {
     private refreshMetadataTurboMode;
     /** One timer turn keeps normal metadata paths out of an exclusive replay. */
     private runMetadataTurn;
+    triggerAsyncAliasOnlyEnrichment(workId: string): void;
+    /**
+     * Permanent background enrichment across the 3 active ALIAS_ONLY sources
+     * (MangaDex, MangaFire, MangaBall) for newly published works,
+     * bounded transient retries, and lightweight incomplete-alias rechecks.
+     * Never blocks chapter publication and updates ONLY `works.aliases`.
+     */
+    runAliasOnlyEnrichmentTurn(forceInTest?: boolean): Promise<number>;
     /** Source-backed historical metadata remains a P2 catalog task and shares
      * normal priority claims; it never steals a chapter worker or bypasses a
      * STAFF/P0/P1 reserve. At most four network-only tasks are admitted across

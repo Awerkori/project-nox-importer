@@ -209,8 +209,16 @@ export class HipercoolAdapter implements SourceAdapter {
     const title = series.title || slug;
     const coverUrl = series.coverUrl || null;
     const synopsis = series.synopsis || '';
-    const author = series.author || undefined;
-    const artist = series.artist || undefined;
+    const author =
+      series.author ||
+      (Array.isArray(series.authors) && series.authors.length > 0
+        ? series.authors.filter(Boolean).join(', ')
+        : undefined);
+    const artist =
+      series.artist ||
+      (Array.isArray(series.artists) && series.artists.length > 0
+        ? series.artists.filter(Boolean).join(', ')
+        : undefined);
 
     const genres: string[] = (series.genres || []).map((g: any) => (typeof g === 'string' ? g : g.name)).filter(Boolean);
     const rawAlt = series.alternativeTitles ?? series.alternative_titles ?? series.aliases;
@@ -219,17 +227,19 @@ export class HipercoolAdapter implements SourceAdapter {
       alternativeTitles = rawAlt.map((a: any) => typeof a === 'string' ? a.trim() : String(a?.title || a?.name || '').trim()).filter(Boolean);
     } else if (typeof rawAlt === 'string' && rawAlt.trim().length > 0) {
       const trimmed = rawAlt.trim();
+      let parsedJsonArray = false;
       if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
         try {
           const parsed = JSON.parse(trimmed);
           if (Array.isArray(parsed)) {
+            parsedJsonArray = true;
             alternativeTitles = parsed.map((a: any) => typeof a === 'string' ? a.trim() : String(a?.title || a?.name || '').trim()).filter(Boolean);
           }
         } catch {
           // Fallback to text delimiters below
         }
       }
-      if (alternativeTitles.length === 0) {
+      if (!parsedJsonArray && alternativeTitles.length === 0) {
         alternativeTitles = trimmed.split(/[\r\n;]+|\s+\/\s+/).map((s: string) => s.trim()).filter(Boolean);
       }
     }

@@ -23,6 +23,11 @@ import { buildDiscoveryQueryCandidates, classifyExplicitSourceMetadata, extractS
 import { mergeAlternativeTitles } from '../core/alternative-titles.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
 import { LiteMemoryPressureGuard, type LiteMemoryPressureSnapshot } from './memory-pressure.js';
+import {
+  ALIAS_ONLY_SOURCE_IDS,
+  AliasOnlyEnrichmentService,
+  AliasOnlyRepository,
+} from '../alias-sources/index.js';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const withTimeout = async <T>(operation: Promise<T>, timeoutMs: number, code: string): Promise<T> => {
@@ -179,6 +184,17 @@ export class ImporterLiteRuntime {
   private readonly executor: LiteExecutor;
   private readonly dedupe: DeduplicationEngine;
   private readonly historicalMetadataDedupe: DeduplicationEngine;
+  private readonly aliasOnlyService: AliasOnlyEnrichmentService;
+  private readonly aliasOnlyRepo: AliasOnlyRepository;
+  private readonly aliasOnlyGate = new AsyncSemaphore(1, 'lite_alias_only_enrichment');
+  private readonly pendingImmediateAliasWorkIds = new Set<string>();
+  private lastAliasOnlyTurnAt = 0;
+  private aliasOnlyTelemetry = {
+    processedWorks: 0,
+    aliasesAdded: 0,
+    lastRunAt: null as string | null,
+    lastOutcome: 'IDLE' as string,
+  };
   private readonly logger = new Logger('ImporterLite');
   private readonly downloads: AsyncSemaphore;
   private readonly bufferedPages: AsyncSemaphore;
@@ -345,6 +361,8 @@ export class ImporterLiteRuntime {
       // historical merge. The main catalog client remains the typed client
       // used for onboarding/full-work deduplication.
       : new DeduplicationEngine(new DirectSupabaseClient(sourceMetadataPool) as any);
+    this.aliasOnlyService = new AliasOnlyEnrichmentService();
+    this.aliasOnlyRepo = new AliasOnlyRepository(sourceMetadataPool);
   }
 
   private getAvailablePool(): Pool {
@@ -976,9 +994,85 @@ export class ImporterLiteRuntime {
         await this.refillSourceMetadataEnrichment();
         await this.refillCrossSourceMetadataDiscovery();
         await this.runCrossSourceMetadataDiscovery();
+        void this.runAliasOnlyEnrichmentTurn();
       }
     } catch (error: any) {
       this.logger.warn('Metadata turn failed', { error: error?.message });
+    }
+  }
+
+  public triggerAsyncAliasOnlyEnrichment(workId: string): void {
+    if (!workId || this.stopped) return;
+    this.pendingImmediateAliasWorkIds.add(workId);
+    if (process.env.NODE_ENV !== 'test') {
+      void this.runAliasOnlyEnrichmentTurn();
+    }
+  }
+
+  /**
+   * Permanent background enrichment across the 3 active ALIAS_ONLY sources
+   * (MangaDex, MangaFire, MangaBall) for newly published works,
+   * bounded transient retries, and lightweight incomplete-alias rechecks.
+   * Never blocks chapter publication and updates ONLY `works.aliases`.
+   */
+  public async runAliasOnlyEnrichmentTurn(forceInTest = false): Promise<number> {
+    if (this.stopped || (!forceInTest && process.env.NODE_ENV === 'test')) return 0;
+    if (!forceInTest && !this.isRuntimeLeader) return 0;
+    if (this.metadataReplayV4Exclusive.enabled || this.shouldPauseLowPriorityMetadata()) return 0;
+    if (this.hasSustainedSourceMetadataPoolPressure()) return 0;
+
+    const hasImmediate = this.pendingImmediateAliasWorkIds.size > 0;
+    if (!forceInTest && !hasImmediate && Date.now() - this.lastAliasOnlyTurnAt < 20_000) {
+      return 0;
+    }
+
+    if (!this.aliasOnlyGate.tryAcquire()) return 0;
+    try {
+      this.lastAliasOnlyTurnAt = Date.now();
+      const due = await this.aliasOnlyRepo.findDueWorksForRuntimeEnrichment(3);
+      for (const item of due) {
+        this.pendingImmediateAliasWorkIds.delete(item.target.id);
+      }
+      if (!due.length) {
+        this.pendingImmediateAliasWorkIds.clear();
+        this.aliasOnlyTelemetry.lastRunAt = new Date().toISOString();
+        this.aliasOnlyTelemetry.lastOutcome = 'NO_DUE_WORKS';
+        return 0;
+      }
+
+      const batchResults = [];
+      for (const item of due) {
+        if (this.stopped || this.shouldPauseLowPriorityMetadata()) break;
+        const enriched = await this.aliasOnlyService.enrichWork(item.target, item.onlySources);
+        batchResults.push({
+          target: item.target,
+          priorityBucket: item.priorityBucket,
+          result: enriched,
+        });
+      }
+
+      if (!batchResults.length) return 0;
+      const persisted = await this.aliasOnlyRepo.persistBatchResults('runtime_permanent_v1', batchResults);
+      this.aliasOnlyTelemetry.processedWorks += batchResults.length;
+      this.aliasOnlyTelemetry.aliasesAdded += persisted.aliasesPersisted;
+      this.aliasOnlyTelemetry.lastRunAt = new Date().toISOString();
+      this.aliasOnlyTelemetry.lastOutcome = `PROCESSED_${batchResults.length}_ADDED_${persisted.aliasesPersisted}`;
+      if (persisted.aliasesPersisted > 0) {
+        this.logger.info('Enriched work aliases from ALIAS_ONLY sources', {
+          processedWorks: batchResults.length,
+          worksUpdated: persisted.worksUpdated,
+          aliasesPersisted: persisted.aliasesPersisted,
+          ptBrPersisted: persisted.ptBrPersisted,
+        });
+      }
+      return batchResults.length;
+    } catch (error: any) {
+      this.aliasOnlyTelemetry.lastRunAt = new Date().toISOString();
+      this.aliasOnlyTelemetry.lastOutcome = `ERROR:${error?.message || 'unknown'}`;
+      this.logger.warn('ALIAS_ONLY background turn skipped due to error', { error: error?.message });
+      return 0;
+    } finally {
+      this.aliasOnlyGate.release();
     }
   }
 
@@ -2004,6 +2098,16 @@ export class ImporterLiteRuntime {
         waiters: this.sourceMetadataPersistenceGate.queued,
       },
       sourceMetadataProducer: this.sourceMetadataProducer,
+      aliasOnlyEnrichment: {
+        enabled: true,
+        category: 'ALIAS_ONLY',
+        availableSources: [...ALIAS_ONLY_SOURCE_IDS],
+        processedWorks: this.aliasOnlyTelemetry.processedWorks,
+        aliasesAdded: this.aliasOnlyTelemetry.aliasesAdded,
+        lastRunAt: this.aliasOnlyTelemetry.lastRunAt,
+        lastOutcome: this.aliasOnlyTelemetry.lastOutcome,
+        sources: this.aliasOnlyService.getHealthSnapshots(),
+      },
       memoryPressure: liveness.memoryPressure,
       pipeline: {
         limits: {
@@ -2169,6 +2273,7 @@ export class ImporterLiteRuntime {
           aliases: sourceMetadataClassification.aliases, author: snapshot.details.author, artist: snapshot.details.artist,
           synopsis: sanitizeSynopsis(snapshot.details.synopsis) || undefined, kind: snapshot.details.kind, year: snapshot.details.year,
         });
+        this.triggerAsyncAliasOnlyEnrichment(resolved.workId);
       }
       const language = String(snapshot.details.language || (snapshot.details.raw as any)?.language || 'pt-BR');
       const edition = String(snapshot.details.edition || (snapshot.details.raw as any)?.edition || 'default');

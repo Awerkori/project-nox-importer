@@ -228,7 +228,7 @@ export class MangaFlixAdapter implements SourceAdapter {
     }
 
     // Extract alternative titles from separator notation, e.g. "Title - Alt Title"
-    const parts = rawTitle.split(/\s*[-–—/|]\s*/);
+    const parts = rawTitle.split(/\s+[-–—]\s+|\s*[/|]\s*/);
     if (parts.length === 2 && parts[0].length >= 3 && parts[1].length >= 3) {
       if (!/^(capitulo|completo|volume|scan|novel|official)/i.test(parts[1])) {
         alternativeTitles.push(parts[1]);
