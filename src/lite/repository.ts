@@ -208,7 +208,8 @@ export class LiteRepository {
             OR (status.version<3 AND (status.aliases_state='PARSER_ERROR' OR status.tags_state='PARSER_ERROR'))
             OR ((status.aliases_state='EXTERNAL_BLOCKED' OR status.tags_state='EXTERNAL_BLOCKED')
               AND COALESCE(status.next_retry_at,'-infinity'::timestamptz)<=now()))`;
-      const pending = await client.query<{ count: string }>(`SELECT count(*)::int AS count
+      const pending = await client.query<{ count: string }>(`SELECT count(*)::int AS count FROM (
+        SELECT 1
         FROM importer_lite_tasks
         WHERE task_type='CATALOG'
           AND state IN ('READY','RUNNING','RETRY_WAIT')
@@ -218,7 +219,9 @@ export class LiteRepository {
           -- cannot execute and must not consume the one protected P2 seat.
           OR (state='RUNNING' AND lease_until>now())
           OR (state='RETRY_WAIT' AND next_run_at<=now()+interval '30 seconds'))
-          AND payload ? 'metadataSourceRefresh'`);
+          AND payload ? 'metadataSourceRefresh'
+        LIMIT $1
+      ) AS bounded_pending`, [ceiling]);
       if (Number(pending.rows[0]?.count || 0) >= ceiling) {
         await client.query('COMMIT');
         return 0;
@@ -1362,7 +1365,8 @@ export class LiteRepository {
         FROM importer_lite_tasks task
         JOIN importer_sources source ON source.id=task.payload->>'source'
         LEFT JOIN importer_lite_source_health health ON health.source=source.id
-        WHERE task.task_type='DISCOVER'
+        WHERE task.idempotency_key >= 'lite:discover:' AND task.idempotency_key < 'lite:discover:~'
+          AND task.task_type='DISCOVER'
           AND (
             (task.state IN ('READY','RETRY_WAIT') AND task.next_run_at<=now())
             OR (task.state='RUNNING' AND task.lease_until<now())
@@ -1375,13 +1379,17 @@ export class LiteRepository {
           AND (source.cooldown_until IS NULL OR source.cooldown_until<=now())
           AND (health.cooldown_until IS NULL OR health.cooldown_until<=now())
         ORDER BY task.next_run_at,task.updated_at,task.id
-        LIMIT 1 FOR UPDATE OF task SKIP LOCKED
+        LIMIT 1
       )
       UPDATE importer_lite_tasks task
       SET state='RUNNING',lease_owner=$1,lease_until=now()+$2::interval,
         attempts=task.attempts+1,updated_at=now()
       FROM picked
       WHERE task.id=picked.id
+        AND (
+          (task.state IN ('READY','RETRY_WAIT') AND task.next_run_at<=now())
+          OR (task.state='RUNNING' AND task.lease_until<now())
+        )
       RETURNING task.*`, [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
     return result.rows[0] ? asTask(result.rows[0]) : null;
   }
@@ -1525,26 +1533,29 @@ export class LiteRepository {
    */
   async readyImportSources(limit = 64): Promise<string[]> {
     const maximum = Math.max(1, Math.min(128, limit));
-    const result = await this.db.query<Row>(`WITH lane AS (
-        SELECT min(priority) AS priority
-        FROM importer_lite_tasks
-        WHERE state='READY' AND monitoring=false AND task_type='IMPORT_CHAPTER' AND next_run_at<=now()
-      ), candidate_works AS (
-        SELECT rw.work_key
-        FROM importer_lite_ready_works rw JOIN lane ON lane.priority=rw.priority
-        ORDER BY rw.last_claimed_at NULLS FIRST,rw.next_run_at,rw.work_key
+    const result = await this.db.query<Row>(`WITH candidate_works AS (
+        SELECT rw.work_key,rw.priority
+        FROM importer_lite_ready_works rw
+        WHERE rw.operation_rank=1 AND rw.next_run_at<=now()
+        ORDER BY rw.priority,rw.operation_rank,rw.last_claimed_at NULLS FIRST,rw.next_run_at,rw.work_key
         LIMIT $1
-      ), candidates AS (
-        SELECT t.id,t.work_id,t.chapter_key
+      ), raw_candidates AS (
+        SELECT t.id,t.work_id,t.chapter_key,rw.priority
         FROM candidate_works rw
         JOIN LATERAL (
           SELECT id,work_id,chapter_key
-          FROM importer_lite_tasks t JOIN lane ON lane.priority=t.priority
+          FROM importer_lite_tasks t
           WHERE t.work_key=rw.work_key AND t.state='READY' AND t.monitoring=false
-            AND t.task_type='IMPORT_CHAPTER' AND t.next_run_at<=now()
+            AND t.priority=rw.priority AND t.task_type='IMPORT_CHAPTER' AND t.next_run_at<=now()
           ORDER BY t.next_run_at,t.created_at
           LIMIT 1
         ) t ON true
+      ), lane AS (
+        SELECT min(priority) AS priority FROM raw_candidates
+      ), candidates AS (
+        SELECT rc.id,rc.work_id,rc.chapter_key
+        FROM raw_candidates rc
+        JOIN lane ON lane.priority=rc.priority
       ), import_routes AS (
         SELECT DISTINCT ON (c.id) c.id,cs.source
         FROM candidates c
