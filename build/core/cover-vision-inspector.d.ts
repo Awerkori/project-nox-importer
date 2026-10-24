@@ -8,6 +8,7 @@ export interface CoverInspectionTarget {
     headers?: Record<string, string>;
     source?: string;
     author?: string;
+    artist?: string;
     synopsis?: string;
 }
 export interface CoverInspectionResult {

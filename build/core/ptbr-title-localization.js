@@ -49,6 +49,7 @@ const PT_WORDS = new Set([
     'louco', 'louca', 'insano', 'insana', 'obsessivo', 'obsessiva', 'possessivo', 'possessiva', 'ciumento', 'ciumenta', 'cruel', 'gentil', 'tímido', 'tímida', 'quieto', 'quieta', 'solitário', 'solitária', 'inocente', 'puro', 'pura', 'virgem', 'virgindade', 'safado', 'safada', 'safadas', 'pervertido', 'pervertida', 'tarado', 'tarada', 'devasso', 'devassa', 'sacana', 'sacanas', 'sacanagem', 'infiel', 'fiel', 'leal', 'traidor', 'traidora', 'traído', 'traída', 'traição', 'corno', 'cornudo', 'vadia', 'vadias', 'puta', 'putas', 'putaria', 'prostituta', 'bêbado', 'bêbada', 'casado', 'casada', 'casadas', 'casados', 'solteiro', 'solteira', 'solteiras', 'gordinha', 'bobinha', 'peituda', 'peitudas', 'bunduda', 'bundudas', 'gostosa', 'gostosas', 'deliciosa', 'sensual', 'erótico', 'erótica', 'sexual', 'sexo', 'pornô', 'porno', 'porra', 'gozo', 'sêmen', 'leite', 'esperma', 'afrodisíaco', 'afrodisíacos', 'hipnose', 'hipnotizada', 'hipnotizado', 'submissa', 'submisso', 'incesto', 'harém', 'orgia', 'suruba', 'boquete', 'anal', 'tesão', 'pau', 'rola', 'piroca', 'buceta', 'xoxota', 'cu', 'roupa', 'roupas', 'calcinha', 'calcinhas', 'biquíni', 'saia', 'vestido', 'uniforme', 'depósito', 'visita', 'domiciliar', 'maneira', 'lua', 'mel',
     'feliz', 'triste', 'sozinho', 'sozinha', 'junto', 'juntos', 'juntas', 'livre', 'preso', 'presa', 'vivo', 'viva', 'morto', 'morta', 'grávida', 'grávidas', 'gravidez',
     'futuro', 'passado', 'presente', 'logando', 'subindo', 'caindo', 'vivendo', 'morrendo', 'amando', 'odiando', 'fugindo', 'lutando', 'buscando', 'procurando', 'esperando', 'sonhando', 'brincando', 'jogando', 'treinando', 'estudando', 'trabalhando', 'comendo', 'bebendo', 'dormindo', 'acordando', 'sorrindo', 'chorando', 'fodendo', 'fodê', 'transando', 'chupando', 'gozando', 'sentando', 'dando', 'pegando', 'roubando', 'matando', 'salvando', 'protegendo', 'criando', 'destruindo', 'conquistando', 'dominando', 'domando', 'cuidando', 'ensinando', 'aprendendo', 'ajudando', 'usando', 'fazendo', 'tendo', 'sendo', 'violentando', 'abusando', 'seduzindo', 'provocando', 'traindo', 'lavando', 'lava', 'paga', 'pagar', 'deixa', 'deixam', 'deixar', 'imagens', 'pés', 'pé', 'compêndio', 'milênio', 'vá', 'embora', 'grátis', 'véu', 'torna', 'tornou', 'tornei', 'virei', 'virou', 'virando',
+    'eunuco', 'eunucos', 'recupera', 'recuperar', 'recuperou', 'recuperando', 'masculinidade', 'virilidade', 'potência', 'vigor', 'força', 'honra',
 ]);
 export function isPortugueseWord(w) {
     const lower = w.toLowerCase().replace(/[^\p{L}]/gu, '');
@@ -56,8 +57,8 @@ export function isPortugueseWord(w) {
         return false;
     if (PT_WORDS.has(lower))
         return true;
-    return (lower.length >= 5 &&
-        /(?:ção|ções|nho|nha|nhos|nhas|lho|lha|lhos|lhas|mente|ando|endo|indo|ada|ado|adas|ados|ida|ido|idas|idos|ista|istas|ismo|ismos|eiro|eira|eiros|eiras|ador|adora|adores|adoras|oso|osa|osos|osas|ável|ível|áveis|íveis|ência|ências|ância|âncias|amento|amentos|imento|imentos)$/i.test(lower));
+    return (lower.length >= 4 &&
+        /(?:ção|ções|nho|nha|nhos|nhas|lho|lha|lhos|lhas|mente|ando|endo|indo|ada|ado|adas|ados|ida|ido|idas|idos|ista|istas|ismo|ismos|eiro|eira|eiros|eiras|ador|adora|adores|adoras|oso|osa|osos|osas|ável|ível|áveis|íveis|ência|ências|ância|âncias|amento|amentos|imento|imentos|dade|dades|eza|ezas|ura|uras|ante|antes|ente|entes|ivo|iva|ivos|ivas|ico|ica|icos|icas|aria|arias|eria|erias|oria|orias|ano|ana|anos|anas)$/i.test(lower));
 }
 // Internationally consecrated franchise titles adopted as-is in Brazil
 export const CONSECRATED_PROPER_TITLES = new Set([

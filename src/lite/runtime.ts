@@ -191,12 +191,20 @@ type SourceProbeRecord = {
   error?: string | null;
 };
 
+export type ComplementaryCoverCandidate = {
+  source: string;
+  sourceWorkId: string;
+  coverUrl: string;
+  isBrazilianSource: boolean;
+};
+
 type CrossSourceMetadataResult = {
   busy: boolean;
   attemptedSources: string[];
   deferredSources: string[];
   attached: Array<{ source: string; sourceWorkId: string; aliasesAdded: number; tagsAdded: number }>;
   discoveredAliases?: string[];
+  matchedCovers?: ComplementaryCoverCandidate[];
   sourceProbes?: Record<string, SourceProbeRecord>;
 };
 
@@ -1462,6 +1470,7 @@ export class ImporterLiteRuntime {
       deferredSources: [],
       attached: [],
       discoveredAliases: [],
+      matchedCovers: [],
       sourceProbes: {},
     };
     if (!this.crossSourceMetadataGate.tryAcquire()) return { ...result, busy: true };
@@ -1666,6 +1675,14 @@ export class ImporterLiteRuntime {
                 rawMetadata: sourceMetadata, version: 7,
               });
               result.attached.push({ source, sourceWorkId: details.sourceWorkId, aliasesAdded, tagsAdded });
+              if (details.coverUrl && typeof details.coverUrl === 'string' && details.coverUrl.startsWith('http')) {
+                result.matchedCovers?.push({
+                  source,
+                  sourceWorkId: details.sourceWorkId,
+                  coverUrl: details.coverUrl,
+                  isBrazilianSource: !['nexus', 'mangadex', 'mangafire', 'mangaball'].includes(source),
+                });
+              }
               result.sourceProbes![source] = {
                 outcome: aliasesAdded > 0 ? 'MATCHED_ENRICHED' : 'MATCHED_NO_NEW_ALIASES',
                 queries: queriesExecuted,
@@ -2520,32 +2537,70 @@ export class ImporterLiteRuntime {
 
         // Permanent Visual Cover Inspection for Brazilian Scans:
         // If the work still has an international title and no PT-BR alias was found in metadata across all sources,
-        // inspect the cover image with OCR to check for a PT-BR translated title on the artwork.
-        if (snapshot.details.coverUrl) {
-          try {
-            const workTitleCheck = await this.pool.query<{
-              id: string;
-              title: string;
-              slug: string;
-              aliases: string[];
-              metadata_provenance: any;
-            }>(
-              `SELECT id, title, slug, aliases, metadata_provenance FROM works WHERE id = $1::uuid LIMIT 1`,
-              [resolved.workId],
-            );
-            const currentWork = workTitleCheck.rows[0];
-            if (currentWork && !isPtBrTitle(currentWork.title)) {
-              const hasPtBrAlias = (currentWork.aliases || []).some((a) => isPtBrTitle(a));
-              if (!hasPtBrAlias) {
-                const coverHeaders = await adapter.getImageHeaders?.(snapshot.details.coverUrl);
+        // inspect cover images from confirmed Brazilian complementary sources and the origin source.
+        try {
+          const workTitleCheck = await this.pool.query<{
+            id: string;
+            title: string;
+            slug: string;
+            aliases: string[];
+            metadata_provenance: any;
+          }>(
+            `SELECT id, title, slug, aliases, metadata_provenance FROM works WHERE id = $1::uuid LIMIT 1`,
+            [resolved.workId],
+          );
+          const currentWork = workTitleCheck.rows[0];
+          if (currentWork && !isPtBrTitle(currentWork.title)) {
+            const hasPtBrAlias = (currentWork.aliases || []).some((a) => isPtBrTitle(a));
+            if (!hasPtBrAlias) {
+              const originIsBrazilian = !['nexus', 'mangadex', 'mangafire', 'mangaball'].includes(source);
+              const complementaryCovers = complementaryOutcome.matchedCovers || [];
+
+              // Priority order:
+              // 1. Confirmed Brazilian complementary sources
+              // 2. Brazilian origin source
+              // 3. Other confirmed complementary sources
+              // 4. Foreign origin source
+              const candidateCovers: Array<{ source: string; coverUrl: string }> = [];
+              for (const c of complementaryCovers.filter((cov) => cov.isBrazilianSource)) {
+                candidateCovers.push({ source: c.source, coverUrl: c.coverUrl });
+              }
+              if (originIsBrazilian && snapshot.details.coverUrl) {
+                candidateCovers.push({ source, coverUrl: snapshot.details.coverUrl });
+              }
+              for (const c of complementaryCovers.filter((cov) => !cov.isBrazilianSource)) {
+                candidateCovers.push({ source: c.source, coverUrl: c.coverUrl });
+              }
+              if (!originIsBrazilian && snapshot.details.coverUrl) {
+                candidateCovers.push({ source, coverUrl: snapshot.details.coverUrl });
+              }
+
+              // Deduplicate candidate covers by URL
+              const seenUrls = new Set<string>();
+              const uniqueCovers = candidateCovers.filter((c) => {
+                if (!c.coverUrl || seenUrls.has(c.coverUrl)) return false;
+                seenUrls.add(c.coverUrl);
+                return true;
+              });
+
+              for (const cand of uniqueCovers) {
+                const candAdapter = this.registry.get(cand.source) || adapter;
+                let coverHeaders: Record<string, string> | undefined;
+                try {
+                  if (typeof candAdapter.getImageHeaders === 'function') {
+                    coverHeaders = await candAdapter.getImageHeaders(cand.coverUrl);
+                  }
+                } catch {
+                  coverHeaders = undefined;
+                }
                 const visionRes = await inspectCoverForPtBrTitle({
                   workId: currentWork.id,
                   slug: currentWork.slug,
                   title: currentWork.title,
                   aliases: currentWork.aliases || [],
-                  coverUrl: snapshot.details.coverUrl,
+                  coverUrl: cand.coverUrl,
                   headers: coverHeaders,
-                  source,
+                  source: cand.source,
                   author: snapshot.details.author || undefined,
                   synopsis: snapshot.details.synopsis || undefined,
                 });
@@ -2562,12 +2617,13 @@ export class ImporterLiteRuntime {
                   const updatedProv = {
                     ...(currentWork.metadata_provenance || {}),
                     title: {
-                      source: 'cover_vision',
+                      source: cand.source,
                       method: 'PTBR_FOUND_COVER',
                       localized_ptbr: true,
                       previous_value: currentWork.title,
                       confidence: visionRes.confidence,
                       evidence: visionRes.evidence,
+                      cover_url: cand.coverUrl,
                       updated_at: new Date().toISOString(),
                     },
                   };
@@ -2584,18 +2640,22 @@ export class ImporterLiteRuntime {
                     previousTitle: currentWork.title,
                     promotedTitle: detectedTitle,
                     method: 'PTBR_FOUND_COVER',
+                    source: cand.source,
                     confidence: visionRes.confidence,
-                    coverUrl: snapshot.details.coverUrl,
+                    coverUrl: cand.coverUrl,
                   });
+
+                  // Stop on first verified match
+                  break;
                 }
               }
             }
-          } catch (visionErr: any) {
-            this.logger.warn('Cover vision inspection failed gracefully', {
-              workId: resolved.workId,
-              error: visionErr?.message || visionErr,
-            });
           }
+        } catch (visionErr: any) {
+          this.logger.warn('Cover vision inspection failed gracefully', {
+            workId: resolved.workId,
+            error: visionErr?.message || visionErr,
+          });
         }
       }
       const language = String(snapshot.details.language || (snapshot.details.raw as any)?.language || 'pt-BR');
