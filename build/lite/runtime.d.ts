@@ -43,6 +43,7 @@ export declare class ImporterLiteRuntime {
     private readonly sourceMetadataLaneGate;
     private readonly sourceMetadataPersistenceGate;
     private readonly newWorkCatalogGate;
+    private lastNewWorkDiscoveryAt;
     private readonly crossSourceMetadataGate;
     private readonly crossSourceDiscoveryLaneGate;
     private sourceMetadataPoolWaitStartedAt;

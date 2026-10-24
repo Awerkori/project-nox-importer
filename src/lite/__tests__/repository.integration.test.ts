@@ -844,6 +844,50 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toMatchObject({ state:'RUNNING' });
   });
 
+  it('advances due source discovery from the new-work lane when P1 chapters are queued and separates mapped from unmapped works', async () => {
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
+      VALUES ('00000000-0000-4000-8000-000000000901','source-a','already-mapped',$1::uuid,'p1-a','P1 A','SYNCED')`, [ids.p1a]);
+    await repo.enqueue({ taskType:'IMPORT_CHAPTER', workId:ids.p1a, workKey:`work:${ids.p1a}`,
+      chapterKey:'chapter-p1-busy', priority:'P1', idempotencyKey:'chapter-p1-busy' });
+    await repo.enqueue({ taskType:'DISCOVER', workKey:'source:source-a', priority:'P2',
+      idempotencyKey:'lite:discover:source-a', payload:{ source:'source-a' } });
+
+    const adapter = {
+      id: 'source-a',
+      fetchUpdatedWorks: vi.fn(async () => ({
+        works: [
+          { sourceWorkId: 'already-mapped', title: 'P1 A', slug: 'p1-a' },
+          { sourceWorkId: 'brand-new-work', title: 'Brand New Work', slug: 'brand-new-work' },
+        ],
+        nextCursor: null,
+      })),
+    };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: (id: string) => id === 'source-a' ? adapter : undefined } as unknown as SourceRegistry,
+      { upload:async ()=>'unused', healthCheck:async()=>true, getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY:1, QUEUE_LEASE_DURATION_SECONDS:60, SOURCE_OPERATION_TIMEOUT_MS:5_000 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+
+    await (runtime as any).runNewWorkCatalog();
+
+    expect(adapter.fetchUpdatedWorks).toHaveBeenCalledTimes(1);
+    const catalogTasks = await db.query<{ idempotency_key: string; work_id: string | null }>(`
+      SELECT idempotency_key, work_id::text AS work_id
+      FROM importer_lite_tasks
+      WHERE task_type='CATALOG'
+      ORDER BY idempotency_key`);
+    expect(catalogTasks.rows).toEqual([
+      { idempotency_key: 'lite:catalog:source-a:already-mapped', work_id: ids.p1a },
+      { idempotency_key: 'lite:catalog:source-a:brand-new-work', work_id: null },
+    ]);
+
+    const nextOnboarding = await repo.claimNewWorkCatalog('new-work-catalog', 90);
+    expect(nextOnboarding?.idempotencyKey).toBe('lite:catalog:source-a:brand-new-work');
+  });
+
   it('keeps the new-work catalog lease alive while its bounded metadata pass is still running', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
@@ -3748,12 +3792,19 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(complementary.rows[0]).toMatchObject({ aliases_state: 'ENRICHED', tags_state: 'ENRICHED', aliases_added: 1, tags_added: 1 });
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
       WHERE payload ? 'metadataSourceRefresh' AND payload->>'source'='source-b'`)).rows[0].count).toBe(0);
-    const onboardingV7 = await db.query(`SELECT state,checkpoint->>'coverage' AS coverage,checkpoint->'checkedSources' AS checked
+    const onboardingV7 = await db.query(`SELECT state,checkpoint->>'coverage' AS coverage,checkpoint->'checkedSources' AS checked,checkpoint->'sourceProbes' AS probes
       FROM importer_lite_tasks WHERE idempotency_key=$1`, [`lite:metadata:cross-source:v7:${ids.p1a}`]);
     expect(onboardingV7.rows[0]).toMatchObject({
       state: 'DONE',
       coverage: 'CROSS_SOURCE_PROBES_COMPLETE',
       checked: ['source-a', 'source-b'],
+      probes: {
+        'source-b': expect.objectContaining({
+          outcome: 'MATCHED_ENRICHED',
+          sourceWorkId: 'only-i-level-up',
+          primaryTitle: 'Solo Leveling',
+        }),
+      },
     });
   });
 
