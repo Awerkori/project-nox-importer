@@ -210,6 +210,32 @@ describe('ptbr-title-localization', () => {
     expect(step3.newTitle).toBe('O Segundo Eunuco Recupera Sua Masculinidade');
   });
 
+  it('Scenario 9: Visual Cover Analysis promotes title when metadata has no PT-BR alias (PTBR_FOUND_COVER)', () => {
+    const coverPromo = resolveAutomaticPtBrTitlePromotion({
+      title: 'The Second Eunuch Regains His Manhood',
+      aliases: ['2회차 환관이 남성을 되찾음'],
+      coverTitle: 'O Segundo Eunuco Recupera Sua Masculinidade',
+    });
+
+    expect(coverPromo.promoted).toBe(true);
+    expect(coverPromo.newTitle).toBe('O Segundo Eunuco Recupera Sua Masculinidade');
+    expect(coverPromo.method).toBe('PTBR_FOUND_COVER');
+    expect(coverPromo.newAliases).toContain('The Second Eunuch Regains His Manhood');
+    expect(coverPromo.newAliases).toContain('2회차 환관이 남성을 되찾음');
+  });
+
+  it('Scenario 10: Metadata PT-BR alias takes priority over cover title when both exist', () => {
+    const promo = resolveAutomaticPtBrTitlePromotion({
+      title: 'Solo Leveling',
+      aliases: ['Subindo de Nível Sozinho'],
+      coverTitle: 'Só Eu Subo de Nível',
+    });
+
+    expect(promo.promoted).toBe(true);
+    expect(promo.newTitle).toBe('Subindo de Nível Sozinho');
+    expect(promo.method).toBe('PTBR_PROMOTED_EXISTING_ALIAS');
+  });
+
   it('cleans (Brazil) and scan suffixes from candidate PT-BR titles', () => {
     expect(cleanPtBrCandidateTitle('Não mexa comigo, Nagatoro (Brazil)')).toBe('Não mexa comigo, Nagatoro');
   });
