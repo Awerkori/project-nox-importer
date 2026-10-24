@@ -50,6 +50,15 @@ const PT_WORDS = new Set([
     'feliz', 'triste', 'sozinho', 'sozinha', 'junto', 'juntos', 'juntas', 'livre', 'preso', 'presa', 'vivo', 'viva', 'morto', 'morta', 'grávida', 'grávidas', 'gravidez',
     'futuro', 'passado', 'presente', 'logando', 'subindo', 'caindo', 'vivendo', 'morrendo', 'amando', 'odiando', 'fugindo', 'lutando', 'buscando', 'procurando', 'esperando', 'sonhando', 'brincando', 'jogando', 'treinando', 'estudando', 'trabalhando', 'comendo', 'bebendo', 'dormindo', 'acordando', 'sorrindo', 'chorando', 'fodendo', 'fodê', 'transando', 'chupando', 'gozando', 'sentando', 'dando', 'pegando', 'roubando', 'matando', 'salvando', 'protegendo', 'criando', 'destruindo', 'conquistando', 'dominando', 'domando', 'cuidando', 'ensinando', 'aprendendo', 'ajudando', 'usando', 'fazendo', 'tendo', 'sendo', 'violentando', 'abusando', 'seduzindo', 'provocando', 'traindo', 'lavando', 'lava', 'paga', 'pagar', 'deixa', 'deixam', 'deixar', 'imagens', 'pés', 'pé', 'compêndio', 'milênio', 'vá', 'embora', 'grátis', 'véu', 'torna', 'tornou', 'tornei', 'virei', 'virou', 'virando',
 ]);
+export function isPortugueseWord(w) {
+    const lower = w.toLowerCase().replace(/[^\p{L}]/gu, '');
+    if (!lower)
+        return false;
+    if (PT_WORDS.has(lower))
+        return true;
+    return (lower.length >= 5 &&
+        /(?:ção|ções|nho|nha|nhos|nhas|lho|lha|lhos|lhas|mente|ando|endo|indo|ada|ado|adas|ados|ida|ido|idas|idos|ista|istas|ismo|ismos|eiro|eira|eiros|eiras|ador|adora|adores|adoras|oso|osa|osos|osas|ável|ível|áveis|íveis|ência|ências|ância|âncias|amento|amentos|imento|imentos)$/i.test(lower));
+}
 // Internationally consecrated franchise titles adopted as-is in Brazil
 export const CONSECRATED_PROPER_TITLES = new Set([
     'one piece',
@@ -336,6 +345,25 @@ export function resolveAutomaticPtBrTitlePromotion(input) {
                 newAliases: mergedAliases,
                 method: 'PTBR_PROMOTED_EXISTING_ALIAS',
             };
+        }
+    }
+    // 3.5. TIER 3.5 — VISUALLY DETECTED PT-BR COVER TITLE (PTBR_FOUND_COVER)
+    if (input.coverTitle) {
+        const cleanedCover = cleanPtBrCandidateTitle(input.coverTitle);
+        if (cleanedCover && cleanedCover.length >= 3 && cleanedCover.length <= 200) {
+            const coverKey = alternativeTitleKey(cleanedCover);
+            if (isPtBrTitle(cleanedCover) &&
+                !PT_PT_REJECTED_ALIASES.has(coverKey) &&
+                !isConsecratedProperTitle(cleanedCover) &&
+                coverKey !== alternativeTitleKey(currentTitle)) {
+                const mergedAliases = mergeAlternativeTitles(currentAliases.filter((a) => alternativeTitleKey(cleanPtBrCandidateTitle(a) || a) !== coverKey), [currentTitle], cleanedCover);
+                return {
+                    promoted: true,
+                    newTitle: cleanedCover,
+                    newAliases: mergedAliases,
+                    method: 'PTBR_FOUND_COVER',
+                };
+            }
         }
     }
     // 4. TIER 4 — CONSECRATED / PROPER NAME / INTERNATIONAL PRESERVATION

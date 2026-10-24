@@ -99,6 +99,20 @@ export class NexusAdapter {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
         };
     }
+    formatCoverUrl(url) {
+        if (!url)
+            return null;
+        if (url.startsWith('http://') || url.startsWith('https://'))
+            return url;
+        return `https://assets.nexusmangas.com/${url.replace(/^\/+/, '')}`;
+    }
+    getImageHeaders(_url) {
+        return {
+            Referer: `${this.baseUrl}/`,
+            Origin: this.baseUrl,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+        };
+    }
     async request(url, options = {}) {
         const parsedUrl = new URL(url);
         await this.rateLimiter.acquire(parsedUrl.host);
@@ -167,7 +181,7 @@ export class NexusAdapter {
             sourceWorkId: w.id,
             title: w.title,
             slug: w.slug,
-            coverUrl: w.cover_url || null,
+            coverUrl: this.formatCoverUrl(w.cover_url),
             updatedAt: w.updated_at,
         }));
         return { works: summaries, nextCursor };
@@ -250,7 +264,7 @@ export class NexusAdapter {
             sourceWorkId: row.id,
             title: row.title,
             slug: row.slug,
-            coverUrl: row.cover_url || null,
+            coverUrl: this.formatCoverUrl(row.cover_url),
             synopsis: row.description || '',
             author: row.author || '',
             artist: row.artist || '',
@@ -329,7 +343,7 @@ export class NexusAdapter {
             sourceWorkId: w.id,
             title: w.title,
             slug: w.slug,
-            coverUrl: w.cover_url || null,
+            coverUrl: this.formatCoverUrl(w.cover_url),
             updatedAt: w.updated_at,
         }));
     }

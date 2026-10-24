@@ -20,7 +20,9 @@ import { telemetryCollector } from '../core/telemetry-collector.js';
 import { SourceAdmissionGate } from '../core/source-admission-gate.js';
 import { sanitizeSynopsis } from './metadata.js';
 import { buildDiscoveryQueryCandidates, classifyExplicitSourceMetadata, extractStoredMappingMetadata, isProviderDisplayTitleAlias } from './mapping-metadata.js';
-import { mergeAlternativeTitles } from '../core/alternative-titles.js';
+import { mergeAlternativeTitles, alternativeTitleKey } from '../core/alternative-titles.js';
+import { isPtBrTitle } from '../core/ptbr-title-localization.js';
+import { inspectCoverForPtBrTitle } from '../core/cover-vision-inspector.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
 import { LiteMemoryPressureGuard, type LiteMemoryPressureSnapshot } from './memory-pressure.js';
 import {
@@ -2513,6 +2515,86 @@ export class ImporterLiteRuntime {
               workId: resolved.workId, error: error?.message,
             });
             this.triggerAsyncAliasOnlyEnrichment(resolved.workId);
+          }
+        }
+
+        // Permanent Visual Cover Inspection for Brazilian Scans:
+        // If the work still has an international title and no PT-BR alias was found in metadata across all sources,
+        // inspect the cover image with OCR to check for a PT-BR translated title on the artwork.
+        if (snapshot.details.coverUrl) {
+          try {
+            const workTitleCheck = await this.pool.query<{
+              id: string;
+              title: string;
+              slug: string;
+              aliases: string[];
+              metadata_provenance: any;
+            }>(
+              `SELECT id, title, slug, aliases, metadata_provenance FROM works WHERE id = $1::uuid LIMIT 1`,
+              [resolved.workId],
+            );
+            const currentWork = workTitleCheck.rows[0];
+            if (currentWork && !isPtBrTitle(currentWork.title)) {
+              const hasPtBrAlias = (currentWork.aliases || []).some((a) => isPtBrTitle(a));
+              if (!hasPtBrAlias) {
+                const coverHeaders = await adapter.getImageHeaders?.(snapshot.details.coverUrl);
+                const visionRes = await inspectCoverForPtBrTitle({
+                  workId: currentWork.id,
+                  slug: currentWork.slug,
+                  title: currentWork.title,
+                  aliases: currentWork.aliases || [],
+                  coverUrl: snapshot.details.coverUrl,
+                  headers: coverHeaders,
+                  source,
+                  author: snapshot.details.author || undefined,
+                  synopsis: snapshot.details.synopsis || undefined,
+                });
+
+                if (visionRes.foundPtBrTitle && visionRes.detectedTitle) {
+                  const detectedTitle = visionRes.detectedTitle;
+                  const newAliases = mergeAlternativeTitles(
+                    (currentWork.aliases || []).filter(
+                      (a) => alternativeTitleKey(a) !== alternativeTitleKey(detectedTitle),
+                    ),
+                    [currentWork.title],
+                    detectedTitle,
+                  );
+                  const updatedProv = {
+                    ...(currentWork.metadata_provenance || {}),
+                    title: {
+                      source: 'cover_vision',
+                      method: 'PTBR_FOUND_COVER',
+                      localized_ptbr: true,
+                      previous_value: currentWork.title,
+                      confidence: visionRes.confidence,
+                      evidence: visionRes.evidence,
+                      updated_at: new Date().toISOString(),
+                    },
+                  };
+
+                  await this.pool.query(
+                    `UPDATE works
+                     SET title = $1, aliases = $2, metadata_provenance = $3
+                     WHERE id = $4::uuid`,
+                    [detectedTitle, newAliases, JSON.stringify(updatedProv), currentWork.id],
+                  );
+
+                  this.logger.info('Cover Vision promoted title to PT-BR from cover artwork', {
+                    workId: currentWork.id,
+                    previousTitle: currentWork.title,
+                    promotedTitle: detectedTitle,
+                    method: 'PTBR_FOUND_COVER',
+                    confidence: visionRes.confidence,
+                    coverUrl: snapshot.details.coverUrl,
+                  });
+                }
+              }
+            }
+          } catch (visionErr: any) {
+            this.logger.warn('Cover vision inspection failed gracefully', {
+              workId: resolved.workId,
+              error: visionErr?.message || visionErr,
+            });
           }
         }
       }

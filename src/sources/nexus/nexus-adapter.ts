@@ -109,6 +109,21 @@ export class NexusAdapter implements SourceAdapter {
     };
   }
 
+  private formatCoverUrl(url?: string | null): string | null {
+    if (!url) return null;
+    if (url.startsWith('http://') || url.startsWith('https://')) return url;
+    return `https://assets.nexusmangas.com/${url.replace(/^\/+/, '')}`;
+  }
+
+  getImageHeaders(_url: string): Record<string, string> {
+    return {
+      Referer: `${this.baseUrl}/`,
+      Origin: this.baseUrl,
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    };
+  }
+
   private async request<T>(url: string, options: RequestInit = {}): Promise<T> {
     const parsedUrl = new URL(url);
     await this.rateLimiter.acquire(parsedUrl.host);
@@ -196,7 +211,7 @@ export class NexusAdapter implements SourceAdapter {
       sourceWorkId: w.id,
       title: w.title,
       slug: w.slug,
-      coverUrl: w.cover_url || null,
+      coverUrl: this.formatCoverUrl(w.cover_url),
       updatedAt: w.updated_at,
     }));
 
@@ -278,7 +293,7 @@ export class NexusAdapter implements SourceAdapter {
       sourceWorkId: row.id,
       title: row.title,
       slug: row.slug,
-      coverUrl: row.cover_url || null,
+      coverUrl: this.formatCoverUrl(row.cover_url),
       synopsis: row.description || '',
       author: row.author || '',
       artist: row.artist || '',
@@ -370,7 +385,7 @@ export class NexusAdapter implements SourceAdapter {
       sourceWorkId: w.id,
       title: w.title,
       slug: w.slug,
-      coverUrl: w.cover_url || null,
+      coverUrl: this.formatCoverUrl(w.cover_url),
       updatedAt: w.updated_at,
     }));
   }

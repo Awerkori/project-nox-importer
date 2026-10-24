@@ -26,6 +26,8 @@ export declare class NexusAdapter implements SourceAdapter {
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
     private ensureCatalogLoaded;
     private get headers();
+    private formatCoverUrl;
+    getImageHeaders(_url: string): Record<string, string>;
     private request;
     fetchUpdatedWorks(cursor?: string | null, options?: {
         mode?: 'bootstrap' | 'maintenance';

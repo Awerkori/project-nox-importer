@@ -1,3 +1,4 @@
+export declare function isPortugueseWord(w: string): boolean;
 export declare const CONSECRATED_PROPER_TITLES: Set<string>;
 /**
  * Owner-specified editorial title preferences with confirmed work identity.
@@ -18,12 +19,13 @@ export interface AutomaticPtBrTitlePromotionInput {
     title: string;
     aliases: readonly string[];
     provenance?: Record<string, any> | null;
+    coverTitle?: string | null;
 }
 export interface AutomaticPtBrTitlePromotionResult {
     promoted: boolean;
     newTitle: string;
     newAliases: string[];
-    method?: 'OWNER_EDITORIAL_PREFERENCE' | 'PTBR_PROMOTED_EXISTING_ALIAS';
+    method?: 'OWNER_EDITORIAL_PREFERENCE' | 'PTBR_PROMOTED_EXISTING_ALIAS' | 'PTBR_FOUND_COVER';
     ownerEditorialPreference?: boolean;
 }
 /**
