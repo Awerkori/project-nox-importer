@@ -3,6 +3,7 @@ import { decodeHtmlEntities } from '../sources/common/html-utils.js';
 import { evaluateMetadataMatchEvidence, matchWorkCandidate, getCanonicalSynonyms } from './matching.js';
 import { CANONICAL_ADULT_TAG_NAME, CANONICAL_ADULT_TAG_SLUG, canonicalAdultTagName } from './tag-normalization.js';
 import { mergeAlternativeTitles } from './alternative-titles.js';
+import { isConsecratedProperTitle, isPtBrTitle, OWNER_EDITORIAL_TITLE_PREFERENCES, resolveAutomaticPtBrTitlePromotion, } from './ptbr-title-localization.js';
 export const ADULT_SOURCES = new Set([
     'hanamiheaven',
     'hipercool',
@@ -814,11 +815,31 @@ export class DeduplicationEngine {
             if (candidate.aliases && candidate.aliases.length > 0)
                 initialProv.aliases = { source, updated_at: now };
             const newWorkId = crypto.randomUUID();
-            const initialAliases = mergeAlternativeTitles([], (candidate.aliases || []).map((a) => decodeHtmlEntities(a)), title);
+            const rawDecodedTitle = decodeHtmlEntities(title).slice(0, 200);
+            const rawInitialAliases = mergeAlternativeTitles([], (candidate.aliases || []).map((a) => decodeHtmlEntities(a)), rawDecodedTitle);
+            const initialPtBrPromo = resolveAutomaticPtBrTitlePromotion({
+                workId: newWorkId,
+                slug: uniqueSlug,
+                title: rawDecodedTitle,
+                aliases: rawInitialAliases,
+                provenance: initialProv,
+            });
+            const finalInitialTitle = initialPtBrPromo.promoted ? initialPtBrPromo.newTitle.slice(0, 200) : rawDecodedTitle;
+            const initialAliases = initialPtBrPromo.promoted ? initialPtBrPromo.newAliases : rawInitialAliases;
+            if (initialPtBrPromo.promoted) {
+                initialProv.title = {
+                    source,
+                    method: initialPtBrPromo.method,
+                    localized_ptbr: true,
+                    previous_value: rawDecodedTitle,
+                    updated_at: now,
+                    ...(initialPtBrPromo.ownerEditorialPreference ? { owner_editorial_preference: true } : {}),
+                };
+            }
             const { error: insertWorkErr } = await this.supabase.from('works').insert({
                 id: newWorkId,
                 slug: uniqueSlug,
-                title: decodeHtmlEntities(title).slice(0, 200),
+                title: finalInitialTitle,
                 aliases: initialAliases,
                 synopsis: decodeHtmlEntities(candidate.synopsis || '').slice(0, 5000),
                 description: decodeHtmlEntities(candidate.synopsis || '').slice(0, 10000),
@@ -896,7 +917,7 @@ export class DeduplicationEngine {
     async applyMetadataPrecedence(workId, candidate, source) {
         const { data: work, error } = await this.supabase
             .from('works')
-            .select('id, title, aliases, synopsis, description, author, artist, kind, status, year, age_rating, cover_id, metadata_provenance, content_rating')
+            .select('id, slug, title, aliases, synopsis, description, author, artist, kind, status, year, age_rating, cover_id, metadata_provenance, content_rating')
             .eq('id', workId)
             .maybeSingle();
         if (error || !work) {
@@ -916,9 +937,20 @@ export class DeduplicationEngine {
                 return false;
             if (Array.isArray(candidateValue) && candidateValue.length === 0)
                 return false;
-            // 2. Manual edit is strictly immutable
+            // 2. Manual edit, owner preference, localized PT-BR or protected title is strictly protected from reversion
             if (prov[fieldName]?.source === 'manual')
                 return false;
+            if (fieldName === 'title' &&
+                (prov.title?.localized_ptbr === true ||
+                    prov.title?.owner_editorial_preference === true ||
+                    prov.title?.source === 'ptbr_primary_titles_v1' ||
+                    prov.title?.proper_name_preserved === true ||
+                    isPtBrTitle(work.title) ||
+                    OWNER_EDITORIAL_TITLE_PREFERENCES.has(workId) ||
+                    (work.slug && OWNER_EDITORIAL_TITLE_PREFERENCES.has(work.slug)) ||
+                    isConsecratedProperTitle(work.title))) {
+                return false;
+            }
             // 3. Monotonic adult protection: once ADULT_18, never downgrade content_rating or age_rating
             if (fieldName === 'content_rating' && isCurrentlyAdult && candidateValue !== 'ADULT_18')
                 return false;
@@ -964,14 +996,37 @@ export class DeduplicationEngine {
             const mergedAliases = mergeAlternativeTitles(existingAliases, sourceSuppliedTitles.map((alias) => decodeHtmlEntities(alias)), updates.title || work.title);
             const existingAliasKeys = new Set(existingAliases.map((alias) => this.tagLookupKey(alias)));
             aliasesAdded = mergedAliases.filter((alias) => !existingAliasKeys.has(this.tagLookupKey(alias))).length;
-            const aliasesChanged = mergedAliases.length !== existingAliases.length
-                || mergedAliases.some((alias, index) => alias !== existingAliases[index]);
-            if (aliasesChanged) {
-                updates.aliases = mergedAliases;
-                // Preserve the audit signal that an editor curated this field while
-                // retaining every editor-entered value in the union above.
+            const autoPromo = resolveAutomaticPtBrTitlePromotion({
+                workId,
+                slug: work.slug,
+                title: updates.title || work.title,
+                aliases: mergedAliases,
+                provenance: prov,
+            });
+            if (autoPromo.promoted) {
+                updates.title = autoPromo.newTitle.slice(0, 200);
+                updates.aliases = autoPromo.newAliases;
+                prov.title = {
+                    source,
+                    method: autoPromo.method,
+                    localized_ptbr: true,
+                    previous_value: work.title,
+                    updated_at: now,
+                    ...(autoPromo.ownerEditorialPreference ? { owner_editorial_preference: true } : {}),
+                };
                 if (prov.aliases?.source !== 'manual')
                     prov.aliases = { source, updated_at: now };
+            }
+            else {
+                const aliasesChanged = mergedAliases.length !== existingAliases.length
+                    || mergedAliases.some((alias, index) => alias !== existingAliases[index]);
+                if (aliasesChanged) {
+                    updates.aliases = mergedAliases;
+                    // Preserve the audit signal that an editor curated this field while
+                    // retaining every editor-entered value in the union above.
+                    if (prov.aliases?.source !== 'manual')
+                        prov.aliases = { source, updated_at: now };
+                }
             }
         }
         // Synopsis & Description

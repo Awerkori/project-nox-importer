@@ -29,7 +29,7 @@ const HAS_HANGUL_REGEX = /[\uac00-\ud7af]/u;
 const HAS_KANA_REGEX = /[\u3040-\u30ff]/u;
 
 const SPANISH_OR_ITALIAN_EXCLUSIVE_REGEX =
-  /[ñ¿¡]|\b(?:el|los|las|del|una|unos|unas|hacia|también|después|pero|joven|jóvenes|corazón|dragón|prisión|traición|reencarnación|maldición|canción|pasión|habitación|educación|tentación|obsesión|redención|salvación|en\s+el|en\s+la|de\s+la|con\s+el|con\s+la|a\s+solas|mi\s+hermana|mi\s+esposa|nella|della|degli|delle|nello|ragazza|dans|avec|pour|une|château)\b/iu;
+  /[ñ¿¡]|^la\s+|(?<![\p{L}\p{N}\-])(?:el|los|las|del|una|unos|unas|hacia|también|después|pero|joven|jóvenes|corazón|dragón|prisión|traición|reencarnación|maldición|canción|pasión|habitación|educación|tentación|obsesión|redención|salvación|en\s+el|en\s+la|de\s+la|con\s+el|con\s+la|a\s+solas|mi\s+hermana|mi\s+esposa|nella|della|degli|delle|nello|ragazza|dans|avec|pour|une|château)(?![\p{L}\p{N}])/iu;
 
 const PT_STRONG_DIACRITIC_OR_SUFFIX_REGEX =
   /[ãõç]|\b\p{L}+(?:ção|ções|nho|nha|lh[ao]s?|íssim[ao])\b/iu;
