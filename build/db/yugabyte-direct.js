@@ -162,10 +162,11 @@ export function createYugabyteMetadataPool() {
     // prefer its batched variant only here, never on the chapter pool.
     const metadataSessionOptions = '-c enable_nestloop=off';
     const cfg = getConfig();
-    // V4/turbo campaigns (which used four merges) are complete; incremental
-    // metadata needs one merge + one producer seat. Return the other two
-    // physical backends (cluster max_connections=13) to chapters and the site.
-    const poolMax = parseInt(process.env.METADATA_DB_POOL_MAX || '2', 10);
+    // The cluster has 13 connections shared with the reader. Incremental P2
+    // work is deliberately serial at YSQL: it retains a durable progress lane
+    // for aliases/tags/new works without reserving capacity needed by chapters
+    // or Hyperdrive. Network work still happens outside a DB checkout.
+    const poolMax = cfg.METADATA_DB_POOL_MAX;
     const metadataPool = new pg.Pool(yugabytePoolOptions(cfg, poolMax, 'project-nox-importer-metadata', 30_000, 15_000, metadataSessionOptions, false));
     metadataPool.on('error', (err) => {
         logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });

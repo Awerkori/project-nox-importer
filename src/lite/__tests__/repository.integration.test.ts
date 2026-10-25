@@ -34,6 +34,8 @@ const newWorkCatalogLaneMigration = readFileSync(resolve(process.cwd(), 'migrati
 const runnableNewWorkCatalogLaneMigration = readFileSync(resolve(process.cwd(), 'migrations/20261016074500_lite_new_work_catalog_runnable_source.sql'), 'utf8');
 const fairReadyWorkClaimIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261018213000_lite_ready_work_fair_claim_idx.sql'), 'utf8');
 const v4ActiveWorkIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261019021500_lite_v4_active_work_index.sql'), 'utf8');
+const multiWorkClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025044500_multi_work_claim_loop_and_concurrency_unblock.sql'), 'utf8');
+const boundedClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025063000_bound_claim_probe_and_metadata_pool.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -929,7 +931,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
   });
 
-  it('keeps the historical metadata lane live through a lone pool waiter and reduces rather than starves under sustained pressure', async () => {
+  it('keeps the historical metadata lane live through a lone pool waiter with one serial YSQL seat', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const lanePool = poolFor(db) as any;
     lanePool.waitingCount = 1;
@@ -955,21 +957,21 @@ describe('LiteRepository against the additive Lite migration', () => {
     let active = 0;
     let maximum = 0;
     let releaseFetches!: () => void;
-    let notifyFourStarted!: () => void;
-    const fourStarted = new Promise<void>((resolve) => { notifyFourStarted = resolve; });
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
     const holdFetches = new Promise<void>((resolve) => { releaseFetches = resolve; });
-    let remainingClaims = 4;
+    let remainingClaims = 1;
     claim.mockImplementation(async () => remainingClaims-- > 0 ? ({ id: `metadata-${remainingClaims}` } as any) : null);
     (runtime as any).catalog = async () => {
       active++;
       maximum = Math.max(maximum, active);
-      if (active === 4) notifyFourStarted();
+      if (active === 1) notifyStarted();
       await holdFetches;
       active--;
     };
     const idleRun = (runtime as any).runSourceMetadataRefresh();
-    await fourStarted;
-    expect(maximum).toBe(4);
+    await started;
+    expect(maximum).toBe(1);
     expect((runtime as any).sourceMetadataGate.capacity).toBe(4);
     expect((runtime as any).sourceMetadataPreparationGate.capacity).toBe(1);
     expect((runtime as any).sourceMetadataPersistenceGate.capacity).toBe(1);
@@ -2220,6 +2222,38 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(claims.find(Boolean)?.idempotencyKey).toBe('single-claim');
     expect((await db.query(`SELECT attempts,state FROM importer_lite_tasks WHERE idempotency_key='single-claim'`)).rows[0])
       .toMatchObject({ attempts: 1, state: 'RUNNING' });
+  });
+
+  it('skips in-flight works before the bounded fair-claim probe and reaches another ready work', async () => {
+    // Keep the broad historical fixture on its original migration boundary;
+    // this test alone verifies the production claim replacement chain.
+    await db.exec(multiWorkClaimMigration);
+    await db.exec(boundedClaimMigration);
+    const activeWorkIds = Array.from({ length: 5 }, (_, index) =>
+      `00000000-0000-4000-8000-${String(700 + index).padStart(12, '0')}`,
+    );
+    for (const [index, workId] of activeWorkIds.entries()) {
+      await db.query(`INSERT INTO works(id,title,slug,cover_id) VALUES($1::uuid,$2,$3,$4::uuid)`,
+        [workId, `Active ${index}`, `active-${index}`, ids.cover]);
+      await repo.enqueue({
+        taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`,
+        chapterKey: `active:${index}`, priority: 'P1', idempotencyKey: `active-work-${index}`,
+        payload: { orderKey: `n|${String(index).padStart(12, '0')}|000000000000|||` },
+      });
+      await db.query(`UPDATE importer_lite_tasks SET state='RUNNING',lease_owner='active-fixture',lease_until=now()+interval '5 minutes'
+        WHERE idempotency_key=$1`, [`active-work-${index}`]);
+    }
+    await repo.enqueue({
+      taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'claimable-after-active', priority: 'P1', idempotencyKey: 'claimable-after-active',
+      payload: { orderKey: 'n|000000000999|000000000000|||' },
+    });
+
+    const claimed = await repo.claim('bounded-claim-worker', 120);
+    expect(claimed?.idempotencyKey).toBe('claimable-after-active');
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_ready_works
+      WHERE work_key = ANY($1::text[]) AND next_run_at <= now()`,
+      [activeWorkIds.map((workId) => `work:${workId}`)])).rows[0].count).toBe(5);
   });
 
   it('does not let 1,300 blocked rows hide a ready chapter and fairly rotates ready works', async () => {
@@ -4571,6 +4605,41 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).shouldPauseChapterAdmission()).toBe(false);
     (runtime as any).sitePausedUntil = Date.now() + 1_000;
     expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
+  });
+
+  it('honors the durable manual protective stop for chapter and P2 claims, then resumes after it is cleared', async () => {
+    const pool = poolFor(db) as Pool;
+    const runtime = new ImporterLiteRuntime(
+      pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', NOX_MANGA_URL: 'https://reader.test',
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
+        QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    await db.query(`INSERT INTO settings(key,value) VALUES('importer_protective_stop',$1)`, [JSON.stringify({
+      active: true, reason: 'site incident', triggered_at: new Date().toISOString(),
+    })]);
+    const chapterClaim = vi.fn();
+    const catalogClaim = vi.fn();
+    (runtime as any).queue.claim = chapterClaim;
+    (runtime as any).queue.claimNewWorkCatalog = catalogClaim;
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
+    try {
+      await (runtime as any).probeSharedResources();
+      expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
+      await expect((runtime as any).claimNext('manual-stop-chapter')).resolves.toBeNull();
+      await (runtime as any).runNewWorkCatalog();
+      expect(chapterClaim).not.toHaveBeenCalled();
+      expect(catalogClaim).not.toHaveBeenCalled();
+
+      await db.query(`UPDATE settings SET value=$1 WHERE key='importer_protective_stop'`, [JSON.stringify({ active: false })]);
+      await (runtime as any).probeSharedResources();
+      expect((runtime as any).shouldPauseChapterAdmission()).toBe(false);
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
   });
 
   it('confirms a failed site probe before pausing productive Lite claims', async () => {

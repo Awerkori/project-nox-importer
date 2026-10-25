@@ -54,6 +54,11 @@ const rankForSource = (source) => source === 'mangaflix' ? 10 : source === 'manh
 const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
 const RUNTIME_LEASE_SECONDS = 45;
 const RUNTIME_LEASE_RENEW_MS = 15_000;
+// This is the existing operator-controlled brake used by the legacy runtime.
+// Lite must honor the same durable setting during a rolling cutover: a manual
+// site-incident pause must never be bypassed simply because Lite owns the
+// shared producer lease.
+const MANUAL_PROTECTIVE_STOP_KEY = 'importer_protective_stop';
 // Declared-size page bodies are filled directly into their final Uint8Array.
 // Match the measured 24-download fence so five six-page chapter waves do not
 // idle behind a smaller count-only gate. The independent live-body
@@ -219,14 +224,17 @@ export class ImporterLiteRuntime {
     // the HTTP phase.
     sourceMetadataGate = new AsyncSemaphore(4, 'lite_source_metadata_refetch');
     sourceMetadataPreparationGate = new AsyncSemaphore(1, 'lite_source_metadata_prepare');
-    sourceMetadataLaneGate = new AsyncSemaphore(4, 'lite_source_metadata_lane');
+    // One physical P2 YSQL seat is reserved. Keep the durable source-refresh
+    // lane aligned with that budget so low-priority work never builds a local
+    // checkout queue that competes with reader traffic.
+    sourceMetadataLaneGate = new AsyncSemaphore(1, 'lite_source_metadata_lane');
     sourceMetadataPersistenceGate = new AsyncSemaphore(1, 'lite_source_metadata_persistence');
     newWorkCatalogGate = new AsyncSemaphore(1, 'lite_new_work_catalog_lane');
     lastNewWorkDiscoveryAt = 0;
     // Reserve 3 permits (2 for background V7 discovery + 1 for NEW_WORK onboarding)
     // so background V7 tasks can never starve a newly created work's onboarding pass.
     crossSourceMetadataGate = new AsyncSemaphore(3, 'lite_cross_source_metadata');
-    crossSourceDiscoveryLaneGate = new AsyncSemaphore(2, 'lite_cross_source_discovery_lane');
+    crossSourceDiscoveryLaneGate = new AsyncSemaphore(1, 'lite_cross_source_discovery_lane');
     sourceMetadataPoolWaitStartedAt = 0;
     sourceAdmissionGate = new SourceAdmissionGate(10_000);
     lastMetadataEnrichmentAt = 0;
@@ -288,6 +296,11 @@ export class ImporterLiteRuntime {
     sitePausedUntil = 0;
     idleClaimUntil = 0;
     idleMonitorUntil = 0;
+    manualProtectiveStop = {
+        active: false,
+        reason: null,
+        checkedAt: new Date(0).toISOString(),
+    };
     lastSiteProbe = {
         state: 'UNKNOWN', checkedAt: new Date(0).toISOString(), latencyMs: null,
     };
@@ -299,7 +312,45 @@ export class ImporterLiteRuntime {
      * idle time.  Only the independent site-health gate pauses new work.
      */
     shouldPauseChapterAdmission() {
-        return Date.now() < this.sitePausedUntil || this.metadataReplayV4Exclusive.enabled || this.metadataTurboMode.enabled;
+        return this.manualProtectiveStop.active
+            || Date.now() < this.sitePausedUntil
+            || this.metadataReplayV4Exclusive.enabled
+            || this.metadataTurboMode.enabled;
+    }
+    /**
+     * Read the durable staff brake on the existing 30-second health cadence.
+     * This is one indexed point lookup for the whole process, never a per-slot
+     * poll. A stop only prevents a new claim; leased work remains able to make
+     * its atomic durable transition and then drains naturally.
+     */
+    async refreshManualProtectiveStop() {
+        try {
+            const result = await this.pool.query('SELECT value FROM settings WHERE key=$1 LIMIT 1', [MANUAL_PROTECTIVE_STOP_KEY]);
+            const raw = result.rows[0]?.value;
+            let parsed = null;
+            try {
+                parsed = raw ? JSON.parse(raw) : null;
+            }
+            catch {
+                parsed = raw;
+            }
+            const object = parsed && typeof parsed === 'object' ? parsed : null;
+            const active = parsed === true || parsed === 'true' || object?.active === true;
+            const reason = object && typeof object.reason === 'string' ? object.reason.slice(0, 240) : null;
+            const changed = active !== this.manualProtectiveStop.active || reason !== this.manualProtectiveStop.reason;
+            this.manualProtectiveStop = { active, reason, checkedAt: new Date().toISOString() };
+            if (changed) {
+                const log = active ? this.logger.warn.bind(this.logger) : this.logger.info.bind(this.logger);
+                log(active ? 'Manual protective stop is blocking new Lite claims' : 'Manual protective stop cleared; Lite may resume claims', {
+                    reason,
+                });
+            }
+        }
+        catch (error) {
+            // Preserve the last known durable decision. A diagnostic lookup must
+            // not turn a transient YSQL wait into a restart or an aggressive retry.
+            this.logger.warn('Manual protective-stop check deferred', { error: error?.message });
+        }
     }
     /**
      * Metadata is optional P2 work. Yield it before taking away an in-flight
@@ -317,7 +368,7 @@ export class ImporterLiteRuntime {
         // Source metadata is P2 and yields first, but a retained native RSS high
         // watermark must not freeze aliases/tags forever. Reduced mode keeps one
         // fetch/merge lane; critical mode accepts no new metadata work.
-        this.sourceMetadataLaneGate.setCapacity(snapshot.state === 'NORMAL' ? (this.metadataTurboMode.enabled ? 16 : 4) : 1);
+        this.sourceMetadataLaneGate.setCapacity(snapshot.state === 'NORMAL' && this.metadataTurboMode.enabled ? 6 : 1);
         if (snapshot.state !== before) {
             const log = snapshot.state === 'NORMAL' ? this.logger.info.bind(this.logger) : this.logger.warn.bind(this.logger);
             log('Adjusted Lite page admission for memory pressure', snapshot);
@@ -376,6 +427,7 @@ export class ImporterLiteRuntime {
         await this.assertReaderCanonicalIdentitySchema();
         if (!(await this.waitForRuntimeLeadership()))
             return;
+        await this.refreshManualProtectiveStop();
         await this.refreshMetadataReplayV4ExclusiveMode(true);
         await this.refreshMetadataTurboMode(true);
         if (this.metadataReplayV4Exclusive.enabled) {
@@ -971,7 +1023,9 @@ export class ImporterLiteRuntime {
             const searchCap = next.enabled ? (next.searchConcurrency ?? 128) : 4;
             const metadataCap = next.enabled ? (next.metadataGateCapacity ?? Math.max(discoveryCap + 8, 48)) : 3;
             const persistenceCap = next.enabled ? Math.min(next.persistenceCapacity ?? 4, 4) : 1;
-            this.sourceMetadataLaneGate.setCapacity(next.enabled ? 6 : 4);
+            // Normal operation owns one physical P2 YSQL backend. An explicit
+            // campaign may increase network fan-out, but not the normal lane.
+            this.sourceMetadataLaneGate.setCapacity(next.enabled ? 6 : 1);
             this.sourceMetadataGate.setCapacity(searchCap);
             this.sourceMetadataPreparationGate.setCapacity(next.enabled ? 4 : 1);
             this.sourceMetadataPersistenceGate.setCapacity(persistenceCap);
@@ -1416,13 +1470,15 @@ export class ImporterLiteRuntime {
         // See refillSourceMetadataEnrichment: only an intermittent isolated-pool
         // queue constrains this optional lane to one external request.
         const constrainedPool = sustainedPoolPressure;
-        if ((!this.metadataTurboMode.enabled && (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'))
+        if (this.manualProtectiveStop.active
+            || (!this.metadataTurboMode.enabled && (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'))
             || this.shouldPauseLowPriorityMetadata())
             return false;
-        // Backpressure reduces the dedicated lane from its tested two external
-        // seats to one. Do not turn it fully off: that caused READY dwell and
-        // made the very pause intended to protect YSQL hold durable work idle.
-        const maxActive = !this.metadataTurboMode.enabled && constrainedPool ? 1 : 6;
+        // Keep one serial P2 lane during normal operation. It is enough to avoid
+        // starvation, while a 13-connection cluster retains capacity for the
+        // reader and primary chapter pool. An explicit metadata campaign remains
+        // opt-in and is still reduced as soon as this pool shows pressure.
+        const maxActive = !this.metadataTurboMode.enabled || constrainedPool ? 1 : 6;
         if (this.sourceMetadataLaneGate.active >= maxActive)
             return false;
         if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire())
@@ -1477,6 +1533,7 @@ export class ImporterLiteRuntime {
     async runCrossSourceMetadataDiscovery(overrideWorkerId) {
         if (this.metadataReplayV4Exclusive.enabled || this.sourceMetadataRefreshDeferredForV4
             || !this.isRuntimeLeader
+            || this.manualProtectiveStop.active
             || (!this.metadataTurboMode.enabled && (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'))
             || this.shouldPauseLowPriorityMetadata()
             || !this.crossSourceDiscoveryLaneGate.tryAcquire())
@@ -1558,7 +1615,7 @@ export class ImporterLiteRuntime {
         // wide, performs no network inside a transaction, and the normal pool
         // queue naturally serializes its short DB phases; site and memory remain
         // the admission guardrails.
-        if (!this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
+        if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
             || !this.newWorkCatalogGate.tryAcquire())
             return;
         try {
@@ -1885,7 +1942,7 @@ export class ImporterLiteRuntime {
         // has a waiter, even though both paths remain serialized by that pool.
         // Queueing one local merge preserves the single-flight limit and lets the
         // longer v4 lease cover the bounded YSQL wait.
-        if (!this.isRuntimeLeader || this.shouldPauseLowPriorityMetadata()
+        if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.shouldPauseLowPriorityMetadata()
             || (!this.metadataReplayV4Exclusive.enabled
                 && Date.now() - this.lastMetadataReplayAt < STORED_METADATA_REPLAY_INTERVAL_MS))
             return;
@@ -2139,6 +2196,8 @@ export class ImporterLiteRuntime {
         return this.claimGate.runExclusive(async () => {
             if (!this.isRuntimeLeader)
                 return null;
+            if (this.manualProtectiveStop.active)
+                return null;
             if (Date.now() < this.idleClaimUntil)
                 return null;
             const task = await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS);
@@ -2153,7 +2212,7 @@ export class ImporterLiteRuntime {
      */
     async runMonitorTurn() {
         if (this.stopped || !this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled
-            || Date.now() < this.sitePausedUntil || this.pool.waitingCount > 0)
+            || this.manualProtectiveStop.active || Date.now() < this.sitePausedUntil || this.pool.waitingCount > 0)
             return;
         if (!this.monitorGate.tryAcquire())
             return;
@@ -2183,6 +2242,7 @@ export class ImporterLiteRuntime {
         }
     }
     async probeSharedResources() {
+        await this.refreshManualProtectiveStop();
         if (this.metadataTurboMode.enabled) {
             this.sitePausedUntil = 0;
             this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 0 };
@@ -2247,6 +2307,7 @@ export class ImporterLiteRuntime {
                 leader: this.isRuntimeLeader,
                 chapterWorkers: this.chapterWorkerCapacity,
                 metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
+                manualProtectiveStop: this.manualProtectiveStop,
                 snapshotDeferred: 'POOL_BUSY',
                 ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
                 sourceMetadataYsql: {
@@ -2326,6 +2387,7 @@ export class ImporterLiteRuntime {
             leader: this.isRuntimeLeader,
             chapterWorkers: this.chapterWorkerCapacity,
             metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
+            manualProtectiveStop: this.manualProtectiveStop,
             publishedLastMinute: progress.publishedLastMinute,
             oldestReadyAt: progress.oldestReadyAt?.toISOString() || null,
             oldestStoredUnpublishedAt: progress.oldestStoredUnpublishedAt?.toISOString() || null,

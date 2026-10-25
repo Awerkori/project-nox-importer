@@ -96,6 +96,7 @@ export declare class ImporterLiteRuntime {
     private sitePausedUntil;
     private idleClaimUntil;
     private idleMonitorUntil;
+    private manualProtectiveStop;
     private lastSiteProbe;
     /**
      * A queued checkout from the importer's two-connection pool is a local,
@@ -105,6 +106,13 @@ export declare class ImporterLiteRuntime {
      * idle time.  Only the independent site-health gate pauses new work.
      */
     private shouldPauseChapterAdmission;
+    /**
+     * Read the durable staff brake on the existing 30-second health cadence.
+     * This is one indexed point lookup for the whole process, never a per-slot
+     * poll. A stop only prevents a new claim; leased work remains able to make
+     * its atomic durable transition and then drains naturally.
+     */
+    private refreshManualProtectiveStop;
     /**
      * Metadata is optional P2 work. Yield it before taking away an in-flight
      * chapter's page/upload permits; page-level backpressure itself makes any
