@@ -124,6 +124,31 @@ describe('PageByteBudget', () => {
     expect(budget.snapshot()).toEqual({ capacityBytes: 48 * mib, reservedBytes: 0, waiting: 0 });
   });
 
+  it('leaves a second terminal promotion room at the measured cap-five live occupancy', async () => {
+    const mib = 1024 * 1024;
+    const initial = LITE_PAGE_BUFFER_UNKNOWN_REDUCED_INITIAL_BYTES;
+    const terminal = 20 * mib;
+    // One terminal body plus eleven provisional bodies reproduces the 31 MiB
+    // live reservation observed during the cap-five ramp. A second body must
+    // be able to reach its 20 MiB terminal bound without waiting for an
+    // unrelated upload to release first.
+    const budget = new PageByteBudget(56 * mib);
+    const first = await budget.reserve(initial, undefined, { completionHeadroomBytes: terminal - initial });
+    await first.upgrade(terminal, undefined, { intent: 'COMPLETION' });
+    const provisional = [];
+    for (let index = 0; index < 11; index++) {
+      provisional.push(await budget.reserve(initial, undefined, { completionHeadroomBytes: terminal - initial }));
+    }
+    expect(budget.snapshot()).toEqual({ capacityBytes: 56 * mib, reservedBytes: 31 * mib, waiting: 0 });
+
+    await provisional[0].upgrade(terminal, undefined, { intent: 'COMPLETION' });
+    expect(budget.snapshot()).toEqual({ capacityBytes: 56 * mib, reservedBytes: 50 * mib, waiting: 0 });
+
+    for (const reservation of provisional) reservation.release();
+    first.release();
+    expect(budget.snapshot()).toEqual({ capacityBytes: 56 * mib, reservedBytes: 0, waiting: 0 });
+  });
+
   it('uses the p95-sized provisional reservation only in the normal profile', async () => {
     const mib = 1024 * 1024;
     expect(unknownPageInitialReservationBytes(48 * mib)).toBe(LITE_PAGE_BUFFER_UNKNOWN_REDUCED_INITIAL_BYTES);
