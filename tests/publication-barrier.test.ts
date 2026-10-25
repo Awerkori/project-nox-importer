@@ -55,7 +55,11 @@ describe('Publication Barrier & Canonical Ordering', () => {
     await db.exec(`ALTER TABLE public.chapters ADD COLUMN IF NOT EXISTS is_fresh_release boolean default true;`);
 
     // Insert bot user into auth.users
-    await db.query(`insert into auth.users (id, email) values ($1, 'bot@projectnox.app')`, [testUserId]);
+    await db.query(
+      `insert into auth.users (id, email, raw_user_meta_data)
+       values ($1, 'bot@projectnox.app', '{"username":"importer_test_bot","display_name":"Importer Test Bot"}'::jsonb)`,
+      [testUserId],
+    );
 
     // Create valid cover media with storage_ready = true and valid created_by
     const mediaRes = await db.query(
