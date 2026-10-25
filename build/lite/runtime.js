@@ -59,6 +59,11 @@ const RUNTIME_LEASE_RENEW_MS = 15_000;
 // site-incident pause must never be bypassed simply because Lite owns the
 // shared producer lease.
 const MANUAL_PROTECTIVE_STOP_KEY = 'importer_protective_stop';
+// An operator may temporarily lower the number of in-flight chapter claims
+// without changing DIScloud environment variables or restarting healthy work.
+// It is intentionally a durable setting beside the manual stop, so a rollback
+// or controlled ramp is observable and survives a native Git deployment.
+const CHAPTER_ADMISSION_CAP_KEY = 'importer_chapter_admission_cap';
 // Declared-size page bodies are filled directly into their final Uint8Array.
 // Match the measured 24-download fence so five six-page chapter waves do not
 // idle behind a smaller count-only gate. The independent live-body
@@ -210,6 +215,7 @@ export class ImporterLiteRuntime {
     // it against the real process.
     memoryPressureEnabled = process.env.NODE_ENV !== 'test';
     claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
+    chapterAdmissionGate;
     historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
     metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
     // The exclusive V4 campaign may merge four distinct canonical works. A
@@ -301,6 +307,7 @@ export class ImporterLiteRuntime {
         reason: null,
         checkedAt: new Date(0).toISOString(),
     };
+    operatorChapterAdmissionCap = 0;
     lastSiteProbe = {
         state: 'UNKNOWN', checkedAt: new Date(0).toISOString(), latencyMs: null,
     };
@@ -318,22 +325,24 @@ export class ImporterLiteRuntime {
             || this.metadataTurboMode.enabled;
     }
     /**
-     * Read the durable staff brake on the existing 30-second health cadence.
-     * This is one indexed point lookup for the whole process, never a per-slot
-     * poll. A stop only prevents a new claim; leased work remains able to make
-     * its atomic durable transition and then drains naturally.
+     * Read the durable staff brake and chapter ramp cap on the existing
+     * 30-second health cadence. This is one indexed lookup for the whole
+     * process, never a per-slot poll. A stop prevents a new claim; a reduced
+     * cap drains in-flight work naturally instead of cancelling a safe write.
      */
     async refreshManualProtectiveStop() {
         try {
-            const result = await this.pool.query('SELECT value FROM settings WHERE key=$1 LIMIT 1', [MANUAL_PROTECTIVE_STOP_KEY]);
-            const raw = result.rows[0]?.value;
-            let parsed = null;
-            try {
-                parsed = raw ? JSON.parse(raw) : null;
-            }
-            catch {
-                parsed = raw;
-            }
+            const result = await this.pool.query('SELECT key,value FROM settings WHERE key IN ($1,$2)', [MANUAL_PROTECTIVE_STOP_KEY, CHAPTER_ADMISSION_CAP_KEY]);
+            const values = new Map(result.rows.map((row) => [row.key, row.value]));
+            const parse = (raw) => {
+                try {
+                    return raw ? JSON.parse(raw) : null;
+                }
+                catch {
+                    return raw;
+                }
+            };
+            const parsed = parse(values.get(MANUAL_PROTECTIVE_STOP_KEY));
             const object = parsed && typeof parsed === 'object' ? parsed : null;
             const active = parsed === true || parsed === 'true' || object?.active === true;
             const reason = object && typeof object.reason === 'string' ? object.reason.slice(0, 240) : null;
@@ -343,6 +352,24 @@ export class ImporterLiteRuntime {
                 const log = active ? this.logger.warn.bind(this.logger) : this.logger.info.bind(this.logger);
                 log(active ? 'Manual protective stop is blocking new Lite claims' : 'Manual protective stop cleared; Lite may resume claims', {
                     reason,
+                });
+            }
+            const capValue = parse(values.get(CHAPTER_ADMISSION_CAP_KEY));
+            const capObject = capValue && typeof capValue === 'object'
+                ? capValue
+                : null;
+            const requestedCap = capObject?.chapterWorkers ?? capObject?.capacity ?? capObject?.cap ?? capValue;
+            const numericCap = typeof requestedCap === 'number' ? requestedCap : Number(requestedCap);
+            const nextCap = Number.isFinite(numericCap) && numericCap >= 1
+                ? Math.min(this.chapterWorkerCapacity, Math.max(1, Math.floor(numericCap)))
+                : this.chapterWorkerCapacity;
+            if (nextCap !== this.operatorChapterAdmissionCap) {
+                const previousCap = this.operatorChapterAdmissionCap;
+                this.operatorChapterAdmissionCap = nextCap;
+                this.chapterAdmissionGate.setCapacity(nextCap);
+                this.logger.info('Adjusted Lite chapter admission cap', {
+                    previousCap, nextCap, configuredWorkers: this.chapterWorkerCapacity,
+                    source: values.has(CHAPTER_ADMISSION_CAP_KEY) ? 'operator-setting' : 'runtime-default',
                 });
             }
         }
@@ -392,6 +419,8 @@ export class ImporterLiteRuntime {
         this.bufferedPageBytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
         this.memoryPressureGuard = new LiteMemoryPressureGuard(this.bufferedPages, this.bufferedPageBytes, this.bufferedPages.capacity);
         this.chapterWorkerCapacity = Math.max(1, Math.min(config.LITE_CHAPTER_WORKERS ?? 1, config.MAX_CONCURRENT_CHAPTERS, config.TESTED_CONCURRENCY_CEILING));
+        this.operatorChapterAdmissionCap = this.chapterWorkerCapacity;
+        this.chapterAdmissionGate = new AsyncSemaphore(this.chapterWorkerCapacity, 'lite_chapter_admission');
         // Five independent MangaFlix chapter waves can fill the measured 24-page
         // fence while each remains capped at six pages. The regressed 32/8 ramp
         // widened the global fence itself; this controlled ramp does not.
@@ -479,7 +508,7 @@ export class ImporterLiteRuntime {
         // Lite cutover.  The Lite-specific cap begins safely and can only rise
         // through an explicit, benchmarked staging configuration.
         const workers = this.chapterWorkerCapacity;
-        telemetryCollector.configureChapterSlots(workers, () => workers);
+        telemetryCollector.configureChapterSlots(workers, () => this.chapterAdmissionGate.capacity);
         // Queue lease owners include the per-boot leader identity. A process that
         // lost leadership can never checkpoint or finish a lease reclaimed by a
         // successor which happens to use the same configured WORKER_ID.
@@ -2127,20 +2156,30 @@ export class ImporterLiteRuntime {
                     await sleep(250);
                     continue;
                 }
-                telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
-                const task = await this.claimNext(workerId);
-                if (!task) {
-                    this.setWorkerLiveness(workerId, 'IDLE');
-                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
-                    await sleep(750);
+                if (!this.chapterAdmissionGate.tryAcquire()) {
+                    telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'operator-chapter-cap');
+                    await sleep(100);
                     continue;
                 }
-                telemetryCollector.setSlotState(slotIndex, task.taskType === 'IMPORT_CHAPTER' ? 'ACTIVE_DOWNLOAD' : task.taskType === 'PUBLISH' ? 'ACTIVE_DB' : 'ACTIVE_SOURCE', task.taskType);
-                this.setWorkerLiveness(workerId, task.taskType === 'PUBLISH' ? 'PUBLISH' : task.taskType === 'IMPORT_CHAPTER' ? 'DOWNLOAD' : 'FETCH', task);
-                await this.handle(task, workerId);
-                this.setWorkerLiveness(workerId, 'FINALIZE', task);
-                telemetryCollector.setSlotState(slotIndex, 'IDLE');
-                this.setWorkerLiveness(workerId, 'IDLE');
+                try {
+                    telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
+                    const task = await this.claimNext(workerId);
+                    if (!task) {
+                        this.setWorkerLiveness(workerId, 'IDLE');
+                        telemetryCollector.setSlotState(slotIndex, 'IDLE');
+                        await sleep(750);
+                        continue;
+                    }
+                    telemetryCollector.setSlotState(slotIndex, task.taskType === 'IMPORT_CHAPTER' ? 'ACTIVE_DOWNLOAD' : task.taskType === 'PUBLISH' ? 'ACTIVE_DB' : 'ACTIVE_SOURCE', task.taskType);
+                    this.setWorkerLiveness(workerId, task.taskType === 'PUBLISH' ? 'PUBLISH' : task.taskType === 'IMPORT_CHAPTER' ? 'DOWNLOAD' : 'FETCH', task);
+                    await this.handle(task, workerId);
+                    this.setWorkerLiveness(workerId, 'FINALIZE', task);
+                    telemetryCollector.setSlotState(slotIndex, 'IDLE');
+                    this.setWorkerLiveness(workerId, 'IDLE');
+                }
+                finally {
+                    this.chapterAdmissionGate.release();
+                }
             }
             catch {
                 this.setWorkerLiveness(workerId, 'IDLE');
@@ -2175,6 +2214,11 @@ export class ImporterLiteRuntime {
                 arrayBuffers: Math.round(memory.arrayBuffers / 1024 / 1024) },
             memoryPressure,
             ysqlPool: { total: this.pool.totalCount, idle: this.pool.idleCount, waiting: this.pool.waitingCount },
+            chapterAdmission: {
+                active: this.chapterAdmissionGate.active,
+                capacity: this.chapterAdmissionGate.capacity,
+                waiters: this.chapterAdmissionGate.queued,
+            },
             sourceMetadataLane: {
                 active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
                 capacity: this.sourceMetadataLaneGate.capacity,
@@ -2306,6 +2350,7 @@ export class ImporterLiteRuntime {
                 runtimeInstanceId: this.runtimeInstanceId,
                 leader: this.isRuntimeLeader,
                 chapterWorkers: this.chapterWorkerCapacity,
+                chapterAdmissionCap: this.operatorChapterAdmissionCap,
                 metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
                 manualProtectiveStop: this.manualProtectiveStop,
                 snapshotDeferred: 'POOL_BUSY',
@@ -2386,6 +2431,7 @@ export class ImporterLiteRuntime {
             runtimeInstanceId: this.runtimeInstanceId,
             leader: this.isRuntimeLeader,
             chapterWorkers: this.chapterWorkerCapacity,
+            chapterAdmissionCap: this.operatorChapterAdmissionCap,
             metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
             manualProtectiveStop: this.manualProtectiveStop,
             publishedLastMinute: progress.publishedLastMinute,
