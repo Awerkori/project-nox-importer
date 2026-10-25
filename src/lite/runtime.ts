@@ -320,7 +320,7 @@ export class ImporterLiteRuntime {
   // coverage continues; it just stops rescanning empty horizons every 15 s.
   private sourceMetadataNoCandidateUntil = 0;
   private lastManifestP1RepairAt = 0;
-  private manifestP1CatchupActive = true;
+  private manifestP1CatchupActive = false;
   // Observation is intentionally a one-slot lane. It may create P0 chapter
   // work, but an empty observation must never compete with chapter workers.
   private readonly monitorGate = new AsyncSemaphore(1, 'lite_p0_monitor');
