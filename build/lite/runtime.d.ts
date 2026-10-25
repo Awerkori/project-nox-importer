@@ -43,6 +43,7 @@ export declare class ImporterLiteRuntime {
     private readonly memoryPressureGuard;
     private readonly memoryPressureEnabled;
     private readonly claimGate;
+    private readonly chapterAdmissionGate;
     private readonly historicalP1BackfillGate;
     private readonly metadataReplayGate;
     private readonly metadataReplayExclusiveGate;
@@ -97,6 +98,7 @@ export declare class ImporterLiteRuntime {
     private idleClaimUntil;
     private idleMonitorUntil;
     private manualProtectiveStop;
+    private operatorChapterAdmissionCap;
     private lastSiteProbe;
     /**
      * A queued checkout from the importer's two-connection pool is a local,
@@ -107,10 +109,10 @@ export declare class ImporterLiteRuntime {
      */
     private shouldPauseChapterAdmission;
     /**
-     * Read the durable staff brake on the existing 30-second health cadence.
-     * This is one indexed point lookup for the whole process, never a per-slot
-     * poll. A stop only prevents a new claim; leased work remains able to make
-     * its atomic durable transition and then drains naturally.
+     * Read the durable staff brake and chapter ramp cap on the existing
+     * 30-second health cadence. This is one indexed lookup for the whole
+     * process, never a per-slot poll. A stop prevents a new claim; a reduced
+     * cap drains in-flight work naturally instead of cancelling a safe write.
      */
     private refreshManualProtectiveStop;
     /**

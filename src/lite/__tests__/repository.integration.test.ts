@@ -4613,6 +4613,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       pool, {}, { get: () => undefined } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', NOX_MANGA_URL: 'https://reader.test',
+        LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1,
         DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
         QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
@@ -4640,6 +4641,31 @@ describe('LiteRepository against the additive Lite migration', () => {
     } finally {
       vi.stubGlobal('fetch', originalFetch);
     }
+  });
+
+  it('applies a durable chapter admission cap and drains existing holders before lowering it', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009',
+        LITE_CHAPTER_WORKERS: 8, MAX_CONCURRENT_CHAPTERS: 8, TESTED_CONCURRENCY_CEILING: 8,
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
+        QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    await db.query(`INSERT INTO settings(key,value) VALUES('importer_chapter_admission_cap','4')`);
+    await (runtime as any).refreshManualProtectiveStop();
+    const gate = (runtime as any).chapterAdmissionGate;
+    expect(gate.capacity).toBe(4);
+    expect(Array.from({ length: 4 }, () => gate.tryAcquire())).toEqual([true, true, true, true]);
+    expect(gate.tryAcquire()).toBe(false);
+
+    await db.query(`UPDATE settings SET value='2' WHERE key='importer_chapter_admission_cap'`);
+    await (runtime as any).refreshManualProtectiveStop();
+    expect(gate.capacity).toBe(2);
+    expect(gate.tryAcquire()).toBe(false);
+    gate.release(); gate.release(); gate.release();
+    expect(gate.tryAcquire()).toBe(true);
+    gate.release(); gate.release();
   });
 
   it('confirms a failed site probe before pausing productive Lite claims', async () => {
