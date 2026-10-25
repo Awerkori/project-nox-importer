@@ -2698,6 +2698,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     queue.progressSnapshot = vi.fn();
     const admission = (runtime as any).chapterAdmissionGate;
     expect(admission.tryAcquire()).toBe(true);
+    telemetryCollector.setRuntimeFingerprint({ gitSha: 'test-git', artifactSha256: 'test-artifact' });
 
     try {
       await (runtime as any).emitOperationalSnapshot();
@@ -2709,12 +2710,24 @@ describe('LiteRepository against the additive Lite migration', () => {
         : stored.rows[0]?.value;
       expect(heartbeat).toMatchObject({
         snapshotDeferred: 'CHAPTER_BUSY',
+        runtimeFingerprint: {
+          gitSha: 'test-git',
+          artifactSha256: 'test-artifact',
+        },
         liveness: { chapterAdmission: { active: 1 } },
-        pipeline: { chapterStages: { completed: expect.any(Number) } },
+        pipeline: {
+          limits: {
+            configuredPagesPerChapter: 1,
+            runtimeMaximumPagesPerChapter: 1,
+            sourcePagesPerChapter: { mangaflix: 1, manhastro: 1, default: 1 },
+          },
+          chapterStages: { completed: expect.any(Number) },
+        },
       });
       expect((runtime as any).heartbeatCompletedAt).not.toBeNull();
     } finally {
       admission.release();
+      telemetryCollector.setRuntimeFingerprint({});
     }
   });
 
@@ -4805,9 +4818,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     // and 80 MiB byte fences remain the aggregate media authority.
     expect((runtime as any).bufferedPages.capacity).toBe(48);
     expect((runtime as any).executor.perChapterPageConcurrency).toBe(8);
-    expect((runtime as any).executor.pageConcurrency('mangaflix')).toBe(8);
-    expect((runtime as any).executor.pageConcurrency('manhastro')).toBe(6);
-    expect((runtime as any).executor.pageConcurrency('unlisted-source')).toBe(6);
+    expect((runtime as any).executor.getPageConcurrencyForSource('mangaflix')).toBe(8);
+    expect((runtime as any).executor.getPageConcurrencyForSource('manhastro')).toBe(6);
+    expect((runtime as any).executor.getPageConcurrencyForSource('unlisted-source')).toBe(6);
   });
 
   it('lets an eighth chapter worker fill page-wave gaps without widening global media limits', () => {
@@ -4823,8 +4836,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).downloads.capacity).toBe(24);
     expect((runtime as any).bufferedPages.capacity).toBe(48);
     expect((runtime as any).executor.perChapterPageConcurrency).toBe(8);
-    expect((runtime as any).executor.pageConcurrency('mangaflix')).toBe(8);
-    expect((runtime as any).executor.pageConcurrency('manhastro')).toBe(6);
+    expect((runtime as any).executor.getPageConcurrencyForSource('mangaflix')).toBe(8);
+    expect((runtime as any).executor.getPageConcurrencyForSource('manhastro')).toBe(6);
   });
 
   it('reports an anonymous bounded source-rate summary for production diagnosis', () => {

@@ -402,7 +402,12 @@ export class LiteExecutor {
    * a measured source may opt into a larger wave. The shared page, byte and
    * upload fences remain the hard aggregate authority.
    */
-  private pageConcurrency(source: string): number {
+  /**
+   * The exact page-wave limit used for a source.  This is intentionally
+   * exposed to the runtime heartbeat: a global configuration value alone is
+   * not evidence that a source-specific cap was applied.
+   */
+  public getPageConcurrencyForSource(source: string): number {
     const sourceLimit = SOURCE_CONCURRENCY_LIMITS[source]?.maxPagesPerChapter ?? 6;
     return Math.max(1, Math.min(this.perChapterPageConcurrency, sourceLimit));
   }
@@ -691,7 +696,7 @@ export class LiteExecutor {
         let mediaIds: string[];
         const mediaPipelineStartedAt = performance.now();
         try {
-          mediaIds = await mapBounded(urls, this.pageConcurrency(route.source), async (url, index) => {
+          mediaIds = await mapBounded(urls, this.getPageConcurrencyForSource(route.source), async (url, index) => {
           const position = index + 1;
           const receipt = uploadReceipts.get(position);
           if (receipt?.state === 'PERSISTED' && receipt.storageReady === true && Number(receipt.bytes) > 0 &&
