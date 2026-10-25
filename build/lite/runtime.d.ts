@@ -41,6 +41,7 @@ export declare class ImporterLiteRuntime {
     private readonly bufferedPages;
     private readonly bufferedPageBytes;
     private readonly memoryPressureGuard;
+    private readonly configuredPageBufferCapacity;
     private readonly memoryPressureEnabled;
     private readonly claimGate;
     private readonly chapterAdmissionGate;
@@ -123,6 +124,14 @@ export declare class ImporterLiteRuntime {
      */
     private shouldPauseLowPriorityMetadata;
     private refreshMemoryPressure;
+    /**
+     * At cap three, two eight-page MangaFlix waves plus one six-page source
+     * need at most 22 live bodies. Starting at 48/80 in that operating mode
+     * merely creates allocator high-water that the memory guard later removes.
+     * Higher ramps retain the established #802 ceiling; this profiles only the
+     * normal state and never overrides REDUCED/CRITICAL backpressure.
+     */
+    private mediaProfileForChapterAdmissionCap;
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter, sourceMetadataPool?: Pool);
     private getAvailablePool;
     start(): Promise<void>;

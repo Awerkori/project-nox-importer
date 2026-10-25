@@ -40,6 +40,23 @@ describe('LiteMemoryPressureGuard', () => {
     expect(guard.sample(memory(320)).state).toBe('NORMAL');
   });
 
+  it('uses an operator-sized normal profile without weakening reduced or critical backpressure', () => {
+    const pages = new AsyncSemaphore(48, 'test_lite_memory_operator_profile');
+    const bytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
+    const guard = new LiteMemoryPressureGuard(pages, bytes, 48);
+
+    guard.setNormalMediaProfile({ pageBufferCapacity: 24, pageByteCapacity: 48 * mib });
+    expect(guard.getNormalMediaProfile()).toEqual({ pageBufferCapacity: 24, pageByteCapacity: 48 * mib });
+    expect(guard.sample(memory(320))).toMatchObject({ state: 'NORMAL', pageBufferCapacity: 24, pageByteCapacity: 48 * mib });
+    expect(guard.sample(memory(405))).toMatchObject({ state: 'CRITICAL', pageBufferCapacity: 1, pageByteCapacity: 20 * mib });
+
+    guard.setNormalMediaProfile({ pageBufferCapacity: 48, pageByteCapacity: 80 * mib });
+    // The requested wider profile is remembered, but it cannot bypass a
+    // current critical brake. It applies only after normal-state recovery.
+    expect(guard.sample(memory(405))).toMatchObject({ state: 'CRITICAL', pageBufferCapacity: 1, pageByteCapacity: 20 * mib });
+    expect(guard.sample(memory(320))).toMatchObject({ state: 'NORMAL', pageBufferCapacity: 48, pageByteCapacity: 80 * mib });
+  });
+
   it('collects once more before retained RSS escalates REDUCED into CRITICAL', () => {
     const pages = new AsyncSemaphore(20, 'test_lite_memory_second_gc');
     const bytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);

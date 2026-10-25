@@ -260,6 +260,7 @@ export class ImporterLiteRuntime {
   private readonly bufferedPages: AsyncSemaphore;
   private readonly bufferedPageBytes: PageByteBudget;
   private readonly memoryPressureGuard: LiteMemoryPressureGuard;
+  private readonly configuredPageBufferCapacity: number;
   // Vitest shares one Node process across many integration fixtures, so its
   // host RSS is not the Lite runtime's container RSS. The guard itself is
   // exercised with deterministic memory snapshots; production always enables
@@ -429,8 +430,10 @@ export class ImporterLiteRuntime {
         const previousCap = this.operatorChapterAdmissionCap;
         this.operatorChapterAdmissionCap = nextCap;
         this.chapterAdmissionGate.setCapacity(nextCap);
+        this.memoryPressureGuard.setNormalMediaProfile(this.mediaProfileForChapterAdmissionCap(nextCap));
         this.logger.info('Adjusted Lite chapter admission cap', {
           previousCap, nextCap, configuredWorkers: this.chapterWorkerCapacity,
+          mediaProfile: this.memoryPressureGuard.getNormalMediaProfile(),
           source: values.has(CHAPTER_ADMISSION_CAP_KEY) ? 'operator-setting' : 'runtime-default',
         });
       }
@@ -465,6 +468,25 @@ export class ImporterLiteRuntime {
     return snapshot;
   }
 
+  /**
+   * At cap three, two eight-page MangaFlix waves plus one six-page source
+   * need at most 22 live bodies. Starting at 48/80 in that operating mode
+   * merely creates allocator high-water that the memory guard later removes.
+   * Higher ramps retain the established #802 ceiling; this profiles only the
+   * normal state and never overrides REDUCED/CRITICAL backpressure.
+   */
+  private mediaProfileForChapterAdmissionCap(cap: number): { pageBufferCapacity: number; pageByteCapacity: number } {
+    const normalizedCap = Math.max(1, Math.floor(cap));
+    return {
+      pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, Math.max(8, normalizedCap * 8)),
+      pageByteCapacity: normalizedCap <= 3
+        ? 48 * 1024 * 1024
+        : normalizedCap === 4
+          ? 64 * 1024 * 1024
+          : LITE_PAGE_BUFFER_BUDGET_BYTES,
+    };
+  }
+
   constructor(
     private readonly pool: Pool,
     private readonly catalogClient: any,
@@ -478,7 +500,8 @@ export class ImporterLiteRuntime {
     this.runtimeInstanceId = `${config.WORKER_ID}@${process.pid}-${randomUUID().slice(0, 8)}`;
     this.queue = new LiteRepository(pool, sourceMetadataPool);
     this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
-    this.bufferedPages = new AsyncSemaphore(Math.min(config.BUFFERED_PAGE_CONCURRENCY, SAFE_BUFFERED_PAGE_CAP), 'lite_global_page_buffers');
+    this.configuredPageBufferCapacity = Math.min(config.BUFFERED_PAGE_CONCURRENCY, SAFE_BUFFERED_PAGE_CAP);
+    this.bufferedPages = new AsyncSemaphore(this.configuredPageBufferCapacity, 'lite_global_page_buffers');
     this.bufferedPageBytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
     this.memoryPressureGuard = new LiteMemoryPressureGuard(this.bufferedPages, this.bufferedPageBytes, this.bufferedPages.capacity);
     this.chapterWorkerCapacity = Math.max(1, Math.min(config.LITE_CHAPTER_WORKERS ?? 1,
@@ -2562,6 +2585,7 @@ export class ImporterLiteRuntime {
             pageDownloads: this.downloads.capacity,
             pageBuffers: this.bufferedPages.capacity,
             pageBufferBytes: this.bufferedPageBytes.capacityBytes,
+            normalPageMediaProfile: this.memoryPressureGuard.getNormalMediaProfile(),
             ...this.pageWaveLimits(),
             telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
             uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
@@ -2662,6 +2686,7 @@ export class ImporterLiteRuntime {
           pageDownloads: this.downloads.capacity,
           pageBuffers: this.bufferedPages.capacity,
           pageBufferBytes: this.bufferedPageBytes.capacityBytes,
+          normalPageMediaProfile: this.memoryPressureGuard.getNormalMediaProfile(),
           ...this.pageWaveLimits(),
           telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
           uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,

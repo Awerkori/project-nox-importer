@@ -16,6 +16,10 @@ export type LiteMemoryPressureSnapshot = {
     retainedRssMetadataResume: boolean;
     pauseLowPriorityMetadata: boolean;
 };
+export type LiteNormalMediaProfile = {
+    pageBufferCapacity: number;
+    pageByteCapacity: number;
+};
 type MemoryUsageLike = Pick<NodeJS.MemoryUsage, 'rss' | 'heapUsed' | 'heapTotal' | 'external' | 'arrayBuffers'>;
 /**
  * Small runtime-local memory brake for the Lite media path. It controls only
@@ -26,14 +30,25 @@ type MemoryUsageLike = Pick<NodeJS.MemoryUsage, 'rss' | 'heapUsed' | 'heapTotal'
 export declare class LiteMemoryPressureGuard {
     private readonly pageBuffers;
     private readonly pageBytes;
-    private readonly normalPageBufferCapacity;
     private state;
     private snapshotValue;
+    private normalPageBufferCapacity;
+    private normalPageByteCapacity;
     private lastForcedGcAt;
     private retainedCriticalSince;
     private retainedCriticalBaselineMiB;
     private retainedRssMetadataResume;
-    constructor(pageBuffers: AsyncSemaphore, pageBytes: PageByteBudget, normalPageBufferCapacity: number);
+    constructor(pageBuffers: AsyncSemaphore, pageBytes: PageByteBudget, normalPageBufferCapacity: number, normalPageByteCapacity?: number);
+    /**
+     * The durable chapter-admission cap bounds how many page waves can exist at
+     * once. Keep the normal media profile no wider than that cap needs, while
+     * retaining the established 48/80 profile for a wider measured ramp.
+     *
+     * A pressure state remains authoritative: changing the operator cap never
+     * widens an already reduced or critical process mid-wave.
+     */
+    setNormalMediaProfile(profile: LiteNormalMediaProfile): void;
+    getNormalMediaProfile(): LiteNormalMediaProfile;
     sample(memory?: MemoryUsageLike): LiteMemoryPressureSnapshot;
     snapshot(): LiteMemoryPressureSnapshot;
     private nextState;

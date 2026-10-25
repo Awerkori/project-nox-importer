@@ -38,18 +38,47 @@ const FORCED_GC_COOLDOWN_MS = 10_000;
 export class LiteMemoryPressureGuard {
     pageBuffers;
     pageBytes;
-    normalPageBufferCapacity;
     state = 'NORMAL';
     snapshotValue;
+    normalPageBufferCapacity;
+    normalPageByteCapacity;
     lastForcedGcAt = 0;
     retainedCriticalSince = null;
     retainedCriticalBaselineMiB = 0;
     retainedRssMetadataResume = false;
-    constructor(pageBuffers, pageBytes, normalPageBufferCapacity) {
+    constructor(pageBuffers, pageBytes, normalPageBufferCapacity, normalPageByteCapacity = LITE_PAGE_BUFFER_BUDGET_BYTES) {
         this.pageBuffers = pageBuffers;
         this.pageBytes = pageBytes;
         this.normalPageBufferCapacity = normalPageBufferCapacity;
+        this.normalPageByteCapacity = normalPageByteCapacity;
         this.snapshotValue = this.buildSnapshot(process.memoryUsage());
+    }
+    /**
+     * The durable chapter-admission cap bounds how many page waves can exist at
+     * once. Keep the normal media profile no wider than that cap needs, while
+     * retaining the established 48/80 profile for a wider measured ramp.
+     *
+     * A pressure state remains authoritative: changing the operator cap never
+     * widens an already reduced or critical process mid-wave.
+     */
+    setNormalMediaProfile(profile) {
+        if (!Number.isSafeInteger(profile.pageBufferCapacity) || profile.pageBufferCapacity < 1 ||
+            !Number.isSafeInteger(profile.pageByteCapacity) || profile.pageByteCapacity < 1) {
+            throw new Error('LITE_NORMAL_MEDIA_PROFILE_INVALID');
+        }
+        this.normalPageBufferCapacity = profile.pageBufferCapacity;
+        this.normalPageByteCapacity = profile.pageByteCapacity;
+        if (this.state === 'NORMAL') {
+            this.pageBuffers.setCapacity(profile.pageBufferCapacity);
+            this.pageBytes.setCapacityBytes(profile.pageByteCapacity);
+            this.snapshotValue = this.buildSnapshot(process.memoryUsage());
+        }
+    }
+    getNormalMediaProfile() {
+        return {
+            pageBufferCapacity: this.normalPageBufferCapacity,
+            pageByteCapacity: this.normalPageByteCapacity,
+        };
     }
     sample(memory) {
         let observed = memory || process.memoryUsage();
@@ -130,7 +159,7 @@ export class LiteMemoryPressureGuard {
         }
         return {
             pageBufferCapacity: this.normalPageBufferCapacity,
-            pageByteCapacity: LITE_PAGE_BUFFER_BUDGET_BYTES,
+            pageByteCapacity: this.normalPageByteCapacity,
         };
     }
     /**
