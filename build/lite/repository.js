@@ -2274,7 +2274,8 @@ export class LiteRepository {
                 // checkpoint. Legacy/recovery tasks without them still use the
                 // conservative checkpoint lookup in the executor.
                 JSON.stringify({ importTaskId: task.id, source: completion.selectedSource,
-                    chapterId: completion.chapterId, mediaIds: completion.mediaIds })]);
+                    chapterId: completion.chapterId, mediaIds: completion.mediaIds,
+                    orderKey: String(task.payload.orderKey || '') || null })]);
             await this.refreshReadyWork(client, task.workKey);
             await client.query('COMMIT');
             return true;
@@ -2648,7 +2649,7 @@ export class LiteRepository {
          FROM picked WHERE t.id=picked.task_id RETURNING picked.work_key`, [limit]) : noUploadOutcomeRecovery;
             // A completed media checkpoint never waits for a global sweep: it gains
             // one durable PUBLISH task. The unique key makes this idempotent.
-            const ready = await client.query(`SELECT i.id,i.work_id,i.work_key,i.chapter_key,i.priority,i.base_priority FROM importer_lite_tasks i
+            const ready = await client.query(`SELECT i.id,i.work_id,i.work_key,i.chapter_key,i.priority,i.base_priority,i.payload->>'orderKey' AS order_key FROM importer_lite_tasks i
           WHERE i.state='DONE' AND i.task_type='IMPORT_CHAPTER'
             AND i.checkpoint ? 'mediaIds' AND NOT i.checkpoint ? 'publishedAt'
             -- An existing PUBLISH task is the durable recovery authority.
@@ -2665,7 +2666,7 @@ export class LiteRepository {
                 await client.query(`INSERT INTO importer_lite_tasks(task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,payload,checkpoint)
            VALUES ('PUBLISH',$1::uuid,$2,$3,$4,$5,'lite:publish:'||$1::text||':'||$3,$6::jsonb,$7::jsonb)
            ON CONFLICT(idempotency_key) DO NOTHING`, [row.work_id, row.work_key, row.chapter_key, row.priority, row.base_priority,
-                    JSON.stringify({ importTaskId: row.id }), JSON.stringify({})]);
+                    JSON.stringify({ importTaskId: row.id, orderKey: row.order_key || null }), JSON.stringify({})]);
             }
             // Before Lite accepted repeated page media IDs, a chapter with visually
             // identical pages could have every reference persisted but fail the old
@@ -2991,7 +2992,20 @@ export class LiteRepository {
             // timestamp on a recovery retry without an extra read round-trip.
             const result = await client.query(`WITH publication AS (
           UPDATE chapters
-          SET published_at=COALESCE(published_at,clock_timestamp()),
+          SET published_at=COALESCE(
+                published_at,
+                GREATEST(
+                  clock_timestamp(),
+                  COALESCE(
+                    (SELECT max(ch_prev.published_at) + interval '1 millisecond'
+                     FROM chapters ch_prev
+                     WHERE ch_prev.work_id = chapters.work_id
+                       AND ch_prev.chapter_order_key < chapters.chapter_order_key
+                       AND ch_prev.published_at IS NOT NULL),
+                    clock_timestamp()
+                  )
+                )
+              ),
               is_fresh_release=CASE WHEN published_at IS NULL THEN $2 ELSE is_fresh_release END
           WHERE id=$1::uuid
           RETURNING published_at
