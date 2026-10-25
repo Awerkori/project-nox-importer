@@ -2452,6 +2452,20 @@ export class LiteRepository {
       WHERE NOT (importer_lite_source_health.health='RATE_LIMITED'
         AND importer_lite_source_health.cooldown_until>now())`, [source]).catch(() => { });
     }
+    /**
+     * The UNKNOWN receipt proof is deliberately expensive: it must join the
+     * durable upload intent to a Telegram media row before any task can reopen.
+     * Use this index-only watermark to avoid repeating that historical proof
+     * when no ambiguous receipt has appeared since the last empty pass.
+     */
+    async newestUnknownUploadAt() {
+        const result = await this.db.query(`SELECT updated_at
+      FROM importer_lite_uploads
+      WHERE state='UNKNOWN'
+      ORDER BY updated_at DESC
+      LIMIT 1`);
+        return result.rows[0]?.updated_at ? new Date(result.rows[0].updated_at) : null;
+    }
     /** One bounded recovery turn; it cannot consume the claim path or scan works. */
     async reconcile(limit = 50, options = {}) {
         const recoverUploadOutcomes = options.recoverUploadOutcomes !== false;

@@ -993,7 +993,8 @@ describe('LiteRepository against the additive Lite migration', () => {
         LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
     );
     const reconcile = vi.fn().mockResolvedValue({});
-    (runtime as any).queue = { reconcile, recoverDuplicateCanonicalCatalogFailures: vi.fn().mockResolvedValue(0) };
+    const newestUnknownUploadAt = vi.fn().mockResolvedValue(new Date('2026-10-25T00:00:00.000Z'));
+    (runtime as any).queue = { reconcile, newestUnknownUploadAt, recoverDuplicateCanonicalCatalogFailures: vi.fn().mockResolvedValue(0) };
     for (const method of ['probeDueSourceRecovery', 'refreshSourceFairness', 'refillHistoricalP1Catalog',
       'refillManifestProvenP1Imports', 'refillStoredMetadataEnrichment', 'runStoredMetadataReplay']) {
       vi.spyOn(runtime as any, method).mockResolvedValue(undefined);
@@ -1022,6 +1023,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).runRecoveryTurn();
     expect(reconcile).toHaveBeenLastCalledWith(50, {
       recoverUploadOutcomes: true,
+      recoverSourceCooldowns: true,
+    });
+
+    // An empty proof pass records the durable watermark. Repeating the
+    // recovery interval without a newer UNKNOWN must keep the cold join out
+    // of the chapter pool while all ordinary recovery remains live.
+    (runtime as any).lastUploadOutcomeRecoveryAt = Date.now() - 5 * 60_000;
+    (runtime as any).lastSourceCooldownRecoveryAt = Date.now() - 30_000;
+    await (runtime as any).runRecoveryTurn();
+    expect(reconcile).toHaveBeenLastCalledWith(50, {
+      recoverUploadOutcomes: false,
       recoverSourceCooldowns: true,
     });
 
