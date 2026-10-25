@@ -93,6 +93,8 @@ export declare class LiteExecutor {
     /** Keep local source shares aligned with the runtime's durable chapter cap. */
     setEffectiveChapterAdmissionCap(capacity: number): void;
     getFairSourceDemand(): string[];
+    /** The durable chapter-admission cap currently used to calculate source shares. */
+    getEffectiveChapterAdmissionCap(): number;
     /** Aggregate-only batch evidence for the existing heartbeat. */
     getUploadBatchSnapshot(): {
         reservations: UploadBatchSnapshot;

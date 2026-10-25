@@ -1852,6 +1852,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(mangaFlix.capacity).toBe(8);
 
     executor.setEffectiveChapterAdmissionCap(3);
+    expect(executor.getEffectiveChapterAdmissionCap()).toBe(3);
     expect(mangaFlix.capacity).toBe(2);
     expect([mangaFlix.tryAcquire(), mangaFlix.tryAcquire(), mangaFlix.tryAcquire()]).toEqual([true, true, false]);
     mangaFlix.release();

@@ -2480,6 +2480,9 @@ export class ImporterLiteRuntime {
                     waiters: this.sourceMetadataPersistenceGate.queued,
                 },
                 sourceMetadataProducer: this.sourceMetadataProducer,
+                sourceFairness: {
+                    effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
+                },
                 memoryPressure: liveness.memoryPressure,
                 // In-memory stage telemetry is safe to sample while the two YSQL
                 // connections are busy.  Without it, the exact periods that need
@@ -2605,7 +2608,14 @@ export class ImporterLiteRuntime {
                 chapterStages: this.chapterStageTelemetry(pipelineTelemetry),
             },
             telegram, sourceRate: this.sourceRateLimiter.getSummary(), diversity,
-            sourceFairness: { readySources: fairSources, count: fairSources.length },
+            sourceFairness: {
+                readySources: fairSources,
+                count: fairSources.length,
+                // This is the executor input, not the configured worker count. It
+                // makes a production heartbeat prove that source shares honor the
+                // guarded admission cap during a controlled ramp.
+                effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
+            },
             liveness,
             site: this.lastSiteProbe,
         };
