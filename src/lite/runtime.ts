@@ -839,7 +839,15 @@ export class ImporterLiteRuntime {
       return;
     }
     const now = Date.now();
-    const recoverUploadOutcomes = now - this.lastUploadOutcomeRecoveryAt >= UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS;
+    // Unknown-upload repair is a cold historical proof path. It may need to
+    // examine a large legacy UNKNOWN set, whereas a live chapter already has
+    // its own receipt/intent fence and never depends on this sweep to finish.
+    // Do not let that exceptional scan occupy the primary YSQL seats during a
+    // productive wave. Leaving the timestamp untouched makes the next quiet
+    // recovery turn run it automatically; it is deferred, not abandoned.
+    const chapterOrPoolBusy = this.chapterAdmissionGate.active > 0 || this.pool.waitingCount > 0;
+    const recoverUploadOutcomes = !chapterOrPoolBusy
+      && now - this.lastUploadOutcomeRecoveryAt >= UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS;
     if (recoverUploadOutcomes) this.lastUploadOutcomeRecoveryAt = now;
     // Lease, publication and unknown-upload repair must remain live during a
     // busy P1 wave. The SOURCE_RATE_LIMITED scan is different: it can inspect

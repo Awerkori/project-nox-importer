@@ -982,13 +982,14 @@ describe('LiteRepository against the additive Lite migration', () => {
     memorySpy.mockRestore();
   });
 
-  it('defers only the expensive source-cooldown sweep while the main YSQL pool is queued', async () => {
-    const lanePool = Object.assign(poolFor(db), { waitingCount: 2 });
+  it('defers exceptional unknown-upload recovery until chapter admission is quiet', async () => {
+    const lanePool = Object.assign(poolFor(db), { waitingCount: 0 });
     const runtime = new ImporterLiteRuntime(
       lanePool as Pool, {}, { get: () => null } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
       { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
-        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
+        LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
     );
     const reconcile = vi.fn().mockResolvedValue({});
     (runtime as any).queue = { reconcile, recoverDuplicateCanonicalCatalogFailures: vi.fn().mockResolvedValue(0) };
@@ -997,20 +998,20 @@ describe('LiteRepository against the additive Lite migration', () => {
       vi.spyOn(runtime as any, method).mockResolvedValue(undefined);
     }
 
-    // A first turn under pressure still runs one bounded sweep (the pool is
-    // almost never idle during a chapter wave, which previously parked
-    // healthy-route SOURCE_RATE_LIMITED imports for days).
+    const admission = (runtime as any).chapterAdmissionGate;
+    expect(admission.tryAcquire()).toBe(true);
+    await (runtime as any).runRecoveryTurn();
+    expect(reconcile).toHaveBeenLastCalledWith(50, {
+      recoverUploadOutcomes: false,
+      recoverSourceCooldowns: true,
+    });
+
+    // The pending proof runs on the next quiet turn rather than being lost.
+    admission.release();
     await (runtime as any).runRecoveryTurn();
     expect(reconcile).toHaveBeenLastCalledWith(50, {
       recoverUploadOutcomes: true,
       recoverSourceCooldowns: true,
-    });
-
-    // Subsequent turns within the max gap defer only the expensive sweep.
-    await (runtime as any).runRecoveryTurn();
-    expect(reconcile).toHaveBeenLastCalledWith(50, {
-      recoverUploadOutcomes: false,
-      recoverSourceCooldowns: false,
     });
   });
 
