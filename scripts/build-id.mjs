@@ -1,7 +1,6 @@
 import { readFileSync, writeFileSync, readdirSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { createHash } from 'crypto';
 import { join } from 'path';
-import { execFileSync } from 'node:child_process';
 
 // Copy assets required at runtime
 for (const [srcRel, destDirRel, fileName] of [
@@ -37,9 +36,13 @@ try {
     }
   }
   visit(root);
-  let gitSha = process.env.GITHUB_SHA || process.env.GIT_SHA || 'unknown';
-  try { gitSha = execFileSync('git', ['rev-parse', 'HEAD'], {encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim(); } catch {}
-  writeFileSync(join(root, 'BUILD_ID'), JSON.stringify({gitSha, artifactSha256:hash.digest('hex'), builtAt:new Date().toISOString()}));
+  const artifactSha256 = hash.digest('hex');
+  // A local/pre-commit build is made while the source changes are still dirty,
+  // so `git rev-parse HEAD` identifies the parent commit rather than this
+  // artifact. Prefer the CI revision when it is supplied; otherwise use the
+  // content fingerprint that is actually being deployed.
+  const gitSha = process.env.GITHUB_SHA || process.env.GIT_SHA || `artifact:${artifactSha256}`;
+  writeFileSync(join(root, 'BUILD_ID'), JSON.stringify({gitSha, artifactSha256, builtAt:new Date().toISOString()}));
 } catch (err) {
   console.error("Failed to generate BUILD_ID:", err);
   writeFileSync(join(process.cwd(), 'build', 'BUILD_ID'), 'unknown');
