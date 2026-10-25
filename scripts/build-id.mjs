@@ -24,7 +24,9 @@ for (const [srcRel, destDirRel, fileName] of [
   }
 }
 
-// read build/index.js to generate an artifact hash
+// Hash the runnable JavaScript plus the DIScloud startup contract. A changed
+// START environment can alter the live process even when build/*.js is
+// identical, so it must not share an artifact identity with the prior deploy.
 try {
   const root = join(process.cwd(), 'build');
   const hash = createHash('sha256');
@@ -36,6 +38,12 @@ try {
     }
   }
   visit(root);
+  for (const deploymentFile of ['discloud.config']) {
+    const deploymentPath = join(process.cwd(), deploymentFile);
+    if (existsSync(deploymentPath)) {
+      hash.update(`deployment:${deploymentFile}`).update(readFileSync(deploymentPath));
+    }
+  }
   const artifactSha256 = hash.digest('hex');
   // A local/pre-commit build is made while the source changes are still dirty,
   // so `git rev-parse HEAD` identifies the parent commit rather than this
