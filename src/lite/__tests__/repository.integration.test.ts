@@ -4754,6 +4754,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     gate.release(); gate.release();
   });
 
+  it('matches the normal media profile to a low durable chapter cap without changing global downloads', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009',
+        LITE_CHAPTER_WORKERS: 8, MAX_CONCURRENT_CHAPTERS: 8, TESTED_CONCURRENCY_CEILING: 8,
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 24, BUFFERED_PAGE_CONCURRENCY: 48, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 8,
+        QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    await db.query(`INSERT INTO settings(key,value) VALUES('importer_chapter_admission_cap','3')`);
+    await (runtime as any).refreshManualProtectiveStop();
+
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(3);
+    expect((runtime as any).downloads.capacity).toBe(24);
+    expect((runtime as any).bufferedPages.capacity).toBe(24);
+    expect((runtime as any).bufferedPageBytes.capacityBytes).toBe(48 * 1024 * 1024);
+    expect((runtime as any).memoryPressureGuard.getNormalMediaProfile()).toEqual({
+      pageBufferCapacity: 24, pageByteCapacity: 48 * 1024 * 1024,
+    });
+  });
+
   it('confirms a failed site probe before pausing productive Lite claims', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,

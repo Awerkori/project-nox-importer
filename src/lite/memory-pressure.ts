@@ -50,6 +50,11 @@ export type LiteMemoryPressureSnapshot = {
   pauseLowPriorityMetadata: boolean;
 };
 
+export type LiteNormalMediaProfile = {
+  pageBufferCapacity: number;
+  pageByteCapacity: number;
+};
+
 type MemoryUsageLike = Pick<NodeJS.MemoryUsage, 'rss' | 'heapUsed' | 'heapTotal' | 'external' | 'arrayBuffers'>;
 
 /**
@@ -61,6 +66,8 @@ type MemoryUsageLike = Pick<NodeJS.MemoryUsage, 'rss' | 'heapUsed' | 'heapTotal'
 export class LiteMemoryPressureGuard {
   private state: LiteMemoryPressureState = 'NORMAL';
   private snapshotValue: LiteMemoryPressureSnapshot;
+  private normalPageBufferCapacity: number;
+  private normalPageByteCapacity: number;
   private lastForcedGcAt = 0;
   private retainedCriticalSince: number | null = null;
   private retainedCriticalBaselineMiB = 0;
@@ -69,9 +76,41 @@ export class LiteMemoryPressureGuard {
   constructor(
     private readonly pageBuffers: AsyncSemaphore,
     private readonly pageBytes: PageByteBudget,
-    private readonly normalPageBufferCapacity: number,
+    normalPageBufferCapacity: number,
+    normalPageByteCapacity = LITE_PAGE_BUFFER_BUDGET_BYTES,
   ) {
+    this.normalPageBufferCapacity = normalPageBufferCapacity;
+    this.normalPageByteCapacity = normalPageByteCapacity;
     this.snapshotValue = this.buildSnapshot(process.memoryUsage());
+  }
+
+  /**
+   * The durable chapter-admission cap bounds how many page waves can exist at
+   * once. Keep the normal media profile no wider than that cap needs, while
+   * retaining the established 48/80 profile for a wider measured ramp.
+   *
+   * A pressure state remains authoritative: changing the operator cap never
+   * widens an already reduced or critical process mid-wave.
+   */
+  setNormalMediaProfile(profile: LiteNormalMediaProfile): void {
+    if (!Number.isSafeInteger(profile.pageBufferCapacity) || profile.pageBufferCapacity < 1 ||
+        !Number.isSafeInteger(profile.pageByteCapacity) || profile.pageByteCapacity < 1) {
+      throw new Error('LITE_NORMAL_MEDIA_PROFILE_INVALID');
+    }
+    this.normalPageBufferCapacity = profile.pageBufferCapacity;
+    this.normalPageByteCapacity = profile.pageByteCapacity;
+    if (this.state === 'NORMAL') {
+      this.pageBuffers.setCapacity(profile.pageBufferCapacity);
+      this.pageBytes.setCapacityBytes(profile.pageByteCapacity);
+      this.snapshotValue = this.buildSnapshot(process.memoryUsage());
+    }
+  }
+
+  getNormalMediaProfile(): LiteNormalMediaProfile {
+    return {
+      pageBufferCapacity: this.normalPageBufferCapacity,
+      pageByteCapacity: this.normalPageByteCapacity,
+    };
   }
 
   sample(memory?: MemoryUsageLike): LiteMemoryPressureSnapshot {
@@ -152,7 +191,7 @@ export class LiteMemoryPressureGuard {
     }
     return {
       pageBufferCapacity: this.normalPageBufferCapacity,
-      pageByteCapacity: LITE_PAGE_BUFFER_BUDGET_BYTES,
+      pageByteCapacity: this.normalPageByteCapacity,
     };
   }
 
