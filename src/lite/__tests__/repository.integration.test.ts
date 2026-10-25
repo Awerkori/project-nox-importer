@@ -5,6 +5,7 @@ import type { Pool } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AsyncSemaphore } from '../../core/concurrency.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
+import { telemetryCollector } from '../../core/telemetry-collector.js';
 import { ImporterEngine } from '../../core/engine.js';
 import { DURABLE_RECEIPT_BATCH_JOIN_MS, DURABLE_RESERVATION_BATCH_JOIN_MS, LiteExecutor, UploadReceiptBatcher, UploadReservationBatcher } from '../executor.js';
 import { PageByteBudget } from '../page-byte-budget.js';
@@ -4982,6 +4983,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
     const originalFetch = globalThis.fetch;
     const originalReceiptBatch = repo.recordUploadReceipts.bind(repo);
+    const chapterMetric = vi.spyOn(telemetryCollector, 'recordChapterMetric');
     let releaseFirst!: () => void;
     let markFirstStarted!: () => void;
     const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
@@ -5021,6 +5023,11 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(storage.upload).toHaveBeenCalledTimes(3);
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(3);
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
+    expect(chapterMetric).toHaveBeenLastCalledWith(expect.objectContaining({
+      jobId: task!.id, source: 'source-a', pageCount: 3,
+      totalDurationMs: expect.any(Number), media_pipeline_wall_ms: expect.any(Number),
+      db_publish_ms: expect.any(Number), totalBytes: expect.any(Number),
+    }));
   });
 
   it('flushes receipt arrivals that occur while a prior durable batch is in flight', async () => {
