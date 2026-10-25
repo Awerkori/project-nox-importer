@@ -2710,6 +2710,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       expect(heartbeat).toMatchObject({
         snapshotDeferred: 'CHAPTER_BUSY',
         liveness: { chapterAdmission: { active: 1 } },
+        pipeline: { chapterStages: { completed: expect.any(Number) } },
       });
       expect((runtime as any).heartbeatCompletedAt).not.toBeNull();
     } finally {
