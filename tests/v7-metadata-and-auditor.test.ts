@@ -423,6 +423,7 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
     // and metadata remains bounded. Eight workers retain DNS/file capacity
     // without the observed retained native RSS in 512 MiB.
     expect(discloudCfg).toContain('UV_THREADPOOL_SIZE=8');
+    expect(discloudCfg).toContain('MALLOC_ARENA_MAX=1');
 
     const indexSrc = readFileSync(resolve(__dirname, '../src/index.ts'), 'utf-8');
     expect(indexSrc).toContain("dns.setDefaultResultOrder?.('ipv4first')");
