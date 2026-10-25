@@ -407,6 +407,13 @@ export declare class LiteRepository {
      */
     recordSourceFailure(source: string, error: unknown): Promise<void>;
     recordSourceSuccess(source: string): Promise<void>;
+    /**
+     * The UNKNOWN receipt proof is deliberately expensive: it must join the
+     * durable upload intent to a Telegram media row before any task can reopen.
+     * Use this index-only watermark to avoid repeating that historical proof
+     * when no ambiguous receipt has appeared since the last empty pass.
+     */
+    newestUnknownUploadAt(): Promise<Date | null>;
     /** One bounded recovery turn; it cannot consume the claim path or scan works. */
     reconcile(limit?: number, options?: {
         recoverUploadOutcomes?: boolean;

@@ -277,6 +277,10 @@ export class ImporterLiteRuntime {
     };
     lastSourceRecoveryProbeAt = 0;
     lastUploadOutcomeRecoveryAt = 0;
+    // Watermark for the cold UNKNOWN-receipt proof. The indexed newest-row
+    // probe costs one storage read; the proof itself otherwise joins every
+    // historical UNKNOWN receipt to media even after an empty pass.
+    lastUnknownUploadRecoverySeenAt = 0;
     lastSourceCooldownRecoveryAt = 0;
     // Backoff after an exhausted V5 source-metadata probe chain. Incremental
     // coverage continues; it just stops rescanning empty horizons every 15 s.
@@ -815,10 +819,21 @@ export class ImporterLiteRuntime {
         // productive wave. Leaving the timestamp untouched makes the next quiet
         // recovery turn run it automatically; it is deferred, not abandoned.
         const chapterOrPoolBusy = this.chapterAdmissionGate.active > 0 || this.pool.waitingCount > 0;
-        const recoverUploadOutcomes = !chapterOrPoolBusy
-            && now - this.lastUploadOutcomeRecoveryAt >= UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS;
-        if (recoverUploadOutcomes)
+        let recoverUploadOutcomes = false;
+        let newestUnknownUploadAt = 0;
+        if (!chapterOrPoolBusy && now - this.lastUploadOutcomeRecoveryAt >= UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS) {
             this.lastUploadOutcomeRecoveryAt = now;
+            try {
+                const newest = await this.queue.newestUnknownUploadAt();
+                newestUnknownUploadAt = newest?.getTime() || 0;
+                recoverUploadOutcomes = newestUnknownUploadAt > this.lastUnknownUploadRecoverySeenAt;
+            }
+            catch {
+                // Keep the existing fail-safe proof path if the cheap watermark read
+                // is unavailable. It is rare and never changes receipt semantics.
+                recoverUploadOutcomes = true;
+            }
+        }
         // Lease, publication and unknown-upload repair must remain live during a
         // busy P1 wave. The SOURCE_RATE_LIMITED scan can inspect thousands of
         // deferred rows, so running it on every recovery turn whenever the pool
@@ -833,7 +848,10 @@ export class ImporterLiteRuntime {
         if (recoverSourceCooldowns)
             this.lastSourceCooldownRecoveryAt = now;
         try {
-            await this.queue.reconcile(50, { recoverUploadOutcomes, recoverSourceCooldowns });
+            const recovery = await this.queue.reconcile(50, { recoverUploadOutcomes, recoverSourceCooldowns });
+            if (recoverUploadOutcomes && Number(recovery.uploadReceiptRecoveries || 0) === 0 && newestUnknownUploadAt > 0) {
+                this.lastUnknownUploadRecoverySeenAt = newestUnknownUploadAt;
+            }
         }
         catch { /* bounded recovery retries next turn */ }
         try {
