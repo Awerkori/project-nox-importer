@@ -75,6 +75,8 @@ export declare class LiteRepository {
     private readonly db;
     private readonly sourceMetadataDb;
     private historicalP1ReserveAbundant;
+    private historicalP1ReserveCheckedAt;
+    private manifestP1ReserveCache;
     hasAbundantHistoricalP1Reserve(): boolean;
     /**
      * Source-backed historical metadata is deliberately allowed one tiny,

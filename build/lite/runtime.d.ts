@@ -75,6 +75,8 @@ export declare class ImporterLiteRuntime {
     private sourceMetadataProducer;
     private lastSourceRecoveryProbeAt;
     private lastUploadOutcomeRecoveryAt;
+    private lastSourceCooldownRecoveryAt;
+    private sourceMetadataNoCandidateUntil;
     private lastManifestP1RepairAt;
     private manifestP1CatchupActive;
     private readonly monitorGate;

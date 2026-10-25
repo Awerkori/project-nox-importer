@@ -20,6 +20,8 @@ const SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN = 4;
 const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE = 8;
 const SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS = 48;
 const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK = 2;
+/** Reuse an abundant executable-P1 reserve measurement for this long. */
+const EXECUTABLE_P1_RESERVE_CACHE_MS = 180_000;
 // Historical refetch owns one P2 seat while the importer is serving chapter
 // work. Looking across eight providers merely to fill that one seat made the
 // producer's six-tier candidate CTE the dominant YSQL workload. A durable
@@ -87,6 +89,13 @@ export class LiteRepository {
     // authority; the runtime uses the hint to avoid a second catalog turn when
     // the materialised P1 import reserve is already abundant.
     historicalP1ReserveAbundant = false;
+    // The executable-P1 reserve count correlates every READY import with its
+    // route/source health. Production ASH showed it as the single largest YSQL
+    // CPU consumer (~22%) while the reserve held thousands of executable rows.
+    // An abundant answer is stable for minutes, so reuse it briefly; a low
+    // reserve is never cached and is always re-measured on the next turn.
+    historicalP1ReserveCheckedAt = 0;
+    manifestP1ReserveCache = null;
     hasAbundantHistoricalP1Reserve() { return this.historicalP1ReserveAbundant; }
     /**
      * Source-backed historical metadata is deliberately allowed one tiny,
@@ -934,7 +943,10 @@ export class LiteRepository {
     async refillManifestProvenP1Imports(readyFloor = 64, batchLimit = 16, forceRepair = false) {
         const floor = Math.max(1, Math.min(512, readyFloor));
         const maximum = Math.max(1, Math.min(forceRepair ? 600 : 32, batchLimit));
-        const reserve = await this.db.query(`SELECT count(*)::int AS count FROM (
+        const cachedReserve = this.manifestP1ReserveCache;
+        const reserveFromCache = !forceRepair && cachedReserve && cachedReserve.floor === floor
+            && cachedReserve.count >= floor && Date.now() - cachedReserve.at < EXECUTABLE_P1_RESERVE_CACHE_MS;
+        const reserve = reserveFromCache ? { rows: [{ count: String(cachedReserve.count) }] } : await this.db.query(`SELECT count(*)::int AS count FROM (
       SELECT 1 FROM importer_lite_tasks t
       WHERE t.state='READY' AND t.monitoring=false AND t.priority=2
         AND t.task_type='IMPORT_CHAPTER' AND t.next_run_at<=now()
@@ -952,6 +964,8 @@ export class LiteRepository {
         LIMIT $1
     ) AS bounded_ready`, [floor]);
         const current = Number(reserve.rows[0]?.count || 0);
+        if (!reserveFromCache)
+            this.manifestP1ReserveCache = { at: Date.now(), floor, count: current };
         // A healthy executable P1 reserve must remain dominant, but it cannot
         // permanently hide a confirmed historical manifest simply because an old
         // catalog task has already completed. Admit only a tiny repair seat in
@@ -1580,6 +1594,9 @@ export class LiteRepository {
         // need to materialize their alternatives. Bound the eligibility check as
         // well; it remains outside the claim path.
         const abundantFloor = Math.min(512, Math.max(64, floor * 4));
+        if (this.historicalP1ReserveAbundant
+            && Date.now() - this.historicalP1ReserveCheckedAt < EXECUTABLE_P1_RESERVE_CACHE_MS)
+            return 0;
         this.historicalP1ReserveAbundant = false;
         const client = await this.db.connect();
         try {
@@ -1610,6 +1627,7 @@ export class LiteRepository {
                 // reserve drains, the next recovery turn automatically resumes the
                 // bounded, source-diverse producer.
                 this.historicalP1ReserveAbundant = true;
+                this.historicalP1ReserveCheckedAt = Date.now();
                 await client.query('COMMIT');
                 return 0;
             }
@@ -1948,18 +1966,22 @@ export class LiteRepository {
             const deferredLimit = Math.min(available, 16);
             if (deferredLimit > 0) {
                 const deferred = await client.query(`
+          /*+ IndexScan(importer_lite_tasks importer_lite_tasks_cross_source_deferred_open_idx) */
           SELECT id::text,work_key,checkpoint
           FROM importer_lite_tasks
           WHERE task_type='CATALOG' AND state='DONE'
-            AND idempotency_key >= $3 AND idempotency_key < $4
+            AND idempotency_key >= $2 AND idempotency_key < $3
             AND payload ? 'metadataCrossSourceDiscovery'
             AND checkpoint->>'coverage'='CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED'
             AND next_run_at<=now()
-            AND COALESCE(NULLIF(checkpoint->>'deferredRounds','')::int,0)<$1
+            -- Literal (not a bind parameter) so the planner can prove the
+            -- importer_lite_tasks_cross_source_deferred_open_idx predicate.
+            -- Exhausted rows (thousands) otherwise stay in the older index
+            -- and every refill walked them all (~7.7 s per call).
+            AND COALESCE(NULLIF(checkpoint->>'deferredRounds','')::int,0)<${METADATA_CROSS_SOURCE_DEFERRED_RECHECK_LIMIT}
           ORDER BY next_run_at,id
-          LIMIT $2
+          LIMIT $1
           FOR UPDATE SKIP LOCKED`, [
-                    METADATA_CROSS_SOURCE_DEFERRED_RECHECK_LIMIT,
                     deferredLimit,
                     METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX,
                     `${METADATA_CROSS_SOURCE_DISCOVERY_V7_PREFIX}~`

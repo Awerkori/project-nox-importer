@@ -154,6 +154,10 @@ const CROSS_SOURCE_DEFERRED_RECHECK_INTERVAL_MS = 15 * 60_000;
 // uploads/media proof query. Keep it durable, but do not place that cold path
 // in every 30-second chapter recovery turn.
 const UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS = 5 * 60_000;
+/** Max gap between SOURCE_RATE_LIMITED re-admission passes under pool pressure. */
+const SOURCE_COOLDOWN_RECOVERY_MAX_GAP_MS = 2 * 60_000;
+/** Pause between V5 source-metadata producer chains that found no candidate. */
+const SOURCE_METADATA_NO_CANDIDATE_BACKOFF_MS = 5 * 60_000;
 // Confirmed manifest rows are the durable evidence for a historical chapter.
 // At boot, repair any rows that older releases left without their idempotent
 // import task quickly, but only in small database-only batches.  Once the
@@ -311,6 +315,10 @@ export class ImporterLiteRuntime {
   };
   private lastSourceRecoveryProbeAt = 0;
   private lastUploadOutcomeRecoveryAt = 0;
+  private lastSourceCooldownRecoveryAt = 0;
+  // Backoff after an exhausted V5 source-metadata probe chain. Incremental
+  // coverage continues; it just stops rescanning empty horizons every 15 s.
+  private sourceMetadataNoCandidateUntil = 0;
   private lastManifestP1RepairAt = 0;
   private manifestP1CatchupActive = true;
   // Observation is intentionally a one-slot lane. It may create P0 chapter
@@ -754,7 +762,12 @@ export class ImporterLiteRuntime {
     // thousands of deferred chapter rows and is not needed to settle work
     // already in flight. Yield only that optional re-admission pass while the
     // tiny main pool is queued; the next idle recovery turn resumes it.
-    const recoverSourceCooldowns = this.pool.waitingCount === 0;
+    // The pool is almost never idle during a chapter wave, which left 5.3k
+    // healthy-route SOURCE_RATE_LIMITED imports (152 works) parked since
+    // 2026-10-14. Guarantee one bounded pass per interval even when queued.
+    const recoverSourceCooldowns = this.pool.waitingCount === 0
+      || now - this.lastSourceCooldownRecoveryAt >= SOURCE_COOLDOWN_RECOVERY_MAX_GAP_MS;
+    if (recoverSourceCooldowns) this.lastSourceCooldownRecoveryAt = now;
     try { await this.queue.reconcile(50, { recoverUploadOutcomes, recoverSourceCooldowns }); } catch { /* bounded recovery retries next turn */ }
     try { await this.probeDueSourceRecovery(); } catch (error: any) {
       this.logger.warn('Source cooldown recovery probe failed', { error: error?.message });
@@ -1325,6 +1338,10 @@ export class ImporterLiteRuntime {
     const minInterval = this.metadataTurboMode.enabled ? 2_000 : SOURCE_METADATA_REFILL_INTERVAL_MS;
     if (!this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled || this.metadataTurboMode.enabled
       || (!replaceCompletedTask && Date.now() - this.lastSourceMetadataRefillAt < minInterval)) return;
+    if (!replaceCompletedTask && Date.now() < this.sourceMetadataNoCandidateUntil) {
+      this.noteSourceMetadataProducer('NO_CANDIDATE_BACKOFF');
+      return;
+    }
     if (this.sourceMetadataRefreshDeferredForV4) {
       this.noteSourceMetadataProducer('DEFERRED_V4_BACKLOG');
       return;
@@ -1383,6 +1400,10 @@ export class ImporterLiteRuntime {
       // execution concurrency. In particular, a partially productive
       // horizon must not strand the remaining V5 slots.
       advanceEmptyHorizon = admitted < capacity && emptyProbeTurn < SOURCE_METADATA_EMPTY_PROBE_TURNS;
+      if (admitted) this.sourceMetadataNoCandidateUntil = 0;
+      else if (emptyProbeTurn >= SOURCE_METADATA_EMPTY_PROBE_TURNS) {
+        this.sourceMetadataNoCandidateUntil = Date.now() + SOURCE_METADATA_NO_CANDIDATE_BACKOFF_MS;
+      }
       if (admitted) {
         this.logger.info('Admitted source-backed historical metadata refresh', { admitted });
         // A producer tick that creates executable work must wake the dedicated
