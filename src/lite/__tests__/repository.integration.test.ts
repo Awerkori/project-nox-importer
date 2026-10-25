@@ -1639,7 +1639,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     ]);
   });
 
-  it('lets an abundant materialized P1 import reserve suppress catalog maintenance completely', async () => {
+  it('keeps one deferred historical P1 producer turn while an abundant import reserve is healthy', async () => {
     for (let index = 0; index < 64; index++) {
       await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
         chapterKey: `abundant-${index}`, priority: 'P1', idempotencyKey: `abundant-${index}` });
@@ -1650,10 +1650,48 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
       VALUES('00000000-0000-4000-8000-000000000125'::uuid,'source-b','abundant-b',$1::uuid,'WAITING_ADMISSION')`, [ids.p1a]);
 
-    expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(0);
+    expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(1);
     expect(repo.hasAbundantHistoricalP1Reserve()).toBe(true);
-    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
-      WHERE task_type='CATALOG' AND payload ? 'historicalP1Backfill'`)).rows[0].count).toBe(0);
+    expect((await db.query(`SELECT payload->>'source' AS source,payload->>'deferBehindReadyImport' AS deferred
+      FROM importer_lite_tasks WHERE task_type='CATALOG' AND payload ? 'historicalP1Backfill'`)).rows)
+      .toEqual([{ source: 'source-b', deferred: 'true' }]);
+    expect(await repo.promoteDeferredHistoricalP1Catalog()).toBe(true);
+    expect((await db.query(`SELECT payload->>'deferBehindReadyImport' AS deferred
+      FROM importer_lite_tasks WHERE task_type='CATALOG' AND payload ? 'historicalP1Backfill'`)).rows)
+      .toEqual([{ deferred: null }]);
+  });
+
+  it('rotates the historical P1 producer past a hot source instead of cutting candidates by global recency', async () => {
+    await db.query(`INSERT INTO importer_sources(id) VALUES('source-c'),('source-d'),('source-e')`);
+    for (let index = 0; index < 64; index++) {
+      await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+        chapterKey: `recent-hot-${index}`, priority: 'P1', idempotencyKey: `recent-hot-${index}` });
+    }
+    for (let index = 0; index < 128; index++) {
+      await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+        VALUES($1::uuid,'source-a',$2,$3::uuid,'WAITING_ADMISSION')`, [
+        `00000000-0000-4000-8000-${String(300 + index).padStart(12, '0')}`,
+        `recent-hot-${String(index).padStart(3, '0')}`, ids.p1a,
+      ]);
+    }
+    for (const [index, source] of ['source-b', 'source-c', 'source-d', 'source-e'].entries()) {
+      await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+        VALUES($1::uuid,$2,$3,$4::uuid,'WAITING_ADMISSION')`, [
+        `00000000-0000-4000-8000-${String(500 + index).padStart(12, '0')}`,
+        source, `${source}-older`, ids.p1b,
+      ]);
+    }
+
+    // The first bounded turn samples source-a through source-d. Its four
+    // durable checks finish, then the cursor must reach source-e even though
+    // source-a still owns every globally-newest mapping row.
+    expect(await repo.refillHistoricalP1Catalog(4, 16)).toBe(4);
+    await db.query(`UPDATE importer_lite_tasks SET state='DONE'
+      WHERE task_type='CATALOG' AND payload ? 'historicalP1Backfill'`);
+    expect(await repo.refillHistoricalP1Catalog(4, 16)).toBeGreaterThanOrEqual(1);
+    expect((await db.query(`SELECT payload->>'source' AS source
+      FROM importer_lite_tasks WHERE idempotency_key='lite:catalog:source-e:source-e-older'`)).rows)
+      .toEqual([{ source: 'source-e' }]);
   });
 
   it('does not let a cooled single-source P1 backlog suppress healthy catalog alternatives', async () => {
