@@ -5112,9 +5112,10 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('uses a longer join only for deferred receipts, not pre-upload intents', () => {
-    expect(DURABLE_RESERVATION_BATCH_JOIN_MS).toBe(300);
-    expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBe(600);
+    expect(DURABLE_RESERVATION_BATCH_JOIN_MS).toBe(500);
+    expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBe(900);
     expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBeGreaterThan(DURABLE_RESERVATION_BATCH_JOIN_MS);
+    expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBeLessThan(1_000);
   });
 
   it('flushes reservation arrivals that occur while a prior durable batch is in flight', async () => {
