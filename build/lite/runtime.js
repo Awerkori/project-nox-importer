@@ -1130,11 +1130,12 @@ export class ImporterLiteRuntime {
                     break;
                 this.pendingImmediateCoverVisionWorkIds.delete(task.workId);
                 await this.coverVisionQueue.markRunning(task.workId);
+                const inspectedUrls = [...task.inspectedUrls];
                 try {
                     const workRes = await this.pool.query(`SELECT id, title, slug, aliases, metadata_provenance FROM works WHERE id = $1::uuid LIMIT 1`, [task.workId]);
                     const currentWork = workRes.rows[0];
                     if (!currentWork) {
-                        await this.coverVisionQueue.markNoPtBrFound(task.workId, task.inspectedUrls);
+                        await this.coverVisionQueue.markNoPtBrFound(task.workId, inspectedUrls);
                         continue;
                     }
                     if (isPtBrTitle(currentWork.title) || currentWork.metadata_provenance?.title?.localized_ptbr === true) {
@@ -1143,12 +1144,11 @@ export class ImporterLiteRuntime {
                             attributingSource: currentWork.metadata_provenance?.title?.source || 'already_localized',
                             confidence: 1.0,
                             evidence: { reason: 'ALREADY_LOCALIZED_PTBR' },
-                            inspectedUrls: task.inspectedUrls,
+                            inspectedUrls,
                         });
                         continue;
                     }
                     let matched = false;
-                    const inspectedUrls = [...task.inspectedUrls];
                     for (const cand of task.candidateCovers) {
                         if (this.stopped)
                             break;
@@ -1226,7 +1226,7 @@ export class ImporterLiteRuntime {
                         workId: task.workId,
                         error: taskErr?.message || taskErr,
                     });
-                    await this.coverVisionQueue.markFailed(task.workId, taskErr?.message || String(taskErr), task.inspectedUrls, task.maxAttempts);
+                    await this.coverVisionQueue.markFailed(task.workId, taskErr?.message || String(taskErr), inspectedUrls, task.maxAttempts);
                 }
             }
             this.coverVisionTelemetry.processedWorks += tasks.length;

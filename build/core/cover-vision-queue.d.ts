@@ -36,6 +36,6 @@ export declare class CoverVisionQueue {
         inspectedUrls: string[];
     }): Promise<void>;
     markNoPtBrFound(workId: string, inspectedUrls: string[]): Promise<void>;
-    markFailed(workId: string, error: string, inspectedUrls: string[], maxAttempts?: number): Promise<void>;
+    markFailed(workId: string, error: string, inspectedUrls: string[], maxAttempts?: number, retryDelayMinutes?: number): Promise<void>;
     getTask(workId: string): Promise<CoverVisionWorkTask | null>;
 }
