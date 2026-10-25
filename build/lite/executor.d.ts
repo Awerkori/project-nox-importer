@@ -102,7 +102,12 @@ export declare class LiteExecutor {
      * a measured source may opt into a larger wave. The shared page, byte and
      * upload fences remain the hard aggregate authority.
      */
-    private pageConcurrency;
+    /**
+     * The exact page-wave limit used for a source.  This is intentionally
+     * exposed to the runtime heartbeat: a global configuration value alone is
+     * not evidence that a source-specific cap was applied.
+     */
+    getPageConcurrencyForSource(source: string): number;
     private hasFairAlternative;
     private sourceSlot;
     private routes;

@@ -2460,6 +2460,41 @@ export class ImporterLiteRuntime {
     };
   }
 
+  /**
+   * Only immutable, non-secret release identifiers belong in the durable
+   * heartbeat.  Keeping this adjacent to the effective limits makes an
+   * operator able to distinguish an old artifact from a deliberately lower
+   * environment setting without consulting process logs.
+   */
+  private runtimeFingerprintTelemetry(pipelineTelemetry: any): Record<string, string | null> {
+    const fingerprint = pipelineTelemetry?.runtimeFingerprint || {};
+    const stringValue = (key: string): string | null =>
+      typeof fingerprint[key] === 'string' ? fingerprint[key] : null;
+    return {
+      gitSha: stringValue('gitSha'),
+      artifactSha256: stringValue('artifactSha256'),
+      buildId: stringValue('buildId'),
+      builtAt: stringValue('builtAt'),
+      bootedAt: stringValue('bootedAt'),
+      nodeVersion: stringValue('nodeVersion'),
+    };
+  }
+
+  /** Values after both the runtime and per-source clamps; no configuration secrets. */
+  private pageWaveLimits(): Record<string, unknown> {
+    const runtimeMaximum = Math.max(1, Math.min(8, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY));
+    return {
+      configuredPagesPerChapter: this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY,
+      runtimeMaximumPagesPerChapter: runtimeMaximum,
+      pagesPerChapter: runtimeMaximum,
+      sourcePagesPerChapter: {
+        mangaflix: this.executor.getPageConcurrencyForSource('mangaflix'),
+        manhastro: this.executor.getPageConcurrencyForSource('manhastro'),
+        default: this.executor.getPageConcurrencyForSource('__default__'),
+      },
+    };
+  }
+
   private async emitOperationalSnapshotOnce(): Promise<void> {
     this.heartbeatStartedAt = new Date().toISOString();
     const liveness = this.livenessSnapshot();
@@ -2487,6 +2522,7 @@ export class ImporterLiteRuntime {
       const deferred = {
         runtime: 'lite' as const,
         runtimeInstanceId: this.runtimeInstanceId,
+        runtimeFingerprint: this.runtimeFingerprintTelemetry(pipelineTelemetry),
         leader: this.isRuntimeLeader,
         chapterWorkers: this.chapterWorkerCapacity,
         chapterAdmissionCap: this.operatorChapterAdmissionCap,
@@ -2526,7 +2562,7 @@ export class ImporterLiteRuntime {
             pageDownloads: this.downloads.capacity,
             pageBuffers: this.bufferedPages.capacity,
             pageBufferBytes: this.bufferedPageBytes.capacityBytes,
-            pagesPerChapter: Math.max(1, Math.min(8, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
+            ...this.pageWaveLimits(),
             telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
             uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
           },
@@ -2575,6 +2611,7 @@ export class ImporterLiteRuntime {
     const snapshot = {
       runtime: 'lite' as const,
       runtimeInstanceId: this.runtimeInstanceId,
+      runtimeFingerprint: this.runtimeFingerprintTelemetry(pipelineTelemetry),
       leader: this.isRuntimeLeader,
       chapterWorkers: this.chapterWorkerCapacity,
       chapterAdmissionCap: this.operatorChapterAdmissionCap,
@@ -2625,7 +2662,7 @@ export class ImporterLiteRuntime {
           pageDownloads: this.downloads.capacity,
           pageBuffers: this.bufferedPages.capacity,
           pageBufferBytes: this.bufferedPageBytes.capacityBytes,
-          pagesPerChapter: Math.max(1, Math.min(8, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
+          ...this.pageWaveLimits(),
           telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
           uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
         },

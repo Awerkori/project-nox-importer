@@ -314,6 +314,15 @@ export declare class ImporterLiteRuntime {
      * work, media, or URL identifiers.
      */
     private chapterStageTelemetry;
+    /**
+     * Only immutable, non-secret release identifiers belong in the durable
+     * heartbeat.  Keeping this adjacent to the effective limits makes an
+     * operator able to distinguish an old artifact from a deliberately lower
+     * environment setting without consulting process logs.
+     */
+    private runtimeFingerprintTelemetry;
+    /** Values after both the runtime and per-source clamps; no configuration secrets. */
+    private pageWaveLimits;
     private emitOperationalSnapshotOnce;
     private handle;
     private discover;
