@@ -131,10 +131,14 @@ export declare class ImporterLiteRuntime {
      * and reached 375 MiB RSS with the former 24-body/48-MiB envelope.  The
      * media wall is still the throughput bottleneck, so a wider chapter ramp
      * must share a smaller page wave rather than multiply that allocation
-     * high-water.  Twenty bodies and forty MiB leave room for five chapter
-     * admissions to overlap their upload/DB phases while staying below the
-     * measured allocator-retention cliff.  This profiles only NORMAL; the
-     * existing REDUCED/CRITICAL guard remains authoritative.
+     * high-water. Twenty bodies remain fixed for caps three through five.
+     *
+     * The #833 cap-five sample established a distinct, bounded constraint:
+     * its 40 MiB page budget was fully reserved with five page waiters while
+     * RSS was 318 MiB and YSQL had no waiter. Give only cap five an additional
+     * eight MiB so one more real page can make progress; this does not restore
+     * the prior 24-body/48-MiB cap-three envelope. REDUCED still drops this to
+     * 32 MiB and CRITICAL remains the one-page brake.
      */
     private mediaProfileForChapterAdmissionCap;
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter, sourceMetadataPool?: Pool);

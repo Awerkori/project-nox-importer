@@ -4854,7 +4854,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     gate.release(); gate.release();
   });
 
-  it('shares a bounded media profile across the measured three-to-five chapter ramp without changing global downloads', async () => {
+  it('keeps the cap-five page-body fence while granting its measured byte-budget relief without changing global downloads', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
@@ -4878,7 +4878,10 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refreshManualProtectiveStop();
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(5);
     expect((runtime as any).bufferedPages.capacity).toBe(20);
-    expect((runtime as any).bufferedPageBytes.capacityBytes).toBe(40 * 1024 * 1024);
+    expect((runtime as any).bufferedPageBytes.capacityBytes).toBe(48 * 1024 * 1024);
+    expect((runtime as any).memoryPressureGuard.getNormalMediaProfile()).toEqual({
+      pageBufferCapacity: 20, pageByteCapacity: 48 * 1024 * 1024,
+    });
   });
 
   it('confirms a failed site probe before pausing productive Lite claims', async () => {
