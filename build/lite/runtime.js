@@ -59,7 +59,7 @@ const RUNTIME_LEASE_RENEW_MS = 15_000;
 // idle behind a smaller count-only gate. The independent live-body
 // budget remains authoritative, and RSS pressure can cut both admissions
 // before the container approaches its 512 MiB limit.
-const SAFE_BUFFERED_PAGE_CAP = 24;
+const SAFE_BUFFERED_PAGE_CAP = 48;
 // Stored metadata replay is local and no-network. Keep replay admission
 // responsive, but poll the source-mapping producer less often: it uses the
 // same small YSQL pool as chapter work and only needs to refill a two-task
