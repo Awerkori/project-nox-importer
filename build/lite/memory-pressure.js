@@ -140,6 +140,20 @@ export class LiteMemoryPressureGuard {
             return { pageBufferCapacity: 1, pageByteCapacity: 20 * MIB };
         }
         if (state === 'REDUCED') {
+            // An operator profile at or below the former reduced 48 MiB ceiling
+            // must still have a smaller REDUCED mode.  Otherwise cap 1--3 profiles
+            // (8/48, 16/48 and 24/48) only changed the state label while admitting
+            // exactly the same media load.  Production demonstrated that failure:
+            // cap 2 reached 359 MiB RSS with 50 MiB live external memory, yet its
+            // 16/48 normal profile was identical to REDUCED.  Halve both bounded
+            // gates in that compact operating mode; NORMAL recovery restores the
+            // operator-selected envelope through the existing hysteresis.
+            if (this.normalPageByteCapacity <= 48 * MIB) {
+                return {
+                    pageBufferCapacity: Math.max(1, Math.floor(this.normalPageBufferCapacity / 2)),
+                    pageByteCapacity: Math.min(this.normalPageByteCapacity, 32 * MIB),
+                };
+            }
             return {
                 // RSS can retain allocator arenas after a completed media wave even
                 // when the live page payload is well below the reduced byte fence.

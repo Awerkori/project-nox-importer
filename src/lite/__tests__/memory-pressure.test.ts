@@ -57,6 +57,17 @@ describe('LiteMemoryPressureGuard', () => {
     expect(guard.sample(memory(320))).toMatchObject({ state: 'NORMAL', pageBufferCapacity: 48, pageByteCapacity: 80 * mib });
   });
 
+  it('makes a compact cap-aware profile materially smaller when RSS enters REDUCED', () => {
+    const pages = new AsyncSemaphore(48, 'test_lite_memory_compact_reduced_profile');
+    const bytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
+    const guard = new LiteMemoryPressureGuard(pages, bytes, 48);
+
+    guard.setNormalMediaProfile({ pageBufferCapacity: 16, pageByteCapacity: 48 * mib });
+    expect(guard.sample(memory(320))).toMatchObject({ state: 'NORMAL', pageBufferCapacity: 16, pageByteCapacity: 48 * mib });
+    expect(guard.sample(memory(355))).toMatchObject({ state: 'REDUCED', pageBufferCapacity: 8, pageByteCapacity: 32 * mib });
+    expect(guard.sample(memory(320))).toMatchObject({ state: 'NORMAL', pageBufferCapacity: 16, pageByteCapacity: 48 * mib });
+  });
+
   it('collects once more before retained RSS escalates REDUCED into CRITICAL', () => {
     const pages = new AsyncSemaphore(20, 'test_lite_memory_second_gc');
     const bytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
