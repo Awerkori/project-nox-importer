@@ -92,6 +92,7 @@ export declare class ImporterLiteRuntime {
     private leaseRenewError;
     private heartbeatStartedAt;
     private heartbeatCompletedAt;
+    private lastFullOperationalSnapshotAt;
     private operationalSnapshotRunning;
     private readonly workerLiveness;
     private sitePausedUntil;

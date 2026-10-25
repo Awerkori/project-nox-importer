@@ -294,6 +294,10 @@ export class ImporterLiteRuntime {
     leaseRenewError = null;
     heartbeatStartedAt = null;
     heartbeatCompletedAt = null;
+    // Full snapshots aggregate several large task-table views. Retain the
+    // timestamp of the last completed one so the compact heartbeat is explicit
+    // about how fresh those optional diagnostics are while chapters are busy.
+    lastFullOperationalSnapshotAt = null;
     // A full operational snapshot includes optional aggregate diagnostics. It
     // must never overlap itself when the shared two-connection pool is slow:
     // concurrent timer turns otherwise amplify the very YSQL wait they report.
@@ -2340,10 +2344,19 @@ export class ImporterLiteRuntime {
         this.logger.info('Lite liveness', {
             leader: this.isRuntimeLeader, ...liveness,
         });
-        if (this.pool.waitingCount > 0) {
-            // Do not run four diagnostic scans while the small direct pool is busy.
-            // Keep a tiny durable liveness marker instead: an old full snapshot must
-            // never be mistaken for a stopped runtime during productive traffic.
+        const snapshotDeferred = this.pool.waitingCount > 0
+            ? 'POOL_BUSY'
+            : this.chapterAdmissionGate.active > 0
+                ? 'CHAPTER_BUSY'
+                : null;
+        if (snapshotDeferred) {
+            // Do not run four diagnostic scans while the small direct pool is busy,
+            // nor race them against an admitted chapter between its short database
+            // phases. The latter was a check-then-race: a snapshot could start with
+            // no waiter and occupy every seat before the next chapter commit.
+            // Keep a tiny durable liveness marker instead; a clean idle turn resumes
+            // the full aggregate view without delaying P1/P2 or publication work,
+            // and an old full snapshot cannot be mistaken for a stopped runtime.
             const pipelineTelemetry = telemetryCollector.getSnapshotReport();
             const deferred = {
                 runtime: 'lite',
@@ -2353,7 +2366,8 @@ export class ImporterLiteRuntime {
                 chapterAdmissionCap: this.operatorChapterAdmissionCap,
                 metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
                 manualProtectiveStop: this.manualProtectiveStop,
-                snapshotDeferred: 'POOL_BUSY',
+                snapshotDeferred,
+                lastFullOperationalSnapshotAt: this.lastFullOperationalSnapshotAt,
                 ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
                 sourceMetadataYsql: {
                     isolated: this.sourceMetadataPool !== this.pool,
@@ -2404,6 +2418,7 @@ export class ImporterLiteRuntime {
             this.logger.info('Lite operational heartbeat deferred', deferred);
             await this.pool.query(`INSERT INTO settings(key,value) VALUES('importer_heartbeat',$1)
          ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [JSON.stringify(deferred)]);
+            this.heartbeatCompletedAt = new Date().toISOString();
             return;
         }
         const [tasks, progress, blocked, sourceHealth, metadataProduct] = await Promise.all([
@@ -2426,12 +2441,14 @@ export class ImporterLiteRuntime {
             active: (storageMetrics.bots || []).reduce((sum, bot) => sum + Number(bot.active || 0), 0),
             rateLimits429: (storageMetrics.bots || []).reduce((sum, bot) => sum + Number(bot.rateLimits429 || 0), 0),
         } : null;
+        const fullSnapshotAt = new Date().toISOString();
         const snapshot = {
             runtime: 'lite',
             runtimeInstanceId: this.runtimeInstanceId,
             leader: this.isRuntimeLeader,
             chapterWorkers: this.chapterWorkerCapacity,
             chapterAdmissionCap: this.operatorChapterAdmissionCap,
+            lastFullOperationalSnapshotAt: fullSnapshotAt,
             metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
             manualProtectiveStop: this.manualProtectiveStop,
             publishedLastMinute: progress.publishedLastMinute,
@@ -2500,6 +2517,7 @@ export class ImporterLiteRuntime {
         // never an authority for leadership or task eligibility.
         await this.pool.query(`INSERT INTO settings(key,value) VALUES('importer_heartbeat',$1)
        ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [JSON.stringify({ ...snapshot, observedAt: new Date().toISOString() })]);
+        this.lastFullOperationalSnapshotAt = fullSnapshotAt;
         this.heartbeatCompletedAt = new Date().toISOString();
     }
     async handle(task, workerId) {
