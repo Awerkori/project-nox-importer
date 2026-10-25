@@ -384,6 +384,13 @@ export class LiteExecutor {
   private sourceCapacity(source: string): number {
     const configured = SOURCE_CONCURRENCY_LIMITS[source]?.maxChapters ?? 2;
     if (this.fairDemandSources.size <= 1 || !this.fairDemandSources.has(source)) return configured;
+    let totalDemand = 0;
+    for (const s of this.fairDemandSources) {
+      totalDemand += SOURCE_CONCURRENCY_LIMITS[s]?.maxChapters ?? 2;
+    }
+    if (this.chapterWorkerCapacity >= totalDemand) {
+      return configured;
+    }
     const fairShare = Math.max(1, Math.ceil(Math.max(1, this.chapterWorkerCapacity) /
       Math.min(5, this.fairDemandSources.size)));
     return Math.min(configured, fairShare);
