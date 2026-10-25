@@ -75,6 +75,7 @@ export declare class ImporterLiteRuntime {
     private readonly metadataReplayV4WorkTails;
     private sourcePoliciesCache;
     private sourceMetadataProducer;
+    private historicalP1Producer;
     private lastSourceRecoveryProbeAt;
     private lastUploadOutcomeRecoveryAt;
     private lastUnknownUploadRecoverySeenAt;

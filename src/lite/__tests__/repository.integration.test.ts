@@ -2798,6 +2798,35 @@ describe('LiteRepository against the additive Lite migration', () => {
     }
   });
 
+  it('records bounded historical P1 producer progress in the heartbeat without changing admission', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { WORKER_ID: 'snapshot-p1-producer', IMPORTER_USER_ID: ids.staff, DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, TELEGRAM_MEDIA_CONCURRENCY: 1,
+        UPLOAD_RATE_LIMIT_BYTES_PER_SEC: 1, LITE_CHAPTER_WORKERS: 1,
+        MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
+    );
+    const queue = (runtime as any).queue;
+    queue.refillHistoricalP1Catalog = vi.fn().mockResolvedValue(2);
+    queue.promoteDeferredHistoricalP1Catalog = vi.fn().mockResolvedValue(true);
+    (runtime as any).isRuntimeLeader = true;
+
+    await (runtime as any).refillHistoricalP1Catalog();
+    expect((runtime as any).historicalP1Producer).toEqual({
+      observedAt: expect.any(String), admitted: 2, promoted: true, error: null,
+    });
+
+    await (runtime as any).emitOperationalSnapshot();
+    const stored = await db.query(`SELECT value FROM settings WHERE key='importer_heartbeat'`);
+    const heartbeat = typeof stored.rows[0]?.value === 'string'
+      ? JSON.parse(stored.rows[0].value)
+      : stored.rows[0]?.value;
+    expect(heartbeat.sourceFairness.historicalP1Producer).toMatchObject({
+      admitted: 2, promoted: true, error: null,
+    });
+  });
+
   it('fences a legacy runtime and Lite during cutover without stranding an in-flight durable task', async () => {
     // This is deliberately cross-runtime rather than a second Lite instance:
     // a rolling DIScloud deployment must never leave both v1 and Lite able to
