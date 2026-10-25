@@ -82,6 +82,7 @@ export declare class LiteExecutor {
     private readonly receiptBatcher;
     private readonly reservationBatcher;
     private fairDemandSources;
+    private effectiveChapterAdmissionCap;
     constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined, pageBytes?: PageByteBudget);
     /**
      * A bounded runtime sample of sources with ready imports. It only controls
@@ -89,6 +90,8 @@ export declare class LiteExecutor {
      * existence, priority and work-level round-robin.
      */
     setFairSourceDemand(sources: Iterable<string>): void;
+    /** Keep local source shares aligned with the runtime's durable chapter cap. */
+    setEffectiveChapterAdmissionCap(capacity: number): void;
     getFairSourceDemand(): string[];
     /** Aggregate-only batch evidence for the existing heartbeat. */
     getUploadBatchSnapshot(): {

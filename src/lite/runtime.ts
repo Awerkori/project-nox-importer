@@ -430,6 +430,7 @@ export class ImporterLiteRuntime {
         const previousCap = this.operatorChapterAdmissionCap;
         this.operatorChapterAdmissionCap = nextCap;
         this.chapterAdmissionGate.setCapacity(nextCap);
+        this.executor.setEffectiveChapterAdmissionCap(nextCap);
         this.memoryPressureGuard.setNormalMediaProfile(this.mediaProfileForChapterAdmissionCap(nextCap));
         this.logger.info('Adjusted Lite chapter admission cap', {
           previousCap, nextCap, configuredWorkers: this.chapterWorkerCapacity,

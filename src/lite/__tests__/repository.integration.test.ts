@@ -1844,6 +1844,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(fallback.capacity).toBe(1);
   });
 
+  it('uses the effective admission cap, not configured workers, for source shares', () => {
+    const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
+      new AsyncSemaphore(24, 'effective-cap-downloads'), 4, new AsyncSemaphore(48, 'effective-cap-buffers'), new HostRateLimiter(2), 20);
+    executor.setFairSourceDemand(['mangaflix', 'source-b']);
+    const mangaFlix = (executor as any).sourceSlot('mangaflix') as AsyncSemaphore;
+    expect(mangaFlix.capacity).toBe(8);
+
+    executor.setEffectiveChapterAdmissionCap(3);
+    expect(mangaFlix.capacity).toBe(2);
+    expect([mangaFlix.tryAcquire(), mangaFlix.tryAcquire(), mangaFlix.tryAcquire()]).toEqual([true, true, false]);
+    mangaFlix.release();
+    mangaFlix.release();
+  });
+
   it('yields a source-capped claim without spending a retry attempt', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'yield-source', priority: 'P1', idempotencyKey: 'yield-source' });
@@ -4741,13 +4755,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`INSERT INTO settings(key,value) VALUES('importer_chapter_admission_cap','4')`);
     await (runtime as any).refreshManualProtectiveStop();
     const gate = (runtime as any).chapterAdmissionGate;
+    const executor = (runtime as any).executor as LiteExecutor;
+    executor.setFairSourceDemand(['mangaflix', 'source-b']);
     expect(gate.capacity).toBe(4);
+    expect((executor as any).sourceSlot('mangaflix').capacity).toBe(2);
     expect(Array.from({ length: 4 }, () => gate.tryAcquire())).toEqual([true, true, true, true]);
     expect(gate.tryAcquire()).toBe(false);
 
     await db.query(`UPDATE settings SET value='2' WHERE key='importer_chapter_admission_cap'`);
     await (runtime as any).refreshManualProtectiveStop();
     expect(gate.capacity).toBe(2);
+    expect((executor as any).sourceSlot('mangaflix').capacity).toBe(1);
     expect(gate.tryAcquire()).toBe(false);
     gate.release(); gate.release(); gate.release();
     expect(gate.tryAcquire()).toBe(true);

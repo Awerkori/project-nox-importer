@@ -342,6 +342,11 @@ export class LiteExecutor {
     receiptBatcher;
     reservationBatcher;
     fairDemandSources = new Set();
+    // The configured worker count is an upper bound only. The durable runtime
+    // cap can be lower during a controlled ramp, and source fairness must use
+    // that effective chapter capacity or one fast source can occupy every
+    // admitted slot despite a healthy alternative being ready.
+    effectiveChapterAdmissionCap;
     // Held from byte download through Telegram acknowledgement. Receipt
     // persistence retains only scalar metadata, never image bytes, so it can
     // overlap the next bounded page wave without weakening the memory budget.
@@ -362,6 +367,7 @@ export class LiteExecutor {
         this.pageBytes = pageBytes;
         this.receiptBatcher = new UploadReceiptBatcher(queue);
         this.reservationBatcher = new UploadReservationBatcher(queue);
+        this.effectiveChapterAdmissionCap = Math.max(1, Math.floor(chapterWorkerCapacity));
     }
     /**
      * A bounded runtime sample of sources with ready imports. It only controls
@@ -370,6 +376,15 @@ export class LiteExecutor {
      */
     setFairSourceDemand(sources) {
         this.fairDemandSources = new Set([...sources].filter(Boolean));
+        for (const [source, slot] of this.sourceSlots)
+            slot.setCapacity(this.sourceCapacity(source));
+    }
+    /** Keep local source shares aligned with the runtime's durable chapter cap. */
+    setEffectiveChapterAdmissionCap(capacity) {
+        const next = Math.max(1, Math.floor(capacity));
+        if (next === this.effectiveChapterAdmissionCap)
+            return;
+        this.effectiveChapterAdmissionCap = next;
         for (const [source, slot] of this.sourceSlots)
             slot.setCapacity(this.sourceCapacity(source));
     }
@@ -386,10 +401,10 @@ export class LiteExecutor {
         for (const s of this.fairDemandSources) {
             totalDemand += SOURCE_CONCURRENCY_LIMITS[s]?.maxChapters ?? 2;
         }
-        if (this.chapterWorkerCapacity >= totalDemand) {
+        if (this.effectiveChapterAdmissionCap >= totalDemand) {
             return configured;
         }
-        const fairShare = Math.max(1, Math.ceil(Math.max(1, this.chapterWorkerCapacity) /
+        const fairShare = Math.max(1, Math.ceil(this.effectiveChapterAdmissionCap /
             Math.min(5, this.fairDemandSources.size)));
         return Math.min(configured, fairShare);
     }
