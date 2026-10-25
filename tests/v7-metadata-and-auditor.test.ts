@@ -420,9 +420,9 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
   it('19. runtime and discloud config protect network throughput within the container native-memory budget', () => {
     const discloudCfg = readFileSync(resolve(__dirname, '../discloud.config'), 'utf-8');
     // The Lite media path cannot issue more than 24 global page downloads,
-    // and metadata remains bounded. Sixteen workers retain DNS/file capacity
-    // without the observed 32-thread native footprint in 512 MiB.
-    expect(discloudCfg).toContain('UV_THREADPOOL_SIZE=16');
+    // and metadata remains bounded. Eight workers retain DNS/file capacity
+    // without the observed retained native RSS in 512 MiB.
+    expect(discloudCfg).toContain('UV_THREADPOOL_SIZE=8');
 
     const indexSrc = readFileSync(resolve(__dirname, '../src/index.ts'), 'utf-8');
     expect(indexSrc).toContain("dns.setDefaultResultOrder?.('ipv4first')");
