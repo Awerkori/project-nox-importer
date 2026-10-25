@@ -330,6 +330,16 @@ export class ImporterLiteRuntime {
     admitted: 0,
     error: null as string | null,
   };
+  // This is deliberately in-memory telemetry for the bounded P1 producer.
+  // Its durable cursor remains the source of truth; recording each recovery
+  // turn lets an operator distinguish a deployed-but-idle cursor from a
+  // runtime that never received the source-fairness implementation.
+  private historicalP1Producer = {
+    observedAt: null as string | null,
+    admitted: 0,
+    promoted: false,
+    error: null as string | null,
+  };
   private lastSourceRecoveryProbeAt = 0;
   private lastUploadOutcomeRecoveryAt = 0;
   // Watermark for the cold UNKNOWN-receipt proof. The indexed newest-row
@@ -842,8 +852,20 @@ export class ImporterLiteRuntime {
       // this promotes only one previously-deferred P1 producer check; it does
       // not change STAFF/P0/P1/P2 ordering or chapter admission capacity.
       const promoted = await this.queue.promoteDeferredHistoricalP1Catalog(this.executor.getFairSourceDemand());
+      this.historicalP1Producer = {
+        observedAt: new Date().toISOString(),
+        admitted,
+        promoted,
+        error: null,
+      };
       if (admitted || promoted) this.logger.info('Advanced bounded historical P1 catalog producer', { admitted, promoted });
     } catch (error: any) {
+      this.historicalP1Producer = {
+        observedAt: new Date().toISOString(),
+        admitted: 0,
+        promoted: false,
+        error: String(error?.message || 'UNKNOWN').slice(0, 240),
+      };
       this.logger.warn('Historical P1 catalog refill failed', { error: error?.message });
     } finally {
       this.historicalP1BackfillGate.release();
@@ -2593,6 +2615,7 @@ export class ImporterLiteRuntime {
         sourceMetadataProducer: this.sourceMetadataProducer,
         sourceFairness: {
           effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
+          historicalP1Producer: this.historicalP1Producer,
         },
         memoryPressure: liveness.memoryPressure,
         // In-memory stage telemetry is safe to sample while the two YSQL
@@ -2729,6 +2752,7 @@ export class ImporterLiteRuntime {
         // makes a production heartbeat prove that source shares honor the
         // guarded admission cap during a controlled ramp.
         effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
+        historicalP1Producer: this.historicalP1Producer,
       },
       liveness,
       site: this.lastSiteProbe,
