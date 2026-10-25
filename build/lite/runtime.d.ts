@@ -307,6 +307,13 @@ export declare class ImporterLiteRuntime {
     private probeSharedResources;
     /** A small diagnostic snapshot; it deliberately skips contention and scans. */
     private emitOperationalSnapshot;
+    /**
+     * Keep per-chapter timing useful during a busy wave without serialising the
+     * full collector report (or issuing another database query). All values are
+     * pre-aggregated, bounded in process, and intentionally contain no task,
+     * work, media, or URL identifiers.
+     */
+    private chapterStageTelemetry;
     private emitOperationalSnapshotOnce;
     private handle;
     private discover;

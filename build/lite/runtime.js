@@ -2345,6 +2345,32 @@ export class ImporterLiteRuntime {
             this.operationalSnapshotRunning = false;
         }
     }
+    /**
+     * Keep per-chapter timing useful during a busy wave without serialising the
+     * full collector report (or issuing another database query). All values are
+     * pre-aggregated, bounded in process, and intentionally contain no task,
+     * work, media, or URL identifiers.
+     */
+    chapterStageTelemetry(pipelineTelemetry) {
+        const profile = pipelineTelemetry?.jobProfile || {};
+        const stages = profile.stages || {};
+        const pick = (name) => stages[name] || null;
+        return {
+            completed: Number(profile.totalCompleted || 0),
+            totalDuration: profile.totalDuration || null,
+            wallTimeBreakdownMs: profile.wallTimeBreakdownMs || null,
+            stages: {
+                sourceFetch: pick('sourceFetch'),
+                pageResolution: pick('pageResolution'),
+                download: pick('download'),
+                telegramUpload: pick('telegramUpload'),
+                dbPublish: pick('dbPublish'),
+                rateLimitWait: pick('rateLimitWait'),
+                semaphoreWait: pick('semaphoreWait'),
+                otherWait: pick('otherWait'),
+            },
+        };
+    }
     async emitOperationalSnapshotOnce() {
         this.heartbeatStartedAt = new Date().toISOString();
         const liveness = this.livenessSnapshot();
@@ -2421,6 +2447,7 @@ export class ImporterLiteRuntime {
                     pageBufferLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_buffers,
                     pageByteBudget: this.bufferedPageBytes.snapshot(),
                     uploadBatches: this.executor.getUploadBatchSnapshot(),
+                    chapterStages: this.chapterStageTelemetry(pipelineTelemetry),
                 },
                 sourceRate: this.sourceRateLimiter.getSummary(),
                 liveness,
@@ -2516,6 +2543,7 @@ export class ImporterLiteRuntime {
                 pageBufferLimiter: pipelineTelemetry.limitersAudit?.lite_global_page_buffers,
                 pageByteBudget: this.bufferedPageBytes.snapshot(),
                 uploadBatches: this.executor.getUploadBatchSnapshot(),
+                chapterStages: this.chapterStageTelemetry(pipelineTelemetry),
             },
             telegram, sourceRate: this.sourceRateLimiter.getSummary(), diversity,
             sourceFairness: { readySources: fairSources, count: fairSources.length },
