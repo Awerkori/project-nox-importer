@@ -1958,6 +1958,20 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual({ state: 'RETRY_WAIT', reason: 'SOURCE_RATE_LIMITED' });
   });
 
+  it('uses the due-only source-cooldown index for the bounded recovery sweep', async () => {
+    const query = vi.fn((text: string, values?: unknown[]) => db.query(text, values));
+    const instrumentedPool = {
+      query,
+      connect: async () => ({ query, release: () => undefined }),
+    } as unknown as Pool;
+    const observed = new LiteRepository(instrumentedPool);
+    await observed.reconcile(1, { recoverUploadOutcomes: false, recoverSourceCooldowns: true });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('IndexScan(task importer_lite_tasks_source_cooldown_due_idx)'),
+      expect.any(Array),
+    );
+  });
+
   it('keeps an import ready when a confirmed healthy alternative can satisfy the same chapter', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'fallback-survives-cooldown', priority: 'P1', idempotencyKey: 'fallback-survives-cooldown',
