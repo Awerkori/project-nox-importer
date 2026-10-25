@@ -396,6 +396,17 @@ export class LiteExecutor {
     return Math.min(configured, fairShare);
   }
 
+  /**
+   * Page waves remain source-scoped even when the runtime permits a wider
+   * maximum.  Unknown sources retain the established six-page default; only
+   * a measured source may opt into a larger wave. The shared page, byte and
+   * upload fences remain the hard aggregate authority.
+   */
+  private pageConcurrency(source: string): number {
+    const sourceLimit = SOURCE_CONCURRENCY_LIMITS[source]?.maxPagesPerChapter ?? 6;
+    return Math.max(1, Math.min(this.perChapterPageConcurrency, sourceLimit));
+  }
+
   private hasFairAlternative(source: string): boolean {
     return this.fairDemandSources.size > 1 &&
       [...this.fairDemandSources].some((candidate) => candidate !== source);
@@ -680,7 +691,7 @@ export class LiteExecutor {
         let mediaIds: string[];
         const mediaPipelineStartedAt = performance.now();
         try {
-          mediaIds = await mapBounded(urls, this.perChapterPageConcurrency, async (url, index) => {
+          mediaIds = await mapBounded(urls, this.pageConcurrency(route.source), async (url, index) => {
           const position = index + 1;
           const receipt = uploadReceipts.get(position);
           if (receipt?.state === 'PERSISTED' && receipt.storageReady === true && Number(receipt.bytes) > 0 &&

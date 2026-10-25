@@ -427,10 +427,10 @@ export class ImporterLiteRuntime {
         this.chapterWorkerCapacity = Math.max(1, Math.min(config.LITE_CHAPTER_WORKERS ?? 1, config.MAX_CONCURRENT_CHAPTERS, config.TESTED_CONCURRENCY_CEILING));
         this.operatorChapterAdmissionCap = this.chapterWorkerCapacity;
         this.chapterAdmissionGate = new AsyncSemaphore(this.chapterWorkerCapacity, 'lite_chapter_admission');
-        // Five independent MangaFlix chapter waves can fill the measured 24-page
-        // fence while each remains capped at six pages. The regressed 32/8 ramp
-        // widened the global fence itself; this controlled ramp does not.
-        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(6, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter, this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes);
+        // MangaFlix may use an eight-page wave, while every other source retains
+        // its source-scoped page cap. The hard global download/buffer/byte fences
+        // remain unchanged; this only fills existing unused media permits.
+        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(8, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter, this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes);
         this.dedupe = new DeduplicationEngine(catalogClient);
         this.historicalMetadataDedupe = sourceMetadataPool === pool
             ? this.dedupe
@@ -2437,7 +2437,7 @@ export class ImporterLiteRuntime {
                         pageDownloads: this.downloads.capacity,
                         pageBuffers: this.bufferedPages.capacity,
                         pageBufferBytes: this.bufferedPageBytes.capacityBytes,
-                        pagesPerChapter: Math.max(1, Math.min(6, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
+                        pagesPerChapter: Math.max(1, Math.min(8, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
                         telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
                         uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
                     },
@@ -2533,7 +2533,7 @@ export class ImporterLiteRuntime {
                     pageDownloads: this.downloads.capacity,
                     pageBuffers: this.bufferedPages.capacity,
                     pageBufferBytes: this.bufferedPageBytes.capacityBytes,
-                    pagesPerChapter: Math.max(1, Math.min(6, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
+                    pagesPerChapter: Math.max(1, Math.min(8, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)),
                     telegramUploads: this.config.TELEGRAM_MEDIA_CONCURRENCY,
                     uploadBytesPerSecond: this.config.UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
                 },

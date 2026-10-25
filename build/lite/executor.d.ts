@@ -96,6 +96,13 @@ export declare class LiteExecutor {
         receipts: UploadBatchSnapshot;
     };
     private sourceCapacity;
+    /**
+     * Page waves remain source-scoped even when the runtime permits a wider
+     * maximum.  Unknown sources retain the established six-page default; only
+     * a measured source may opt into a larger wave. The shared page, byte and
+     * upload fences remain the hard aggregate authority.
+     */
+    private pageConcurrency;
     private hasFairAlternative;
     private sourceSlot;
     private routes;

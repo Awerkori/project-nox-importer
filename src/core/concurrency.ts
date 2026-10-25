@@ -188,11 +188,14 @@ export function resolveChapterUploadConcurrency(chapterConcurrency: number, medi
 }
 
 export const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig> = {
-  // Production throughput evidence: MangaFlix is the only selected healthy
-  // P1 route, while the 24-request/page-body fences retain spare capacity.
-  // Eight six-page chapter waves can fill gaps between DB/upload phases, but
-  // still cannot widen the global page, byte, Telegram, or YSQL limits.
-  mangaflix: { maxChapters: 8, maxPagesPerChapter: 6 },
+  // Production throughput evidence: MangaFlix is a healthy P1 route while
+  // the 24-request/page-body fences retain spare capacity. Its source slot
+  // can fill gaps between DB/upload phases without widening those global caps.
+  // The Lite media profile shows the 24 global page permits are underused
+  // while MangaFlix's long chapters spend their wall time in page waves.
+  // Eight pages lets three admitted chapters occupy that existing hard fence;
+  // it never widens the global download, buffer, byte, Telegram, or YSQL cap.
+  mangaflix: { maxChapters: 8, maxPagesPerChapter: 8 },
   manhastro: { maxChapters: 3, maxPagesPerChapter: 6 },
   mangotoons: { maxChapters: 2, maxPagesPerChapter: 4 },
   taimumangas: { maxChapters: 3, maxPagesPerChapter: 6 },
