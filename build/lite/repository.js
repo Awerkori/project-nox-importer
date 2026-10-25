@@ -2500,7 +2500,7 @@ export class LiteRepository {
             // refreshed work first, earliest canonical chapter within each work),
             // then a few routes per source. This runs only in the 30-second
             // reconciler and refreshes the normal ready-work projection.
-            const sourceCooldownRecovery = recoverSourceCooldowns ? await client.query(`WITH due_candidates AS (
+            const sourceCooldownRecovery = recoverSourceCooldowns ? await client.query(`/*+ IndexScan(task importer_lite_tasks_source_cooldown_due_idx) */ WITH due_candidates AS (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,
              row_number() OVER (PARTITION BY task.work_key
