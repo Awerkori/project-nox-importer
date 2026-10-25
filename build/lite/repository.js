@@ -94,7 +94,6 @@ export class LiteRepository {
     // CPU consumer (~22%) while the reserve held thousands of executable rows.
     // An abundant answer is stable for minutes, so reuse it briefly; a low
     // reserve is never cached and is always re-measured on the next turn.
-    historicalP1ReserveCheckedAt = 0;
     manifestP1ReserveCache = null;
     hasAbundantHistoricalP1Reserve() { return this.historicalP1ReserveAbundant; }
     /**
@@ -1566,14 +1565,16 @@ export class LiteRepository {
      * The v1 catalog contains durable, confirmed source/work mappings that may
      * predate Lite's chapter-manifest table.  They are evidence worth checking,
      * but are not evidence that a numeric chapter gap exists.  This bounded
-     * admission turns only a few such mappings into P1 catalog passes when the
-     * real P1 reserve becomes low.  Cataloging remains outside the claim SQL;
-     * its confirmed manifest is what may subsequently create IMPORT_CHAPTER
-     * tasks.
+     * admission turns only a few such mappings into P1 catalog passes.  A deep
+     * executable reserve keeps those passes deferred, rather than suppressing
+     * them entirely: that small producer lane is what lets an older, healthy
+     * source eventually materialize a confirmed manifest. Cataloging remains
+     * outside the claim SQL; its confirmed manifest is what may subsequently
+     * create IMPORT_CHAPTER tasks.
      *
-     * The inner window is deliberately small and indexed by the legacy mapping
-     * status.  Limiting each source to two candidates prevents a large legacy
-     * mapping set from monopolising the next P1 refill.
+     * A durable source cursor probes only a few providers per turn.  This avoids
+     * letting the newest rows of a giant mapping set hide older providers before
+     * source fairness can run, without making the claim path scan the catalog.
      */
     async refillHistoricalP1Catalog(readyFloor = 64, batchLimit = 16) {
         const floor = Math.max(1, Math.min(512, readyFloor));
@@ -1586,23 +1587,11 @@ export class LiteRepository {
         // need to materialize their alternatives. Bound the eligibility check as
         // well; it remains outside the claim path.
         const abundantFloor = Math.min(512, Math.max(64, floor * 4));
-        if (this.historicalP1ReserveAbundant
-            && Date.now() - this.historicalP1ReserveCheckedAt < EXECUTABLE_P1_RESERVE_CACHE_MS)
-            return 0;
         this.historicalP1ReserveAbundant = false;
-        // Fast check first using the shared pool WITHOUT holding an open transaction
-        const fastReserve = await this.db.query(`SELECT count(*)::int AS count FROM (
-      SELECT 1 FROM importer_lite_tasks t
-      WHERE t.state='READY' AND t.monitoring=false AND t.priority=2 AND t.task_type='IMPORT_CHAPTER'
-        AND t.next_run_at<=now()
-      LIMIT $1
-    ) AS bounded_ready`, [abundantFloor]);
-        const currentFast = Number(fastReserve.rows[0]?.count || 0);
-        if (currentFast >= abundantFloor) {
-            this.historicalP1ReserveAbundant = true;
-            this.historicalP1ReserveCheckedAt = Date.now();
-            return 0;
-        }
+        // The old abundance fast-path returned here.  That saved one transaction
+        // but also made a deep hot backlog permanently invisible to the bounded
+        // source producer.  The single transaction below is now the only reserve
+        // probe and also serializes the small durable source cursor.
         const client = await this.db.connect();
         try {
             await client.query('BEGIN');
@@ -1613,16 +1602,7 @@ export class LiteRepository {
         LIMIT $1
       ) AS bounded_ready`, [abundantFloor]);
             const current = Number(reserve.rows[0]?.count || 0);
-            if (current >= abundantFloor) {
-                // Do not spend the shared pool on catalog selection or promotion
-                // while hundreds of P1 chapters are already executable. When this
-                // reserve drains, the next recovery turn automatically resumes the
-                // bounded, source-diverse producer.
-                this.historicalP1ReserveAbundant = true;
-                this.historicalP1ReserveCheckedAt = Date.now();
-                await client.query('COMMIT');
-                return 0;
-            }
+            this.historicalP1ReserveAbundant = current >= abundantFloor;
             // A large hot P1 import reserve is productive work.  Keep only a small,
             // source-diverse historical producer reserve while it is healthy, but
             // mark that reserve as deferred: it must not take a chapter worker or a
@@ -1662,53 +1642,99 @@ export class LiteRepository {
             // second scheduler and not a scan in the claim path. It gives genuine
             // alternatives a chance to materialize while a hot source is healthy.
             const limit = Math.min(maximum - pending, target - activeSources);
-            const candidates = await client.query(`WITH bounded AS (
-          SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id
-          FROM importer_work_mappings m
-          JOIN importer_sources s ON s.id=m.source
-          LEFT JOIN importer_lite_source_health h ON h.source=m.source
-          WHERE m.work_id IS NOT NULL
-            AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-            AND s.enabled=true
-            AND ${sourceExecutionEligibilitySql('s')}
-            -- This is P1 repair for an existing canonical mapping, not P2
-            -- discovery.  An operator may disable new-work discovery while
-            -- still allowing an already-mapped work to fill its chapters.
-            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-            AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-            AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
-            AND NOT EXISTS (
-              SELECT 1 FROM importer_lite_tasks t
-              WHERE t.idempotency_key='lite:catalog:' || m.source || ':' || m.source_work_id
-            )
-            -- An old failed check stays durable for diagnosis and bounded
-            -- retry, but cannot consume every source seat in the producer
-            -- lane.  Never queue another mapping from a source that already
-            -- has a pending historical check: use this small opportunity to
-            -- ask a different healthy source for a manifest instead.
-            AND NOT EXISTS (
-              SELECT 1 FROM importer_lite_tasks t
-              WHERE t.state IN ('READY','RUNNING','RETRY_WAIT')
-                AND t.priority=2 AND t.task_type='CATALOG'
-                AND t.payload ? 'historicalP1Backfill'
-                AND t.payload->>'source'=m.source
-            )
-          ORDER BY m.updated_at DESC,m.id DESC
-          LIMIT $1
-        ), fair AS (
-          SELECT *,row_number() OVER (PARTITION BY source ORDER BY updated_at DESC,id DESC) AS source_position
-          FROM bounded
+            // Walk sources durably instead of taking a global newest-mapping window.
+            // The latter let a recent MangaFlix/Manhastro burst fill all 128 rows
+            // before the per-source rank even ran. Up to six indexed source probes
+            // fill at most four producer seats per recovery turn; they never run in
+            // claim SQL.
+            await client.query(`INSERT INTO importer_lite_metadata_source_cursor(cursor_name,last_source)
+        VALUES('historical_p1_catalog',NULL) ON CONFLICT(cursor_name) DO NOTHING`);
+            const cursor = await client.query(`
+        SELECT last_source FROM importer_lite_metadata_source_cursor
+        WHERE cursor_name='historical_p1_catalog' FOR UPDATE`);
+            const lastSource = cursor.rows[0]?.last_source || null;
+            const eligibleSourceSelect = (cursorPredicate) => `
+        SELECT s.id AS source
+        FROM importer_sources s
+        LEFT JOIN importer_lite_source_health h ON h.source=s.id
+        WHERE s.enabled=true AND ${cursorPredicate}
+          AND ${sourceExecutionEligibilitySql('s')}
+          AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+          AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+          AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+        ORDER BY s.id LIMIT $2`;
+            // Probe a tiny surplus of sources: a durable delayed retry can occupy a
+            // source's producer seat, but must not make the next healthy source wait
+            // for another recovery interval. Only successfully inspected sources
+            // advance the cursor below, so this never skips the remainder.
+            const sourceProbeLimit = Math.min(16, Math.max(limit, target) + 2);
+            const sourceProbe = await client.query(`
+        WITH after_cursor AS (
+          ${eligibleSourceSelect(lastSource ? 's.id>$1::text' : '$1::text IS NULL')}
+        ), wrapped AS (
+          ${eligibleSourceSelect(lastSource ? 's.id<=$1::text' : '$1::text IS NOT NULL')}
         )
-        SELECT source,source_work_id,work_id FROM fair
-        WHERE source_position<=$3
-        ORDER BY updated_at DESC,id DESC
-        LIMIT $2`, [Math.max(128, maximum * 16), limit, perSource]);
-            if (!candidates.rowCount) {
+        SELECT source FROM after_cursor
+        UNION ALL SELECT source FROM wrapped
+        LIMIT $2`, [lastSource, sourceProbeLimit]);
+            if (!sourceProbe.rowCount) {
+                await client.query('COMMIT');
+                return 0;
+            }
+            const candidates = [];
+            let lastProbedSource = null;
+            for (const source of sourceProbe.rows.map((row) => String(row.source))) {
+                if (candidates.length >= limit)
+                    break;
+                lastProbedSource = source;
+                await client.query('SAVEPOINT historical_p1_source_candidate');
+                try {
+                    await client.query(`SET LOCAL statement_timeout = '2500ms'`);
+                    const candidate = await client.query(`
+            SELECT m.source,m.source_work_id,m.work_id
+            FROM importer_work_mappings m
+            JOIN importer_sources s ON s.id=m.source
+            LEFT JOIN importer_lite_source_health h ON h.source=m.source
+            WHERE m.source=$1 AND m.work_id IS NOT NULL
+              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+              AND s.enabled=true
+              AND ${sourceExecutionEligibilitySql('s')}
+              AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+              AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+              AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+              AND NOT EXISTS (
+                SELECT 1 FROM importer_lite_tasks t
+                WHERE t.idempotency_key='lite:catalog:' || m.source || ':' || m.source_work_id
+              )
+              -- An old failed check stays durable for diagnosis and bounded
+              -- retry, but cannot consume every source seat in this lane.
+              AND NOT EXISTS (
+                SELECT 1 FROM importer_lite_tasks t
+                WHERE t.state IN ('READY','RUNNING','RETRY_WAIT')
+                  AND t.priority=2 AND t.task_type='CATALOG'
+                  AND t.payload ? 'historicalP1Backfill'
+                  AND t.payload->>'source'=m.source
+              )
+            ORDER BY m.source_work_id
+            LIMIT $2`, [source, perSource]);
+                    candidates.push(...candidate.rows);
+                    await client.query('RELEASE SAVEPOINT historical_p1_source_candidate');
+                }
+                catch {
+                    await client.query('ROLLBACK TO SAVEPOINT historical_p1_source_candidate');
+                }
+                finally {
+                    await client.query(`SET LOCAL statement_timeout = '12000ms'`);
+                }
+            }
+            await client.query(`UPDATE importer_lite_metadata_source_cursor
+        SET last_source=$2,updated_at=now() WHERE cursor_name=$1`, ['historical_p1_catalog', lastProbedSource || sourceProbe.rows.at(-1).source]);
+            if (!candidates.length) {
                 await client.query('COMMIT');
                 return 0;
             }
             const values = [];
-            const tuples = candidates.rows.map((row, index) => {
+            const tuples = candidates.map((row, index) => {
                 const start = index * 12;
                 const source = String(row.source);
                 const sourceWorkId = String(row.source_work_id);

@@ -75,7 +75,6 @@ export declare class LiteRepository {
     private readonly db;
     private readonly sourceMetadataDb;
     private historicalP1ReserveAbundant;
-    private historicalP1ReserveCheckedAt;
     private manifestP1ReserveCache;
     hasAbundantHistoricalP1Reserve(): boolean;
     /**
@@ -282,14 +281,16 @@ export declare class LiteRepository {
      * The v1 catalog contains durable, confirmed source/work mappings that may
      * predate Lite's chapter-manifest table.  They are evidence worth checking,
      * but are not evidence that a numeric chapter gap exists.  This bounded
-     * admission turns only a few such mappings into P1 catalog passes when the
-     * real P1 reserve becomes low.  Cataloging remains outside the claim SQL;
-     * its confirmed manifest is what may subsequently create IMPORT_CHAPTER
-     * tasks.
+     * admission turns only a few such mappings into P1 catalog passes.  A deep
+     * executable reserve keeps those passes deferred, rather than suppressing
+     * them entirely: that small producer lane is what lets an older, healthy
+     * source eventually materialize a confirmed manifest. Cataloging remains
+     * outside the claim SQL; its confirmed manifest is what may subsequently
+     * create IMPORT_CHAPTER tasks.
      *
-     * The inner window is deliberately small and indexed by the legacy mapping
-     * status.  Limiting each source to two candidates prevents a large legacy
-     * mapping set from monopolising the next P1 refill.
+     * A durable source cursor probes only a few providers per turn.  This avoids
+     * letting the newest rows of a giant mapping set hide older providers before
+     * source fairness can run, without making the claim path scan the catalog.
      */
     refillHistoricalP1Catalog(readyFloor?: number, batchLimit?: number): Promise<number>;
     /**
