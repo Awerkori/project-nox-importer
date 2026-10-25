@@ -1,7 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import {
   inspectCoverForPtBrTitle,
+  downloadCoverWithLimit,
   CoverInspectionTarget,
 } from '../cover-vision-inspector.js';
 import {
@@ -9,6 +12,19 @@ import {
   isPtBrTitle,
 } from '../ptbr-title-localization.js';
 import { mergeAlternativeTitles } from '../alternative-titles.js';
+import { CoverVisionQueue, type CoverCandidate } from '../cover-vision-queue.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const FIXTURES_DIR = path.resolve(__dirname, 'fixtures');
+
+function getRequiredFixture(filename: string): Buffer {
+  const fullPath = path.join(FIXTURES_DIR, filename);
+  if (!fs.existsSync(fullPath)) {
+    throw new Error(`Mandatory fixture missing: ${fullPath}. Permanent fixtures must be checked into the repository.`);
+  }
+  return fs.readFileSync(fullPath);
+}
 
 describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
   // =========================================================================
@@ -67,9 +83,8 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
       expect(promo.method).toBe('PTBR_FOUND_COVER');
     });
 
-    it('end-to-end OCR extracts PT-BR title from image buffer and validates PTBR_FOUND_COVER', async () => {
-      if (!fs.existsSync('/tmp/cover_ptbr.png')) return;
-      const buf = fs.readFileSync('/tmp/cover_ptbr.png');
+    it('end-to-end OCR extracts PT-BR title from image buffer and validates PTBR_FOUND_COVER (MANDATORY FIXTURE)', async () => {
+      const buf = getRequiredFixture('cover_ptbr_real.png');
       const res = await inspectCoverForPtBrTitle({
         title: 'The Second Eunuch Regains His Manhood',
         aliases: ['The Second Eunuch'],
@@ -142,7 +157,6 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
   // =========================================================================
   describe('Test D: Anti-hallucination and noise rejection', () => {
     it('rejects scanlator watermarks, scan credits, and urls', async () => {
-      // Create a mock target where OCR returns scan credits
       const target: CoverInspectionTarget = {
         title: 'Solo Leveling',
         aliases: ['Na Honjaman Rebeleop'],
@@ -150,7 +164,6 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
         coverUrl: 'https://example.com/cover.jpg',
       };
 
-      // Mock fetch returning a tiny 1x1 png or empty image
       const fakePng = Buffer.from(
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
         'base64',
@@ -168,9 +181,8 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
 
     it('rejects candidate titles that match the author or artist name', () => {
       const author = 'Carlos Eduardo Ferreira';
-      const targetAuthorTitle = author; // Looks Portuguese, but is author
+      const targetAuthorTitle = author;
 
-      // If an OCR line happens to match the author, it should not become the title
       const isAuthorMatch = cleanPtBrCandidateTitle(author)?.toLowerCase() === targetAuthorTitle.toLowerCase();
       expect(isAuthorMatch).toBe(true);
     });
@@ -190,9 +202,8 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
       expect(isRepetitive).toBe(true);
     });
 
-    it('end-to-end OCR rejects scanlator noise cover without false positives', async () => {
-      if (!fs.existsSync('/tmp/cover_scanlator.png')) return;
-      const buf = fs.readFileSync('/tmp/cover_scanlator.png');
+    it('end-to-end OCR rejects scanlator noise cover without false positives (MANDATORY FIXTURE)', async () => {
+      const buf = getRequiredFixture('cover_scanlator_noise.png');
       const res = await inspectCoverForPtBrTitle({
         title: 'Random Work',
         coverBuffer: buf,
@@ -203,9 +214,8 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
       expect(res.detectedTitle).toBeNull();
     });
 
-    it('end-to-end OCR rejects English cover text without false positives', async () => {
-      if (!fs.existsSync('/tmp/cover_english.png')) return;
-      const buf = fs.readFileSync('/tmp/cover_english.png');
+    it('end-to-end OCR rejects English cover text without false positives (MANDATORY FIXTURE)', async () => {
+      const buf = getRequiredFixture('cover_english.png');
       const res = await inspectCoverForPtBrTitle({
         title: 'The Second Eunuch Regains His Manhood',
         coverBuffer: buf,
@@ -228,7 +238,7 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
         title: 'O Segundo Eunuco Recupera Sua Masculinidade',
         aliases: [
           'The Second Eunuch Regains His Manhood',
-          '제2의 환관이 남성성을 되찾다',
+          '제2의 환관이 남성성을 되찾da',
         ],
         provenance: {
           title: {
@@ -241,7 +251,6 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
         },
       };
 
-      // Incoming payload from origin source arrives with the original English title
       const incomingSync = {
         workId: localizedWork.workId,
         slug: localizedWork.slug,
@@ -255,7 +264,6 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
 
       const result = resolveAutomaticPtBrTitlePromotion(incomingSync);
 
-      // Title must remain strictly preserved
       expect(result.promoted).toBe(false);
       expect(result.newTitle).toBe('O Segundo Eunuco Recupera Sua Masculinidade');
     });
@@ -289,6 +297,161 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
       expect(res.inspected).toBe(false);
       expect(res.foundPtBrTitle).toBe(false);
       expect(res.evidence.reason).toBe('NO_IMAGE_DATA');
+    });
+
+    it('downloadCoverWithLimit stops reading chunk stream if size exceeds max bytes without Content-Length', async () => {
+      const originalFetch = globalThis.fetch;
+      try {
+        let streamCancelled = false;
+        const mockStream = new ReadableStream({
+          pull(controller) {
+            const chunk = new Uint8Array(1024 * 1024);
+            controller.enqueue(chunk);
+          },
+          cancel() {
+            streamCancelled = true;
+          },
+        });
+
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          headers: new Headers(), // No content-length header
+          body: mockStream,
+        }) as any;
+
+        const result = await downloadCoverWithLimit('https://example.com/oversized.jpg', undefined, 5 * 1024 * 1024, 5000);
+
+        expect(result.ok).toBe(false);
+        expect(result.reason).toBe('IMAGE_EXCEEDS_MAX_SIZE');
+        expect(streamCancelled).toBe(true);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('downloadCoverWithLimit succeeds when stream is within 5MB limit', async () => {
+      const originalFetch = globalThis.fetch;
+      try {
+        const payload = Buffer.from('TEST_IMAGE_DATA');
+        const mockStream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(payload);
+            controller.close();
+          },
+        });
+
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          headers: new Headers(),
+          body: mockStream,
+        }) as any;
+
+        const result = await downloadCoverWithLimit('https://example.com/valid.jpg', undefined, 5 * 1024 * 1024, 5000);
+
+        expect(result.ok).toBe(true);
+        expect(result.buffer).toBeDefined();
+        expect(result.buffer?.toString()).toBe('TEST_IMAGE_DATA');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  });
+
+  // =========================================================================
+  // TEST G: Durable Task Queue Operations
+  // =========================================================================
+  describe('Test G: Durable Cover Vision Queue Operations', () => {
+    it('enqueues task and updates on conflict without modifying completed tasks', async () => {
+      const mockQueries: Array<{ sql: string; params: any[] }> = [];
+      const mockPool: any = {
+        query: vi.fn().mockImplementation((sql: string, params: any[]) => {
+          mockQueries.push({ sql, params });
+          if (sql.includes('to_regclass')) {
+            return Promise.resolve({ rows: [{ ok: true }] });
+          }
+          return Promise.resolve({ rows: [] });
+        }),
+      };
+
+      const queue = new CoverVisionQueue(mockPool);
+      const candidates: CoverCandidate[] = [
+        { source: 'mangaflix', coverUrl: 'https://mangaflix.org/cover1.jpg' },
+        { source: 'nexus', coverUrl: 'https://nexus.to/cover2.jpg' },
+      ];
+
+      await queue.enqueueTask('11111111-2222-3333-4444-555555555555', candidates);
+
+      expect(mockQueries.length).toBeGreaterThanOrEqual(1);
+      const insertQuery = mockQueries.find((q) => q.sql.includes('INSERT INTO public.cover_vision_work_tasks'));
+      expect(insertQuery).toBeDefined();
+      expect(insertQuery?.params[0]).toBe('11111111-2222-3333-4444-555555555555');
+      expect(JSON.parse(insertQuery?.params[1])).toEqual(candidates);
+    });
+
+    it('findDueTasks maps returned rows to CoverVisionWorkTask structures', async () => {
+      const mockPool: any = {
+        query: vi.fn().mockImplementation((sql: string) => {
+          if (sql.includes('to_regclass')) return Promise.resolve({ rows: [{ ok: true }] });
+          return Promise.resolve({
+            rows: [
+              {
+                work_id: '11111111-2222-3333-4444-555555555555',
+                candidate_covers: [{ source: 'mangaflix', coverUrl: 'https://example.com/c1.jpg' }],
+                status: 'PENDING',
+                attempts: 0,
+                max_attempts: 3,
+                inspected_urls: [],
+                detected_title: null,
+                attributing_source: null,
+                confidence: null,
+                evidence: null,
+                last_error: null,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+                next_retry_at: null,
+              },
+            ],
+          });
+        }),
+      };
+
+      const queue = new CoverVisionQueue(mockPool);
+      const due = await queue.findDueTasks(2);
+
+      expect(due.length).toBe(1);
+      expect(due[0].workId).toBe('11111111-2222-3333-4444-555555555555');
+      expect(due[0].status).toBe('PENDING');
+      expect(due[0].candidateCovers[0].source).toBe('mangaflix');
+    });
+
+    it('marks running, completed, no ptbr found, and failed with backoff', async () => {
+      const mockQueries: Array<{ sql: string; params: any[] }> = [];
+      const mockPool: any = {
+        query: vi.fn().mockImplementation((sql: string, params: any[]) => {
+          mockQueries.push({ sql, params });
+          return Promise.resolve({ rows: [] });
+        }),
+      };
+
+      const queue = new CoverVisionQueue(mockPool);
+
+      await queue.markRunning('test-work-id');
+      expect(mockQueries.some((q) => q.sql.includes("status = 'RUNNING'"))).toBe(true);
+
+      await queue.markCompleted('test-work-id', {
+        detectedTitle: 'Título em Português',
+        attributingSource: 'mangaflix',
+        confidence: 0.95,
+        evidence: { method: 'test' },
+        inspectedUrls: ['url1'],
+      });
+      expect(mockQueries.some((q) => q.sql.includes("status = 'COMPLETED'"))).toBe(true);
+
+      await queue.markNoPtBrFound('test-work-id', ['url1', 'url2']);
+      expect(mockQueries.some((q) => q.sql.includes("status = 'NO_PTBR_FOUND'"))).toBe(true);
+
+      await queue.markFailed('test-work-id', 'Connection error', ['url1'], 3);
+      expect(mockQueries.some((q) => q.sql.includes("next_retry_at = now() + interval '5 minutes'"))).toBe(true);
     });
   });
 });

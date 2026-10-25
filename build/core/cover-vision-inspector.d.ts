@@ -28,6 +28,11 @@ export interface CoverInspectionResult {
         reason?: string;
     };
 }
+export declare function downloadCoverWithLimit(url: string, headers?: Record<string, string>, maxBytes?: number, timeoutMs?: number): Promise<{
+    ok: boolean;
+    buffer?: Buffer;
+    reason?: string;
+}>;
 /**
  * Visually inspects a manga/manhwa cover artwork using OCR + context validation
  * to detect Brazilian Portuguese titles rendered directly onto the cover art.

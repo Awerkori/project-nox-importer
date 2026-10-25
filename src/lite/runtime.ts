@@ -23,6 +23,7 @@ import { buildDiscoveryQueryCandidates, classifyExplicitSourceMetadata, extractS
 import { mergeAlternativeTitles, alternativeTitleKey } from '../core/alternative-titles.js';
 import { isPtBrTitle } from '../core/ptbr-title-localization.js';
 import { inspectCoverForPtBrTitle } from '../core/cover-vision-inspector.js';
+import { CoverVisionQueue, type CoverCandidate } from '../core/cover-vision-queue.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
 import { LiteMemoryPressureGuard, type LiteMemoryPressureSnapshot } from './memory-pressure.js';
 import {
@@ -228,6 +229,16 @@ export class ImporterLiteRuntime {
     lastRunAt: null as string | null,
     lastOutcome: 'IDLE' as string,
   };
+  private readonly coverVisionQueue: CoverVisionQueue;
+  private readonly coverVisionGate = new AsyncSemaphore(1, 'lite_cover_vision');
+  private readonly pendingImmediateCoverVisionWorkIds = new Set<string>();
+  private lastCoverVisionTurnAt = 0;
+  private coverVisionTelemetry = {
+    processedWorks: 0,
+    promotedTitles: 0,
+    lastRunAt: null as string | null,
+    lastOutcome: 'IDLE' as string,
+  };
   private readonly logger = new Logger('ImporterLite');
   private readonly downloads: AsyncSemaphore;
   private readonly bufferedPages: AsyncSemaphore;
@@ -396,6 +407,7 @@ export class ImporterLiteRuntime {
       : new DeduplicationEngine(new DirectSupabaseClient(sourceMetadataPool) as any);
     this.aliasOnlyService = new AliasOnlyEnrichmentService();
     this.aliasOnlyRepo = new AliasOnlyRepository(sourceMetadataPool);
+    this.coverVisionQueue = new CoverVisionQueue(sourceMetadataPool);
   }
 
   private getAvailablePool(): Pool {
@@ -1013,6 +1025,7 @@ export class ImporterLiteRuntime {
         );
         const admitted = await this.refillCrossSourceMetadataDiscovery();
         void this.runAliasOnlyEnrichmentTurn();
+        void this.runCoverVisionTurn();
         if (!claimed.some(Boolean) && !admitted) {
           await this.queue.disableMetadataTurboExclusiveMode();
           await this.refreshMetadataTurboMode(true);
@@ -1034,6 +1047,7 @@ export class ImporterLiteRuntime {
         await this.refillCrossSourceMetadataDiscovery();
         await this.runCrossSourceMetadataDiscovery();
         void this.runAliasOnlyEnrichmentTurn();
+        void this.runCoverVisionTurn();
       }
     } catch (error: any) {
       this.logger.warn('Metadata turn failed', { error: error?.message });
@@ -1113,6 +1127,188 @@ export class ImporterLiteRuntime {
       return 0;
     } finally {
       this.aliasOnlyGate.release();
+    }
+  }
+
+  public triggerAsyncCoverVision(workId: string): void {
+    if (!workId || this.stopped) return;
+    this.pendingImmediateCoverVisionWorkIds.add(workId);
+    if (process.env.NODE_ENV !== 'test') {
+      void this.runCoverVisionTurn();
+    }
+  }
+
+  /**
+   * Permanent background visual inspection of covers for PT-BR titles.
+   * Concurrency is strictly bounded by coverVisionGate (capacity 1).
+   * Fully decoupled from chapter download and publishing workers.
+   */
+  public async runCoverVisionTurn(forceInTest = false): Promise<number> {
+    if (this.stopped || (!forceInTest && process.env.NODE_ENV === 'test')) return 0;
+    if (!forceInTest && !this.isRuntimeLeader) return 0;
+    if (this.metadataReplayV4Exclusive.enabled || this.shouldPauseLowPriorityMetadata()) return 0;
+    if (this.hasSustainedSourceMetadataPoolPressure()) return 0;
+
+    const hasImmediate = this.pendingImmediateCoverVisionWorkIds.size > 0;
+    if (!forceInTest && !hasImmediate && Date.now() - this.lastCoverVisionTurnAt < 15_000) {
+      return 0;
+    }
+
+    if (!this.coverVisionGate.tryAcquire()) return 0;
+    try {
+      this.lastCoverVisionTurnAt = Date.now();
+      const tasks = await this.coverVisionQueue.findDueTasks(2);
+      if (!tasks.length) {
+        this.pendingImmediateCoverVisionWorkIds.clear();
+        this.coverVisionTelemetry.lastRunAt = new Date().toISOString();
+        this.coverVisionTelemetry.lastOutcome = 'NO_DUE_TASKS';
+        return 0;
+      }
+
+      let promotedCount = 0;
+      for (const task of tasks) {
+        if (this.stopped || this.shouldPauseLowPriorityMetadata()) break;
+        this.pendingImmediateCoverVisionWorkIds.delete(task.workId);
+
+        await this.coverVisionQueue.markRunning(task.workId);
+
+        try {
+          const workRes = await this.pool.query<{
+            id: string;
+            title: string;
+            slug: string;
+            aliases: string[];
+            metadata_provenance: any;
+          }>(
+            `SELECT id, title, slug, aliases, metadata_provenance FROM works WHERE id = $1::uuid LIMIT 1`,
+            [task.workId],
+          );
+          const currentWork = workRes.rows[0];
+          if (!currentWork) {
+            await this.coverVisionQueue.markNoPtBrFound(task.workId, task.inspectedUrls);
+            continue;
+          }
+
+          if (isPtBrTitle(currentWork.title) || currentWork.metadata_provenance?.title?.localized_ptbr === true) {
+            await this.coverVisionQueue.markCompleted(task.workId, {
+              detectedTitle: currentWork.title,
+              attributingSource: currentWork.metadata_provenance?.title?.source || 'already_localized',
+              confidence: 1.0,
+              evidence: { reason: 'ALREADY_LOCALIZED_PTBR' },
+              inspectedUrls: task.inspectedUrls,
+            });
+            continue;
+          }
+
+          let matched = false;
+          const inspectedUrls = [...task.inspectedUrls];
+
+          for (const cand of task.candidateCovers) {
+            if (this.stopped) break;
+            if (inspectedUrls.includes(cand.coverUrl)) continue;
+            inspectedUrls.push(cand.coverUrl);
+
+            const candAdapter = this.registry.get(cand.source);
+            let coverHeaders: Record<string, string> | undefined;
+            try {
+              if (candAdapter && typeof candAdapter.getImageHeaders === 'function') {
+                coverHeaders = await candAdapter.getImageHeaders(cand.coverUrl);
+              }
+            } catch {
+              coverHeaders = undefined;
+            }
+
+            const visionRes = await inspectCoverForPtBrTitle({
+              workId: currentWork.id,
+              slug: currentWork.slug,
+              title: currentWork.title,
+              aliases: currentWork.aliases || [],
+              coverUrl: cand.coverUrl,
+              headers: coverHeaders,
+              source: cand.source,
+            });
+
+            if (visionRes.foundPtBrTitle && visionRes.detectedTitle) {
+              const detectedTitle = visionRes.detectedTitle;
+              const newAliases = mergeAlternativeTitles(
+                (currentWork.aliases || []).filter(
+                  (a) => alternativeTitleKey(a) !== alternativeTitleKey(detectedTitle),
+                ),
+                [currentWork.title],
+                detectedTitle,
+              );
+              const updatedProv = {
+                ...(currentWork.metadata_provenance || {}),
+                title: {
+                  source: cand.source,
+                  method: 'PTBR_FOUND_COVER',
+                  localized_ptbr: true,
+                  previous_value: currentWork.title,
+                  confidence: visionRes.confidence,
+                  evidence: visionRes.evidence,
+                  cover_url: cand.coverUrl,
+                  updated_at: new Date().toISOString(),
+                },
+              };
+
+              const updateRes = await this.pool.query(
+                `UPDATE works
+                 SET title = $1, aliases = $2, metadata_provenance = $3
+                 WHERE id = $4::uuid
+                   AND (metadata_provenance->'title'->>'localized_ptbr' IS NULL OR metadata_provenance->'title'->>'localized_ptbr' != 'true')`,
+                [detectedTitle, newAliases, JSON.stringify(updatedProv), currentWork.id],
+              );
+
+              if ((updateRes.rowCount || 0) > 0) {
+                this.logger.info('Cover Vision promoted title to PT-BR from cover artwork (async turn)', {
+                  workId: currentWork.id,
+                  previousTitle: currentWork.title,
+                  promotedTitle: detectedTitle,
+                  method: 'PTBR_FOUND_COVER',
+                  source: cand.source,
+                  confidence: visionRes.confidence,
+                  coverUrl: cand.coverUrl,
+                });
+                promotedCount++;
+              }
+
+              await this.coverVisionQueue.markCompleted(task.workId, {
+                detectedTitle,
+                attributingSource: cand.source,
+                confidence: visionRes.confidence,
+                evidence: visionRes.evidence,
+                inspectedUrls,
+              });
+
+              matched = true;
+              break;
+            }
+          }
+
+          if (!matched) {
+            await this.coverVisionQueue.markNoPtBrFound(task.workId, inspectedUrls);
+          }
+        } catch (taskErr: any) {
+          this.logger.warn('Error processing cover vision task', {
+            workId: task.workId,
+            error: taskErr?.message || taskErr,
+          });
+          await this.coverVisionQueue.markFailed(
+            task.workId,
+            taskErr?.message || String(taskErr),
+            task.inspectedUrls,
+            task.maxAttempts,
+          );
+        }
+      }
+
+      this.coverVisionTelemetry.processedWorks += tasks.length;
+      this.coverVisionTelemetry.promotedTitles += promotedCount;
+      this.coverVisionTelemetry.lastRunAt = new Date().toISOString();
+      this.coverVisionTelemetry.lastOutcome = `PROCESSED_${tasks.length}_PROMOTED_${promotedCount}`;
+      return promotedCount;
+    } finally {
+      this.coverVisionGate.release();
     }
   }
 
@@ -2583,76 +2779,14 @@ export class ImporterLiteRuntime {
                 return true;
               });
 
-              for (const cand of uniqueCovers) {
-                const candAdapter = this.registry.get(cand.source) || adapter;
-                let coverHeaders: Record<string, string> | undefined;
-                try {
-                  if (typeof candAdapter.getImageHeaders === 'function') {
-                    coverHeaders = await candAdapter.getImageHeaders(cand.coverUrl);
-                  }
-                } catch {
-                  coverHeaders = undefined;
-                }
-                const visionRes = await inspectCoverForPtBrTitle({
-                  workId: currentWork.id,
-                  slug: currentWork.slug,
-                  title: currentWork.title,
-                  aliases: currentWork.aliases || [],
-                  coverUrl: cand.coverUrl,
-                  headers: coverHeaders,
-                  source: cand.source,
-                  author: snapshot.details.author || undefined,
-                  synopsis: snapshot.details.synopsis || undefined,
-                });
-
-                if (visionRes.foundPtBrTitle && visionRes.detectedTitle) {
-                  const detectedTitle = visionRes.detectedTitle;
-                  const newAliases = mergeAlternativeTitles(
-                    (currentWork.aliases || []).filter(
-                      (a) => alternativeTitleKey(a) !== alternativeTitleKey(detectedTitle),
-                    ),
-                    [currentWork.title],
-                    detectedTitle,
-                  );
-                  const updatedProv = {
-                    ...(currentWork.metadata_provenance || {}),
-                    title: {
-                      source: cand.source,
-                      method: 'PTBR_FOUND_COVER',
-                      localized_ptbr: true,
-                      previous_value: currentWork.title,
-                      confidence: visionRes.confidence,
-                      evidence: visionRes.evidence,
-                      cover_url: cand.coverUrl,
-                      updated_at: new Date().toISOString(),
-                    },
-                  };
-
-                  await this.pool.query(
-                    `UPDATE works
-                     SET title = $1, aliases = $2, metadata_provenance = $3
-                     WHERE id = $4::uuid`,
-                    [detectedTitle, newAliases, JSON.stringify(updatedProv), currentWork.id],
-                  );
-
-                  this.logger.info('Cover Vision promoted title to PT-BR from cover artwork', {
-                    workId: currentWork.id,
-                    previousTitle: currentWork.title,
-                    promotedTitle: detectedTitle,
-                    method: 'PTBR_FOUND_COVER',
-                    source: cand.source,
-                    confidence: visionRes.confidence,
-                    coverUrl: cand.coverUrl,
-                  });
-
-                  // Stop on first verified match
-                  break;
-                }
+              if (uniqueCovers.length > 0) {
+                await this.coverVisionQueue.enqueueTask(resolved.workId, uniqueCovers);
+                this.triggerAsyncCoverVision(resolved.workId);
               }
             }
           }
         } catch (visionErr: any) {
-          this.logger.warn('Cover vision inspection failed gracefully', {
+          this.logger.warn('Cover vision enqueueing failed gracefully', {
             workId: resolved.workId,
             error: visionErr?.message || visionErr,
           });

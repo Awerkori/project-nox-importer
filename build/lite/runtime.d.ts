@@ -31,6 +31,11 @@ export declare class ImporterLiteRuntime {
     private readonly pendingImmediateAliasWorkIds;
     private lastAliasOnlyTurnAt;
     private aliasOnlyTelemetry;
+    private readonly coverVisionQueue;
+    private readonly coverVisionGate;
+    private readonly pendingImmediateCoverVisionWorkIds;
+    private lastCoverVisionTurnAt;
+    private coverVisionTelemetry;
     private readonly logger;
     private readonly downloads;
     private readonly bufferedPages;
@@ -171,6 +176,13 @@ export declare class ImporterLiteRuntime {
      * Never blocks chapter publication and updates ONLY `works.aliases`.
      */
     runAliasOnlyEnrichmentTurn(forceInTest?: boolean): Promise<number>;
+    triggerAsyncCoverVision(workId: string): void;
+    /**
+     * Permanent background visual inspection of covers for PT-BR titles.
+     * Concurrency is strictly bounded by coverVisionGate (capacity 1).
+     * Fully decoupled from chapter download and publishing workers.
+     */
+    runCoverVisionTurn(forceInTest?: boolean): Promise<number>;
     /** Source-backed historical metadata remains a P2 catalog task and shares
      * normal priority claims; it never steals a chapter worker or bypasses a
      * STAFF/P0/P1 reserve. At most four network-only tasks are admitted across
