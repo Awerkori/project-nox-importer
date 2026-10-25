@@ -1061,21 +1061,13 @@ export class LiteRepository {
       SELECT 1 FROM importer_lite_tasks t
       WHERE t.state='READY' AND t.monitoring=false AND t.priority=2
         AND t.task_type='IMPORT_CHAPTER' AND t.next_run_at<=now()
-        AND EXISTS (
-          SELECT 1 FROM importer_lite_chapter_sources cs
-          JOIN importer_sources s ON s.id=cs.source
-          LEFT JOIN importer_lite_source_health h ON h.source=cs.source
-          WHERE cs.work_id=t.work_id AND cs.canonical_chapter_key=t.chapter_key
-            AND cs.confirmed=true AND cs.has_chapter=true AND s.enabled=true
-            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-            AND ${sourceExecutionEligibilitySql('s')}
-            AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-            AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
-        )
-        LIMIT $1
-    ) AS bounded_ready`, [floor]);
+      LIMIT $1
+    ) AS bounded_ready`, [floor * 2]);
     const current = Number(reserve.rows[0]?.count || 0);
     if (!reserveFromCache) this.manifestP1ReserveCache = { at: Date.now(), floor, count: current };
+    if (!forceRepair && current >= floor * 2) {
+      return 0;
+    }
     // A healthy executable P1 reserve must remain dominant, but it cannot
     // permanently hide a confirmed historical manifest simply because an old
     // catalog task has already completed. Admit only a tiny repair seat in
@@ -1720,6 +1712,21 @@ export class LiteRepository {
     if (this.historicalP1ReserveAbundant
       && Date.now() - this.historicalP1ReserveCheckedAt < EXECUTABLE_P1_RESERVE_CACHE_MS) return 0;
     this.historicalP1ReserveAbundant = false;
+
+    // Fast check first using the shared pool WITHOUT holding an open transaction
+    const fastReserve = await this.db.query<{ count: string }>(`SELECT count(*)::int AS count FROM (
+      SELECT 1 FROM importer_lite_tasks t
+      WHERE t.state='READY' AND t.monitoring=false AND t.priority=2 AND t.task_type='IMPORT_CHAPTER'
+        AND t.next_run_at<=now()
+      LIMIT $1
+    ) AS bounded_ready`, [abundantFloor]);
+    const currentFast = Number(fastReserve.rows[0]?.count || 0);
+    if (currentFast >= abundantFloor) {
+      this.historicalP1ReserveAbundant = true;
+      this.historicalP1ReserveCheckedAt = Date.now();
+      return 0;
+    }
+
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
@@ -1727,19 +1734,6 @@ export class LiteRepository {
         SELECT 1 FROM importer_lite_tasks t
         WHERE t.state='READY' AND t.monitoring=false AND t.priority=2 AND t.task_type='IMPORT_CHAPTER'
           AND t.next_run_at<=now()
-          AND EXISTS (
-            SELECT 1
-            FROM importer_lite_chapter_sources cs
-            JOIN importer_sources s ON s.id=cs.source
-            LEFT JOIN importer_lite_source_health h ON h.source=cs.source
-            WHERE cs.work_id=t.work_id AND cs.canonical_chapter_key=t.chapter_key
-              AND cs.confirmed=true AND cs.has_chapter=true
-              AND s.enabled=true
-              AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-              AND ${sourceExecutionEligibilitySql('s')}
-              AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-              AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
-          )
         LIMIT $1
       ) AS bounded_ready`, [abundantFloor]);
       const current = Number(reserve.rows[0]?.count || 0);
