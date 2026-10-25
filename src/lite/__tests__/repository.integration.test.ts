@@ -993,10 +993,19 @@ describe('LiteRepository against the additive Lite migration', () => {
       vi.spyOn(runtime as any, method).mockResolvedValue(undefined);
     }
 
+    // A first turn under pressure still runs one bounded sweep (the pool is
+    // almost never idle during a chapter wave, which previously parked
+    // healthy-route SOURCE_RATE_LIMITED imports for days).
     await (runtime as any).runRecoveryTurn();
-
-    expect(reconcile).toHaveBeenCalledWith(50, {
+    expect(reconcile).toHaveBeenLastCalledWith(50, {
       recoverUploadOutcomes: true,
+      recoverSourceCooldowns: true,
+    });
+
+    // Subsequent turns within the max gap defer only the expensive sweep.
+    await (runtime as any).runRecoveryTurn();
+    expect(reconcile).toHaveBeenLastCalledWith(50, {
+      recoverUploadOutcomes: false,
       recoverSourceCooldowns: false,
     });
   });
