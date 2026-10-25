@@ -573,7 +573,10 @@ export class LiteExecutor {
   }
 
   async importChapter(task: LiteTask, workerId: string): Promise<void> {
+    const taskStartedAt = performance.now();
+    const routeLookupStartedAt = performance.now();
     const routeSnapshot = await this.routes(task);
+    const routeLookupMs = performance.now() - routeLookupStartedAt;
     const legacy = routeSnapshot.legacy;
     if (legacy?.publishedAt) {
       const chapterId = await this.createOrLoadChapter(task, legacy);
@@ -612,6 +615,13 @@ export class LiteExecutor {
     // A failed preferred source must not make a canonical chapter wait for a
     // confirmed, healthy alternative.  This loop is bounded by its routes.
     for (const route of routes) {
+      let sourcePermitWaitMs = 0;
+      let sourceFetchMs = 0;
+      let dbPreparationMs = 0;
+      let pageDownloadDemandMs = 0;
+      let telegramUploadDemandMs = 0;
+      let rateLimitWaitMs = 0;
+      let totalBytes = 0;
       this.onRouteSelected?.(task.id, route.source);
       const adapter = this.registry.get(route.source);
       if (!adapter) { lastError = new Error('SOURCE_ADAPTER_UNAVAILABLE'); continue; }
@@ -628,7 +638,9 @@ export class LiteExecutor {
           await this.queue.yieldForSourceFairness(task, workerId);
           return;
         }
+        const sourcePermitStartedAt = performance.now();
         await sourceSlot.acquire();
+        sourcePermitWaitMs = performance.now() - sourcePermitStartedAt;
       }
       try {
         // Telegram has accepted these pages, but their durable receipts still
@@ -645,7 +657,9 @@ export class LiteExecutor {
         };
         let urls: string[];
         try {
+          const sourceFetchStartedAt = performance.now();
           urls = await adapter.fetchChapterPages(route.sourceChapterId, Number(task.payload.displayNumber));
+          sourceFetchMs = performance.now() - sourceFetchStartedAt;
           if (!urls.length || urls.length > 1000) throw new Error('INVALID_PAGE_MANIFEST');
         } catch (error) { throw sourceFailure(error); }
         const pageManifestHash = calculateSha256(Buffer.from(JSON.stringify(urls)));
@@ -657,11 +671,14 @@ export class LiteExecutor {
         // From this point a partial chapter can only resume from the exact
         // same route; otherwise a valid alternative could create a mixed
         // edition without any detectable corruption.
+        const dbPreparationStartedAt = performance.now();
         if (!await this.queue.checkpoint(task, workerId, {
           selectedSource: route.source, sourceChapterId: route.sourceChapterId, pageManifestHash, plannedPageCount: urls.length,
         })) throw new Error('LEASE_LOST_BEFORE_MEDIA_STORAGE');
         const chapterId = await this.createOrLoadChapter(task, legacy);
+        dbPreparationMs = performance.now() - dbPreparationStartedAt;
         let mediaIds: string[];
+        const mediaPipelineStartedAt = performance.now();
         try {
           mediaIds = await mapBounded(urls, this.perChapterPageConcurrency, async (url, index) => {
           const position = index + 1;
@@ -691,7 +708,11 @@ export class LiteExecutor {
           try {
             let downloaded: { bytes: Uint8Array; image: ReturnType<typeof inspectImage> };
             try {
-              if (host) await this.sourceRateLimiter.acquire(host, pageSignal);
+              if (host) {
+                const rateLimitStartedAt = performance.now();
+                await this.sourceRateLimiter.acquire(host, pageSignal);
+                rateLimitWaitMs += performance.now() - rateLimitStartedAt;
+              }
               const initialReservationBytes = unknownPageInitialReservationBytes(this.pageBytes.capacityBytes);
               const reservation = await this.pageBytes.reserve(
                 initialReservationBytes,
@@ -730,11 +751,13 @@ export class LiteExecutor {
                   telemetryCollector.recordImageDownload(route.source, performance.now() - startedAt, bytes.length);
                   return { bytes, image };
                 } finally {
+                  pageDownloadDemandMs += performance.now() - startedAt;
                   telemetryCollector.trackActiveDownload(-1);
                 }
               });
             } catch (error) { throw sourceFailure(error); }
             const { bytes, image } = downloaded;
+            totalBytes += bytes.byteLength;
             const sha256 = calculateSha256(bytes);
             const reserved = await this.reservationBatcher.reserve({ taskId: task.id, pagePosition: position, sha256 });
             if (reserved.state === 'PERSISTED') return reserved.mediaId;
@@ -752,6 +775,7 @@ export class LiteExecutor {
                   providerKey = await this.storage.upload(bytes, image.mime, reserved.mediaId, chapterId);
                   telemetryCollector.recordTelegramUpload(performance.now() - uploadStartedAt, bytes.length);
                 } finally {
+                  telegramUploadDemandMs += performance.now() - uploadStartedAt;
                   telemetryCollector.trackActiveTelegramUpload(-1);
                 }
                 const receipt = this.receiptBatcher.persist({
@@ -814,9 +838,43 @@ export class LiteExecutor {
           throw error;
         }
         await drainDeferredReceipts();
+        // A media wave is not complete until every Telegram receipt is
+        // durably recorded; include that bounded drain in its wall time.
+        const mediaPipelineWallMs = performance.now() - mediaPipelineStartedAt;
+        const dbPublishStartedAt = performance.now();
         if (!await this.queue.completeImportAndEnqueuePublish(task, workerId, {
           chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source, mediaStoredAt: new Date().toISOString(),
         })) throw new Error('LEASE_LOST_AFTER_MEDIA_STORAGE');
+        const dbPublishMs = performance.now() - dbPublishStartedAt;
+        const totalDurationMs = performance.now() - taskStartedAt;
+        // This stays entirely in the existing bounded in-memory telemetry
+        // collector. It writes neither page data nor a new operational row,
+        // but makes an importer-only chapter wave explainable by stage.
+        telemetryCollector.recordChapterMetric({
+          jobId: task.id,
+          source: route.source,
+          chapterNumber: Number.isFinite(Number(task.payload.displayNumber)) ? Number(task.payload.displayNumber) : 0,
+          pageCount: urls.length,
+          totalBytes,
+          totalDurationMs: Math.round(totalDurationMs),
+          totalSlotOccupancyMs: Math.round(totalDurationMs),
+          claim_acquire_ms: 0,
+          mutex_wait_ms: 0,
+          claim_db_ms: 0,
+          metadata_load_ms: 0,
+          source_fetch_ms: Math.round(sourceFetchMs),
+          page_resolution_ms: Math.round(routeLookupMs),
+          download_ms: Math.round(pageDownloadDemandMs),
+          encode_ms: 0,
+          telegram_upload_ms: Math.round(telegramUploadDemandMs),
+          media_pipeline_wall_ms: Math.round(mediaPipelineWallMs),
+          db_wait_ms: 0,
+          db_publish_ms: Math.round(dbPreparationMs + dbPublishMs),
+          rate_limit_wait_ms: Math.round(rateLimitWaitMs),
+          semaphore_wait_ms: Math.round(sourcePermitWaitMs),
+          other_wait_ms: Math.max(0, Math.round(totalDurationMs - routeLookupMs - sourceFetchMs - mediaPipelineWallMs - dbPreparationMs - dbPublishMs)),
+          timestamp: new Date().toISOString(),
+        });
         return;
       } catch (error) {
         lastError = error;
