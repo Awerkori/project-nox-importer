@@ -1172,6 +1172,7 @@ export class ImporterLiteRuntime {
 
         await this.coverVisionQueue.markRunning(task.workId);
 
+        const inspectedUrls = [...task.inspectedUrls];
         try {
           const workRes = await this.pool.query<{
             id: string;
@@ -1185,7 +1186,7 @@ export class ImporterLiteRuntime {
           );
           const currentWork = workRes.rows[0];
           if (!currentWork) {
-            await this.coverVisionQueue.markNoPtBrFound(task.workId, task.inspectedUrls);
+            await this.coverVisionQueue.markNoPtBrFound(task.workId, inspectedUrls);
             continue;
           }
 
@@ -1195,13 +1196,12 @@ export class ImporterLiteRuntime {
               attributingSource: currentWork.metadata_provenance?.title?.source || 'already_localized',
               confidence: 1.0,
               evidence: { reason: 'ALREADY_LOCALIZED_PTBR' },
-              inspectedUrls: task.inspectedUrls,
+              inspectedUrls,
             });
             continue;
           }
 
           let matched = false;
-          const inspectedUrls = [...task.inspectedUrls];
 
           for (const cand of task.candidateCovers) {
             if (this.stopped) break;
@@ -1296,7 +1296,7 @@ export class ImporterLiteRuntime {
           await this.coverVisionQueue.markFailed(
             task.workId,
             taskErr?.message || String(taskErr),
-            task.inspectedUrls,
+            inspectedUrls,
             task.maxAttempts,
           );
         }

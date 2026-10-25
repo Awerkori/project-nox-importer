@@ -358,16 +358,19 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
   });
 
   // =========================================================================
-  // TEST G: Durable Task Queue Operations
+  // TEST G: Durable Task Queue Operations & Bug Fixes (Bugs 1 & 2)
   // =========================================================================
   describe('Test G: Durable Cover Vision Queue Operations', () => {
-    it('enqueues task and updates on conflict without modifying completed tasks', async () => {
+    it('enqueues brand new task directly in PENDING status', async () => {
       const mockQueries: Array<{ sql: string; params: any[] }> = [];
       const mockPool: any = {
         query: vi.fn().mockImplementation((sql: string, params: any[]) => {
           mockQueries.push({ sql, params });
           if (sql.includes('to_regclass')) {
             return Promise.resolve({ rows: [{ ok: true }] });
+          }
+          if (sql.includes('SELECT status, candidate_covers, inspected_urls')) {
+            return Promise.resolve({ rows: [] }); // No existing task
           }
           return Promise.resolve({ rows: [] });
         }),
@@ -386,11 +389,14 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
       expect(insertQuery).toBeDefined();
       expect(insertQuery?.params[0]).toBe('11111111-2222-3333-4444-555555555555');
       expect(JSON.parse(insertQuery?.params[1])).toEqual(candidates);
+      expect(insertQuery?.params[2]).toBe(3);
     });
 
-    it('findDueTasks maps returned rows to CoverVisionWorkTask structures', async () => {
+    it('BUG 1: findDueTasks enforces retry interval, max attempts, and safe abandoned-task recovery', async () => {
+      let executedSql = '';
       const mockPool: any = {
         query: vi.fn().mockImplementation((sql: string) => {
+          executedSql = sql;
           if (sql.includes('to_regclass')) return Promise.resolve({ rows: [{ ok: true }] });
           return Promise.resolve({
             rows: [
@@ -398,7 +404,7 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
                 work_id: '11111111-2222-3333-4444-555555555555',
                 candidate_covers: [{ source: 'mangaflix', coverUrl: 'https://example.com/c1.jpg' }],
                 status: 'PENDING',
-                attempts: 0,
+                attempts: 1,
                 max_attempts: 3,
                 inspected_urls: [],
                 detected_title: null,
@@ -420,11 +426,143 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
 
       expect(due.length).toBe(1);
       expect(due[0].workId).toBe('11111111-2222-3333-4444-555555555555');
-      expect(due[0].status).toBe('PENDING');
-      expect(due[0].candidateCovers[0].source).toBe('mangaflix');
+
+      // Verify Bug 1 fix in SQL query:
+      // 1. Must check attempts < max_attempts
+      expect(executedSql).toContain('attempts < max_attempts');
+      // 2. Must respect next_retry_at interval for PENDING tasks
+      expect(executedSql).toContain('(next_retry_at IS NULL OR next_retry_at <= now())');
+      // 3. Must only recover RUNNING tasks if updated_at is older than 5 minutes (preventing duplicate execution)
+      expect(executedSql).toContain("updated_at <= now() - interval '5 minutes'");
     });
 
-    it('marks running, completed, no ptbr found, and failed with backoff', async () => {
+    it('BUG 1: markFailed calculates next_retry_at and marks FAILED at maxAttempts without indefinite retries', async () => {
+      const mockQueries: Array<{ sql: string; params: any[] }> = [];
+      const mockPool: any = {
+        query: vi.fn().mockImplementation((sql: string, params: any[]) => {
+          mockQueries.push({ sql, params });
+          return Promise.resolve({ rows: [] });
+        }),
+      };
+
+      const queue = new CoverVisionQueue(mockPool);
+
+      // Attempt 1 of 3 (transient failure): should set next_retry_at = now() + 5 minutes
+      await queue.markFailed('work-1', 'Network error', ['https://example.com/cover1.jpg'], 3, 5);
+
+      const query1 = mockQueries[0];
+      expect(query1.sql).toContain("CASE WHEN attempts + 1 >= $3 THEN 'FAILED' ELSE 'PENDING' END");
+      expect(query1.sql).toContain("next_retry_at = CASE WHEN attempts + 1 >= $3 THEN NULL ELSE now() + ($5 || ' minutes')::interval END");
+      expect(query1.params[0]).toBe('Network error');
+      expect(query1.params[2]).toBe(3); // maxAttempts
+      expect(query1.params[4]).toBe(5); // retryDelayMinutes
+    });
+
+    it('BUG 2: enqueueTask reactivates NO_PTBR_FOUND task to PENDING when fresh uninspected covers arrive', async () => {
+      const mockQueries: Array<{ sql: string; params: any[] }> = [];
+      const mockPool: any = {
+        query: vi.fn().mockImplementation((sql: string, params: any[]) => {
+          mockQueries.push({ sql, params });
+          if (sql.includes('to_regclass')) return Promise.resolve({ rows: [{ ok: true }] });
+          if (sql.includes('SELECT status, candidate_covers, inspected_urls')) {
+            return Promise.resolve({
+              rows: [
+                {
+                  status: 'NO_PTBR_FOUND',
+                  candidate_covers: [{ source: 'source-a', coverUrl: 'https://example.com/cover-old.jpg' }],
+                  inspected_urls: ['https://example.com/cover-old.jpg'],
+                },
+              ],
+            });
+          }
+          return Promise.resolve({ rows: [] });
+        }),
+      };
+
+      const queue = new CoverVisionQueue(mockPool);
+      // New cover arrives from a complementary source
+      const incoming = [
+        { source: 'source-b', coverUrl: 'https://example.com/cover-NEW.jpg' },
+      ];
+
+      await queue.enqueueTask('work-reactivate-test', incoming);
+
+      // Must find the update query resetting to PENDING
+      const updateQuery = mockQueries.find((q) => q.sql.includes("status = 'PENDING'"));
+      expect(updateQuery).toBeDefined();
+      expect(updateQuery?.sql).toContain('attempts = 0');
+      expect(updateQuery?.sql).toContain('next_retry_at = NULL');
+
+      const updatedCandidates = JSON.parse(updateQuery?.params[0]);
+      expect(updatedCandidates.length).toBe(2);
+      expect(updatedCandidates.some((c: CoverCandidate) => c.coverUrl === 'https://example.com/cover-NEW.jpg')).toBe(true);
+      expect(updatedCandidates.some((c: CoverCandidate) => c.coverUrl === 'https://example.com/cover-old.jpg')).toBe(true);
+    });
+
+    it('BUG 2: enqueueTask does NOT reactivate NO_PTBR_FOUND when incoming covers were already inspected', async () => {
+      const mockQueries: Array<{ sql: string; params: any[] }> = [];
+      const mockPool: any = {
+        query: vi.fn().mockImplementation((sql: string, params: any[]) => {
+          mockQueries.push({ sql, params });
+          if (sql.includes('to_regclass')) return Promise.resolve({ rows: [{ ok: true }] });
+          if (sql.includes('SELECT status, candidate_covers, inspected_urls')) {
+            return Promise.resolve({
+              rows: [
+                {
+                  status: 'NO_PTBR_FOUND',
+                  candidate_covers: [{ source: 'source-a', coverUrl: 'https://example.com/cover-old.jpg' }],
+                  inspected_urls: ['https://example.com/cover-old.jpg'],
+                },
+              ],
+            });
+          }
+          return Promise.resolve({ rows: [] });
+        }),
+      };
+
+      const queue = new CoverVisionQueue(mockPool);
+      // Same cover re-delivered
+      const incoming = [
+        { source: 'source-a', coverUrl: 'https://example.com/cover-old.jpg' },
+      ];
+
+      await queue.enqueueTask('work-no-duplicate', incoming);
+
+      // Must NOT update status to PENDING
+      const updateQuery = mockQueries.find((q) => q.sql.includes("status = 'PENDING'"));
+      expect(updateQuery).toBeUndefined();
+    });
+
+    it('BUG 2: enqueueTask never re-enqueues or modifies COMPLETED tasks', async () => {
+      const mockQueries: Array<{ sql: string; params: any[] }> = [];
+      const mockPool: any = {
+        query: vi.fn().mockImplementation((sql: string, params: any[]) => {
+          mockQueries.push({ sql, params });
+          if (sql.includes('to_regclass')) return Promise.resolve({ rows: [{ ok: true }] });
+          if (sql.includes('SELECT status, candidate_covers, inspected_urls')) {
+            return Promise.resolve({
+              rows: [
+                {
+                  status: 'COMPLETED',
+                  candidate_covers: [{ source: 'source-a', coverUrl: 'https://example.com/cover.jpg' }],
+                  inspected_urls: ['https://example.com/cover.jpg'],
+                },
+              ],
+            });
+          }
+          return Promise.resolve({ rows: [] });
+        }),
+      };
+
+      const queue = new CoverVisionQueue(mockPool);
+      await queue.enqueueTask('work-completed', [{ source: 'source-b', coverUrl: 'https://example.com/new.jpg' }]);
+
+      // Neither insert nor update query should be executed
+      const writeQuery = mockQueries.find((q) => q.sql.includes('INSERT') || q.sql.includes('UPDATE'));
+      expect(writeQuery).toBeUndefined();
+    });
+
+    it('marks running, completed, and no ptbr found correctly', async () => {
       const mockQueries: Array<{ sql: string; params: any[] }> = [];
       const mockPool: any = {
         query: vi.fn().mockImplementation((sql: string, params: any[]) => {
@@ -449,9 +587,6 @@ describe('CoverVisionInspector & Permanent PT-BR Guarantee Tests', () => {
 
       await queue.markNoPtBrFound('test-work-id', ['url1', 'url2']);
       expect(mockQueries.some((q) => q.sql.includes("status = 'NO_PTBR_FOUND'"))).toBe(true);
-
-      await queue.markFailed('test-work-id', 'Connection error', ['url1'], 3);
-      expect(mockQueries.some((q) => q.sql.includes("next_retry_at = now() + interval '5 minutes'"))).toBe(true);
     });
   });
 });
