@@ -38,6 +38,7 @@ const v4ActiveWorkIndexMigration = readFileSync(resolve(process.cwd(), 'migratio
 const multiWorkClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025044500_multi_work_claim_loop_and_concurrency_unblock.sql'), 'utf8');
 const boundedClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025063000_bound_claim_probe_and_metadata_pool.sql'), 'utf8');
 const sourceCooldownDueIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025070000_lite_source_cooldown_due_index.sql'), 'utf8');
+const progressSnapshotIndexesMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025073000_lite_progress_snapshot_indexes.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -154,6 +155,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(fairReadyWorkClaimIndexMigration);
   await db.exec(v4ActiveWorkIndexMigration);
   await db.exec(sourceCooldownDueIndexMigration);
+  await db.exec(progressSnapshotIndexesMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
