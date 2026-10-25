@@ -19,6 +19,7 @@ declare const ConfigSchema: z.ZodObject<{
     TESTED_CONCURRENCY_CEILING: z.ZodDefault<z.ZodNumber>;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     DIRECT_DB_POOL_MAX: z.ZodDefault<z.ZodNumber>;
+    METADATA_DB_POOL_MAX: z.ZodDefault<z.ZodNumber>;
     UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.ZodDefault<z.ZodNumber>;
     TELEGRAM_MEDIA_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
     DOWNLOAD_INFLIGHT_CONCURRENCY: z.ZodDefault<z.ZodNumber>;
@@ -49,6 +50,7 @@ declare const ConfigSchema: z.ZodObject<{
     TESTED_CONCURRENCY_CEILING: number;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: number;
     DIRECT_DB_POOL_MAX: number;
+    METADATA_DB_POOL_MAX: number;
     UPLOAD_RATE_LIMIT_BYTES_PER_SEC: number;
     TELEGRAM_MEDIA_CONCURRENCY: number;
     DOWNLOAD_INFLIGHT_CONCURRENCY: number;
@@ -88,6 +90,7 @@ declare const ConfigSchema: z.ZodObject<{
     TESTED_CONCURRENCY_CEILING?: number | undefined;
     BATCH_PAGE_DOWNLOAD_CONCURRENCY?: number | undefined;
     DIRECT_DB_POOL_MAX?: number | undefined;
+    METADATA_DB_POOL_MAX?: number | undefined;
     UPLOAD_RATE_LIMIT_BYTES_PER_SEC?: number | undefined;
     TELEGRAM_MEDIA_CONCURRENCY?: number | undefined;
     DOWNLOAD_INFLIGHT_CONCURRENCY?: number | undefined;

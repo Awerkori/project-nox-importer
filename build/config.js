@@ -53,6 +53,10 @@ const ConfigSchema = z.object({
     // lowered acquisition wait but raised SQL p95 to 411ms, transaction p95 to
     // 1.70s, RSS to 261MiB and CPU to 22.5%, without increasing publications.
     DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(3),
+    // The cluster has a very small connection budget shared with Hyperdrive and
+    // reader traffic. P2 metadata keeps one durable seat so aliases/tags/new
+    // works progress, but it cannot reserve a second backend from the reader.
+    METADATA_DB_POOL_MAX: z.coerce.number().int().min(1).max(4).default(1),
     // At the measured 52.75 MiB median chapter size, the former 4 MiB/s global
     // ceiling could never reach the 8/min acceptance floor (4.55/min before
     // network and publication overhead). Eight MiB/s is the first reversible
