@@ -484,21 +484,26 @@ export class ImporterLiteRuntime {
   }
 
   /**
-   * At cap three, two eight-page MangaFlix waves plus one six-page source
-   * need at most 22 live bodies. Starting at 48/80 in that operating mode
-   * merely creates allocator high-water that the memory guard later removes.
-   * Higher ramps retain the established #802 ceiling; this profiles only the
-   * normal state and never overrides REDUCED/CRITICAL backpressure.
+   * The clean #832 cap-three ramp measured 18 simultaneous page downloads
+   * and reached 375 MiB RSS with the former 24-body/48-MiB envelope.  The
+   * media wall is still the throughput bottleneck, so a wider chapter ramp
+   * must share a smaller page wave rather than multiply that allocation
+   * high-water.  Twenty bodies and forty MiB leave room for five chapter
+   * admissions to overlap their upload/DB phases while staying below the
+   * measured allocator-retention cliff.  This profiles only NORMAL; the
+   * existing REDUCED/CRITICAL guard remains authoritative.
    */
   private mediaProfileForChapterAdmissionCap(cap: number): { pageBufferCapacity: number; pageByteCapacity: number } {
     const normalizedCap = Math.max(1, Math.floor(cap));
+    if (normalizedCap >= 3 && normalizedCap <= 5) {
+      return {
+        pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, 20),
+        pageByteCapacity: 40 * 1024 * 1024,
+      };
+    }
     return {
       pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, Math.max(8, normalizedCap * 8)),
-      pageByteCapacity: normalizedCap <= 3
-        ? 48 * 1024 * 1024
-        : normalizedCap === 4
-          ? 64 * 1024 * 1024
-          : LITE_PAGE_BUFFER_BUDGET_BYTES,
+      pageByteCapacity: normalizedCap <= 2 ? 48 * 1024 * 1024 : LITE_PAGE_BUFFER_BUDGET_BYTES,
     };
   }
 

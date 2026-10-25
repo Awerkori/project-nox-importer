@@ -4854,7 +4854,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     gate.release(); gate.release();
   });
 
-  it('matches the normal media profile to a low durable chapter cap without changing global downloads', async () => {
+  it('shares a bounded media profile across the measured three-to-five chapter ramp without changing global downloads', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
@@ -4868,11 +4868,17 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(3);
     expect((runtime as any).downloads.capacity).toBe(24);
-    expect((runtime as any).bufferedPages.capacity).toBe(24);
-    expect((runtime as any).bufferedPageBytes.capacityBytes).toBe(48 * 1024 * 1024);
+    expect((runtime as any).bufferedPages.capacity).toBe(20);
+    expect((runtime as any).bufferedPageBytes.capacityBytes).toBe(40 * 1024 * 1024);
     expect((runtime as any).memoryPressureGuard.getNormalMediaProfile()).toEqual({
-      pageBufferCapacity: 24, pageByteCapacity: 48 * 1024 * 1024,
+      pageBufferCapacity: 20, pageByteCapacity: 40 * 1024 * 1024,
     });
+
+    await db.query(`UPDATE settings SET value='5' WHERE key='importer_chapter_admission_cap'`);
+    await (runtime as any).refreshManualProtectiveStop();
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(5);
+    expect((runtime as any).bufferedPages.capacity).toBe(20);
+    expect((runtime as any).bufferedPageBytes.capacityBytes).toBe(40 * 1024 * 1024);
   });
 
   it('confirms a failed site probe before pausing productive Lite claims', async () => {
