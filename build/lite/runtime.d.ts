@@ -135,10 +135,13 @@ export declare class ImporterLiteRuntime {
      *
      * The #833 cap-five sample established a distinct, bounded constraint:
      * its 40 MiB page budget was fully reserved with five page waiters while
-     * RSS was 318 MiB and YSQL had no waiter. Give only cap five an additional
-     * eight MiB so one more real page can make progress; this does not restore
-     * the prior 24-body/48-MiB cap-three envelope. REDUCED still drops this to
-     * 32 MiB and CRITICAL remains the one-page brake.
+     * RSS was 318 MiB and YSQL had no waiter. #834 raised that envelope to
+     * 48 MiB, but the next sample still had 31 MiB reserved and 21 waiters.
+     * A lengthless body needs a final 19 MiB promotion after its 1 MiB initial
+     * reservation, so 48 MiB cannot make terminal progress at that observed
+     * live occupancy. Cap five therefore gets 56 MiB: enough for that one
+     * bounded completion without widening the fixed 20-page fence. REDUCED
+     * still drops this to 32 MiB and CRITICAL remains the one-page brake.
      */
     private mediaProfileForChapterAdmissionCap;
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter, sourceMetadataPool?: Pool);
