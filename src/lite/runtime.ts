@@ -164,7 +164,9 @@ const CROSS_SOURCE_DEFERRED_RECHECK_INTERVAL_MS = 15 * 60_000;
 // uploads/media proof query. Keep it durable, but do not place that cold path
 // in every 30-second chapter recovery turn.
 const UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS = 5 * 60_000;
-/** Max gap between SOURCE_RATE_LIMITED re-admission passes under pool pressure. */
+/** Re-admit due source-cooldown work promptly once the chapter lane is quiet. */
+const SOURCE_COOLDOWN_RECOVERY_IDLE_INTERVAL_MS = 30_000;
+/** Max gap between SOURCE_RATE_LIMITED re-admission passes during a chapter wave. */
 const SOURCE_COOLDOWN_RECOVERY_MAX_GAP_MS = 2 * 60_000;
 /** Pause between V5 source-metadata producer chains that found no candidate. */
 const SOURCE_METADATA_NO_CANDIDATE_BACKOFF_MS = 5 * 60_000;
@@ -850,15 +852,16 @@ export class ImporterLiteRuntime {
       && now - this.lastUploadOutcomeRecoveryAt >= UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS;
     if (recoverUploadOutcomes) this.lastUploadOutcomeRecoveryAt = now;
     // Lease, publication and unknown-upload repair must remain live during a
-    // busy P1 wave. The SOURCE_RATE_LIMITED scan is different: it can inspect
-    // thousands of deferred chapter rows and is not needed to settle work
-    // already in flight. Yield only that optional re-admission pass while the
-    // tiny main pool is queued; the next idle recovery turn resumes it.
-    // The pool is almost never idle during a chapter wave, which left 5.3k
-    // healthy-route SOURCE_RATE_LIMITED imports (152 works) parked since
-    // 2026-10-14. Guarantee one bounded pass per interval even when queued.
-    const recoverSourceCooldowns = this.pool.waitingCount === 0
-      || now - this.lastSourceCooldownRecoveryAt >= SOURCE_COOLDOWN_RECOVERY_MAX_GAP_MS;
+    // busy P1 wave. The SOURCE_RATE_LIMITED scan can inspect thousands of
+    // deferred rows, so running it on every recovery turn whenever the pool
+    // happens to have no waiter still steals a primary YSQL seat from live
+    // publication. Re-admit quickly while idle, but rate-limit it during an
+    // active wave. The bounded max-gap keeps deferred sources progressing
+    // without permanent starvation under sustained chapter traffic.
+    const sourceCooldownIntervalMs = chapterOrPoolBusy
+      ? SOURCE_COOLDOWN_RECOVERY_MAX_GAP_MS
+      : SOURCE_COOLDOWN_RECOVERY_IDLE_INTERVAL_MS;
+    const recoverSourceCooldowns = now - this.lastSourceCooldownRecoveryAt >= sourceCooldownIntervalMs;
     if (recoverSourceCooldowns) this.lastSourceCooldownRecoveryAt = now;
     try { await this.queue.reconcile(50, { recoverUploadOutcomes, recoverSourceCooldowns }); } catch { /* bounded recovery retries next turn */ }
     try { await this.probeDueSourceRecovery(); } catch (error: any) {

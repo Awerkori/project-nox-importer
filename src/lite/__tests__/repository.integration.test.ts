@@ -1006,13 +1006,34 @@ describe('LiteRepository against the additive Lite migration', () => {
       recoverSourceCooldowns: true,
     });
 
-    // The pending proof runs on the next quiet turn rather than being lost.
+    // Do not repeatedly run the multi-row cooldown scan during this same
+    // chapter wave merely because the pool had a transient idle seat.
+    await (runtime as any).runRecoveryTurn();
+    expect(reconcile).toHaveBeenLastCalledWith(50, {
+      recoverUploadOutcomes: false,
+      recoverSourceCooldowns: false,
+    });
+
+    // The pending upload proof and cooldown pass both resume promptly once
+    // quiet; the latter retains its short idle cadence for replenishment.
     admission.release();
+    (runtime as any).lastSourceCooldownRecoveryAt = Date.now() - 30_000;
     await (runtime as any).runRecoveryTurn();
     expect(reconcile).toHaveBeenLastCalledWith(50, {
       recoverUploadOutcomes: true,
       recoverSourceCooldowns: true,
     });
+
+    // A sustained wave still receives one bounded source-cooldown pass at
+    // the max gap, so this efficiency guard cannot starve deferred sources.
+    expect(admission.tryAcquire()).toBe(true);
+    (runtime as any).lastSourceCooldownRecoveryAt = Date.now() - 2 * 60_000;
+    await (runtime as any).runRecoveryTurn();
+    expect(reconcile).toHaveBeenLastCalledWith(50, {
+      recoverUploadOutcomes: false,
+      recoverSourceCooldowns: true,
+    });
+    admission.release();
   });
 
   it('prefetches one durable successor without widening the historical fetch lane under shared-pool pressure', async () => {
