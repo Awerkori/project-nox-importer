@@ -389,6 +389,8 @@ export class LiteExecutor {
             slot.setCapacity(this.sourceCapacity(source));
     }
     getFairSourceDemand() { return [...this.fairDemandSources].sort(); }
+    /** The durable chapter-admission cap currently used to calculate source shares. */
+    getEffectiveChapterAdmissionCap() { return this.effectiveChapterAdmissionCap; }
     /** Aggregate-only batch evidence for the existing heartbeat. */
     getUploadBatchSnapshot() {
         return { reservations: this.reservationBatcher.snapshot(), receipts: this.receiptBatcher.snapshot() };

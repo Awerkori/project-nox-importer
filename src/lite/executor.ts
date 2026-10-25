@@ -390,6 +390,9 @@ export class LiteExecutor {
 
   getFairSourceDemand(): string[] { return [...this.fairDemandSources].sort(); }
 
+  /** The durable chapter-admission cap currently used to calculate source shares. */
+  getEffectiveChapterAdmissionCap(): number { return this.effectiveChapterAdmissionCap; }
+
   /** Aggregate-only batch evidence for the existing heartbeat. */
   getUploadBatchSnapshot(): { reservations: UploadBatchSnapshot; receipts: UploadBatchSnapshot } {
     return { reservations: this.reservationBatcher.snapshot(), receipts: this.receiptBatcher.snapshot() };
