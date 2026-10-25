@@ -2645,6 +2645,39 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).operationalSnapshotRunning).toBe(false);
   });
 
+  it('uses a compact heartbeat while a chapter admission is active instead of racing its YSQL commits', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { WORKER_ID: 'snapshot-chapter-busy', IMPORTER_USER_ID: ids.staff, DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, TELEGRAM_MEDIA_CONCURRENCY: 1,
+        UPLOAD_RATE_LIMIT_BYTES_PER_SEC: 1, LITE_CHAPTER_WORKERS: 1,
+        MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
+    );
+    const queue = (runtime as any).queue;
+    queue.operationalSnapshot = vi.fn();
+    queue.progressSnapshot = vi.fn();
+    const admission = (runtime as any).chapterAdmissionGate;
+    expect(admission.tryAcquire()).toBe(true);
+
+    try {
+      await (runtime as any).emitOperationalSnapshot();
+      expect(queue.operationalSnapshot).not.toHaveBeenCalled();
+      expect(queue.progressSnapshot).not.toHaveBeenCalled();
+      const stored = await db.query(`SELECT value FROM settings WHERE key='importer_heartbeat'`);
+      const heartbeat = typeof stored.rows[0]?.value === 'string'
+        ? JSON.parse(stored.rows[0].value)
+        : stored.rows[0]?.value;
+      expect(heartbeat).toMatchObject({
+        snapshotDeferred: 'CHAPTER_BUSY',
+        liveness: { chapterAdmission: { active: 1 } },
+      });
+      expect((runtime as any).heartbeatCompletedAt).not.toBeNull();
+    } finally {
+      admission.release();
+    }
+  });
+
   it('fences a legacy runtime and Lite during cutover without stranding an in-flight durable task', async () => {
     // This is deliberately cross-runtime rather than a second Lite instance:
     // a rolling DIScloud deployment must never leave both v1 and Lite able to
