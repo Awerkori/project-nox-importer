@@ -82,6 +82,47 @@ function cleanCoverLine(raw: string): string {
     .trim();
 }
 
+export async function downloadCoverWithLimit(
+  url: string,
+  headers?: Record<string, string>,
+  maxBytes = MAX_COVER_IMAGE_BYTES,
+  timeoutMs = 8_000,
+): Promise<{ ok: boolean; buffer?: Buffer; reason?: string }> {
+  try {
+    const res = await fetch(url, {
+      headers: headers || { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return { ok: false, reason: `HTTP_${res.status}` };
+    const declaredLength = Number(res.headers.get('content-length') || 0);
+    if (declaredLength > maxBytes) return { ok: false, reason: 'IMAGE_EXCEEDS_MAX_SIZE' };
+
+    if (!res.body) return { ok: false, reason: 'EMPTY_RESPONSE_BODY' };
+
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let receivedBytes = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        receivedBytes += value.length;
+        if (receivedBytes > maxBytes) {
+          try { await reader.cancel('EXCEEDED_MAX_BYTES'); } catch {}
+          return { ok: false, reason: 'IMAGE_EXCEEDS_MAX_SIZE' };
+        }
+        chunks.push(value);
+      }
+    }
+
+    if (receivedBytes === 0) return { ok: false, reason: 'NO_IMAGE_DATA' };
+    return { ok: true, buffer: Buffer.concat(chunks) };
+  } catch (err: any) {
+    return { ok: false, reason: `FETCH_FAILED: ${err?.message || err}` };
+  }
+}
+
 /**
  * Visually inspects a manga/manhwa cover artwork using OCR + context validation
  * to detect Brazilian Portuguese titles rendered directly onto the cover art.
@@ -113,32 +154,8 @@ export async function inspectCoverForPtBrTitle(
 
   let buf: Buffer | null = target.coverBuffer || null;
   if (!buf && target.coverUrl) {
-    try {
-      const res = await fetch(target.coverUrl, {
-        headers: target.headers || { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-        signal: AbortSignal.timeout(8_000),
-      });
-      if (res.ok) {
-        const contentLength = Number(res.headers.get('content-length') || 0);
-        if (contentLength > MAX_COVER_IMAGE_BYTES) {
-          return {
-            inspected: false,
-            foundPtBrTitle: false,
-            detectedTitle: null,
-            confidence: 0,
-            evidence: {
-              source: target.source,
-              coverUrl: target.coverUrl,
-              rawLines: [],
-              filteredCandidates: [],
-              durationMs: Math.round(performance.now() - t0),
-              reason: 'IMAGE_EXCEEDS_MAX_SIZE',
-            },
-          };
-        }
-        buf = Buffer.from(await res.arrayBuffer());
-      }
-    } catch (fetchErr: any) {
+    const dl = await downloadCoverWithLimit(target.coverUrl, target.headers, MAX_COVER_IMAGE_BYTES, 8_000);
+    if (!dl.ok || !dl.buffer) {
       return {
         inspected: false,
         foundPtBrTitle: false,
@@ -150,10 +167,11 @@ export async function inspectCoverForPtBrTitle(
           rawLines: [],
           filteredCandidates: [],
           durationMs: Math.round(performance.now() - t0),
-          reason: `FETCH_FAILED: ${fetchErr?.message || fetchErr}`,
+          reason: dl.reason || 'DOWNLOAD_FAILED',
         },
       };
     }
+    buf = dl.buffer;
   }
 
   if (!buf || buf.length === 0) {
