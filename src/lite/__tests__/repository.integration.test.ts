@@ -853,6 +853,36 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toMatchObject({ state:'RUNNING' });
   });
 
+  it('retains exactly one P2 metadata seat while a chapter is admitted, and fully opens P2 once idle', () => {
+    const pool = Object.assign(poolFor(db), { waitingCount: 0 });
+    const runtime = new ImporterLiteRuntime(
+      pool as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload:async ()=>'unused',healthCheck:async()=>true,getProviderKey:()=>'telegram' },
+      { IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY:1,
+        BUFFERED_PAGE_CONCURRENCY:1, BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,
+        LITE_CHAPTER_WORKERS:1, MAX_CONCURRENT_CHAPTERS:1, TESTED_CONCURRENCY_CEILING:1 } as any,
+    );
+    const chapterGate = (runtime as any).chapterAdmissionGate;
+    expect(chapterGate.tryAcquire()).toBe(true);
+
+    pool.waitingCount = 1;
+    expect((runtime as any).tryAcquireBackgroundMetadataBudget()).toBeNull();
+    pool.waitingCount = 0;
+    const first = (runtime as any).tryAcquireBackgroundMetadataBudget();
+    expect(first).toEqual(expect.any(Function));
+    expect((runtime as any).tryAcquireBackgroundMetadataBudget()).toBeNull();
+    first();
+
+    const replacement = (runtime as any).tryAcquireBackgroundMetadataBudget();
+    expect(replacement).toEqual(expect.any(Function));
+    replacement();
+    chapterGate.release();
+
+    // An idle chapter budget never throttles the P2 recovery lanes.
+    expect((runtime as any).tryAcquireBackgroundMetadataBudget()).toEqual(expect.any(Function));
+    expect((runtime as any).tryAcquireBackgroundMetadataBudget()).toEqual(expect.any(Function));
+  });
+
   it('advances due source discovery from the new-work lane when P1 chapters are queued and separates mapped from unmapped works', async () => {
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
