@@ -853,7 +853,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toMatchObject({ state:'RUNNING' });
   });
 
-  it('retains exactly one P2 metadata seat while a chapter is admitted, and fully opens P2 once idle', () => {
+  it('retains exactly one P2 metadata seat while chapter demand is admitted or ready, and fully opens P2 once idle', () => {
     const pool = Object.assign(poolFor(db), { waitingCount: 0 });
     const runtime = new ImporterLiteRuntime(
       pool as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
@@ -877,6 +877,15 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(replacement).toEqual(expect.any(Function));
     replacement();
     chapterGate.release();
+
+    // The durable fair-source sample closes the startup window before the
+    // first worker has acquired its chapter admission permit.
+    (runtime as any).executor.setFairSourceDemand(['source-a']);
+    const readyDemand = (runtime as any).tryAcquireBackgroundMetadataBudget();
+    expect(readyDemand).toEqual(expect.any(Function));
+    expect((runtime as any).tryAcquireBackgroundMetadataBudget()).toBeNull();
+    readyDemand();
+    (runtime as any).executor.setFairSourceDemand([]);
 
     // An idle chapter budget never throttles the P2 recovery lanes.
     expect((runtime as any).tryAcquireBackgroundMetadataBudget()).toEqual(expect.any(Function));

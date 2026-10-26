@@ -294,12 +294,14 @@ export declare class ImporterLiteRuntime {
     /** A bounded source view refreshes on recovery and at import-priority boundaries. */
     private refreshSourceFairness;
     /**
-     * P2 background lanes normally run independently of chapter workers.  Once
-     * a P0/P1 chapter has been admitted, they share the same Yugabyte service
-     * even when their network work is separate.  Admit one such lane at a time
-     * and start none while the primary pool already has a waiter.  An idle
-     * chapter gate returns an immediate no-op release, preserving normal P2
-     * progress and its recovery after a sustained chapter backlog.
+     * P2 background lanes normally run independently of chapter workers. Once
+     * a P0/P1 chapter is admitted, or a ready chapter route is already known,
+     * they share the same Yugabyte service even when their network work is
+     * separate. Admit one such lane at a time and start none while the primary
+     * pool already has a waiter. The ready-source view closes the short startup
+     * race where P2 could take several seats before the first chapter acquired
+     * its admission permit. With no chapter demand, releases remain no-ops and
+     * normal P2 recovery retains its full capacity.
      */
     private tryAcquireBackgroundMetadataBudget;
     private upsertChapterSources;
