@@ -117,15 +117,19 @@ export class LiteMemoryPressureGuard {
     let observed = memory || process.memoryUsage();
     const rssMiBBeforeGc = observed.rss / MIB;
     // V8's heap can remain small while completed image ArrayBuffers are ready
-    // for collection.  A first collection happens before NORMAL yields.  A
-    // second, cooldown-bounded collection happens only if retained RSS would
-    // otherwise move REDUCED into CRITICAL.  That distinction matters for the
-    // lengthless-page pipeline: its durable byte budget can already be empty
-    // while the previous wave's dead backing stores still occupy RSS.
+    // for collection. A first collection happens before NORMAL yields. Once
+    // REDUCED has drained its bounded page wave, collect again on the same
+    // cooldown instead of waiting for CRITICAL: production retained 286 MiB
+    // of native RSS at 364 MiB after all tasks, page bytes and ArrayBuffers
+    // were already idle. This cannot run during a live page wave.
+    const pageBytes = this.pageBytes.snapshot().reservedBytes;
+    const drainedPageWave = pageBytes <= RETAINED_RSS_METADATA_MAX_RESERVED_PAGE_BYTES &&
+      (observed.external || 0) / MIB <= RETAINED_RSS_METADATA_MAX_EXTERNAL_MIB &&
+      (observed.arrayBuffers || 0) / MIB <= RETAINED_RSS_METADATA_MAX_ARRAY_BUFFER_MIB;
     const shouldCollect = this.state === 'NORMAL'
       ? rssMiBBeforeGc >= NORMAL_RSS_MIB
       : this.state === 'REDUCED'
-        ? rssMiBBeforeGc >= CRITICAL_RSS_MIB
+        ? rssMiBBeforeGc >= CRITICAL_RSS_MIB || drainedPageWave
         : false;
     if (!memory && shouldCollect && Date.now() - this.lastForcedGcAt >= FORCED_GC_COOLDOWN_MS) {
       const gc = (globalThis as typeof globalThis & { gc?: () => void }).gc;
