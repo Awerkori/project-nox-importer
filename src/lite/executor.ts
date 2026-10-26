@@ -19,12 +19,13 @@ import { PageByteBudget, type PageByteReservation, unknownPageInitialReservation
 // the next bounded page wave proceeds. This separates pool amortisation from
 // pre-upload latency without changing a full-batch flush or any concurrency.
 // Yugabyte's write latency is material relative to an individual page. The
-// production batch telemetry showed 3.5 reservation rows and 5.1 receipt
-// rows per write at 300/600 ms, leaving hundreds of small `WITH unnest`
-// writes to contend for the three-seat pool.  These remain sub-second joins;
-// the pre-upload intent is still committed before Telegram is called and
-// receipts remain scalar-only after Telegram has confirmed the page.
-export const DURABLE_RESERVATION_BATCH_JOIN_MS = 500;
+// controlled cap-seven ramp measured 4.2 reservation rows per write with a
+// 500 ms join, while a flush itself reached 1.15 s p95. A 700 ms bounded
+// join safely gathers the next staggered page wave before its pre-upload
+// intent is committed, reducing contention on the three-seat pool without
+// changing the durable-before-Telegram fence. Receipts remain scalar-only
+// after Telegram has confirmed the page.
+export const DURABLE_RESERVATION_BATCH_JOIN_MS = 700;
 export const DURABLE_RECEIPT_BATCH_JOIN_MS = 900;
 
 async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
