@@ -4854,7 +4854,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     gate.release(); gate.release();
   });
 
-  it('keeps the cap-five page-body fence while reserving its measured terminal-body headroom without changing global downloads', async () => {
+  it('keeps caps five and six inside the measured page-body fence while reserving terminal-body headroom', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
@@ -4877,6 +4877,18 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`UPDATE settings SET value='5' WHERE key='importer_chapter_admission_cap'`);
     await (runtime as any).refreshManualProtectiveStop();
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(5);
+    expect((runtime as any).bufferedPages.capacity).toBe(20);
+    expect((runtime as any).bufferedPageBytes.capacityBytes).toBe(56 * 1024 * 1024);
+    expect((runtime as any).memoryPressureGuard.getNormalMediaProfile()).toEqual({
+      pageBufferCapacity: 20, pageByteCapacity: 56 * 1024 * 1024,
+    });
+
+    await db.query(`UPDATE settings SET value='6' WHERE key='importer_chapter_admission_cap'`);
+    await (runtime as any).refreshManualProtectiveStop();
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(6);
+    // A sixth chapter may overlap prepare/publish work, but it must share
+    // the cap-five media envelope until a wider one is measured safely.
+    expect((runtime as any).downloads.capacity).toBe(24);
     expect((runtime as any).bufferedPages.capacity).toBe(20);
     expect((runtime as any).bufferedPageBytes.capacityBytes).toBe(56 * 1024 * 1024);
     expect((runtime as any).memoryPressureGuard.getNormalMediaProfile()).toEqual({
