@@ -101,6 +101,7 @@ export declare class ImporterLiteRuntime {
     private sitePausedUntil;
     private idleClaimUntil;
     private idleMonitorUntil;
+    private fairDemandImportPriority;
     private manualProtectiveStop;
     private operatorChapterAdmissionCap;
     private lastSiteProbe;
@@ -289,7 +290,7 @@ export declare class ImporterLiteRuntime {
      * an older queued task bypasses the producer's active-work exclusion.
      */
     private serializeV4Work;
-    /** A bounded source view refreshes only outside claims and only once per recovery turn. */
+    /** A bounded source view refreshes on recovery and at import-priority boundaries. */
     private refreshSourceFairness;
     private upsertChapterSources;
     /**

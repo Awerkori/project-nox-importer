@@ -323,6 +323,11 @@ export class ImporterLiteRuntime {
     sitePausedUntil = 0;
     idleClaimUntil = 0;
     idleMonitorUntil = 0;
+    // `readyImportSources` is sampled outside the durable claim SQL. When the
+    // highest runnable import priority changes, retaining the prior P0-only
+    // sample until the 30-second recovery turn lets the first P1 wave bypass
+    // source-share limits even though alternatives are already READY.
+    fairDemandImportPriority = null;
     manualProtectiveStop = {
         active: false,
         reason: null,
@@ -2120,13 +2125,15 @@ export class ImporterLiteRuntime {
                 this.metadataReplayV4WorkTails.delete(workId);
         }
     }
-    /** A bounded source view refreshes only outside claims and only once per recovery turn. */
+    /** A bounded source view refreshes on recovery and at import-priority boundaries. */
     async refreshSourceFairness() {
         try {
             this.executor.setFairSourceDemand(await this.queue.readyImportSources());
+            return true;
         }
         catch (error) {
             this.logger.warn('Source fairness sample failed', { error: error?.message });
+            return false;
         }
     }
     async upsertChapterSources(rows) {
@@ -2339,6 +2346,14 @@ export class ImporterLiteRuntime {
             if (Date.now() < this.idleClaimUntil)
                 return null;
             const task = await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS);
+            if (task?.taskType === 'IMPORT_CHAPTER' && task.priority !== this.fairDemandImportPriority) {
+                // The claim gate makes this a true priority-boundary refresh: no
+                // second worker can begin a stale P0-sized source wave while the
+                // first task of the new priority updates the local source caps.
+                // It is one bounded read per transition, never per page or task.
+                if (await this.refreshSourceFairness())
+                    this.fairDemandImportPriority = task.priority;
+            }
             this.idleClaimUntil = task ? 0 : Date.now() + 750;
             return task;
         });

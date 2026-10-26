@@ -1898,6 +1898,37 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(fallback.capacity).toBe(1);
   });
 
+  it('refreshes source demand before the first P1 claim after a P0-only wave', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => null } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', WORKER_ID: 'priority-fairness-test',
+        QUEUE_LEASE_DURATION_SECONDS: 60, DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, LITE_CHAPTER_WORKERS: 5, MAX_CONCURRENT_CHAPTERS: 5,
+        TESTED_CONCURRENCY_CEILING: 5 } as any,
+    );
+    const claims = [
+      { id: 'p0', taskType: 'IMPORT_CHAPTER', priority: 'P0' },
+      { id: 'p1', taskType: 'IMPORT_CHAPTER', priority: 'P1' },
+    ];
+    const readyImportSources = vi.fn()
+      .mockResolvedValueOnce(['mangaflix'])
+      .mockResolvedValueOnce(['mangaflix', 'manhastro', 'nexus']);
+    (runtime as any).queue = {
+      claim: vi.fn(async () => claims.shift() || null),
+      readyImportSources,
+    };
+    (runtime as any).isRuntimeLeader = true;
+
+    await (runtime as any).claimNext('priority-fairness-worker');
+    await (runtime as any).claimNext('priority-fairness-worker');
+
+    expect(readyImportSources).toHaveBeenCalledTimes(2);
+    expect((runtime as any).executor.getFairSourceDemand()).toEqual(['mangaflix', 'manhastro', 'nexus']);
+    const mangaFlix = (runtime as any).executor.sourceSlot('mangaflix') as AsyncSemaphore;
+    expect(mangaFlix.capacity).toBe(2);
+  });
+
   it('uses the effective admission cap, not configured workers, for source shares', () => {
     const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
       new AsyncSemaphore(24, 'effective-cap-downloads'), 4, new AsyncSemaphore(48, 'effective-cap-buffers'), new HostRateLimiter(2), 20);

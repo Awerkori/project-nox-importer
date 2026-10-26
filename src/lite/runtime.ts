@@ -10,7 +10,7 @@ import type { StorageProvider } from '../storage/provider.js';
 import { canonicalChapterKey, chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { LiteExecutor } from './executor.js';
 import { LiteRepository, type EnqueueLiteTask, type LiteSourcePolicy } from './repository.js';
-import type { LiteTask } from './types.js';
+import type { LitePriority, LiteTask } from './types.js';
 import { Logger } from '../core/logger.js';
 import { readImageBody } from '../core/bounded-body.js';
 import { processAndStoreMedia } from '../storage/media.js';
@@ -378,6 +378,11 @@ export class ImporterLiteRuntime {
   private sitePausedUntil = 0;
   private idleClaimUntil = 0;
   private idleMonitorUntil = 0;
+  // `readyImportSources` is sampled outside the durable claim SQL. When the
+  // highest runnable import priority changes, retaining the prior P0-only
+  // sample until the 30-second recovery turn lets the first P1 wave bypass
+  // source-share limits even though alternatives are already READY.
+  private fairDemandImportPriority: LitePriority | null = null;
   private manualProtectiveStop = {
     active: false,
     reason: null as string | null,
@@ -2202,12 +2207,14 @@ export class ImporterLiteRuntime {
     }
   }
 
-  /** A bounded source view refreshes only outside claims and only once per recovery turn. */
-  private async refreshSourceFairness(): Promise<void> {
+  /** A bounded source view refreshes on recovery and at import-priority boundaries. */
+  private async refreshSourceFairness(): Promise<boolean> {
     try {
       this.executor.setFairSourceDemand(await this.queue.readyImportSources());
+      return true;
     } catch (error: any) {
       this.logger.warn('Source fairness sample failed', { error: error?.message });
+      return false;
     }
   }
 
@@ -2433,6 +2440,13 @@ export class ImporterLiteRuntime {
       if (this.manualProtectiveStop.active) return null;
       if (Date.now() < this.idleClaimUntil) return null;
       const task = await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS);
+      if (task?.taskType === 'IMPORT_CHAPTER' && task.priority !== this.fairDemandImportPriority) {
+        // The claim gate makes this a true priority-boundary refresh: no
+        // second worker can begin a stale P0-sized source wave while the
+        // first task of the new priority updates the local source caps.
+        // It is one bounded read per transition, never per page or task.
+        if (await this.refreshSourceFairness()) this.fairDemandImportPriority = task.priority;
+      }
       this.idleClaimUntil = task ? 0 : Date.now() + 750;
       return task;
     });
