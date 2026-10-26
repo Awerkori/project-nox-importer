@@ -8,6 +8,22 @@ import { telemetryCollector } from '../core/telemetry-collector.js';
 import { BoundedSamples } from '../core/bounded-samples.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { PageByteBudget, unknownPageInitialReservationBytes } from './page-byte-budget.js';
+const withTimeout = async (operation, timeoutMs, code) => {
+    let timer;
+    try {
+        return await Promise.race([
+            operation,
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error(code)), timeoutMs);
+                timer.unref();
+            }),
+        ]);
+    }
+    finally {
+        if (timer)
+            clearTimeout(timer);
+    }
+};
 // A pre-upload intent gates Telegram, so keep its join window short. A
 // confirmed receipt is deferred and can safely coalesce a little longer while
 // the next bounded page wave proceeds. This separates pool amortisation from
@@ -339,6 +355,7 @@ export class LiteExecutor {
     chapterWorkerCapacity;
     onRouteSelected;
     pageBytes;
+    chapterManifestTimeoutMs;
     sourceSlots = new Map();
     receiptBatcher;
     reservationBatcher;
@@ -353,7 +370,11 @@ export class LiteExecutor {
     // overlap the next bounded page wave without weakening the memory budget.
     // This is distinct from request concurrency: it bounds real image buffers
     // across every chapter worker while Telegram is slow or cooling down.
-    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = defaultBufferedPages(downloads), sourceRateLimiter = new HostRateLimiter(2), chapterWorkerCapacity = 1, onRouteSelected, pageBytes = new PageByteBudget()) {
+    // Keep an upstream manifest request below the durable task lease. A source
+    // can be slow or its own limiter can stall before it reaches the page-body
+    // fetch timeout; without this fence it held a chapter admission until lease
+    // reconciliation, starving unrelated ready work.
+    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = defaultBufferedPages(downloads), sourceRateLimiter = new HostRateLimiter(2), chapterWorkerCapacity = 1, onRouteSelected, pageBytes = new PageByteBudget(), chapterManifestTimeoutMs = 30_000) {
         this.db = db;
         this.queue = queue;
         this.registry = registry;
@@ -366,6 +387,7 @@ export class LiteExecutor {
         this.chapterWorkerCapacity = chapterWorkerCapacity;
         this.onRouteSelected = onRouteSelected;
         this.pageBytes = pageBytes;
+        this.chapterManifestTimeoutMs = chapterManifestTimeoutMs;
         this.receiptBatcher = new UploadReceiptBatcher(queue);
         this.reservationBatcher = new UploadReservationBatcher(queue);
         this.effectiveChapterAdmissionCap = Math.max(1, Math.floor(chapterWorkerCapacity));
@@ -695,7 +717,7 @@ export class LiteExecutor {
                 let urls;
                 try {
                     const sourceFetchStartedAt = performance.now();
-                    urls = await adapter.fetchChapterPages(route.sourceChapterId, Number(task.payload.displayNumber));
+                    urls = await withTimeout(adapter.fetchChapterPages(route.sourceChapterId, Number(task.payload.displayNumber)), this.chapterManifestTimeoutMs, 'CHAPTER_MANIFEST_TIMEOUT');
                     sourceFetchMs = performance.now() - sourceFetchStartedAt;
                     if (!urls.length || urls.length > 1000)
                         throw new Error('INVALID_PAGE_MANIFEST');

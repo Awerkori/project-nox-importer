@@ -558,7 +558,8 @@ export class ImporterLiteRuntime {
     // remain unchanged; this only fills existing unused media permits.
     this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads,
       Math.max(1, Math.min(8, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter,
-      this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes);
+      this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes,
+      config.SOURCE_OPERATION_TIMEOUT_MS);
     this.dedupe = new DeduplicationEngine(catalogClient);
     this.historicalMetadataDedupe = sourceMetadataPool === pool
       ? this.dedupe
