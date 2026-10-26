@@ -5296,7 +5296,7 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('uses a longer join only for deferred receipts, not pre-upload intents', () => {
-    expect(DURABLE_RESERVATION_BATCH_JOIN_MS).toBe(500);
+    expect(DURABLE_RESERVATION_BATCH_JOIN_MS).toBe(700);
     expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBe(900);
     expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBeGreaterThan(DURABLE_RESERVATION_BATCH_JOIN_MS);
     expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBeLessThan(1_000);
