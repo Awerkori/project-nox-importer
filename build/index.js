@@ -28,6 +28,10 @@ import { telemetryCollector } from './core/telemetry-collector.js';
 import { ImporterLiteRuntime } from './lite/runtime.js';
 import { reconcileAuditedSources } from './core/source-audit-bootstrap.js';
 async function main() {
+    // This is intentionally a release-observability marker, not a scheduling
+    // knob.  It lets the durable Lite heartbeat distinguish a rebuilt rollout
+    // from an older process when the hosting platform has delayed replacement.
+    const rolloutRevision = 'r840';
     const __dirname = path.dirname(fileURLToPath(import.meta.url));
     let buildCommit = 'unknown';
     try {
@@ -44,6 +48,7 @@ async function main() {
         buildMetadata.gitSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     }
     catch { }
+    buildMetadata.rolloutRevision = rolloutRevision;
     telemetryCollector.setRuntimeFingerprint({ ...buildMetadata, nodeVersion: process.version, bootedAt: new Date().toISOString() });
     const config = getConfig();
     // Network diagnostics: determine egress IP and TCP port reachability

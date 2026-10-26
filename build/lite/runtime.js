@@ -2460,6 +2460,7 @@ export class ImporterLiteRuntime {
             gitSha: stringValue('gitSha'),
             artifactSha256: stringValue('artifactSha256'),
             buildId: stringValue('buildId'),
+            rolloutRevision: stringValue('rolloutRevision'),
             builtAt: stringValue('builtAt'),
             bootedAt: stringValue('bootedAt'),
             nodeVersion: stringValue('nodeVersion'),
