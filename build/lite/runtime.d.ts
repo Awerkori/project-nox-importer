@@ -56,6 +56,7 @@ export declare class ImporterLiteRuntime {
     private readonly sourceMetadataLaneGate;
     private readonly sourceMetadataPersistenceGate;
     private readonly newWorkCatalogGate;
+    private readonly backgroundMetadataUnderChapterLoadGate;
     private lastNewWorkDiscoveryAt;
     private readonly crossSourceMetadataGate;
     private readonly crossSourceDiscoveryLaneGate;
@@ -292,6 +293,15 @@ export declare class ImporterLiteRuntime {
     private serializeV4Work;
     /** A bounded source view refreshes on recovery and at import-priority boundaries. */
     private refreshSourceFairness;
+    /**
+     * P2 background lanes normally run independently of chapter workers.  Once
+     * a P0/P1 chapter has been admitted, they share the same Yugabyte service
+     * even when their network work is separate.  Admit one such lane at a time
+     * and start none while the primary pool already has a waiter.  An idle
+     * chapter gate returns an immediate no-op release, preserving normal P2
+     * progress and its recovery after a sustained chapter backlog.
+     */
+    private tryAcquireBackgroundMetadataBudget;
     private upsertChapterSources;
     /**
      * Catalog passes can rediscover a whole work that the legacy importer has

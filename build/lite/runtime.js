@@ -239,6 +239,13 @@ export class ImporterLiteRuntime {
     sourceMetadataLaneGate = new AsyncSemaphore(1, 'lite_source_metadata_lane');
     sourceMetadataPersistenceGate = new AsyncSemaphore(1, 'lite_source_metadata_persistence');
     newWorkCatalogGate = new AsyncSemaphore(1, 'lite_new_work_catalog_lane');
+    // P2 has dedicated lanes so aliases, metadata and new works never depend on
+    // an empty P1 queue.  Those lanes previously started independently just as
+    // a full chapter wave began, however, which let three low-priority catalog
+    // transactions contend with the three-seat primary pool.  While a chapter
+    // is admitted, retain one P2 seat: it prevents permanent starvation but
+    // reserves the remaining shared YSQL capacity for publication.
+    backgroundMetadataUnderChapterLoadGate = new AsyncSemaphore(1, 'lite_background_metadata_under_chapter_load');
     lastNewWorkDiscoveryAt = 0;
     // Reserve 3 permits (2 for background V7 discovery + 1 for NEW_WORK onboarding)
     // so background V7 tasks can never starve a newly created work's onboarding pass.
@@ -1609,8 +1616,15 @@ export class ImporterLiteRuntime {
         const maxActive = !this.metadataTurboMode.enabled || constrainedPool ? 1 : 6;
         if (this.sourceMetadataLaneGate.active >= maxActive)
             return false;
-        if (!this.isRuntimeLeader || !this.sourceMetadataLaneGate.tryAcquire())
+        if (!this.isRuntimeLeader)
             return false;
+        const releaseBackgroundBudget = this.tryAcquireBackgroundMetadataBudget();
+        if (!releaseBackgroundBudget)
+            return false;
+        if (!this.sourceMetadataLaneGate.tryAcquire()) {
+            releaseBackgroundBudget();
+            return false;
+        }
         let claimed = false;
         let completedSource;
         try {
@@ -1637,6 +1651,7 @@ export class ImporterLiteRuntime {
         }
         finally {
             this.sourceMetadataLaneGate.release();
+            releaseBackgroundBudget();
             // Refill only after actual progress. This keeps an empty catalogue from
             // polling its full candidate set, while a completed task immediately
             // frees its durable replacement instead of waiting for the 15 s timer.
@@ -1663,9 +1678,15 @@ export class ImporterLiteRuntime {
             || !this.isRuntimeLeader
             || this.manualProtectiveStop.active
             || (!this.metadataTurboMode.enabled && (Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'))
-            || this.shouldPauseLowPriorityMetadata()
-            || !this.crossSourceDiscoveryLaneGate.tryAcquire())
+            || this.shouldPauseLowPriorityMetadata())
             return false;
+        const releaseBackgroundBudget = this.tryAcquireBackgroundMetadataBudget();
+        if (!releaseBackgroundBudget)
+            return false;
+        if (!this.crossSourceDiscoveryLaneGate.tryAcquire()) {
+            releaseBackgroundBudget();
+            return false;
+        }
         let claimed = false;
         try {
             const workerId = overrideWorkerId || `${this.runtimeInstanceId}:cross-source-metadata`;
@@ -1680,6 +1701,7 @@ export class ImporterLiteRuntime {
         }
         finally {
             this.crossSourceDiscoveryLaneGate.release();
+            releaseBackgroundBudget();
             // A coverage task advances one provider per durable checkpoint.  Wake
             // its successor promptly, but never spin when no due task exists.
             if (claimed && this.isRuntimeLeader) {
@@ -1743,9 +1765,15 @@ export class ImporterLiteRuntime {
         // wide, performs no network inside a transaction, and the normal pool
         // queue naturally serializes its short DB phases; site and memory remain
         // the admission guardrails.
-        if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()
-            || !this.newWorkCatalogGate.tryAcquire())
+        if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata())
             return;
+        const releaseBackgroundBudget = this.tryAcquireBackgroundMetadataBudget();
+        if (!releaseBackgroundBudget)
+            return;
+        if (!this.newWorkCatalogGate.tryAcquire()) {
+            releaseBackgroundBudget();
+            return;
+        }
         try {
             const workerId = `${this.runtimeInstanceId}:new-work-catalog`;
             const task = await this.queue.claimNewWorkCatalog(workerId, CATALOG_TASK_LEASE_SECONDS);
@@ -1767,6 +1795,7 @@ export class ImporterLiteRuntime {
         }
         finally {
             this.newWorkCatalogGate.release();
+            releaseBackgroundBudget();
         }
     }
     /**
@@ -2078,6 +2107,11 @@ export class ImporterLiteRuntime {
             ? this.metadataReplayExclusiveGate : this.metadataReplayGate;
         if (!replayGate.tryAcquire())
             return;
+        const releaseBackgroundBudget = this.tryAcquireBackgroundMetadataBudget();
+        if (!releaseBackgroundBudget) {
+            replayGate.release();
+            return;
+        }
         try {
             this.lastMetadataReplayAt = Date.now();
             const workerId = `${this.runtimeInstanceId}:metadata-replay`;
@@ -2102,6 +2136,7 @@ export class ImporterLiteRuntime {
         }
         finally {
             replayGate.release();
+            releaseBackgroundBudget();
         }
     }
     /**
@@ -2135,6 +2170,21 @@ export class ImporterLiteRuntime {
             this.logger.warn('Source fairness sample failed', { error: error?.message });
             return false;
         }
+    }
+    /**
+     * P2 background lanes normally run independently of chapter workers.  Once
+     * a P0/P1 chapter has been admitted, they share the same Yugabyte service
+     * even when their network work is separate.  Admit one such lane at a time
+     * and start none while the primary pool already has a waiter.  An idle
+     * chapter gate returns an immediate no-op release, preserving normal P2
+     * progress and its recovery after a sustained chapter backlog.
+     */
+    tryAcquireBackgroundMetadataBudget() {
+        if (this.chapterAdmissionGate.active === 0)
+            return () => { };
+        if (this.pool.waitingCount > 0 || !this.backgroundMetadataUnderChapterLoadGate.tryAcquire())
+            return null;
+        return () => this.backgroundMetadataUnderChapterLoadGate.release();
     }
     async upsertChapterSources(rows) {
         for (let offset = 0; offset < rows.length; offset += 500) {
@@ -2319,6 +2369,11 @@ export class ImporterLiteRuntime {
                 active: this.chapterAdmissionGate.active,
                 capacity: this.chapterAdmissionGate.capacity,
                 waiters: this.chapterAdmissionGate.queued,
+            },
+            backgroundMetadataUnderChapterLoad: {
+                active: this.backgroundMetadataUnderChapterLoadGate.active,
+                capacity: this.backgroundMetadataUnderChapterLoadGate.capacity,
+                waiters: this.backgroundMetadataUnderChapterLoadGate.queued,
             },
             sourceMetadataLane: {
                 active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
@@ -2546,6 +2601,11 @@ export class ImporterLiteRuntime {
                     capacity: this.sourceMetadataLaneGate.capacity,
                     waiters: this.sourceMetadataLaneGate.queued,
                 },
+                backgroundMetadataUnderChapterLoad: {
+                    active: this.backgroundMetadataUnderChapterLoadGate.active,
+                    capacity: this.backgroundMetadataUnderChapterLoadGate.capacity,
+                    waiters: this.backgroundMetadataUnderChapterLoadGate.queued,
+                },
                 sourceMetadataPersistence: {
                     active: this.sourceMetadataPersistenceGate.active,
                     capacity: this.sourceMetadataPersistenceGate.capacity,
@@ -2644,6 +2704,11 @@ export class ImporterLiteRuntime {
                 active: this.sourceMetadataLaneGate.capacity - this.sourceMetadataLaneGate.available,
                 capacity: this.sourceMetadataLaneGate.capacity,
                 waiters: this.sourceMetadataLaneGate.queued,
+            },
+            backgroundMetadataUnderChapterLoad: {
+                active: this.backgroundMetadataUnderChapterLoadGate.active,
+                capacity: this.backgroundMetadataUnderChapterLoadGate.capacity,
+                waiters: this.backgroundMetadataUnderChapterLoadGate.queued,
             },
             sourceMetadataPersistence: {
                 active: this.sourceMetadataPersistenceGate.active,
