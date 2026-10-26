@@ -2782,7 +2782,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     queue.progressSnapshot = vi.fn();
     const admission = (runtime as any).chapterAdmissionGate;
     expect(admission.tryAcquire()).toBe(true);
-    telemetryCollector.setRuntimeFingerprint({ gitSha: 'test-git', artifactSha256: 'test-artifact' });
+    telemetryCollector.setRuntimeFingerprint({
+      gitSha: 'test-git', artifactSha256: 'test-artifact', rolloutRevision: 'r840',
+    });
 
     try {
       await (runtime as any).emitOperationalSnapshot();
@@ -2797,6 +2799,7 @@ describe('LiteRepository against the additive Lite migration', () => {
         runtimeFingerprint: {
           gitSha: 'test-git',
           artifactSha256: 'test-artifact',
+          rolloutRevision: 'r840',
         },
         liveness: { chapterAdmission: { active: 1 } },
         pipeline: {
