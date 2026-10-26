@@ -91,6 +91,22 @@ function hostFor(url: string): string | null {
   try { return new URL(url).host; } catch { return null; }
 }
 
+// The global page budget controls importer memory, but a single upstream CDN
+// can still receive every admitted request at once.  In the cap-five ramp,
+// MangaFlix's two image hosts reached 20 simultaneous bodies: page p95 grew
+// to 30.7 s while a comparable healthy window peaked at six bodies and 1.9 s
+// p95.  Keep that measured six-body envelope at
+// the network edge.  This is deliberately host-specific: other providers can
+// still use the shared download capacity when they have eligible work.
+const MANGAFLIX_MEDIA_HOST_CONCURRENCY = 6;
+const MANGAFLIX_MEDIA_HOSTS = new Set(['cdn.mangaflix.net', 'static.mangaflix.net']);
+
+function mangaFlixMediaHost(host: string | null): string | null {
+  if (!host) return null;
+  const normalized = host.toLowerCase();
+  return MANGAFLIX_MEDIA_HOSTS.has(normalized) ? normalized : null;
+}
+
 function batchPercentile(values: number[], percentile: number): number {
   if (!values.length) return 0;
   const sorted = [...values].sort((left, right) => left - right);
@@ -354,6 +370,10 @@ function defaultBufferedPages(downloads: AsyncSemaphore): AsyncSemaphore {
 
 export class LiteExecutor {
   private readonly sourceSlots = new Map<string, AsyncSemaphore>();
+  // These gates own only source-page admission.  They are acquired before a
+  // page gets byte/count permits and released as soon as its HTTP body is
+  // validated, so waiting for a slow CDN never retains importer media.
+  private mangaFlixMediaSlot: AsyncSemaphore | null = null;
   private readonly receiptBatcher: UploadReceiptBatcher;
   private readonly reservationBatcher: UploadReservationBatcher;
   private fairDemandSources = new Set<string>();
@@ -449,6 +469,18 @@ export class LiteExecutor {
   public getPageConcurrencyForSource(source: string): number {
     const sourceLimit = SOURCE_CONCURRENCY_LIMITS[source]?.maxPagesPerChapter ?? 6;
     return Math.max(1, Math.min(this.perChapterPageConcurrency, sourceLimit));
+  }
+
+  private mediaHostSlot(host: string | null): AsyncSemaphore | null {
+    if (!mangaFlixMediaHost(host)) return null;
+    // `cdn` and `static` are aliases used by the same source. Sharing a
+    // single six-body envelope prevents a mixed manifest from widening this
+    // measured cap to twelve requests.
+    if (!this.mangaFlixMediaSlot) {
+      this.mangaFlixMediaSlot = new AsyncSemaphore(MANGAFLIX_MEDIA_HOST_CONCURRENCY,
+        'lite_mangaflix_media_bodies');
+    }
+    return this.mangaFlixMediaSlot;
   }
 
   private hasFairAlternative(source: string): boolean {
@@ -746,6 +778,7 @@ export class LiteExecutor {
               String(receipt.mime || '').startsWith('image/') && receipt.mediaSha256 === receipt.sha256) return receipt.mediaId;
           if (receipt?.state === 'UNKNOWN') throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
           const host = hostFor(url);
+          const mediaHostSlot = this.mediaHostSlot(host);
           // A count permit owns only the active HTTP body/validation phase.
           // Reserve bounded room before taking the global request slot. A
           // provider can omit Content-Length (MangaFlix does in production),
@@ -754,6 +787,19 @@ export class LiteExecutor {
           // one-MiB initial reservation is upgraded by readImageBody before
           // an oversized chunk is accepted, with the same 20-MiB terminal
           // headroom as the former header-first admission.
+          // CDN queueing is local backpressure, not an upstream body timeout.
+          // Wait before starting the 45-second request/body deadline and
+          // before reserving media so queued pages have no retained footprint.
+          let mediaHostHeld = false;
+          if (mediaHostSlot) {
+            await mediaHostSlot.acquire();
+            mediaHostHeld = true;
+          }
+          const releaseMediaHost = () => {
+            if (!mediaHostHeld) return;
+            mediaHostHeld = false;
+            mediaHostSlot?.release();
+          };
           const pageSignal = AbortSignal.timeout(45_000);
           let pageBufferHeld = false;
           const releasePageBuffer = () => {
@@ -814,6 +860,11 @@ export class LiteExecutor {
                   telemetryCollector.trackActiveDownload(-1);
                 }
               });
+              // The host gate protects only the source response body.  The
+              // validated body remains governed by PageByteBudget while its
+              // durable reservation and Telegram upload overlap the next CDN
+              // request.
+              releaseMediaHost();
             } catch (error) { throw sourceFailure(error); }
             const { bytes, image } = downloaded;
             totalBytes += bytes.byteLength;
@@ -888,6 +939,7 @@ export class LiteExecutor {
                 throw error;
             }
           } finally {
+            releaseMediaHost();
             byteReservation.value?.release();
             releasePageBuffer();
           }
