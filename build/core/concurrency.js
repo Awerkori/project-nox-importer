@@ -183,7 +183,11 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     mangotoons: { maxChapters: 2, maxPagesPerChapter: 4 },
     taimumangas: { maxChapters: 3, maxPagesPerChapter: 6 },
     hipercool: { maxChapters: 2, maxPagesPerChapter: 4 },
-    nexus: { maxChapters: 2, maxPagesPerChapter: 4 },
+    // Nexus completed 10 P1 publications/minute from two works while another
+    // source was ready. Keep its proven two-seat capacity when it is the only
+    // executable source, but reserve a seat for an alternative during a fair
+    // ramp so its short chapters cannot monopolize public Lançamentos.
+    nexus: { maxChapters: 2, fairMaxChapters: 1, maxPagesPerChapter: 4 },
     instahentai: { maxChapters: 2, maxPagesPerChapter: 4 },
     euphoriascan: { maxChapters: 2, maxPagesPerChapter: 4 },
     fleurblanche: { maxChapters: 3, maxPagesPerChapter: 6 },
