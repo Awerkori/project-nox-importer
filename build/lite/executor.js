@@ -396,7 +396,8 @@ export class LiteExecutor {
         return { reservations: this.reservationBatcher.snapshot(), receipts: this.receiptBatcher.snapshot() };
     }
     sourceCapacity(source) {
-        const configured = SOURCE_CONCURRENCY_LIMITS[source]?.maxChapters ?? 2;
+        const sourceLimits = SOURCE_CONCURRENCY_LIMITS[source];
+        const configured = sourceLimits?.maxChapters ?? 2;
         if (this.fairDemandSources.size <= 1 || !this.fairDemandSources.has(source))
             return configured;
         let totalDemand = 0;
@@ -408,7 +409,7 @@ export class LiteExecutor {
         }
         const fairShare = Math.max(1, Math.ceil(this.effectiveChapterAdmissionCap /
             Math.min(5, this.fairDemandSources.size)));
-        return Math.min(configured, fairShare);
+        return Math.min(sourceLimits?.fairMaxChapters ?? configured, fairShare);
     }
     /**
      * Page waves remain source-scoped even when the runtime permits a wider

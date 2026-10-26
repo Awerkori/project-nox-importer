@@ -1911,6 +1911,23 @@ describe('LiteRepository against the additive Lite migration', () => {
     mangaFlix.release();
   });
 
+  it('keeps Nexus at one seat only while an alternative ready source can publish', () => {
+    const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
+      new AsyncSemaphore(24, 'nexus-fair-downloads'), 4, new AsyncSemaphore(48, 'nexus-fair-buffers'), new HostRateLimiter(2), 6);
+    const nexus = (executor as any).sourceSlot('nexus') as AsyncSemaphore;
+    // Scarcity must not penalize the sole healthy source.
+    expect(nexus.capacity).toBe(2);
+
+    executor.setFairSourceDemand(['nexus', 'mangaflix']);
+    // The cap-six ramp published ten Nexus chapters from two works in one
+    // minute while MangaFlix was ready. Its fair seat leaves concurrent room
+    // for the alternative without widening global media limits.
+    expect(nexus.capacity).toBe(1);
+
+    executor.setFairSourceDemand(['nexus']);
+    expect(nexus.capacity).toBe(2);
+  });
+
   it('yields a source-capped claim without spending a retry attempt', async () => {
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'yield-source', priority: 'P1', idempotencyKey: 'yield-source' });

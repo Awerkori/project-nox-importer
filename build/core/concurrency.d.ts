@@ -44,6 +44,8 @@ export declare function releasePermitOnce(semaphore: AsyncSemaphore): () => void
 export declare function withSourceChapterPermits<T>(source: AsyncSemaphore, global: AsyncSemaphore, fn: () => Promise<T>, signal?: AbortSignal): Promise<T>;
 export interface SourceConcurrencyConfig {
     maxChapters: number;
+    /** Optional lower chapter share only while another ready source can run. */
+    fairMaxChapters?: number;
     maxPagesPerChapter: number;
 }
 /**
