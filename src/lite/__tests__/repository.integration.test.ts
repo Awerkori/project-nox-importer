@@ -2787,6 +2787,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).operationalSnapshotRunning).toBe(false);
   });
 
+  it('does not admit a chapter into a full snapshot that began while idle', () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { WORKER_ID: 'snapshot-admission-fence', IMPORTER_USER_ID: ids.staff,
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, LITE_CHAPTER_WORKERS: 1,
+        MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
+    );
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(false);
+    (runtime as any).operationalSnapshotRunning = true;
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
+  });
+
   it('uses a compact heartbeat while a chapter admission is active instead of racing its YSQL commits', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,

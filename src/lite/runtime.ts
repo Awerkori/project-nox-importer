@@ -390,16 +390,19 @@ export class ImporterLiteRuntime {
 
   /**
    * A queued checkout from the importer's two-connection pool is a local,
-   * transient condition, not proof that the Reader is unhealthy.  Claims are
+   * transient condition, not proof that the Reader is unhealthy. Claims are
    * already serialized by `claimGate`; freezing every chapter slot whenever
    * one write is queued turns ordinary receipt persistence into avoidable
-   * idle time.  Only the independent site-health gate pauses new work.
+   * idle time. A full diagnostic snapshot is the exception: it begins only
+   * while idle, then runs several optional reads. Do not admit a new chapter
+   * into that short pool window after its idle check has already passed.
    */
   private shouldPauseChapterAdmission(): boolean {
     return this.manualProtectiveStop.active
       || Date.now() < this.sitePausedUntil
       || this.metadataReplayV4Exclusive.enabled
-      || this.metadataTurboMode.enabled;
+      || this.metadataTurboMode.enabled
+      || this.operationalSnapshotRunning;
   }
 
   /**
