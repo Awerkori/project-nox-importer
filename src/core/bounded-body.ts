@@ -44,6 +44,14 @@ export interface BufferReservationLike {
 
 export const MAX_IMAGE_BODY_BYTES = 20 * 1024 * 1024;
 
+// Some image CDNs (including MangaFlix's current CDN) omit Content-Length
+// and stream thousands of 4 KiB chunks. Retaining every chunk until the final
+// contiguous body is built leaves hundreds of tiny native ArrayBuffers per
+// page behind in the allocator. Fixed-size blocks keep the same bounded byte
+// accounting and final body contract while making the transient allocation
+// count proportional to image size rather than network chunking.
+const LENGTHLESS_IMAGE_BLOCK_BYTES = 256 * 1024;
+
 function emitTrace(callback: (() => void) | undefined): void {
   try {
     callback?.();
@@ -233,7 +241,13 @@ export async function readImageBody(
   // does not weaken the memory accounting; it removes the transient second
   // live copy which was the previous RSS high-water source.
   let directBody: Uint8Array | null = contentLengthBytes === null ? null : new Uint8Array(contentLengthBytes);
-  const chunks: Uint8Array[] = [];
+  // Declared-size responses use `directBody`. Lengthless responses assemble
+  // into bounded blocks, then make the one unavoidable contiguous copy that
+  // inspection and storage require. Do not preallocate MAX_IMAGE_BODY_BYTES:
+  // most real MangaFlix pages are far smaller and the reservation remains the
+  // authority for their terminal-size safety.
+  const lengthlessBlocks: Uint8Array[] = [];
+  let lengthlessBlockOffset = 0;
   let length = 0;
   let chunkCount = 0;
   let firstChunkSeen = false;
@@ -306,7 +320,20 @@ export async function readImageBody(
         }
         directBody.set(value, length);
       } else {
-        chunks.push(value);
+        let valueOffset = 0;
+        while (valueOffset < value.byteLength) {
+          let block = lengthlessBlocks[lengthlessBlocks.length - 1];
+          if (!block || lengthlessBlockOffset >= block.byteLength) {
+            const remainingBodyCapacity = maxBytes - (length + valueOffset);
+            block = new Uint8Array(Math.min(LENGTHLESS_IMAGE_BLOCK_BYTES, remainingBodyCapacity));
+            lengthlessBlocks.push(block);
+            lengthlessBlockOffset = 0;
+          }
+          const copied = Math.min(block.byteLength - lengthlessBlockOffset, value.byteLength - valueOffset);
+          block.set(value.subarray(valueOffset, valueOffset + copied), lengthlessBlockOffset);
+          lengthlessBlockOffset += copied;
+          valueOffset += copied;
+        }
       }
       length = newLength;
     }
@@ -337,9 +364,11 @@ export async function readImageBody(
     const result = new Uint8Array(length);
     if (bodyMemoryProbe) bodyMemoryProbe.afterAllocation = captureBodyMemorySnapshot();
     let offset = 0;
-    for (const chunk of chunks) {
-      result.set(chunk, offset);
-      offset += chunk.byteLength;
+    for (const block of lengthlessBlocks) {
+      const bytes = Math.min(block.byteLength, length - offset);
+      if (bytes <= 0) break;
+      result.set(block.subarray(0, bytes), offset);
+      offset += bytes;
     }
     if (bodyMemoryProbe) {
       bodyMemoryProbe.concatDurationMs = Math.round((performance.now() - concatStartedAt) * 1000) / 1000;
@@ -367,7 +396,8 @@ export async function readImageBody(
     }
     throw error;
   } finally {
-    chunks.length = 0;
+    lengthlessBlocks.length = 0;
+    lengthlessBlockOffset = 0;
     if (bodyMemoryProbe) {
       bodyMemoryProbe.afterChunkRefsReleased = captureBodyMemorySnapshot();
       emitBodyMemoryProbe(bodyMemoryProbe);
