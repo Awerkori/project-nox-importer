@@ -25,8 +25,9 @@ for (const [srcRel, destDirRel, fileName] of [
 }
 
 // Hash the runnable JavaScript plus the DIScloud startup contract. A changed
-// START environment can alter the live process even when build/*.js is
-// identical, so it must not share an artifact identity with the prior deploy.
+// START environment or npm start script can alter the live process even when
+// build/*.js is identical, so it must not share an artifact identity with
+// the prior deploy.
 try {
   const root = join(process.cwd(), 'build');
   const hash = createHash('sha256');
@@ -38,7 +39,7 @@ try {
     }
   }
   visit(root);
-  for (const deploymentFile of ['discloud.config']) {
+  for (const deploymentFile of ['discloud.config', 'package.json']) {
     const deploymentPath = join(process.cwd(), deploymentFile);
     if (existsSync(deploymentPath)) {
       hash.update(`deployment:${deploymentFile}`).update(readFileSync(deploymentPath));
