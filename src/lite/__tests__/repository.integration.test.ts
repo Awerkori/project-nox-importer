@@ -1937,23 +1937,6 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(fallback.capacity).toBe(1);
   });
 
-  it('bounds MangaFlix CDN bodies without consuming the shared page capacity for other hosts', () => {
-    const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
-      new AsyncSemaphore(24, 'mangaflix-host-downloads'), 8, new AsyncSemaphore(20, 'mangaflix-host-buffers'),
-      new HostRateLimiter(100), 5);
-    const staticCdn = (executor as any).mediaHostSlot('static.mangaflix.net') as AsyncSemaphore;
-    const alternateCdn = (executor as any).mediaHostSlot('cdn.mangaflix.net') as AsyncSemaphore;
-
-    expect(staticCdn.capacity).toBe(6);
-    expect(alternateCdn.capacity).toBe(6);
-    expect(alternateCdn).toBe(staticCdn);
-    expect((executor as any).mediaHostSlot('albums.manhastro.net')).toBeNull();
-    expect(Array.from({ length: 7 }, () => staticCdn.tryAcquire())).toEqual([true, true, true, true, true, true, false]);
-    staticCdn.release();
-    expect(staticCdn.tryAcquire()).toBe(true);
-    for (let index = 0; index < 6; index++) staticCdn.release();
-  });
-
   it('refreshes source demand before the first P1 claim after a P0-only wave', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => null } as unknown as SourceRegistry,

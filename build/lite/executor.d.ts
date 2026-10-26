@@ -80,7 +80,6 @@ export declare class LiteExecutor {
     private readonly pageBytes;
     private readonly chapterManifestTimeoutMs;
     private readonly sourceSlots;
-    private mangaFlixMediaSlot;
     private readonly receiptBatcher;
     private readonly reservationBatcher;
     private fairDemandSources;
@@ -115,7 +114,6 @@ export declare class LiteExecutor {
      * not evidence that a source-specific cap was applied.
      */
     getPageConcurrencyForSource(source: string): number;
-    private mediaHostSlot;
     private hasFairAlternative;
     private sourceSlot;
     private routes;
