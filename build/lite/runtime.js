@@ -431,7 +431,7 @@ export class ImporterLiteRuntime {
      * and reached 375 MiB RSS with the former 24-body/48-MiB envelope.  The
      * media wall is still the throughput bottleneck, so a wider chapter ramp
      * must share a smaller page wave rather than multiply that allocation
-     * high-water. Twenty bodies remain fixed for caps three through five.
+     * high-water. Twenty bodies remain fixed for caps three through six.
      *
      * The #833 cap-five sample established a distinct, bounded constraint:
      * its 40 MiB page budget was fully reserved with five page waiters while
@@ -439,16 +439,19 @@ export class ImporterLiteRuntime {
      * 48 MiB, but the next sample still had 31 MiB reserved and 21 waiters.
      * A lengthless body needs a final 19 MiB promotion after its 1 MiB initial
      * reservation, so 48 MiB cannot make terminal progress at that observed
-     * live occupancy. Cap five therefore gets 56 MiB: enough for that one
-     * bounded completion without widening the fixed 20-page fence. REDUCED
-     * still drops this to 32 MiB and CRITICAL remains the one-page brake.
+     * live occupancy. Caps five and six therefore share 56 MiB: enough for
+     * that one bounded completion without widening the fixed 20-page fence.
+     * REDUCED remains bounded at 48 MiB and CRITICAL remains the one-page
+     * brake.  In particular, cap six must not fall through to the legacy
+     * 48-body/80-MiB profile: that would turn a one-seat admission experiment
+     * into an unmeasured media expansion.
      */
     mediaProfileForChapterAdmissionCap(cap) {
         const normalizedCap = Math.max(1, Math.floor(cap));
-        if (normalizedCap >= 3 && normalizedCap <= 5) {
+        if (normalizedCap >= 3 && normalizedCap <= 6) {
             return {
                 pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, 20),
-                pageByteCapacity: (normalizedCap === 5 ? 56 : 40) * 1024 * 1024,
+                pageByteCapacity: (normalizedCap >= 5 ? 56 : 40) * 1024 * 1024,
             };
         }
         return {
