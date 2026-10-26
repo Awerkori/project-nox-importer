@@ -78,12 +78,13 @@ export declare class LiteExecutor {
     private readonly chapterWorkerCapacity;
     private readonly onRouteSelected?;
     private readonly pageBytes;
+    private readonly chapterManifestTimeoutMs;
     private readonly sourceSlots;
     private readonly receiptBatcher;
     private readonly reservationBatcher;
     private fairDemandSources;
     private effectiveChapterAdmissionCap;
-    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined, pageBytes?: PageByteBudget);
+    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined, pageBytes?: PageByteBudget, chapterManifestTimeoutMs?: number);
     /**
      * A bounded runtime sample of sources with ready imports. It only controls
      * local execution permits; the durable queue remains authority for task

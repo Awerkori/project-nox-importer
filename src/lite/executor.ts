@@ -14,6 +14,21 @@ import { BoundedSamples } from '../core/bounded-samples.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { PageByteBudget, type PageByteReservation, unknownPageInitialReservationBytes } from './page-byte-budget.js';
 
+const withTimeout = async <T>(operation: Promise<T>, timeoutMs: number, code: string): Promise<T> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(code)), timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
 // A pre-upload intent gates Telegram, so keep its join window short. A
 // confirmed receipt is deferred and can safely coalesce a little longer while
 // the next bounded page wave proceeds. This separates pool amortisation from
@@ -352,6 +367,10 @@ export class LiteExecutor {
   // overlap the next bounded page wave without weakening the memory budget.
   // This is distinct from request concurrency: it bounds real image buffers
   // across every chapter worker while Telegram is slow or cooling down.
+  // Keep an upstream manifest request below the durable task lease. A source
+  // can be slow or its own limiter can stall before it reaches the page-body
+  // fetch timeout; without this fence it held a chapter admission until lease
+  // reconciliation, starving unrelated ready work.
   constructor(
     private readonly db: Pool,
     private readonly queue: LiteRepository,
@@ -365,6 +384,7 @@ export class LiteExecutor {
     private readonly chapterWorkerCapacity = 1,
     private readonly onRouteSelected?: (taskId: string, source: string) => void,
     private readonly pageBytes = new PageByteBudget(),
+    private readonly chapterManifestTimeoutMs = 30_000,
   ) {
     this.receiptBatcher = new UploadReceiptBatcher(queue);
     this.reservationBatcher = new UploadReservationBatcher(queue);
@@ -693,7 +713,11 @@ export class LiteExecutor {
         let urls: string[];
         try {
           const sourceFetchStartedAt = performance.now();
-          urls = await adapter.fetchChapterPages(route.sourceChapterId, Number(task.payload.displayNumber));
+          urls = await withTimeout(
+            adapter.fetchChapterPages(route.sourceChapterId, Number(task.payload.displayNumber)),
+            this.chapterManifestTimeoutMs,
+            'CHAPTER_MANIFEST_TIMEOUT',
+          );
           sourceFetchMs = performance.now() - sourceFetchStartedAt;
           if (!urls.length || urls.length > 1000) throw new Error('INVALID_PAGE_MANIFEST');
         } catch (error) { throw sourceFailure(error); }

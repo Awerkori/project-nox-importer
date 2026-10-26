@@ -3441,6 +3441,35 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(1);
   });
 
+  it('releases a chapter slot when a source stalls before returning its page manifest', async () => {
+    const key = 'pt-br|default|chapter|manifest-timeout|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_chapter_id,language,edition,source_rank,confirmed)
+      VALUES ($1,$2,'source-a','stalled-manifest','pt-BR','default',10,true),
+             ($1,$2,'source-b','healthy-manifest','pt-BR','default',20,true)`, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key,
+      priority: 'P1', idempotencyKey: 'manifest-timeout-fallback',
+      payload: { displayNumber: '1.1', chapterTitle: 'Manifest timeout', language: 'pt-BR', edition: 'default', orderKey: '1.1' } });
+    const task = await repo.claim('worker-a', 120);
+    const sourceA = { id: 'source-a', fetchChapterPages: vi.fn(() => new Promise<string[]>(() => {})) };
+    const sourceB = { id: 'source-b', fetchChapterPages: vi.fn(async () => ['https://source-b.test/page.png']) };
+    const registry = { get: (id: string) => id === 'source-a' ? sourceA : sourceB } as unknown as SourceRegistry;
+    const storage: StorageProvider = { upload: vi.fn(async () => 'telegram-file'), healthCheck: async () => true, getProviderKey: () => 'telegram' };
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200, headers: { 'content-type': 'image/png' } })));
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
+        '00000000-0000-4000-8000-000000000009', new AsyncSemaphore(2, 'manifest-timeout-downloads'), 1,
+        new AsyncSemaphore(2, 'manifest-timeout-buffers'), new HostRateLimiter(100), 1, undefined, undefined, 20);
+      await executor.importChapter(task!, 'worker-a');
+    } finally { vi.stubGlobal('fetch', originalFetch); }
+    expect(sourceA.fetchChapterPages).toHaveBeenCalledOnce();
+    expect(sourceB.fetchChapterPages).toHaveBeenCalledOnce();
+    expect((await db.query(`SELECT state,checkpoint->>'selectedSource' AS source FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
+      .toMatchObject({ state: 'DONE', source: 'source-b' });
+  });
+
   it('skips a preferred source with chapter ingestion disabled and immediately uses its confirmed alternative', async () => {
     const key = 'pt-br|default|chapter|admin-fallback|-';
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,source_rank,confirmed)
