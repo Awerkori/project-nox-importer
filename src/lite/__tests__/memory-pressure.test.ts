@@ -86,6 +86,24 @@ describe('LiteMemoryPressureGuard', () => {
     expect(gc).toHaveBeenCalledTimes(1);
   });
 
+  it('collects a drained reduced media wave before native RSS reaches CRITICAL', () => {
+    const pages = new AsyncSemaphore(20, 'test_lite_memory_drained_reduced_gc');
+    const bytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
+    const guard = new LiteMemoryPressureGuard(pages, bytes, 20);
+    expect(guard.sample(memory(355)).state).toBe('REDUCED');
+
+    // Explicit setup above cannot invoke GC. In the real sampler all page
+    // reservations and ArrayBuffers have drained, while allocator RSS remains
+    // high; collect before allowing that retained plateau to become CRITICAL.
+    const processMemory = vi.spyOn(process, 'memoryUsage');
+    processMemory.mockReturnValueOnce(memory(364, 8, 0)).mockReturnValueOnce(memory(360, 8, 0));
+    const gc = vi.fn();
+    vi.stubGlobal('gc', gc);
+
+    expect(guard.sample()).toMatchObject({ state: 'REDUCED', pageBufferCapacity: 20, pageByteCapacity: 48 * mib });
+    expect(gc).toHaveBeenCalledTimes(1);
+  });
+
   it('releases only the single metadata lane after a stable, low-live-native RSS plateau', () => {
     const pages = new AsyncSemaphore(20, 'test_lite_retained_rss_resume');
     const bytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
