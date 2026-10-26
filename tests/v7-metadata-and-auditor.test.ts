@@ -419,11 +419,18 @@ describe('V7 Metadata & Lockstep Auditor Definitive Suite', () => {
 
   it('19. runtime and discloud config protect network throughput within the container native-memory budget', () => {
     const discloudCfg = readFileSync(resolve(__dirname, '../discloud.config'), 'utf-8');
+    const packageJson = JSON.parse(readFileSync(resolve(__dirname, '../package.json'), 'utf-8'));
     // The Lite media path cannot issue more than 24 global page downloads,
     // and metadata remains bounded. Eight workers retain DNS/file capacity
     // without the observed retained native RSS in 512 MiB.
     expect(discloudCfg).toContain('UV_THREADPOOL_SIZE=8');
     expect(discloudCfg).toContain('MALLOC_ARENA_MAX=1');
+    // Discloud may run the package start script for a Node build. Keep it
+    // equivalent to START so a valid deployment never silently loses the
+    // allocator/GC guardrails that bound media RSS.
+    expect(packageJson.scripts.start).toContain('UV_THREADPOOL_SIZE=8');
+    expect(packageJson.scripts.start).toContain('MALLOC_ARENA_MAX=1');
+    expect(packageJson.scripts.start).toContain('--expose-gc');
 
     const indexSrc = readFileSync(resolve(__dirname, '../src/index.ts'), 'utf-8');
     expect(indexSrc).toContain("dns.setDefaultResultOrder?.('ipv4first')");
