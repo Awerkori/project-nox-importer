@@ -39,6 +39,7 @@ const multiWorkClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/
 const boundedClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025063000_bound_claim_probe_and_metadata_pool.sql'), 'utf8');
 const sourceCooldownDueIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025070000_lite_source_cooldown_due_index.sql'), 'utf8');
 const progressSnapshotIndexesMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025073000_lite_progress_snapshot_indexes.sql'), 'utf8');
+const earliestPendingChapterClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261026053000_lite_claim_earliest_pending_chapter.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -156,6 +157,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(v4ActiveWorkIndexMigration);
   await db.exec(sourceCooldownDueIndexMigration);
   await db.exec(progressSnapshotIndexesMigration);
+  await db.exec(earliestPendingChapterClaimMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -2352,6 +2354,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     // this test alone verifies the production claim replacement chain.
     await db.exec(multiWorkClaimMigration);
     await db.exec(boundedClaimMigration);
+    await db.exec(earliestPendingChapterClaimMigration);
     const activeWorkIds = Array.from({ length: 5 }, (_, index) =>
       `00000000-0000-4000-8000-${String(700 + index).padStart(12, '0')}`,
     );
@@ -2435,6 +2438,22 @@ describe('LiteRepository against the additive Lite migration', () => {
       await repo.finish(task!, `manifest-order-${i}`, { state: 'DONE' });
     }
     expect(claimed).toEqual(['manifest-1', 'manifest-20', 'manifest-26']);
+  });
+
+  it('keeps a deep confirmed chapter backlog ordered without scanning every later predecessor', async () => {
+    await db.query(`
+      INSERT INTO importer_lite_tasks(task_type,work_id,work_key,chapter_key,priority,base_priority,state,idempotency_key,payload,next_run_at)
+      SELECT 'IMPORT_CHAPTER',$1::uuid,'work:' || $1::text,'ordered-bulk:' || n,2,2,'READY','ordered-bulk-' || n,
+        jsonb_build_object('orderKey','n|' || lpad(n::text,12,'0') || '|000000000000|||'),now()-interval '1 second'
+      FROM generate_series(1,1300) n
+    `, [ids.p1a]);
+    await db.query(`SELECT importer_lite_refresh_ready_work('work:' || $1)`, [ids.p1a]);
+
+    const first = await repo.claim('ordered-bulk-first', 120);
+    expect(first?.idempotencyKey).toBe('ordered-bulk-1');
+    await repo.finish(first!, 'ordered-bulk-first', { state: 'DONE' });
+    const second = await repo.claim('ordered-bulk-second', 120);
+    expect(second?.idempotencyKey).toBe('ordered-bulk-2');
   });
 
   it('materializes a 1,300-chapter catalog batch in bounded inserts and keeps its queue durable', async () => {
@@ -2766,6 +2785,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     release();
     await first;
     expect((runtime as any).operationalSnapshotRunning).toBe(false);
+  });
+
+  it('does not admit a chapter into a full snapshot that began while idle', () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { WORKER_ID: 'snapshot-admission-fence', IMPORTER_USER_ID: ids.staff,
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, LITE_CHAPTER_WORKERS: 1,
+        MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
+    );
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(false);
+    (runtime as any).operationalSnapshotRunning = true;
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
   });
 
   it('uses a compact heartbeat while a chapter admission is active instead of racing its YSQL commits', async () => {
