@@ -5231,6 +5231,68 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);
   });
 
+  it('releases the page-count permit while a durable reservation batch is contended', async () => {
+    const key = 'pt-br|default|chapter|6-reservation-backpressure|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
+      VALUES ($1,$2,'source-a','a-6-reservation-backpressure','pt-BR','default',true)`, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key, priority: 'P1', idempotencyKey: 'reservation-backpressure',
+      payload: { displayNumber: '6.3', chapterTitle: 'Six Point Three', language: 'pt-BR', edition: 'default', orderKey: '6.3' } });
+    const task = await repo.claim('worker-a', 120);
+    const registry = { get: () => ({ id: 'source-a', fetchChapterPages: async () => ['https://source-a.test/one.png', 'https://source-a.test/two.png'] }) } as unknown as SourceRegistry;
+    let beginReservationQuery!: () => void;
+    let releaseReservationQuery!: () => void;
+    const reservationQueryStarted = new Promise<void>((resolve) => { beginReservationQuery = resolve; });
+    const reservationQueryGate = new Promise<void>((resolve) => { releaseReservationQuery = resolve; });
+    const reserveUploads = repo.reserveUploads.bind(repo);
+    let delayed = false;
+    const reservationSpy = vi.spyOn(repo, 'reserveUploads').mockImplementation(async (inputs) => {
+      if (!delayed) {
+        delayed = true;
+        beginReservationQuery();
+        await reservationQueryGate;
+      }
+      return reserveUploads(inputs);
+    });
+    const pngA = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    pngA[pngA.length - 13] ^= (Date.now() % 251) + 1;
+    const pngB = Uint8Array.from(pngA);
+    pngB[pngB.length - 14] ^= 1;
+    let fetches = 0;
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      fetches++;
+      return new Response(url.includes('one') ? pngA : pngB, { status: 200 });
+    }));
+    const pageBuffers = new AsyncSemaphore(1, 'reservation-backpressure-page-buffers');
+    const downloads = new AsyncSemaphore(2, 'reservation-backpressure-downloads');
+    const byteBudget = new PageByteBudget(22 * 1024 * 1024);
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry,
+        { upload: async (_bytes, _mime, mediaId) => `telegram-${mediaId}`, healthCheck: async () => true, getProviderKey: () => 'telegram' },
+        '00000000-0000-4000-8000-000000000009', downloads, 2,
+        pageBuffers, new HostRateLimiter(100), 1, undefined, byteBudget);
+      const importing = executor.importChapter(task!, 'worker-a');
+      await reservationQueryStarted;
+      // The first page is waiting for its durable intent.  The second must
+      // still finish its bounded HTTP body phase; byte admission, not the
+      // stale count permit, is now the sole memory guard while YSQL is slow.
+      await expect(Promise.race([
+        (async () => { while (fetches < 2) await new Promise<void>((resolve) => setTimeout(resolve, 2)); })(),
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('SECOND_PAGE_BLOCKED_BY_RESERVATION')), 500)),
+      ])).resolves.toBeUndefined();
+      expect(pageBuffers.active).toBe(0);
+      expect(downloads.active).toBe(0);
+      expect(byteBudget.snapshot().reservedBytes).toBeGreaterThan(0);
+      releaseReservationQuery();
+      await importing;
+    } finally {
+      reservationSpy.mockRestore();
+      vi.stubGlobal('fetch', originalFetch);
+    }
+    expect(byteBudget.snapshot()).toMatchObject({ reservedBytes: 0, waiting: 0 });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);
+  });
+
   it('does not occupy a page-count slot while waiting for bounded byte admission', async () => {
     const key = 'pt-br|default|chapter|6-byte-admission|-';
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)

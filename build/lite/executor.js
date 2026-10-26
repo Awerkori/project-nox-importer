@@ -828,16 +828,19 @@ export class LiteExecutor {
                             const { bytes, image } = downloaded;
                             totalBytes += bytes.byteLength;
                             const sha256 = calculateSha256(bytes);
+                            // The page body has finished its only count-bound phase: HTTP
+                            // read and image validation.  It remains fully byte-reserved
+                            // until its receipt is durable, so a slow pre-upload intent
+                            // cannot raise retained media beyond PageByteBudget.  Releasing
+                            // the count permit here prevents a contended YSQL reservation
+                            // batch from idling unrelated page downloads behind a body that
+                            // is no longer being read.
+                            releasePageBuffer();
                             const reserved = await this.reservationBatcher.reserve({ taskId: task.id, pagePosition: position, sha256 });
                             if (reserved.state === 'PERSISTED')
                                 return reserved.mediaId;
                             if (reserved.state === 'UNKNOWN')
                                 throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
-                            // The body remains byte-reserved through storage and receipt
-                            // persistence, so this only frees the count gate for another
-                            // download; it cannot increase retained media beyond the
-                            // bounded PageByteBudget.
-                            releasePageBuffer();
                             try {
                                 const uploadStartedAt = performance.now();
                                 telemetryCollector.trackActiveTelegramUpload(1);
