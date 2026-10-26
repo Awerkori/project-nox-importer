@@ -3,6 +3,18 @@ import { MangaFlixAdapter } from '../../src/sources/mangaflix/mangaflix-adapter.
 import { HostRateLimiter } from '../../src/core/rate-limiter.js';
 
 describe('MangaFlixAdapter', () => {
+  it('applies the image rate envelope to the CDN host returned by chapter manifests', () => {
+    const rateLimiter = new HostRateLimiter(5.0);
+    new MangaFlixAdapter(rateLimiter, vi.fn() as any);
+
+    // Production manifests use cdn.mangaflix.net for chapter pages. Without
+    // this explicit bucket Lite falls back to the global 5 req/s default on
+    // every fresh runtime despite MangaFlix having an 8 -> 16 req/s policy.
+    expect(rateLimiter.getHostRate('cdn.mangaflix.net')).toBe(8.0);
+    // Existing static cover/legacy-image URLs retain their established policy.
+    expect(rateLimiter.getHostRate('static.mangaflix.net')).toBe(8.0);
+  });
+
   it('correctly fetches updated works in maintenance mode', async () => {
     const mockTransport = vi.fn().mockResolvedValue({
       ok: true,
