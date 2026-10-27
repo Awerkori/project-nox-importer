@@ -23,6 +23,11 @@ export interface EnqueueLiteTask {
     checkpoint?: Record<string, unknown>;
     /** Reserved for the one-resource P0 observation lane, never normal work. */
     monitoring?: boolean;
+    /**
+     * Startup's durable DISCOVER seeds are claimed through their dedicated
+     * source lane and do not require a ready-work projection refresh.
+     */
+    skipReadyWorkRefresh?: boolean;
 }
 export interface LiteSourcePolicy {
     enabled: boolean;

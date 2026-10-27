@@ -1061,7 +1061,12 @@ export class LiteRepository {
          ON CONFLICT (idempotency_key) DO NOTHING RETURNING *`, [input.taskType, input.workId || null, input.workKey, input.chapterKey || null, priority,
                 LITE_PRIORITY_RANK[input.priority], input.idempotencyKey, input.nextRunAt || new Date(),
                 input.maxAttempts || 8, JSON.stringify(input.payload || {}), JSON.stringify(input.checkpoint || {}), Boolean(input.monitoring)]);
-            await this.refreshReadyWork(client, input.workKey);
+            // Startup's `lite:discover:*` seeds are claimed by claimDueDiscovery
+            // directly from importer_lite_tasks. Avoid running the expensive
+            // ready-work stored procedure inside every boot transaction, but retain
+            // the established projection refresh for all normal enqueue callers.
+            if (!input.skipReadyWorkRefresh)
+                await this.refreshReadyWork(client, input.workKey);
             await client.query('COMMIT');
             return { inserted: Boolean(result.rowCount), task: result.rows[0] ? asTask(result.rows[0]) : null };
         }
