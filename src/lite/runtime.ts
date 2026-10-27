@@ -2469,14 +2469,43 @@ export class ImporterLiteRuntime {
           await sleep(250);
           continue;
         }
-        if (!this.chapterAdmissionGate.tryAcquire()) {
-          telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'operator-chapter-cap');
-          await sleep(100);
+        // Claiming is intentionally single-flight for durable priority and
+        // work-order correctness.  Do not spend one of the scarce chapter
+        // permits merely waiting for that short YSQL section: at a cap of 12
+        // the former order allowed eleven slots to be counted as "active"
+        // while only one worker could actually reach the claim or download.
+        // Serialise first, then reserve a permit only for the worker that is
+        // about to issue the durable claim.  This changes no claim ordering,
+        // lease, source-share or publication rule.
+        if (!this.claimGate.tryAcquire()) {
+          telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB', 'claim-serialization');
+          await sleep(25);
           continue;
         }
+        let task: LiteTask | null = null;
+        let admissionAcquired = false;
         try {
+          if (!this.chapterAdmissionGate.tryAcquire()) {
+            telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'operator-chapter-cap');
+            await sleep(100);
+            continue;
+          }
+          admissionAcquired = true;
           telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB');
-          const task = await this.claimNext(workerId);
+          task = await this.claimNext(workerId, true);
+        } catch (error) {
+          // The admission permit protects a claimed chapter, never a failed
+          // claim attempt.  Preserve the old finally guarantee when YSQL
+          // rejects the short durable claim.
+          if (admissionAcquired) {
+            this.chapterAdmissionGate.release();
+            admissionAcquired = false;
+          }
+          throw error;
+        } finally {
+          this.claimGate.release();
+        }
+        try {
           if (!task) {
             this.setWorkerLiveness(workerId, 'IDLE');
             telemetryCollector.setSlotState(slotIndex, 'IDLE');
@@ -2492,7 +2521,7 @@ export class ImporterLiteRuntime {
           telemetryCollector.setSlotState(slotIndex, 'IDLE');
           this.setWorkerLiveness(workerId, 'IDLE');
         } finally {
-          this.chapterAdmissionGate.release();
+          if (admissionAcquired) this.chapterAdmissionGate.release();
         }
       } catch {
         this.setWorkerLiveness(workerId, 'IDLE');
@@ -2534,6 +2563,11 @@ export class ImporterLiteRuntime {
         capacity: this.chapterAdmissionGate.capacity,
         waiters: this.chapterAdmissionGate.queued,
       },
+      claimSerialization: {
+        active: this.claimGate.active,
+        capacity: this.claimGate.capacity,
+        waiters: this.claimGate.queued,
+      },
       backgroundMetadataUnderChapterLoad: {
         active: this.backgroundMetadataUnderChapterLoadGate.active,
         capacity: this.backgroundMetadataUnderChapterLoadGate.capacity,
@@ -2557,8 +2591,8 @@ export class ImporterLiteRuntime {
   }
 
   /** One empty claim probe per idle interval, shared by every worker. */
-  private async claimNext(workerId: string): Promise<LiteTask | null> {
-    return this.claimGate.runExclusive(async () => {
+  private async claimNext(workerId: string, claimGateHeld = false): Promise<LiteTask | null> {
+    const claim = async (): Promise<LiteTask | null> => {
       if (!this.isRuntimeLeader) return null;
       if (this.manualProtectiveStop.active) return null;
       if (Date.now() < this.idleClaimUntil) return null;
@@ -2572,7 +2606,8 @@ export class ImporterLiteRuntime {
       }
       this.idleClaimUntil = task ? 0 : Date.now() + 750;
       return task;
-    });
+    };
+    return claimGateHeld ? claim() : this.claimGate.runExclusive(claim);
   }
 
   /**
