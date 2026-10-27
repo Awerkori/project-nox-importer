@@ -354,6 +354,18 @@ export class ImporterLiteRuntime {
   // historical UNKNOWN receipt to media even after an empty pass.
   private lastUnknownUploadRecoverySeenAt = 0;
   private lastSourceCooldownRecoveryAt = 0;
+  // Source discovery rows are durable and idempotent. A transient YSQL
+  // timeout while seeding them must never take down a freshly elected daemon;
+  // retain the failed seed for a bounded retry after workers/heartbeats start.
+  private nextDiscoverySeedRetryAt = 0;
+  private discoverySeed = {
+    attemptedAt: null as string | null,
+    completedAt: null as string | null,
+    sources: 0,
+    inserted: 0,
+    failed: 0,
+    error: null as string | null,
+  };
   // Backoff after an exhausted V5 source-metadata probe chain. Incremental
   // coverage continues; it just stops rescanning empty horizons every 15 s.
   private sourceMetadataNoCandidateUntil = 0;
@@ -475,6 +487,20 @@ export class ImporterLiteRuntime {
   }
 
   /**
+   * A process has no workers before start() reaches its durable settings
+   * check. Arm the brake at that boundary, rather than making every
+   * unstarted runtime instance look manually paused. If the lookup fails,
+   * refreshManualProtectiveStop intentionally preserves this state.
+   */
+  private armStartupProtectiveStop(): void {
+    this.manualProtectiveStop = {
+      active: true,
+      reason: 'startup pending durable protective-stop check',
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
    * Metadata is optional P2 work. Yield it before taking away an in-flight
    * chapter's page/upload permits; page-level backpressure itself makes any
    * already-started chapter drain safely.
@@ -587,6 +613,10 @@ export class ImporterLiteRuntime {
   }
 
   async start(): Promise<void> {
+    // Fail closed before any boot-time work can make a future worker eligible.
+    // A successful durable read below is the only way this temporary brake is
+    // cleared; a YSQL timeout leaves it armed.
+    this.armStartupProtectiveStop();
     // Do this before taking the shared producer lease or creating a task. A
     // Lite process must fail closed against an old Reader schema, rather than
     // discover a numeric collision after it has downloaded/uploaded media.
@@ -856,20 +886,46 @@ export class ImporterLiteRuntime {
     }
   }
 
-  private async seedDiscovery(): Promise<void> {
-    const sources = await this.pool.query<{ id: string; sync_interval_minutes: number }>(`SELECT id,sync_interval_minutes FROM importer_sources
-      WHERE enabled=true AND (
-        COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
-        (status='COOLDOWN' AND cooldown_until IS NOT NULL AND cooldown_until<=now())
-      )
-        AND COALESCE((to_jsonb(importer_sources)->>'catalog_discovery_enabled')::boolean,true)
-      ORDER BY id`);
-    const firstRun = Date.now();
-    for (const [index, { id, sync_interval_minutes }] of sources.rows.entries()) {
-      await this.queue.enqueue({ taskType: 'DISCOVER', workKey: `source:${id}`, priority: 'P2',
-        idempotencyKey: `lite:discover:${id}`, payload: { source: id, syncIntervalMinutes: sync_interval_minutes },
-        checkpoint: { cursor: null }, nextRunAt: new Date(firstRun + index * 60_000) });
+  private async seedDiscovery(): Promise<{ sources: number; inserted: number; failed: number }> {
+    const attemptedAt = new Date().toISOString();
+    let sources: { rows: Array<{ id: string; sync_interval_minutes: number }> };
+    try {
+      sources = await this.pool.query<{ id: string; sync_interval_minutes: number }>(`SELECT id,sync_interval_minutes FROM importer_sources
+        WHERE enabled=true AND (
+          COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
+          (status='COOLDOWN' AND cooldown_until IS NOT NULL AND cooldown_until<=now())
+        )
+          AND COALESCE((to_jsonb(importer_sources)->>'catalog_discovery_enabled')::boolean,true)
+        ORDER BY id`);
+    } catch (error: any) {
+      const message = String(error?.message || 'DISCOVERY_SEED_SOURCE_READ_FAILED').slice(0, 240);
+      this.discoverySeed = { attemptedAt, completedAt: new Date().toISOString(), sources: 0, inserted: 0, failed: 1, error: message };
+      this.nextDiscoverySeedRetryAt = Date.now() + 30_000;
+      this.logger.warn('Discovery seed source read failed; startup continues and retry is scheduled', { error: message });
+      return { sources: 0, inserted: 0, failed: 1 };
     }
+    const firstRun = Date.now();
+    let inserted = 0;
+    let failed = 0;
+    let lastError: string | null = null;
+    for (const [index, { id, sync_interval_minutes }] of sources.rows.entries()) {
+      try {
+        const result = await this.queue.enqueue({ taskType: 'DISCOVER', workKey: `source:${id}`, priority: 'P2',
+          idempotencyKey: `lite:discover:${id}`, payload: { source: id, syncIntervalMinutes: sync_interval_minutes },
+          checkpoint: { cursor: null }, nextRunAt: new Date(firstRun + index * 60_000), skipReadyWorkRefresh: true });
+        if (result.inserted) inserted++;
+      } catch (error: any) {
+        failed++;
+        lastError = String(error?.message || 'DISCOVERY_SEED_ENQUEUE_FAILED').slice(0, 240);
+        // An enqueue transaction is all-or-nothing and keyed by source, so
+        // preserving the other sources and retrying this durable idempotent
+        // key cannot duplicate discovery work or weaken queue integrity.
+        this.logger.warn('Discovery seed enqueue failed; source will retry after startup', { source: id, error: lastError });
+      }
+    }
+    this.discoverySeed = { attemptedAt, completedAt: new Date().toISOString(), sources: sources.rows.length, inserted, failed, error: lastError };
+    this.nextDiscoverySeedRetryAt = failed > 0 ? Date.now() + 30_000 : 0;
+    return { sources: sources.rows.length, inserted, failed };
   }
 
   /**
@@ -969,6 +1025,9 @@ export class ImporterLiteRuntime {
       this.logger.warn('Source cooldown recovery probe failed', { error: error?.message });
     }
     try { await this.queue.recoverDuplicateCanonicalCatalogFailures(); } catch { /* bounded recovery retries next turn */ }
+    if (this.nextDiscoverySeedRetryAt > 0 && now >= this.nextDiscoverySeedRetryAt && this.pool.waitingCount === 0) {
+      await this.seedDiscovery();
+    }
     await this.refreshSourceFairness();
     await this.refillHistoricalP1Catalog();
     await this.refillManifestProvenP1Imports();
@@ -2686,6 +2745,10 @@ export class ImporterLiteRuntime {
         chapterAdmissionCap: this.operatorChapterAdmissionCap,
         metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
         manualProtectiveStop: this.manualProtectiveStop,
+        discoverySeed: {
+          ...this.discoverySeed,
+          retryAt: this.nextDiscoverySeedRetryAt ? new Date(this.nextDiscoverySeedRetryAt).toISOString() : null,
+        },
         snapshotDeferred,
         lastFullOperationalSnapshotAt: this.lastFullOperationalSnapshotAt,
         ysql: { poolTotal: this.pool.totalCount, poolIdle: this.pool.idleCount, poolWaiting: this.pool.waitingCount },
@@ -2786,6 +2849,10 @@ export class ImporterLiteRuntime {
       lastFullOperationalSnapshotAt: fullSnapshotAt,
       metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
       manualProtectiveStop: this.manualProtectiveStop,
+      discoverySeed: {
+        ...this.discoverySeed,
+        retryAt: this.nextDiscoverySeedRetryAt ? new Date(this.nextDiscoverySeedRetryAt).toISOString() : null,
+      },
       publishedLastMinute: progress.publishedLastMinute,
       oldestReadyAt: progress.oldestReadyAt?.toISOString() || null,
       oldestStoredUnpublishedAt: progress.oldestStoredUnpublishedAt?.toISOString() || null,

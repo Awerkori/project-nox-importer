@@ -320,6 +320,19 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(claimed?.taskType).toBe('CATALOG');
   });
 
+  it('enqueues DISCOVER directly without a ready-work projection transaction', async () => {
+    const refreshReadyWork = vi.spyOn(repo as any, 'refreshReadyWork');
+    await repo.enqueue({
+      taskType: 'DISCOVER', workKey: 'source:source-a', priority: 'P2',
+      idempotencyKey: 'lite:discover:source-a', payload: { source: 'source-a' }, skipReadyWorkRefresh: true,
+    });
+
+    expect(refreshReadyWork).not.toHaveBeenCalled();
+    expect(await repo.claimDueDiscovery('discovery-worker', 30)).toMatchObject({
+      taskType: 'DISCOVER', idempotencyKey: 'lite:discover:source-a',
+    });
+  });
+
   it('admits one low-priority no-network metadata task from explicit stored mapping fields', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1::uuid`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings
@@ -3288,6 +3301,46 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     await db.query(`UPDATE importer_sources SET cooldown_until=NULL WHERE id='source-a'`);
     expect(await repo.sourcePolicy('source-a')).toMatchObject({ status: 'COOLDOWN', runnable: false });
+  });
+
+  it('keeps startup alive when a discovery seed enqueue hits an idle transaction timeout', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    const enqueue = vi.fn()
+      .mockRejectedValueOnce(new Error('terminating connection due to idle-in-transaction timeout'))
+      .mockResolvedValue({ inserted: true, task: null });
+    (runtime as any).queue = { enqueue };
+
+    await expect((runtime as any).seedDiscovery()).resolves.toEqual({ sources: 2, inserted: 1, failed: 1 });
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect((runtime as any).nextDiscoverySeedRetryAt).toBeGreaterThan(Date.now());
+    expect((runtime as any).discoverySeed).toMatchObject({
+      sources: 2, inserted: 1, failed: 1,
+      error: expect.stringContaining('idle-in-transaction timeout'),
+    });
+  });
+
+  it('fails closed for chapter admission until the durable protective-stop setting is read', async () => {
+    const unavailablePool = {
+      query: vi.fn().mockRejectedValue(new Error('temporary YSQL timeout')),
+      connect: vi.fn(),
+    } as unknown as Pool;
+    const runtime = new ImporterLiteRuntime(
+      unavailablePool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(false);
+    (runtime as any).armStartupProtectiveStop();
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
+    await (runtime as any).refreshManualProtectiveStop();
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
   });
 
   it('reopens only source-blocked work after fresh catalog evidence, never an unknown upload outcome', async () => {

@@ -81,6 +81,8 @@ export declare class ImporterLiteRuntime {
     private lastUploadOutcomeRecoveryAt;
     private lastUnknownUploadRecoverySeenAt;
     private lastSourceCooldownRecoveryAt;
+    private nextDiscoverySeedRetryAt;
+    private discoverySeed;
     private sourceMetadataNoCandidateUntil;
     private lastManifestP1RepairAt;
     private manifestP1CatchupActive;
@@ -123,6 +125,13 @@ export declare class ImporterLiteRuntime {
      * cap drains in-flight work naturally instead of cancelling a safe write.
      */
     private refreshManualProtectiveStop;
+    /**
+     * A process has no workers before start() reaches its durable settings
+     * check. Arm the brake at that boundary, rather than making every
+     * unstarted runtime instance look manually paused. If the lookup fails,
+     * refreshManualProtectiveStop intentionally preserves this state.
+     */
+    private armStartupProtectiveStop;
     /**
      * Metadata is optional P2 work. Yield it before taking away an in-flight
      * chapter's page/upload permits; page-level backpressure itself makes any
