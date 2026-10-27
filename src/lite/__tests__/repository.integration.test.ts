@@ -5265,6 +5265,30 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).chapterAdmissionGate.active).toBe(0);
   });
 
+  it('keeps a full chapter cap out of the serialized claim lane', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', LITE_CHAPTER_WORKERS: 2,
+        MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1, DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    const admission = (runtime as any).chapterAdmissionGate;
+    expect(admission.tryAcquire()).toBe(true);
+    const serializedClaim = vi.spyOn((runtime as any).claimGate, 'tryAcquire');
+
+    const worker = (runtime as any).worker('full-cap-worker', 1);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 125));
+      expect(serializedClaim).not.toHaveBeenCalled();
+    } finally {
+      (runtime as any).stopped = true;
+      admission.release();
+      await worker;
+    }
+  });
+
   it('does not freeze normal chapter admission for a transient local pool waiter', () => {
     const pool = poolFor(db) as Pool & { waitingCount?: number };
     const runtime = new ImporterLiteRuntime(
