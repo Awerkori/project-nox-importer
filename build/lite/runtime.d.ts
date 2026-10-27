@@ -47,6 +47,7 @@ export declare class ImporterLiteRuntime {
     private readonly chapterAdmissionGate;
     private readonly historicalP1BackfillGate;
     private readonly metadataReplayGate;
+    private readonly metadataTurnGate;
     private readonly metadataReplayExclusiveGate;
     private readonly metadataReplayV4RefillGate;
     private readonly metadataReplayV4PersistenceGate;
