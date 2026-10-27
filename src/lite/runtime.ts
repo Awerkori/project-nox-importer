@@ -2343,14 +2343,21 @@ export class ImporterLiteRuntime {
   /** A bounded source view refreshes on recovery and at import-priority boundaries. */
   private async refreshSourceFairness(): Promise<boolean> {
     if (this.sourceFairnessRefresh) return this.sourceFairnessRefresh;
-    // Claims, checkpoints and public publication use the same small pool.
-    // Fairness remains enforced by the last bounded sample and the durable
-    // source/work fences, so defer this optional rescan rather than adding a
-    // long ready-work query behind a live chapter transaction.
-    if (this.pool.waitingCount > 0) return false;
+    // Claims, checkpoints and public publication use the small primary pool.
+    // A stale source view during a sustained chapter wave can leave only the
+    // sources visible at the last idle instant with usable slots.  The
+    // existing isolated metadata connection is safe for this read only while
+    // it has no work of its own; otherwise retain the old bounded view rather
+    // than queue a fourth class of work behind either pool.
+    const primaryBusy = this.pool.waitingCount > 0;
+    const isolatedPoolAvailable = this.sourceMetadataPool !== this.pool
+      && this.sourceMetadataPool.waitingCount === 0
+      && (this.sourceMetadataPool.idleCount > 0 || this.sourceMetadataPool.totalCount === 0);
+    if (primaryBusy && !isolatedPoolAvailable) return false;
+    const fairnessPool = primaryBusy ? this.sourceMetadataPool : this.pool;
     const refresh = (async (): Promise<boolean> => {
       try {
-        this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand());
+        this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand(64, fairnessPool));
         return true;
       } catch (error: any) {
         this.logger.warn('Source fairness sample failed', { error: error?.message });
