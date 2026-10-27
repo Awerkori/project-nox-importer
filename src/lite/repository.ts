@@ -2064,6 +2064,49 @@ export class LiteRepository {
   }
 
   /**
+   * Before the P0/P2 policy boundary was corrected, an operational source
+   * with `catalog_discovery_enabled=false` could park its existing-work P0
+   * monitor as SOURCE_NOT_READY:ACTIVE. That switch is for source-wide P2
+   * DISCOVER only; reopen just those legacy monitor rows in small, idempotent
+   * batches. Normal source health/cooldown eligibility remains authoritative.
+   */
+  async reopenP0MonitorsBlockedByDiscoveryPolicy(limit = 64): Promise<number> {
+    const maximum = Math.max(1, Math.min(64, limit));
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const reopened = await client.query<Row>(`
+        WITH picked AS (
+          SELECT t.id
+          FROM importer_lite_tasks t
+          JOIN importer_sources s ON s.id=t.payload->>'source'
+          LEFT JOIN importer_lite_source_health h ON h.source=s.id
+          WHERE t.task_type='CATALOG'
+            AND t.monitoring=true
+            AND t.state IN ('BLOCKED','RETRY_WAIT')
+            AND t.reason='SOURCE_NOT_READY:ACTIVE'
+            AND s.enabled=true
+            AND COALESCE((to_jsonb(s)->>'catalog_discovery_enabled')::boolean,true)=false
+            AND ${sourceExecutionEligibilitySql('s')}
+            AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+            AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+          ORDER BY t.next_run_at,t.created_at,t.id
+          LIMIT $1 FOR UPDATE OF t SKIP LOCKED
+        )
+        UPDATE importer_lite_tasks task SET
+          state='READY',attempts=0,reason=NULL,next_run_at=now(),
+          lease_owner=NULL,lease_until=NULL,updated_at=now()
+        FROM picked WHERE task.id=picked.id
+        RETURNING task.*`, [maximum]);
+      await client.query('COMMIT');
+      return reopened.rowCount || 0;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
+
+  /**
    * Source administration and transient Lite health remain durable authority.
    * This indexed one-source read happens before source networking, never in a
    * normal task claim, and prevents a paused/cooling provider from consuming
