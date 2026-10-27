@@ -1985,6 +1985,31 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(fallback.capacity).toBe(1);
   });
 
+  it('re-samples a stale singleton source before it can take a long-source burst', async () => {
+    const queue = { yieldForSourceFairness: vi.fn(async () => true) } as unknown as LiteRepository;
+    let executor: LiteExecutor;
+    const refresh = vi.fn(async () => {
+      executor.setFairSourceDemand(['mangaflix', 'manhastro', 'nexus', 'taimumangas', 'hanamiheaven']);
+    });
+    executor = new LiteExecutor({} as Pool, queue, {} as SourceRegistry, {} as StorageProvider, ids.staff,
+      new AsyncSemaphore(24, 'burst-fair-downloads'), 4, new AsyncSemaphore(48, 'burst-fair-buffers'),
+      new HostRateLimiter(2), 12, undefined, undefined, 30_000, refresh);
+    executor.setFairSourceDemand(['mangaflix']);
+    const mangaFlix = (executor as any).sourceSlot('mangaflix') as AsyncSemaphore;
+    expect([mangaFlix.tryAcquire(), mangaFlix.tryAcquire(), mangaFlix.tryAcquire()]).toEqual([true, true, true]);
+
+    try {
+      const permit = await (executor as any).acquireSourcePermit({ priority: 'P1' }, 'burst-fair-worker', 'mangaflix');
+      expect(permit).toBeNull();
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect((queue as any).yieldForSourceFairness).toHaveBeenCalledTimes(1);
+      expect(executor.getSourceFairnessBurstSnapshot()).toMatchObject({ refreshes: 1, demandSources: 5, refreshInFlight: false });
+      expect(mangaFlix.capacity).toBe(3);
+    } finally {
+      mangaFlix.release(); mangaFlix.release(); mangaFlix.release();
+    }
+  });
+
   it('refreshes source demand before the first P1 claim after a P0-only wave', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => null } as unknown as SourceRegistry,
