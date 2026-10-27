@@ -465,7 +465,13 @@ export class ImporterLiteRuntime {
         const normalizedCap = Math.max(1, Math.floor(cap));
         if (normalizedCap >= 3 && normalizedCap <= 7) {
             return {
-                pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, 20),
+                // The byte budget remains the authority for live media memory.  A
+                // production cap-seven sample left four download permits idle while
+                // twenty count-only buffer slots had nine waiters (p95 15.9 s), with
+                // only 27 MiB of live external memory.  Thirty-two slots remove that
+                // artificial count fence without widening the measured 56 MiB byte
+                // envelope used by cap five through seven.
+                pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, normalizedCap >= 5 ? 32 : 20),
                 pageByteCapacity: (normalizedCap >= 5 ? 56 : 40) * 1024 * 1024,
             };
         }
