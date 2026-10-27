@@ -87,6 +87,7 @@ export declare class ImporterLiteRuntime {
     private lastManifestP1RepairAt;
     private manifestP1CatchupActive;
     private readonly monitorGate;
+    private readonly monitorClaimGate;
     private readonly runtimeInstanceId;
     private readonly runtimeBootedAt;
     private readonly chapterWorkerCapacity;
@@ -345,9 +346,11 @@ export declare class ImporterLiteRuntime {
     /** One empty claim probe per idle interval, shared by every worker. */
     private claimNext;
     /**
-     * Claim at most one due P0 observation. A failed/empty probe backs off for
-     * fifteen seconds, so thousands of watched works do not turn into empty DB
-     * claims. This is a resource budget, not a second priority scheduler.
+     * Claim at most one due P0 observation per short queue turn. A second
+     * already-claimed observation may fetch another source concurrently, but
+     * claims themselves remain serial and stop whenever the chapter pool has a
+     * waiter. This gives P0 bounded continuous coverage without borrowing a
+     * chapter admission or turning a deep watch backlog into SQL polling.
      */
     private runMonitorTurn;
     /** A small protective gate, deliberately not another scheduler. */
