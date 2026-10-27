@@ -2080,6 +2080,26 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).executor.getFairSourceDemand()).toEqual(['mangaflix', 'manhastro']);
   });
 
+  it('refreshes fairness through an idle isolated metadata pool while primary claims wait', async () => {
+    const pool = Object.assign(poolFor(db), { waitingCount: 1 }) as Pool & { waitingCount: number };
+    const metadataPool = Object.assign(poolFor(db), { waitingCount: 0, idleCount: 1, totalCount: 1 }) as Pool;
+    const runtime = new ImporterLiteRuntime(
+      pool, {}, { get: () => null } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', WORKER_ID: 'fairness-isolated-pool-test',
+        QUEUE_LEASE_DURATION_SECONDS: 60, DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, LITE_CHAPTER_WORKERS: 5, MAX_CONCURRENT_CHAPTERS: 5,
+        TESTED_CONCURRENCY_CEILING: 5 } as any,
+      new HostRateLimiter(2), metadataPool,
+    );
+    const readyImportSourceDemand = vi.fn(async () => new Map([['mangaflix', 2], ['manhastro', 2]]));
+    (runtime as any).queue = { readyImportSourceDemand };
+
+    await expect((runtime as any).refreshSourceFairness()).resolves.toBe(true);
+    expect(readyImportSourceDemand).toHaveBeenCalledWith(64, metadataPool);
+    expect((runtime as any).executor.getFairSourceDemand()).toEqual(['mangaflix', 'manhastro']);
+  });
+
   it('uses the effective admission cap, not configured workers, for source shares', () => {
     const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
       new AsyncSemaphore(24, 'effective-cap-downloads'), 4, new AsyncSemaphore(48, 'effective-cap-buffers'), new HostRateLimiter(2), 20);

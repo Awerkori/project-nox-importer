@@ -1481,9 +1481,9 @@ export class LiteRepository {
      * The sample is outside claim; durable claim remains authority for task
      * existence, priority and work-level round-robin.
      */
-    async readyImportSourceRows(limit = 64) {
+    async readyImportSourceRows(limit = 64, db = this.db) {
         const maximum = Math.max(1, Math.min(128, limit));
-        const result = await this.db.query(`WITH candidate_works AS (
+        const result = await db.query(`WITH candidate_works AS (
         SELECT rw.work_key,rw.priority
         FROM importer_lite_ready_works rw
         WHERE rw.operation_rank=1 AND rw.next_run_at<=now()
@@ -1551,8 +1551,8 @@ export class LiteRepository {
       ORDER BY routes.id, routes.source_rank, routes.created_at, routes.source`, [maximum]);
         return result.rows.map((row) => String(row.source));
     }
-    async readyImportSources(limit = 64) {
-        return [...new Set(await this.readyImportSourceRows(limit))].sort();
+    async readyImportSources(limit = 64, db = this.db) {
+        return [...new Set(await this.readyImportSourceRows(limit, db))].sort();
     }
     /**
      * A bounded source demand view for the local fairness gate.  The count is
@@ -1560,9 +1560,9 @@ export class LiteRepository {
      * deep single-work P1 backlog cannot claim capacity reserved for unrelated
      * works or sources.
      */
-    async readyImportSourceDemand(limit = 64) {
+    async readyImportSourceDemand(limit = 64, db = this.db) {
         const demand = new Map();
-        for (const source of await this.readyImportSourceRows(limit)) {
+        for (const source of await this.readyImportSourceRows(limit, db)) {
             demand.set(source, (demand.get(source) || 0) + 1);
         }
         return demand;
