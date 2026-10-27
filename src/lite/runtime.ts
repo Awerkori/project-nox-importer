@@ -2523,6 +2523,17 @@ export class ImporterLiteRuntime {
         // Serialise first, then reserve a permit only for the worker that is
         // about to issue the durable claim.  This changes no claim ordering,
         // lease, source-share or publication rule.
+        //
+        // A full operator cap cannot produce a claim.  Keep the surplus
+        // workers out of the single-flight lane in that case: otherwise they
+        // repeatedly acquire the claim mutex only to discover that every
+        // chapter seat is occupied.  The acquisition below remains the
+        // authoritative race-safe check after entering the lane.
+        if (this.chapterAdmissionGate.available <= 0) {
+          telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'operator-chapter-cap');
+          await sleep(100);
+          continue;
+        }
         if (!this.claimGate.tryAcquire()) {
           telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB', 'claim-serialization');
           await sleep(25);
