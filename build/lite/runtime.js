@@ -2251,7 +2251,7 @@ export class ImporterLiteRuntime {
     /** A bounded source view refreshes on recovery and at import-priority boundaries. */
     async refreshSourceFairness() {
         try {
-            this.executor.setFairSourceDemand(await this.queue.readyImportSources());
+            this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand());
             return true;
         }
         catch (error) {

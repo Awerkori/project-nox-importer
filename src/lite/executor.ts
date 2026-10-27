@@ -371,6 +371,10 @@ export class LiteExecutor {
   private readonly receiptBatcher: UploadReceiptBatcher;
   private readonly reservationBatcher: UploadReservationBatcher;
   private fairDemandSources = new Set<string>();
+  // `null` retains the established equal-share mode used by narrow tests and
+  // by callers that only know which sources are eligible.  The runtime's
+  // durable sampler supplies a bounded per-source executable-work count.
+  private fairDemandCounts: Map<string, number> | null = null;
   // A priority-boundary sample can legitimately contain one source, then a
   // different ready work can materialise before the next 30-second recovery
   // turn.  Without one bounded re-sample, MangaFlix may take all eight of its
@@ -422,6 +426,33 @@ export class LiteExecutor {
    */
   setFairSourceDemand(sources: Iterable<string>): void {
     this.fairDemandSources = new Set([...sources].filter(Boolean));
+    this.fairDemandCounts = null;
+    for (const [source, slot] of this.sourceSlots) slot.setCapacity(this.sourceCapacity(source));
+  }
+
+  /**
+   * Use idle chapter capacity when a fair source has fewer executable works
+   * than its nominal equal share.  A source can never exceed its own measured
+   * limit (or explicit fair maximum), and every ready source still receives a
+   * first seat before demand-weighted seats are distributed.
+   */
+  setFairSourceDemandCounts(demand: ReadonlyMap<string, number>): void {
+    const normalized = new Map<string, number>();
+    for (const [source, count] of demand) {
+      const value = Math.max(0, Math.floor(Number(count) || 0));
+      if (source && value > 0) normalized.set(source, value);
+    }
+    this.fairDemandSources = new Set(normalized.keys());
+    this.fairDemandCounts = normalized;
+    for (const [source, slot] of this.sourceSlots) {
+      // An in-flight source is temporarily absent from the runnable view by
+      // design.  Retain enough local demand for its existing holders to drain
+      // naturally instead of collapsing it to a one-seat source mid-chapter.
+      if (!this.fairDemandCounts.has(source) && slot.active > 0) {
+        this.fairDemandSources.add(source);
+        this.fairDemandCounts.set(source, slot.active);
+      }
+    }
     for (const [source, slot] of this.sourceSlots) slot.setCapacity(this.sourceCapacity(source));
   }
 
@@ -456,6 +487,7 @@ export class LiteExecutor {
     const sourceLimits = SOURCE_CONCURRENCY_LIMITS[source];
     const configured = sourceLimits?.maxChapters ?? 2;
     if (this.fairDemandSources.size <= 1 || !this.fairDemandSources.has(source)) return configured;
+    if (this.fairDemandCounts) return this.demandAwareSourceCapacity(source, configured);
     let totalDemand = 0;
     for (const s of this.fairDemandSources) {
       totalDemand += SOURCE_CONCURRENCY_LIMITS[s]?.maxChapters ?? 2;
@@ -466,6 +498,35 @@ export class LiteExecutor {
     const fairShare = Math.max(1, Math.ceil(this.effectiveChapterAdmissionCap /
       Math.min(5, this.fairDemandSources.size)));
     return Math.min(sourceLimits?.fairMaxChapters ?? configured, fairShare);
+  }
+
+  private demandAwareSourceCapacity(source: string, configured: number): number {
+    const demand = this.fairDemandCounts;
+    if (!demand) return configured;
+    const entries = [...demand.entries()]
+      .filter(([, count]) => count > 0)
+      .map(([candidate, count]) => {
+        const limits = SOURCE_CONCURRENCY_LIMITS[candidate];
+        const maximum = Math.max(1, Math.min(
+          limits?.maxChapters ?? 2,
+          limits?.fairMaxChapters ?? limits?.maxChapters ?? 2,
+          count,
+        ));
+        return { source: candidate, demand: count, maximum, allocated: 1 };
+      });
+    if (entries.length <= 1) return configured;
+
+    let remaining = Math.max(0, this.effectiveChapterAdmissionCap - entries.length);
+    while (remaining > 0) {
+      const candidate = entries
+        .filter((entry) => entry.allocated < entry.maximum)
+        .sort((left, right) => (right.demand / right.allocated) - (left.demand / left.allocated)
+          || right.maximum - left.maximum || left.source.localeCompare(right.source))[0];
+      if (!candidate) break;
+      candidate.allocated++;
+      remaining--;
+    }
+    return entries.find((entry) => entry.source === source)?.allocated ?? configured;
   }
 
   /**
@@ -495,6 +556,7 @@ export class LiteExecutor {
     // cannot bypass the same per-source cap until the next refresh.
     if (this.fairDemandSources.size > 0 && !this.fairDemandSources.has(source)) {
       this.fairDemandSources.add(source);
+      if (this.fairDemandCounts) this.fairDemandCounts.set(source, 1);
       for (const [knownSource, knownSlot] of this.sourceSlots) knownSlot.setCapacity(this.sourceCapacity(knownSource));
     }
     let slot = this.sourceSlots.get(source);

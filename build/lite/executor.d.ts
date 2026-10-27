@@ -93,6 +93,7 @@ export declare class LiteExecutor {
     private readonly receiptBatcher;
     private readonly reservationBatcher;
     private fairDemandSources;
+    private fairDemandCounts;
     private sourceBurstRefresh;
     private lastSourceBurstRefreshAt;
     private sourceBurstRefreshes;
@@ -104,6 +105,13 @@ export declare class LiteExecutor {
      * existence, priority and work-level round-robin.
      */
     setFairSourceDemand(sources: Iterable<string>): void;
+    /**
+     * Use idle chapter capacity when a fair source has fewer executable works
+     * than its nominal equal share.  A source can never exceed its own measured
+     * limit (or explicit fair maximum), and every ready source still receives a
+     * first seat before demand-weighted seats are distributed.
+     */
+    setFairSourceDemandCounts(demand: ReadonlyMap<string, number>): void;
     /** Keep local source shares aligned with the runtime's durable chapter cap. */
     setEffectiveChapterAdmissionCap(capacity: number): void;
     getFairSourceDemand(): string[];
@@ -117,6 +125,7 @@ export declare class LiteExecutor {
         receipts: UploadBatchSnapshot;
     };
     private sourceCapacity;
+    private demandAwareSourceCapacity;
     /**
      * Page waves remain source-scoped even when the runtime permits a wider
      * maximum.  Unknown sources retain the established six-page default; only
