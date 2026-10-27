@@ -1476,6 +1476,20 @@ export class LiteRepository {
         SELECT rw.work_key,rw.priority
         FROM importer_lite_ready_works rw
         WHERE rw.operation_rank=1 AND rw.next_run_at<=now()
+          -- Match the claim function's in-flight work fence.  A later P0
+          -- task is deliberately visible in the durable projection while an
+          -- earlier P1 chapter for the same work runs, but it is not an
+          -- executable source alternative yet. Including it here could make
+          -- the fairness sample contain only that blocked source and leave
+          -- unrelated P1 workers holding admission while they wait for a
+          -- saturated per-source slot.
+          AND NOT EXISTS (
+            SELECT 1
+            FROM importer_lite_tasks active_work
+            WHERE active_work.work_key=rw.work_key
+              AND active_work.task_type IN ('IMPORT_CHAPTER','PUBLISH')
+              AND active_work.state='RUNNING'
+          )
         ORDER BY rw.priority,rw.operation_rank,rw.last_claimed_at NULLS FIRST,rw.next_run_at,rw.work_key
         LIMIT $1
       ), raw_candidates AS (

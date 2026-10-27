@@ -1937,6 +1937,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.readyImportSources()).toEqual(['source-a']);
   });
 
+  it('does not let a P0 task behind an active earlier chapter hide executable P1 source demand', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'active-earlier-p1', priority: 'P1', idempotencyKey: 'active-earlier-p1',
+      payload: { orderKey: 'n|000001|000000|0' } });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'blocked-p0', priority: 'P0', idempotencyKey: 'blocked-p0',
+      payload: { orderKey: 'n|000002|000000|0' } });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      chapterKey: 'executable-p1', priority: 'P1', idempotencyKey: 'executable-p1',
+      payload: { orderKey: 'n|000001|000000|0' } });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+      VALUES($1::uuid,'blocked-p0','source-a','a','blocked-p0','pt-BR','default','n|000002|000000|0',10,true),
+            ($2::uuid,'executable-p1','source-b','b','executable-p1','pt-BR','default','n|000001|000000|0',10,true)`, [ids.p1a, ids.p1b]);
+    await db.query(`UPDATE importer_lite_tasks
+      SET state='RUNNING',lease_owner='active-p1',lease_until=now()+interval '5 minutes'
+      WHERE idempotency_key='active-earlier-p1'`);
+
+    expect(await repo.readyImportSources()).toEqual(['source-b']);
+  });
+
   it('caps one source only while other ready sources can use a chapter slot', () => {
     const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
       new AsyncSemaphore(24, 'fair-downloads'), 4, new AsyncSemaphore(48, 'fair-buffers'), new HostRateLimiter(2), 5);
