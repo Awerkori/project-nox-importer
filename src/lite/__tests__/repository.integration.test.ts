@@ -3705,6 +3705,28 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE idempotency_key=$1`, [`lite:publish:${ids.p1a}:${key}`])).rows[0].count).toBe(1);
   });
 
+  it('does not clear a newer source cooldown while completing an already-uploaded chapter', async () => {
+    const key = 'pt-br|default|chapter|completion-cooldown|-';
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: key, priority: 'P1', idempotencyKey: 'completion-cooldown' });
+    const task = await repo.claim('importer-cooldown', 120);
+    expect(task).toBeTruthy();
+    await db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+      VALUES('source-a','RATE_LIMITED',now()+interval '1 hour',2,'provider 429')
+      ON CONFLICT(source) DO UPDATE SET health=excluded.health,cooldown_until=excluded.cooldown_until,
+        consecutive_failures=excluded.consecutive_failures,last_error=excluded.last_error`);
+
+    expect(await repo.completeImportAndEnqueuePublish(task!, 'importer-cooldown', {
+      chapterId: ids.chapter, mediaIds: [ids.page], pageCount: 1,
+      selectedSource: 'source-a', mediaStoredAt: new Date().toISOString(),
+    })).toBe(true);
+    expect((await db.query(`SELECT health,cooldown_until>now() AS cooling
+      FROM importer_lite_source_health WHERE source='source-a'`)).rows[0])
+      .toMatchObject({ health: 'RATE_LIMITED', cooling: true });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key=$1`, [`lite:publish:${ids.p1a}:${key}`])).rows[0].count).toBe(1);
+  });
+
   it('publishes an atomic completion payload without rereading its import checkpoint', async () => {
     await repo.enqueue({ taskType: 'PUBLISH', workId: ids.publish, workKey: `work:${ids.publish}`,
       chapterKey: 'chapter:payload', priority: 'P1', idempotencyKey: 'publish-payload',

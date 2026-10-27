@@ -2426,32 +2426,42 @@ export class LiteRepository {
         const client = await this.db.connect();
         try {
             await client.query('BEGIN');
-            const completed = await client.query(`UPDATE importer_lite_tasks
-           SET state='DONE', checkpoint=checkpoint || $3::jsonb,
-               lease_owner=NULL, lease_until=NULL, updated_at=now()
-         WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`, [task.id, workerId, JSON.stringify(checkpoint)]);
-            if (completed.rowCount !== 1) {
-                await client.query('ROLLBACK');
-                return false;
-            }
-            // A completed upload which began before a later provider 429 must not
-            // erase that newer cooldown. This mirrors recordSourceSuccess exactly,
-            // but keeps the successful transition in one brief transaction.
-            await client.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
-        VALUES($1,'HEALTHY',NULL,0,NULL)
-        ON CONFLICT(source) DO UPDATE SET health='HEALTHY',cooldown_until=NULL,
-          consecutive_failures=0,last_error=NULL,updated_at=now()
-        WHERE NOT (importer_lite_source_health.health='RATE_LIMITED'
-          AND importer_lite_source_health.cooldown_until>now())`, [completion.selectedSource]);
-            await client.query(`INSERT INTO importer_lite_tasks
-          (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,payload)
-        SELECT 'PUBLISH',$1::uuid,$2,$3,
-          CASE WHEN EXISTS (
-            SELECT 1 FROM importer_staff_requests s
-            WHERE s.work_id=$1::uuid AND s.status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')
-          ) THEN 0 ELSE $4::smallint END,
-          $4::smallint,$5,$6::jsonb
-        ON CONFLICT(idempotency_key) DO NOTHING`, [task.workId, task.workKey, task.chapterKey, LITE_PRIORITY_RANK[publishPriority],
+            // Keep the post-media transition short: these writes are all fenced by
+            // the exact import lease and do not need three separate trips through
+            // the small direct YSQL pool.  The CTE dependency makes a lost lease a
+            // true no-op: it cannot acknowledge source health or materialize a
+            // PUBLISH task. `refreshReadyWork` remains a separate, ordered step so
+            // the durable per-work chapter barrier is refreshed before commit.
+            const completed = await client.query(`WITH completed AS (
+           UPDATE importer_lite_tasks
+              SET state='DONE', checkpoint=checkpoint || $3::jsonb,
+                  lease_owner=NULL, lease_until=NULL, updated_at=now()
+            WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()
+          RETURNING id
+         ), source_success AS (
+           -- A completed upload which began before a later provider 429 must
+           -- not erase that newer cooldown. This is the established
+           -- recordSourceSuccess condition, now scoped to the completion CTE.
+           INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+           SELECT $4,'HEALTHY',NULL,0,NULL FROM completed
+           ON CONFLICT(source) DO UPDATE SET health='HEALTHY',cooldown_until=NULL,
+             consecutive_failures=0,last_error=NULL,updated_at=now()
+           WHERE NOT (importer_lite_source_health.health='RATE_LIMITED'
+             AND importer_lite_source_health.cooldown_until>now())
+         ), publish AS (
+           INSERT INTO importer_lite_tasks
+             (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,payload)
+           SELECT 'PUBLISH',$5::uuid,$6,$7,
+             CASE WHEN EXISTS (
+               SELECT 1 FROM importer_staff_requests s
+               WHERE s.work_id=$5::uuid AND s.status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')
+             ) THEN 0 ELSE $8::smallint END,
+             $8::smallint,$9,$10::jsonb
+           FROM completed
+           ON CONFLICT(idempotency_key) DO NOTHING
+         )
+         SELECT EXISTS(SELECT 1 FROM completed) AS completed`, [task.id, workerId, JSON.stringify(checkpoint), completion.selectedSource,
+                task.workId, task.workKey, task.chapterKey, LITE_PRIORITY_RANK[publishPriority],
                 `lite:publish:${task.workId}:${task.chapterKey}`,
                 // The completion transaction already owns these durable, scalar
                 // references. Carry them with the PUBLISH task so its normal path
@@ -2461,6 +2471,10 @@ export class LiteRepository {
                 JSON.stringify({ importTaskId: task.id, source: completion.selectedSource,
                     chapterId: completion.chapterId, mediaIds: completion.mediaIds,
                     orderKey: String(task.payload.orderKey || '') || null })]);
+            if (!completed.rows[0]?.completed) {
+                await client.query('ROLLBACK');
+                return false;
+            }
             await this.refreshReadyWork(client, task.workKey);
             await client.query('COMMIT');
             return true;
