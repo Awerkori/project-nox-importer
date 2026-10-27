@@ -5383,7 +5383,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).lastSiteProbe).toMatchObject({ state: 'HEALTHY' });
   });
 
-  it('pauses claims when the site-health failure is confirmed', async () => {
+  it('pauses claims when Reader returns a confirmed unhealthy response', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
@@ -5392,11 +5392,26 @@ describe('LiteRepository against the additive Lite migration', () => {
         QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
     const originalFetch = globalThis.fetch;
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('site unavailable')));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 503 })));
     try { await (runtime as any).probeSharedResources(); } finally { vi.stubGlobal('fetch', originalFetch); }
     expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
-    expect((runtime as any).lastSiteProbe).toMatchObject({ state: 'PAUSED', latencyMs: null });
+    expect((runtime as any).lastSiteProbe).toMatchObject({ state: 'PAUSED' });
     for (const timer of (runtime as any).timers) clearTimeout(timer);
+  });
+
+  it('does not freeze chapter admission when only importer egress is unavailable', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', NOX_MANGA_URL: 'https://reader.test',
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
+        QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('egress unavailable')));
+    try { await (runtime as any).probeSharedResources(); } finally { vi.stubGlobal('fetch', originalFetch); }
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(false);
+    expect((runtime as any).lastSiteProbe).toMatchObject({ state: 'DEGRADED', latencyMs: null });
   });
 
   it('releases the site protection early only after a confirmed recovery probe', async () => {
@@ -5409,8 +5424,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     const originalFetch = globalThis.fetch;
     vi.stubGlobal('fetch', vi.fn()
-      .mockRejectedValueOnce(new TypeError('site unavailable'))
-      .mockRejectedValueOnce(new TypeError('site unavailable'))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
       .mockResolvedValueOnce(new Response(null, { status: 200 })));
     try {
       await (runtime as any).probeSharedResources();
