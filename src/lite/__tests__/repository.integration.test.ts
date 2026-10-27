@@ -1974,6 +1974,24 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.readyImportSources()).toEqual(['source-b']);
   });
 
+  it('keeps a routable P1 alternative in the fairness view behind live P0 work', async () => {
+    // The durable claim remains P0-first. This view is only consumed by the
+    // local source permits: one P0 may wait for its saturated source, while a
+    // later P0 claim can yield and let P1 use an otherwise-idle chapter seat.
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'p0-hot-source', priority: 'P0', idempotencyKey: 'p0-hot-source',
+      payload: { orderKey: 'n|000001|000000|0' } });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      chapterKey: 'p1-alternative-source', priority: 'P1', idempotencyKey: 'p1-alternative-source',
+      payload: { orderKey: 'n|000001|000000|0' } });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+      VALUES($1::uuid,'p0-hot-source','source-a','a','p0-hot','pt-BR','default','n|000001|000000|0',10,true),
+            ($2::uuid,'p1-alternative-source','source-b','b','p1-alternative','pt-BR','default','n|000001|000000|0',10,true)`, [ids.p1a, ids.p1b]);
+
+    expect(await repo.readyImportSourceDemand()).toEqual(new Map([['source-a', 1], ['source-b', 1]]));
+  });
+
   it('caps one source only while other ready sources can use a chapter slot', () => {
     const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
       new AsyncSemaphore(24, 'fair-downloads'), 4, new AsyncSemaphore(48, 'fair-buffers'), new HostRateLimiter(2), 5);
@@ -2347,6 +2365,26 @@ describe('LiteRepository against the additive Lite migration', () => {
     hotSlot.release();
     const permit = await waiting;
     expect(permit.waitMs).toBeGreaterThanOrEqual(0);
+    permit.sourceSlot.release();
+  });
+
+  it('yields a second saturated P0 claimant after preserving its one source reservation', async () => {
+    const queue = { yieldForSourceFairness: vi.fn(async () => true) } as unknown as LiteRepository;
+    const executor = new LiteExecutor({} as Pool, queue, {} as SourceRegistry, {} as StorageProvider, ids.staff,
+      new AsyncSemaphore(2, 'p0-second-source-yield-downloads'), 1,
+      new AsyncSemaphore(2, 'p0-second-source-yield-buffers'), new HostRateLimiter(2), 2);
+    executor.setFairSourceDemand(['source-a', 'source-b']);
+    const hotSlot = (executor as any).sourceSlot('source-a') as AsyncSemaphore;
+    expect(hotSlot.tryAcquire()).toBe(true);
+
+    const reserved = (executor as any).acquireSourcePermit({ priority: 'P0' }, 'p0-reserved-worker', 'source-a');
+    await vi.waitFor(() => expect(hotSlot.queued).toBe(1));
+    const yielded = await (executor as any).acquireSourcePermit({ priority: 'P0' }, 'p0-yield-worker', 'source-a');
+    expect(yielded).toBeNull();
+    expect((queue as any).yieldForSourceFairness).toHaveBeenCalledTimes(1);
+
+    hotSlot.release();
+    const permit = await reserved;
     permit.sourceSlot.release();
   });
 
