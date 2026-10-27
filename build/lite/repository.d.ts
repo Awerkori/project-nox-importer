@@ -328,6 +328,14 @@ export declare class LiteRepository {
      */
     recoverDuplicateCanonicalCatalogFailures(limit?: number): Promise<number>;
     /**
+     * Before the P0/P2 policy boundary was corrected, an operational source
+     * with `catalog_discovery_enabled=false` could park its existing-work P0
+     * monitor as SOURCE_NOT_READY:ACTIVE. That switch is for source-wide P2
+     * DISCOVER only; reopen just those legacy monitor rows in small, idempotent
+     * batches. Normal source health/cooldown eligibility remains authoritative.
+     */
+    reopenP0MonitorsBlockedByDiscoveryPolicy(limit?: number): Promise<number>;
+    /**
      * Source administration and transient Lite health remain durable authority.
      * This indexed one-source read happens before source networking, never in a
      * normal task claim, and prevents a paused/cooling provider from consuming

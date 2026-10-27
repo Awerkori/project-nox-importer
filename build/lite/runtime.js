@@ -621,6 +621,7 @@ export class ImporterLiteRuntime {
             // immediately eligible under the normal strict priority contract.
             await this.queue.staggerReadyDiscoveries(60_000, 64);
             await this.queue.recoverDuplicateCanonicalCatalogFailures();
+            await this.queue.reopenP0MonitorsBlockedByDiscoveryPolicy();
             await this.refreshSourceFairness();
             await this.refillHistoricalP1Catalog();
             await this.refillManifestProvenP1Imports();
@@ -1009,6 +1010,10 @@ export class ImporterLiteRuntime {
         }
         try {
             await this.queue.recoverDuplicateCanonicalCatalogFailures();
+        }
+        catch { /* bounded recovery retries next turn */ }
+        try {
+            await this.queue.reopenP0MonitorsBlockedByDiscoveryPolicy();
         }
         catch { /* bounded recovery retries next turn */ }
         if (this.nextDiscoverySeedRetryAt > 0 && now >= this.nextDiscoverySeedRetryAt && this.pool.waitingCount === 0) {
@@ -3018,11 +3023,10 @@ export class ImporterLiteRuntime {
         if (!adapter)
             return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'SOURCE_ADAPTER_UNAVAILABLE' });
         const policy = await this.queue.sourcePolicy(source);
-        // `catalogDiscoveryEnabled` controls source-wide P2 discovery only.  A
-        // CATALOG task already has a confirmed source-work mapping: blocking it
-        // because the provider opts out of new-work discovery also blocks P0
-        // release checks (and P1 repairs) for existing Reader works.
-        if (!policy?.runnable) {
+        // This source-wide switch is deliberately limited to P2 DISCOVER. A
+        // known-work CATALOG task is handled below and must remain available for
+        // P0 release checks and P1 repairs.
+        if (!policy?.runnable || !policy.catalogDiscoveryEnabled) {
             const nextRunAt = policy?.cooldownUntil && policy.cooldownUntil > new Date()
                 ? policy.cooldownUntil : new Date(Date.now() + (policy?.syncIntervalMs || 60 * 60_000));
             await this.queue.finish(task, workerId, { state: 'RETRY_WAIT',
@@ -3105,6 +3109,10 @@ export class ImporterLiteRuntime {
         if (!adapter || !sourceWorkId)
             return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CATALOG_INPUT_INVALID' });
         const policy = await this.queue.sourcePolicy(source);
+        // `catalogDiscoveryEnabled` controls source-wide P2 DISCOVER only. A
+        // CATALOG task already has a confirmed source-work mapping: blocking it
+        // because the provider opts out of new-work discovery also blocks P0
+        // release checks (and P1 repairs) for existing Reader works.
         if (!policy?.runnable) {
             const nextRunAt = policy?.cooldownUntil && policy.cooldownUntil > new Date()
                 ? policy.cooldownUntil : new Date(Date.now() + (policy?.syncIntervalMs || 60 * 60_000));

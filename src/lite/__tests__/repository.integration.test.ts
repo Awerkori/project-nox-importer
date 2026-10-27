@@ -3497,6 +3497,15 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).seedDiscovery();
     expect((await db.query(`SELECT idempotency_key FROM importer_lite_tasks WHERE idempotency_key LIKE 'lite:discover:%' ORDER BY idempotency_key`)).rows)
       .toEqual([]);
+
+    // The source-wide switch must also fence a previously durable P2
+    // discovery row. It is not a blanket ban on known-work CATALOG tasks.
+    await repo.enqueue({ taskType: 'DISCOVER', workKey: 'source:source-b', priority: 'P2',
+      idempotencyKey: 'disabled-source-discover', payload: { source: 'source-b' } });
+    const disabledDiscovery = await repo.claim('disabled-discovery-worker', 30);
+    await (runtime as any).handle(disabledDiscovery, 'disabled-discovery-worker');
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`, [disabledDiscovery!.id])).rows[0])
+      .toMatchObject({ state: 'RETRY_WAIT', reason: 'SOURCE_DISCOVERY_DISABLED' });
   });
 
   it('releases an expired administrative cooldown for P2 without overriding a live cooldown', async () => {
@@ -4242,6 +4251,23 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toBe(canonical);
     expect((await db.query(`SELECT canonical_page_count,retired_page_count FROM importer_chapter_identity_merges WHERE retired_chapter_id=$1::uuid`, [retired])).rows[0])
       .toEqual({ canonical_page_count: 1, retired_page_count: 1 });
+  });
+
+  it('reopens only legacy P0 monitors blocked by the discovery-only switch', async () => {
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS catalog_discovery_enabled boolean NOT NULL DEFAULT true`);
+    await db.query(`UPDATE importer_sources SET catalog_discovery_enabled=false WHERE id='source-a'`);
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:legacy-p0', priority: 'P2', monitoring: true,
+      idempotencyKey: 'legacy-p0-monitor', payload: { source: 'source-a', sourceWorkId: 'legacy-p0' } });
+    await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-b:unrelated', priority: 'P2', monitoring: true,
+      idempotencyKey: 'unrelated-monitor', payload: { source: 'source-b', sourceWorkId: 'unrelated' } });
+    await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED',attempts=4,reason='SOURCE_NOT_READY:ACTIVE',
+      next_run_at=now()+interval '1 hour' WHERE idempotency_key IN ('legacy-p0-monitor','unrelated-monitor')`);
+
+    expect(await repo.reopenP0MonitorsBlockedByDiscoveryPolicy()).toBe(1);
+    expect((await db.query(`SELECT state,attempts,reason FROM importer_lite_tasks WHERE idempotency_key='legacy-p0-monitor'`)).rows[0])
+      .toEqual({ state: 'READY', attempts: 0, reason: null });
+    expect((await db.query(`SELECT state,attempts,reason FROM importer_lite_tasks WHERE idempotency_key='unrelated-monitor'`)).rows[0])
+      .toEqual({ state: 'BLOCKED', attempts: 4, reason: 'SOURCE_NOT_READY:ACTIVE' });
   });
 
   it('turns only a genuinely new monitor observation into P0 and returns the watch to its bounded lane', async () => {
