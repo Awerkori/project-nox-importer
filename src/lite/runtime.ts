@@ -430,7 +430,7 @@ export class ImporterLiteRuntime {
     checkedAt: new Date(0).toISOString(),
   };
   private operatorChapterAdmissionCap = 0;
-  private lastSiteProbe: { state: 'UNKNOWN' | 'HEALTHY' | 'PAUSED'; checkedAt: string; latencyMs: number | null } = {
+  private lastSiteProbe: { state: 'UNKNOWN' | 'HEALTHY' | 'DEGRADED' | 'PAUSED'; checkedAt: string; latencyMs: number | null } = {
     state: 'UNKNOWN', checkedAt: new Date(0).toISOString(), latencyMs: null,
   };
 
@@ -2738,6 +2738,20 @@ export class ImporterLiteRuntime {
       this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: confirmation.latencyMs };
       this.logger.warn('Transient site-health probe recovered before pausing Lite claims', {
         firstStatus: first.status, firstLatencyMs: first.latencyMs, confirmationLatencyMs: confirmation.latencyMs,
+      });
+      return;
+    }
+    // An importer-side network failure does not establish that Reader is
+    // unavailable to visitors.  Pausing every chapter after two `fetch`
+    // exceptions turned a transient DISCloud egress path into a global
+    // throughput brake even while the public health endpoint was healthy.
+    // A real Reader response (5xx or slow) still takes the conservative
+    // pause below; only two absent HTTP responses retain admissions.
+    if (first.status === null && confirmation.status === null) {
+      this.sitePausedUntil = 0;
+      this.lastSiteProbe = { state: 'DEGRADED', checkedAt: new Date().toISOString(), latencyMs: null };
+      this.logger.warn('Importer egress could not confirm Reader health; retaining Lite admissions', {
+        firstStatus: first.status, confirmationStatus: confirmation.status,
       });
       return;
     }

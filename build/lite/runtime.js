@@ -2666,6 +2666,20 @@ export class ImporterLiteRuntime {
             });
             return;
         }
+        // An importer-side network failure does not establish that Reader is
+        // unavailable to visitors.  Pausing every chapter after two `fetch`
+        // exceptions turned a transient DISCloud egress path into a global
+        // throughput brake even while the public health endpoint was healthy.
+        // A real Reader response (5xx or slow) still takes the conservative
+        // pause below; only two absent HTTP responses retain admissions.
+        if (first.status === null && confirmation.status === null) {
+            this.sitePausedUntil = 0;
+            this.lastSiteProbe = { state: 'DEGRADED', checkedAt: new Date().toISOString(), latencyMs: null };
+            this.logger.warn('Importer egress could not confirm Reader health; retaining Lite admissions', {
+                firstStatus: first.status, confirmationStatus: confirmation.status,
+            });
+            return;
+        }
         // A confirmed outage reduces pressure without retrying tasks or restarting
         // the process.  The next scheduled probe can release this small gate.
         // An early recovery probe must not extend a still-valid protective window
