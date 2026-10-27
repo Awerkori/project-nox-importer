@@ -5104,6 +5104,34 @@ describe('LiteRepository against the additive Lite migration', () => {
     schedule.mockRestore();
   });
 
+  it('keeps overlapping metadata ticks from queuing isolated-pool control work', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => null } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    let releaseRefresh!: () => void;
+    const refreshV4 = vi.fn(() => new Promise<void>((resolve) => { releaseRefresh = resolve; }));
+    (runtime as any).refreshMetadataReplayV4ExclusiveMode = refreshV4;
+    (runtime as any).refreshMetadataTurboMode = vi.fn().mockResolvedValue(undefined);
+    (runtime as any).refillSourceMetadataEnrichment = vi.fn().mockResolvedValue(undefined);
+    (runtime as any).refillCrossSourceMetadataDiscovery = vi.fn().mockResolvedValue(0);
+    (runtime as any).runCrossSourceMetadataDiscovery = vi.fn().mockResolvedValue(false);
+    (runtime as any).runAliasOnlyEnrichmentTurn = vi.fn().mockResolvedValue(0);
+    (runtime as any).runCoverVisionTurn = vi.fn().mockResolvedValue(0);
+
+    const first = (runtime as any).runMetadataTurn();
+    await Promise.resolve();
+    await (runtime as any).runMetadataTurn();
+    expect(refreshV4).toHaveBeenCalledTimes(1);
+
+    releaseRefresh();
+    await first;
+    expect((runtime as any).metadataTurnGate.active).toBe(0);
+  });
+
   it('claims ready exclusive V4 work before a non-blocking producer refill', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => { throw new Error('no source access expected'); } } as unknown as SourceRegistry,

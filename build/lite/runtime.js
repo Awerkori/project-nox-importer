@@ -227,6 +227,11 @@ export class ImporterLiteRuntime {
     chapterAdmissionGate;
     historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
     metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
+    // Metadata ticks are rearmed before a prior turn completes so recovery is
+    // prompt after long external work. The tick itself must nevertheless stay
+    // single-flight: otherwise each overlapping turn queues its settings and
+    // producer reads on the one isolated YSQL connection.
+    metadataTurnGate = new AsyncSemaphore(1, 'lite_metadata_turn');
     // The exclusive V4 campaign may merge four distinct canonical works. A
     // separate gate keeps normal operation strictly single-flight.
     metadataReplayExclusiveGate = new AsyncSemaphore(4, 'lite_metadata_replay_exclusive');
@@ -1282,6 +1287,8 @@ export class ImporterLiteRuntime {
     }
     /** One timer turn keeps normal metadata paths out of an exclusive replay. */
     async runMetadataTurn() {
+        if (!this.metadataTurnGate.tryAcquire())
+            return;
         try {
             await this.refreshMetadataReplayV4ExclusiveMode();
             await this.refreshMetadataTurboMode();
@@ -1319,6 +1326,9 @@ export class ImporterLiteRuntime {
         }
         catch (error) {
             this.logger.warn('Metadata turn failed', { error: error?.message });
+        }
+        finally {
+            this.metadataTurnGate.release();
         }
     }
     triggerAsyncAliasOnlyEnrichment(workId) {
