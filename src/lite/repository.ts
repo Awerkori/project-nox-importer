@@ -1664,13 +1664,23 @@ export class LiteRepository {
       ), lane AS (
         SELECT min(priority) AS priority FROM import_routes
       )
+      -- P0 remains the durable claim priority.  Its first saturated source
+      -- waiter is reserved by the executor, but subsequent P0 claims must be
+      -- able to yield to a routable P1 source instead of holding every chapter
+      -- admission seat behind that one provider.  Include P1 only in this
+      -- *local fairness view* when P0 is the live lane; STAFF remains
+      -- exclusive and the claim function remains the priority authority.
+      --
       -- One route per executable work, ordered with the same source-rank
-      -- preference as the executor.  Keeping the rows (rather than a DISTINCT
+      -- preference as the executor. Keeping the rows (rather than a DISTINCT
       -- source list) lets the local fair-share gate distinguish a provider
       -- with one runnable work from one with a real ready-work backlog.
       SELECT DISTINCT ON (routes.id) routes.source
       FROM import_routes routes
-      JOIN lane ON lane.priority=routes.priority
+      JOIN lane ON (
+        routes.priority=lane.priority
+        OR (lane.priority=1 AND routes.priority=2)
+      )
       ORDER BY routes.id, routes.source_rank, routes.created_at, routes.source`, [maximum]);
     return result.rows.map((row) => String(row.source));
   }
