@@ -1154,6 +1154,31 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(refill).toHaveBeenLastCalledWith(4, undefined);
   });
 
+  it('does not queue overlapping cross-source refills on the isolated metadata connection', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => null } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', WORKER_ID: 'cross-source-refill-gate-test',
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    let resolveRefill!: (value: number) => void;
+    const refill = vi.fn(() => new Promise<number>((resolve) => { resolveRefill = resolve; }));
+    (runtime as any).queue = { refillCrossSourceMetadataDiscovery: refill };
+    (runtime as any).isRuntimeLeader = true;
+
+    const first = (runtime as any).refillCrossSourceMetadataDiscovery();
+    await Promise.resolve();
+    // Simulate the next timer turn after the regular 15-second fence has
+    // elapsed while the first YSQL transaction is still in progress.
+    (runtime as any).lastCrossSourceDiscoveryRefillAt = 0;
+    await expect((runtime as any).refillCrossSourceMetadataDiscovery()).resolves.toBe(0);
+    expect(refill).toHaveBeenCalledTimes(1);
+
+    resolveRefill(2);
+    await expect(first).resolves.toBe(2);
+    expect((runtime as any).crossSourceMetadataRefillGate.active).toBe(0);
+  });
+
   it('advances only a bounded number of empty historical source horizons', async () => {
     const memorySpy = vi.spyOn(process, 'memoryUsage').mockReturnValue({ rss: 128 * 1024 * 1024 } as NodeJS.MemoryUsage);
     const runtime = new ImporterLiteRuntime(

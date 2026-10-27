@@ -51,6 +51,7 @@ export declare class ImporterLiteRuntime {
     private readonly metadataReplayV4RefillGate;
     private readonly metadataReplayV4PersistenceGate;
     private readonly sourceMetadataRefillGate;
+    private readonly crossSourceMetadataRefillGate;
     private readonly sourceMetadataGate;
     private readonly sourceMetadataPreparationGate;
     private readonly sourceMetadataLaneGate;
