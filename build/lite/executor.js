@@ -356,6 +356,7 @@ export class LiteExecutor {
     onRouteSelected;
     pageBytes;
     chapterManifestTimeoutMs;
+    refreshFairDemandOnSourceBurst;
     sourceSlots = new Map();
     // One urgent chapter may wait for a saturated source rather than yielding
     // behind P1/P2 work indefinitely. It is deliberately a single reservation:
@@ -365,6 +366,15 @@ export class LiteExecutor {
     receiptBatcher;
     reservationBatcher;
     fairDemandSources = new Set();
+    // A priority-boundary sample can legitimately contain one source, then a
+    // different ready work can materialise before the next 30-second recovery
+    // turn.  Without one bounded re-sample, MangaFlix may take all eight of its
+    // source slots in that short interval and keep them through long chapters.
+    // This is deliberately neither a poll nor a new scheduler: it is shared by
+    // the workers that encounter the first potential singleton-source burst.
+    sourceBurstRefresh = null;
+    lastSourceBurstRefreshAt = 0;
+    sourceBurstRefreshes = 0;
     // The configured worker count is an upper bound only. The durable runtime
     // cap can be lower during a controlled ramp, and source fairness must use
     // that effective chapter capacity or one fast source can occupy every
@@ -379,7 +389,7 @@ export class LiteExecutor {
     // can be slow or its own limiter can stall before it reaches the page-body
     // fetch timeout; without this fence it held a chapter admission until lease
     // reconciliation, starving unrelated ready work.
-    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = defaultBufferedPages(downloads), sourceRateLimiter = new HostRateLimiter(2), chapterWorkerCapacity = 1, onRouteSelected, pageBytes = new PageByteBudget(), chapterManifestTimeoutMs = 30_000) {
+    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = defaultBufferedPages(downloads), sourceRateLimiter = new HostRateLimiter(2), chapterWorkerCapacity = 1, onRouteSelected, pageBytes = new PageByteBudget(), chapterManifestTimeoutMs = 30_000, refreshFairDemandOnSourceBurst) {
         this.db = db;
         this.queue = queue;
         this.registry = registry;
@@ -393,6 +403,7 @@ export class LiteExecutor {
         this.onRouteSelected = onRouteSelected;
         this.pageBytes = pageBytes;
         this.chapterManifestTimeoutMs = chapterManifestTimeoutMs;
+        this.refreshFairDemandOnSourceBurst = refreshFairDemandOnSourceBurst;
         this.receiptBatcher = new UploadReceiptBatcher(queue);
         this.reservationBatcher = new UploadReservationBatcher(queue);
         this.effectiveChapterAdmissionCap = Math.max(1, Math.floor(chapterWorkerCapacity));
@@ -417,6 +428,14 @@ export class LiteExecutor {
             slot.setCapacity(this.sourceCapacity(source));
     }
     getFairSourceDemand() { return [...this.fairDemandSources].sort(); }
+    /** Compact evidence that an initially-singleton source was re-sampled. */
+    getSourceFairnessBurstSnapshot() {
+        return {
+            refreshes: this.sourceBurstRefreshes,
+            demandSources: this.fairDemandSources.size,
+            refreshInFlight: this.sourceBurstRefresh !== null,
+        };
+    }
     /** The durable chapter-admission cap currently used to calculate source shares. */
     getEffectiveChapterAdmissionCap() { return this.effectiveChapterAdmissionCap; }
     /** Aggregate-only batch evidence for the existing heartbeat. */
@@ -477,6 +496,53 @@ export class LiteExecutor {
         return slot;
     }
     /**
+     * Re-sample exactly once before a source can grow past the share it would
+     * receive with four plausible alternatives.  A true singleton remains
+     * unconstrained after this one check; a real alternative immediately lowers
+     * the existing source semaphore and the normal durable yield path handles
+     * the not-yet-started claim.  This avoids a periodic query per chapter and
+     * never preempts media already in flight.
+     */
+    async refreshStaleSingletonDemand(source, sourceSlot) {
+        if (!this.refreshFairDemandOnSourceBurst || this.fairDemandSources.size > 1)
+            return;
+        const configured = SOURCE_CONCURRENCY_LIMITS[source]?.maxChapters ?? 2;
+        if (configured <= 3)
+            return;
+        const probeThreshold = Math.max(2, Math.ceil(this.effectiveChapterAdmissionCap / 4));
+        if (sourceSlot.active < probeThreshold)
+            return;
+        const now = Date.now();
+        if (this.sourceBurstRefresh) {
+            await this.sourceBurstRefresh;
+            return;
+        }
+        // A no-alternative result is valid for a short period.  The ordinary
+        // recovery refresh remains the authority for later materialisation, while
+        // this guard prevents a hot singleton from turning into YSQL polling.
+        if (now - this.lastSourceBurstRefreshAt < 10_000)
+            return;
+        this.lastSourceBurstRefreshAt = now;
+        const refresh = (async () => {
+            try {
+                await this.refreshFairDemandOnSourceBurst();
+                this.sourceBurstRefreshes++;
+            }
+            catch {
+                // A failed optional fairness sample must never block a healthy sole
+                // source. The next recovery turn retains its existing error handling.
+            }
+        })();
+        this.sourceBurstRefresh = refresh;
+        try {
+            await refresh;
+        }
+        finally {
+            if (this.sourceBurstRefresh === refresh)
+                this.sourceBurstRefresh = null;
+        }
+    }
+    /**
      * Preserve one STAFF/P0 source reservation when source-share fairness is
      * currently full. Normal work still yields to a healthy alternative; the
      * bounded priority waiter merely receives the next released slot and never
@@ -484,6 +550,7 @@ export class LiteExecutor {
      */
     async acquireSourcePermit(task, workerId, source) {
         const sourceSlot = this.sourceSlot(source);
+        await this.refreshStaleSingletonDemand(source, sourceSlot);
         if (sourceSlot.tryAcquire())
             return { sourceSlot, waitMs: 0 };
         const priorityReservation = (task.priority === 'STAFF' || task.priority === 'P0')

@@ -594,7 +594,7 @@ export class ImporterLiteRuntime {
     this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads,
       Math.max(1, Math.min(8, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter,
       this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes,
-      config.SOURCE_OPERATION_TIMEOUT_MS);
+      config.SOURCE_OPERATION_TIMEOUT_MS, async () => { await this.refreshSourceFairness(); });
     this.dedupe = new DeduplicationEngine(catalogClient);
     this.historicalMetadataDedupe = sourceMetadataPool === pool
       ? this.dedupe
@@ -2830,6 +2830,7 @@ export class ImporterLiteRuntime {
         sourceMetadataProducer: this.sourceMetadataProducer,
         sourceFairness: {
           effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
+          burst: this.executor.getSourceFairnessBurstSnapshot(),
           historicalP1Producer: this.historicalP1Producer,
         },
         memoryPressure: liveness.memoryPressure,
@@ -2976,6 +2977,7 @@ export class ImporterLiteRuntime {
         // makes a production heartbeat prove that source shares honor the
         // guarded admission cap during a controlled ramp.
         effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
+        burst: this.executor.getSourceFairnessBurstSnapshot(),
         historicalP1Producer: this.historicalP1Producer,
       },
       liveness,

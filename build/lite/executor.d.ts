@@ -27,6 +27,14 @@ export type UploadBatchSnapshot = {
         max: number;
     };
 };
+export type SourceFairnessBurstSnapshot = {
+    /** Number of bounded re-samples requested before a singleton source burst. */
+    refreshes: number;
+    /** Source count in the last successfully installed fair-demand sample. */
+    demandSources: number;
+    /** True only while the one bounded re-sample is using the shared YSQL pool. */
+    refreshInFlight: boolean;
+};
 /**
  * Coalesce only post-Telegram durable receipts.  The pre-upload intent stays
  * a per-page fence, so a crash can never make a successful send retryable.
@@ -79,13 +87,17 @@ export declare class LiteExecutor {
     private readonly onRouteSelected?;
     private readonly pageBytes;
     private readonly chapterManifestTimeoutMs;
+    private readonly refreshFairDemandOnSourceBurst?;
     private readonly sourceSlots;
     private readonly prioritySourceWaitGate;
     private readonly receiptBatcher;
     private readonly reservationBatcher;
     private fairDemandSources;
+    private sourceBurstRefresh;
+    private lastSourceBurstRefreshAt;
+    private sourceBurstRefreshes;
     private effectiveChapterAdmissionCap;
-    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined, pageBytes?: PageByteBudget, chapterManifestTimeoutMs?: number);
+    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined, pageBytes?: PageByteBudget, chapterManifestTimeoutMs?: number, refreshFairDemandOnSourceBurst?: (() => Promise<void>) | undefined);
     /**
      * A bounded runtime sample of sources with ready imports. It only controls
      * local execution permits; the durable queue remains authority for task
@@ -95,6 +107,8 @@ export declare class LiteExecutor {
     /** Keep local source shares aligned with the runtime's durable chapter cap. */
     setEffectiveChapterAdmissionCap(capacity: number): void;
     getFairSourceDemand(): string[];
+    /** Compact evidence that an initially-singleton source was re-sampled. */
+    getSourceFairnessBurstSnapshot(): SourceFairnessBurstSnapshot;
     /** The durable chapter-admission cap currently used to calculate source shares. */
     getEffectiveChapterAdmissionCap(): number;
     /** Aggregate-only batch evidence for the existing heartbeat. */
@@ -117,6 +131,15 @@ export declare class LiteExecutor {
     getPageConcurrencyForSource(source: string): number;
     private hasFairAlternative;
     private sourceSlot;
+    /**
+     * Re-sample exactly once before a source can grow past the share it would
+     * receive with four plausible alternatives.  A true singleton remains
+     * unconstrained after this one check; a real alternative immediately lowers
+     * the existing source semaphore and the normal durable yield path handles
+     * the not-yet-started claim.  This avoids a periodic query per chapter and
+     * never preempts media already in flight.
+     */
+    private refreshStaleSingletonDemand;
     /**
      * Preserve one STAFF/P0 source reservation when source-share fairness is
      * currently full. Normal work still yields to a healthy alternative; the
