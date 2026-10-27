@@ -3018,7 +3018,11 @@ export class ImporterLiteRuntime {
         if (!adapter)
             return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'SOURCE_ADAPTER_UNAVAILABLE' });
         const policy = await this.queue.sourcePolicy(source);
-        if (!policy?.runnable || !policy.catalogDiscoveryEnabled) {
+        // `catalogDiscoveryEnabled` controls source-wide P2 discovery only.  A
+        // CATALOG task already has a confirmed source-work mapping: blocking it
+        // because the provider opts out of new-work discovery also blocks P0
+        // release checks (and P1 repairs) for existing Reader works.
+        if (!policy?.runnable) {
             const nextRunAt = policy?.cooldownUntil && policy.cooldownUntil > new Date()
                 ? policy.cooldownUntil : new Date(Date.now() + (policy?.syncIntervalMs || 60 * 60_000));
             await this.queue.finish(task, workerId, { state: 'RETRY_WAIT',
