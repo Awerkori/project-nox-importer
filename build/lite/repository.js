@@ -49,6 +49,10 @@ const METADATA_REPLAY_V4_SOURCE_DONE_PREFIX = 'metadata_replay_v4_source_done:';
 const METADATA_REPLAY_V4_MAPPING_CURSOR_PREFIX = 'metadata_replay_v4_mapping_cursor:';
 const METADATA_REPLAY_V4_SOURCE_CURSOR_KEY = 'metadata_replay_v4_source_cursor';
 const METADATA_REPLAY_V4_SOURCE_BURST_PREFIX = 'metadata_replay_v4_source_burst:';
+// P0 observation is a separate, one-seat service.  Persisting its provider
+// frontier prevents a deep watch backlog from one source from making another
+// eligible source wait until that backlog has drained.
+const P0_MONITOR_SOURCE_CURSOR = 'p0_monitor';
 const METADATA_REPLAY_V4_INTERVAL_MS = 20_000;
 const METADATA_REPLAY_V4_WINDOWS_PER_SOURCE_TURN = 4;
 const METADATA_REPLAY_V4_SOURCE_BURST_LIMIT = 3;
@@ -1328,10 +1332,62 @@ export class LiteRepository {
     /**
      * P0 observation has one durable, explicitly bounded lane.  It is never
      * selected by normal claims, so unchanged watches cannot starve P1/P2.
+     *
+     * The old stored function selected the globally oldest watch. A provider
+     * with hundreds of overdue watches could therefore hide every other source
+     * for hours even while this lane itself remained healthy. This short
+     * transaction locks one durable source cursor, claims the oldest due watch
+     * for the next source in its round-robin, and advances only when the claim
+     * succeeds. It neither changes chapter priority nor admits media work.
      */
     async claimMonitor(workerId, leaseSeconds) {
-        const result = await this.db.query('SELECT * FROM public.importer_lite_claim_monitor_task($1,$2::interval)', [workerId, `${Math.max(30, leaseSeconds)} seconds`]);
-        return result.rows[0] ? asTask(result.rows[0]) : null;
+        const client = await this.db.connect();
+        try {
+            await client.query('BEGIN');
+            await client.query(`INSERT INTO importer_lite_metadata_source_cursor(cursor_name,last_source)
+        VALUES($1,NULL) ON CONFLICT(cursor_name) DO NOTHING`, [P0_MONITOR_SOURCE_CURSOR]);
+            const cursor = await client.query(`
+        SELECT last_source FROM importer_lite_metadata_source_cursor
+        WHERE cursor_name=$1 FOR UPDATE`, [P0_MONITOR_SOURCE_CURSOR]);
+            const lastSource = cursor.rows[0]?.last_source || '';
+            const result = await client.query(`
+        WITH source_heads AS (
+          SELECT DISTINCT ON (COALESCE(NULLIF(t.payload->>'source',''),'~'))
+            t.id,COALESCE(NULLIF(t.payload->>'source',''),'~') AS source
+          FROM importer_lite_tasks t
+          WHERE t.state='READY' AND t.task_type='CATALOG' AND t.monitoring=true
+            AND t.next_run_at<=now()
+          ORDER BY COALESCE(NULLIF(t.payload->>'source',''),'~'),t.next_run_at,t.created_at,t.id
+        ), picked AS (
+          SELECT id,source FROM source_heads
+          ORDER BY CASE WHEN source>$1::text THEN 0 ELSE 1 END,source
+          LIMIT 1
+        ), claimed AS (
+          UPDATE importer_lite_tasks task
+          SET state='RUNNING',lease_owner=$3,lease_until=now()+$4::interval,
+              attempts=attempts+1,updated_at=now()
+          FROM picked
+          WHERE task.id=picked.id AND task.state='READY'
+          RETURNING task.*
+        ), advanced AS (
+          UPDATE importer_lite_metadata_source_cursor cursor
+          SET last_source=picked.source,updated_at=now()
+          FROM picked
+          WHERE cursor.cursor_name=$2
+            AND EXISTS (SELECT 1 FROM claimed)
+          RETURNING cursor.last_source
+        )
+        SELECT * FROM claimed`, [lastSource, P0_MONITOR_SOURCE_CURSOR, workerId, `${Math.max(30, leaseSeconds)} seconds`]);
+            await client.query('COMMIT');
+            return result.rows[0] ? asTask(result.rows[0]) : null;
+        }
+        catch (error) {
+            await client.query('ROLLBACK').catch(() => { });
+            throw error;
+        }
+        finally {
+            client.release();
+        }
     }
     /**
      * Claims one already-durable, no-network metadata replay.  This deliberately
