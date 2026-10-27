@@ -2634,6 +2634,17 @@ export class ImporterLiteRuntime {
     async emitOperationalSnapshot() {
         if (this.operationalSnapshotRunning)
             return;
+        // The compact heartbeat is specifically the busy-pool path.  It writes a
+        // single liveness marker, but must not hold the full-snapshot admission
+        // fence while that write itself waits behind chapter persistence.  Doing
+        // so turned ordinary pool contention into an avoidable all-worker pause.
+        // This check and the flag assignment below are synchronous, so an idle
+        // full snapshot still establishes its fence before a worker can interleave
+        // and start a new claim.
+        if (this.pool.waitingCount > 0 || this.chapterAdmissionGate.active > 0) {
+            await this.emitOperationalSnapshotOnce();
+            return;
+        }
         this.operationalSnapshotRunning = true;
         try {
             await this.emitOperationalSnapshotOnce();

@@ -3019,6 +3019,22 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
   });
 
+  it('does not hold chapter admission while persisting a deferred busy-pool heartbeat', async () => {
+    const pool = poolFor(db) as Pool;
+    const runtime = new ImporterLiteRuntime(
+      pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { WORKER_ID: 'snapshot-busy-pool', IMPORTER_USER_ID: ids.staff,
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, TELEGRAM_MEDIA_CONCURRENCY: 1,
+        UPLOAD_RATE_LIMIT_BYTES_PER_SEC: 1 } as any,
+    );
+    Object.defineProperty(pool, 'waitingCount', { configurable: true, get: () => 1 });
+    await (runtime as any).emitOperationalSnapshot();
+    expect((runtime as any).operationalSnapshotRunning).toBe(false);
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(false);
+  });
+
   it('uses a compact heartbeat while a chapter admission is active instead of racing its YSQL commits', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
