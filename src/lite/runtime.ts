@@ -2956,6 +2956,7 @@ export class ImporterLiteRuntime {
         sourceMetadataProducer: this.sourceMetadataProducer,
         sourceFairness: {
           effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
+          pageDownloadShares: this.executor.getFairSourcePageShares(),
           burst: this.executor.getSourceFairnessBurstSnapshot(),
           historicalP1Producer: this.historicalP1Producer,
         },
@@ -3103,6 +3104,7 @@ export class ImporterLiteRuntime {
         // makes a production heartbeat prove that source shares honor the
         // guarded admission cap during a controlled ramp.
         effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
+        pageDownloadShares: this.executor.getFairSourcePageShares(),
         burst: this.executor.getSourceFairnessBurstSnapshot(),
         historicalP1Producer: this.historicalP1Producer,
       },

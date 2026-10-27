@@ -2046,6 +2046,29 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((executor as any).sourceSlot('mangotoons').capacity).toBe(1);
   });
 
+  it('keeps a MangaFlix page wave from consuming the shared request budget', () => {
+    const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
+      new AsyncSemaphore(24, 'page-share-downloads'), 8,
+      new AsyncSemaphore(48, 'page-share-buffers'), new HostRateLimiter(2), 12);
+    executor.setFairSourceDemandCounts(new Map([
+      ['mangaflix', 24], ['nexus', 2], ['taimumangas', 1], ['mangotoons', 1],
+    ]));
+
+    // Each ready alternative receives a useful page wave before the four
+    // remaining permits are assigned by demand. MangaFlix can still use ten
+    // of the existing 24 requests, but cannot occupy all 24 while the other
+    // runnable sources are waiting behind its large chapter waves.
+    expect((executor as any).sourcePageSlot('mangaflix').capacity).toBe(10);
+    expect((executor as any).sourcePageSlot('nexus').capacity).toBe(4);
+    expect((executor as any).sourcePageSlot('taimumangas').capacity).toBe(6);
+    expect((executor as any).sourcePageSlot('mangotoons').capacity).toBe(4);
+
+    executor.setFairSourceDemandCounts(new Map([['mangaflix', 24]]));
+    // A genuine singleton remains work-conserving and gets the complete
+    // pre-existing global request budget.
+    expect((executor as any).sourcePageSlot('mangaflix').capacity).toBe(24);
+  });
+
   it('re-samples a stale singleton source before it can take a long-source burst', async () => {
     const queue = { yieldForSourceFairness: vi.fn(async () => true) } as unknown as LiteRepository;
     let executor: LiteExecutor;
