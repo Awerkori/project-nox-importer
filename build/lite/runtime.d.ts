@@ -108,6 +108,7 @@ export declare class ImporterLiteRuntime {
     private idleClaimUntil;
     private idleMonitorUntil;
     private fairDemandImportPriority;
+    private sourceFairnessRefresh;
     private manualProtectiveStop;
     private operatorChapterAdmissionCap;
     private lastSiteProbe;
