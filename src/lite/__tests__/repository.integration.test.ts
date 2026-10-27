@@ -2211,6 +2211,26 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(row.rows[0]).toMatchObject({ state: 'READY', attempts: 0, lease_owner: null, delayed: true });
   });
 
+  it('reserves one saturated source slot for P0 instead of yielding it behind P1 alternatives', async () => {
+    const queue = { yieldForSourceFairness: vi.fn(async () => true) } as unknown as LiteRepository;
+    const executor = new LiteExecutor({} as Pool, queue, {} as SourceRegistry, {} as StorageProvider, ids.staff,
+      new AsyncSemaphore(2, 'p0-source-reserve-downloads'), 1,
+      new AsyncSemaphore(2, 'p0-source-reserve-buffers'), new HostRateLimiter(2), 2);
+    executor.setFairSourceDemand(['source-a', 'source-b']);
+    const hotSlot = (executor as any).sourceSlot('source-a') as AsyncSemaphore;
+    expect(hotSlot.capacity).toBe(1);
+    expect(hotSlot.tryAcquire()).toBe(true);
+
+    const waiting = (executor as any).acquireSourcePermit({ priority: 'P0' }, 'p0-worker', 'source-a');
+    await vi.waitFor(() => expect(hotSlot.queued).toBe(1));
+    expect((queue as any).yieldForSourceFairness).not.toHaveBeenCalled();
+
+    hotSlot.release();
+    const permit = await waiting;
+    expect(permit.waitMs).toBeGreaterThanOrEqual(0);
+    permit.sourceSlot.release();
+  });
+
   it('reports durable public publication diversity rather than task completion', async () => {
     await db.query(`INSERT INTO importer_publication_events
       (chapter_id,transition_at,recorded_at,bucket_minute,is_fresh_release,source,work_id,priority)

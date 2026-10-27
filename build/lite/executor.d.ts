@@ -80,6 +80,7 @@ export declare class LiteExecutor {
     private readonly pageBytes;
     private readonly chapterManifestTimeoutMs;
     private readonly sourceSlots;
+    private readonly prioritySourceWaitGate;
     private readonly receiptBatcher;
     private readonly reservationBatcher;
     private fairDemandSources;
@@ -116,6 +117,13 @@ export declare class LiteExecutor {
     getPageConcurrencyForSource(source: string): number;
     private hasFairAlternative;
     private sourceSlot;
+    /**
+     * Preserve one STAFF/P0 source reservation when source-share fairness is
+     * currently full. Normal work still yields to a healthy alternative; the
+     * bounded priority waiter merely receives the next released slot and never
+     * preempts an in-flight chapter or expands source/global concurrency.
+     */
+    private acquireSourcePermit;
     private routes;
     /**
      * Existing legacy mappings are exact source identities, unlike a numeric
