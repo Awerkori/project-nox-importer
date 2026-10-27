@@ -363,6 +363,12 @@ export class ImporterLiteRuntime {
     // sample until the 30-second recovery turn lets the first P1 wave bypass
     // source-share limits even though alternatives are already READY.
     fairDemandImportPriority = null;
+    // The runnable-source view is a fairness hint, never the durable claim
+    // authority.  Keep one refresh in flight and retain its last successful
+    // result while chapter persistence is already waiting for the small YSQL
+    // pool; a second multi-work scan under that pressure only delays the
+    // publication it is meant to distribute fairly.
+    sourceFairnessRefresh = null;
     manualProtectiveStop = {
         active: false,
         reason: null,
@@ -2256,13 +2262,31 @@ export class ImporterLiteRuntime {
     }
     /** A bounded source view refreshes on recovery and at import-priority boundaries. */
     async refreshSourceFairness() {
-        try {
-            this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand());
-            return true;
-        }
-        catch (error) {
-            this.logger.warn('Source fairness sample failed', { error: error?.message });
+        if (this.sourceFairnessRefresh)
+            return this.sourceFairnessRefresh;
+        // Claims, checkpoints and public publication use the same small pool.
+        // Fairness remains enforced by the last bounded sample and the durable
+        // source/work fences, so defer this optional rescan rather than adding a
+        // long ready-work query behind a live chapter transaction.
+        if (this.pool.waitingCount > 0)
             return false;
+        const refresh = (async () => {
+            try {
+                this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand());
+                return true;
+            }
+            catch (error) {
+                this.logger.warn('Source fairness sample failed', { error: error?.message });
+                return false;
+            }
+        })();
+        this.sourceFairnessRefresh = refresh;
+        try {
+            return await refresh;
+        }
+        finally {
+            if (this.sourceFairnessRefresh === refresh)
+                this.sourceFairnessRefresh = null;
         }
     }
     /**
