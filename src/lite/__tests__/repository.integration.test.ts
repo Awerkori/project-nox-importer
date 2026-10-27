@@ -2465,6 +2465,33 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE cursor_name='p0_monitor'`)).rows).toEqual([{ last_source: 'source-c' }]);
   });
 
+  it('reads the established P0 cursor without rewriting it for every monitor claim', async () => {
+    const queries: string[] = [];
+    const trackedQuery = async (text: string, values?: unknown[]) => {
+      queries.push(text);
+      return db.query(text, values);
+    };
+    const trackedPool = {
+      query: trackedQuery,
+      connect: async () => ({ query: trackedQuery, release: () => undefined }),
+    } as unknown as Pool;
+    const trackedRepo = new LiteRepository(trackedPool);
+    await trackedRepo.enqueueMany(['source-a', 'source-b'].map((source) => ({
+      taskType: 'CATALOG' as const, workKey: `source:${source}:watch`, priority: 'P2' as const,
+      idempotencyKey: `cursor-read:${source}`, nextRunAt: new Date(), monitoring: true,
+      payload: { source, sourceWorkId: `${source}-watch` },
+    })));
+
+    const first = await trackedRepo.claimMonitor('cursor-monitor-a', 120);
+    expect(first).not.toBeNull();
+    await trackedRepo.finish(first!, 'cursor-monitor-a', { state: 'DONE' });
+    queries.length = 0;
+
+    const second = await trackedRepo.claimMonitor('cursor-monitor-b', 120);
+    expect(second).not.toBeNull();
+    expect(queries.some((query) => query.includes('INSERT INTO importer_lite_metadata_source_cursor'))).toBe(false);
+  });
+
   it('recovers an interrupted P0 monitor through the bounded lease reconciler', async () => {
     await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:restart-watch', priority: 'P2', monitoring: true,
       idempotencyKey: 'restart-watch', payload: { source: 'source-a', sourceWorkId: 'restart-watch' } });

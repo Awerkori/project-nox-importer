@@ -1344,11 +1344,22 @@ export class LiteRepository {
         const client = await this.db.connect();
         try {
             await client.query('BEGIN');
-            await client.query(`INSERT INTO importer_lite_metadata_source_cursor(cursor_name,last_source)
-        VALUES($1,NULL) ON CONFLICT(cursor_name) DO NOTHING`, [P0_MONITOR_SOURCE_CURSOR]);
-            const cursor = await client.query(`
+            // This cursor is created once per database lifetime.  Repeating an
+            // INSERT .. ON CONFLICT on every P0 observation was a write/lock round
+            // trip even after the durable row already existed, precisely while P1
+            // was waiting on the small primary pool.  Read-and-lock the normal path
+            // instead; retain the insert only for a fresh database or a concurrent
+            // first claim.
+            let cursor = await client.query(`
         SELECT last_source FROM importer_lite_metadata_source_cursor
         WHERE cursor_name=$1 FOR UPDATE`, [P0_MONITOR_SOURCE_CURSOR]);
+            if (!cursor.rows[0]) {
+                await client.query(`INSERT INTO importer_lite_metadata_source_cursor(cursor_name,last_source)
+          VALUES($1,NULL) ON CONFLICT(cursor_name) DO NOTHING`, [P0_MONITOR_SOURCE_CURSOR]);
+                cursor = await client.query(`
+          SELECT last_source FROM importer_lite_metadata_source_cursor
+          WHERE cursor_name=$1 FOR UPDATE`, [P0_MONITOR_SOURCE_CURSOR]);
+            }
             const lastSource = cursor.rows[0]?.last_source || '';
             const result = await client.query(`
         WITH source_heads AS (
