@@ -4245,6 +4245,10 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('turns only a genuinely new monitor observation into P0 and returns the watch to its bounded lane', async () => {
+    // This switch applies to source-wide P2 discovery.  It must not suppress
+    // an existing-work P0 observation with a known provider mapping.
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS catalog_discovery_enabled boolean NOT NULL DEFAULT true`);
+    await db.query(`UPDATE importer_sources SET catalog_discovery_enabled=false WHERE id='source-a'`);
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,order_key,confirmed)
       VALUES($1,'pt-br|default|chapter|10|-','source-a','known-10','pt-BR','default','n|000000000010|000000000000||||-',true)`, [ids.p1a]);
     await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:monitored-work', priority: 'P2', monitoring: true,
