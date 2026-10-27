@@ -316,9 +316,12 @@ export class ImporterLiteRuntime {
     sourceMetadataNoCandidateUntil = 0;
     lastManifestP1RepairAt = 0;
     manifestP1CatchupActive = false;
-    // Observation is intentionally a one-slot lane. It may create P0 chapter
-    // work, but an empty observation must never compete with chapter workers.
-    monitorGate = new AsyncSemaphore(1, 'lite_p0_monitor');
+    // P0 observation has two small network slots. They can keep independent
+    // source watches current while chapters run, but only one short SQL claim
+    // is ever in flight; the second slot is for an already claimed source
+    // snapshot, never a second scheduler or chapter admission.
+    monitorGate = new AsyncSemaphore(2, 'lite_p0_monitor');
+    monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
     runtimeInstanceId;
     runtimeBootedAt = new Date();
     chapterWorkerCapacity;
@@ -2484,9 +2487,11 @@ export class ImporterLiteRuntime {
         });
     }
     /**
-     * Claim at most one due P0 observation. A failed/empty probe backs off for
-     * fifteen seconds, so thousands of watched works do not turn into empty DB
-     * claims. This is a resource budget, not a second priority scheduler.
+     * Claim at most one due P0 observation per short queue turn. A second
+     * already-claimed observation may fetch another source concurrently, but
+     * claims themselves remain serial and stop whenever the chapter pool has a
+     * waiter. This gives P0 bounded continuous coverage without borrowing a
+     * chapter admission or turning a deep watch backlog into SQL polling.
      */
     async runMonitorTurn() {
         if (this.stopped || !this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled
@@ -2497,8 +2502,23 @@ export class ImporterLiteRuntime {
         try {
             if (Date.now() < this.idleMonitorUntil)
                 return;
-            const task = await this.queue.claimMonitor(`${this.runtimeInstanceId}:lite-monitor`, this.config.QUEUE_LEASE_DURATION_SECONDS);
-            this.idleMonitorUntil = task ? 0 : Date.now() + 15_000;
+            // A second bounded source probe may wait only for the first short
+            // transactional claim, then fetch independently.  Dropping it here
+            // would turn the two network permits back into one whenever YSQL takes
+            // more than a tick to return a claim.
+            await this.monitorClaimGate.acquire();
+            let task = null;
+            try {
+                // Recheck after taking the claim gate: a sibling may have found the
+                // lane empty while this turn waited for its one bounded claim.
+                if (Date.now() < this.idleMonitorUntil)
+                    return;
+                task = await this.queue.claimMonitor(`${this.runtimeInstanceId}:lite-monitor`, this.config.QUEUE_LEASE_DURATION_SECONDS);
+                this.idleMonitorUntil = task ? 0 : Date.now() + 15_000;
+            }
+            finally {
+                this.monitorClaimGate.release();
+            }
             if (task)
                 await this.handle(task, `${this.runtimeInstanceId}:lite-monitor`);
         }

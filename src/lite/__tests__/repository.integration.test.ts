@@ -5252,6 +5252,30 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(normalClaim).not.toHaveBeenCalled();
   });
 
+  it('keeps two independent P0 source probes in flight while serializing their queue claims', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    const claimMonitor = vi.fn()
+      .mockResolvedValueOnce({ id: 'p0-source-a', taskType: 'CATALOG' })
+      .mockResolvedValueOnce({ id: 'p0-source-b', taskType: 'CATALOG' });
+    (runtime as any).queue = { claimMonitor };
+    let releaseSnapshots!: () => void;
+    const snapshots = new Promise<void>((resolve) => { releaseSnapshots = resolve; });
+    const handle = vi.fn(async () => snapshots);
+    (runtime as any).handle = handle;
+
+    const turns = [(runtime as any).runMonitorTurn(), (runtime as any).runMonitorTurn()];
+    await vi.waitFor(() => expect(handle).toHaveBeenCalledTimes(2));
+    expect(claimMonitor).toHaveBeenCalledTimes(2);
+    releaseSnapshots();
+    await Promise.all(turns);
+  });
+
   it('releases the page-count permit after durable intent while bytes stay bounded during slow uploads', async () => {
     const key = 'pt-br|default|chapter|6|-';
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
