@@ -104,6 +104,7 @@ export declare class ImporterLiteRuntime {
     private operationalSnapshotRunning;
     private readonly workerLiveness;
     private sitePausedUntil;
+    private siteRecoveryProbeScheduled;
     private idleClaimUntil;
     private idleMonitorUntil;
     private fairDemandImportPriority;
@@ -358,6 +359,7 @@ export declare class ImporterLiteRuntime {
     private runMonitorTurn;
     /** A small protective gate, deliberately not another scheduler. */
     private probeSiteHealth;
+    private scheduleSiteRecoveryProbe;
     private probeSharedResources;
     /** A small diagnostic snapshot; it deliberately skips contention and scans. */
     private emitOperationalSnapshot;

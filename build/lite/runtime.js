@@ -350,6 +350,12 @@ export class ImporterLiteRuntime {
     operationalSnapshotRunning = false;
     workerLiveness = new Map();
     sitePausedUntil = 0;
+    // A confirmed site-health failure still stops new claims immediately.  A
+    // single early recheck prevents a brief Cloudflare/egress failure from
+    // consuming the entire 30-second protection interval after Reader has
+    // already recovered.  Repeated rechecks are deliberately avoided: the
+    // normal health cadence remains authoritative during a real outage.
+    siteRecoveryProbeScheduled = false;
     idleClaimUntil = 0;
     idleMonitorUntil = 0;
     // `readyImportSources` is sampled outside the durable claim SQL. When the
@@ -2597,7 +2603,20 @@ export class ImporterLiteRuntime {
             return { healthy: false, latencyMs: null, status: null };
         }
     }
-    async probeSharedResources() {
+    scheduleSiteRecoveryProbe() {
+        if (this.stopped || this.siteRecoveryProbeScheduled)
+            return;
+        this.siteRecoveryProbeScheduled = true;
+        const timer = setTimeout(() => {
+            this.siteRecoveryProbeScheduled = false;
+            if (this.stopped || this.metadataTurboMode.enabled || Date.now() >= this.sitePausedUntil)
+                return;
+            void this.probeSharedResources(true).catch(() => { });
+        }, 5_000);
+        timer.unref();
+        this.timers.push(timer);
+    }
+    async probeSharedResources(recoveryProbe = false) {
         await this.refreshManualProtectiveStop();
         if (this.metadataTurboMode.enabled) {
             this.sitePausedUntil = 0;
@@ -2606,6 +2625,7 @@ export class ImporterLiteRuntime {
         }
         const first = await this.probeSiteHealth();
         if (first.healthy) {
+            this.sitePausedUntil = 0;
             this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: first.latencyMs };
             return;
         }
@@ -2615,6 +2635,7 @@ export class ImporterLiteRuntime {
         // not masquerade as a site incident or collapse productive slots.
         const confirmation = await this.probeSiteHealth();
         if (confirmation.healthy) {
+            this.sitePausedUntil = 0;
             this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: confirmation.latencyMs };
             this.logger.warn('Transient site-health probe recovered before pausing Lite claims', {
                 firstStatus: first.status, firstLatencyMs: first.latencyMs, confirmationLatencyMs: confirmation.latencyMs,
@@ -2623,12 +2644,18 @@ export class ImporterLiteRuntime {
         }
         // A confirmed outage reduces pressure without retrying tasks or restarting
         // the process.  The next scheduled probe can release this small gate.
-        this.sitePausedUntil = Date.now() + 30_000;
+        // An early recovery probe must not extend a still-valid protective window
+        // if Reader remains unavailable.  The regular 30-second health timer
+        // will make the next bounded decision.
+        if (!recoveryProbe || this.sitePausedUntil <= Date.now())
+            this.sitePausedUntil = Date.now() + 30_000;
         this.lastSiteProbe = { state: 'PAUSED', checkedAt: new Date().toISOString(), latencyMs: confirmation.latencyMs ?? first.latencyMs };
         this.logger.warn('Pausing new Lite claims to protect shared site resources', {
             firstStatus: first.status, firstLatencyMs: first.latencyMs,
             confirmationStatus: confirmation.status, confirmationLatencyMs: confirmation.latencyMs,
         });
+        if (!recoveryProbe)
+            this.scheduleSiteRecoveryProbe();
     }
     /** A small diagnostic snapshot; it deliberately skips contention and scans. */
     async emitOperationalSnapshot() {

@@ -5377,6 +5377,32 @@ describe('LiteRepository against the additive Lite migration', () => {
     try { await (runtime as any).probeSharedResources(); } finally { vi.stubGlobal('fetch', originalFetch); }
     expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
     expect((runtime as any).lastSiteProbe).toMatchObject({ state: 'PAUSED', latencyMs: null });
+    for (const timer of (runtime as any).timers) clearTimeout(timer);
+  });
+
+  it('releases the site protection early only after a confirmed recovery probe', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', NOX_MANGA_URL: 'https://reader.test',
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
+        QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn()
+      .mockRejectedValueOnce(new TypeError('site unavailable'))
+      .mockRejectedValueOnce(new TypeError('site unavailable'))
+      .mockResolvedValueOnce(new Response(null, { status: 200 })));
+    try {
+      await (runtime as any).probeSharedResources();
+      expect((runtime as any).shouldPauseChapterAdmission()).toBe(true);
+      await (runtime as any).probeSharedResources(true);
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+      for (const timer of (runtime as any).timers) clearTimeout(timer);
+    }
+    expect((runtime as any).shouldPauseChapterAdmission()).toBe(false);
+    expect((runtime as any).lastSiteProbe).toMatchObject({ state: 'HEALTHY' });
   });
 
   it('uses the measured three-chapter Hanami fence instead of serializing a healthy source', () => {
