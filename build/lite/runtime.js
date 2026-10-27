@@ -233,6 +233,12 @@ export class ImporterLiteRuntime {
     metadataReplayV4RefillGate = new AsyncSemaphore(1, 'lite_metadata_replay_v4_refill');
     metadataReplayV4PersistenceGate = new AsyncSemaphore(4, 'lite_metadata_replay_v4_persistence');
     sourceMetadataRefillGate = new AsyncSemaphore(1, 'lite_source_metadata_refill');
+    // The regular metadata turn runs on a short cadence so an idle P2 lane can
+    // recover promptly. Cross-source materialisation can outlive that cadence,
+    // though, and shares the one isolated YSQL connection with source fairness
+    // sampling. A second timer turn cannot admit useful extra work; it only
+    // queues another transaction behind the first.
+    crossSourceMetadataRefillGate = new AsyncSemaphore(1, 'lite_cross_source_metadata_refill');
     // Network waits are independent from YSQL work. Four source requests may
     // wait on distinct providers, while preparing a mapping and committing its
     // merge remain deliberately narrow. No transaction or pool checkout spans
@@ -1656,6 +1662,8 @@ export class ImporterLiteRuntime {
             || this.shouldPauseLowPriorityMetadata()
             || Date.now() - this.lastCrossSourceDiscoveryRefillAt < minInterval)
             return 0;
+        if (!this.crossSourceMetadataRefillGate.tryAcquire())
+            return 0;
         this.lastCrossSourceDiscoveryRefillAt = Date.now();
         try {
             const admitted = await this.queue.refillCrossSourceMetadataDiscovery(this.metadataTurboMode.enabled ? 32 : 2);
@@ -1666,6 +1674,9 @@ export class ImporterLiteRuntime {
         catch (error) {
             this.logger.warn('Cross-source metadata coverage refill failed', { error: error?.message });
             return 0;
+        }
+        finally {
+            this.crossSourceMetadataRefillGate.release();
         }
     }
     noteSourceMetadataProducer(outcome, admitted = 0, error = null) {
