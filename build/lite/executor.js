@@ -357,6 +357,11 @@ export class LiteExecutor {
     pageBytes;
     chapterManifestTimeoutMs;
     sourceSlots = new Map();
+    // One urgent chapter may wait for a saturated source rather than yielding
+    // behind P1/P2 work indefinitely. It is deliberately a single reservation:
+    // priority work gets the next released source slot without turning a source
+    // outage into a queue of chapter-admission holders.
+    prioritySourceWaitGate = new AsyncSemaphore(1, 'lite_priority_source_wait');
     receiptBatcher;
     reservationBatcher;
     fairDemandSources = new Set();
@@ -470,6 +475,32 @@ export class LiteExecutor {
         }
         slot.setCapacity(this.sourceCapacity(source));
         return slot;
+    }
+    /**
+     * Preserve one STAFF/P0 source reservation when source-share fairness is
+     * currently full. Normal work still yields to a healthy alternative; the
+     * bounded priority waiter merely receives the next released slot and never
+     * preempts an in-flight chapter or expands source/global concurrency.
+     */
+    async acquireSourcePermit(task, workerId, source) {
+        const sourceSlot = this.sourceSlot(source);
+        if (sourceSlot.tryAcquire())
+            return { sourceSlot, waitMs: 0 };
+        const priorityReservation = (task.priority === 'STAFF' || task.priority === 'P0')
+            && this.prioritySourceWaitGate.tryAcquire();
+        if (!priorityReservation && this.hasFairAlternative(source)) {
+            await this.queue.yieldForSourceFairness(task, workerId);
+            return null;
+        }
+        const sourcePermitStartedAt = performance.now();
+        try {
+            await sourceSlot.acquire();
+            return { sourceSlot, waitMs: performance.now() - sourcePermitStartedAt };
+        }
+        finally {
+            if (priorityReservation)
+                this.prioritySourceWaitGate.release();
+        }
     }
     async routes(task) {
         if (!task.workId || !task.chapterKey)
@@ -687,19 +718,14 @@ export class LiteExecutor {
                 lastError = new Error('SOURCE_CHAPTER_OWNERSHIP_UNVERIFIED');
                 continue;
             }
-            const sourceSlot = this.sourceSlot(route.source);
             // A hot source must not keep a worker parked when the bounded runtime
-            // sample has a healthy alternative ready. This is a durable yield, not
-            // a retry: no provider call has started and the task keeps its priority.
-            if (!sourceSlot.tryAcquire()) {
-                if (this.hasFairAlternative(route.source)) {
-                    await this.queue.yieldForSourceFairness(task, workerId);
-                    return;
-                }
-                const sourcePermitStartedAt = performance.now();
-                await sourceSlot.acquire();
-                sourcePermitWaitMs = performance.now() - sourcePermitStartedAt;
-            }
+            // sample has a healthy alternative ready. Normal work remains a durable
+            // yield; one STAFF/P0 task instead reserves the next source slot.
+            const sourcePermit = await this.acquireSourcePermit(task, workerId, route.source);
+            if (!sourcePermit)
+                return;
+            const { sourceSlot } = sourcePermit;
+            sourcePermitWaitMs = sourcePermit.waitMs;
             try {
                 // Telegram has accepted these pages, but their durable receipts still
                 // need the small YSQL pool. Do not make every page worker idle behind
