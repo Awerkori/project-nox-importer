@@ -3071,6 +3071,36 @@ describe('LiteRepository against the additive Lite migration', () => {
     });
   });
 
+  it('defers costly historical P1 catalog production behind live YSQL wait without starving it', async () => {
+    const lanePool = Object.assign(poolFor(db), { waitingCount: 2 });
+    const runtime = new ImporterLiteRuntime(
+      lanePool as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: ids.staff, DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, TELEGRAM_MEDIA_CONCURRENCY: 1,
+        UPLOAD_RATE_LIMIT_BYTES_PER_SEC: 1, LITE_CHAPTER_WORKERS: 1,
+        MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
+    );
+    const queue = (runtime as any).queue;
+    queue.refillHistoricalP1Catalog = vi.fn().mockResolvedValue(2);
+    queue.promoteDeferredHistoricalP1Catalog = vi.fn().mockResolvedValue(true);
+    (runtime as any).isRuntimeLeader = true;
+    (runtime as any).lastHistoricalP1ProducerAttemptAt = Date.now();
+
+    await (runtime as any).refillHistoricalP1Catalog();
+    expect(queue.refillHistoricalP1Catalog).not.toHaveBeenCalled();
+    expect(queue.promoteDeferredHistoricalP1Catalog).not.toHaveBeenCalled();
+    expect((runtime as any).historicalP1Producer).toMatchObject({
+      admitted: 0, promoted: false, error: 'DEFERRED_FOR_LIVE_YSQL',
+    });
+
+    // A sustained productive wave still gets a bounded historical turn.
+    (runtime as any).lastHistoricalP1ProducerAttemptAt = Date.now() - 120_001;
+    await (runtime as any).refillHistoricalP1Catalog();
+    expect(queue.refillHistoricalP1Catalog).toHaveBeenCalledTimes(1);
+    expect(queue.promoteDeferredHistoricalP1Catalog).toHaveBeenCalledTimes(1);
+  });
+
   it('fences a legacy runtime and Lite during cutover without stranding an in-flight durable task', async () => {
     // This is deliberately cross-runtime rather than a second Lite instance:
     // a rolling DIScloud deployment must never leave both v1 and Lite able to
@@ -5365,6 +5395,25 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).runMonitorTurn();
     expect(monitorClaim).toHaveBeenCalledTimes(1);
     expect(normalClaim).not.toHaveBeenCalled();
+  });
+
+  it('keeps one bounded P0 monitor claim alive while chapter work waits for YSQL', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    // Simulate the production state where P1 has checkout waiters.  The P0
+    // lane remains capped by monitorGate/monitorClaimGate; it must not be
+    // skipped indefinitely merely because those waiters exist.
+    (runtime as any).pool.waitingCount = 3;
+    const monitorClaim = vi.spyOn((runtime as any).queue, 'claimMonitor').mockResolvedValue(null);
+
+    await (runtime as any).runMonitorTurn();
+
+    expect(monitorClaim).toHaveBeenCalledTimes(1);
   });
 
   it('keeps two independent P0 source probes in flight while serializing their queue claims', async () => {

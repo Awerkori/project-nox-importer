@@ -77,6 +77,7 @@ export declare class ImporterLiteRuntime {
     private sourcePoliciesCache;
     private sourceMetadataProducer;
     private historicalP1Producer;
+    private lastHistoricalP1ProducerAttemptAt;
     private lastSourceRecoveryProbeAt;
     private lastUploadOutcomeRecoveryAt;
     private lastUnknownUploadRecoverySeenAt;
@@ -348,9 +349,11 @@ export declare class ImporterLiteRuntime {
     /**
      * Claim at most one due P0 observation per short queue turn. A second
      * already-claimed observation may fetch another source concurrently, but
-     * claims themselves remain serial and stop whenever the chapter pool has a
-     * waiter. This gives P0 bounded continuous coverage without borrowing a
-     * chapter admission or turning a deep watch backlog into SQL polling.
+     * claims themselves remain serial.  A chapter-pool waiter must not turn
+     * into a global P0 off switch: the one bounded monitor claim may queue
+     * behind the current database work, then keeps source discovery alive while
+     * P1/P2 media continues.  The two monitor permits still cap both the
+     * network work and the single outstanding P0 database claim.
      */
     private runMonitorTurn;
     /** A small protective gate, deliberately not another scheduler. */

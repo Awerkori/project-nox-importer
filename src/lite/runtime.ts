@@ -121,6 +121,12 @@ const SOURCE_METADATA_EMPTY_PROBE_TURNS = 3;
 // Stage 2 metadata lane experiment: two dedicated slots, polled every five
 // seconds. Source adapter host limits and source cooldowns remain authoritative.
 const SOURCE_METADATA_LANE_INTERVAL_MS = 5_000;
+// Historical P1 catalog production can hold a primary-pool client across a
+// bounded source cursor and several provider probes.  It is useful reserve
+// work, but never worth extending a live publication queue on every recovery
+// turn.  Under measured pool contention defer it, while this maximum gap
+// keeps the producer source-fair and prevents permanent P1 starvation.
+const HISTORICAL_P1_BUSY_MAX_GAP_MS = 120_000;
 // A first catalog pass creates the canonical work, cover and its explicit
 // metadata.  It must not be stranded behind an indefinitely non-empty P1
 // chapter reserve, but one serial task is sufficient and remains below the
@@ -347,6 +353,7 @@ export class ImporterLiteRuntime {
     promoted: false,
     error: null as string | null,
   };
+  private lastHistoricalP1ProducerAttemptAt = 0;
   private lastSourceRecoveryProbeAt = 0;
   private lastUploadOutcomeRecoveryAt = 0;
   // Watermark for the cold UNKNOWN-receipt proof. The indexed newest-row
@@ -941,6 +948,17 @@ export class ImporterLiteRuntime {
   private async refillHistoricalP1Catalog(): Promise<void> {
     if (!this.isRuntimeLeader || !this.historicalP1BackfillGate.tryAcquire()) return;
     try {
+      const now = Date.now();
+      if (this.pool.waitingCount > 0 && now - this.lastHistoricalP1ProducerAttemptAt < HISTORICAL_P1_BUSY_MAX_GAP_MS) {
+        this.historicalP1Producer = {
+          observedAt: new Date(now).toISOString(),
+          admitted: 0,
+          promoted: false,
+          error: 'DEFERRED_FOR_LIVE_YSQL',
+        };
+        return;
+      }
+      this.lastHistoricalP1ProducerAttemptAt = now;
       const admitted = await this.queue.refillHistoricalP1Catalog();
       // One turn per already-bounded recovery interval lets an alternative
       // healthy source materialize without returning to a continuously
@@ -2613,13 +2631,15 @@ export class ImporterLiteRuntime {
   /**
    * Claim at most one due P0 observation per short queue turn. A second
    * already-claimed observation may fetch another source concurrently, but
-   * claims themselves remain serial and stop whenever the chapter pool has a
-   * waiter. This gives P0 bounded continuous coverage without borrowing a
-   * chapter admission or turning a deep watch backlog into SQL polling.
+   * claims themselves remain serial.  A chapter-pool waiter must not turn
+   * into a global P0 off switch: the one bounded monitor claim may queue
+   * behind the current database work, then keeps source discovery alive while
+   * P1/P2 media continues.  The two monitor permits still cap both the
+   * network work and the single outstanding P0 database claim.
    */
   private async runMonitorTurn(): Promise<void> {
     if (this.stopped || !this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled
-      || this.manualProtectiveStop.active || Date.now() < this.sitePausedUntil || this.pool.waitingCount > 0) return;
+      || this.manualProtectiveStop.active || Date.now() < this.sitePausedUntil) return;
     if (!this.monitorGate.tryAcquire()) return;
     try {
       if (Date.now() < this.idleMonitorUntil) return;
