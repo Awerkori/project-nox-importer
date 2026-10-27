@@ -1958,6 +1958,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.readyImportSources()).toEqual(['source-b']);
   });
 
+  it('falls through an unroutable P0 lane to executable P1 source demand', async () => {
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'unroutable-p0', priority: 'P0', idempotencyKey: 'unroutable-p0',
+      payload: { orderKey: 'n|000001|000000|0' } });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      chapterKey: 'routable-p1', priority: 'P1', idempotencyKey: 'routable-p1',
+      payload: { orderKey: 'n|000001|000000|0' } });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+      VALUES($1::uuid,'routable-p1','source-b','b','routable-p1','pt-BR','default','n|000001|000000|0',10,true)`, [ids.p1b]);
+
+    expect(await repo.readyImportSources()).toEqual(['source-b']);
+  });
+
   it('caps one source only while other ready sources can use a chapter slot', () => {
     const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
       new AsyncSemaphore(24, 'fair-downloads'), 4, new AsyncSemaphore(48, 'fair-buffers'), new HostRateLimiter(2), 5);

@@ -1626,15 +1626,15 @@ export class LiteRepository {
           ORDER BY t.next_run_at,t.created_at
           LIMIT 1
         ) t ON true
-      ), lane AS (
-        SELECT min(priority) AS priority FROM raw_candidates
-      ), candidates AS (
-        SELECT rc.id,rc.work_id,rc.chapter_key
-        FROM raw_candidates rc
-        JOIN lane ON lane.priority=rc.priority
       ), import_routes AS (
-        SELECT DISTINCT ON (c.id) c.id,cs.source
-        FROM candidates c
+        -- Pick the priority lane only after routing evidence is available.
+        -- A durable P0 task may be READY while its confirmed route is in a
+        -- source cooldown or has been retired. It remains first for the
+        -- claim path and will be retried safely, but it cannot be a fairness
+        -- alternative yet. Letting that empty lane hide routable P1 work
+        -- keeps P1 admission slots waiting on saturated sources.
+        SELECT DISTINCT ON (c.id) c.id,c.priority,cs.source
+        FROM raw_candidates c
         JOIN works w ON w.id=c.work_id
         JOIN media cover ON cover.id=w.cover_id
         JOIN importer_lite_chapter_sources cs
@@ -1650,8 +1650,13 @@ export class LiteRepository {
           AND ${sourceExecutionEligibilitySql('s')}
           AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
           AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+      ), lane AS (
+        SELECT min(priority) AS priority FROM import_routes
       )
-      SELECT DISTINCT source FROM import_routes ORDER BY source`, [maximum]);
+      SELECT DISTINCT routes.source
+      FROM import_routes routes
+      JOIN lane ON lane.priority=routes.priority
+      ORDER BY routes.source`, [maximum]);
     return result.rows.map((row) => String(row.source));
   }
 
