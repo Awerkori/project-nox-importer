@@ -1913,9 +1913,11 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`INSERT INTO importer_lite_chapter_sources
       (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
       VALUES($1::uuid,'source-fair-a','source-a','a','a-1','pt-BR','default','n|000001|000000|0',10,true),
+            ($1::uuid,'source-fair-a','source-b','b','a-fallback','pt-BR','default','n|000001|000000|0',20,true),
             ($2::uuid,'source-fair-b','source-b','b','b-1','pt-BR','default','n|000001|000000|0',10,true)`, [ids.p1a, ids.p1b]);
 
     expect(await repo.readyImportSources()).toEqual(['source-a', 'source-b']);
+    expect(await repo.readyImportSourceDemand()).toEqual(new Map([['source-a', 1], ['source-b', 1]]));
 
     await db.query(`UPDATE importer_sources SET status='COOLDOWN',blocked_reason='TURNSTILE',
       cooldown_until=now()-interval '1 second' WHERE id='source-b'`);
@@ -1985,6 +1987,22 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(fallback.capacity).toBe(1);
   });
 
+  it('uses executable source demand without reserving idle chapter shares', () => {
+    const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
+      new AsyncSemaphore(24, 'demand-aware-downloads'), 4,
+      new AsyncSemaphore(48, 'demand-aware-buffers'), new HostRateLimiter(2), 12);
+    executor.setFairSourceDemandCounts(new Map([
+      ['manhastro', 44], ['mangaflix', 4], ['taimumangas', 4], ['nexus', 2], ['mangotoons', 1],
+    ]));
+    expect((executor as any).sourceSlot('manhastro').capacity).toBe(3);
+    expect((executor as any).sourceSlot('mangaflix').capacity).toBe(4);
+    expect((executor as any).sourceSlot('taimumangas').capacity).toBe(3);
+    // Nexus retains its explicit one-seat fairness cap, and the one-work
+    // MangaToons frontier cannot reserve a second idle chapter slot.
+    expect((executor as any).sourceSlot('nexus').capacity).toBe(1);
+    expect((executor as any).sourceSlot('mangotoons').capacity).toBe(1);
+  });
+
   it('re-samples a stale singleton source before it can take a long-source burst', async () => {
     const queue = { yieldForSourceFairness: vi.fn(async () => true) } as unknown as LiteRepository;
     let executor: LiteExecutor;
@@ -2023,22 +2041,24 @@ describe('LiteRepository against the additive Lite migration', () => {
       { id: 'p0', taskType: 'IMPORT_CHAPTER', priority: 'P0' },
       { id: 'p1', taskType: 'IMPORT_CHAPTER', priority: 'P1' },
     ];
-    const readyImportSources = vi.fn()
-      .mockResolvedValueOnce(['mangaflix'])
-      .mockResolvedValueOnce(['mangaflix', 'manhastro', 'nexus']);
+    const readyImportSourceDemand = vi.fn()
+      .mockResolvedValueOnce(new Map([['mangaflix', 1]]))
+      .mockResolvedValueOnce(new Map([['mangaflix', 1], ['manhastro', 1], ['nexus', 1]]));
     (runtime as any).queue = {
       claim: vi.fn(async () => claims.shift() || null),
-      readyImportSources,
+      readyImportSourceDemand,
     };
     (runtime as any).isRuntimeLeader = true;
 
     await (runtime as any).claimNext('priority-fairness-worker');
     await (runtime as any).claimNext('priority-fairness-worker');
 
-    expect(readyImportSources).toHaveBeenCalledTimes(2);
+    expect(readyImportSourceDemand).toHaveBeenCalledTimes(2);
     expect((runtime as any).executor.getFairSourceDemand()).toEqual(['mangaflix', 'manhastro', 'nexus']);
     const mangaFlix = (runtime as any).executor.sourceSlot('mangaflix') as AsyncSemaphore;
-    expect(mangaFlix.capacity).toBe(2);
+    // Each source has one executable frontier, so the remaining two chapter
+    // seats are not reserved against work that cannot run concurrently.
+    expect(mangaFlix.capacity).toBe(1);
   });
 
   it('uses the effective admission cap, not configured workers, for source shares', () => {

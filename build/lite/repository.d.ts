@@ -268,7 +268,15 @@ export declare class LiteRepository {
      * The sample is outside claim; durable claim remains authority for task
      * existence, priority and work-level round-robin.
      */
+    private readyImportSourceRows;
     readyImportSources(limit?: number): Promise<string[]>;
+    /**
+     * A bounded source demand view for the local fairness gate.  The count is
+     * deliberately one executable frontier per work, never raw chapters, so a
+     * deep single-work P1 backlog cannot claim capacity reserved for unrelated
+     * works or sources.
+     */
+    readyImportSourceDemand(limit?: number): Promise<Map<string, number>>;
     /**
      * Recent public publication attribution. It reads the durable publication
      * event rather than task DONE, so media storage or a stale task can never

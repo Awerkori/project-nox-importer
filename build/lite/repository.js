@@ -1481,7 +1481,7 @@ export class LiteRepository {
      * The sample is outside claim; durable claim remains authority for task
      * existence, priority and work-level round-robin.
      */
-    async readyImportSources(limit = 64) {
+    async readyImportSourceRows(limit = 64) {
         const maximum = Math.max(1, Math.min(128, limit));
         const result = await this.db.query(`WITH candidate_works AS (
         SELECT rw.work_key,rw.priority
@@ -1521,7 +1521,7 @@ export class LiteRepository {
         -- claim path and will be retried safely, but it cannot be a fairness
         -- alternative yet. Letting that empty lane hide routable P1 work
         -- keeps P1 admission slots waiting on saturated sources.
-        SELECT DISTINCT ON (c.id) c.id,c.priority,cs.source
+        SELECT c.id,c.priority,cs.source,cs.source_rank,cs.created_at
         FROM raw_candidates c
         JOIN works w ON w.id=c.work_id
         JOIN media cover ON cover.id=w.cover_id
@@ -1541,11 +1541,31 @@ export class LiteRepository {
       ), lane AS (
         SELECT min(priority) AS priority FROM import_routes
       )
-      SELECT DISTINCT routes.source
+      -- One route per executable work, ordered with the same source-rank
+      -- preference as the executor.  Keeping the rows (rather than a DISTINCT
+      -- source list) lets the local fair-share gate distinguish a provider
+      -- with one runnable work from one with a real ready-work backlog.
+      SELECT DISTINCT ON (routes.id) routes.source
       FROM import_routes routes
       JOIN lane ON lane.priority=routes.priority
-      ORDER BY routes.source`, [maximum]);
+      ORDER BY routes.id, routes.source_rank, routes.created_at, routes.source`, [maximum]);
         return result.rows.map((row) => String(row.source));
+    }
+    async readyImportSources(limit = 64) {
+        return [...new Set(await this.readyImportSourceRows(limit))].sort();
+    }
+    /**
+     * A bounded source demand view for the local fairness gate.  The count is
+     * deliberately one executable frontier per work, never raw chapters, so a
+     * deep single-work P1 backlog cannot claim capacity reserved for unrelated
+     * works or sources.
+     */
+    async readyImportSourceDemand(limit = 64) {
+        const demand = new Map();
+        for (const source of await this.readyImportSourceRows(limit)) {
+            demand.set(source, (demand.get(source) || 0) + 1);
+        }
+        return demand;
     }
     /**
      * Recent public publication attribution. It reads the durable publication
