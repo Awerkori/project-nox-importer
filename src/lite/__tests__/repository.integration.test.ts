@@ -5063,6 +5063,41 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(claim).toHaveBeenCalledTimes(1);
   });
 
+  it('does not spend chapter admission permits while workers wait for claim serialization', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', LITE_CHAPTER_WORKERS: 3,
+        MAX_CONCURRENT_CHAPTERS: 3, TESTED_CONCURRENCY_CEILING: 3, DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    let releaseClaim!: () => void;
+    let enteredClaim!: () => void;
+    const entered = new Promise<void>((resolve) => { enteredClaim = resolve; });
+    const claim = vi.fn(async () => {
+      enteredClaim();
+      await new Promise<void>((resolve) => { releaseClaim = resolve; });
+      return null;
+    });
+    (runtime as any).queue.claim = claim;
+
+    const first = (runtime as any).worker('serialized-claim-a', 1);
+    await entered;
+    const second = (runtime as any).worker('serialized-claim-b', 2);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    // The second worker is waiting before admission, not occupying a chapter
+    // slot behind the one durable claim query.
+    expect((runtime as any).chapterAdmissionGate.active).toBe(1);
+    expect(claim).toHaveBeenCalledTimes(1);
+
+    (runtime as any).stopped = true;
+    releaseClaim();
+    await Promise.all([first, second]);
+    expect((runtime as any).chapterAdmissionGate.active).toBe(0);
+  });
+
   it('does not freeze normal chapter admission for a transient local pool waiter', () => {
     const pool = poolFor(db) as Pool & { waitingCount?: number };
     const runtime = new ImporterLiteRuntime(
