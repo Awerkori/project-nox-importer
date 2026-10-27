@@ -238,6 +238,13 @@ export declare class LiteRepository {
     /**
      * P0 observation has one durable, explicitly bounded lane.  It is never
      * selected by normal claims, so unchanged watches cannot starve P1/P2.
+     *
+     * The old stored function selected the globally oldest watch. A provider
+     * with hundreds of overdue watches could therefore hide every other source
+     * for hours even while this lane itself remained healthy. This short
+     * transaction locks one durable source cursor, claims the oldest due watch
+     * for the next source in its round-robin, and advances only when the claim
+     * succeeds. It neither changes chapter priority nor admits media work.
      */
     claimMonitor(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /**

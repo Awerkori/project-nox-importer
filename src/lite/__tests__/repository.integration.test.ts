@@ -2357,6 +2357,34 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('discovery-worker', 120))?.idempotencyKey).toBe('p2-healthy');
   });
 
+  it('rotates the one-seat P0 monitor lane across due sources instead of draining a hot source first', async () => {
+    await repo.enqueueMany([
+      ...Array.from({ length: 12 }, (_, index) => ({
+        taskType: 'CATALOG' as const, workKey: `source:source-a:watch:${index}`, priority: 'P2' as const,
+        idempotencyKey: `source-a-watch:${index}`, nextRunAt: new Date(), monitoring: true,
+        payload: { source: 'source-a', sourceWorkId: `source-a-watch-${index}` },
+      })),
+      ...['source-b', 'source-c'].map((source) => ({
+        taskType: 'CATALOG' as const, workKey: `source:${source}:watch`, priority: 'P2' as const,
+        idempotencyKey: `${source}-watch`, nextRunAt: new Date(), monitoring: true,
+        payload: { source, sourceWorkId: `${source}-watch` },
+      })),
+    ]);
+
+    const first = await repo.claimMonitor('p0-monitor-a', 120);
+    expect(first?.payload.source).toBe('source-a');
+    await repo.finish(first!, 'p0-monitor-a', { state: 'DONE' });
+
+    const second = await repo.claimMonitor('p0-monitor-b', 120);
+    expect(second?.payload.source).toBe('source-b');
+    await repo.finish(second!, 'p0-monitor-b', { state: 'DONE' });
+
+    const third = await repo.claimMonitor('p0-monitor-c', 120);
+    expect(third?.payload.source).toBe('source-c');
+    expect((await db.query(`SELECT last_source FROM importer_lite_metadata_source_cursor
+      WHERE cursor_name='p0_monitor'`)).rows).toEqual([{ last_source: 'source-c' }]);
+  });
+
   it('recovers an interrupted P0 monitor through the bounded lease reconciler', async () => {
     await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:restart-watch', priority: 'P2', monitoring: true,
       idempotencyKey: 'restart-watch', payload: { source: 'source-a', sourceWorkId: 'restart-watch' } });
