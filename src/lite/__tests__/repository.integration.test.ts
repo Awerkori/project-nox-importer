@@ -40,6 +40,7 @@ const boundedClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20
 const sourceCooldownDueIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025070000_lite_source_cooldown_due_index.sql'), 'utf8');
 const progressSnapshotIndexesMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025073000_lite_progress_snapshot_indexes.sql'), 'utf8');
 const earliestPendingChapterClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261026053000_lite_claim_earliest_pending_chapter.sql'), 'utf8');
+const readyWorkCanonicalFrontierMigration = readFileSync(resolve(process.cwd(), 'migrations/20261028043000_lite_ready_work_canonical_frontier.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -158,6 +159,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(sourceCooldownDueIndexMigration);
   await db.exec(progressSnapshotIndexesMigration);
   await db.exec(earliestPendingChapterClaimMigration);
+  await db.exec(readyWorkCanonicalFrontierMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -205,6 +207,68 @@ describe('LiteRepository against the additive Lite migration', () => {
     const firstMissing = existing.at(-1)! + 1;
     expect(claimed?.chapterKey).toBe(`pt-br|default|chapter|${firstMissing}|-`);
     expect(claimed?.priority).toBe('P1');
+  });
+
+  it('projects a work at its executable P1 frontier until its later P0 release can legally advance', async () => {
+    const workId = ids.p1a;
+    const predecessorKey = 'pt-br|default|chapter|71|-';
+    const laterP0Key = 'pt-br|default|chapter|73|-';
+    await repo.enqueue({
+      taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`,
+      chapterKey: predecessorKey, priority: 'P1', idempotencyKey: 'frontier-p1-71',
+      payload: { orderKey: 'n|000000000071|000000000000|||' },
+    });
+    await repo.enqueue({
+      taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`,
+      chapterKey: laterP0Key, priority: 'P0', idempotencyKey: 'frontier-p0-73',
+      payload: { orderKey: 'n|000000000073|000000000000|||' },
+    });
+    await repo.enqueue({
+      taskType: 'IMPORT_CHAPTER', workId: ids.p0, workKey: `work:${ids.p0}`,
+      chapterKey: 'pt-br|default|chapter|1|-', priority: 'P0', idempotencyKey: 'independent-p0',
+      payload: { orderKey: 'n|000000000001|000000000000|||' },
+    });
+
+    // A P0 chapter behind a confirmed P1 predecessor must not make the whole
+    // work look P0-ready to the bounded fair probe.  The real frontier is P1.
+    expect((await db.query(`SELECT priority,operation_rank FROM importer_lite_ready_works
+      WHERE work_key=$1`, [`work:${workId}`])).rows[0]).toEqual({ priority: 2, operation_rank: 1 });
+
+    const independent = await repo.claim('frontier-worker', 120);
+    expect(independent?.idempotencyKey).toBe('independent-p0');
+    await repo.finish(independent!, 'frontier-worker', { state: 'DONE' });
+
+    const predecessor = await repo.claim('frontier-worker', 120);
+    expect(predecessor?.idempotencyKey).toBe('frontier-p1-71');
+    await repo.finish(predecessor!, 'frontier-worker', { state: 'DONE' });
+
+    // Once the dependency finishes, the actual P0 release immediately gains
+    // normal P0 precedence rather than being demoted with its old barrier.
+    expect((await db.query(`SELECT priority,operation_rank FROM importer_lite_ready_works
+      WHERE work_key=$1`, [`work:${workId}`])).rows[0]).toEqual({ priority: 1, operation_rank: 1 });
+    expect((await repo.claim('frontier-worker', 120))?.idempotencyKey).toBe('frontier-p0-73');
+  });
+
+  it('keeps a retrying canonical predecessor as the ready-work boundary', async () => {
+    const workId = ids.p1a;
+    await repo.enqueue({
+      taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`,
+      chapterKey: 'pt-br|default|chapter|71|-', priority: 'P1', idempotencyKey: 'retry-frontier-p1',
+      payload: { orderKey: 'n|000000000071|000000000000|||' },
+    });
+    await repo.enqueue({
+      taskType: 'IMPORT_CHAPTER', workId, workKey: `work:${workId}`,
+      chapterKey: 'pt-br|default|chapter|73|-', priority: 'P0', idempotencyKey: 'retry-frontier-p0',
+      payload: { orderKey: 'n|000000000073|000000000000|||' },
+    });
+    await db.query(`UPDATE importer_lite_tasks SET state='RETRY_WAIT',next_run_at=now()+interval '5 minutes'
+      WHERE idempotency_key='retry-frontier-p1'`);
+    await (repo as any).refreshReadyWork((repo as any).db, `work:${workId}`);
+
+    const projection = (await db.query(`SELECT priority,next_run_at>now() AS deferred
+      FROM importer_lite_ready_works WHERE work_key=$1`, [`work:${workId}`])).rows[0];
+    expect(projection).toEqual({ priority: 2, deferred: true });
+    expect(await repo.claim('retry-frontier-worker', 120)).toBeNull();
   });
 
   it('does not invent numeric gaps when the source confirms only chapters 1 and 37', async () => {
@@ -2589,6 +2653,38 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillP0MonitorCoverage(1)).toEqual({ source: 'source-b', admitted: 1, revived: 0 });
     expect((await db.query(`SELECT last_source FROM importer_lite_metadata_source_cursor
       WHERE cursor_name='p0_monitor_coverage'`)).rows).toEqual([{ last_source: 'source-b' }]);
+  });
+
+  it('advances a durable per-source coverage cursor instead of rescanning covered mappings', async () => {
+    await db.query(`UPDATE importer_sources SET enabled=false WHERE id='source-b'`);
+    const workIds = Array.from({ length: 9 }, (_, index) =>
+      `00000000-0000-4000-8000-${String(1200 + index).padStart(12, '0')}`,
+    );
+    for (const [index, workId] of workIds.entries()) {
+      const sourceWorkId = `coverage-cursor-${String(index + 1).padStart(2, '0')}`;
+      await db.query(`INSERT INTO works(id,title,slug,cover_id,published)
+        VALUES($1::uuid,$2,$3,$4::uuid,true)`, [workId, `Cursor ${index}`, `cursor-${index}`, ids.cover]);
+      await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+        VALUES($1::uuid,'source-a',$2,$3::uuid,'ACTIVE')`, [
+        `00000000-0000-4000-8000-${String(1300 + index).padStart(12, '0')}`, sourceWorkId, workId,
+      ]);
+      if (index < 8) {
+        await repo.enqueue({ taskType: 'CATALOG', workId, workKey: `work:${workId}`, priority: 'P2', monitoring: true,
+          idempotencyKey: `lite:p0-monitor:source-a:${sourceWorkId}`,
+          payload: { source: 'source-a', sourceWorkId, p0MonitorCoverage: true } });
+      }
+    }
+
+    // The first 8-row inspection window is already covered. It advances the
+    // durable mapping cursor rather than repeatedly joining those same rows.
+    expect(await repo.refillP0MonitorCoverage(1)).toEqual({ source: 'source-a', admitted: 0, revived: 0 });
+    expect((await db.query(`SELECT value FROM settings
+      WHERE key='p0_monitor_coverage_mapping:source-a'`)).rows[0].value).toBe('coverage-cursor-08');
+
+    // The next turn resumes at row 9 and enrols it without a global scan.
+    expect(await repo.refillP0MonitorCoverage(1)).toEqual({ source: 'source-a', admitted: 1, revived: 0 });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE idempotency_key='lite:p0-monitor:source-a:coverage-cursor-09'`)).rows[0].count).toBe(1);
   });
 
   it('turns a genuinely new chapter observed by an enrolled watch into P0 while P1 remains separate', async () => {

@@ -59,6 +59,13 @@ const P0_MONITOR_SOURCE_CURSOR = 'p0_monitor';
 // Sharing them let a deep backlog on one provider repeatedly steer both
 // decisions, even though the two operations have different fairness goals.
 const P0_MONITOR_COVERAGE_CURSOR = 'p0_monitor_coverage';
+// The source cursor decides provider fairness; this second, per-provider
+// cursor decides which mapping slice is inspected next.  Without it, an
+// almost-complete source would repeatedly scan every already-covered mapping
+// merely to discover there was no missing watch.  Persisted settings keep the
+// scan resumable across restarts without adding a hot queue-table index.
+const P0_MONITOR_COVERAGE_MAPPING_CURSOR_PREFIX = 'p0_monitor_coverage_mapping:';
+const P0_MONITOR_COVERAGE_SCAN_MULTIPLIER = 8;
 const METADATA_REPLAY_V4_INTERVAL_MS = 20_000;
 const METADATA_REPLAY_V4_WINDOWS_PER_SOURCE_TURN = 4;
 const METADATA_REPLAY_V4_SOURCE_BURST_LIMIT = 3;
@@ -185,34 +192,84 @@ export class LiteRepository {
                 await client.query('COMMIT');
                 return { source: null, admitted: 0, revived: 0 };
             }
+            const mappingCursorKey = `${P0_MONITOR_COVERAGE_MAPPING_CURSOR_PREFIX}${source}`;
+            let mappingCursor = await client.query(`
+        SELECT value FROM settings WHERE key=$1 FOR UPDATE`, [mappingCursorKey]);
+            if (!mappingCursor.rows[0]) {
+                await client.query(`INSERT INTO settings(key,value) VALUES($1,'')
+          ON CONFLICT(key) DO NOTHING`, [mappingCursorKey]);
+                mappingCursor = await client.query(`
+          SELECT value FROM settings WHERE key=$1 FOR UPDATE`, [mappingCursorKey]);
+            }
+            const lastSourceWorkId = mappingCursor.rows[0]?.value || '';
+            // Inspect a small deterministic slice, not only currently-missing
+            // rows. Advancing over healthy rows is what makes a 30k catalogue stay
+            // bounded after coverage reaches 100%.
+            const scanLimit = Math.min(256, maximum * P0_MONITOR_COVERAGE_SCAN_MULTIPLIER);
             // `lite:catalog` is the original durable identity used by a first
             // catalog pass.  A successful old pass can be revived as its recurring
             // watch.  A READY/RUNNING/RETRY_WAIT/BLOCKED normal catalog task is not
             // touched: it remains the authoritative in-flight mapping work.  New
             // coverage rows use their own identity so they cannot collide with a
             // later P2 discovery pass for the same mapping.
-            const candidates = await client.query(`
-        SELECT m.source,m.source_work_id,m.work_id::text AS work_id,
-          existing.id AS existing_task_id
+            const readCoverageSlice = async (after, through) => client.query(`
+        WITH mapping_slice AS (
+          SELECT m.source,m.source_work_id,m.work_id::text AS work_id,
+            existing.id AS existing_task_id,existing.state AS existing_state,
+            existing.monitoring AS existing_monitoring,coverage.id AS coverage_task_id
+          FROM importer_work_mappings m
+          JOIN works w ON w.id=m.work_id
+          LEFT JOIN importer_lite_tasks existing
+            ON existing.idempotency_key='lite:catalog:' || m.source || ':' || m.source_work_id
+          LEFT JOIN importer_lite_tasks coverage
+            ON coverage.idempotency_key='lite:p0-monitor:' || m.source || ':' || m.source_work_id
+          WHERE m.source=$1
+            AND m.source_work_id>$2 AND m.source_work_id<=$3
+            AND m.work_id IS NOT NULL
+            AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+            AND w.published=true
+            AND COALESCE(to_jsonb(w)->>'status','ONGOING') IN ('ONGOING','HIATUS')
+          ORDER BY m.source_work_id
+          LIMIT $4
+        )
+        SELECT source,source_work_id,work_id,existing_task_id
+        FROM mapping_slice
+        -- Do not create a parallel source snapshot beside either the
+        -- original recurring watch or a normal catalog task that has not
+        -- finished. Exact idempotency joins stay index-backed.
+        WHERE coverage_task_id IS NULL
+          AND (existing_task_id IS NULL OR (existing_state='DONE' AND existing_monitoring=false))
+        ORDER BY source_work_id
+        LIMIT $5`, [source, after, through, scanLimit, maximum]);
+            // Read the full bounded slice once to advance the durable cursor even
+            // when every row in it is covered; read the filtered candidates from
+            // the same lexical window. A wrapped turn starts the next catalogue
+            // cycle without a global anti-join.
+            const scanRows = await client.query(`
+        SELECT m.source_work_id
         FROM importer_work_mappings m
         JOIN works w ON w.id=m.work_id
-        LEFT JOIN importer_lite_tasks existing
-          ON existing.idempotency_key='lite:catalog:' || m.source || ':' || m.source_work_id
-        LEFT JOIN importer_lite_tasks coverage
-          ON coverage.idempotency_key='lite:p0-monitor:' || m.source || ':' || m.source_work_id
-        WHERE m.source=$1
+        WHERE m.source=$1 AND m.source_work_id>$2
           AND m.work_id IS NOT NULL
           AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
           AND w.published=true
           AND COALESCE(to_jsonb(w)->>'status','ONGOING') IN ('ONGOING','HIATUS')
-          -- Do not create a parallel source snapshot beside either the
-          -- original recurring watch or a normal catalog task that has not
-          -- finished.  The exact idempotency joins are indexed and avoid a
-          -- JSON payload anti-join across the queue history.
-          AND coverage.id IS NULL
-          AND (existing.id IS NULL OR (existing.state='DONE' AND existing.monitoring=false))
-        ORDER BY m.source_work_id
-        LIMIT $2`, [source, maximum]);
+        ORDER BY m.source_work_id LIMIT $3`, [source, lastSourceWorkId, scanLimit]);
+            const wrapped = scanRows.rowCount === 0 && lastSourceWorkId !== '';
+            const effectiveAfter = wrapped ? '' : lastSourceWorkId;
+            const effectiveScanRows = wrapped
+                ? await client.query(`
+            SELECT m.source_work_id FROM importer_work_mappings m
+            JOIN works w ON w.id=m.work_id
+            WHERE m.source=$1 AND m.source_work_id>$2
+              AND m.work_id IS NOT NULL
+              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+              AND w.published=true
+              AND COALESCE(to_jsonb(w)->>'status','ONGOING') IN ('ONGOING','HIATUS')
+            ORDER BY m.source_work_id LIMIT $3`, [source, effectiveAfter, scanLimit])
+                : scanRows;
+            const lastScanned = effectiveScanRows.rows.at(-1)?.source_work_id || '';
+            const candidates = await readCoverageSlice(effectiveAfter, lastScanned);
             let admitted = 0;
             let revived = 0;
             for (const candidate of candidates.rows) {
@@ -248,6 +305,7 @@ export class LiteRepository {
             // an otherwise healthy long-running importer.
             await client.query(`UPDATE importer_lite_metadata_source_cursor
         SET last_source=$2,updated_at=now() WHERE cursor_name=$1`, [P0_MONITOR_COVERAGE_CURSOR, source]);
+            await client.query(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`, [mappingCursorKey, lastScanned]);
             await client.query('COMMIT');
             return { source, admitted, revived };
         }
