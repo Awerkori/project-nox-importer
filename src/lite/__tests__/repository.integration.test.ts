@@ -6010,6 +6010,71 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_uploads WHERE task_id=$1 AND state='PERSISTED'`, [task!.id])).rows[0].count).toBe(2);
   });
 
+  it('starts a fresh origin timeout after a page waits for the shared download gate', async () => {
+    const key = 'pt-br|default|chapter|6-admission-before-transfer|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
+      VALUES ($1,$2,'source-a','a-6-admission-before-transfer','pt-BR','default',true)`, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key, priority: 'P1', idempotencyKey: 'admission-before-transfer',
+      payload: { displayNumber: '6.4', chapterTitle: 'Six Point Four', language: 'pt-BR', edition: 'default', orderKey: '6.4' } });
+    const task = await repo.claim('worker-a', 120);
+    const registry = { get: () => ({ id: 'source-a', fetchChapterPages: async () => ['https://source-a.test/page.png'] }) } as unknown as SourceRegistry;
+    const downloads = new AsyncSemaphore(1, 'admission-before-transfer-downloads');
+    expect(downloads.tryAcquire()).toBe(true);
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })));
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry,
+        { upload: async () => 'telegram-file', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+        '00000000-0000-4000-8000-000000000009', downloads, 1,
+        new AsyncSemaphore(1, 'admission-before-transfer-buffers'), new HostRateLimiter(100), 1,
+        undefined, undefined, 30_000, undefined, 250, 30);
+      const importing = executor.importChapter(task!, 'worker-a');
+      await vi.waitFor(() => expect(downloads.queued).toBe(1));
+      // This deliberately exceeds the short transfer budget.  It is local
+      // queue time, so the fetch itself must still get its own full budget.
+      await new Promise<void>((resolve) => setTimeout(resolve, 60));
+      downloads.release();
+      await importing;
+    } finally {
+      if (downloads.active > 0) downloads.release();
+      vi.stubGlobal('fetch', originalFetch);
+    }
+    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
+    expect((await db.query(`SELECT health,consecutive_failures FROM importer_lite_source_health WHERE source='source-a'`)).rows[0])
+      .toMatchObject({ health: 'HEALTHY', consecutive_failures: 0 });
+  });
+
+  it('retries a saturated local admission without degrading the origin source', async () => {
+    const key = 'pt-br|default|chapter|6-admission-timeout|-';
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
+      VALUES ($1,$2,'source-a','a-6-admission-timeout','pt-BR','default',true)`, [ids.p1a, key]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key, priority: 'P1', idempotencyKey: 'admission-timeout',
+      payload: { displayNumber: '6.5', chapterTitle: 'Six Point Five', language: 'pt-BR', edition: 'default', orderKey: '6.5' } });
+    const task = await repo.claim('worker-a', 120);
+    const registry = { get: () => ({ id: 'source-a', fetchChapterPages: async () => ['https://source-a.test/page.png'] }) } as unknown as SourceRegistry;
+    const downloads = new AsyncSemaphore(1, 'admission-timeout-downloads');
+    expect(downloads.tryAcquire()).toBe(true);
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry,
+        { upload: async () => 'telegram-file', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+        '00000000-0000-4000-8000-000000000009', downloads, 1,
+        new AsyncSemaphore(1, 'admission-timeout-buffers'), new HostRateLimiter(100), 1,
+        undefined, undefined, 30_000, undefined, 40, 30);
+      await executor.importChapter(task!, 'worker-a');
+    } finally {
+      downloads.release();
+      vi.stubGlobal('fetch', originalFetch);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
+      .toMatchObject({ state: 'RETRY_WAIT', reason: 'PAGE_ADMISSION_TIMEOUT' });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_source_health WHERE source='source-a'`)).rows[0].count).toBe(0);
+  });
+
   it('releases the page-count permit while a durable reservation batch is contended', async () => {
     const key = 'pt-br|default|chapter|6-reservation-backpressure|-';
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,confirmed)
