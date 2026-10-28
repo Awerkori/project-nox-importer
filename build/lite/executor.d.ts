@@ -89,7 +89,6 @@ export declare class LiteExecutor {
     private readonly chapterManifestTimeoutMs;
     private readonly refreshFairDemandOnSourceBurst?;
     private readonly sourceSlots;
-    private readonly sourcePageSlots;
     private readonly prioritySourceWaitGate;
     private readonly receiptBatcher;
     private readonly reservationBatcher;
@@ -120,8 +119,6 @@ export declare class LiteExecutor {
     getSourceFairnessBurstSnapshot(): SourceFairnessBurstSnapshot;
     /** The durable chapter-admission cap currently used to calculate source shares. */
     getEffectiveChapterAdmissionCap(): number;
-    /** Effective per-source shares of the unchanged global page-request budget. */
-    getFairSourcePageShares(): Record<string, number>;
     /** Aggregate-only batch evidence for the existing heartbeat. */
     getUploadBatchSnapshot(): {
         reservations: UploadBatchSnapshot;
@@ -129,15 +126,6 @@ export declare class LiteExecutor {
     };
     private sourceCapacity;
     private demandAwareSourceCapacity;
-    /** Keep chapter and page shares in one bounded, locally refreshed view. */
-    private refreshFairSourceCapacities;
-    /**
-     * Reserve one useful page wave for every source with executable work before
-     * demand-weighting the remaining existing global download permits. A sole
-     * source retains the full global limit, so scarcity never turns into an
-     * artificial throughput ceiling.
-     */
-    private sourcePageCapacity;
     /**
      * Page waves remain source-scoped even when the runtime permits a wider
      * maximum.  Unknown sources retain the established six-page default; only
@@ -152,8 +140,6 @@ export declare class LiteExecutor {
     getPageConcurrencyForSource(source: string): number;
     private hasFairAlternative;
     private sourceSlot;
-    /** Local fair share acquired before byte/buffer/global HTTP admission. */
-    private sourcePageSlot;
     /**
      * Re-sample exactly once before a source can grow past the share it would
      * receive with four plausible alternatives.  A true singleton remains
