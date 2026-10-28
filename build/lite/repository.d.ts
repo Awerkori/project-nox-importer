@@ -121,6 +121,7 @@ export declare class LiteRepository {
     private p1SecondaryClaims;
     private lastHistoricalP1CatalogSource;
     private p1BacklogCache;
+    private p0MonitorCursorEnsured;
     hasAbundantHistoricalP1Reserve(): boolean;
     invalidateP1BacklogCache(): void;
     getActiveCoolingSources(): string[];

@@ -3667,11 +3667,14 @@ export class ImporterLiteRuntime {
             // entry for the same canonical identity was not mapped yet.
             const chapterTasks = [...chapterTaskByKey.values()].filter((candidate) => !legacyByChapterKey.has(String(candidate.chapterKey)));
             if (resolved.status !== 'NEW_WORK' && task.priority !== 'STAFF') {
-                const hasUnpublishedNormalPredecessor = workHasPendingBacklog || chapterTasks.some((candidate) => {
+                const hasUnpublishedFrontierPredecessor = workHasPendingBacklog || chapterTasks.some((candidate) => {
                     const candidateOrder = String(candidate.payload?.orderKey || '');
-                    return candidateOrder.startsWith('n|') && Boolean(newestManifestNormalOrder) && candidateOrder < String(newestManifestNormalOrder);
+                    return candidateOrder.startsWith('n|')
+                        && Boolean(newestManifestNormalOrder)
+                        && candidateOrder < String(newestManifestNormalOrder)
+                        && (!knownNormalOrder || candidateOrder > knownNormalOrder);
                 });
-                if (hasUnpublishedNormalPredecessor) {
+                if (hasUnpublishedFrontierPredecessor) {
                     for (const candidate of chapterTasks) {
                         if (candidate.priority === 'P0')
                             candidate.priority = 'P1';
