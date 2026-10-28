@@ -456,10 +456,15 @@ export class ImporterLiteRuntime {
     checkedAt: new Date(0).toISOString(),
   };
   private operatorChapterAdmissionCap = 0;
+  private adaptiveChapterAdmissionCap = 0;
+  private adaptiveHealthyStreak = 0;
+  private adaptiveAdmissionReason = 'operator-ceiling';
+  private lastLegacyBlockedRepairAt = 0;
   private p1ClaimCounter = 0;
   private lastP1FocusRefreshAt = 0;
   private p1FocusRefreshInFlight: Promise<void> | null = null;
   private readonly historicalP1CatalogExecGate = new AsyncSemaphore(2, 'lite_historical_p1_catalog_exec');
+  private readonly historicalP1CatalogClaimGate = new AsyncSemaphore(1, 'lite_historical_p1_catalog_claim');
   private p2SubordinationState: { subordinated: boolean; reason: string | null; checkedAt: string | null } = {
     subordinated: false,
     reason: null,
@@ -527,19 +532,92 @@ export class ImporterLiteRuntime {
       if (nextCap !== this.operatorChapterAdmissionCap) {
         const previousCap = this.operatorChapterAdmissionCap;
         this.operatorChapterAdmissionCap = nextCap;
-        this.chapterAdmissionGate.setCapacity(nextCap);
-        this.executor.setEffectiveChapterAdmissionCap(nextCap);
-        this.memoryPressureGuard.setNormalMediaProfile(this.mediaProfileForChapterAdmissionCap(nextCap));
-        this.logger.info('Adjusted Lite chapter admission cap', {
-          previousCap, nextCap, configuredWorkers: this.chapterWorkerCapacity,
-          mediaProfile: this.memoryPressureGuard.getNormalMediaProfile(),
-          source: values.has(CHAPTER_ADMISSION_CAP_KEY) ? 'operator-setting' : 'runtime-default',
-        });
+        this.adaptiveChapterAdmissionCap = nextCap;
+        this.adaptiveHealthyStreak = 0;
+        this.adaptiveAdmissionReason = values.has(CHAPTER_ADMISSION_CAP_KEY) ? 'operator-setting' : 'runtime-default';
+        this.applyEffectiveChapterAdmissionCap(nextCap, this.adaptiveAdmissionReason, previousCap);
+      } else if (this.adaptiveChapterAdmissionCap > nextCap) {
+        const prevEffective = this.chapterAdmissionGate.capacity;
+        this.adaptiveChapterAdmissionCap = nextCap;
+        this.applyEffectiveChapterAdmissionCap(nextCap, 'operator-ceiling-clamp', prevEffective);
       }
     } catch (error: any) {
       // Preserve the last known durable decision. A diagnostic lookup must
       // not turn a transient YSQL wait into a restart or an aggressive retry.
       this.logger.warn('Manual protective-stop check deferred', { error: error?.message });
+    }
+  }
+
+  private applyEffectiveChapterAdmissionCap(effectiveCap: number, source: string, previousCap = this.chapterAdmissionGate.capacity): void {
+    const bounded = Math.min(this.chapterWorkerCapacity, Math.max(1, Math.floor(effectiveCap)));
+    if (bounded === this.chapterAdmissionGate.capacity && this.executor.getEffectiveChapterAdmissionCap() === bounded) {
+      return;
+    }
+    this.chapterAdmissionGate.setCapacity(bounded);
+    this.executor.setEffectiveChapterAdmissionCap(bounded);
+    this.memoryPressureGuard.setNormalMediaProfile(this.mediaProfileForChapterAdmissionCap(bounded));
+    this.logger.info('Adjusted Lite chapter admission cap', {
+      previousCap,
+      nextCap: bounded,
+      operatorCap: this.operatorChapterAdmissionCap,
+      configuredWorkers: this.chapterWorkerCapacity,
+      mediaProfile: this.memoryPressureGuard.getNormalMediaProfile(),
+      source,
+    });
+  }
+
+  /**
+   * Coherent adaptive backpressure with hysteresis reusing the single existing
+   * chapterAdmissionGate (never interrupting in-flight chapters or critical DB
+   * writes). Steps down when Reader latency or YSQL pool pressure rises, and
+   * ramps back +1 only after 2 consecutive healthy 30-second observations.
+   */
+  private updateAdaptiveAdmissionControl(): void {
+    const ceiling = this.operatorChapterAdmissionCap > 0
+      ? this.operatorChapterAdmissionCap
+      : this.chapterWorkerCapacity;
+    if (this.adaptiveChapterAdmissionCap <= 0) {
+      this.adaptiveChapterAdmissionCap = ceiling;
+    }
+    const floor = Math.min(2, ceiling);
+    const current = Math.min(ceiling, Math.max(floor, this.adaptiveChapterAdmissionCap));
+    const siteLatencyMs = this.lastSiteProbe.latencyMs;
+    const dbSnap = (telemetryCollector.getSnapshotReport() as any)?.database || {};
+    const sqlP95Ms = Number(dbSnap.sqlP95Ms || 0);
+    const poolWaiting = Number(this.pool.waitingCount || 0);
+    const memState = this.memoryPressureGuard.snapshot().state;
+
+    const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
+      || (typeof siteLatencyMs === 'number' && siteLatencyMs > 1_050);
+    const highYsqlPressure = poolWaiting >= 4 && sqlP95Ms > 1_500;
+
+    if (highSitePressure || highYsqlPressure) {
+      this.adaptiveHealthyStreak = 0;
+      const reduced = Math.max(floor, Math.min(current - 1, Math.floor(current * 0.75)));
+      this.adaptiveAdmissionReason = highSitePressure ? 'adaptive-site-pressure' : 'adaptive-ysql-pressure';
+      if (reduced < current) {
+        this.adaptiveChapterAdmissionCap = reduced;
+        this.applyEffectiveChapterAdmissionCap(reduced, this.adaptiveAdmissionReason, current);
+      }
+      return;
+    }
+
+    const healthyForRamp = (this.lastSiteProbe.state === 'HEALTHY' || this.lastSiteProbe.state === 'UNKNOWN')
+      && (siteLatencyMs === null || siteLatencyMs <= 750)
+      && poolWaiting <= 1
+      && memState === 'NORMAL';
+
+    if (healthyForRamp) {
+      this.adaptiveHealthyStreak++;
+      if (current < ceiling && this.adaptiveHealthyStreak >= 2) {
+        this.adaptiveHealthyStreak = 0;
+        const steppedUp = Math.min(ceiling, current + 1);
+        this.adaptiveChapterAdmissionCap = steppedUp;
+        this.adaptiveAdmissionReason = steppedUp === ceiling ? 'adaptive-restored-ceiling' : 'adaptive-step-up';
+        this.applyEffectiveChapterAdmissionCap(steppedUp, this.adaptiveAdmissionReason, current);
+      }
+    } else {
+      this.adaptiveHealthyStreak = 0;
     }
   }
 
@@ -716,6 +794,7 @@ export class ImporterLiteRuntime {
       // Stagger only discovery rows; executable catalog/chapter work remains
       // immediately eligible under the normal strict priority contract.
       await this.queue.staggerReadyDiscoveries(60_000, 64);
+      this.lastLegacyBlockedRepairAt = Date.now();
       await this.queue.recoverDuplicateCanonicalCatalogFailures();
       await this.queue.reopenP0MonitorsBlockedByDiscoveryPolicy();
       await this.refillP0MonitorCoverage();
@@ -1090,7 +1169,7 @@ export class ImporterLiteRuntime {
     if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active) return;
     if (typeof (this.queue as any).refreshP1FocusGroup !== 'function') return;
     const now = Date.now();
-    if (!force && now - this.lastP1FocusRefreshAt < 15_000) return;
+    if (!force && now - this.lastP1FocusRefreshAt < 30_000) return;
     if (this.p1FocusRefreshInFlight) return this.p1FocusRefreshInFlight;
     this.lastP1FocusRefreshAt = now;
     const effectiveCap = Math.max(12, this.executor.getEffectiveChapterAdmissionCap());
@@ -1118,7 +1197,9 @@ export class ImporterLiteRuntime {
     let claimed = false;
     try {
       const workerId = `${this.runtimeInstanceId}:p1-catalog`;
-      const task = await this.queue.claimHistoricalP1Catalog(workerId, CATALOG_TASK_LEASE_SECONDS);
+      const task = await this.historicalP1CatalogClaimGate.runExclusive(() =>
+        this.queue.claimHistoricalP1Catalog(workerId, CATALOG_TASK_LEASE_SECONDS),
+      );
       if (!task) return false;
       claimed = true;
       await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
@@ -1200,8 +1281,15 @@ export class ImporterLiteRuntime {
     try { await this.probeDueSourceRecovery(); } catch (error: any) {
       this.logger.warn('Source cooldown recovery probe failed', { error: error?.message });
     }
-    try { await this.queue.recoverDuplicateCanonicalCatalogFailures(); } catch { /* bounded recovery retries next turn */ }
-    try { await this.queue.reopenP0MonitorsBlockedByDiscoveryPolicy(); } catch { /* bounded recovery retries next turn */ }
+    if (!chapterOrPoolBusy && now - this.lastLegacyBlockedRepairAt >= 30 * 60_000) {
+      this.lastLegacyBlockedRepairAt = now;
+      try { await this.queue.recoverDuplicateCanonicalCatalogFailures(); } catch { /* bounded recovery retries next turn */ }
+      try {
+        if (typeof (this.queue as any).reopenP0MonitorsBlockedByDiscoveryPolicy === 'function') {
+          await this.queue.reopenP0MonitorsBlockedByDiscoveryPolicy();
+        }
+      } catch { /* bounded recovery retries next turn */ }
+    }
     if (this.nextDiscoverySeedRetryAt > 0 && now >= this.nextDiscoverySeedRetryAt && this.pool.waitingCount === 0) {
       await this.seedDiscovery();
     }
@@ -2895,14 +2983,21 @@ export class ImporterLiteRuntime {
     }
   }
 
-  /** A small protective gate, deliberately not another scheduler. */
+  /**
+   * Probe a lightweight DB-backed public Reader endpoint (/api/releases?limit=1)
+   * rather than the static Cloudflare Worker edge /api/health isolate, so real
+   * YSQL or Reader latency degradation is immediately visible to protection.
+   */
   private async probeSiteHealth(): Promise<{ healthy: boolean; latencyMs: number | null; status: number | null }> {
     const started = Date.now();
     try {
-      const response = await fetch(`${this.config.NOX_MANGA_URL.replace(/\/$/, '')}/api/health`, { signal: AbortSignal.timeout(3_000) });
+      const response = await fetch(`${this.config.NOX_MANGA_URL.replace(/\/$/, '')}/api/releases?limit=1`, {
+        signal: AbortSignal.timeout(3_500),
+        headers: { 'Cache-Control': 'no-cache' },
+      });
       await response.body?.cancel().catch(() => {});
       const latencyMs = Date.now() - started;
-      return { healthy: response.ok && latencyMs <= 1_500, latencyMs, status: response.status };
+      return { healthy: response.ok && latencyMs <= 1_800, latencyMs, status: response.status };
     } catch {
       return { healthy: false, latencyMs: null, status: null };
     }
@@ -2931,6 +3026,7 @@ export class ImporterLiteRuntime {
     if (first.healthy) {
       this.sitePausedUntil = 0;
       this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: first.latencyMs };
+      this.updateAdaptiveAdmissionControl();
       return;
     }
     // A one-off DIScloud egress failure previously halted every worker for
@@ -2944,6 +3040,7 @@ export class ImporterLiteRuntime {
       this.logger.warn('Transient site-health probe recovered before pausing Lite claims', {
         firstStatus: first.status, firstLatencyMs: first.latencyMs, confirmationLatencyMs: confirmation.latencyMs,
       });
+      this.updateAdaptiveAdmissionControl();
       return;
     }
     // An importer-side network failure does not establish that Reader is
@@ -2958,6 +3055,7 @@ export class ImporterLiteRuntime {
       this.logger.warn('Importer egress could not confirm Reader health; retaining Lite admissions', {
         firstStatus: first.status, confirmationStatus: confirmation.status,
       });
+      this.updateAdaptiveAdmissionControl();
       return;
     }
     // A confirmed outage reduces pressure without retrying tasks or restarting
@@ -2967,6 +3065,7 @@ export class ImporterLiteRuntime {
     // will make the next bounded decision.
     if (!recoveryProbe || this.sitePausedUntil <= Date.now()) this.sitePausedUntil = Date.now() + 30_000;
     this.lastSiteProbe = { state: 'PAUSED', checkedAt: new Date().toISOString(), latencyMs: confirmation.latencyMs ?? first.latencyMs };
+    this.updateAdaptiveAdmissionControl();
     this.logger.warn('Pausing new Lite claims to protect shared site resources', {
       firstStatus: first.status, firstLatencyMs: first.latencyMs,
       confirmationStatus: confirmation.status, confirmationLatencyMs: confirmation.latencyMs,
@@ -2984,7 +3083,11 @@ export class ImporterLiteRuntime {
     // This check and the flag assignment below are synchronous, so an idle
     // full snapshot still establishes its fence before a worker can interleave
     // and start a new claim.
-    if (this.pool.waitingCount > 0 || this.chapterAdmissionGate.active > 0) {
+    const recentFullSnapshot = Boolean(
+      this.lastFullOperationalSnapshotAt
+      && Date.now() - Date.parse(this.lastFullOperationalSnapshotAt) < 5 * 60_000,
+    );
+    if (this.pool.waitingCount > 0 || this.chapterAdmissionGate.active > 0 || recentFullSnapshot) {
       await this.emitOperationalSnapshotOnce();
       return;
     }
@@ -3069,11 +3172,17 @@ export class ImporterLiteRuntime {
     this.logger.info('Lite liveness', {
       leader: this.isRuntimeLeader, ...liveness,
     });
+    const recentFullSnapshot = Boolean(
+      this.lastFullOperationalSnapshotAt
+      && Date.now() - Date.parse(this.lastFullOperationalSnapshotAt) < 5 * 60_000,
+    );
     const snapshotDeferred = this.pool.waitingCount > 0
       ? 'POOL_BUSY'
       : this.chapterAdmissionGate.active > 0
         ? 'CHAPTER_BUSY'
-        : null;
+        : recentFullSnapshot
+          ? 'RECENT_FULL_SNAPSHOT'
+          : null;
     if (snapshotDeferred) {
       // Do not run four diagnostic scans while the small direct pool is busy,
       // nor race them against an admitted chapter between its short database
@@ -3090,6 +3199,12 @@ export class ImporterLiteRuntime {
         leader: this.isRuntimeLeader,
         chapterWorkers: this.chapterWorkerCapacity,
         chapterAdmissionCap: this.operatorChapterAdmissionCap,
+        adaptiveAdmission: {
+          operatorCap: this.operatorChapterAdmissionCap,
+          effectiveCap: this.chapterAdmissionGate.capacity,
+          healthyStreak: this.adaptiveHealthyStreak,
+          reason: this.adaptiveAdmissionReason,
+        },
         metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
         manualProtectiveStop: this.manualProtectiveStop,
         discoverySeed: {
@@ -3199,6 +3314,12 @@ export class ImporterLiteRuntime {
       leader: this.isRuntimeLeader,
       chapterWorkers: this.chapterWorkerCapacity,
       chapterAdmissionCap: this.operatorChapterAdmissionCap,
+      adaptiveAdmission: {
+        operatorCap: this.operatorChapterAdmissionCap,
+        effectiveCap: this.chapterAdmissionGate.capacity,
+        healthyStreak: this.adaptiveHealthyStreak,
+        reason: this.adaptiveAdmissionReason,
+      },
       lastFullOperationalSnapshotAt: fullSnapshotAt,
       metadataReplayV4Exclusive: this.metadataReplayV4Exclusive,
       manualProtectiveStop: this.manualProtectiveStop,

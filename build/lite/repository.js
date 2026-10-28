@@ -1439,27 +1439,36 @@ export class LiteRepository {
      * waiting behind hundreds of operation_rank=1 chapter imports on hot sources.
      */
     async claimHistoricalP1Catalog(workerId, leaseSeconds) {
-        const dbToUse = (this.sourceMetadataDb && this.sourceMetadataDb !== this.db && (this.sourceMetadataDb.waitingCount || 0) === 0)
-            ? this.sourceMetadataDb
-            : this.db;
-        const result = await dbToUse.query(`
-      WITH runnable_candidates AS (
+        const metaDb = this.sourceMetadataDb || this.db;
+        const result = await metaDb.query(`
+      WITH due_works AS (
+        SELECT rw.work_key
+        FROM importer_lite_ready_works rw
+        WHERE rw.priority <= 2
+          AND rw.operation_rank <= 2
+          AND rw.next_run_at <= now()
+        ORDER BY rw.operation_rank DESC, rw.last_claimed_at ASC NULLS FIRST, rw.next_run_at ASC
+        LIMIT 48
+      ), runnable_candidates AS (
         SELECT
           t.id,
           t.work_key,
           t.payload->>'source' AS source,
           t.created_at
-        FROM importer_lite_tasks t
+        FROM due_works rw
+        JOIN importer_lite_tasks t
+          ON t.work_key = rw.work_key
+         AND t.state = 'READY'
+         AND t.monitoring = false
+         AND t.priority = 2
+         AND t.task_type = 'CATALOG'
+         AND t.payload ? 'historicalP1Backfill'
+         AND t.next_run_at <= now()
         JOIN importer_sources s ON s.id = t.payload->>'source'
         LEFT JOIN importer_lite_source_health h ON h.source = s.id
-        WHERE t.state = 'READY'
-          AND t.monitoring = false
-          AND t.priority = 2
-          AND t.task_type = 'CATALOG'
-          AND t.payload ? 'historicalP1Backfill'
-          AND t.next_run_at <= now()
-          AND s.enabled = true
+        WHERE s.enabled = true
           AND s.id NOT IN ('mangaball','mangadex','mangafire')
+          AND COALESCE(s.status, 'ACTIVE') <> 'DISABLED'
           AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = true
           AND ${sourceExecutionEligibilitySql('s')}
           AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
@@ -1498,7 +1507,7 @@ export class LiteRepository {
             if (typeof task.payload.source === 'string') {
                 this.lastHistoricalP1CatalogSource = task.payload.source;
             }
-            await this.db.query('SELECT public.importer_lite_refresh_ready_work($1)', [task.workKey]).catch(() => { });
+            await metaDb.query('SELECT public.importer_lite_refresh_ready_work($1)', [task.workKey]).catch(() => { });
         }
         return task;
     }
@@ -1511,7 +1520,8 @@ export class LiteRepository {
         const desiredSize = Math.max(12, Math.min(32, Math.floor(options.targetSize || 18)));
         const maxPerSource = Math.max(2, Math.min(8, Math.floor(options.maxPerSource || 3)));
         this.p1FocusTargetSize = desiredSize;
-        const candidatesRes = await this.db.query(`
+        const metaDb = this.sourceMetadataDb || this.db;
+        const candidatesRes = await metaDb.query(`
       WITH ready_p1_works AS (
         SELECT rw.work_key,
                NULLIF(substring(rw.work_key from 6), '')::uuid AS work_id,
@@ -1522,26 +1532,36 @@ export class LiteRepository {
           AND rw.operation_rank <= 1
           AND rw.work_key LIKE 'work:%'
           AND rw.next_run_at <= now() + interval '35 seconds'
-        ORDER BY rw.next_run_at, rw.last_claimed_at NULLS FIRST, rw.work_key
-        LIMIT 96
+        ORDER BY rw.last_claimed_at ASC NULLS FIRST, rw.next_run_at ASC, rw.work_key ASC
+        LIMIT 48
       ), work_stats AS (
         SELECT
           rpw.work_key,
           rpw.work_id::text AS work_id,
-          count(t.id)::int AS remaining_chapters,
-          min(t.created_at) AS oldest_task_at,
-          (array_agg(t.chapter_key ORDER BY NULLIF(t.payload->>'orderKey','') NULLS LAST, t.created_at, t.id)
-            FILTER (WHERE t.state IN ('READY', 'RUNNING')))[1] AS frontier_chapter_key
+          COALESCE(pend.remaining_chapters, 0)::int AS remaining_chapters,
+          pend.oldest_task_at,
+          ft.chapter_key AS frontier_chapter_key
         FROM ready_p1_works rpw
-        JOIN importer_lite_tasks t
-          ON t.work_key = rpw.work_key
-         AND t.monitoring = false
-         AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
-         AND (
-           t.state IN ('READY', 'RUNNING')
-           OR (t.state = 'RETRY_WAIT' AND t.attempts < t.max_attempts)
-         )
-        GROUP BY rpw.work_key, rpw.work_id
+        LEFT JOIN LATERAL (
+          SELECT t.chapter_key
+          FROM importer_lite_tasks t
+          WHERE t.work_key = rpw.work_key
+            AND t.state = 'READY'
+            AND t.monitoring = false
+            AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+          ORDER BY t.priority ASC, t.next_run_at ASC, t.created_at ASC
+          LIMIT 1
+        ) ft ON true
+        LEFT JOIN LATERAL (
+          SELECT count(p.id)::int AS remaining_chapters,
+                 min(p.created_at) AS oldest_task_at
+          FROM importer_lite_tasks p
+          WHERE p.work_key = rpw.work_key
+            AND p.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+            AND p.state IN ('RUNNING', 'READY', 'RETRY_WAIT')
+            AND p.monitoring = false
+            AND (p.state <> 'RETRY_WAIT' OR p.attempts < p.max_attempts)
+        ) pend ON true
       )
       SELECT
         ws.work_key,
@@ -1605,16 +1625,14 @@ export class LiteRepository {
         // Detect previous Focus works that exited because their backlog completed.
         const exitedFocusKeys = [...this.p1FocusMeta.keys()].filter((key) => !candidateByKey.has(key));
         if (exitedFocusKeys.length > 0) {
-            const stillPending = await this.db.query(`
+            const stillPending = await metaDb.query(`
         SELECT DISTINCT t.work_key
         FROM importer_lite_tasks t
         WHERE t.work_key = ANY($1::text[])
-          AND t.monitoring = false
           AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
-          AND (
-            t.state IN ('READY', 'RUNNING')
-            OR (t.state = 'RETRY_WAIT' AND t.attempts < t.max_attempts)
-          )`, [exitedFocusKeys]);
+          AND t.state IN ('RUNNING', 'READY', 'RETRY_WAIT')
+          AND t.monitoring = false
+          AND (t.state <> 'RETRY_WAIT' OR t.attempts < t.max_attempts)`, [exitedFocusKeys]);
             const pendingSet = new Set(stillPending.rows.map((r) => String(r.work_key)));
             for (const exitedKey of exitedFocusKeys) {
                 if (!pendingSet.has(exitedKey)) {
@@ -1737,15 +1755,17 @@ export class LiteRepository {
      */
     async hasExecutableOrRecoverableP1Backlog(forceFresh = false) {
         const now = Date.now();
-        if (!forceFresh && this.p1BacklogCache && now - this.p1BacklogCache.at < 5_000) {
+        if (!forceFresh && this.p1BacklogCache && now - this.p1BacklogCache.at < 15_000) {
             return { pending: this.p1BacklogCache.pending, reason: this.p1BacklogCache.reason };
         }
-        const probe = await this.db.query(`
+        const metaDb = this.sourceMetadataDb || this.db;
+        const probe = await metaDb.query(`
       SELECT COALESCE(
         (
           SELECT 'P1_RUNNING'
           FROM importer_lite_tasks t
-          WHERE t.state = 'RUNNING'
+          WHERE t.state IN ('RUNNING', 'RETRY_WAIT')
+            AND t.state = 'RUNNING'
             AND t.monitoring = false
             AND t.priority = 2
             AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH', 'CATALOG')
@@ -1754,11 +1774,17 @@ export class LiteRepository {
         ),
         (
           SELECT 'P1_READY_CHAPTER'
-          FROM importer_lite_tasks t
+          FROM (
+            SELECT work_key FROM importer_lite_ready_works
+            WHERE priority = 2 AND operation_rank <= 1
+            LIMIT 32
+          ) rw
+          JOIN importer_lite_tasks t
+            ON t.work_key = rw.work_key
+           AND t.state = 'READY'
           LEFT JOIN works w ON w.id = t.work_id
           LEFT JOIN media cov ON cov.id = w.cover_id
-          WHERE t.state = 'READY'
-            AND t.monitoring = false
+          WHERE t.monitoring = false
             AND t.priority = 2
             AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
             AND (
@@ -1783,7 +1809,8 @@ export class LiteRepository {
           FROM importer_lite_tasks t
           LEFT JOIN works w ON w.id = t.work_id
           LEFT JOIN media cov ON cov.id = w.cover_id
-          WHERE t.state = 'RETRY_WAIT'
+          WHERE t.state IN ('RUNNING', 'RETRY_WAIT')
+            AND t.state = 'RETRY_WAIT'
             AND t.monitoring = false
             AND t.priority = 2
             AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
@@ -1807,10 +1834,37 @@ export class LiteRepository {
         ),
         (
           SELECT 'P1_HISTORICAL_CATALOG'
+          FROM (
+            SELECT work_key FROM importer_lite_ready_works
+            WHERE priority <= 2 AND operation_rank <= 2
+            ORDER BY operation_rank DESC, next_run_at ASC
+            LIMIT 64
+          ) rw
+          JOIN importer_lite_tasks t
+            ON t.work_key = rw.work_key
+           AND t.state = 'READY'
+          JOIN importer_sources s ON s.id = t.payload->>'source'
+          LEFT JOIN importer_lite_source_health h ON h.source = s.id
+          WHERE t.monitoring = false
+            AND t.priority = 2
+            AND t.task_type = 'CATALOG'
+            AND t.payload ? 'historicalP1Backfill'
+            AND t.attempts < t.max_attempts
+            AND s.enabled = true
+            AND s.id NOT IN ('mangaball', 'mangadex', 'mangafire')
+            AND COALESCE(s.status, 'ACTIVE') <> 'DISABLED'
+            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = true
+            AND ${sourceExecutionEligibilitySql('s')}
+            AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
+          LIMIT 1
+        ),
+        (
+          SELECT 'P1_HISTORICAL_CATALOG'
           FROM importer_lite_tasks t
           JOIN importer_sources s ON s.id = t.payload->>'source'
           LEFT JOIN importer_lite_source_health h ON h.source = s.id
-          WHERE t.state IN ('READY', 'RETRY_WAIT')
+          WHERE t.state IN ('RUNNING', 'RETRY_WAIT')
+            AND t.state = 'RETRY_WAIT'
             AND t.monitoring = false
             AND t.priority = 2
             AND t.task_type = 'CATALOG'
@@ -1837,37 +1891,43 @@ export class LiteRepository {
      * that work's P1 canonical sequence instead of publishing out of order.
      */
     async hasPendingWorkChapterBacklog(workId) {
-        const result = await this.db.query(`
+        const metaDb = this.sourceMetadataDb || this.db;
+        const result = await metaDb.query(`
       SELECT (
         EXISTS (
           SELECT 1
           FROM importer_lite_tasks t
-          WHERE t.work_id = $1::uuid
-            AND (
-              (
-                t.monitoring = false
-                AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
-                AND (
-                  t.state IN ('READY', 'RUNNING')
-                  OR (t.state = 'RETRY_WAIT' AND t.attempts < t.max_attempts)
-                )
-                AND NOT (
-                  t.task_type = 'IMPORT_CHAPTER'
-                  AND t.chapter_key IS NOT NULL
-                  AND public.importer_lite_manifest_p1_route_deferred(t.work_id, t.chapter_key)
-                )
-              )
-              OR (
-                t.monitoring = false
-                AND t.task_type = 'CATALOG'
-                AND t.base_priority = 2
-                AND NOT (t.payload ? 'metadataEnrichment')
-                AND (
-                  t.state IN ('READY', 'RUNNING')
-                  OR (t.state = 'RETRY_WAIT' AND t.attempts < t.max_attempts)
-                )
-              )
+          WHERE t.work_key = ('work:' || $1::text)
+            AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+            AND t.state IN ('RUNNING', 'READY', 'RETRY_WAIT')
+            AND t.monitoring = false
+            AND (t.state <> 'RETRY_WAIT' OR t.attempts < t.max_attempts)
+            AND NOT (
+              t.task_type = 'IMPORT_CHAPTER'
+              AND t.chapter_key IS NOT NULL
+              AND public.importer_lite_manifest_p1_route_deferred(t.work_id, t.chapter_key)
             )
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM importer_lite_tasks t
+          WHERE t.work_key = ('work:' || $1::text)
+            AND t.state = 'READY'
+            AND t.monitoring = false
+            AND t.task_type = 'CATALOG'
+            AND t.base_priority = 2
+            AND NOT (t.payload ? 'metadataEnrichment')
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM importer_lite_tasks t
+          WHERE t.state IN ('RUNNING', 'RETRY_WAIT')
+            AND t.work_key = ('work:' || $1::text)
+            AND t.monitoring = false
+            AND t.task_type = 'CATALOG'
+            AND t.base_priority = 2
+            AND NOT (t.payload ? 'metadataEnrichment')
+            AND (t.state = 'RUNNING' OR t.attempts < t.max_attempts)
         )
         OR (
           EXISTS (
@@ -2437,13 +2497,24 @@ export class LiteRepository {
         // but also made a deep hot backlog permanently invisible to the bounded
         // source producer.  The single transaction below is now the only reserve
         // probe and also serializes the small durable source cursor.
-        const client = await this.db.connect();
+        const metaDb = this.sourceMetadataDb || this.db;
+        const client = await metaDb.connect();
         try {
             await client.query('BEGIN');
             const reserve = await client.query(`SELECT count(*)::int AS count FROM (
-        SELECT 1 FROM importer_lite_tasks t
-        WHERE t.state='READY' AND t.monitoring=false AND t.priority=2 AND t.task_type='IMPORT_CHAPTER'
-          AND t.next_run_at<=now()
+        SELECT 1
+        FROM (
+          SELECT work_key FROM importer_lite_ready_works
+          WHERE priority = 2 AND operation_rank = 1 AND next_run_at <= now()
+          LIMIT $1
+        ) rw
+        JOIN importer_lite_tasks t
+          ON t.work_key = rw.work_key
+         AND t.state = 'READY'
+         AND t.monitoring = false
+         AND t.priority = 2
+         AND t.task_type = 'IMPORT_CHAPTER'
+         AND t.next_run_at <= now()
         LIMIT $1
       ) AS bounded_ready`, [abundantFloor]);
             const current = Number(reserve.rows[0]?.count || 0);
@@ -2462,20 +2533,42 @@ export class LiteRepository {
             // fresh 16-row catalog batch every recovery turn and grow a hidden P1
             // producer queue.  Existing work is never discarded; this merely caps
             // new pending historical checks at one small batch.
-            const pendingBackfill = await client.query(`WITH bounded_backfill AS (
-        SELECT state,next_run_at,payload FROM importer_lite_tasks
-        WHERE state IN ('READY','RUNNING','RETRY_WAIT') AND priority=2 AND task_type='CATALOG'
-          AND payload ? 'historicalP1Backfill'
-        ORDER BY CASE WHEN state='RUNNING' OR (state='READY' AND next_run_at<=now()) THEN 0 ELSE 1 END,
-          next_run_at,created_at
+            const pendingBackfill = await client.query(`WITH active_backfill AS (
+        SELECT t.state, t.next_run_at, t.created_at, t.payload->>'source' AS source
+        FROM (
+          SELECT work_key FROM importer_lite_ready_works
+          WHERE priority <= 2 AND operation_rank <= 2
+          ORDER BY priority ASC, operation_rank DESC, next_run_at ASC
+          LIMIT 128
+        ) rw
+        JOIN importer_lite_tasks t
+          ON t.work_key = rw.work_key
+         AND t.state = 'READY'
+         AND t.priority = 2
+         AND t.task_type = 'CATALOG'
+         AND t.payload ? 'historicalP1Backfill'
+        UNION ALL
+        SELECT t.state, t.next_run_at, t.created_at, t.payload->>'source' AS source
+        FROM importer_lite_tasks t
+        WHERE t.state IN ('RUNNING', 'RETRY_WAIT')
+          AND t.priority = 2
+          AND t.task_type = 'CATALOG'
+          AND t.payload ? 'historicalP1Backfill'
+      ), bounded_backfill AS (
+        SELECT state, next_run_at, source
+        FROM active_backfill
+        ORDER BY CASE WHEN state = 'RUNNING' OR (state = 'READY' AND next_run_at <= now()) THEN 0 ELSE 1 END,
+          next_run_at, created_at
         LIMIT $1
-      ) SELECT count(*)::int AS total,
-        count(DISTINCT payload->>'source') FILTER (
-          WHERE state='RUNNING' OR (state='READY' AND next_run_at<=now())
-        )::int AS active_sources
-        FROM bounded_backfill`, [maximum]);
+      ) SELECT
+        (SELECT count(*)::int FROM bounded_backfill) AS total,
+        (SELECT count(DISTINCT source) FILTER (
+          WHERE state = 'RUNNING' OR (state = 'READY' AND next_run_at <= now())
+        )::int FROM bounded_backfill) AS active_sources,
+        (SELECT array_agg(DISTINCT source) FILTER (WHERE source IS NOT NULL) FROM active_backfill) AS occupied_sources`, [maximum]);
             const pending = Number(pendingBackfill.rows[0]?.total || 0);
             const activeSources = Number(pendingBackfill.rows[0]?.active_sources || 0);
+            const occupiedSources = new Set((pendingBackfill.rows[0]?.occupied_sources || []).map((s) => String(s)));
             // A provider in cooldown remains durable, but it must not occupy every
             // healthy-source check in this tiny producer lane. Total pending work is
             // still capped, while only runnable/running checks consume the target.
@@ -2532,6 +2625,8 @@ export class LiteRepository {
                 if (candidates.length >= limit)
                     break;
                 lastProbedSource = source;
+                if (occupiedSources.has(source))
+                    continue;
                 await client.query('SAVEPOINT historical_p1_source_candidate');
                 try {
                     await client.query(`SET LOCAL statement_timeout = '2500ms'`);
@@ -2550,15 +2645,6 @@ export class LiteRepository {
               AND NOT EXISTS (
                 SELECT 1 FROM importer_lite_tasks t
                 WHERE t.idempotency_key='lite:catalog:' || m.source || ':' || m.source_work_id
-              )
-              -- An old failed check stays durable for diagnosis and bounded
-              -- retry, but cannot consume every source seat in this lane.
-              AND NOT EXISTS (
-                SELECT 1 FROM importer_lite_tasks t
-                WHERE t.state IN ('READY','RUNNING','RETRY_WAIT')
-                  AND t.priority=2 AND t.task_type='CATALOG'
-                  AND t.payload ? 'historicalP1Backfill'
-                  AND t.payload->>'source'=m.source
               )
             ORDER BY m.source_work_id
             LIMIT $2`, [source, perSource]);
@@ -2613,20 +2699,28 @@ export class LiteRepository {
      * leaving the materialised import reserve dominant.
      */
     async promoteDeferredHistoricalP1Catalog(activeImportSources = []) {
-        const client = await this.db.connect();
+        const metaDb = this.sourceMetadataDb || this.db;
+        const client = await metaDb.connect();
         try {
             await client.query('BEGIN');
             const busySources = [...new Set([...activeImportSources].filter(Boolean))];
             const sourcePenalty = busySources.length
-                ? `CASE WHEN payload->>'source'=ANY($1::text[]) THEN 1 ELSE 0 END,`
+                ? `CASE WHEN t.payload->>'source'=ANY($1::text[]) THEN 1 ELSE 0 END,`
                 : '';
-            const candidate = await client.query(`SELECT id,work_key
-        FROM importer_lite_tasks
-        WHERE state='READY' AND monitoring=false AND priority=2 AND task_type='CATALOG'
-          AND next_run_at<=now() AND payload ? 'historicalP1Backfill'
-          AND COALESCE(payload->>'deferBehindReadyImport','false')='true'
-        ORDER BY ${sourcePenalty} next_run_at,created_at,id
-        LIMIT 1 FOR UPDATE SKIP LOCKED`, busySources.length ? [busySources] : []);
+            const candidate = await client.query(`SELECT t.id,t.work_key
+        FROM (
+          SELECT work_key FROM importer_lite_ready_works
+          WHERE priority <= 2 AND operation_rank <= 2 AND next_run_at <= now()
+          ORDER BY priority ASC, operation_rank DESC, next_run_at ASC
+          LIMIT 64
+        ) rw
+        JOIN importer_lite_tasks t
+          ON t.work_key = rw.work_key
+         AND t.state='READY' AND t.monitoring=false AND t.priority=2 AND t.task_type='CATALOG'
+         AND t.next_run_at<=now() AND t.payload ? 'historicalP1Backfill'
+         AND COALESCE(t.payload->>'deferBehindReadyImport','false')='true'
+        ORDER BY ${sourcePenalty} t.next_run_at,t.created_at,t.id
+        LIMIT 1 FOR UPDATE OF t SKIP LOCKED`, busySources.length ? [busySources] : []);
             const row = candidate.rows[0];
             if (!row) {
                 await client.query('COMMIT');
@@ -2654,7 +2748,8 @@ export class LiteRepository {
      */
     async recoverDuplicateCanonicalCatalogFailures(limit = 32) {
         const maximum = Math.max(1, Math.min(64, limit));
-        const client = await this.db.connect();
+        const metaDb = this.sourceMetadataDb || this.db;
+        const client = await metaDb.connect();
         try {
             await client.query('BEGIN');
             const recovered = await client.query(`WITH picked AS (
@@ -2688,7 +2783,8 @@ export class LiteRepository {
      */
     async reopenP0MonitorsBlockedByDiscoveryPolicy(limit = 64) {
         const maximum = Math.max(1, Math.min(64, limit));
-        const client = await this.db.connect();
+        const metaDb = this.sourceMetadataDb || this.db;
+        const client = await metaDb.connect();
         try {
             await client.query('BEGIN');
             const reopened = await client.query(`
@@ -3468,9 +3564,16 @@ export class LiteRepository {
             if (cooldownUntil) {
                 const deferred = await client.query(`WITH candidates AS (
             SELECT t.id
-            FROM importer_lite_tasks t
-            WHERE t.state='READY' AND t.monitoring=false AND t.task_type='IMPORT_CHAPTER'
-              AND EXISTS (
+            FROM (
+              SELECT work_key FROM importer_lite_ready_works
+              WHERE operation_rank = 1
+              ORDER BY priority ASC, next_run_at ASC
+              LIMIT 256
+            ) rw
+            JOIN importer_lite_tasks t
+              ON t.work_key = rw.work_key
+             AND t.state='READY' AND t.monitoring=false AND t.task_type='IMPORT_CHAPTER'
+            WHERE EXISTS (
                 SELECT 1 FROM importer_lite_chapter_sources blocked
                 WHERE blocked.work_id=t.work_id AND blocked.canonical_chapter_key=t.chapter_key
                   AND blocked.source=$1 AND blocked.confirmed=true AND blocked.has_chapter=true
@@ -3492,7 +3595,7 @@ export class LiteRepository {
                   AND (alternative_health.cooldown_until IS NULL OR alternative_health.cooldown_until<=now())
               )
             LIMIT 256
-            FOR UPDATE SKIP LOCKED
+            FOR UPDATE OF t SKIP LOCKED
           ), updated AS (
             UPDATE importer_lite_tasks t
             SET state='RETRY_WAIT',lease_owner=NULL,lease_until=NULL,
@@ -3613,8 +3716,8 @@ export class LiteRepository {
                  AND COALESCE(h.health,'HEALTHY') IN ('HEALTHY','DEGRADED','RATE_LIMITED')
                  AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
              )
-           ORDER BY task.next_run_at,task.id
-           LIMIT 512
+           ORDER BY task.next_run_at ASC, task.work_key ASC, task.created_at ASC, task.id ASC
+           LIMIT 128
          ), due_candidates AS (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,
@@ -3676,12 +3779,8 @@ export class LiteRepository {
            SET state='READY',reason=NULL,updated_at=now()
            FROM picked WHERE t.id=picked.id
            RETURNING picked.work_key
-         ), refreshed AS (
-           SELECT public.importer_lite_refresh_ready_work(work_key)
-           FROM (SELECT DISTINCT work_key FROM reopened) affected
          )
-         SELECT (SELECT count(*)::int FROM reopened) AS count, count(*)::int AS refreshed
-         FROM refreshed`, [SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS, SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN,
+         SELECT work_key FROM reopened`, [SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS, SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN,
                 SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE, SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK]) : { rows: [], rowCount: 0 };
             // Recover only a receipt that is independently proven by a durable
             // Telegram media row with the same reserved id and content hash. Since
@@ -3758,16 +3857,22 @@ export class LiteRepository {
             // once after verifying presentation and every *positional* media
             // reference. This is bounded and fenced in the checkpoint so another
             // genuine publish error never becomes a retry loop.
-            const repairedPublishes = await client.query(`WITH picked AS (
-          SELECT p.id,p.work_key
-          FROM importer_lite_tasks p
-          JOIN importer_lite_tasks i ON i.id=(p.payload->>'importTaskId')::uuid
+            const repairedPublishes = await client.query(`WITH completed_imports AS (
+          SELECT i.id, i.work_id, i.work_key, i.chapter_key, i.checkpoint
+          FROM importer_lite_tasks i
+          WHERE i.state='DONE' AND i.task_type='IMPORT_CHAPTER'
+            AND i.checkpoint ? 'mediaIds' AND NOT i.checkpoint ? 'publishedAt'
+          ORDER BY i.updated_at
+          LIMIT $1
+        ), picked AS (
+          SELECT p.id, p.work_key
+          FROM completed_imports i
+          JOIN importer_lite_tasks p
+            ON p.idempotency_key = 'lite:publish:' || i.work_id::text || ':' || i.chapter_key
           JOIN works w ON w.id=i.work_id
           LEFT JOIN media cover ON cover.id=w.cover_id
           WHERE p.task_type='PUBLISH' AND p.state='BLOCKED' AND p.reason='MAX_ATTEMPTS_EXHAUSTED'
             AND NOT p.checkpoint ? 'publishIntegrityRepairV1'
-            AND i.task_type='IMPORT_CHAPTER' AND i.state='DONE'
-            AND i.checkpoint ? 'mediaIds' AND NOT i.checkpoint ? 'publishedAt'
             AND w.title IS NOT NULL AND w.slug IS NOT NULL
             AND cover.storage_ready=true AND cover.bytes>=1500
             AND COALESCE(jsonb_array_length(i.checkpoint->'mediaIds'),0)>0
@@ -3783,14 +3888,21 @@ export class LiteRepository {
           FROM picked WHERE p.id=picked.id RETURNING picked.work_key`, [limit]);
             const disabledBackfillCatalogs = recoverSourceCooldowns ? await client.query(`WITH picked AS (
            SELECT t.id, t.work_key
-           FROM importer_lite_tasks t
+           FROM (
+             SELECT work_key FROM importer_lite_ready_works
+             WHERE priority <= 2 AND operation_rank <= 2
+             ORDER BY operation_rank DESC, next_run_at ASC
+             LIMIT 64
+           ) rw
+           JOIN importer_lite_tasks t
+             ON t.work_key = rw.work_key
+            AND t.state = 'READY'
+            AND t.monitoring = false
+            AND t.priority = 2
+            AND t.task_type = 'CATALOG'
+            AND t.payload ? 'historicalP1Backfill'
            JOIN importer_sources s ON s.id = t.payload->>'source'
-           WHERE t.state = 'READY'
-             AND t.monitoring = false
-             AND t.priority = 2
-             AND t.task_type = 'CATALOG'
-             AND t.payload ? 'historicalP1Backfill'
-             AND (
+           WHERE (
                s.enabled = false
                OR COALESCE(s.status, 'ACTIVE') = 'DISABLED'
                OR COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = false
@@ -3804,32 +3916,52 @@ export class LiteRepository {
            FROM picked
           WHERE t.id = picked.id
          RETURNING picked.work_key`, [Math.min(64, Math.max(16, limit))]) : noUploadOutcomeRecovery;
-            const demotedOutOfSequenceP0 = recoverSourceCooldowns ? await client.query(`WITH picked AS (
-           SELECT t.id, t.work_key
+            const demotedOutOfSequenceP0 = recoverSourceCooldowns ? await client.query(`WITH candidate_p0 AS (
+           SELECT t.id, t.work_id, t.work_key, t.payload
+           FROM (
+             SELECT work_key FROM importer_lite_ready_works
+             WHERE priority <= 2 AND operation_rank = 1
+             ORDER BY priority ASC, next_run_at ASC
+             LIMIT 128
+           ) rw
+           JOIN importer_lite_tasks t
+             ON t.work_key = rw.work_key
+            AND t.state = 'READY'
+            AND t.priority = 1
+            AND t.base_priority = 1
+            AND t.monitoring = false
+            AND t.task_type = 'IMPORT_CHAPTER'
+            AND t.work_id IS NOT NULL
+            AND NULLIF(t.payload->>'orderKey', '') IS NOT NULL
+           UNION ALL
+           SELECT t.id, t.work_id, t.work_key, t.payload
            FROM importer_lite_tasks t
-           WHERE t.state IN ('READY', 'RETRY_WAIT')
+           WHERE t.state IN ('RUNNING', 'RETRY_WAIT')
+             AND t.state = 'RETRY_WAIT'
              AND t.monitoring = false
              AND t.priority = 1
              AND t.base_priority = 1
              AND t.task_type = 'IMPORT_CHAPTER'
              AND t.work_id IS NOT NULL
              AND NULLIF(t.payload->>'orderKey', '') IS NOT NULL
-             AND NOT EXISTS (
+         ), picked AS (
+           SELECT c.id, c.work_key
+           FROM candidate_p0 c
+           JOIN importer_lite_tasks t ON t.id = c.id
+           WHERE NOT EXISTS (
                SELECT 1 FROM importer_staff_requests sr
-               WHERE sr.work_id = t.work_id
+               WHERE sr.work_id = c.work_id
                  AND sr.status IN ('QUEUED', 'IMPORTING', 'RETRYING', 'ACTIVE')
              )
              AND EXISTS (
                SELECT 1
                FROM importer_lite_tasks prev
-               WHERE prev.work_id = t.work_id
-                 AND prev.monitoring = false
+               WHERE prev.work_key = c.work_key
                  AND prev.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
-                 AND NULLIF(prev.payload->>'orderKey', '') < NULLIF(t.payload->>'orderKey', '')
-                 AND (
-                   prev.state IN ('READY', 'RUNNING')
-                   OR (prev.state = 'RETRY_WAIT' AND prev.attempts < prev.max_attempts)
-                 )
+                 AND prev.state IN ('RUNNING', 'READY', 'RETRY_WAIT')
+                 AND prev.monitoring = false
+                 AND NULLIF(prev.payload->>'orderKey', '') < NULLIF(c.payload->>'orderKey', '')
+                 AND (prev.state <> 'RETRY_WAIT' OR prev.attempts < prev.max_attempts)
                  AND NOT (
                    prev.task_type = 'IMPORT_CHAPTER'
                    AND prev.chapter_key IS NOT NULL
@@ -3844,7 +3976,7 @@ export class LiteRepository {
            FROM picked
           WHERE t.id = picked.id
          RETURNING picked.work_key`, [Math.min(64, Math.max(16, limit))]) : noUploadOutcomeRecovery;
-            for (const key of new Set([...leases.rows, ...retries.rows, ...uploads.rows, ...reopenedUnknownTasks.rows, ...ready.rows, ...repairedPublishes.rows, ...disabledBackfillCatalogs.rows, ...demotedOutOfSequenceP0.rows].map((row) => row.work_key))) {
+            for (const key of new Set([...leases.rows, ...retries.rows, ...sourceCooldownRecovery.rows, ...uploads.rows, ...reopenedUnknownTasks.rows, ...ready.rows, ...repairedPublishes.rows, ...disabledBackfillCatalogs.rows, ...demotedOutOfSequenceP0.rows].map((row) => row.work_key))) {
                 await this.refreshReadyWork(client, key);
             }
             await client.query('COMMIT');
@@ -3855,7 +3987,7 @@ export class LiteRepository {
             return { leases: leaseRetries, retries: readyRetries, exhausted, uploads: uploads.rowCount || 0,
                 uploadReceiptRecoveries: provenUploadReceipts.rowCount || 0,
                 publishable: ready.rowCount || 0, publishRepairs: repairedPublishes.rowCount || 0,
-                sourceCooldownRecoveries: Number(sourceCooldownRecovery.rows[0]?.count || 0) };
+                sourceCooldownRecoveries: sourceCooldownRecovery.rowCount || 0 };
         }
         catch (error) {
             await client.query('ROLLBACK').catch(() => { });
