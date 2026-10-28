@@ -30,7 +30,10 @@ const headers = {
 };
 
 async function apiGet(endpoint) {
-  const url = `https://api.discloud.app/v2${endpoint}`;
+  const cleanEndpoint = endpoint.startsWith('/v2/')
+    ? endpoint.slice(3)
+    : (endpoint.startsWith('/') ? endpoint : `/${endpoint}`);
+  const url = `https://api.discloud.app/v2${cleanEndpoint}`;
   try {
     const res = await fetch(url, { headers });
     const text = await res.text();
