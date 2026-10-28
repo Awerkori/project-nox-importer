@@ -579,7 +579,7 @@ export class ImporterLiteRuntime {
     if (this.adaptiveChapterAdmissionCap <= 0) {
       this.adaptiveChapterAdmissionCap = ceiling;
     }
-    const floor = Math.min(2, ceiling);
+    const floor = Math.min(6, ceiling);
     const current = Math.min(ceiling, Math.max(floor, this.adaptiveChapterAdmissionCap));
     const siteLatencyMs = this.lastSiteProbe.latencyMs;
     const dbSnap = (telemetryCollector.getSnapshotReport() as any)?.database || {};
@@ -588,8 +588,8 @@ export class ImporterLiteRuntime {
     const memState = this.memoryPressureGuard.snapshot().state;
 
     const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
-      || (typeof siteLatencyMs === 'number' && siteLatencyMs > 1_050);
-    const highYsqlPressure = poolWaiting >= 4 && sqlP95Ms > 1_500;
+      || (typeof siteLatencyMs === 'number' && siteLatencyMs > 1_800);
+    const highYsqlPressure = poolWaiting >= 8 && sqlP95Ms > 2_500;
 
     if (highSitePressure || highYsqlPressure) {
       this.adaptiveHealthyStreak = 0;
@@ -603,15 +603,15 @@ export class ImporterLiteRuntime {
     }
 
     const healthyForRamp = (this.lastSiteProbe.state === 'HEALTHY' || this.lastSiteProbe.state === 'UNKNOWN')
-      && (siteLatencyMs === null || siteLatencyMs <= 750)
-      && poolWaiting <= 1
+      && (siteLatencyMs === null || siteLatencyMs <= 1_400)
+      && poolWaiting <= 3
       && memState === 'NORMAL';
 
     if (healthyForRamp) {
       this.adaptiveHealthyStreak++;
-      if (current < ceiling && this.adaptiveHealthyStreak >= 2) {
+      if (current < ceiling && this.adaptiveHealthyStreak >= 1) {
         this.adaptiveHealthyStreak = 0;
-        const steppedUp = Math.min(ceiling, current + 1);
+        const steppedUp = Math.min(ceiling, current + 2);
         this.adaptiveChapterAdmissionCap = steppedUp;
         this.adaptiveAdmissionReason = steppedUp === ceiling ? 'adaptive-restored-ceiling' : 'adaptive-step-up';
         this.applyEffectiveChapterAdmissionCap(steppedUp, this.adaptiveAdmissionReason, current);
