@@ -1,6 +1,9 @@
 name: Deploy DIScloud
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -12,8 +15,7 @@ concurrency:
 
 jobs:
   deploy:
-    # A manually dispatched workflow can be selected from another branch in
-    # the UI. Production deploys must always use the reviewed main ref.
+    # Production deploys must always use the reviewed main ref.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -48,6 +50,11 @@ jobs:
       - name: Build deployment artifact
         run: npm run build
 
+      - name: Run CI safety validations
+        env:
+          YUGABYTE_PASSWORD: test-ci-placeholder-password
+        run: npx vitest run tests/auto-heal-watchdog.test.ts
+
       - name: Verify generated runtime artifact
         run: |
           test -f build/index.js
@@ -71,3 +78,10 @@ jobs:
             package.json
             package-lock.json
             README.md
+
+      - name: Verify deployed runtime and site health
+        env:
+          DISCLOUD_TOKEN: ${{ secrets.DISCLOUD_TOKEN }}
+          DISCLOUD_APP_ID: ${{ steps.resolve_discloud_app.outputs.app_id }}
+          DISCLOUD_IS_TEAM: ${{ steps.resolve_discloud_app.outputs.is_team }}
+        run: node scripts/discloud-verify-deployment.mjs
