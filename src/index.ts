@@ -46,9 +46,12 @@ async function main() {
   rootLogger.info(`Starting Project Nox Importer daemon... | Build: ${buildCommit}`);
   let buildMetadata: Record<string, unknown> = { buildId: buildCommit };
   try { buildMetadata = JSON.parse(buildCommit); } catch {}
-  try {
-    buildMetadata.gitSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch {}
+  // Only probe local git if gitSha was not baked into BUILD_ID during build
+  if (!buildMetadata.gitSha || String(buildMetadata.gitSha).startsWith('artifact:') || buildMetadata.gitSha === 'unknown') {
+    try {
+      buildMetadata.gitSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch {}
+  }
   buildMetadata.rolloutRevision = rolloutRevision;
   telemetryCollector.setRuntimeFingerprint({ ...buildMetadata, nodeVersion: process.version, bootedAt: new Date().toISOString() });
 

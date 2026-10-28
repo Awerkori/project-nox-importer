@@ -44,10 +44,13 @@ async function main() {
         buildMetadata = JSON.parse(buildCommit);
     }
     catch { }
-    try {
-        buildMetadata.gitSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    // Only probe local git if gitSha was not baked into BUILD_ID during build
+    if (!buildMetadata.gitSha || String(buildMetadata.gitSha).startsWith('artifact:') || buildMetadata.gitSha === 'unknown') {
+        try {
+            buildMetadata.gitSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        }
+        catch { }
     }
-    catch { }
     buildMetadata.rolloutRevision = rolloutRevision;
     telemetryCollector.setRuntimeFingerprint({ ...buildMetadata, nodeVersion: process.version, bootedAt: new Date().toISOString() });
     const config = getConfig();
