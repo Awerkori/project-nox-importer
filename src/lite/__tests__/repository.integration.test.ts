@@ -41,6 +41,7 @@ const sourceCooldownDueIndexMigration = readFileSync(resolve(process.cwd(), 'mig
 const progressSnapshotIndexesMigration = readFileSync(resolve(process.cwd(), 'migrations/20261025073000_lite_progress_snapshot_indexes.sql'), 'utf8');
 const earliestPendingChapterClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261026053000_lite_claim_earliest_pending_chapter.sql'), 'utf8');
 const readyWorkCanonicalFrontierMigration = readFileSync(resolve(process.cwd(), 'migrations/20261028043000_lite_ready_work_canonical_frontier.sql'), 'utf8');
+const p1FocusGroupsAndFrontierFixMigration = readFileSync(resolve(process.cwd(), 'migrations/20261028190000_lite_p1_focus_groups_and_frontier_fix.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -160,6 +161,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(progressSnapshotIndexesMigration);
   await db.exec(earliestPendingChapterClaimMigration);
   await db.exec(readyWorkCanonicalFrontierMigration);
+  await db.exec(p1FocusGroupsAndFrontierFixMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -969,7 +971,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).tryAcquireBackgroundMetadataBudget()).toEqual(expect.any(Function));
   });
 
-  it('advances due source discovery from the new-work lane when P1 chapters are queued and separates mapped from unmapped works', async () => {
+  it('subordinates P2 new-work discovery to executable P1 backlog and resumes once only terminal/deferred P1 remains', async () => {
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
       VALUES ('00000000-0000-4000-8000-000000000901','source-a','already-mapped',$1::uuid,'p1-a','P1 A','SYNCED')`, [ids.p1a]);
@@ -996,8 +998,16 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     (runtime as any).isRuntimeLeader = true;
 
+    // While executable P1 chapter work exists, new-work discovery is subordinated.
     await (runtime as any).runNewWorkCatalog();
+    expect(adapter.fetchUpdatedWorks).toHaveBeenCalledTimes(0);
 
+    // Terminal BLOCKED P1 tasks must never permanently starve P2 discovery.
+    await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED', reason='ALL_ROUTES_UNAVAILABLE'
+      WHERE idempotency_key='chapter-p1-busy'`);
+    await (runtime as any).queue.hasExecutableOrRecoverableP1Backlog(true);
+
+    await (runtime as any).runNewWorkCatalog();
     expect(adapter.fetchUpdatedWorks).toHaveBeenCalledTimes(1);
     const catalogTasks = await db.query<{ idempotency_key: string; work_id: string | null }>(`
       SELECT idempotency_key, work_id::text AS work_id
@@ -4672,7 +4682,7 @@ describe('LiteRepository against the additive Lite migration', () => {
         AND payload ? 'historicalManifestRepair'`, [ids.p1a]);
     expect(p1.rows[0].count).toBe(35);
     expect((await db.query(`SELECT priority FROM importer_lite_tasks
-      WHERE idempotency_key='lite:chapter:' || $1 || ':pt-br|default|chapter|37|-'`, [ids.p1a])).rows[0].priority).toBe(1);
+      WHERE idempotency_key='lite:chapter:' || $1 || ':pt-br|default|chapter|37|-'`, [ids.p1a])).rows[0].priority).toBe(2);
     expect((await repo.claim('manifest-gap-worker', 120))?.chapterKey).toBe('pt-br|default|chapter|2|-');
   });
 
@@ -6337,5 +6347,275 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(result).toBe('completed');
     expect(calls).toEqual([1, 2]);
     expect(batcher.snapshot()).toMatchObject({ sampledFlushes: 2, totalItems: 3, totalWrites: 2, failedFlushes: 0 });
+  });
+
+  it('does not skip uncovered P0 mappings when missing count exceeds limit and revives BLOCKED monitors', async () => {
+    await db.query(`UPDATE importer_sources SET enabled=false WHERE id='source-b'`);
+    const workIds = Array.from({ length: 5 }, (_, index) =>
+      `00000000-0000-4000-8000-${String(2200 + index).padStart(12, '0')}`,
+    );
+    for (const [index, workId] of workIds.entries()) {
+      const sourceWorkId = `p0-no-skip-${String(index + 1).padStart(2, '0')}`;
+      await db.query(`INSERT INTO works(id,title,slug,cover_id,published)
+        VALUES($1::uuid,$2,$3,$4::uuid,true)`, [workId, `NoSkip ${index}`, `noskip-${index}`, ids.cover]);
+      await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+        VALUES($1::uuid,'source-a',$2,$3::uuid,'ACTIVE')`, [
+        `00000000-0000-4000-8000-${String(2300 + index).padStart(12, '0')}`, sourceWorkId, workId,
+      ]);
+      if (index === 0) {
+        await repo.enqueue({
+          taskType: 'CATALOG', workId, workKey: `work:${workId}`, priority: 'P2', monitoring: true,
+          idempotencyKey: `lite:p0-monitor:source-a:${sourceWorkId}`,
+          payload: { source: 'source-a', sourceWorkId, p0MonitorCoverage: true },
+        });
+        await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED', reason='TRANSIENT_EXHAUSTED'
+          WHERE idempotency_key=$1`, [`lite:p0-monitor:source-a:${sourceWorkId}`]);
+      }
+    }
+
+    // With limit=2, scanLimit=16 sees all 5 uncovered/blocked mappings, processes 2,
+    // and must keep cursor at p0-no-skip-02 so 03..05 are enrolled on subsequent turns.
+    const first = await repo.refillP0MonitorCoverage(2);
+    expect(first).toEqual({ source: 'source-a', admitted: 1, revived: 1 });
+    expect((await db.query(`SELECT value FROM settings WHERE key='p0_monitor_coverage_mapping:source-a'`)).rows[0].value)
+      .toBe('p0-no-skip-02');
+
+    const second = await repo.refillP0MonitorCoverage(2);
+    expect(second).toEqual({ source: 'source-a', admitted: 2, revived: 0 });
+    const third = await repo.refillP0MonitorCoverage(2);
+    expect(third).toEqual({ source: 'source-a', admitted: 1, revived: 0 });
+
+    const enrolledCount = await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE monitoring=true AND state IN ('READY','RETRY_WAIT') AND payload->>'source'='source-a'`);
+    expect(enrolledCount.rows[0].count).toBe(5);
+  });
+
+  it('enforces Nano Machine P0->P1 canonical sequence rule and transient-cooldown frontier barrier', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1a]);
+    // Chapter 1 is published; chapter 2 is pending P1 historical backfill.
+    await db.query(`INSERT INTO chapters(id,work_id,number,display_number,canonical_chapter_key,published_at)
+      VALUES('00000000-0000-4000-8000-000000000701',$1,1,'1','pt-br|default|chapter|1|-',now())`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_chapter_mappings(source,source_chapter_id,chapter_id)
+      VALUES('source-a','ch-1','00000000-0000-4000-8000-000000000701')`);
+    await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key)
+      VALUES($1,'pt-br|default|chapter|1|-','00000000-0000-4000-8000-000000000701','1','n|000000000001|000000000000|||')`, [ids.p1a]);
+    await repo.enqueue({
+      taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
+      chapterKey: 'pt-br|default|chapter|2|-', priority: 'P1',
+      idempotencyKey: `lite:chapter:${ids.p1a}:pt-br|default|chapter|2|-`,
+      payload: { displayNumber: '2', orderKey: 'n|000000000002|000000000000|||', language: 'pt-BR', edition: 'default', manifestP1Repair: true },
+    });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
+      VALUES($1::uuid,'pt-br|default|chapter|2|-','source-a','nano','ch-2','pt-BR','default','n|000000000002|000000000000|||',10,true,true)`, [ids.p1a]);
+
+    // P0 monitor observes brand-new chapter 3 while chapter 2 is still pending in P1.
+    await repo.enqueue({
+      taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2', monitoring: true,
+      idempotencyKey: 'lite:p0-monitor:source-a:nano',
+      payload: { source: 'source-a', sourceWorkId: 'nano', p0MonitorCoverage: true },
+    });
+    const watch = await repo.claimMonitor('nano-monitor', 120);
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, {
+        get: () => ({
+          id: 'source-a',
+          fetchWorkSnapshot: async () => ({
+            details: { sourceWorkId: 'nano', title: 'P1 A', slug: 'p1-a', status: 'ONGOING' as const, language: 'pt-BR' },
+            chapters: [
+              { sourceChapterId: 'ch-1', number: 1, displayNumber: '1', title: 'Ch 1' },
+              { sourceChapterId: 'ch-2', number: 2, displayNumber: '2', title: 'Ch 2' },
+              { sourceChapterId: 'ch-3', number: 3, displayNumber: '3', title: 'Ch 3' },
+            ],
+          }),
+        }),
+      } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
+    await (runtime as any).catalog(watch, 'nano-monitor');
+
+    // Chapter 3 must be incorporated into P1 (priority=2), NOT P0 (priority=1).
+    const ch3 = await db.query(`SELECT priority FROM importer_lite_tasks
+      WHERE idempotency_key=$1`, [`lite:chapter:${ids.p1a}:pt-br|default|chapter|3|-`]);
+    expect(ch3.rows[0].priority).toBe(2);
+
+    // Even if source-a enters a transient 60s health cooldown, chapter 2 must NOT be skipped to claim chapter 3!
+    await db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures)
+      VALUES('source-a','RATE_LIMITED',now()+interval '60 seconds',1)
+      ON CONFLICT(source) DO UPDATE SET health='RATE_LIMITED', cooldown_until=excluded.cooldown_until`);
+    expect(await repo.claim('cooldown-barrier-worker', 120)).toBeNull();
+
+    // Clear cooldown and complete chapters 2 and 3; next P0 release (chapter 4) must resume P0 fast-lane (priority=1)!
+    await db.query(`DELETE FROM importer_lite_source_health WHERE source='source-a'`);
+    await db.query(`UPDATE importer_lite_ready_works SET next_run_at=now() WHERE work_key=$1`, [`work:${ids.p1a}`]);
+    const claimedCh2 = await repo.claim('drain-worker', 120);
+    expect(claimedCh2?.chapterKey).toBe('pt-br|default|chapter|2|-');
+    await db.query(`UPDATE importer_lite_tasks SET state='DONE', lease_owner=NULL, lease_until=NULL
+      WHERE work_id=$1 AND task_type='IMPORT_CHAPTER'`, [ids.p1a]);
+    await db.query(`INSERT INTO chapters(id,work_id,number,display_number,canonical_chapter_key,published_at) VALUES
+      ('00000000-0000-4000-8000-000000000702',$1,2,'2','pt-br|default|chapter|2|-',now()),
+      ('00000000-0000-4000-8000-000000000703',$1,3,'3','pt-br|default|chapter|3|-',now())`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_chapter_mappings(source,source_chapter_id,chapter_id) VALUES
+      ('source-a','ch-2','00000000-0000-4000-8000-000000000702'),
+      ('source-a','ch-3','00000000-0000-4000-8000-000000000703')`);
+    await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key) VALUES
+      ($1,'pt-br|default|chapter|2|-','00000000-0000-4000-8000-000000000702','2','n|000000000002|000000000000|||'),
+      ($1,'pt-br|default|chapter|3|-','00000000-0000-4000-8000-000000000703','3','n|000000000003|000000000000|||')`, [ids.p1a]);
+
+    await db.query(`UPDATE importer_lite_tasks SET state='READY', next_run_at=now() WHERE id=$1`, [watch!.id]);
+    const secondWatch = await repo.claimMonitor('nano-monitor', 120);
+    const caughtUpRuntime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, {
+        get: () => ({
+          id: 'source-a',
+          fetchWorkSnapshot: async () => ({
+            details: { sourceWorkId: 'nano', title: 'P1 A', slug: 'p1-a', status: 'ONGOING' as const, language: 'pt-BR' },
+            chapters: [
+              { sourceChapterId: 'ch-1', number: 1, displayNumber: '1', title: 'Ch 1' },
+              { sourceChapterId: 'ch-2', number: 2, displayNumber: '2', title: 'Ch 2' },
+              { sourceChapterId: 'ch-3', number: 3, displayNumber: '3', title: 'Ch 3' },
+              { sourceChapterId: 'ch-4', number: 4, displayNumber: '4', title: 'Ch 4' },
+            ],
+          }),
+        }),
+      } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (caughtUpRuntime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
+    await (caughtUpRuntime as any).catalog(secondWatch, 'nano-monitor');
+
+    const ch4 = await db.query(`SELECT priority FROM importer_lite_tasks
+      WHERE idempotency_key=$1`, [`lite:chapter:${ids.p1a}:pt-br|default|chapter|4|-`]);
+    expect(ch4.rows[0].priority).toBe(1);
+  });
+
+  it('prioritizes P1 focus group works with secondary spillover, excluded-source skipping, and completion tracking', async () => {
+    const focusWork = ids.p1a;
+    const secondaryWork = ids.p1b;
+    await repo.enqueue({
+      taskType: 'IMPORT_CHAPTER', workId: focusWork, workKey: `work:${focusWork}`,
+      chapterKey: 'focus-ch-1', priority: 'P1', idempotencyKey: 'focus-ch-1',
+      payload: { orderKey: 'n|000001', language: 'pt-BR', edition: 'default' },
+    });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
+      VALUES($1::uuid,'focus-ch-1','source-a','focus','focus-1','pt-BR','default','n|000001',10,true,true)`, [focusWork]);
+
+    await repo.enqueue({
+      taskType: 'IMPORT_CHAPTER', workId: secondaryWork, workKey: `work:${secondaryWork}`,
+      chapterKey: 'secondary-ch-1', priority: 'P1', idempotencyKey: 'secondary-ch-1',
+      payload: { orderKey: 'n|000001', language: 'pt-BR', edition: 'default' },
+    });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
+      VALUES($1::uuid,'secondary-ch-1','source-b','sec','sec-1','pt-BR','default','n|000001',10,true,true)`, [secondaryWork]);
+
+    // Make secondaryWork appear older in ready_works so default FIFO would pick secondaryWork,
+    // while preferFocus=true picks focusWork first!
+    await db.query(`UPDATE importer_lite_ready_works SET last_claimed_at = now() - interval '10 minutes' WHERE work_key=$1`, [`work:${secondaryWork}`]);
+    await db.query(`UPDATE importer_lite_ready_works SET last_claimed_at = now() - interval '1 minute' WHERE work_key=$1`, [`work:${focusWork}`]);
+
+    // When source-a is excluded (fair-share saturated), claim jumps directly to source-b (secondaryWork)!
+    const excludedClaim = await repo.claim('fair-skip-worker', 120, {
+      focusWorkKeys: [`work:${focusWork}`],
+      preferFocus: true,
+      excludedSources: ['source-a'],
+    });
+    expect(excludedClaim?.idempotencyKey).toBe('secondary-ch-1');
+    expect(await repo.yieldForSourceFairness(excludedClaim!, 'fair-skip-worker', 50)).toBe(true);
+    await db.query(`UPDATE importer_lite_tasks SET next_run_at=now() WHERE id=$1`, [excludedClaim!.id]);
+    await db.query(`UPDATE importer_lite_ready_works SET next_run_at=now() WHERE work_key=$1`, [`work:${secondaryWork}`]);
+
+    // With no excluded source and preferFocus=true, focusWork is claimed first;
+    // while focusWork is RUNNING, the very next preferFocus=true claim automatically spills over to secondaryWork!
+    const firstClaim = await repo.claim('focus-worker-1', 120, {
+      focusWorkKeys: [`work:${focusWork}`],
+      preferFocus: true,
+    });
+    expect(firstClaim?.idempotencyKey).toBe('focus-ch-1');
+
+    const spilloverClaim = await repo.claim('focus-worker-2', 120, {
+      focusWorkKeys: [`work:${focusWork}`],
+      preferFocus: true,
+    });
+    expect(spilloverClaim?.idempotencyKey).toBe('secondary-ch-1');
+
+    // Track focus group refresh & completion accounting once focusWork finishes its backlog.
+    await db.query(`UPDATE importer_lite_tasks SET state='READY', lease_owner=NULL, lease_until=NULL WHERE id IN ($1,$2)`, [firstClaim!.id, spilloverClaim!.id]);
+    await db.query(`SELECT public.importer_lite_refresh_ready_work($1), public.importer_lite_refresh_ready_work($2)`, [`work:${focusWork}`, `work:${secondaryWork}`]);
+    const initialSnap = await repo.refreshP1FocusGroup({ targetSize: 15, maxPerSource: 3 });
+    expect(initialSnap.focusWorkCount).toBe(2);
+
+    await db.query(`UPDATE importer_lite_tasks SET state='DONE', lease_owner=NULL, lease_until=NULL WHERE id=$1`, [firstClaim!.id]);
+    await db.query(`INSERT INTO importer_lite_chapters(work_id,canonical_chapter_key,chapter_id,display_number,order_key)
+      VALUES($1,'focus-ch-1',$2,'1','n|000001')`, [focusWork, ids.chapter]);
+    await db.query(`SELECT public.importer_lite_refresh_ready_work($1)`, [`work:${focusWork}`]);
+
+    const afterCompletion = await repo.refreshP1FocusGroup({ targetSize: 15, maxPerSource: 3 });
+    expect(afterCompletion.focusWorkCount).toBe(1);
+    expect(afterCompletion.completedWorksSinceBoot).toBe(1);
+  });
+
+  it('publishes inline atomically on the worker hot path without creating an intermediate PUBLISH task', async () => {
+    await repo.enqueue({
+      taskType: 'IMPORT_CHAPTER', workId: ids.publish, workKey: `work:${ids.publish}`,
+      chapterKey: 'pt-br|default|chapter|9|-', priority: 'P1', idempotencyKey: 'inline-publish-ch-9',
+      payload: { displayNumber: '9', chapterTitle: 'Inline Nine', orderKey: 'n|000009', language: 'pt-BR', edition: 'default' },
+    });
+    await db.query(`INSERT INTO importer_lite_chapter_sources
+      (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed)
+      VALUES($1::uuid,'pt-br|default|chapter|9|-','source-a','pub','src-ch-9','pt-BR','default','n|000009',10,true)`, [ids.publish]);
+
+    const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL+XQAAAABJRU5ErkJggg==', 'base64'));
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(png, { status: 200 })));
+    try {
+      const storage: StorageProvider = {
+        upload: vi.fn(async () => 'telegram-inline-9'),
+        healthCheck: async () => true,
+        getProviderKey: () => 'telegram',
+        getLastBotReference: () => 'bot-1',
+        getLastShardId: () => '00000000-0000-4000-8000-000000000801',
+        getLastChannelId: () => 'chan-1',
+        getLastMessageId: () => 901,
+      };
+      const adapter = {
+        id: 'source-a',
+        fetchChapterPages: async () => ['https://source-a.test/inline-9.png'],
+      };
+      const runtime = new ImporterLiteRuntime(
+        poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+        storage,
+        {
+          IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009',
+          DOWNLOAD_INFLIGHT_CONCURRENCY: 2,
+          BUFFERED_PAGE_CONCURRENCY: 2,
+          BATCH_PAGE_DOWNLOAD_CONCURRENCY: 2,
+          SOURCE_OPERATION_TIMEOUT_MS: 5_000,
+          TELEGRAM_MEDIA_CONCURRENCY: 2,
+        } as any,
+      );
+
+      const claimed = await repo.claim('inline-worker', 120);
+      expect(claimed?.idempotencyKey).toBe('inline-publish-ch-9');
+      await (runtime as any).handle(claimed, 'inline-worker', { inlinePublish: true });
+
+      const publishTasks = await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks WHERE task_type='PUBLISH'`);
+      expect(publishTasks.rows[0].count).toBe(0);
+
+      const chapterRow = await db.query(`SELECT published_at IS NOT NULL AS is_published FROM chapters
+        WHERE work_id=$1 AND canonical_chapter_key='pt-br|default|chapter|9|-'`, [ids.publish]);
+      expect(chapterRow.rows[0].is_published).toBe(true);
+
+      const events = await db.query(`SELECT source, work_id::text AS work_id, priority FROM importer_publication_events`);
+      expect(events.rows).toEqual([{ source: 'source-a', work_id: ids.publish, priority: 2 }]);
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
   });
 });

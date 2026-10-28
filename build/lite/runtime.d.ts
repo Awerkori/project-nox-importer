@@ -115,6 +115,11 @@ export declare class ImporterLiteRuntime {
     private sourceFairnessRefresh;
     private manualProtectiveStop;
     private operatorChapterAdmissionCap;
+    private p1ClaimCounter;
+    private lastP1FocusRefreshAt;
+    private p1FocusRefreshInFlight;
+    private readonly historicalP1CatalogExecGate;
+    private p2SubordinationState;
     private lastSiteProbe;
     /**
      * A queued checkout from the importer's two-connection pool is a local,
@@ -209,6 +214,8 @@ export declare class ImporterLiteRuntime {
      * consumes a chapter admission or page/download permit.
      */
     private refillP0MonitorCoverage;
+    private refreshP1FocusGroupNow;
+    private runHistoricalP1CatalogTurn;
     private runRecoveryTurn;
     /**
      * Probe one expired source cooldown per recovery turn using the same

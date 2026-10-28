@@ -141,6 +141,7 @@ export declare class LiteExecutor {
      */
     getPageConcurrencyForSource(source: string): number;
     private hasFairAlternative;
+    getSaturatedFairSources(): string[];
     private sourceSlot;
     /**
      * Re-sample exactly once before a source can grow past the share it would
@@ -167,6 +168,13 @@ export declare class LiteExecutor {
     private legacyMappedChapter;
     private mapCanonicalChapter;
     private createOrLoadChapter;
-    importChapter(task: LiteTask, workerId: string): Promise<void>;
+    /**
+     * Coalesces the pre-media lease-fenced checkpoint write and fresh canonical
+     * chapter creation into one atomic YSQL round trip (instead of four).
+     */
+    private prepareFreshChapterImport;
+    importChapter(task: LiteTask, workerId: string, options?: {
+        inlinePublish?: boolean;
+    }): Promise<void>;
     publish(task: LiteTask, workerId: string): Promise<void>;
 }
