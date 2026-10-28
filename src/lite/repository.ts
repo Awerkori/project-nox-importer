@@ -393,7 +393,11 @@ export class LiteRepository {
       await client.query(`UPDATE importer_lite_metadata_source_cursor
         SET last_source=$2,updated_at=now() WHERE cursor_name=$1`,
       [P0_MONITOR_COVERAGE_CURSOR, source]);
-      await client.query(`UPDATE settings SET value=$2,updated_at=now() WHERE key=$1`,
+      // `settings` is a legacy shared table.  Production intentionally has
+      // only the key/value contract, whereas isolated test databases may add
+      // an `updated_at` convenience column.  Coverage cursors must not turn
+      // that optional test-only column into a P0 availability dependency.
+      await client.query(`UPDATE settings SET value=$2 WHERE key=$1`,
         [mappingCursorKey, lastScanned]);
       await client.query('COMMIT');
       return { source, admitted, revived };

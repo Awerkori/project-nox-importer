@@ -2657,6 +2657,10 @@ describe('LiteRepository against the additive Lite migration', () => {
 
   it('advances a durable per-source coverage cursor instead of rescanning covered mappings', async () => {
     await db.query(`UPDATE importer_sources SET enabled=false WHERE id='source-b'`);
+    // The shared production settings table has no updated_at column.  The
+    // P0 coverage cursor is durable state, so this legacy schema must remain
+    // fully supported instead of failing the background monitor refill.
+    await db.query(`ALTER TABLE settings DROP COLUMN updated_at`);
     const workIds = Array.from({ length: 9 }, (_, index) =>
       `00000000-0000-4000-8000-${String(1200 + index).padStart(12, '0')}`,
     );
