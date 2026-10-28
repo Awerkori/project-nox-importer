@@ -59,6 +59,12 @@ const METADATA_REPLAY_V4_SOURCE_BURST_PREFIX = 'metadata_replay_v4_source_burst:
 // frontier prevents a deep watch backlog from one source from making another
 // eligible source wait until that backlog has drained.
 const P0_MONITOR_SOURCE_CURSOR = 'p0_monitor';
+// This cursor is intentionally separate from the monitor *claim* cursor.
+// Claim rotation decides which existing watch is fetched next; coverage
+// rotation decides which provider receives its next missing durable watch.
+// Sharing them let a deep backlog on one provider repeatedly steer both
+// decisions, even though the two operations have different fairness goals.
+const P0_MONITOR_COVERAGE_CURSOR = 'p0_monitor_coverage';
 const METADATA_REPLAY_V4_INTERVAL_MS = 20_000;
 const METADATA_REPLAY_V4_WINDOWS_PER_SOURCE_TURN = 4;
 const METADATA_REPLAY_V4_SOURCE_BURST_LIMIT = 3;
@@ -125,6 +131,12 @@ export interface LiteSourcePolicy {
   runnable: boolean;
 }
 
+export interface P0MonitorCoverageRefill {
+  source: string | null;
+  admitted: number;
+  revived: number;
+}
+
 /** A page upload that Telegram has confirmed and now needs one durable receipt. */
 export interface UploadReceiptInput {
   taskId: string;
@@ -186,6 +198,149 @@ export class LiteRepository {
    * serial through the runtime's lane gates.
    */
   constructor(private readonly db: Db, private readonly sourceMetadataDb: Db = db) {}
+
+  /**
+   * Enrol a small, source-rotated slice of existing published ongoing works
+   * into the durable P0 observation lane.
+   *
+   * Older Lite releases only made a recurring watch as a side effect of an
+   * initial P2 catalog pass.  Existing mapped works that predated Lite (or
+   * whose first pass completed before that rule) therefore never received a
+   * P0 check at all.  A healthy monitor executor cannot discover a release
+   * for a work it was never asked to observe.
+   *
+   * This is deliberately a producer, not a second claim path: it creates at
+   * most a small number of `monitoring=true` CATALOG rows for one operational
+   * source.  Those rows remain invisible to normal P1/P2 claims and use the
+   * existing two-permit P0 monitor lane.  No network operation or long-lived
+   * transaction occurs here.
+   */
+  async refillP0MonitorCoverage(limit = 16): Promise<P0MonitorCoverageRefill> {
+    const maximum = Math.max(1, Math.min(32, Math.floor(limit)));
+    const client = await this.sourceMetadataDb.connect();
+    try {
+      await client.query('BEGIN');
+      // Coverage work is optional while the old monitor lane keeps serving
+      // existing watches.  A short statement timeout makes a pathological
+      // provider slice a deferred turn, never a boot or chapter failure.
+      await client.query(`SET LOCAL statement_timeout = '2500ms'`);
+      let cursor = await client.query<{ last_source: string | null }>(`
+        SELECT last_source FROM importer_lite_metadata_source_cursor
+        WHERE cursor_name=$1 FOR UPDATE`, [P0_MONITOR_COVERAGE_CURSOR]);
+      if (!cursor.rows[0]) {
+        await client.query(`INSERT INTO importer_lite_metadata_source_cursor(cursor_name,last_source)
+          VALUES($1,NULL) ON CONFLICT(cursor_name) DO NOTHING`, [P0_MONITOR_COVERAGE_CURSOR]);
+        cursor = await client.query<{ last_source: string | null }>(`
+          SELECT last_source FROM importer_lite_metadata_source_cursor
+          WHERE cursor_name=$1 FOR UPDATE`, [P0_MONITOR_COVERAGE_CURSOR]);
+      }
+      const lastSource = cursor.rows[0]?.last_source || '';
+      // There are only a few dozen providers.  Pick one source first and run
+      // the mapping query only for that source; a global anti-join over every
+      // work was the kind of catalogue scan that previously hurt YSQL.
+      const selected = await client.query<{ source: string }>(`
+        WITH after_cursor AS (
+          SELECT s.id AS source
+          FROM importer_sources s
+          LEFT JOIN importer_lite_source_health h ON h.source=s.id
+          WHERE s.enabled=true AND s.id>$1::text
+            AND ${sourceExecutionEligibilitySql('s')}
+            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)=true
+            AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+            AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+          ORDER BY s.id LIMIT 1
+        ), wrapped AS (
+          SELECT s.id AS source
+          FROM importer_sources s
+          LEFT JOIN importer_lite_source_health h ON h.source=s.id
+          WHERE s.enabled=true AND s.id<=$1::text
+            AND ${sourceExecutionEligibilitySql('s')}
+            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)=true
+            AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+            AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+          ORDER BY s.id LIMIT 1
+        )
+        SELECT source FROM after_cursor
+        UNION ALL SELECT source FROM wrapped
+        LIMIT 1`, [lastSource]);
+      const source = selected.rows[0]?.source || null;
+      if (!source) {
+        await client.query('COMMIT');
+        return { source: null, admitted: 0, revived: 0 };
+      }
+
+      // `lite:catalog` is the original durable identity used by a first
+      // catalog pass.  A successful old pass can be revived as its recurring
+      // watch.  A READY/RUNNING/RETRY_WAIT/BLOCKED normal catalog task is not
+      // touched: it remains the authoritative in-flight mapping work.  New
+      // coverage rows use their own identity so they cannot collide with a
+      // later P2 discovery pass for the same mapping.
+      const candidates = await client.query<Row>(`
+        SELECT m.source,m.source_work_id,m.work_id::text AS work_id,
+          existing.id AS existing_task_id
+        FROM importer_work_mappings m
+        JOIN works w ON w.id=m.work_id
+        LEFT JOIN importer_lite_tasks existing
+          ON existing.idempotency_key='lite:catalog:' || m.source || ':' || m.source_work_id
+        LEFT JOIN importer_lite_tasks coverage
+          ON coverage.idempotency_key='lite:p0-monitor:' || m.source || ':' || m.source_work_id
+        WHERE m.source=$1
+          AND m.work_id IS NOT NULL
+          AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+          AND w.published=true
+          AND COALESCE(to_jsonb(w)->>'status','ONGOING') IN ('ONGOING','HIATUS')
+          -- Do not create a parallel source snapshot beside either the
+          -- original recurring watch or a normal catalog task that has not
+          -- finished.  The exact idempotency joins are indexed and avoid a
+          -- JSON payload anti-join across the queue history.
+          AND coverage.id IS NULL
+          AND (existing.id IS NULL OR (existing.state='DONE' AND existing.monitoring=false))
+        ORDER BY m.source_work_id
+        LIMIT $2`, [source, maximum]);
+
+      let admitted = 0;
+      let revived = 0;
+      for (const candidate of candidates.rows) {
+        const sourceWorkId = String(candidate.source_work_id);
+        const workId = String(candidate.work_id);
+        if (candidate.existing_task_id) {
+          const reopened = await client.query<Row>(`
+            UPDATE importer_lite_tasks SET
+              work_id=$2::uuid,work_key=$3,priority=3,base_priority=3,
+              state='READY',next_run_at=now(),attempts=0,lease_owner=NULL,
+              lease_until=NULL,reason=NULL,monitoring=true,
+              payload=payload || $4::jsonb,
+              checkpoint=checkpoint || $5::jsonb,updated_at=now()
+            WHERE id=$1::uuid AND state='DONE' AND monitoring=false
+            RETURNING id`, [candidate.existing_task_id, workId, `work:${workId}`,
+            JSON.stringify({ source, sourceWorkId, p0MonitorCoverage: true }),
+            JSON.stringify({ p0MonitorCoverageEnrolledAt: new Date().toISOString() })]);
+          revived += reopened.rowCount || 0;
+          continue;
+        }
+        const inserted = await client.query<Row>(`
+          INSERT INTO importer_lite_tasks
+            (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
+          VALUES('CATALOG',$1::uuid,$2,3,3,$3,now(),32,$4::jsonb,$5::jsonb,true)
+          ON CONFLICT(idempotency_key) DO NOTHING
+          RETURNING id`, [workId, `work:${workId}`, `lite:p0-monitor:${source}:${sourceWorkId}`,
+          JSON.stringify({ source, sourceWorkId, p0MonitorCoverage: true }),
+          JSON.stringify({ p0MonitorCoverageEnrolledAt: new Date().toISOString() })]);
+        admitted += inserted.rowCount || 0;
+      }
+      // Advance even when the selected provider had no missing watches.  It
+      // prevents an exhausted source from hiding every later provider during
+      // an otherwise healthy long-running importer.
+      await client.query(`UPDATE importer_lite_metadata_source_cursor
+        SET last_source=$2,updated_at=now() WHERE cursor_name=$1`,
+      [P0_MONITOR_COVERAGE_CURSOR, source]);
+      await client.query('COMMIT');
+      return { source, admitted, revived };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally { client.release(); }
+  }
 
   /**
    * Admit at most two low-priority source-backed metadata reads at a time.

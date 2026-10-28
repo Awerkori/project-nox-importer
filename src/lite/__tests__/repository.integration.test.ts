@@ -2559,6 +2559,90 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claim('discovery-worker', 120))?.idempotencyKey).toBe('p2-healthy');
   });
 
+  it('enrols an existing published ongoing mapping into the isolated P0 monitor lane', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000111','source-a','coverage-work-a',$1,'ACTIVE')`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
+      chapterKey: 'p1-stays-runnable', priority: 'P1', idempotencyKey: 'p1-stays-runnable' });
+
+    expect(await repo.refillP0MonitorCoverage(8)).toEqual({ source: 'source-a', admitted: 1, revived: 0 });
+    const watch = await db.query(`SELECT monitoring,priority,base_priority,payload->>'source' AS source,
+      payload->>'sourceWorkId' AS source_work_id
+      FROM importer_lite_tasks WHERE idempotency_key='lite:p0-monitor:source-a:coverage-work-a'`);
+    expect(watch.rows[0]).toEqual({ monitoring: true, priority: 3, base_priority: 3,
+      source: 'source-a', source_work_id: 'coverage-work-a' });
+    // The new watch has no ready-work projection, so P1 keeps its normal
+    // claim capacity while the dedicated monitor consumer owns observation.
+    expect((await repo.claim('p1-worker', 120))?.idempotencyKey).toBe('p1-stays-runnable');
+    expect((await repo.claimMonitor('p0-monitor', 120))?.idempotencyKey)
+      .toBe('lite:p0-monitor:source-a:coverage-work-a');
+  });
+
+  it('rotates P0 coverage enrollment by source instead of filling a hot provider first', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000112','source-a','coverage-source-a',$1,'ACTIVE'),
+      ('00000000-0000-4000-8000-000000000113','source-b','coverage-source-b',$2,'ACTIVE')`, [ids.p1a, ids.p1b]);
+
+    expect(await repo.refillP0MonitorCoverage(1)).toEqual({ source: 'source-a', admitted: 1, revived: 0 });
+    expect(await repo.refillP0MonitorCoverage(1)).toEqual({ source: 'source-b', admitted: 1, revived: 0 });
+    expect((await db.query(`SELECT last_source FROM importer_lite_metadata_source_cursor
+      WHERE cursor_name='p0_monitor_coverage'`)).rows).toEqual([{ last_source: 'source-b' }]);
+  });
+
+  it('turns a genuinely new chapter observed by an enrolled watch into P0 while P1 remains separate', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000116','source-a','coverage-release',$1,'ACTIVE')`, [ids.p1a]);
+    await repo.refillP0MonitorCoverage(8);
+    const watch = await repo.claimMonitor('coverage-monitor', 120);
+    expect(watch).toMatchObject({ monitoring: true, payload: { source: 'source-a', sourceWorkId: 'coverage-release' } });
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => ({
+        id: 'source-a',
+        fetchWorkSnapshot: async () => ({
+          details: { sourceWorkId: 'coverage-release', title: 'P1 A', slug: 'p1-a', status: 'ONGOING' as const, language: 'pt-BR' },
+          chapters: [{ sourceChapterId: 'coverage-release-2', number: 2, displayNumber: '2', title: 'New release' }],
+        }),
+      }) } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
+
+    await (runtime as any).catalog(watch, 'coverage-monitor');
+
+    expect((await db.query(`SELECT priority,base_priority FROM importer_lite_tasks
+      WHERE idempotency_key='lite:chapter:' || $1 || ':pt-br|default|chapter|2|-'`, [ids.p1a])).rows[0])
+      .toEqual({ priority: 1, base_priority: 1 });
+    expect((await db.query(`SELECT monitoring,state FROM importer_lite_tasks WHERE id=$1`, [watch!.id])).rows[0])
+      .toMatchObject({ monitoring: true, state: 'RETRY_WAIT' });
+  });
+
+  it('revives only a completed first catalog pass and never races an active normal catalog task', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000114','source-a','coverage-revive',$1,'ACTIVE'),
+      ('00000000-0000-4000-8000-000000000115','source-b','coverage-active',$2,'ACTIVE')`, [ids.p1a, ids.p1b]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P1',
+      idempotencyKey: 'lite:catalog:source-a:coverage-revive', payload: { source: 'source-a', sourceWorkId: 'coverage-revive' } });
+    await db.query(`UPDATE importer_lite_tasks SET state='DONE' WHERE idempotency_key='lite:catalog:source-a:coverage-revive'`);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1b, workKey: `work:${ids.p1b}`, priority: 'P1',
+      idempotencyKey: 'lite:catalog:source-b:coverage-active', payload: { source: 'source-b', sourceWorkId: 'coverage-active' } });
+
+    expect(await repo.refillP0MonitorCoverage(8)).toEqual({ source: 'source-a', admitted: 0, revived: 1 });
+    expect((await db.query(`SELECT state,monitoring,work_key FROM importer_lite_tasks
+      WHERE idempotency_key='lite:catalog:source-a:coverage-revive'`)).rows[0])
+      .toEqual({ state: 'READY', monitoring: true, work_key: `work:${ids.p1a}` });
+    // The next source has a normal catalog task in flight; coverage must not
+    // create a duplicate source snapshot beside it.
+    expect(await repo.refillP0MonitorCoverage(8)).toEqual({ source: 'source-b', admitted: 0, revived: 0 });
+    expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_tasks
+      WHERE payload->>'source'='source-b' AND payload->>'sourceWorkId'='coverage-active'`)).rows[0].count).toBe(1);
+  });
+
   it('rotates the one-seat P0 monitor lane across due sources instead of draining a hot source first', async () => {
     await repo.enqueueMany([
       ...Array.from({ length: 12 }, (_, index) => ({
@@ -5719,6 +5803,22 @@ describe('LiteRepository against the additive Lite migration', () => {
     // lane remains capped by monitorGate/monitorClaimGate; it must not be
     // skipped indefinitely merely because those waiters exist.
     (runtime as any).pool.waitingCount = 3;
+    const monitorClaim = vi.spyOn((runtime as any).queue, 'claimMonitor').mockResolvedValue(null);
+
+    await (runtime as any).runMonitorTurn();
+
+    expect(monitorClaim).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps P0 observation alive while an isolated P2 metadata campaign runs', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
+    );
+    (runtime as any).isRuntimeLeader = true;
+    (runtime as any).metadataReplayV4Exclusive.enabled = true;
     const monitorClaim = vi.spyOn((runtime as any).queue, 'claimMonitor').mockResolvedValue(null);
 
     await (runtime as any).runMonitorTurn();

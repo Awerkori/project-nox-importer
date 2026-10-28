@@ -226,6 +226,10 @@ export class ImporterLiteRuntime {
     claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
     chapterAdmissionGate;
     historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
+    // Coverage enrolment is a short, isolated producer transaction.  It is not
+    // a second P0 executor: the existing monitor lane remains the only path
+    // that fetches a source snapshot and materialises a P0 chapter.
+    p0MonitorCoverageRefillGate = new AsyncSemaphore(1, 'lite_p0_monitor_coverage_refill');
     metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
     // Metadata ticks are rearmed before a prior turn completes so recovery is
     // prompt after long external work. The tick itself must nevertheless stay
@@ -307,6 +311,17 @@ export class ImporterLiteRuntime {
         observedAt: null,
         admitted: 0,
         promoted: false,
+        error: null,
+    };
+    // Keep this in the heartbeat so an operator can distinguish “P0 found no
+    // release” from “this runtime never enrolled most existing works for P0
+    // observation”.  The durable cursor/task rows remain authoritative.
+    p0MonitorCoverage = {
+        observedAt: null,
+        source: null,
+        admitted: 0,
+        revived: 0,
+        outcome: 'NEVER',
         error: null,
     };
     lastHistoricalP1ProducerAttemptAt = 0;
@@ -633,6 +648,7 @@ export class ImporterLiteRuntime {
             await this.queue.staggerReadyDiscoveries(60_000, 64);
             await this.queue.recoverDuplicateCanonicalCatalogFailures();
             await this.queue.reopenP0MonitorsBlockedByDiscoveryPolicy();
+            await this.refillP0MonitorCoverage();
             await this.refreshSourceFairness();
             await this.refillHistoricalP1Catalog();
             await this.refillManifestProvenP1Imports();
@@ -954,9 +970,54 @@ export class ImporterLiteRuntime {
             this.historicalP1BackfillGate.release();
         }
     }
+    /**
+     * Make P0 monitoring coverage a durable background control plane instead
+     * of an accidental side effect of P2's first catalog pass.  It runs on the
+     * isolated metadata pool, produces only a bounded watch reserve, and never
+     * consumes a chapter admission or page/download permit.
+     */
+    async refillP0MonitorCoverage() {
+        if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active)
+            return;
+        // Do not turn an optional coverage write into a queued checkout while its
+        // isolated pool is already serving a source-metadata commit.  The next
+        // 30-second recovery turn continues from the durable source cursor.
+        if (this.sourceMetadataPool.waitingCount > 0 || !this.p0MonitorCoverageRefillGate.tryAcquire())
+            return;
+        try {
+            const refill = await this.queue.refillP0MonitorCoverage();
+            this.p0MonitorCoverage = {
+                observedAt: new Date().toISOString(),
+                source: refill.source,
+                admitted: refill.admitted,
+                revived: refill.revived,
+                outcome: refill.source ? (refill.admitted || refill.revived ? 'ENROLLED' : 'SOURCE_ALREADY_COVERED') : 'NO_RUNNABLE_SOURCE',
+                error: null,
+            };
+            if (refill.admitted || refill.revived)
+                this.logger.info('Expanded durable P0 monitor coverage', refill);
+        }
+        catch (error) {
+            this.p0MonitorCoverage = {
+                observedAt: new Date().toISOString(), source: null, admitted: 0, revived: 0,
+                outcome: 'ERROR', error: String(error?.message || 'UNKNOWN').slice(0, 240),
+            };
+            // Coverage is a bounded producer; a transient YSQL timeout must not
+            // interfere with the monitor lane that already serves enrolled works.
+            this.logger.warn('P0 monitor coverage refill deferred', { error: error?.message });
+        }
+        finally {
+            this.p0MonitorCoverageRefillGate.release();
+        }
+    }
     async runRecoveryTurn() {
         await this.refreshMetadataReplayV4ExclusiveMode();
         await this.refreshMetadataTurboMode();
+        // P0 discovery is not P2 metadata work.  Even an operator-selected
+        // metadata campaign must not silently freeze the enrolment of existing
+        // ongoing works; this tiny producer still yields under real pool pressure
+        // and respects the durable manual protective stop.
+        await this.refillP0MonitorCoverage();
         if (this.metadataTurboMode.enabled) {
             // Turbo mode dedicates all worker and database resources to V5 and Global Discovery.
             // Do not run P1 catalog refills, P1 manifests, or legacy replay.
@@ -2626,7 +2687,10 @@ export class ImporterLiteRuntime {
      * network work and the single outstanding P0 database claim.
      */
     async runMonitorTurn() {
-        if (this.stopped || !this.isRuntimeLeader || this.metadataReplayV4Exclusive.enabled
+        // A V4 metadata campaign is P2 work; it must not globally freeze P0
+        // release observation.  The monitor's own two network permits and serial
+        // claim gate keep this higher-priority background service bounded.
+        if (this.stopped || !this.isRuntimeLeader
             || this.manualProtectiveStop.active || Date.now() < this.sitePausedUntil)
             return;
         if (!this.monitorGate.tryAcquire())
@@ -2884,6 +2948,7 @@ export class ImporterLiteRuntime {
                     waiters: this.sourceMetadataPersistenceGate.queued,
                 },
                 sourceMetadataProducer: this.sourceMetadataProducer,
+                p0MonitorCoverage: this.p0MonitorCoverage,
                 sourceFairness: {
                     effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
                     burst: this.executor.getSourceFairnessBurstSnapshot(),
@@ -2993,6 +3058,7 @@ export class ImporterLiteRuntime {
                 waiters: this.sourceMetadataPersistenceGate.queued,
             },
             sourceMetadataProducer: this.sourceMetadataProducer,
+            p0MonitorCoverage: this.p0MonitorCoverage,
             aliasOnlyEnrichment: {
                 enabled: true,
                 category: 'ALIAS_ONLY',
