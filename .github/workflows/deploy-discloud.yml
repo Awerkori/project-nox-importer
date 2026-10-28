@@ -24,7 +24,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
 
       - name: Verify deployment credential is configured
@@ -35,6 +35,12 @@ jobs:
             echo 'DISCLOUD_TOKEN is not configured for the discloud-production environment.'
             exit 1
           fi
+
+      - name: Resolve DIScloud target application
+        id: resolve_discloud_app
+        env:
+          DISCLOUD_TOKEN: ${{ secrets.DISCLOUD_TOKEN }}
+        run: node scripts/discloud-resolve-app.mjs
 
       - name: Install dependencies
         run: npm ci
@@ -55,6 +61,8 @@ jobs:
         uses: discloud/deploy-action@fae7024653d941a19daa2b6f56d2ae208e008c54
         with:
           token: ${{ secrets.DISCLOUD_TOKEN }}
+          app_id: ${{ steps.resolve_discloud_app.outputs.app_id }}
+          team: ${{ steps.resolve_discloud_app.outputs.is_team }}
           # Do not upload .env, source, tests, git metadata, or local caches.
           # Runtime configuration remains in DIScloud's protected environment.
           glob: |
