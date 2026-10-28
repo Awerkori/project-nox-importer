@@ -363,12 +363,6 @@ function defaultBufferedPages(downloads: AsyncSemaphore): AsyncSemaphore {
 
 export class LiteExecutor {
   private readonly sourceSlots = new Map<string, AsyncSemaphore>();
-  // Chapter-slot fairness alone is not sufficient for media-heavy sources:
-  // a few eight-page MangaFlix waves can otherwise occupy every global HTTP
-  // request while the chapter seats assigned to other ready sources make no
-  // progress. This gate divides the *existing* global request budget; it does
-  // not raise downloads, buffers, byte reservations, or database concurrency.
-  private readonly sourcePageSlots = new Map<string, AsyncSemaphore>();
   // One urgent chapter may wait for a saturated source rather than yielding
   // behind P1/P2 work indefinitely. It is deliberately a single reservation:
   // priority work gets the next released source slot without turning a source
@@ -433,7 +427,7 @@ export class LiteExecutor {
   setFairSourceDemand(sources: Iterable<string>): void {
     this.fairDemandSources = new Set([...sources].filter(Boolean));
     this.fairDemandCounts = null;
-    this.refreshFairSourceCapacities();
+    for (const [source, slot] of this.sourceSlots) slot.setCapacity(this.sourceCapacity(source));
   }
 
   /**
@@ -459,7 +453,7 @@ export class LiteExecutor {
         this.fairDemandCounts.set(source, slot.active);
       }
     }
-    this.refreshFairSourceCapacities();
+    for (const [source, slot] of this.sourceSlots) slot.setCapacity(this.sourceCapacity(source));
   }
 
   /** Keep local source shares aligned with the runtime's durable chapter cap. */
@@ -467,7 +461,7 @@ export class LiteExecutor {
     const next = Math.max(1, Math.floor(capacity));
     if (next === this.effectiveChapterAdmissionCap) return;
     this.effectiveChapterAdmissionCap = next;
-    this.refreshFairSourceCapacities();
+    for (const [source, slot] of this.sourceSlots) slot.setCapacity(this.sourceCapacity(source));
   }
 
   getFairSourceDemand(): string[] { return [...this.fairDemandSources].sort(); }
@@ -483,13 +477,6 @@ export class LiteExecutor {
 
   /** The durable chapter-admission cap currently used to calculate source shares. */
   getEffectiveChapterAdmissionCap(): number { return this.effectiveChapterAdmissionCap; }
-
-  /** Effective per-source shares of the unchanged global page-request budget. */
-  getFairSourcePageShares(): Record<string, number> {
-    return Object.fromEntries([...this.fairDemandSources]
-      .sort()
-      .map((source) => [source, this.sourcePageCapacity(source)]));
-  }
 
   /** Aggregate-only batch evidence for the existing heartbeat. */
   getUploadBatchSnapshot(): { reservations: UploadBatchSnapshot; receipts: UploadBatchSnapshot } {
@@ -542,45 +529,6 @@ export class LiteExecutor {
     return entries.find((entry) => entry.source === source)?.allocated ?? configured;
   }
 
-  /** Keep chapter and page shares in one bounded, locally refreshed view. */
-  private refreshFairSourceCapacities(): void {
-    for (const [source, slot] of this.sourceSlots) slot.setCapacity(this.sourceCapacity(source));
-    for (const [source, slot] of this.sourcePageSlots) slot.setCapacity(this.sourcePageCapacity(source));
-  }
-
-  /**
-   * Reserve one useful page wave for every source with executable work before
-   * demand-weighting the remaining existing global download permits. A sole
-   * source retains the full global limit, so scarcity never turns into an
-   * artificial throughput ceiling.
-   */
-  private sourcePageCapacity(source: string): number {
-    if (this.fairDemandSources.size <= 1 || !this.fairDemandSources.has(source)) return this.downloads.capacity;
-    const equalShare = Math.max(1, Math.floor(this.downloads.capacity / this.fairDemandSources.size));
-    const entries = [...this.fairDemandSources].map((candidate) => {
-      const chapterMaximum = this.sourceCapacity(candidate);
-      const maximum = Math.max(1, chapterMaximum * this.getPageConcurrencyForSource(candidate));
-      const demand = this.fairDemandCounts?.get(candidate) || chapterMaximum;
-      return {
-        source: candidate,
-        demand: Math.max(1, demand),
-        maximum,
-        allocated: Math.min(maximum, equalShare),
-      };
-    });
-    let remaining = Math.max(0, this.downloads.capacity - entries.reduce((sum, entry) => sum + entry.allocated, 0));
-    while (remaining > 0) {
-      const candidate = entries
-        .filter((entry) => entry.allocated < entry.maximum)
-        .sort((left, right) => (right.demand / right.allocated) - (left.demand / left.allocated)
-          || right.maximum - left.maximum || left.source.localeCompare(right.source))[0];
-      if (!candidate) break;
-      candidate.allocated++;
-      remaining--;
-    }
-    return entries.find((entry) => entry.source === source)?.allocated ?? this.downloads.capacity;
-  }
-
   /**
    * Page waves remain source-scoped even when the runtime permits a wider
    * maximum.  Unknown sources retain the established six-page default; only
@@ -609,7 +557,7 @@ export class LiteExecutor {
     if (this.fairDemandSources.size > 0 && !this.fairDemandSources.has(source)) {
       this.fairDemandSources.add(source);
       if (this.fairDemandCounts) this.fairDemandCounts.set(source, 1);
-      this.refreshFairSourceCapacities();
+      for (const [knownSource, knownSlot] of this.sourceSlots) knownSlot.setCapacity(this.sourceCapacity(knownSource));
     }
     let slot = this.sourceSlots.get(source);
     if (!slot) {
@@ -618,17 +566,6 @@ export class LiteExecutor {
       this.sourceSlots.set(source, slot);
     }
     slot.setCapacity(this.sourceCapacity(source));
-    return slot;
-  }
-
-  /** Local fair share acquired before byte/buffer/global HTTP admission. */
-  private sourcePageSlot(source: string): AsyncSemaphore {
-    let slot = this.sourcePageSlots.get(source);
-    if (!slot) {
-      slot = new AsyncSemaphore(this.sourcePageCapacity(source), `lite_source_page_${source}`);
-      this.sourcePageSlots.set(source, slot);
-    }
-    slot.setCapacity(this.sourcePageCapacity(source));
     return slot;
   }
 
@@ -987,8 +924,6 @@ export class LiteExecutor {
           // A holder keeps the pre-admitted reservation visible to the outer
           // cleanup through download, upload, and receipt persistence.
           const byteReservation: { value: PageByteReservation | null } = { value: null };
-          const pageSourceSlot = this.sourcePageSlot(route.source);
-          let pageSourceHeld = false;
           try {
             let downloaded: { bytes: Uint8Array; image: ReturnType<typeof inspectImage> };
             try {
@@ -997,12 +932,6 @@ export class LiteExecutor {
                 await this.sourceRateLimiter.acquire(host, pageSignal);
                 rateLimitWaitMs += performance.now() - rateLimitStartedAt;
               }
-              // Take the source share before reserving a page body. A slow
-              // MangaFlix wave can wait for its own fair share without
-              // pinning global bytes, buffers, or an HTTP request that an
-              // independent ready source could use.
-              await pageSourceSlot.acquire(pageSignal);
-              pageSourceHeld = true;
               const initialReservationBytes = unknownPageInitialReservationBytes(this.pageBytes.capacityBytes);
               const reservation = await this.pageBytes.reserve(
                 initialReservationBytes,
@@ -1121,7 +1050,6 @@ export class LiteExecutor {
           } finally {
             byteReservation.value?.release();
             releasePageBuffer();
-            if (pageSourceHeld) pageSourceSlot.release();
           }
         });
         } catch (error) {
