@@ -39,6 +39,11 @@ export interface LiteSourcePolicy {
     chapterIngestionEnabled: boolean;
     runnable: boolean;
 }
+export interface P0MonitorCoverageRefill {
+    source: string | null;
+    admitted: number;
+    revived: number;
+}
 /** A page upload that Telegram has confirmed and now needs one durable receipt. */
 export interface UploadReceiptInput {
     taskId: string;
@@ -89,6 +94,23 @@ export declare class LiteRepository {
      * serial through the runtime's lane gates.
      */
     constructor(db: Db, sourceMetadataDb?: Db);
+    /**
+     * Enrol a small, source-rotated slice of existing published ongoing works
+     * into the durable P0 observation lane.
+     *
+     * Older Lite releases only made a recurring watch as a side effect of an
+     * initial P2 catalog pass.  Existing mapped works that predated Lite (or
+     * whose first pass completed before that rule) therefore never received a
+     * P0 check at all.  A healthy monitor executor cannot discover a release
+     * for a work it was never asked to observe.
+     *
+     * This is deliberately a producer, not a second claim path: it creates at
+     * most a small number of `monitoring=true` CATALOG rows for one operational
+     * source.  Those rows remain invisible to normal P1/P2 claims and use the
+     * existing two-permit P0 monitor lane.  No network operation or long-lived
+     * transaction occurs here.
+     */
+    refillP0MonitorCoverage(limit?: number): Promise<P0MonitorCoverageRefill>;
     /**
      * Admit at most two low-priority source-backed metadata reads at a time.
      * Selection rotates across sources, honors source cooldown/eligibility, and

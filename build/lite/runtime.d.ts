@@ -46,6 +46,7 @@ export declare class ImporterLiteRuntime {
     private readonly claimGate;
     private readonly chapterAdmissionGate;
     private readonly historicalP1BackfillGate;
+    private readonly p0MonitorCoverageRefillGate;
     private readonly metadataReplayGate;
     private readonly metadataTurnGate;
     private readonly metadataReplayExclusiveGate;
@@ -79,6 +80,7 @@ export declare class ImporterLiteRuntime {
     private sourcePoliciesCache;
     private sourceMetadataProducer;
     private historicalP1Producer;
+    private p0MonitorCoverage;
     private lastHistoricalP1ProducerAttemptAt;
     private lastSourceRecoveryProbeAt;
     private lastUploadOutcomeRecoveryAt;
@@ -200,6 +202,13 @@ export declare class ImporterLiteRuntime {
      * so a giant work cannot hide missing manifests indefinitely.
      */
     private refillHistoricalP1Catalog;
+    /**
+     * Make P0 monitoring coverage a durable background control plane instead
+     * of an accidental side effect of P2's first catalog pass.  It runs on the
+     * isolated metadata pool, produces only a bounded watch reserve, and never
+     * consumes a chapter admission or page/download permit.
+     */
+    private refillP0MonitorCoverage;
     private runRecoveryTurn;
     /**
      * Probe one expired source cooldown per recovery turn using the same
