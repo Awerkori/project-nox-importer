@@ -42,6 +42,7 @@ const progressSnapshotIndexesMigration = readFileSync(resolve(process.cwd(), 'mi
 const earliestPendingChapterClaimMigration = readFileSync(resolve(process.cwd(), 'migrations/20261026053000_lite_claim_earliest_pending_chapter.sql'), 'utf8');
 const readyWorkCanonicalFrontierMigration = readFileSync(resolve(process.cwd(), 'migrations/20261028043000_lite_ready_work_canonical_frontier.sql'), 'utf8');
 const p1FocusGroupsAndFrontierFixMigration = readFileSync(resolve(process.cwd(), 'migrations/20261028190000_lite_p1_focus_groups_and_frontier_fix.sql'), 'utf8');
+const claimFastChapterPassMigration = readFileSync(resolve(process.cwd(), 'migrations/20261028202000_lite_claim_fast_chapter_pass.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -162,6 +163,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(earliestPendingChapterClaimMigration);
   await db.exec(readyWorkCanonicalFrontierMigration);
   await db.exec(p1FocusGroupsAndFrontierFixMigration);
+  await db.exec(claimFastChapterPassMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -1934,7 +1936,7 @@ describe('LiteRepository against the additive Lite migration', () => {
 
   it('admits the bounded historical P1 source reserve alongside P1 imports instead of hiding it behind a giant work', async () => {
     const giant = '00000000-0000-4000-8000-000000000099';
-    await db.query(`INSERT INTO works(id,title,slug) VALUES($1::uuid,'Giant','giant')`, [giant]);
+    await db.query(`INSERT INTO works(id,title,slug,cover_id) VALUES($1::uuid,'Giant','giant',$2::uuid)`, [giant, ids.cover]);
     for (let index = 0; index < 32; index++) {
       await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: giant, workKey: `work:${giant}`,
         chapterKey: `giant-${index}`, priority: 'P1', idempotencyKey: `giant-${index}` });
@@ -1962,7 +1964,7 @@ describe('LiteRepository against the additive Lite migration', () => {
 
   it('keeps a healthy historical P1 producer reserve behind a deep materialized import backlog', async () => {
     const giant = '00000000-0000-4000-8000-000000000098';
-    await db.query(`INSERT INTO works(id,title,slug) VALUES($1::uuid,'Deep giant','deep-giant')`, [giant]);
+    await db.query(`INSERT INTO works(id,title,slug,cover_id) VALUES($1::uuid,'Deep giant','deep-giant',$2::uuid)`, [giant, ids.cover]);
     for (let index = 0; index < 80; index++) {
       await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: giant, workKey: `work:${giant}`,
         chapterKey: `deep-${index}`, priority: 'P1', idempotencyKey: `deep-${index}` });
@@ -6617,5 +6619,48 @@ describe('LiteRepository against the additive Lite migration', () => {
     } finally {
       vi.stubGlobal('fetch', originalFetch);
     }
+  });
+
+  it('adaptively reduces chapter admission under Reader/YSQL pressure with hysteresis and restores gradually', async () => {
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      {
+        IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009',
+        NOX_MANGA_URL: 'https://reader.test',
+        LITE_CHAPTER_WORKERS: 12,
+        MAX_CONCURRENT_CHAPTERS: 12,
+        TESTED_CONCURRENCY_CEILING: 12,
+        DOWNLOAD_INFLIGHT_CONCURRENCY: 8,
+        BUFFERED_PAGE_CONCURRENCY: 16,
+        BATCH_PAGE_DOWNLOAD_CONCURRENCY: 4,
+        QUEUE_LEASE_DURATION_SECONDS: 30,
+      } as any,
+    );
+    await db.query(`INSERT INTO settings(key,value) VALUES('importer_chapter_admission_cap','8')`);
+    await (runtime as any).refreshManualProtectiveStop();
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(8);
+
+    // Simulate elevated Reader DB latency (>1050ms): steps down immediately (8 -> 6).
+    (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 1_350 };
+    (runtime as any).updateAdaptiveAdmissionControl();
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(6);
+
+    // One healthy probe (<750ms) does not jump immediately (hysteresis streak = 1).
+    (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 220 };
+    (runtime as any).updateAdaptiveAdmissionControl();
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(6);
+
+    // Second consecutive healthy probe steps up +1 (6 -> 7).
+    (runtime as any).updateAdaptiveAdmissionControl();
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(7);
+
+    // Two more healthy probes restore the operator ceiling (7 -> 8) and never exceed it.
+    (runtime as any).updateAdaptiveAdmissionControl();
+    (runtime as any).updateAdaptiveAdmissionControl();
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(8);
+    (runtime as any).updateAdaptiveAdmissionControl();
+    (runtime as any).updateAdaptiveAdmissionControl();
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(8);
   });
 });

@@ -115,10 +115,15 @@ export declare class ImporterLiteRuntime {
     private sourceFairnessRefresh;
     private manualProtectiveStop;
     private operatorChapterAdmissionCap;
+    private adaptiveChapterAdmissionCap;
+    private adaptiveHealthyStreak;
+    private adaptiveAdmissionReason;
+    private lastLegacyBlockedRepairAt;
     private p1ClaimCounter;
     private lastP1FocusRefreshAt;
     private p1FocusRefreshInFlight;
     private readonly historicalP1CatalogExecGate;
+    private readonly historicalP1CatalogClaimGate;
     private p2SubordinationState;
     private lastSiteProbe;
     /**
@@ -138,6 +143,14 @@ export declare class ImporterLiteRuntime {
      * cap drains in-flight work naturally instead of cancelling a safe write.
      */
     private refreshManualProtectiveStop;
+    private applyEffectiveChapterAdmissionCap;
+    /**
+     * Coherent adaptive backpressure with hysteresis reusing the single existing
+     * chapterAdmissionGate (never interrupting in-flight chapters or critical DB
+     * writes). Steps down when Reader latency or YSQL pool pressure rises, and
+     * ramps back +1 only after 2 consecutive healthy 30-second observations.
+     */
+    private updateAdaptiveAdmissionControl;
     /**
      * A process has no workers before start() reaches its durable settings
      * check. Arm the brake at that boundary, rather than making every
@@ -376,7 +389,11 @@ export declare class ImporterLiteRuntime {
      * network work and the single outstanding P0 database claim.
      */
     private runMonitorTurn;
-    /** A small protective gate, deliberately not another scheduler. */
+    /**
+     * Probe a lightweight DB-backed public Reader endpoint (/api/releases?limit=1)
+     * rather than the static Cloudflare Worker edge /api/health isolate, so real
+     * YSQL or Reader latency degradation is immediately visible to protection.
+     */
     private probeSiteHealth;
     private scheduleSiteRecoveryProbe;
     private probeSharedResources;
