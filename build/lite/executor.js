@@ -70,6 +70,17 @@ async function mapBounded(items, limit, fn) {
         throw firstError;
     return result;
 }
+// Waiting for one of our own bounded admission gates is not an upstream
+// failure.  Keep it distinct from an origin timeout so a saturated global
+// media wave cannot put an otherwise healthy source into cooldown.
+class PageAdmissionTimeoutError extends Error {
+    constructor() {
+        super('PAGE_ADMISSION_TIMEOUT');
+        this.name = 'PageAdmissionTimeoutError';
+    }
+}
+const PAGE_ADMISSION_TIMEOUT_MS = 45_000;
+const PAGE_TRANSFER_TIMEOUT_MS = 45_000;
 function sourceFailure(error) {
     const normalized = error instanceof Error ? error : new Error(String(error || 'SOURCE_FAILURE'));
     normalized.sourceFailure = true;
@@ -357,6 +368,8 @@ export class LiteExecutor {
     pageBytes;
     chapterManifestTimeoutMs;
     refreshFairDemandOnSourceBurst;
+    pageAdmissionTimeoutMs;
+    pageTransferTimeoutMs;
     sourceSlots = new Map();
     // One urgent chapter may wait for a saturated source rather than yielding
     // behind P1/P2 work indefinitely. It is deliberately a single reservation:
@@ -393,7 +406,7 @@ export class LiteExecutor {
     // can be slow or its own limiter can stall before it reaches the page-body
     // fetch timeout; without this fence it held a chapter admission until lease
     // reconciliation, starving unrelated ready work.
-    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = defaultBufferedPages(downloads), sourceRateLimiter = new HostRateLimiter(2), chapterWorkerCapacity = 1, onRouteSelected, pageBytes = new PageByteBudget(), chapterManifestTimeoutMs = 30_000, refreshFairDemandOnSourceBurst) {
+    constructor(db, queue, registry, storage, importerUserId, downloads, perChapterPageConcurrency = 4, bufferedPages = defaultBufferedPages(downloads), sourceRateLimiter = new HostRateLimiter(2), chapterWorkerCapacity = 1, onRouteSelected, pageBytes = new PageByteBudget(), chapterManifestTimeoutMs = 30_000, refreshFairDemandOnSourceBurst, pageAdmissionTimeoutMs = PAGE_ADMISSION_TIMEOUT_MS, pageTransferTimeoutMs = PAGE_TRANSFER_TIMEOUT_MS) {
         this.db = db;
         this.queue = queue;
         this.registry = registry;
@@ -408,6 +421,8 @@ export class LiteExecutor {
         this.pageBytes = pageBytes;
         this.chapterManifestTimeoutMs = chapterManifestTimeoutMs;
         this.refreshFairDemandOnSourceBurst = refreshFairDemandOnSourceBurst;
+        this.pageAdmissionTimeoutMs = pageAdmissionTimeoutMs;
+        this.pageTransferTimeoutMs = pageTransferTimeoutMs;
         this.receiptBatcher = new UploadReceiptBatcher(queue);
         this.reservationBatcher = new UploadReservationBatcher(queue);
         this.effectiveChapterAdmissionCap = Math.max(1, Math.floor(chapterWorkerCapacity));
@@ -916,7 +931,15 @@ export class LiteExecutor {
                         // one-MiB initial reservation is upgraded by readImageBody before
                         // an oversized chunk is accepted, with the same 20-MiB terminal
                         // headroom as the former header-first admission.
-                        const pageSignal = AbortSignal.timeout(45_000);
+                        // Do not spend the origin transfer timeout while this page is
+                        // waiting for our own rate, byte, body, or global-download gates.
+                        // Under a full media wave that made a healthy source look slow and
+                        // incorrectly degraded it after the shared queue delay.
+                        const admissionController = new AbortController();
+                        const admissionTimer = setTimeout(() => {
+                            admissionController.abort(new PageAdmissionTimeoutError());
+                        }, this.pageAdmissionTimeoutMs);
+                        let transferStarted = false;
                         let pageBufferHeld = false;
                         const releasePageBuffer = () => {
                             if (!pageBufferHeld)
@@ -932,22 +955,29 @@ export class LiteExecutor {
                             try {
                                 if (host) {
                                     const rateLimitStartedAt = performance.now();
-                                    await this.sourceRateLimiter.acquire(host, pageSignal);
+                                    await this.sourceRateLimiter.acquire(host, admissionController.signal);
                                     rateLimitWaitMs += performance.now() - rateLimitStartedAt;
                                 }
                                 const initialReservationBytes = unknownPageInitialReservationBytes(this.pageBytes.capacityBytes);
-                                const reservation = await this.pageBytes.reserve(initialReservationBytes, pageSignal, { completionHeadroomBytes: MAX_IMAGE_BODY_BYTES - initialReservationBytes });
+                                const reservation = await this.pageBytes.reserve(initialReservationBytes, admissionController.signal, { completionHeadroomBytes: MAX_IMAGE_BODY_BYTES - initialReservationBytes });
                                 byteReservation.value = reservation;
                                 // A task awaiting page bytes owns neither a global HTTP slot
                                 // nor a page-body count permit. Once admitted, the count gate
                                 // still bounds active response bodies independently of uploads.
-                                await this.bufferedPages.acquire(pageSignal);
+                                await this.bufferedPages.acquire(admissionController.signal);
                                 pageBufferHeld = true;
                                 downloaded = await this.downloads.runExclusive(async () => {
+                                    // The shared download permit is the boundary between local
+                                    // admission and the real origin operation.  Clear the local
+                                    // queue deadline before starting the source transfer timer.
+                                    admissionController.signal.throwIfAborted();
+                                    transferStarted = true;
+                                    clearTimeout(admissionTimer);
+                                    const transferSignal = AbortSignal.timeout(this.pageTransferTimeoutMs);
                                     const startedAt = performance.now();
                                     telemetryCollector.trackActiveDownload(1);
                                     try {
-                                        const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: pageSignal });
+                                        const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: transferSignal });
                                         if (!response.ok) {
                                             if (response.status === 429 && host)
                                                 this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));
@@ -955,7 +985,7 @@ export class LiteExecutor {
                                             error.retryAfter = Number(response.headers.get('retry-after') || 0);
                                             throw error;
                                         }
-                                        const bytes = await readImageBody(response, { signal: pageSignal, reservation });
+                                        const bytes = await readImageBody(response, { signal: transferSignal, reservation });
                                         // MangaFlix omits Content-Length.  Its stream must retain
                                         // the 20 MiB terminal reservation while chunks are being
                                         // assembled, but most completed pages are far smaller.
@@ -975,10 +1005,17 @@ export class LiteExecutor {
                                         pageDownloadDemandMs += performance.now() - startedAt;
                                         telemetryCollector.trackActiveDownload(-1);
                                     }
-                                });
+                                }, admissionController.signal);
                             }
                             catch (error) {
+                                if (!transferStarted && admissionController.signal.aborted) {
+                                    const reason = admissionController.signal.reason;
+                                    throw reason instanceof PageAdmissionTimeoutError ? reason : new PageAdmissionTimeoutError();
+                                }
                                 throw sourceFailure(error);
+                            }
+                            finally {
+                                clearTimeout(admissionTimer);
                             }
                             const { bytes, image } = downloaded;
                             totalBytes += bytes.byteLength;

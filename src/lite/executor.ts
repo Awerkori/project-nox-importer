@@ -77,6 +77,19 @@ type SourceFailure = Error & { sourceFailure?: boolean; retryAfter?: number };
 type LegacyMappedChapter = { chapterId: string; publishedAt: Date | null };
 type ChapterRouteSnapshot = { routes: ChapterSourceRoute[]; legacy: LegacyMappedChapter | null };
 
+// Waiting for one of our own bounded admission gates is not an upstream
+// failure.  Keep it distinct from an origin timeout so a saturated global
+// media wave cannot put an otherwise healthy source into cooldown.
+class PageAdmissionTimeoutError extends Error {
+  constructor() {
+    super('PAGE_ADMISSION_TIMEOUT');
+    this.name = 'PageAdmissionTimeoutError';
+  }
+}
+
+const PAGE_ADMISSION_TIMEOUT_MS = 45_000;
+const PAGE_TRANSFER_TIMEOUT_MS = 45_000;
+
 function sourceFailure(error: unknown): SourceFailure {
   const normalized: SourceFailure = error instanceof Error ? error : new Error(String(error || 'SOURCE_FAILURE'));
   normalized.sourceFailure = true;
@@ -413,6 +426,8 @@ export class LiteExecutor {
     private readonly pageBytes = new PageByteBudget(),
     private readonly chapterManifestTimeoutMs = 30_000,
     private readonly refreshFairDemandOnSourceBurst?: () => Promise<void>,
+    private readonly pageAdmissionTimeoutMs = PAGE_ADMISSION_TIMEOUT_MS,
+    private readonly pageTransferTimeoutMs = PAGE_TRANSFER_TIMEOUT_MS,
   ) {
     this.receiptBatcher = new UploadReceiptBatcher(queue);
     this.reservationBatcher = new UploadReservationBatcher(queue);
@@ -914,7 +929,15 @@ export class LiteExecutor {
           // one-MiB initial reservation is upgraded by readImageBody before
           // an oversized chunk is accepted, with the same 20-MiB terminal
           // headroom as the former header-first admission.
-          const pageSignal = AbortSignal.timeout(45_000);
+          // Do not spend the origin transfer timeout while this page is
+          // waiting for our own rate, byte, body, or global-download gates.
+          // Under a full media wave that made a healthy source look slow and
+          // incorrectly degraded it after the shared queue delay.
+          const admissionController = new AbortController();
+          const admissionTimer = setTimeout(() => {
+            admissionController.abort(new PageAdmissionTimeoutError());
+          }, this.pageAdmissionTimeoutMs);
+          let transferStarted = false;
           let pageBufferHeld = false;
           const releasePageBuffer = () => {
             if (!pageBufferHeld) return;
@@ -929,33 +952,40 @@ export class LiteExecutor {
             try {
               if (host) {
                 const rateLimitStartedAt = performance.now();
-                await this.sourceRateLimiter.acquire(host, pageSignal);
+                await this.sourceRateLimiter.acquire(host, admissionController.signal);
                 rateLimitWaitMs += performance.now() - rateLimitStartedAt;
               }
               const initialReservationBytes = unknownPageInitialReservationBytes(this.pageBytes.capacityBytes);
               const reservation = await this.pageBytes.reserve(
                 initialReservationBytes,
-                pageSignal,
+                admissionController.signal,
                 { completionHeadroomBytes: MAX_IMAGE_BODY_BYTES - initialReservationBytes },
               );
               byteReservation.value = reservation;
               // A task awaiting page bytes owns neither a global HTTP slot
               // nor a page-body count permit. Once admitted, the count gate
               // still bounds active response bodies independently of uploads.
-              await this.bufferedPages.acquire(pageSignal);
+              await this.bufferedPages.acquire(admissionController.signal);
               pageBufferHeld = true;
               downloaded = await this.downloads.runExclusive(async () => {
+                // The shared download permit is the boundary between local
+                // admission and the real origin operation.  Clear the local
+                // queue deadline before starting the source transfer timer.
+                admissionController.signal.throwIfAborted();
+                transferStarted = true;
+                clearTimeout(admissionTimer);
+                const transferSignal = AbortSignal.timeout(this.pageTransferTimeoutMs);
                 const startedAt = performance.now();
                 telemetryCollector.trackActiveDownload(1);
                 try {
-                  const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: pageSignal });
+                  const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: transferSignal });
                   if (!response.ok) {
                     if (response.status === 429 && host) this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));
                     const error = sourceFailure(new Error(`PAGE_HTTP_${response.status}`));
                     error.retryAfter = Number(response.headers.get('retry-after') || 0);
                     throw error;
                   }
-                  const bytes = await readImageBody(response, { signal: pageSignal, reservation });
+                  const bytes = await readImageBody(response, { signal: transferSignal, reservation });
                   // MangaFlix omits Content-Length.  Its stream must retain
                   // the 20 MiB terminal reservation while chunks are being
                   // assembled, but most completed pages are far smaller.
@@ -973,8 +1003,16 @@ export class LiteExecutor {
                   pageDownloadDemandMs += performance.now() - startedAt;
                   telemetryCollector.trackActiveDownload(-1);
                 }
-              });
-            } catch (error) { throw sourceFailure(error); }
+              }, admissionController.signal);
+            } catch (error) {
+              if (!transferStarted && admissionController.signal.aborted) {
+                const reason = admissionController.signal.reason;
+                throw reason instanceof PageAdmissionTimeoutError ? reason : new PageAdmissionTimeoutError();
+              }
+              throw sourceFailure(error);
+            } finally {
+              clearTimeout(admissionTimer);
+            }
             const { bytes, image } = downloaded;
             totalBytes += bytes.byteLength;
             const sha256 = calculateSha256(bytes);

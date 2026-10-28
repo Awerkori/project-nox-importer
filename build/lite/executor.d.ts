@@ -88,6 +88,8 @@ export declare class LiteExecutor {
     private readonly pageBytes;
     private readonly chapterManifestTimeoutMs;
     private readonly refreshFairDemandOnSourceBurst?;
+    private readonly pageAdmissionTimeoutMs;
+    private readonly pageTransferTimeoutMs;
     private readonly sourceSlots;
     private readonly prioritySourceWaitGate;
     private readonly receiptBatcher;
@@ -98,7 +100,7 @@ export declare class LiteExecutor {
     private lastSourceBurstRefreshAt;
     private sourceBurstRefreshes;
     private effectiveChapterAdmissionCap;
-    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined, pageBytes?: PageByteBudget, chapterManifestTimeoutMs?: number, refreshFairDemandOnSourceBurst?: (() => Promise<void>) | undefined);
+    constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined, pageBytes?: PageByteBudget, chapterManifestTimeoutMs?: number, refreshFairDemandOnSourceBurst?: (() => Promise<void>) | undefined, pageAdmissionTimeoutMs?: number, pageTransferTimeoutMs?: number);
     /**
      * A bounded runtime sample of sources with ready imports. It only controls
      * local execution permits; the durable queue remains authority for task
