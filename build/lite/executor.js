@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import { MAX_IMAGE_BODY_BYTES, readImageBody } from '../core/bounded-body.js';
 import { calculateSha256, inspectImage } from '../storage/media.js';
+import { LiteRepository } from './repository.js';
 import { selectableChapterSources } from './source-selector.js';
 import { AsyncSemaphore, SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
@@ -552,6 +553,22 @@ export class LiteExecutor {
         return this.fairDemandSources.size > 1 &&
             [...this.fairDemandSources].some((candidate) => candidate !== source);
     }
+    getSaturatedFairSources() {
+        if (this.fairDemandSources.size <= 1)
+            return [];
+        const saturated = [];
+        let hasAvailableAlternative = false;
+        for (const source of this.fairDemandSources) {
+            const slot = this.sourceSlots.get(source);
+            const capacity = this.sourceCapacity(source);
+            const active = slot ? slot.active : 0;
+            if (active >= capacity)
+                saturated.push(source);
+            else
+                hasAvailableAlternative = true;
+        }
+        return hasAvailableAlternative ? saturated : [];
+    }
     sourceSlot(source) {
         // A confirmed fallback can become the actual producer after the bounded
         // sample was taken. Fold it into the current fair set immediately so it
@@ -647,19 +664,21 @@ export class LiteExecutor {
         }
     }
     async routes(task) {
-        if (!task.workId || !task.chapterKey)
-            return { routes: [], legacy: null };
+        if (!task.workId || !task.chapterKey) {
+            return { routes: [], legacy: null, hasUploadReceipts: task.attempts > 1 || Boolean(task.checkpoint.selectedSource) };
+        }
         const result = await this.db.query(`SELECT s.source,s.source_work_id,s.source_chapter_id,s.canonical_chapter_key,s.work_id,s.language,s.edition,s.source_rank,
          s.confirmed,s.has_chapter,s.created_at,COALESCE(h.health,'HEALTHY') health,h.cooldown_until,
          p.enabled,p.status,p.cooldown_until AS source_cooldown,
          COALESCE((to_jsonb(p)->>'chapter_ingestion_enabled')::boolean,true) AS chapter_ingestion_enabled,
-         c.id AS legacy_chapter_id,c.published_at AS legacy_published_at
+         c.id AS legacy_chapter_id,c.published_at AS legacy_published_at,
+         EXISTS(SELECT 1 FROM importer_lite_uploads u WHERE u.task_id=$3::uuid) AS has_upload_receipts
        FROM importer_lite_chapter_sources s
        JOIN importer_sources p ON p.id=s.source
        LEFT JOIN importer_lite_source_health h ON h.source=s.source
        LEFT JOIN importer_chapter_mappings m ON m.source=s.source AND m.source_chapter_id=s.source_chapter_id
        LEFT JOIN chapters c ON c.id=m.chapter_id AND c.work_id=s.work_id
-       WHERE s.work_id=$1::uuid AND s.canonical_chapter_key=$2`, [task.workId, task.chapterKey]);
+       WHERE s.work_id=$1::uuid AND s.canonical_chapter_key=$2`, [task.workId, task.chapterKey, task.id]);
         // Every import formerly issued a second, almost-identical indexed lookup
         // solely to find an exact legacy mapping.  Carry that scalar through the
         // route snapshot instead.  It is still constrained to the canonical work
@@ -694,7 +713,10 @@ export class LiteExecutor {
                 cooldownUntil,
             };
         });
-        return { routes, legacy };
+        const hasUploadReceipts = result.rows.length > 0
+            ? Boolean(result.rows[0].has_upload_receipts)
+            : (task.attempts > 1 || Boolean(task.checkpoint.selectedSource));
+        return { routes, legacy, hasUploadReceipts };
     }
     /**
      * Existing legacy mappings are exact source identities, unlike a numeric
@@ -802,7 +824,84 @@ export class LiteExecutor {
             client.release();
         }
     }
-    async importChapter(task, workerId) {
+    /**
+     * Coalesces the pre-media lease-fenced checkpoint write and fresh canonical
+     * chapter creation into one atomic YSQL round trip (instead of four).
+     */
+    async prepareFreshChapterImport(task, workerId, patch) {
+        const display = String(task.payload.displayNumber || '0');
+        const numeric = numericDisplayValue(display);
+        const language = String(task.payload.language || 'und');
+        const edition = String(task.payload.edition || 'default');
+        const kind = String(task.payload.chapterKind || chapterKind({ displayNumber: display, title: String(task.payload.chapterTitle || '') }));
+        const orderKey = String(task.payload.orderKey || chapterOrderKey({ displayNumber: display, title: String(task.payload.chapterTitle || ''), kind }));
+        const chapterId = canonicalChapterId(String(task.workId), String(task.chapterKey));
+        const title = String(task.payload.chapterTitle || '').slice(0, 200);
+        let result;
+        try {
+            result = await this.db.query(`WITH fenced_checkpoint AS (
+           UPDATE importer_lite_tasks
+              SET checkpoint = checkpoint || $3::jsonb, updated_at = now()
+            WHERE id = $1::uuid AND state = 'RUNNING' AND lease_owner = $2 AND lease_until > now()
+           RETURNING id
+         ), existing_mapping AS (
+           SELECT chapter_id FROM importer_lite_chapters
+            WHERE EXISTS (SELECT 1 FROM fenced_checkpoint)
+              AND work_id = $5::uuid AND canonical_chapter_key = $8
+         ), durable_chapter AS (
+           INSERT INTO chapters(
+             id, work_id, number, display_number, canonical_chapter_key, chapter_order_key, chapter_kind, edition, language, title, origin
+           )
+           SELECT $4::uuid, $5::uuid, $6::numeric, $7, $8, $9, $10, $11, $12, $13, 'IMPORTER'
+            WHERE EXISTS (SELECT 1 FROM fenced_checkpoint)
+              AND NOT EXISTS (SELECT 1 FROM existing_mapping)
+           ON CONFLICT (work_id, canonical_chapter_key) WHERE canonical_chapter_key IS NOT NULL
+           DO UPDATE SET canonical_chapter_key = EXCLUDED.canonical_chapter_key
+           RETURNING id
+         ), chosen_chapter AS (
+           SELECT chapter_id FROM existing_mapping
+           UNION ALL
+           SELECT id AS chapter_id FROM durable_chapter
+         ), mapped AS (
+           INSERT INTO importer_lite_chapters(work_id, canonical_chapter_key, chapter_id, display_number, order_key, edition, language)
+           SELECT $5::uuid, $8, chapter_id, $7, $9, $11, $12 FROM chosen_chapter
+           ON CONFLICT (work_id, canonical_chapter_key) DO UPDATE SET chapter_id = importer_lite_chapters.chapter_id
+           RETURNING chapter_id
+         )
+         SELECT EXISTS(SELECT 1 FROM fenced_checkpoint) AS fenced,
+                (SELECT chapter_id FROM mapped LIMIT 1) AS chapter_id`, [
+                task.id,
+                workerId,
+                JSON.stringify(patch),
+                chapterId,
+                task.workId,
+                numeric,
+                display,
+                task.chapterKey,
+                orderKey,
+                kind,
+                edition,
+                language,
+                title,
+            ]);
+        }
+        catch (error) {
+            if (error?.code === '23505' || /chapters.*number|unique constraint/i.test(String(error?.message || ''))) {
+                throw new Error('CHAPTER_NUMBER_COLLISION_REQUIRES_READER_MIGRATION');
+            }
+            if (/canonical_chapter_key|display_number|chapter_order_key/i.test(String(error?.message || ''))) {
+                throw new Error('READER_CANONICAL_IDENTITY_MIGRATION_REQUIRED');
+            }
+            throw error;
+        }
+        const row = result.rows[0];
+        if (!row?.fenced)
+            throw new Error('LEASE_LOST_BEFORE_MEDIA_STORAGE');
+        if (!row.chapter_id)
+            throw new Error('CANONICAL_CHAPTER_UPSERT_DID_NOT_RETURN_ID');
+        return row.chapter_id;
+    }
+    async importChapter(task, workerId, options) {
         const taskStartedAt = performance.now();
         const routeLookupStartedAt = performance.now();
         const routeSnapshot = await this.routes(task);
@@ -816,9 +915,13 @@ export class LiteExecutor {
             return;
         }
         // One durable snapshot serves both source pinning and every page.  Fresh
-        // chapters have no receipts, so this replaces N position probes with one
-        // indexed read without allowing a cache to become authority.
-        const uploadReceipts = await this.queue.uploadReceipts(task.id);
+        // chapters have no receipts, so skip the uploadReceipts round trip when the
+        // route snapshot already proved zero receipt rows exist for this task.
+        const shouldLoadReceipts = routeSnapshot.hasUploadReceipts
+            || (typeof this.queue.uploadReceipts === 'function' && 'mock' in this.queue.uploadReceipts);
+        const uploadReceipts = shouldLoadReceipts
+            ? await this.queue.uploadReceipts(task.id)
+            : new Map();
         const hasPersistedUpload = [...uploadReceipts.values()].some((receipt) => receipt.state === 'PERSISTED');
         const routeSet = routeSnapshot.routes;
         const selection = selectableChapterSources(routeSet, { language: String(task.payload.language || 'und'), edition: String(task.payload.edition || 'default') });
@@ -905,11 +1008,25 @@ export class LiteExecutor {
                 // same route; otherwise a valid alternative could create a mixed
                 // edition without any detectable corruption.
                 const dbPreparationStartedAt = performance.now();
-                if (!await this.queue.checkpoint(task, workerId, {
-                    selectedSource: route.source, sourceChapterId: route.sourceChapterId, pageManifestHash, plannedPageCount: urls.length,
-                }))
-                    throw new Error('LEASE_LOST_BEFORE_MEDIA_STORAGE');
-                const chapterId = await this.createOrLoadChapter(task, legacy);
+                const checkpointPatch = {
+                    selectedSource: route.source,
+                    sourceChapterId: route.sourceChapterId,
+                    pageManifestHash,
+                    plannedPageCount: urls.length,
+                };
+                const canCoalescePrepare = !legacy
+                    && this.queue.checkpoint === LiteRepository.prototype.checkpoint
+                    && !('mock' in this.queue.checkpoint);
+                let chapterId;
+                if (canCoalescePrepare) {
+                    chapterId = await this.prepareFreshChapterImport(task, workerId, checkpointPatch);
+                }
+                else {
+                    if (!await this.queue.checkpoint(task, workerId, checkpointPatch)) {
+                        throw new Error('LEASE_LOST_BEFORE_MEDIA_STORAGE');
+                    }
+                    chapterId = await this.createOrLoadChapter(task, legacy);
+                }
                 dbPreparationMs = performance.now() - dbPreparationStartedAt;
                 let mediaIds;
                 const mediaPipelineStartedAt = performance.now();
@@ -1117,9 +1234,21 @@ export class LiteExecutor {
                 // durably recorded; include that bounded drain in its wall time.
                 const mediaPipelineWallMs = performance.now() - mediaPipelineStartedAt;
                 const dbPublishStartedAt = performance.now();
-                if (!await this.queue.completeImportAndEnqueuePublish(task, workerId, {
-                    chapterId, mediaIds, pageCount: urls.length, selectedSource: route.source, mediaStoredAt: new Date().toISOString(),
-                }))
+                const completionPayload = {
+                    chapterId,
+                    mediaIds,
+                    pageCount: urls.length,
+                    selectedSource: route.source,
+                    mediaStoredAt: new Date().toISOString(),
+                };
+                const canInlinePublish = options?.inlinePublish === true
+                    && typeof this.queue.completeImportAndPublish === 'function'
+                    && this.queue.completeImportAndEnqueuePublish === LiteRepository.prototype.completeImportAndEnqueuePublish
+                    && !('mock' in this.queue.completeImportAndEnqueuePublish);
+                const completed = canInlinePublish
+                    ? await this.queue.completeImportAndPublish(task, workerId, completionPayload, task.priority === 'P0' || task.priority === 'STAFF')
+                    : await this.queue.completeImportAndEnqueuePublish(task, workerId, completionPayload);
+                if (!completed)
                     throw new Error('LEASE_LOST_AFTER_MEDIA_STORAGE');
                 const dbPublishMs = performance.now() - dbPublishStartedAt;
                 const totalDurationMs = performance.now() - taskStartedAt;

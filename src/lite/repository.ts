@@ -22,9 +22,9 @@ export const DUPLICATE_CANONICAL_BATCH_REASON = 'ON CONFLICT DO UPDATE command c
 // because the generic retry pass is intentionally small. Keep re-admission
 // bounded per source, work and recovery turn so a large work cannot hide other
 // confirmed chapter gaps or immediately recreate the rate limit.
-const SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN = 4;
+const SOURCE_COOLDOWN_RECOVERY_SOURCES_PER_TURN = 8;
 const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_SOURCE = 8;
-const SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS = 48;
+const SOURCE_COOLDOWN_RECOVERY_CANDIDATE_WORKS = 64;
 const SOURCE_COOLDOWN_RECOVERY_TASKS_PER_WORK = 2;
 /** Reuse an abundant executable-P1 reserve measurement for this long. */
 const EXECUTABLE_P1_RESERVE_CACHE_MS = 180_000;
@@ -183,6 +183,33 @@ export interface CompleteImportInput {
   mediaStoredAt: string;
 }
 
+export interface LiteClaimOptions {
+  focusWorkKeys?: string[] | null;
+  preferFocus?: boolean;
+  excludedSources?: string[] | null;
+  chaptersOnly?: boolean;
+}
+
+export interface P1FocusWorkEntry {
+  workKey: string;
+  workId: string;
+  source: string;
+  remainingChapters: number;
+  enteredAt: number;
+}
+
+export interface P1FocusGroupSnapshot {
+  targetSize: number;
+  focusWorkCount: number;
+  focusWorkKeys: string[];
+  focusSources: Record<string, number>;
+  primaryClaims: number;
+  secondaryClaims: number;
+  completedWorksSinceBoot: number;
+  recentCompletedWorkIds: string[];
+  refreshedAt: string | null;
+}
+
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export class LiteRepository {
   // This is only a local maintenance hint. Durable task state remains the
@@ -195,8 +222,38 @@ export class LiteRepository {
   // An abundant answer is stable for minutes, so reuse it briefly; a low
   // reserve is never cached and is always re-measured on the next turn.
   private manifestP1ReserveCache: { at: number; floor: number; count: number } | null = null;
+  private readonly coolingSources = new Map<string, { until: number; rateLimited: boolean }>();
+  private p1FocusWorkKeys: string[] = [];
+  private p1FocusMeta = new Map<string, P1FocusWorkEntry>();
+  private p1FocusTargetSize = 18;
+  private p1FocusRefreshedAt: string | null = null;
+  private p1CompletedWorksCount = 0;
+  private p1CompletedWorkIds: string[] = [];
+  private p1PrimaryClaims = 0;
+  private p1SecondaryClaims = 0;
+  private lastHistoricalP1CatalogSource = '';
+  private p1BacklogCache: { at: number; pending: boolean; reason: string | null } | null = null;
 
   hasAbundantHistoricalP1Reserve(): boolean { return this.historicalP1ReserveAbundant; }
+
+  invalidateP1BacklogCache(): void { this.p1BacklogCache = null; }
+
+  getActiveCoolingSources(): string[] {
+    const now = Date.now();
+    const active: string[] = [];
+    for (const [source, entry] of this.coolingSources.entries()) {
+      if (entry.until > now) active.push(source);
+      else this.coolingSources.delete(source);
+    }
+    return active;
+  }
+
+  private clearNonRateLimitedCoolingSource(source: string): void {
+    const existing = this.coolingSources.get(source);
+    if (existing && !(existing.rateLimited && existing.until > Date.now())) {
+      this.coolingSources.delete(source);
+    }
+  }
 
   /**
    * Source-backed historical metadata is deliberately allowed one tiny,
@@ -223,14 +280,14 @@ export class LiteRepository {
    * transaction occurs here.
    */
   async refillP0MonitorCoverage(limit = 16): Promise<P0MonitorCoverageRefill> {
-    const maximum = Math.max(1, Math.min(32, Math.floor(limit)));
+    const maximum = Math.max(1, Math.min(64, Math.floor(limit)));
     const client = await this.sourceMetadataDb.connect();
     try {
       await client.query('BEGIN');
       // Coverage work is optional while the old monitor lane keeps serving
       // existing watches.  A short statement timeout makes a pathological
       // provider slice a deferred turn, never a boot or chapter failure.
-      await client.query(`SET LOCAL statement_timeout = '2500ms'`);
+      await client.query(`SET LOCAL statement_timeout = '3500ms'`);
       let cursor = await client.query<{ last_source: string | null }>(`
         SELECT last_source FROM importer_lite_metadata_source_cursor
         WHERE cursor_name=$1 FOR UPDATE`, [P0_MONITOR_COVERAGE_CURSOR]);
@@ -251,6 +308,7 @@ export class LiteRepository {
           FROM importer_sources s
           LEFT JOIN importer_lite_source_health h ON h.source=s.id
           WHERE s.enabled=true AND s.id>$1::text
+            AND s.id NOT IN ('mangaball','mangadex','mangafire')
             AND ${sourceExecutionEligibilitySql('s')}
             AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)=true
             AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
@@ -261,6 +319,7 @@ export class LiteRepository {
           FROM importer_sources s
           LEFT JOIN importer_lite_source_health h ON h.source=s.id
           WHERE s.enabled=true AND s.id<=$1::text
+            AND s.id NOT IN ('mangaball','mangadex','mangafire')
             AND ${sourceExecutionEligibilitySql('s')}
             AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)=true
             AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
@@ -291,102 +350,140 @@ export class LiteRepository {
       // bounded after coverage reaches 100%.
       const scanLimit = Math.min(256, maximum * P0_MONITOR_COVERAGE_SCAN_MULTIPLIER);
 
-      // `lite:catalog` is the original durable identity used by a first
-      // catalog pass.  A successful old pass can be revived as its recurring
-      // watch.  A READY/RUNNING/RETRY_WAIT/BLOCKED normal catalog task is not
-      // touched: it remains the authoritative in-flight mapping work.  New
-      // coverage rows use their own identity so they cannot collide with a
-      // later P2 discovery pass for the same mapping.
-      const readCoverageSlice = async (after: string, through: string) => client.query<Row>(`
-        WITH mapping_slice AS (
-          SELECT m.source,m.source_work_id,m.work_id::text AS work_id,
-            existing.id AS existing_task_id,existing.state AS existing_state,
-            existing.monitoring AS existing_monitoring,coverage.id AS coverage_task_id
-          FROM importer_work_mappings m
-          JOIN works w ON w.id=m.work_id
-          LEFT JOIN importer_lite_tasks existing
-            ON existing.idempotency_key='lite:catalog:' || m.source || ':' || m.source_work_id
-          LEFT JOIN importer_lite_tasks coverage
-            ON coverage.idempotency_key='lite:p0-monitor:' || m.source || ':' || m.source_work_id
-          WHERE m.source=$1
-            AND m.source_work_id>$2 AND m.source_work_id<=$3
-            AND m.work_id IS NOT NULL
-            AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-            AND w.published=true
-            AND COALESCE(to_jsonb(w)->>'status','ONGOING') IN ('ONGOING','HIATUS')
-          ORDER BY m.source_work_id
-          LIMIT $4
-        )
-        SELECT source,source_work_id,work_id,existing_task_id
-        FROM mapping_slice
-        -- Do not create a parallel source snapshot beside either the
-        -- original recurring watch or a normal catalog task that has not
-        -- finished. Exact idempotency joins stay index-backed.
-        WHERE coverage_task_id IS NULL
-          AND (existing_task_id IS NULL OR (existing_state='DONE' AND existing_monitoring=false))
-        ORDER BY source_work_id
-        LIMIT $5`, [source, after, through, scanLimit, maximum]);
-
-      // Read the full bounded slice once to advance the durable cursor even
-      // when every row in it is covered; read the filtered candidates from
-      // the same lexical window. A wrapped turn starts the next catalogue
-      // cycle without a global anti-join.
-      const scanRows = await client.query<{ source_work_id: string }>(`
-        SELECT m.source_work_id
+      const loadMappingWindow = async (after: string) => client.query<{ source_work_id: string; work_id: string }>(`
+        SELECT m.source_work_id, m.work_id::text AS work_id
         FROM importer_work_mappings m
         JOIN works w ON w.id=m.work_id
         WHERE m.source=$1 AND m.source_work_id>$2
           AND m.work_id IS NOT NULL
           AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-          AND w.published=true
+          AND (
+            w.published=true
+            OR EXISTS (
+              SELECT 1 FROM importer_lite_tasks wt
+              WHERE wt.work_id=m.work_id
+                AND wt.monitoring=false
+                AND wt.task_type IN ('IMPORT_CHAPTER','PUBLISH')
+                AND wt.state IN ('READY','RUNNING','RETRY_WAIT','DONE')
+            )
+          )
           AND COALESCE(to_jsonb(w)->>'status','ONGOING') IN ('ONGOING','HIATUS')
-        ORDER BY m.source_work_id LIMIT $3`, [source, lastSourceWorkId, scanLimit]);
+        ORDER BY m.source_work_id LIMIT $3`, [source, after, scanLimit]);
+
+      const scanRows = await loadMappingWindow(lastSourceWorkId);
       const wrapped = scanRows.rowCount === 0 && lastSourceWorkId !== '';
       const effectiveAfter = wrapped ? '' : lastSourceWorkId;
-      const effectiveScanRows = wrapped
-        ? await client.query<{ source_work_id: string }>(`
-            SELECT m.source_work_id FROM importer_work_mappings m
-            JOIN works w ON w.id=m.work_id
-            WHERE m.source=$1 AND m.source_work_id>$2
-              AND m.work_id IS NOT NULL
-              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-              AND w.published=true
-              AND COALESCE(to_jsonb(w)->>'status','ONGOING') IN ('ONGOING','HIATUS')
-            ORDER BY m.source_work_id LIMIT $3`, [source, effectiveAfter, scanLimit])
-        : scanRows;
+      const effectiveScanRows = wrapped ? await loadMappingWindow(effectiveAfter) : scanRows;
       const lastScanned = effectiveScanRows.rows.at(-1)?.source_work_id || '';
-      const candidates = await readCoverageSlice(effectiveAfter, lastScanned);
 
       let admitted = 0;
       let revived = 0;
-      for (const candidate of candidates.rows) {
-        const sourceWorkId = String(candidate.source_work_id);
-        const workId = String(candidate.work_id);
-        if (candidate.existing_task_id) {
-          const reopened = await client.query<Row>(`
-            UPDATE importer_lite_tasks SET
-              work_id=$2::uuid,work_key=$3,priority=3,base_priority=3,
-              state='READY',next_run_at=now(),attempts=0,lease_owner=NULL,
-              lease_until=NULL,reason=NULL,monitoring=true,
-              payload=payload || $4::jsonb,
-              checkpoint=checkpoint || $5::jsonb,updated_at=now()
-            WHERE id=$1::uuid AND state='DONE' AND monitoring=false
-            RETURNING id`, [candidate.existing_task_id, workId, `work:${workId}`,
-            JSON.stringify({ source, sourceWorkId, p0MonitorCoverage: true }),
-            JSON.stringify({ p0MonitorCoverageEnrolledAt: new Date().toISOString() })]);
-          revived += reopened.rowCount || 0;
-          continue;
+      let nextMappingCursor = lastScanned;
+
+      if (effectiveScanRows.rows.length > 0) {
+        const lookupKeys: string[] = [];
+        for (const row of effectiveScanRows.rows) {
+          const swid = String(row.source_work_id);
+          lookupKeys.push(`lite:catalog:${source}:${swid}`, `lite:p0-monitor:${source}:${swid}`);
         }
-        const inserted = await client.query<Row>(`
-          INSERT INTO importer_lite_tasks
-            (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
-          VALUES('CATALOG',$1::uuid,$2,3,3,$3,now(),32,$4::jsonb,$5::jsonb,true)
-          ON CONFLICT(idempotency_key) DO NOTHING
-          RETURNING id`, [workId, `work:${workId}`, `lite:p0-monitor:${source}:${sourceWorkId}`,
-          JSON.stringify({ source, sourceWorkId, p0MonitorCoverage: true }),
-          JSON.stringify({ p0MonitorCoverageEnrolledAt: new Date().toISOString() })]);
-        admitted += inserted.rowCount || 0;
+        const existingRows = await client.query<{
+          id: string;
+          idempotency_key: string;
+          state: string;
+          monitoring: boolean;
+        }>(`SELECT id, idempotency_key, state, monitoring
+            FROM importer_lite_tasks
+            WHERE idempotency_key = ANY($1::text[])`, [lookupKeys]);
+        const existingByKey = new Map(existingRows.rows.map((r) => [String(r.idempotency_key), r]));
+
+        const missing: Array<{
+          sourceWorkId: string;
+          workId: string;
+          reviveTaskId: string | null;
+        }> = [];
+        for (const row of effectiveScanRows.rows) {
+          const sourceWorkId = String(row.source_work_id);
+          const workId = String(row.work_id);
+          const catalogTask = existingByKey.get(`lite:catalog:${source}:${sourceWorkId}`);
+          const monitorTask = existingByKey.get(`lite:p0-monitor:${source}:${sourceWorkId}`);
+
+          const hasActiveMonitor = Boolean(
+            (monitorTask && (monitorTask.state === 'READY' || monitorTask.state === 'RUNNING' || monitorTask.state === 'RETRY_WAIT'))
+            || (catalogTask && catalogTask.monitoring && (catalogTask.state === 'READY' || catalogTask.state === 'RUNNING' || catalogTask.state === 'RETRY_WAIT')),
+          );
+          if (hasActiveMonitor) continue;
+
+          // Never race an active or blocked non-monitoring initial catalog task.
+          if (catalogTask && !catalogTask.monitoring && catalogTask.state !== 'DONE') continue;
+
+          if (monitorTask) {
+            missing.push({ sourceWorkId, workId, reviveTaskId: String(monitorTask.id) });
+          } else if (catalogTask && (catalogTask.state === 'DONE' || catalogTask.monitoring)) {
+            missing.push({ sourceWorkId, workId, reviveTaskId: String(catalogTask.id) });
+          } else {
+            missing.push({ sourceWorkId, workId, reviveTaskId: null });
+          }
+        }
+
+        const toProcess = missing.slice(0, maximum);
+        // Never advance past uncovered rows in the same scan window when
+        // missing.length exceeds maximum; resume right after the last enrolled
+        // row so 100% of eligible mappings are enrolled on the first pass.
+        nextMappingCursor = missing.length > maximum
+          ? toProcess.at(-1)!.sourceWorkId
+          : lastScanned;
+
+        const enrolledAt = new Date().toISOString();
+        const toRevive = toProcess.filter((item) => item.reviveTaskId !== null);
+        const toInsert = toProcess.filter((item) => item.reviveTaskId === null);
+
+        if (toRevive.length > 0) {
+          const reopened = await client.query<Row>(`
+            WITH input AS (
+              SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::jsonb[], $5::jsonb[])
+                AS v(task_id, work_id, work_key, payload_patch, checkpoint_patch)
+            )
+            UPDATE importer_lite_tasks t SET
+              work_id=i.work_id, work_key=i.work_key, priority=3, base_priority=3,
+              state='READY', next_run_at=now(), attempts=0, lease_owner=NULL,
+              lease_until=NULL, reason=NULL, monitoring=true,
+              payload=t.payload || i.payload_patch,
+              checkpoint=t.checkpoint || i.checkpoint_patch, updated_at=now()
+            FROM input i
+            WHERE t.id=i.task_id
+              AND (
+                (t.state='DONE' AND t.monitoring=false)
+                OR (t.monitoring=true AND t.state IN ('DONE','BLOCKED'))
+              )
+            RETURNING t.id`, [
+            toRevive.map((item) => item.reviveTaskId),
+            toRevive.map((item) => item.workId),
+            toRevive.map((item) => `work:${item.workId}`),
+            toRevive.map((item) => JSON.stringify({ source, sourceWorkId: item.sourceWorkId, p0MonitorCoverage: true })),
+            toRevive.map(() => JSON.stringify({ p0MonitorCoverageEnrolledAt: enrolledAt })),
+          ]);
+          revived += reopened.rowCount || 0;
+        }
+
+        if (toInsert.length > 0) {
+          const inserted = await client.query<Row>(`
+            INSERT INTO importer_lite_tasks
+              (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
+            SELECT 'CATALOG', v.work_id, v.work_key, 3, 3, v.idem_key, now(), 32, v.payload, v.checkpoint, true
+            FROM unnest($1::uuid[], $2::text[], $3::text[], $4::jsonb[], $5::jsonb[])
+              AS v(work_id, work_key, idem_key, payload, checkpoint)
+            ON CONFLICT(idempotency_key) DO NOTHING
+            RETURNING id`, [
+            toInsert.map((item) => item.workId),
+            toInsert.map((item) => `work:${item.workId}`),
+            toInsert.map((item) => `lite:p0-monitor:${source}:${item.sourceWorkId}`),
+            toInsert.map((item) => JSON.stringify({ source, sourceWorkId: item.sourceWorkId, p0MonitorCoverage: true })),
+            toInsert.map(() => JSON.stringify({ p0MonitorCoverageEnrolledAt: enrolledAt })),
+          ]);
+          admitted += inserted.rowCount || 0;
+        }
       }
+
       // Advance even when the selected provider had no missing watches.  It
       // prevents an exhausted source from hiding every later provider during
       // an otherwise healthy long-running importer.
@@ -398,7 +495,7 @@ export class LiteRepository {
       // an `updated_at` convenience column.  Coverage cursors must not turn
       // that optional test-only column into a P0 availability dependency.
       await client.query(`UPDATE settings SET value=$2 WHERE key=$1`,
-        [mappingCursorKey, lastScanned]);
+        [mappingCursorKey, nextMappingCursor]);
       await client.query('COMMIT');
       return { source, admitted, revived };
     } catch (error) {
@@ -1310,7 +1407,11 @@ export class LiteRepository {
           cs.source_rank,cs.updated_at
         FROM importer_lite_chapter_sources cs
         JOIN works w ON w.id=cs.work_id
+        JOIN importer_sources src ON src.id=cs.source
         WHERE cs.confirmed=true AND cs.has_chapter=true
+          AND src.enabled=true
+          AND COALESCE(src.status,'ACTIVE')<>'DISABLED'
+          AND COALESCE((to_jsonb(src)->>'chapter_ingestion_enabled')::boolean,true)=true
           AND NOT EXISTS (
             SELECT 1 FROM importer_lite_chapters chapter
             WHERE chapter.work_id=cs.work_id AND chapter.canonical_chapter_key=cs.canonical_chapter_key
@@ -1413,6 +1514,7 @@ export class LiteRepository {
       // the established projection refresh for all normal enqueue callers.
       if (!input.skipReadyWorkRefresh) await this.refreshReadyWork(client, input.workKey);
       await client.query('COMMIT');
+      if (result.rowCount) this.invalidateP1BacklogCache();
       return { inserted: Boolean(result.rowCount), task: result.rows[0] ? asTask(result.rows[0]) : null };
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
@@ -1466,6 +1568,7 @@ export class LiteRepository {
       }
       for (const workKey of new Set(uniqueInputs.map((input) => input.workKey))) await this.refreshReadyWork(client, workKey);
       await client.query('COMMIT');
+      if (inserted > 0) this.invalidateP1BacklogCache();
       return { inserted, insertedKeys };
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
@@ -1473,12 +1576,502 @@ export class LiteRepository {
     } finally { client.release(); }
   }
 
-  async claim(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
-    const result = await this.db.query<Row>(
-      'SELECT * FROM public.importer_lite_claim_task($1,$2::interval)',
-      [workerId, `${Math.max(30, leaseSeconds)} seconds`],
+  async claim(workerId: string, leaseSeconds: number, options?: LiteClaimOptions): Promise<LiteTask | null> {
+    const lease = `${Math.max(30, leaseSeconds)} seconds`;
+    const useFocused = Boolean(
+      options && (
+        (options.focusWorkKeys && options.focusWorkKeys.length > 0)
+        || options.preferFocus !== undefined
+        || (options.excludedSources && options.excludedSources.length > 0)
+        || options.chaptersOnly
+      ),
     );
-    return result.rows[0] ? asTask(result.rows[0]) : null;
+    const result = useFocused
+      ? await this.db.query<Row>(
+          'SELECT * FROM public.importer_lite_claim_task_focused($1,$2::interval,$3::text[],$4::boolean,$5::text[],$6::boolean)',
+          [
+            workerId,
+            lease,
+            options?.focusWorkKeys?.length ? options.focusWorkKeys : null,
+            options?.preferFocus ?? true,
+            options?.excludedSources?.length ? options.excludedSources : null,
+            Boolean(options?.chaptersOnly),
+          ],
+        )
+      : await this.db.query<Row>(
+          'SELECT * FROM public.importer_lite_claim_task($1,$2::interval)',
+          [workerId, lease],
+        );
+    const task = result.rows[0] ? asTask(result.rows[0]) : null;
+    if (task && task.priority === 'P1' && (task.taskType === 'IMPORT_CHAPTER' || task.taskType === 'PUBLISH')) {
+      if (this.p1FocusWorkKeys.includes(task.workKey)) this.p1PrimaryClaims++;
+      else this.p1SecondaryClaims++;
+    }
+    return task;
+  }
+
+  /**
+   * Dedicated source-rotated claim for READY historicalP1Backfill CATALOG tasks
+   * across operational sources so multi-source P1 manifests materialize without
+   * waiting behind hundreds of operation_rank=1 chapter imports on hot sources.
+   */
+  async claimHistoricalP1Catalog(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
+    const dbToUse = (this.sourceMetadataDb && this.sourceMetadataDb !== this.db && ((this.sourceMetadataDb as any).waitingCount || 0) === 0)
+      ? this.sourceMetadataDb
+      : this.db;
+    const result = await dbToUse.query<Row>(`
+      WITH runnable_candidates AS (
+        SELECT
+          t.id,
+          t.work_key,
+          t.payload->>'source' AS source,
+          t.created_at
+        FROM importer_lite_tasks t
+        JOIN importer_sources s ON s.id = t.payload->>'source'
+        LEFT JOIN importer_lite_source_health h ON h.source = s.id
+        WHERE t.state = 'READY'
+          AND t.monitoring = false
+          AND t.priority = 2
+          AND t.task_type = 'CATALOG'
+          AND t.payload ? 'historicalP1Backfill'
+          AND t.next_run_at <= now()
+          AND s.enabled = true
+          AND s.id NOT IN ('mangaball','mangadex','mangafire')
+          AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = true
+          AND ${sourceExecutionEligibilitySql('s')}
+          AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
+          AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
+        ORDER BY
+          CASE WHEN (t.payload->>'source') > $3 THEN 0 ELSE 1 END,
+          t.payload->>'source',
+          t.created_at,
+          t.id
+        LIMIT 24
+      ), picked AS (
+        SELECT rc.id
+        FROM runnable_candidates rc
+        JOIN importer_lite_tasks locked ON locked.id = rc.id
+        ORDER BY
+          CASE WHEN rc.source > $3 THEN 0 ELSE 1 END,
+          rc.source,
+          rc.created_at,
+          rc.id
+        LIMIT 1
+        FOR UPDATE OF locked SKIP LOCKED
+      ), claimed AS (
+        UPDATE importer_lite_tasks target
+        SET state = 'RUNNING',
+            lease_owner = $1,
+            lease_until = now() + $2::interval,
+            attempts = target.attempts + 1,
+            updated_at = now()
+        FROM picked
+        WHERE target.id = picked.id
+        RETURNING target.*
+      )
+      SELECT * FROM claimed`,
+      [workerId, `${Math.max(30, leaseSeconds)} seconds`, this.lastHistoricalP1CatalogSource],
+    );
+    const task = result.rows[0] ? asTask(result.rows[0]) : null;
+    if (task) {
+      if (typeof task.payload.source === 'string') {
+        this.lastHistoricalP1CatalogSource = task.payload.source;
+      }
+      await this.db.query('SELECT public.importer_lite_refresh_ready_work($1)', [task.workKey]).catch(() => {});
+    }
+    return task;
+  }
+
+  /**
+   * Dynamically maintain the Primary P1 Focus Group (~15-20 works, expanding
+   * with real admission capacity) favoring near-completion works + queue-age
+   * fairness + multi-source diversity, while detecting completed P1 works.
+   */
+  async refreshP1FocusGroup(options: { targetSize?: number; maxPerSource?: number } = {}): Promise<P1FocusGroupSnapshot> {
+    const desiredSize = Math.max(12, Math.min(32, Math.floor(options.targetSize || 18)));
+    const maxPerSource = Math.max(2, Math.min(8, Math.floor(options.maxPerSource || 3)));
+    this.p1FocusTargetSize = desiredSize;
+
+    const candidatesRes = await this.db.query<Row>(`
+      WITH ready_p1_works AS (
+        SELECT rw.work_key,
+               NULLIF(substring(rw.work_key from 6), '')::uuid AS work_id,
+               rw.next_run_at,
+               rw.last_claimed_at
+        FROM importer_lite_ready_works rw
+        WHERE rw.priority = 2
+          AND rw.operation_rank <= 1
+          AND rw.work_key LIKE 'work:%'
+          AND rw.next_run_at <= now() + interval '35 seconds'
+        ORDER BY rw.next_run_at, rw.last_claimed_at NULLS FIRST, rw.work_key
+        LIMIT 96
+      ), work_stats AS (
+        SELECT
+          rpw.work_key,
+          rpw.work_id::text AS work_id,
+          count(t.id)::int AS remaining_chapters,
+          min(t.created_at) AS oldest_task_at,
+          (array_agg(t.chapter_key ORDER BY NULLIF(t.payload->>'orderKey','') NULLS LAST, t.created_at, t.id)
+            FILTER (WHERE t.state IN ('READY', 'RUNNING')))[1] AS frontier_chapter_key
+        FROM ready_p1_works rpw
+        JOIN importer_lite_tasks t
+          ON t.work_key = rpw.work_key
+         AND t.monitoring = false
+         AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+         AND (
+           t.state IN ('READY', 'RUNNING')
+           OR (t.state = 'RETRY_WAIT' AND t.attempts < t.max_attempts)
+         )
+        GROUP BY rpw.work_key, rpw.work_id
+      )
+      SELECT
+        ws.work_key,
+        ws.work_id,
+        ws.remaining_chapters,
+        ws.oldest_task_at,
+        (
+          SELECT cs.source
+          FROM importer_lite_chapter_sources cs
+          JOIN importer_sources src ON src.id = cs.source
+          LEFT JOIN importer_lite_source_health sh ON sh.source = src.id
+          WHERE cs.work_id = ws.work_id::uuid
+            AND cs.canonical_chapter_key = ws.frontier_chapter_key
+            AND cs.confirmed = true
+            AND COALESCE(cs.has_chapter, true) = true
+            AND src.enabled = true
+            AND COALESCE(src.status, 'ACTIVE') <> 'DISABLED'
+            AND COALESCE((to_jsonb(src)->>'chapter_ingestion_enabled')::boolean, true) = true
+            AND ${sourceExecutionEligibilitySql('src')}
+            AND COALESCE(sh.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
+            AND (sh.cooldown_until IS NULL OR sh.cooldown_until <= now())
+          ORDER BY cs.source_rank, cs.source
+          LIMIT 1
+        ) AS runnable_source,
+        EXISTS (
+          SELECT 1 FROM importer_lite_chapter_sources cs_any
+          WHERE cs_any.work_id = ws.work_id::uuid
+            AND cs_any.canonical_chapter_key = ws.frontier_chapter_key
+            AND cs_any.confirmed = true
+            AND COALESCE(cs_any.has_chapter, true) = true
+        ) AS has_recorded_routes
+      FROM work_stats ws
+      WHERE ws.remaining_chapters > 0
+    `);
+
+    const now = Date.now();
+    const candidateByKey = new Map<string, {
+      workKey: string;
+      workId: string;
+      source: string;
+      remainingChapters: number;
+      oldestTaskMs: number;
+      score: number;
+    }>();
+
+    for (const row of candidatesRes.rows) {
+      const hasRecordedRoutes = Boolean(row.has_recorded_routes);
+      const runnableSource = row.runnable_source ? String(row.runnable_source) : null;
+      if (hasRecordedRoutes && !runnableSource) continue;
+      const source = runnableSource || 'unattributed';
+      const remaining = Math.max(1, Number(row.remaining_chapters || 1));
+      const oldestMs = row.oldest_task_at ? new Date(row.oldest_task_at).getTime() : now;
+      const ageHours = Math.max(0, (now - oldestMs) / 3_600_000);
+      const completionScore = remaining <= 5 ? 50
+        : remaining <= 15 ? 35
+        : remaining <= 35 ? 20
+        : remaining <= 80 ? 10
+        : 0;
+      const fairnessScore = Math.min(35, ageHours * 1.5);
+      candidateByKey.set(String(row.work_key), {
+        workKey: String(row.work_key),
+        workId: String(row.work_id),
+        source,
+        remainingChapters: remaining,
+        oldestTaskMs: oldestMs,
+        score: completionScore + fairnessScore,
+      });
+    }
+
+    // Detect previous Focus works that exited because their backlog completed.
+    const exitedFocusKeys = [...this.p1FocusMeta.keys()].filter((key) => !candidateByKey.has(key));
+    if (exitedFocusKeys.length > 0) {
+      const stillPending = await this.db.query<{ work_key: string }>(`
+        SELECT DISTINCT t.work_key
+        FROM importer_lite_tasks t
+        WHERE t.work_key = ANY($1::text[])
+          AND t.monitoring = false
+          AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+          AND (
+            t.state IN ('READY', 'RUNNING')
+            OR (t.state = 'RETRY_WAIT' AND t.attempts < t.max_attempts)
+          )`, [exitedFocusKeys]);
+      const pendingSet = new Set(stillPending.rows.map((r) => String(r.work_key)));
+      for (const exitedKey of exitedFocusKeys) {
+        if (!pendingSet.has(exitedKey)) {
+          const prev = this.p1FocusMeta.get(exitedKey);
+          this.p1CompletedWorksCount++;
+          if (prev?.workId && !this.p1CompletedWorkIds.includes(prev.workId)) {
+            this.p1CompletedWorkIds.push(prev.workId);
+            if (this.p1CompletedWorkIds.length > 100) this.p1CompletedWorkIds.shift();
+          }
+        }
+      }
+    }
+
+    const nextFocus: P1FocusWorkEntry[] = [];
+    const selectedSet = new Set<string>();
+    const sourceCounts = new Map<string, number>();
+
+    // 1. Keep sticky Focus works that remain runnable so works drain continuously
+    //    to completion without thrashing every chapter.
+    for (const prevKey of this.p1FocusWorkKeys) {
+      if (nextFocus.length >= desiredSize) break;
+      const cand = candidateByKey.get(prevKey);
+      if (!cand) continue;
+      const prevMeta = this.p1FocusMeta.get(prevKey);
+      const enteredAt = prevMeta?.enteredAt || now;
+      // Rotate out after 25m only if it still has >35 chapters and fresher near-done alternatives wait.
+      if (now - enteredAt > 25 * 60_000 && cand.remainingChapters > 35 && candidateByKey.size > desiredSize) {
+        continue;
+      }
+      const currentSourceCount = sourceCounts.get(cand.source) || 0;
+      if (currentSourceCount >= maxPerSource) continue;
+      selectedSet.add(prevKey);
+      sourceCounts.set(cand.source, currentSourceCount + 1);
+      nextFocus.push({
+        workKey: cand.workKey,
+        workId: cand.workId,
+        source: cand.source,
+        remainingChapters: cand.remainingChapters,
+        enteredAt,
+      });
+    }
+
+    // 2. Fill remaining Focus slots favoring unrepresented sources + completion potential + age fairness.
+    const remainingCandidates = [...candidateByKey.values()].filter((c) => !selectedSet.has(c.workKey));
+    while (nextFocus.length < desiredSize && remainingCandidates.length > 0) {
+      let bestIdx = -1;
+      let bestScore = -Infinity;
+      for (let i = 0; i < remainingCandidates.length; i++) {
+        const cand = remainingCandidates[i];
+        const srcCount = sourceCounts.get(cand.source) || 0;
+        if (srcCount >= maxPerSource) continue;
+        const diversityBonus = srcCount === 0 ? 25 : srcCount === 1 ? 10 : 0;
+        const effectiveScore = cand.score + diversityBonus;
+        if (effectiveScore > bestScore) {
+          bestScore = effectiveScore;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx === -1) break;
+      const chosen = remainingCandidates.splice(bestIdx, 1)[0];
+      selectedSet.add(chosen.workKey);
+      sourceCounts.set(chosen.source, (sourceCounts.get(chosen.source) || 0) + 1);
+      nextFocus.push({
+        workKey: chosen.workKey,
+        workId: chosen.workId,
+        source: chosen.source,
+        remainingChapters: chosen.remainingChapters,
+        enteredAt: now,
+      });
+    }
+
+    // 3. Never leave capacity idle if fewer sources have eligible works: relax per-source cap to fill desiredSize.
+    if (nextFocus.length < desiredSize && remainingCandidates.length > 0) {
+      remainingCandidates.sort((a, b) => b.score - a.score || a.oldestTaskMs - b.oldestTaskMs);
+      for (const chosen of remainingCandidates) {
+        if (nextFocus.length >= desiredSize) break;
+        selectedSet.add(chosen.workKey);
+        sourceCounts.set(chosen.source, (sourceCounts.get(chosen.source) || 0) + 1);
+        nextFocus.push({
+          workKey: chosen.workKey,
+          workId: chosen.workId,
+          source: chosen.source,
+          remainingChapters: chosen.remainingChapters,
+          enteredAt: now,
+        });
+      }
+    }
+
+    this.p1FocusWorkKeys = nextFocus.map((item) => item.workKey);
+    this.p1FocusMeta = new Map(nextFocus.map((item) => [item.workKey, item]));
+    this.p1FocusRefreshedAt = new Date(now).toISOString();
+    return this.getP1FocusGroupSnapshot();
+  }
+
+  getP1FocusWorkKeys(): string[] {
+    return this.p1FocusWorkKeys;
+  }
+
+  getP1FocusGroupSnapshot(): P1FocusGroupSnapshot {
+    const focusSources: Record<string, number> = {};
+    for (const entry of this.p1FocusMeta.values()) {
+      focusSources[entry.source] = (focusSources[entry.source] || 0) + 1;
+    }
+    return {
+      targetSize: this.p1FocusTargetSize,
+      focusWorkCount: this.p1FocusWorkKeys.length,
+      focusWorkKeys: [...this.p1FocusWorkKeys],
+      focusSources,
+      primaryClaims: this.p1PrimaryClaims,
+      secondaryClaims: this.p1SecondaryClaims,
+      completedWorksSinceBoot: this.p1CompletedWorksCount,
+      recentCompletedWorkIds: [...this.p1CompletedWorkIds],
+      refreshedAt: this.p1FocusRefreshedAt,
+    };
+  }
+
+  /**
+   * Determines whether executable or recoverable P1 historical backlog exists
+   * so P2 new-work discovery/onboarding remains subordinated to P1 without
+   * ever starving permanently on terminal BLOCKED or disabled-source rows.
+   */
+  async hasExecutableOrRecoverableP1Backlog(forceFresh = false): Promise<{ pending: boolean; reason: string | null }> {
+    const now = Date.now();
+    if (!forceFresh && this.p1BacklogCache && now - this.p1BacklogCache.at < 5_000) {
+      return { pending: this.p1BacklogCache.pending, reason: this.p1BacklogCache.reason };
+    }
+    const probe = await this.db.query<{ reason: string | null }>(`
+      SELECT COALESCE(
+        (
+          SELECT 'P1_RUNNING'
+          FROM importer_lite_tasks t
+          WHERE t.state = 'RUNNING'
+            AND t.monitoring = false
+            AND t.priority = 2
+            AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH', 'CATALOG')
+            AND (t.lease_until IS NULL OR t.lease_until > now())
+          LIMIT 1
+        ),
+        (
+          SELECT 'P1_READY_CHAPTER'
+          FROM importer_lite_tasks t
+          LEFT JOIN works w ON w.id = t.work_id
+          LEFT JOIN media cov ON cov.id = w.cover_id
+          WHERE t.state = 'READY'
+            AND t.monitoring = false
+            AND t.priority = 2
+            AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+            AND (
+              t.work_id IS NULL
+              OR (
+                NULLIF(btrim(w.title), '') IS NOT NULL
+                AND NULLIF(btrim(w.slug), '') IS NOT NULL
+                AND cov.storage_ready = true
+                AND cov.bytes >= 1500
+              )
+            )
+            AND NOT (
+              t.task_type = 'IMPORT_CHAPTER'
+              AND t.work_id IS NOT NULL
+              AND t.chapter_key IS NOT NULL
+              AND public.importer_lite_manifest_p1_route_deferred(t.work_id, t.chapter_key)
+            )
+          LIMIT 1
+        ),
+        (
+          SELECT 'P1_RECOVERABLE_RETRY'
+          FROM importer_lite_tasks t
+          LEFT JOIN works w ON w.id = t.work_id
+          LEFT JOIN media cov ON cov.id = w.cover_id
+          WHERE t.state = 'RETRY_WAIT'
+            AND t.monitoring = false
+            AND t.priority = 2
+            AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+            AND t.attempts < t.max_attempts
+            AND (
+              t.work_id IS NULL
+              OR (
+                NULLIF(btrim(w.title), '') IS NOT NULL
+                AND NULLIF(btrim(w.slug), '') IS NOT NULL
+                AND cov.storage_ready = true
+                AND cov.bytes >= 1500
+              )
+            )
+            AND NOT (
+              t.task_type = 'IMPORT_CHAPTER'
+              AND t.work_id IS NOT NULL
+              AND t.chapter_key IS NOT NULL
+              AND public.importer_lite_manifest_p1_route_deferred(t.work_id, t.chapter_key)
+            )
+          LIMIT 1
+        ),
+        (
+          SELECT 'P1_HISTORICAL_CATALOG'
+          FROM importer_lite_tasks t
+          JOIN importer_sources s ON s.id = t.payload->>'source'
+          LEFT JOIN importer_lite_source_health h ON h.source = s.id
+          WHERE t.state IN ('READY', 'RETRY_WAIT')
+            AND t.monitoring = false
+            AND t.priority = 2
+            AND t.task_type = 'CATALOG'
+            AND t.payload ? 'historicalP1Backfill'
+            AND t.attempts < t.max_attempts
+            AND s.enabled = true
+            AND s.id NOT IN ('mangaball', 'mangadex', 'mangafire')
+            AND COALESCE(s.status, 'ACTIVE') <> 'DISABLED'
+            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = true
+            AND ${sourceExecutionEligibilitySql('s')}
+            AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
+          LIMIT 1
+        )
+      ) AS reason
+    `);
+    const reason = probe.rows[0]?.reason ? String(probe.rows[0].reason) : null;
+    const pending = reason !== null;
+    this.p1BacklogCache = { at: now, pending, reason };
+    return { pending, reason };
+  }
+
+  /**
+   * Checks whether an existing work currently has pending unpublished chapters
+   * on operational routes so newly detected P0 chapters are incorporated into
+   * that work's P1 canonical sequence instead of publishing out of order.
+   */
+  async hasPendingWorkChapterBacklog(workId: string): Promise<boolean> {
+    const result = await this.db.query<{ pending: boolean }>(`
+      SELECT (
+        EXISTS (
+          SELECT 1
+          FROM importer_lite_tasks t
+          WHERE t.work_id = $1::uuid
+            AND t.monitoring = false
+            AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+            AND (
+              t.state IN ('READY', 'RUNNING')
+              OR (t.state = 'RETRY_WAIT' AND t.attempts < t.max_attempts)
+            )
+            AND NOT (
+              t.task_type = 'IMPORT_CHAPTER'
+              AND t.chapter_key IS NOT NULL
+              AND public.importer_lite_manifest_p1_route_deferred(t.work_id, t.chapter_key)
+            )
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM importer_lite_chapter_sources cs
+          JOIN importer_sources s ON s.id = cs.source
+          LEFT JOIN importer_lite_source_health h ON h.source = s.id
+          WHERE cs.work_id = $1::uuid
+            AND cs.confirmed = true
+            AND COALESCE(cs.has_chapter, true) = true
+            AND s.enabled = true
+            AND COALESCE(s.status, 'ACTIVE') <> 'DISABLED'
+            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = true
+            AND ${sourceExecutionEligibilitySql('s')}
+            AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
+            AND NOT EXISTS (
+              SELECT 1 FROM importer_lite_chapters ch
+              WHERE ch.work_id = cs.work_id AND ch.canonical_chapter_key = cs.canonical_chapter_key
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM importer_lite_tasks blk
+              WHERE blk.idempotency_key = 'lite:chapter:' || cs.work_id::text || ':' || cs.canonical_chapter_key
+                AND blk.state = 'BLOCKED'
+            )
+        )
+      ) AS pending`, [workId]);
+    return Boolean(result.rows[0]?.pending);
   }
 
   /** Source-backed metadata owns a dedicated fast lane and never waits behind chapter claims. */
@@ -1979,20 +2572,12 @@ export class LiteRepository {
    * available permit proceed without changing durable priority.
    */
   async yieldForSourceFairness(task: LiteTask, workerId: string, delayMs = 750): Promise<boolean> {
-    const client = await this.db.connect();
-    try {
-      await client.query('BEGIN');
-      const result = await client.query(`UPDATE importer_lite_tasks
-        SET state='READY',attempts=GREATEST(attempts-1,0),lease_owner=NULL,lease_until=NULL,
-            next_run_at=GREATEST(next_run_at,now()+($3::int * interval '1 millisecond')),updated_at=now()
-        WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2`, [task.id, workerId, Math.max(50, Math.min(5_000, delayMs))]);
-      if (result.rowCount === 1) await this.refreshReadyWork(client, task.workKey);
-      await client.query('COMMIT');
-      return result.rowCount === 1;
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw error;
-    } finally { client.release(); }
+    const clampedDelay = Math.max(50, Math.min(5_000, delayMs));
+    const result = await this.db.query<{ yielded: boolean }>(
+      'SELECT public.importer_lite_yield_task($1::uuid, $2, $3::int) AS yielded',
+      [task.id, workerId, clampedDelay],
+    );
+    return result.rows[0]?.yielded === true;
   }
 
   /**
@@ -2842,11 +3427,149 @@ export class LiteRepository {
       }
       await this.refreshReadyWork(client, task.workKey);
       await client.query('COMMIT');
+      this.clearNonRateLimitedCoolingSource(completion.selectedSource);
+      this.invalidateP1BacklogCache();
       return true;
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
       throw error;
     } finally { client.release(); }
+  }
+
+  /**
+   * Inline atomic completion + Reader publication for the production worker hot
+   * path.  Eliminates the intermediate PUBLISH enqueue, re-claim and second
+   * transaction while preserving every lease fence, work-presentation check,
+   * importer_replace_pages integrity check and importer_publication_events row.
+   * If work presentation became incomplete while media was uploading, rolls
+   * back and falls back to completeImportAndEnqueuePublish so durable page
+   * uploads are never lost.
+   */
+  async completeImportAndPublish(
+    task: LiteTask,
+    workerId: string,
+    completion: CompleteImportInput,
+    fresh: boolean,
+  ): Promise<boolean> {
+    if (!task.workId || !task.chapterKey) return false;
+    const checkpoint = {
+      chapterId: completion.chapterId,
+      mediaIds: completion.mediaIds,
+      pageCount: completion.pageCount,
+      selectedSource: completion.selectedSource,
+      mediaStoredAt: completion.mediaStoredAt,
+    };
+    const client = await this.db.connect();
+    let fallbackToTwoStep = false;
+    try {
+      await client.query('BEGIN');
+      const presentation = await client.query<Row>(
+        `SELECT w.cover_id, w.title, w.slug, m.storage_ready, m.bytes
+           FROM importer_lite_tasks t
+           JOIN works w ON w.id = $3::uuid
+           LEFT JOIN media m ON m.id = w.cover_id
+          WHERE t.id = $1::uuid AND t.state = 'RUNNING' AND t.lease_owner = $2 AND t.lease_until > now()
+          FOR UPDATE OF t, w`,
+        [task.id, workerId, task.workId],
+      );
+      const work = presentation.rows[0];
+      if (!work) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      if (!work.title || !work.slug || !work.cover_id || work.storage_ready !== true || Number(work.bytes) < 1500) {
+        fallbackToTwoStep = true;
+        await client.query('ROLLBACK');
+      } else {
+        const pageRows = completion.mediaIds.map((mediaId, index) => ({ media_id: mediaId, position: index + 1 }));
+        await client.query('SELECT public.importer_replace_pages($1::uuid,$2::jsonb)', [
+          completion.chapterId,
+          JSON.stringify(pageRows),
+        ]);
+        const effectivePriorityRank = LITE_PRIORITY_RANK[task.priority];
+        const result = await client.query<{ done: number }>(
+          `WITH publication AS (
+             UPDATE chapters
+                SET published_at = COALESCE(
+                      published_at,
+                      GREATEST(
+                        clock_timestamp(),
+                        COALESCE(
+                          (SELECT max(ch_prev.published_at) + interval '1 millisecond'
+                             FROM chapters ch_prev
+                            WHERE ch_prev.work_id = chapters.work_id
+                              AND ch_prev.chapter_order_key < chapters.chapter_order_key
+                              AND ch_prev.published_at IS NOT NULL),
+                          clock_timestamp()
+                        )
+                      )
+                    ),
+                    is_fresh_release = CASE WHEN published_at IS NULL THEN $2 ELSE is_fresh_release END
+              WHERE id = $1::uuid
+             RETURNING published_at
+           ), event_row AS (
+             INSERT INTO importer_publication_events
+               (chapter_id, transition_at, recorded_at, bucket_minute, is_fresh_release, source, work_id, priority)
+             SELECT $1::uuid, p.published_at, clock_timestamp(), date_trunc('minute', p.published_at), $2, $3, $4::uuid, $5
+               FROM publication p
+             ON CONFLICT(chapter_id) DO NOTHING
+           ), work_row AS (
+             UPDATE works
+                SET published = true,
+                    latest_chapter_published_at = GREATEST(COALESCE(latest_chapter_published_at, p.published_at), p.published_at),
+                    updated_at = now()
+               FROM publication p
+              WHERE works.id = $4::uuid
+           ), done AS (
+             UPDATE importer_lite_tasks t
+                SET state = 'DONE',
+                    lease_owner = NULL,
+                    lease_until = NULL,
+                    checkpoint = t.checkpoint || $8::jsonb || jsonb_build_object('publishedAt', p.published_at::text),
+                    updated_at = now()
+               FROM publication p
+              WHERE t.id = $6::uuid AND t.state = 'RUNNING' AND t.lease_owner = $7 AND t.lease_until > now()
+             RETURNING t.work_key
+           ), source_success AS (
+             INSERT INTO importer_lite_source_health(source, health, cooldown_until, consecutive_failures, last_error)
+             SELECT $3, 'HEALTHY', NULL, 0, NULL FROM done
+             ON CONFLICT(source) DO UPDATE
+               SET health = 'HEALTHY', cooldown_until = NULL, consecutive_failures = 0, last_error = NULL, updated_at = now()
+             WHERE NOT (importer_lite_source_health.health = 'RATE_LIMITED'
+               AND importer_lite_source_health.cooldown_until > now())
+           )
+           SELECT count(*)::int AS done FROM done`,
+          [
+            completion.chapterId,
+            fresh,
+            completion.selectedSource,
+            task.workId,
+            effectivePriorityRank,
+            task.id,
+            workerId,
+            JSON.stringify(checkpoint),
+          ],
+        );
+        if (Number(result.rows[0]?.done || 0) !== 1) {
+          await client.query('ROLLBACK');
+          return false;
+        }
+        await this.refreshReadyWork(client, task.workKey);
+        await client.query('COMMIT');
+        this.clearNonRateLimitedCoolingSource(completion.selectedSource);
+        this.invalidateP1BacklogCache();
+        return true;
+      }
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+    if (fallbackToTwoStep) {
+      return this.completeImportAndEnqueuePublish(task, workerId, completion);
+    }
+    return false;
   }
 
   async finish(task: LiteTask, workerId: string, outcome: {
@@ -2861,6 +3584,7 @@ export class LiteRepository {
     /** A healthy recurring observation starts a fresh bounded failure window. */
     resetAttempts?: boolean;
   }): Promise<boolean> {
+    if (!task) return false;
     const isMetadataTask = task.payload?.metadataEnrichmentVersion === 4
       || task.payload?.metadataEnrichmentVersion === 7
       || Boolean(task.payload?.metadataCrossSourceDiscovery)
@@ -2868,38 +3592,45 @@ export class LiteRepository {
     const dbToUse = (this.sourceMetadataDb && this.sourceMetadataDb !== this.db && ((this.sourceMetadataDb as any).waitingCount || 0) > 0 && ((this.db as any).idleCount || 0) > 0)
       ? this.db
       : (isMetadataTask ? this.sourceMetadataDb : this.db);
-    const client = await dbToUse.connect();
-    try {
-      await client.query('BEGIN');
-      const result = await client.query(
+    const params = [
+      task.id,
+      workerId,
+      outcome.state,
+      outcome.reason || null,
+      outcome.nextRunAt || null,
+      JSON.stringify(outcome.checkpoint || {}),
+      outcome.priority === undefined ? null : LITE_PRIORITY_RANK[outcome.priority],
+      outcome.monitoring === undefined ? null : outcome.monitoring,
+      outcome.workId || null,
+      Boolean(outcome.resetAttempts),
+    ];
+    if (isMetadataTask) {
+      const result = await dbToUse.query(
         `UPDATE importer_lite_tasks
-          SET state=$3, reason=$4, next_run_at=COALESCE($5::timestamptz,next_run_at),
-              base_priority=COALESCE($7::smallint,base_priority),
-              priority=CASE WHEN EXISTS (
-                SELECT 1 FROM importer_staff_requests s
-                WHERE s.work_id=COALESCE($9::uuid,importer_lite_tasks.work_id)
-                  AND s.status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')
-              ) THEN 0 ELSE COALESCE($7::smallint,base_priority) END,
-              checkpoint=checkpoint || $6::jsonb,
-              monitoring=COALESCE($8::boolean,monitoring),
-              work_id=COALESCE($9::uuid,work_id),
-              attempts=CASE WHEN $10::boolean THEN 0 ELSE attempts END,
-              lease_owner=NULL, lease_until=NULL, updated_at=now()
-         WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`,
-        [task.id, workerId, outcome.state, outcome.reason || null, outcome.nextRunAt || null, JSON.stringify(outcome.checkpoint || {}), outcome.priority === undefined ? null : LITE_PRIORITY_RANK[outcome.priority], outcome.monitoring === undefined ? null : outcome.monitoring, outcome.workId || null, Boolean(outcome.resetAttempts)],
+            SET state=$3, reason=$4, next_run_at=COALESCE($5::timestamptz,next_run_at),
+                base_priority=COALESCE($7::smallint,base_priority),
+                priority=CASE WHEN EXISTS (
+                  SELECT 1 FROM importer_staff_requests s
+                  WHERE s.work_id=COALESCE($9::uuid,importer_lite_tasks.work_id)
+                    AND s.status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')
+                ) THEN 0 ELSE COALESCE($7::smallint,base_priority) END,
+                checkpoint=checkpoint || $6::jsonb,
+                monitoring=COALESCE($8::boolean,monitoring),
+                work_id=COALESCE($9::uuid,work_id),
+                attempts=CASE WHEN $10::boolean THEN 0 ELSE attempts END,
+                lease_owner=NULL, lease_until=NULL, updated_at=now()
+          WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`,
+        params,
       );
-      // Metadata campaigns claim their own tasks and never need a generic
-      // ready-work projection. Skipping that projection removes a costly
-      // cross-table refresh per mapping without changing chapter scheduling.
-      if (result.rowCount === 1 && !isMetadataTask) {
-        await this.refreshReadyWork(client, task.workKey);
-      }
-      await client.query('COMMIT');
       return result.rowCount === 1;
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw error;
-    } finally { client.release(); }
+    }
+    const result = await dbToUse.query<{ finished: boolean }>(
+      'SELECT public.importer_lite_finish_task($1::uuid, $2, $3, $4, $5::timestamptz, $6::jsonb, $7::smallint, $8::boolean, $9::uuid, $10::boolean) AS finished',
+      params,
+    );
+    const finished = result.rows[0]?.finished === true;
+    if (finished && !task.monitoring) this.invalidateP1BacklogCache();
+    return finished;
   }
 
   /**
@@ -2943,6 +3674,12 @@ export class LiteRepository {
     const cooldownSeconds = retryAfter > 0 ? Math.min(3600, retryAfter + 2) : 60;
     const health = retryAfter > 0 ? 'RATE_LIMITED' : 'DEGRADED';
     const message = String(detail?.message || 'SOURCE_FAILURE').slice(0, 500);
+    const existingCooling = this.coolingSources.get(source);
+    const nextCoolingUntil = Date.now() + cooldownSeconds * 1_000;
+    this.coolingSources.set(source, {
+      until: existingCooling ? Math.max(existingCooling.until, nextCoolingUntil) : nextCoolingUntil,
+      rateLimited: retryAfter > 0 || Boolean(existingCooling?.rateLimited && existingCooling.until > Date.now()),
+    });
     // Ordinary transient failures retain the one-statement health update: a
     // failure must never make the error path compete with normal imports for
     // extra pool time. A provider-specified retry boundary is different. If
@@ -3018,6 +3755,7 @@ export class LiteRepository {
   }
 
   async recordSourceSuccess(source: string): Promise<void> {
+    this.clearNonRateLimitedCoolingSource(source);
     await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
       VALUES($1,'HEALTHY',NULL,0,NULL)
       ON CONFLICT(source) DO UPDATE SET health='HEALTHY',cooldown_until=NULL,
@@ -3098,7 +3836,30 @@ export class LiteRepository {
       // then a few routes per source. This runs only in the 30-second
       // reconciler and refreshes the normal ready-work projection.
       const sourceCooldownRecovery = recoverSourceCooldowns ? await client.query<Row>(
-        `/*+ IndexScan(task importer_lite_tasks_source_cooldown_due_idx) */ WITH due_candidates AS (
+        `/*+ IndexScan(task importer_lite_tasks_source_cooldown_due_idx) */ WITH runnable_due AS (
+           SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
+             task.created_at,task.updated_at
+           FROM importer_lite_tasks task
+           WHERE task.state='RETRY_WAIT' AND task.monitoring=false AND task.task_type='IMPORT_CHAPTER'
+             AND task.reason='SOURCE_RATE_LIMITED' AND task.next_run_at<=now()
+             AND EXISTS (
+               SELECT 1
+               FROM importer_lite_chapter_sources route
+               JOIN importer_sources s ON s.id=route.source
+               LEFT JOIN importer_lite_source_health h ON h.source=route.source
+               WHERE route.work_id=task.work_id AND route.canonical_chapter_key=task.chapter_key
+                 AND route.confirmed=true AND route.has_chapter=true
+                 AND route.language=COALESCE(NULLIF(task.payload->>'language',''),'und')
+                 AND route.edition=COALESCE(NULLIF(task.payload->>'edition',''),'default')
+                 AND s.enabled=true
+                 AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+                 AND ${sourceExecutionEligibilitySql('s')}
+                 AND COALESCE(h.health,'HEALTHY') IN ('HEALTHY','DEGRADED','RATE_LIMITED')
+                 AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+             )
+           ORDER BY task.next_run_at,task.id
+           LIMIT 512
+         ), due_candidates AS (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,
              row_number() OVER (PARTITION BY task.work_key
@@ -3106,34 +3867,11 @@ export class LiteRepository {
                  task.next_run_at,task.created_at,task.id) AS work_position,
              COALESCE(ready.updated_at,max(task.updated_at) OVER (PARTITION BY task.work_key)) AS work_turn_at,
              min(task.next_run_at) OVER (PARTITION BY task.work_key) AS oldest_due
-           FROM importer_lite_tasks task
+           FROM runnable_due task
            LEFT JOIN importer_lite_ready_works ready ON ready.work_key=task.work_key
-           WHERE task.state='RETRY_WAIT' AND task.monitoring=false AND task.task_type='IMPORT_CHAPTER'
-             AND task.reason='SOURCE_RATE_LIMITED' AND task.next_run_at<=now()
          ), candidate_works AS (
-           -- Pick the bounded work horizon only after proving that the task
-           -- still has a route the executor may use.  Selecting the oldest
-           -- rows first could otherwise fill this horizon with providers
-           -- which remain externally unavailable; the later route join then
-           -- reopened nothing and a healthy, due historical gap behind it
-           -- could wait forever.
            SELECT DISTINCT candidate.work_key,candidate.work_turn_at,candidate.oldest_due
            FROM due_candidates candidate
-           WHERE EXISTS (
-             SELECT 1
-             FROM importer_lite_chapter_sources route
-             JOIN importer_sources s ON s.id=route.source
-             LEFT JOIN importer_lite_source_health h ON h.source=route.source
-             WHERE route.work_id=candidate.work_id AND route.canonical_chapter_key=candidate.chapter_key
-               AND route.confirmed=true AND route.has_chapter=true
-               AND route.language=COALESCE(NULLIF(candidate.payload->>'language',''),'und')
-               AND route.edition=COALESCE(NULLIF(candidate.payload->>'edition',''),'default')
-               AND s.enabled=true
-               AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-               AND ${sourceExecutionEligibilitySql('s')}
-               AND COALESCE(h.health,'HEALTHY') IN ('HEALTHY','DEGRADED','RATE_LIMITED')
-               AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
-           )
            ORDER BY candidate.work_turn_at NULLS FIRST,candidate.oldest_due,candidate.work_key
            LIMIT $1
          ), due AS (
@@ -3298,10 +4036,80 @@ export class LiteRepository {
               checkpoint=p.checkpoint || '{"publishIntegrityRepairV1":true}'::jsonb,updated_at=now()
           FROM picked WHERE p.id=picked.id RETURNING picked.work_key`, [limit],
       );
-      for (const key of new Set([...leases.rows, ...retries.rows, ...uploads.rows, ...reopenedUnknownTasks.rows, ...ready.rows, ...repairedPublishes.rows].map((row) => row.work_key))) {
+      const disabledBackfillCatalogs = recoverSourceCooldowns ? await client.query<Row>(
+        `WITH picked AS (
+           SELECT t.id, t.work_key
+           FROM importer_lite_tasks t
+           JOIN importer_sources s ON s.id = t.payload->>'source'
+           WHERE t.state = 'READY'
+             AND t.monitoring = false
+             AND t.priority = 2
+             AND t.task_type = 'CATALOG'
+             AND t.payload ? 'historicalP1Backfill'
+             AND (
+               s.enabled = false
+               OR COALESCE(s.status, 'ACTIVE') = 'DISABLED'
+               OR COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = false
+               OR s.id IN ('mangaball', 'mangadex', 'mangafire')
+             )
+           LIMIT $1
+           FOR UPDATE OF t SKIP LOCKED
+         )
+         UPDATE importer_lite_tasks t
+            SET state = 'BLOCKED', reason = 'SOURCE_DISABLED', lease_owner = NULL, lease_until = NULL, updated_at = now()
+           FROM picked
+          WHERE t.id = picked.id
+         RETURNING picked.work_key`,
+        [Math.min(64, Math.max(16, limit))],
+      ) : noUploadOutcomeRecovery;
+      const demotedOutOfSequenceP0 = recoverSourceCooldowns ? await client.query<Row>(
+        `WITH picked AS (
+           SELECT t.id, t.work_key
+           FROM importer_lite_tasks t
+           WHERE t.state IN ('READY', 'RETRY_WAIT')
+             AND t.monitoring = false
+             AND t.priority = 1
+             AND t.base_priority = 1
+             AND t.task_type = 'IMPORT_CHAPTER'
+             AND t.work_id IS NOT NULL
+             AND NULLIF(t.payload->>'orderKey', '') IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM importer_staff_requests sr
+               WHERE sr.work_id = t.work_id
+                 AND sr.status IN ('QUEUED', 'IMPORTING', 'RETRYING', 'ACTIVE')
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM importer_lite_tasks prev
+               WHERE prev.work_id = t.work_id
+                 AND prev.monitoring = false
+                 AND prev.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+                 AND NULLIF(prev.payload->>'orderKey', '') < NULLIF(t.payload->>'orderKey', '')
+                 AND (
+                   prev.state IN ('READY', 'RUNNING')
+                   OR (prev.state = 'RETRY_WAIT' AND prev.attempts < prev.max_attempts)
+                 )
+                 AND NOT (
+                   prev.task_type = 'IMPORT_CHAPTER'
+                   AND prev.chapter_key IS NOT NULL
+                   AND public.importer_lite_manifest_p1_route_deferred(prev.work_id, prev.chapter_key)
+                 )
+             )
+           LIMIT $1
+           FOR UPDATE OF t SKIP LOCKED
+         )
+         UPDATE importer_lite_tasks t
+            SET priority = 2, base_priority = 2, updated_at = now()
+           FROM picked
+          WHERE t.id = picked.id
+         RETURNING picked.work_key`,
+        [Math.min(64, Math.max(16, limit))],
+      ) : noUploadOutcomeRecovery;
+      for (const key of new Set([...leases.rows, ...retries.rows, ...uploads.rows, ...reopenedUnknownTasks.rows, ...ready.rows, ...repairedPublishes.rows, ...disabledBackfillCatalogs.rows, ...demotedOutOfSequenceP0.rows].map((row) => row.work_key))) {
         await this.refreshReadyWork(client, key);
       }
       await client.query('COMMIT');
+      this.invalidateP1BacklogCache();
       const leaseRetries = leases.rows.filter((row) => row.state === 'RETRY_WAIT').length;
       const readyRetries = retries.rows.filter((row) => row.state === 'READY').length;
       const exhausted = [...leases.rows, ...retries.rows].filter((row) => row.state === 'BLOCKED').length;

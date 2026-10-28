@@ -80,13 +80,51 @@ export interface CompleteImportInput {
     selectedSource: string;
     mediaStoredAt: string;
 }
+export interface LiteClaimOptions {
+    focusWorkKeys?: string[] | null;
+    preferFocus?: boolean;
+    excludedSources?: string[] | null;
+    chaptersOnly?: boolean;
+}
+export interface P1FocusWorkEntry {
+    workKey: string;
+    workId: string;
+    source: string;
+    remainingChapters: number;
+    enteredAt: number;
+}
+export interface P1FocusGroupSnapshot {
+    targetSize: number;
+    focusWorkCount: number;
+    focusWorkKeys: string[];
+    focusSources: Record<string, number>;
+    primaryClaims: number;
+    secondaryClaims: number;
+    completedWorksSinceBoot: number;
+    recentCompletedWorkIds: string[];
+    refreshedAt: string | null;
+}
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export declare class LiteRepository {
     private readonly db;
     private readonly sourceMetadataDb;
     private historicalP1ReserveAbundant;
     private manifestP1ReserveCache;
+    private readonly coolingSources;
+    private p1FocusWorkKeys;
+    private p1FocusMeta;
+    private p1FocusTargetSize;
+    private p1FocusRefreshedAt;
+    private p1CompletedWorksCount;
+    private p1CompletedWorkIds;
+    private p1PrimaryClaims;
+    private p1SecondaryClaims;
+    private lastHistoricalP1CatalogSource;
+    private p1BacklogCache;
     hasAbundantHistoricalP1Reserve(): boolean;
+    invalidateP1BacklogCache(): void;
+    getActiveCoolingSources(): string[];
+    private clearNonRateLimitedCoolingSource;
     /**
      * Source-backed historical metadata is deliberately allowed one tiny,
      * isolated database seat.  It cannot borrow the chapter claim pool during a
@@ -215,7 +253,39 @@ export declare class LiteRepository {
         inserted: number;
         insertedKeys: Set<string>;
     }>;
-    claim(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    claim(workerId: string, leaseSeconds: number, options?: LiteClaimOptions): Promise<LiteTask | null>;
+    /**
+     * Dedicated source-rotated claim for READY historicalP1Backfill CATALOG tasks
+     * across operational sources so multi-source P1 manifests materialize without
+     * waiting behind hundreds of operation_rank=1 chapter imports on hot sources.
+     */
+    claimHistoricalP1Catalog(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    /**
+     * Dynamically maintain the Primary P1 Focus Group (~15-20 works, expanding
+     * with real admission capacity) favoring near-completion works + queue-age
+     * fairness + multi-source diversity, while detecting completed P1 works.
+     */
+    refreshP1FocusGroup(options?: {
+        targetSize?: number;
+        maxPerSource?: number;
+    }): Promise<P1FocusGroupSnapshot>;
+    getP1FocusWorkKeys(): string[];
+    getP1FocusGroupSnapshot(): P1FocusGroupSnapshot;
+    /**
+     * Determines whether executable or recoverable P1 historical backlog exists
+     * so P2 new-work discovery/onboarding remains subordinated to P1 without
+     * ever starving permanently on terminal BLOCKED or disabled-source rows.
+     */
+    hasExecutableOrRecoverableP1Backlog(forceFresh?: boolean): Promise<{
+        pending: boolean;
+        reason: string | null;
+    }>;
+    /**
+     * Checks whether an existing work currently has pending unpublished chapters
+     * on operational routes so newly detected P0 chapters are incorporated into
+     * that work's P1 canonical sequence instead of publishing out of order.
+     */
+    hasPendingWorkChapterBacklog(workId: string): Promise<boolean>;
     /** Source-backed metadata owns a dedicated fast lane and never waits behind chapter claims. */
     claimSourceMetadataRefresh(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /**
@@ -431,6 +501,16 @@ export declare class LiteRepository {
      * outside this transaction.
      */
     completeImportAndEnqueuePublish(task: LiteTask, workerId: string, completion: CompleteImportInput): Promise<boolean>;
+    /**
+     * Inline atomic completion + Reader publication for the production worker hot
+     * path.  Eliminates the intermediate PUBLISH enqueue, re-claim and second
+     * transaction while preserving every lease fence, work-presentation check,
+     * importer_replace_pages integrity check and importer_publication_events row.
+     * If work presentation became incomplete while media was uploading, rolls
+     * back and falls back to completeImportAndEnqueuePublish so durable page
+     * uploads are never lost.
+     */
+    completeImportAndPublish(task: LiteTask, workerId: string, completion: CompleteImportInput, fresh: boolean): Promise<boolean>;
     finish(task: LiteTask, workerId: string, outcome: {
         state: Extract<LiteTaskState, 'DONE' | 'RETRY_WAIT' | 'BLOCKED'>;
         reason?: string | null;

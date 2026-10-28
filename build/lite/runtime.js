@@ -163,7 +163,7 @@ const UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS = 5 * 60_000;
 /** Re-admit due source-cooldown work promptly once the chapter lane is quiet. */
 const SOURCE_COOLDOWN_RECOVERY_IDLE_INTERVAL_MS = 30_000;
 /** Max gap between SOURCE_RATE_LIMITED re-admission passes during a chapter wave. */
-const SOURCE_COOLDOWN_RECOVERY_MAX_GAP_MS = 2 * 60_000;
+const SOURCE_COOLDOWN_RECOVERY_MAX_GAP_MS = 30_000;
 /** Pause between V5 source-metadata producer chains that found no candidate. */
 const SOURCE_METADATA_NO_CANDIDATE_BACKOFF_MS = 5 * 60_000;
 // Confirmed manifest rows are the durable evidence for a historical chapter.
@@ -401,6 +401,15 @@ export class ImporterLiteRuntime {
         checkedAt: new Date(0).toISOString(),
     };
     operatorChapterAdmissionCap = 0;
+    p1ClaimCounter = 0;
+    lastP1FocusRefreshAt = 0;
+    p1FocusRefreshInFlight = null;
+    historicalP1CatalogExecGate = new AsyncSemaphore(2, 'lite_historical_p1_catalog_exec');
+    p2SubordinationState = {
+        subordinated: false,
+        reason: null,
+        checkedAt: null,
+    };
     lastSiteProbe = {
         state: 'UNKNOWN', checkedAt: new Date(0).toISOString(), latencyMs: null,
     };
@@ -652,6 +661,8 @@ export class ImporterLiteRuntime {
             await this.refreshSourceFairness();
             await this.refillHistoricalP1Catalog();
             await this.refillManifestProvenP1Imports();
+            await this.refreshP1FocusGroupNow(true);
+            void Promise.all([this.runHistoricalP1CatalogTurn(), this.runHistoricalP1CatalogTurn()]).catch(() => { });
             await this.refillStoredMetadataEnrichment();
             await this.refillSourceMetadataEnrichment();
             await this.refillCrossSourceMetadataDiscovery();
@@ -702,6 +713,13 @@ export class ImporterLiteRuntime {
         }, NEW_WORK_CATALOG_LANE_INTERVAL_MS);
         newWorkCatalogTimer.unref();
         this.timers.push(newWorkCatalogTimer);
+        const historicalP1CatalogTimer = setInterval(() => {
+            if (!this.isRuntimeLeader)
+                return;
+            void this.runHistoricalP1CatalogTurn();
+        }, 3_000);
+        historicalP1CatalogTimer.unref();
+        this.timers.push(historicalP1CatalogTimer);
         const healthTimer = setInterval(() => void this.probeSharedResources(), 30_000);
         healthTimer.unref();
         this.timers.push(healthTimer);
@@ -984,8 +1002,9 @@ export class ImporterLiteRuntime {
         // 30-second recovery turn continues from the durable source cursor.
         if (this.sourceMetadataPool.waitingCount > 0 || !this.p0MonitorCoverageRefillGate.tryAcquire())
             return;
+        let shouldContinueCatchup = false;
         try {
-            const refill = await this.queue.refillP0MonitorCoverage();
+            const refill = await this.queue.refillP0MonitorCoverage(64);
             this.p0MonitorCoverage = {
                 observedAt: new Date().toISOString(),
                 source: refill.source,
@@ -994,8 +1013,10 @@ export class ImporterLiteRuntime {
                 outcome: refill.source ? (refill.admitted || refill.revived ? 'ENROLLED' : 'SOURCE_ALREADY_COVERED') : 'NO_RUNNABLE_SOURCE',
                 error: null,
             };
-            if (refill.admitted || refill.revived)
+            if (refill.admitted || refill.revived) {
                 this.logger.info('Expanded durable P0 monitor coverage', refill);
+                shouldContinueCatchup = true;
+            }
         }
         catch (error) {
             this.p0MonitorCoverage = {
@@ -1008,7 +1029,69 @@ export class ImporterLiteRuntime {
         }
         finally {
             this.p0MonitorCoverageRefillGate.release();
+            if (shouldContinueCatchup && !this.stopped && this.isRuntimeLeader && !this.hasSustainedSourceMetadataPoolPressure()) {
+                const timer = setTimeout(() => void this.refillP0MonitorCoverage(), 1_500);
+                timer.unref();
+            }
         }
+    }
+    async refreshP1FocusGroupNow(force = false) {
+        if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active)
+            return;
+        if (typeof this.queue.refreshP1FocusGroup !== 'function')
+            return;
+        const now = Date.now();
+        if (!force && now - this.lastP1FocusRefreshAt < 15_000)
+            return;
+        if (this.p1FocusRefreshInFlight)
+            return this.p1FocusRefreshInFlight;
+        this.lastP1FocusRefreshAt = now;
+        const effectiveCap = Math.max(12, this.executor.getEffectiveChapterAdmissionCap());
+        const targetSize = Math.max(18, Math.min(28, Math.round(effectiveCap * 1.5)));
+        this.p1FocusRefreshInFlight = this.queue.refreshP1FocusGroup({ targetSize, maxPerSource: 3 })
+            .then(() => undefined)
+            .catch((error) => {
+            this.logger.warn('P1 focus group refresh deferred', { error: error?.message });
+        })
+            .finally(() => {
+            this.p1FocusRefreshInFlight = null;
+        });
+        return this.p1FocusRefreshInFlight;
+    }
+    async runHistoricalP1CatalogTurn() {
+        if (this.stopped || !this.isRuntimeLeader
+            || this.manualProtectiveStop.active
+            || this.metadataReplayV4Exclusive.enabled
+            || this.metadataTurboMode.enabled
+            || this.shouldPauseChapterAdmission()
+            || this.shouldPauseLowPriorityMetadata())
+            return false;
+        if (typeof this.queue.claimHistoricalP1Catalog !== 'function')
+            return false;
+        if (!this.historicalP1CatalogExecGate.tryAcquire())
+            return false;
+        let claimed = false;
+        try {
+            const workerId = `${this.runtimeInstanceId}:p1-catalog`;
+            const task = await this.queue.claimHistoricalP1Catalog(workerId, CATALOG_TASK_LEASE_SECONDS);
+            if (!task)
+                return false;
+            claimed = true;
+            await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
+        }
+        catch (error) {
+            this.logger.warn('Historical P1 catalog lane failed', { error: error?.message });
+        }
+        finally {
+            this.historicalP1CatalogExecGate.release();
+            if (claimed && !this.stopped && this.isRuntimeLeader) {
+                void this.refreshSourceFairness();
+                void this.refreshP1FocusGroupNow();
+                const timer = setTimeout(() => void this.runHistoricalP1CatalogTurn(), 250);
+                timer.unref();
+            }
+        }
+        return claimed;
     }
     async runRecoveryTurn() {
         await this.refreshMetadataReplayV4ExclusiveMode();
@@ -1094,6 +1177,8 @@ export class ImporterLiteRuntime {
         await this.refreshSourceFairness();
         await this.refillHistoricalP1Catalog();
         await this.refillManifestProvenP1Imports();
+        await this.refreshP1FocusGroupNow();
+        void this.runHistoricalP1CatalogTurn();
         await this.refillStoredMetadataEnrichment();
         // Metadata replay has its own bounded, local lane.  Feeding its durable
         // task is insufficient while P1 remains busy: execute one saved-mapping
@@ -1954,6 +2039,21 @@ export class ImporterLiteRuntime {
         // the admission guardrails.
         if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata())
             return;
+        if (typeof this.queue.hasExecutableOrRecoverableP1Backlog === 'function') {
+            try {
+                const p1Backlog = await this.queue.hasExecutableOrRecoverableP1Backlog();
+                this.p2SubordinationState = {
+                    subordinated: p1Backlog.pending,
+                    reason: p1Backlog.reason,
+                    checkedAt: new Date().toISOString(),
+                };
+                if (p1Backlog.pending)
+                    return;
+            }
+            catch (error) {
+                this.logger.warn('P1 backlog check for P2 subordination failed', { error: error?.message });
+            }
+        }
         const releaseBackgroundBudget = this.tryAcquireBackgroundMetadataBudget();
         if (!releaseBackgroundBudget)
             return;
@@ -2580,7 +2680,7 @@ export class ImporterLiteRuntime {
                     }
                     telemetryCollector.setSlotState(slotIndex, task.taskType === 'IMPORT_CHAPTER' ? 'ACTIVE_DOWNLOAD' : task.taskType === 'PUBLISH' ? 'ACTIVE_DB' : 'ACTIVE_SOURCE', task.taskType);
                     this.setWorkerLiveness(workerId, task.taskType === 'PUBLISH' ? 'PUBLISH' : task.taskType === 'IMPORT_CHAPTER' ? 'DOWNLOAD' : 'FETCH', task);
-                    await this.handle(task, workerId);
+                    await this.handle(task, workerId, { inlinePublish: true });
                     this.setWorkerLiveness(workerId, 'FINALIZE', task);
                     telemetryCollector.setSlotState(slotIndex, 'IDLE');
                     this.setWorkerLiveness(workerId, 'IDLE');
@@ -2663,7 +2763,21 @@ export class ImporterLiteRuntime {
                 return null;
             if (Date.now() < this.idleClaimUntil)
                 return null;
-            const task = await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS);
+            void this.refreshP1FocusGroupNow();
+            const focusWorkKeys = typeof this.queue.getP1FocusWorkKeys === 'function'
+                ? this.queue.getP1FocusWorkKeys()
+                : [];
+            const excludedSources = typeof this.executor.getSaturatedFairSources === 'function'
+                ? this.executor.getSaturatedFairSources()
+                : [];
+            const preferFocus = (this.p1ClaimCounter++ % 4) !== 3;
+            const task = (focusWorkKeys.length > 0 || excludedSources.length > 0)
+                ? await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, {
+                    focusWorkKeys,
+                    preferFocus,
+                    excludedSources,
+                })
+                : await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS);
             if (task?.taskType === 'IMPORT_CHAPTER' && task.priority !== this.fairDemandImportPriority) {
                 // The claim gate makes this a true priority-boundary refresh: no
                 // second worker can begin a stale P0-sized source wave while the
@@ -2710,13 +2824,17 @@ export class ImporterLiteRuntime {
                 if (Date.now() < this.idleMonitorUntil)
                     return;
                 task = await this.queue.claimMonitor(`${this.runtimeInstanceId}:lite-monitor`, this.config.QUEUE_LEASE_DURATION_SECONDS);
-                this.idleMonitorUntil = task ? 0 : Date.now() + 15_000;
+                this.idleMonitorUntil = task ? 0 : Date.now() + 5_000;
             }
             finally {
                 this.monitorClaimGate.release();
             }
-            if (task)
+            if (task) {
+                if (this.monitorGate.available > 0 && Date.now() >= this.idleMonitorUntil && !this.stopped) {
+                    void this.runMonitorTurn().catch(() => { });
+                }
                 await this.handle(task, `${this.runtimeInstanceId}:lite-monitor`);
+            }
         }
         finally {
             this.monitorGate.release();
@@ -2949,6 +3067,10 @@ export class ImporterLiteRuntime {
                 },
                 sourceMetadataProducer: this.sourceMetadataProducer,
                 p0MonitorCoverage: this.p0MonitorCoverage,
+                p1FocusGroup: typeof this.queue.getP1FocusGroupSnapshot === 'function'
+                    ? this.queue.getP1FocusGroupSnapshot()
+                    : null,
+                p2NewWorkPolicy: this.p2SubordinationState,
                 sourceFairness: {
                     effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
                     burst: this.executor.getSourceFairnessBurstSnapshot(),
@@ -3089,6 +3211,10 @@ export class ImporterLiteRuntime {
                 chapterStages: this.chapterStageTelemetry(pipelineTelemetry),
             },
             telegram, sourceRate: this.sourceRateLimiter.getSummary(), diversity,
+            p1FocusGroup: typeof this.queue.getP1FocusGroupSnapshot === 'function'
+                ? this.queue.getP1FocusGroupSnapshot()
+                : null,
+            p2NewWorkPolicy: this.p2SubordinationState,
             sourceFairness: {
                 readySources: fairSources,
                 count: fairSources.length,
@@ -3111,13 +3237,13 @@ export class ImporterLiteRuntime {
         this.lastFullOperationalSnapshotAt = fullSnapshotAt;
         this.heartbeatCompletedAt = new Date().toISOString();
     }
-    async handle(task, workerId) {
+    async handle(task, workerId, options) {
         if (task.taskType === 'DISCOVER')
             return this.discover(task, workerId);
         if (task.taskType === 'CATALOG')
             return this.catalog(task, workerId);
         if (task.taskType === 'IMPORT_CHAPTER')
-            return this.executor.importChapter(task, workerId);
+            return this.executor.importChapter(task, workerId, options);
         if (task.taskType === 'PUBLISH')
             return this.executor.publish(task, workerId);
         await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'UNKNOWN_TASK_TYPE' });
@@ -3162,17 +3288,31 @@ export class ImporterLiteRuntime {
             const existingMappings = typeof this.queue.existingSourceWorkMappings === 'function'
                 ? await this.queue.existingSourceWorkMappings(source, candidateWorks.map((w) => w.sourceWorkId))
                 : new Map();
-            const catalogInputs = candidateWorks.map((work) => {
+            const p1Backlog = typeof this.queue.hasExecutableOrRecoverableP1Backlog === 'function'
+                ? await this.queue.hasExecutableOrRecoverableP1Backlog()
+                : { pending: false, reason: null };
+            this.p2SubordinationState = {
+                subordinated: p1Backlog.pending,
+                reason: p1Backlog.reason,
+                checkedAt: new Date().toISOString(),
+            };
+            let skippedUnmappedForP1 = 0;
+            const catalogInputs = [];
+            for (const work of candidateWorks) {
                 const mappedWorkId = existingMappings.get(String(work.sourceWorkId));
-                return {
+                if (!mappedWorkId && p1Backlog.pending) {
+                    skippedUnmappedForP1++;
+                    continue;
+                }
+                catalogInputs.push({
                     taskType: 'CATALOG',
                     workId: mappedWorkId || undefined,
                     workKey: mappedWorkId ? `work:${mappedWorkId}` : `source:${source}:${work.sourceWorkId}`,
                     priority: 'P2',
                     idempotencyKey: `lite:catalog:${source}:${work.sourceWorkId}`,
                     payload: { source, sourceWorkId: work.sourceWorkId },
-                };
-            });
+                });
+            }
             if (catalogInputs.length > 1 && typeof this.queue.enqueueMany === 'function') {
                 await this.queue.enqueueMany(catalogInputs);
             }
@@ -3185,11 +3325,12 @@ export class ImporterLiteRuntime {
             // A cursor asks for a later small batch, not an immediate unbounded
             // sweep. This leaves a one-worker cutover free to catalog materialized
             // works and prevents one source from filling every P2 admission slot.
-            const nextDelay = page.nextCursor
+            const effectiveNextCursor = skippedUnmappedForP1 > 0 ? cursor : page.nextCursor;
+            const nextDelay = effectiveNextCursor
                 ? Math.max(60_000, Math.min(policy.syncIntervalMs, 5 * 60_000))
                 : policy.syncIntervalMs;
             await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', priority: 'P2', nextRunAt: new Date(Date.now() + nextDelay),
-                checkpoint: { cursor: page.nextCursor }, resetAttempts: true });
+                checkpoint: { cursor: effectiveNextCursor }, resetAttempts: true });
         }
         catch (error) {
             await this.queue.recordSourceFailure(source, error);
@@ -3219,6 +3360,13 @@ export class ImporterLiteRuntime {
         // because the provider opts out of new-work discovery also blocks P0
         // release checks (and P1 repairs) for existing Reader works.
         if (!policy?.runnable) {
+            if (!task.monitoring && policy && (!policy.enabled || String(policy.status || '').toUpperCase() === 'DISABLED' || !policy.chapterIngestionEnabled)) {
+                await this.queue.finish(task, workerId, {
+                    state: 'BLOCKED',
+                    reason: 'SOURCE_DISABLED',
+                });
+                return;
+            }
             const nextRunAt = policy?.cooldownUntil && policy.cooldownUntil > new Date()
                 ? policy.cooldownUntil : new Date(Date.now() + (policy?.syncIntervalMs || 60 * 60_000));
             await this.queue.finish(task, workerId, {
@@ -3436,6 +3584,10 @@ export class ImporterLiteRuntime {
             // A source can reveal historical chapters later; those are P1 repairs,
             // not P0, without inferring that every numeric gap is a missing chapter.
             const p0Monitoring = task.monitoring || task.priority === 'P0' || task.priority === 'STAFF';
+            const workHasPendingBacklog = (p0Monitoring && resolved.status !== 'NEW_WORK' && task.priority !== 'STAFF'
+                && typeof this.queue.hasPendingWorkChapterBacklog === 'function')
+                ? await this.queue.hasPendingWorkChapterBacklog(resolved.workId)
+                : false;
             const knownFrontier = p0Monitoring
                 ? await this.pool.query(`SELECT max(order_key) AS order_key
           FROM importer_lite_chapter_sources WHERE work_id=$1::uuid AND order_key LIKE 'n|%'`, [resolved.workId])
@@ -3483,7 +3635,7 @@ export class ImporterLiteRuntime {
                 const isNewWorkOpeningRelease = resolved.status === 'NEW_WORK' && (oldestManifestNormalOrder
                     ? orderKey === oldestManifestNormalOrder
                     : sourceChapterIds.size === 1);
-                const chapterPriority = ((p0Monitoring && !historicalRepair && isNewestManifestRelease) || isNewWorkOpeningRelease) ? 'P0' : 'P1';
+                const chapterPriority = ((p0Monitoring && !historicalRepair && isNewestManifestRelease && !workHasPendingBacklog) || isNewWorkOpeningRelease) ? 'P0' : 'P1';
                 sourceRows.push({ workId: resolved.workId, chapterKey, source, sourceWorkId, sourceChapterId: chapter.sourceChapterId,
                     language, edition, orderKey, sourceRank: rankForSource(source) });
                 const legacyChapterId = legacyPublished.get(String(chapter.sourceChapterId))
@@ -3513,7 +3665,19 @@ export class ImporterLiteRuntime {
             const legacyRows = [...legacyByChapterKey.values()];
             // A mapped legacy publication is authoritative even if another source
             // entry for the same canonical identity was not mapped yet.
-            const chapterTasks = [...chapterTaskByKey.values()].filter((task) => !legacyByChapterKey.has(String(task.chapterKey)));
+            const chapterTasks = [...chapterTaskByKey.values()].filter((candidate) => !legacyByChapterKey.has(String(candidate.chapterKey)));
+            if (resolved.status !== 'NEW_WORK' && task.priority !== 'STAFF') {
+                const hasUnpublishedNormalPredecessor = workHasPendingBacklog || chapterTasks.some((candidate) => {
+                    const candidateOrder = String(candidate.payload?.orderKey || '');
+                    return candidateOrder.startsWith('n|') && Boolean(newestManifestNormalOrder) && candidateOrder < String(newestManifestNormalOrder);
+                });
+                if (hasUnpublishedNormalPredecessor) {
+                    for (const candidate of chapterTasks) {
+                        if (candidate.priority === 'P0')
+                            candidate.priority = 'P1';
+                    }
+                }
+            }
             await this.upsertChapterSources(sourceRows);
             await this.upsertLegacyChapterMappings(legacyRows);
             // Do not spend download, Telegram and YSQL capacity on a chapter that
