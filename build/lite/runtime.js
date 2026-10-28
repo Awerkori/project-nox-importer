@@ -523,7 +523,7 @@ export class ImporterLiteRuntime {
         if (this.adaptiveChapterAdmissionCap <= 0) {
             this.adaptiveChapterAdmissionCap = ceiling;
         }
-        const floor = Math.min(6, ceiling);
+        const floor = Math.min(8, ceiling);
         const current = Math.min(ceiling, Math.max(floor, this.adaptiveChapterAdmissionCap));
         const siteLatencyMs = this.lastSiteProbe.latencyMs;
         const dbSnap = telemetryCollector.getSnapshotReport()?.database || {};
@@ -531,7 +531,7 @@ export class ImporterLiteRuntime {
         const poolWaiting = Number(this.pool.waitingCount || 0);
         const memState = this.memoryPressureGuard.snapshot().state;
         const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
-            || (typeof siteLatencyMs === 'number' && siteLatencyMs > 1_800);
+            || (typeof siteLatencyMs === 'number' && siteLatencyMs > 2_500);
         const highYsqlPressure = poolWaiting >= 8 && sqlP95Ms > 2_500;
         if (highSitePressure || highYsqlPressure) {
             this.adaptiveHealthyStreak = 0;
@@ -544,8 +544,8 @@ export class ImporterLiteRuntime {
             return;
         }
         const healthyForRamp = (this.lastSiteProbe.state === 'HEALTHY' || this.lastSiteProbe.state === 'UNKNOWN')
-            && (siteLatencyMs === null || siteLatencyMs <= 1_400)
-            && poolWaiting <= 3
+            && (siteLatencyMs === null || siteLatencyMs <= 2_000)
+            && poolWaiting <= 6
             && memState === 'NORMAL';
         if (healthyForRamp) {
             this.adaptiveHealthyStreak++;
@@ -2929,12 +2929,12 @@ export class ImporterLiteRuntime {
         const started = Date.now();
         try {
             const response = await fetch(`${this.config.NOX_MANGA_URL.replace(/\/$/, '')}/api/releases?limit=1`, {
-                signal: AbortSignal.timeout(3_500),
+                signal: AbortSignal.timeout(4_000),
                 headers: { 'Cache-Control': 'no-cache' },
             });
             await response.body?.cancel().catch(() => { });
             const latencyMs = Date.now() - started;
-            return { healthy: response.ok && latencyMs <= 1_800, latencyMs, status: response.status };
+            return { healthy: response.ok && latencyMs <= 2_500, latencyMs, status: response.status };
         }
         catch {
             return { healthy: false, latencyMs: null, status: null };
