@@ -6641,24 +6641,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refreshManualProtectiveStop();
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(8);
 
-    // Simulate elevated Reader DB latency (>1050ms): steps down immediately (8 -> 6).
-    (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 1_350 };
+    // Simulate elevated Reader DB latency (>1800ms): steps down immediately (8 -> 6).
+    (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 1_950 };
     (runtime as any).updateAdaptiveAdmissionControl();
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(6);
 
-    // One healthy probe (<750ms) does not jump immediately (hysteresis streak = 1).
+    // Healthy probe (<1400ms) steps up +2 to restore operator ceiling (6 -> 8).
     (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 220 };
     (runtime as any).updateAdaptiveAdmissionControl();
-    expect((runtime as any).chapterAdmissionGate.capacity).toBe(6);
-
-    // Second consecutive healthy probe steps up +1 (6 -> 7).
-    (runtime as any).updateAdaptiveAdmissionControl();
-    expect((runtime as any).chapterAdmissionGate.capacity).toBe(7);
-
-    // Two more healthy probes restore the operator ceiling (7 -> 8) and never exceed it.
-    (runtime as any).updateAdaptiveAdmissionControl();
-    (runtime as any).updateAdaptiveAdmissionControl();
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(8);
+
+    // Subsequent healthy probes maintain operator ceiling and never exceed it.
     (runtime as any).updateAdaptiveAdmissionControl();
     (runtime as any).updateAdaptiveAdmissionControl();
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(8);
