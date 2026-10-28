@@ -6637,23 +6637,24 @@ describe('LiteRepository against the additive Lite migration', () => {
         QUEUE_LEASE_DURATION_SECONDS: 30,
       } as any,
     );
-    await db.query(`INSERT INTO settings(key,value) VALUES('importer_chapter_admission_cap','8')`);
+    await db.query(`INSERT INTO settings(key,value) VALUES('importer_chapter_admission_cap','12')`);
     await (runtime as any).refreshManualProtectiveStop();
-    expect((runtime as any).chapterAdmissionGate.capacity).toBe(8);
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(12);
 
-    // Simulate elevated Reader DB latency (>1800ms): steps down immediately (8 -> 6).
-    (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 1_950 };
+    // Simulate elevated Reader DB latency (>2500ms): steps down immediately (12 -> 9).
+    (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 2_600 };
     (runtime as any).updateAdaptiveAdmissionControl();
-    expect((runtime as any).chapterAdmissionGate.capacity).toBe(6);
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(9);
 
-    // Healthy probe (<1400ms) steps up +2 to restore operator ceiling (6 -> 8).
+    // Healthy probe (<2000ms) steps up +2 (9 -> 11).
     (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 220 };
     (runtime as any).updateAdaptiveAdmissionControl();
-    expect((runtime as any).chapterAdmissionGate.capacity).toBe(8);
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(11);
 
-    // Subsequent healthy probes maintain operator ceiling and never exceed it.
+    // Subsequent healthy probe restores operator ceiling (11 -> 12) and never exceeds it.
     (runtime as any).updateAdaptiveAdmissionControl();
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(12);
     (runtime as any).updateAdaptiveAdmissionControl();
-    expect((runtime as any).chapterAdmissionGate.capacity).toBe(8);
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(12);
   });
 });
