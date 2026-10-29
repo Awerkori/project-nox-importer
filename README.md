@@ -101,10 +101,17 @@ O deploy em produção pode ser disparado manualmente através do GitHub Actions
 ## 🔗 Projetos Relacionados
 
 - 🌐 [**Project Nox · Plataforma Web de Mangá**](https://github.com/Awerkori/project-nox-manga) — Leitor e catálogo consumido pelo público.
-- 📦 [**Project Nox · Extensões de Mangá**](https://github.com/Awerkori/manga-extensoes) — Distribuição de fontes para Mihon / TachiyomiSY.
+- 📦 [**Project Nox · Extensões de Mangá**](https://github.com/Awerkori/manga-extensoes) — Distribuição de fontes para Mihon e forks.
 - 💻 [**Project Nox · Código-fonte das Extensões de Mangá**](https://github.com/Awerkori/manga-fonte-extensoes) — Código em Kotlin das extensões.
 - 🎫 [**Project Nox · Central de Pedidos**](https://github.com/Awerkori/project-nox-requests) — Canal oficial de solicitações e chamados.
 - 📊 [**Project Nox · Tracker**](https://awerkori.github.io/project-nox-tracker/) — Dashboard público de status.
+
+---
+
+## 🌟 Créditos e Reconhecimento
+
+- **Project Nox**: Engenharia do motor de ingestão, algoritmos de deduplicação e infraestrutura autônoma.
+- Equipe de infraestrutura e administradores de banco de dados.
 
 ---
 
