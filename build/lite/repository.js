@@ -3432,12 +3432,14 @@ export class LiteRepository {
         const cooldownSeconds = retryAfter > 0 ? Math.min(3600, retryAfter + 2) : 60;
         const health = retryAfter > 0 ? 'RATE_LIMITED' : 'DEGRADED';
         const message = String(detail?.message || 'SOURCE_FAILURE').slice(0, 500);
-        const existingCooling = this.coolingSources.get(source);
-        const nextCoolingUntil = Date.now() + cooldownSeconds * 1_000;
-        this.coolingSources.set(source, {
-            until: existingCooling ? Math.max(existingCooling.until, nextCoolingUntil) : nextCoolingUntil,
-            rateLimited: retryAfter > 0 || Boolean(existingCooling?.rateLimited && existingCooling.until > Date.now()),
-        });
+        if (retryAfter > 0) {
+            const existingCooling = this.coolingSources.get(source);
+            const nextCoolingUntil = Date.now() + cooldownSeconds * 1_000;
+            this.coolingSources.set(source, {
+                until: existingCooling ? Math.max(existingCooling.until, nextCoolingUntil) : nextCoolingUntil,
+                rateLimited: true,
+            });
+        }
         // Ordinary transient failures retain the one-statement health update: a
         // failure must never make the error path compete with normal imports for
         // extra pool time. A provider-specified retry boundary is different. If
@@ -3446,11 +3448,14 @@ export class LiteRepository {
         // immediately defer them while lower executable work waits. Move only
         // those tasks to the same durable cooldown in one bounded event. Tasks
         // with a healthy confirmed alternative stay READY for executor fallback.
+        // Isolated 1-off transient failures (timeouts, aborts) do not immediately
+        // cool down the entire source across all workers unless 3 consecutive failures occur.
         if (!(retryAfter > 0)) {
             await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
-        VALUES($1,$2,now()+($3 || ' seconds')::interval,1,$4)
-        ON CONFLICT(source) DO UPDATE SET health=excluded.health,cooldown_until=excluded.cooldown_until,
-          consecutive_failures=importer_lite_source_health.consecutive_failures+1,last_error=excluded.last_error,updated_at=now()`, [source, health, String(cooldownSeconds), message]).catch(() => { });
+        VALUES($1,$2,NULL,1,$3)
+        ON CONFLICT(source) DO UPDATE SET health=excluded.health,
+          cooldown_until=CASE WHEN importer_lite_source_health.consecutive_failures + 1 >= 3 THEN now()+($4 || ' seconds')::interval ELSE importer_lite_source_health.cooldown_until END,
+          consecutive_failures=importer_lite_source_health.consecutive_failures+1,last_error=excluded.last_error,updated_at=now()`, [source, health, message, String(cooldownSeconds)]).catch(() => { });
             return;
         }
         const client = await this.db.connect().catch(() => null);
