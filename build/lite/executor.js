@@ -80,8 +80,8 @@ class PageAdmissionTimeoutError extends Error {
         this.name = 'PageAdmissionTimeoutError';
     }
 }
-const PAGE_ADMISSION_TIMEOUT_MS = 45_000;
-const PAGE_TRANSFER_TIMEOUT_MS = 45_000;
+const PAGE_ADMISSION_TIMEOUT_MS = 120_000;
+const PAGE_TRANSFER_TIMEOUT_MS = 60_000;
 function sourceFailure(error) {
     const normalized = error instanceof Error ? error : new Error(String(error || 'SOURCE_FAILURE'));
     normalized.sourceFailure = true;
