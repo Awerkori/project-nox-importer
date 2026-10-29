@@ -2860,8 +2860,11 @@ export class ImporterLiteRuntime {
                     focusWorkKeys,
                     preferFocus,
                     excludedSources,
+                    chaptersOnly: true,
                 })
-                : await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS);
+                : await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, {
+                    chaptersOnly: true,
+                });
             if (task?.taskType === 'IMPORT_CHAPTER' && task.priority !== this.fairDemandImportPriority) {
                 // The claim gate makes this a true priority-boundary refresh: no
                 // second worker can begin a stale P0-sized source wave while the
@@ -2870,7 +2873,7 @@ export class ImporterLiteRuntime {
                 if (await this.refreshSourceFairness())
                     this.fairDemandImportPriority = task.priority;
             }
-            this.idleClaimUntil = task ? 0 : Date.now() + 750;
+            this.idleClaimUntil = task ? 0 : Date.now() + 150;
             return task;
         };
         return claimGateHeld ? claim() : this.claimGate.runExclusive(claim);
