@@ -1,6 +1,12 @@
-# Project Nox Importer 🌌
+# Project Nox · Importer
 
-Serviço autônomo 24/7 responsável por rastrear, extrair metadados, baixar, validar, deduplicar e armazenar imagens pesadas de mangás/manhwas, alimentando o catálogo do **Project Nox Manga** sem intervenção manual.
+Serviço autônomo 24/7 responsável por rastrear, extrair metadados, baixar, validar, deduplicar e armazenar imagens de mangás, alimentando continuamente o catálogo do [**Project Nox · Plataforma Web de Mangá**](https://github.com/Awerkori/project-nox-manga) sem necessidade de intervenção manual.
+
+---
+
+## 🎯 Para quem é este repositório?
+
+Este repositório é voltado para **engenheiros de backend, infraestrutura e mantenedores** do ecossistema Project Nox. Trata-se de um serviço daemon de segundo plano, desacoplado do front-end público e de painéis administrativos de equipe.
 
 ---
 
@@ -8,81 +14,73 @@ Serviço autônomo 24/7 responsável por rastrear, extrair metadados, baixar, va
 
 | Camada | Tecnologia / Serviço | Responsabilidade |
 | :--- | :--- | :--- |
-| **Execução 24/7** | DIScloud (Node.js daemon) | Ciclo autônomo, polling, rate limiting, gerenciamento de leases (ONLINE @ TITAN 512MB) |
-| **Banco & Fila** | Supabase PostgreSQL | Fila com locking atômico (`FOR UPDATE SKIP LOCKED`), mapeamentos, RLS estrito |
-| **Storage de Mídia** | `StorageProvider` (Telegram / Mock) | Storage de documentos binários via bot Telegram (R$ 0,00) |
-| **Consumo & Leitura**| Project Nox Manga (Cloudflare Worker) | Plataforma de leitura pública com streaming seguro |
-| **Adapters** | Extensões / REST APIs | Adapters modulares para fontes de catálogo (Nexus, MangaFlix, Manhastro) |
-
-> [!NOTE]
-> Este repositório é 100% isolado do front-end do Project Nox Manga e **não possui qualquer interação com a Central PROJECT NOX SCAN STAFF**.
+| **Execução 24/7** | DIScloud (Node.js daemon) | Ciclo autônomo contínuo, polling, rate limiting e controle de leases |
+| **Banco & Fila** | Supabase (PostgreSQL) | Fila atômica com `FOR UPDATE SKIP LOCKED`, mapeamentos e RLS restrito |
+| **Storage de Mídia** | `StorageProvider` (Telegram / Mock) | Armazenamento seguro de blobs e páginas de mídia sem custo |
+| **Consumo & Leitura**| [Project Nox · Site](https://github.com/Awerkori/project-nox-manga) | Leitor web e plataforma de entrega ao usuário final |
+| **Adapters** | Modulares / TypeScript | Conectores para fontes de catálogo e normalização de dados |
 
 ---
 
 ## 🔒 Mecanismos de Proteção e Resiliência
 
 1. **Fila com Lease e Heartbeat Atômico:**
-   - As tarefas são adquiridas via função PostgreSQL `importer_acquire_job` com `FOR UPDATE SKIP LOCKED`.
-   - Inclui colunas `locked_by`, `locked_at` e `lease_expires_at`.
-   - Heartbeat periódico via `importer_renew_lease` renova a posse da tarefa durante downloads longos.
-   - Tarefas com lease expirado (`lease_expires_at < now()`) são recuperadas com segurança após crash/restart da instância.
+   - Tarefas adquiridas via stored function `importer_acquire_job` (`FOR UPDATE SKIP LOCKED`).
+   - Controle por `locked_by`, `locked_at` e `lease_expires_at` com renovação contínua via `importer_renew_lease`.
+   - Recuperação automática de tarefas órfãs caso ocorra restart ou crash do processo da aplicação.
 
 2. **Deduplicação Conservadora:**
-   - Nunca realiza merges destrutivos baseados apenas em similaridade de títulos.
-   - Ordem de prioridade: `source + source_work_id` -> mapeamento existente -> criação segura.
-   - Qualquer colisão entre IDs externos ou slugs conflitantes é marcada como `sync_status = 'AMBIGUOUS'` para revisão editorial humana segura.
+   - Prevenção contra merges destrutivos baseados apenas em aproximação fonética ou similaridade de títulos.
+   - Hierarquia estrita: chave composta `source + source_work_id` → mapeamento verificado → criação segura.
+   - Conflitos e ambiguidades de catálogo são sinalizados com `sync_status = 'AMBIGUOUS'` para revisão pontual.
 
-3. **Validação Binária Estrita & Deduplicação de Páginas:**
-   - Inspeção binária byte-a-byte (`inspectImage`) para PNG, JPEG e WebP sem dependências externas pesadas.
-   - Hash SHA-256 de cada imagem verificado contra `public.media` antes do upload para evitar duplicações no Telegram.
-   - **Regra de Publicação Obrigatória:** Apenas capítulos com `validPages == expectedPages` são publicados (`published_at`). Se qualquer página falhar, a transação é abortada e o capítulo não entra no catálogo.
+3. **Validação Binária e Integridade de Páginas:**
+   - Inspeção de cabeçalhos binários (`inspectImage`) para formatos PNG, JPEG e WebP.
+   - Geração de hash SHA-256 por página para evitar envios repetidos e economizar tráfego.
+   - **Garantia de Entrega Completa:** O capítulo só é marcado como publicado (`published_at`) quando a totalidade das páginas esperadas for rigorosamente validada (`validPages == expectedPages`).
 
 4. **Isolamento de Segurança (RLS):**
-   - Todas as tabelas `importer_*` possuem Row Level Security ativado.
-   - Permissões revogadas explicitamente de `public`, `anon` e `authenticated`. Apenas o `service_role` tem acesso de execução e gravação.
+   - Políticas de Row Level Security em todas as tabelas operacionais `importer_*`.
+   - Permissões restritas unicamente à role administrativa (`service_role`).
 
 ---
 
-## 🚀 Instalação e Desenvolvimento Local
+## 💻 Instalação e Execução Local
 
+### Pré-requisitos
+- **Node.js** 22 ou posterior
+- Banco PostgreSQL / Supabase com as migrações aplicadas
+
+### Passos
 ```bash
-cd /home/awerkori/.Projects/project-nox-importer
-
 # Instalar dependências
 npm install
 
 # Compilar TypeScript
 npm run build
 
-# Executar suíte de testes completa
+# Executar testes automatizados
 npm test
 
-# Executar em modo desenvolvimento com auto-reload
+# Iniciar em modo de desenvolvimento
 npm run dev
 ```
 
 ---
 
-## 🗄️ Migração do Banco de Dados
+## 🗄️ Estrutura de Banco de Dados
 
-Para aplicar a estrutura do importador no seu Supabase:
+Para inicializar a estrutura do importador em uma instância Supabase:
 
-1. Abra o arquivo [001_importer_schema.sql](file:///home/awerkori/.Projects/project-nox-importer/migrations/001_importer_schema.sql).
-2. Execute o conteúdo no SQL Editor do Supabase com privilégios administrativos.
-3. O schema criará:
-   - `importer_sources` (com o adapter `nexus` já ativado por padrão)
-   - `importer_work_mappings`
-   - `importer_chapter_mappings`
-   - `importer_queue`
-   - `importer_checkpoints`
-   - Stored functions: `importer_acquire_job`, `importer_renew_lease`, `importer_release_job`
-   - Políticas estritas de RLS e grants para `service_role`.
+1. Acesse o arquivo de migração [`migrations/001_importer_schema.sql`](migrations/001_importer_schema.sql).
+2. Execute o script no SQL Editor com privilégios de administrador.
+3. O schema provisiona as tabelas de fila, fontes, mapeamentos, funções atômicas e políticas de segurança.
 
 ---
 
 ## ☁️ Hospedagem na DIScloud
 
-O projeto inclui o arquivo [discloud.config](file:///home/awerkori/.Projects/project-nox-importer/discloud.config) pré-configurado:
+O repositório inclui a configuração pronta em [`discloud.config`](discloud.config):
 
 ```ini
 ID=projectnoximporter
@@ -95,22 +93,21 @@ VERSION=latest
 APT=tools
 ```
 
-### Passos para deploy:
+### Deploy Seguro
+O deploy em produção pode ser disparado manualmente através do GitHub Actions (`Deploy DIScloud`) a partir da branch `main`, exigindo o environment `discloud-production` e a secret protegida `DISCLOUD_TOKEN`.
 
-1. Crie o arquivo `.env` preenchido a partir do `.env.example`.
-2. Execute `npm run build` para gerar a pasta `build/`.
-3. Compacte os arquivos de runtime para a DIScloud (incluindo `build`, `package.json`, `package-lock.json` e `discloud.config`). Configure segredos no ambiente protegido da plataforma; não inclua `.env` no pacote.
-4. Envie o zip através do painel ou bot da DIScloud.
+---
 
-### Deploy manual seguro por GitHub Actions
+## 🔗 Projetos Relacionados
 
-O workflow **Deploy DIScloud** só pode ser executado manualmente a partir da
-branch `main`. Ele recompila o projeto e envia exclusivamente os arquivos de
-runtime; não envia `.env`, código-fonte, testes nem caches.
+- 🌐 [**Project Nox · Plataforma Web de Mangá**](https://github.com/Awerkori/project-nox-manga) — Leitor e catálogo consumido pelo público.
+- 📦 [**Project Nox · Extensões de Mangá**](https://github.com/Awerkori/manga-extensoes) — Distribuição de fontes para Mihon / TachiyomiSY.
+- 💻 [**Project Nox · Código-fonte das Extensões de Mangá**](https://github.com/Awerkori/manga-fonte-extensoes) — Código em Kotlin das extensões.
+- 🎫 [**Project Nox · Central de Pedidos**](https://github.com/Awerkori/project-nox-requests) — Canal oficial de solicitações e chamados.
+- 📊 [**Project Nox · Tracker**](https://awerkori.github.io/project-nox-tracker/) — Dashboard público de status.
 
-Antes da primeira execução, um administrador deve criar o GitHub Environment
-`discloud-production`, habilitar as proteções de aprovação apropriadas e
-configurar nele o secret `DISCLOUD_TOKEN`. O valor deve ser uma API key gerada
-no dashboard da DIScloud para uma conta com permissão de atualizar somente este
-aplicativo (preferencialmente uma conta técnica/moderadora dedicada). Não
-versione, imprima ou reutilize sessões de navegador para esse fim.
+---
+
+## ⚖️ Licença e Responsabilidade
+
+O **Project Nox** desenvolve e disponibiliza ferramentas para estudo e interoperabilidade técnica. O serviço de importação atua exclusivamente de forma programática sem comercialização de conteúdo de terceiros.
