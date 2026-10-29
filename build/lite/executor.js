@@ -1103,7 +1103,15 @@ export class LiteExecutor {
                                     const startedAt = performance.now();
                                     telemetryCollector.trackActiveDownload(1);
                                     try {
-                                        const response = await fetch(url, { headers: await adapter.getImageHeaders?.(url), signal: transferSignal });
+                                        const adapterHeaders = await adapter.getImageHeaders?.(url);
+                                        const imageHeaders = {
+                                            Referer: adapter.baseUrl ? `${adapter.baseUrl}/` : (host ? `https://${host}/` : ''),
+                                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                                            Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+                                            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+                                            ...(adapterHeaders || {}),
+                                        };
+                                        const response = await fetch(url, { headers: imageHeaders, signal: transferSignal });
                                         if (!response.ok) {
                                             if (response.status === 429 && host)
                                                 this.sourceRateLimiter.handle429(host, response.headers.get('retry-after'));

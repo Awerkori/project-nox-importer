@@ -13,6 +13,7 @@ export declare class MangoToonsAdapter implements SourceAdapter {
     private salt;
     private token;
     constructor(rateLimiter?: HostRateLimiter, transport?: typeof fetch);
+    getImageHeaders(_url?: string): Record<string, string>;
     login(): Promise<boolean>;
     private requestApi;
     fetchUpdatedWorks(cursor?: string | null, options?: {
