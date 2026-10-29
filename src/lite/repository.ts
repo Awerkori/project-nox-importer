@@ -3556,117 +3556,40 @@ export class LiteRepository {
       selectedSource: completion.selectedSource,
       mediaStoredAt: completion.mediaStoredAt,
     };
-    const client = await this.db.connect();
-    let fallbackToTwoStep = false;
+    const effectivePriorityRank = LITE_PRIORITY_RANK[task.priority];
+    const pageRows = completion.mediaIds.map((mediaId, index) => ({ media_id: mediaId, position: index + 1 }));
+
     try {
-      await client.query('BEGIN');
-      const presentation = await client.query<Row>(
-        `SELECT w.cover_id, w.title, w.slug, m.storage_ready, m.bytes
-           FROM importer_lite_tasks t
-           JOIN works w ON w.id = $3::uuid
-           LEFT JOIN media m ON m.id = w.cover_id
-          WHERE t.id = $1::uuid AND t.state = 'RUNNING' AND t.lease_owner = $2 AND t.lease_until > now()
-          FOR UPDATE OF t, w`,
-        [task.id, workerId, task.workId],
-      );
-      const work = presentation.rows[0];
-      if (!work) {
-        await client.query('ROLLBACK');
-        return false;
-      }
-      if (!work.title || !work.slug || !work.cover_id || work.storage_ready !== true || Number(work.bytes) < 1500) {
-        fallbackToTwoStep = true;
-        await client.query('ROLLBACK');
-      } else {
-        const pageRows = completion.mediaIds.map((mediaId, index) => ({ media_id: mediaId, position: index + 1 }));
-        await client.query('SELECT public.importer_replace_pages($1::uuid,$2::jsonb)', [
+      const result = await this.db.query<{ outcome: string }>(
+        `SELECT public.importer_lite_complete_import_and_publish(
+           $1::uuid, $2, $3::uuid, $4::uuid, $5::jsonb, $6, $7, $8::smallint, $9::jsonb, $10
+         ) AS outcome`,
+        [
+          task.id,
+          workerId,
+          task.workId,
           completion.chapterId,
           JSON.stringify(pageRows),
-        ]);
-        const effectivePriorityRank = LITE_PRIORITY_RANK[task.priority];
-        const result = await client.query<{ done: number }>(
-          `WITH publication AS (
-             UPDATE chapters
-                SET published_at = COALESCE(
-                      published_at,
-                      GREATEST(
-                        clock_timestamp(),
-                        COALESCE(
-                          (SELECT max(ch_prev.published_at) + interval '1 millisecond'
-                             FROM chapters ch_prev
-                            WHERE ch_prev.work_id = chapters.work_id
-                              AND ch_prev.chapter_order_key < chapters.chapter_order_key
-                              AND ch_prev.published_at IS NOT NULL),
-                          clock_timestamp()
-                        )
-                      )
-                    ),
-                    is_fresh_release = CASE WHEN published_at IS NULL THEN $2 ELSE is_fresh_release END
-              WHERE id = $1::uuid
-             RETURNING published_at
-           ), event_row AS (
-             INSERT INTO importer_publication_events
-               (chapter_id, transition_at, recorded_at, bucket_minute, is_fresh_release, source, work_id, priority)
-             SELECT $1::uuid, p.published_at, clock_timestamp(), date_trunc('minute', p.published_at), $2, $3, $4::uuid, $5
-               FROM publication p
-             ON CONFLICT(chapter_id) DO NOTHING
-           ), work_row AS (
-             UPDATE works
-                SET published = true,
-                    latest_chapter_published_at = GREATEST(COALESCE(latest_chapter_published_at, p.published_at), p.published_at),
-                    updated_at = now()
-               FROM publication p
-              WHERE works.id = $4::uuid
-           ), done AS (
-             UPDATE importer_lite_tasks t
-                SET state = 'DONE',
-                    lease_owner = NULL,
-                    lease_until = NULL,
-                    checkpoint = t.checkpoint || $8::jsonb || jsonb_build_object('publishedAt', p.published_at::text),
-                    updated_at = now()
-               FROM publication p
-              WHERE t.id = $6::uuid AND t.state = 'RUNNING' AND t.lease_owner = $7 AND t.lease_until > now()
-             RETURNING t.work_key
-           ), source_success AS (
-             INSERT INTO importer_lite_source_health(source, health, cooldown_until, consecutive_failures, last_error)
-             SELECT $3, 'HEALTHY', NULL, 0, NULL FROM done
-             ON CONFLICT(source) DO UPDATE
-               SET health = 'HEALTHY', cooldown_until = NULL, consecutive_failures = 0, last_error = NULL, updated_at = now()
-             WHERE NOT (importer_lite_source_health.health = 'RATE_LIMITED'
-               AND importer_lite_source_health.cooldown_until > now())
-           )
-           SELECT count(*)::int AS done FROM done`,
-          [
-            completion.chapterId,
-            fresh,
-            completion.selectedSource,
-            task.workId,
-            effectivePriorityRank,
-            task.id,
-            workerId,
-            JSON.stringify(checkpoint),
-          ],
-        );
-        if (Number(result.rows[0]?.done || 0) !== 1) {
-          await client.query('ROLLBACK');
-          return false;
-        }
-        await this.refreshReadyWork(client, task.workKey);
-        await client.query('COMMIT');
+          fresh,
+          completion.selectedSource,
+          effectivePriorityRank,
+          JSON.stringify(checkpoint),
+          task.workKey,
+        ],
+      );
+      const outcome = result.rows[0]?.outcome;
+      if (outcome === "SUCCESS") {
         this.clearNonRateLimitedCoolingSource(completion.selectedSource);
         this.invalidateP1BacklogCache();
         return true;
       }
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw error;
-    } finally {
-      client.release();
-    }
-    if (fallbackToTwoStep) {
+      if (outcome === "FALLBACK_TWO_STEP") {
+        return this.completeImportAndEnqueuePublish(task, workerId, completion);
+      }
+      return false;
+    } catch {
       return this.completeImportAndEnqueuePublish(task, workerId, completion);
     }
-    return false;
   }
 
   async finish(task: LiteTask, workerId: string, outcome: {

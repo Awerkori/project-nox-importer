@@ -36,9 +36,9 @@ const withTimeout = async (operation, timeoutMs, code) => {
 // intent is committed, reducing contention on the three-seat pool without
 // changing the durable-before-Telegram fence. Receipts remain scalar-only
 // after Telegram has confirmed the page.
-export const DURABLE_RESERVATION_BATCH_JOIN_MS = 350;
-export const DURABLE_RECEIPT_BATCH_JOIN_MS = 450;
-export const UPLOAD_BATCH_FLUSH_THRESHOLD = 16;
+export const DURABLE_RESERVATION_BATCH_JOIN_MS = 100;
+export const DURABLE_RECEIPT_BATCH_JOIN_MS = 120;
+export const UPLOAD_BATCH_FLUSH_THRESHOLD = 8;
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
     let cursor = 0;
