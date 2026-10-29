@@ -583,7 +583,7 @@ export class ImporterLiteRuntime {
     if (this.adaptiveChapterAdmissionCap <= 0) {
       this.adaptiveChapterAdmissionCap = ceiling;
     }
-    const floor = Math.min(8, ceiling);
+    const floor = Math.min(this.operatorChapterAdmissionCap >= 15 ? 12 : 8, ceiling);
     const current = Math.min(ceiling, Math.max(floor, this.adaptiveChapterAdmissionCap));
     const siteLatencyMs = this.lastSiteProbe.latencyMs;
     const dbSnap = (telemetryCollector.getSnapshotReport() as any)?.database || {};
@@ -593,7 +593,7 @@ export class ImporterLiteRuntime {
 
     const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
       || (typeof siteLatencyMs === 'number' && siteLatencyMs > 5_000);
-    const highYsqlPressure = poolWaiting >= 8 && sqlP95Ms > 2_500;
+    const highYsqlPressure = poolWaiting >= 12 && sqlP95Ms > 4_000;
 
     if (highSitePressure || highYsqlPressure) {
       this.adaptiveHealthyStreak = 0;
@@ -608,7 +608,7 @@ export class ImporterLiteRuntime {
 
     const healthyForRamp = (this.lastSiteProbe.state === 'HEALTHY' || this.lastSiteProbe.state === 'UNKNOWN' || this.lastSiteProbe.state === 'DEGRADED')
       && (siteLatencyMs === null || siteLatencyMs <= 4_000)
-      && poolWaiting <= 6
+      && poolWaiting <= 9
       && memState === 'NORMAL';
 
     if (healthyForRamp) {
