@@ -178,7 +178,7 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     // while MangaFlix's long chapters spend their wall time in page waves.
     // Eight pages lets three admitted chapters occupy that existing hard fence;
     // it never widens the global download, buffer, byte, Telegram, or YSQL cap.
-    mangaflix: { maxChapters: 4, fairMaxChapters: 3, maxPagesPerChapter: 8 },
+    mangaflix: { maxChapters: 6, fairMaxChapters: 4, maxPagesPerChapter: 8 },
     manhastro: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 10 },
     mangotoons: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
     taimumangas: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
@@ -186,7 +186,7 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     // Nexus is the primary fast backlog provider with 6,000+ ready chapters.
     // Its CDN and Supabase host rate limiters (8 req/s burst 16, 4 req/s burst 8)
     // comfortably pace up to 16 concurrent chapters with 10 concurrent pages.
-    nexus: { maxChapters: 16, fairMaxChapters: 12, maxPagesPerChapter: 10 },
+    nexus: { maxChapters: 16, fairMaxChapters: 14, maxPagesPerChapter: 10 },
     instahentai: { maxChapters: 2, maxPagesPerChapter: 4 },
     euphoriascan: { maxChapters: 2, maxPagesPerChapter: 4 },
     fleurblanche: { maxChapters: 5, fairMaxChapters: 4, maxPagesPerChapter: 8 },
