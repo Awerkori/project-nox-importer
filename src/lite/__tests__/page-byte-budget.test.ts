@@ -163,9 +163,9 @@ describe('PageByteBudget', () => {
         { completionHeadroomBytes: 20 * mib - LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES },
       ));
     }
-    expect(budget.snapshot()).toEqual({ capacityBytes: 80 * mib, reservedBytes: 48 * mib, waiting: 0 });
+    expect(budget.snapshot()).toEqual({ capacityBytes: 80 * mib, reservedBytes: 24 * mib, waiting: 0 });
     await reservations[0].upgrade(20 * mib, undefined, { intent: 'COMPLETION' });
-    expect(budget.snapshot()).toEqual({ capacityBytes: 80 * mib, reservedBytes: 66 * mib, waiting: 0 });
+    expect(budget.snapshot()).toEqual({ capacityBytes: 80 * mib, reservedBytes: 43 * mib, waiting: 0 });
     for (const reservation of reservations) reservation.release();
   });
 

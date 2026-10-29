@@ -1078,10 +1078,10 @@ export class LiteExecutor {
               }
               const initialReservationBytes = unknownPageInitialReservationBytes(this.pageBytes.capacityBytes);
               // In production, 99.5% of pages are <= 3.68 MiB (p50: 0.29 MiB, avg: 0.49 MiB).
-              // Reserving a 4 MiB virtual headroom ensures that unknown-length responses
+              // Reserving a 1 MiB virtual headroom ensures that unknown-length responses
               // can stream safely while preventing virtual over-reservation from blocking
               // concurrent page admissions.
-              const completionHeadroomBytes = Math.min(4 * 1024 * 1024, MAX_IMAGE_BODY_BYTES - initialReservationBytes);
+              const completionHeadroomBytes = Math.min(1 * 1024 * 1024, MAX_IMAGE_BODY_BYTES - initialReservationBytes);
               const reservation = await this.pageBytes.reserve(
                 initialReservationBytes,
                 admissionController.signal,

@@ -23,10 +23,10 @@ export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
 // so this is an admission estimate only: it never weakens the authoritative
 // byte cap.
 export const LITE_PAGE_BUFFER_UNKNOWN_REDUCED_INITIAL_BYTES = 1 * 1024 * 1024;
-// Production page p95 is below 2 MiB, so using this normal-profile value
-// avoids turning each ordinary 1--2 MiB lengthless image into a 20 MiB
-// reservation.
-export const LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES = 2 * 1024 * 1024;
+// Production page p95 is below 2 MiB, p50 is 0.29 MiB, avg is 0.49 MiB.
+// Using 1 MiB for the normal profile gives 2x the concurrent admission slots
+// while streaming upgrade accommodates larger pages safely without queue stalls.
+export const LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES = 1 * 1024 * 1024;
 // `readImageBody` fills a declared-length response directly into its final
 // Uint8Array, so the former streamed-chunks-plus-final-body duplication no
 // longer determines the normal high-water mark. Production now reaches the
