@@ -457,15 +457,17 @@ export class LiteExecutor {
         this.fairDemandCounts = normalized;
         for (const [source, slot] of this.sourceSlots) {
             // An in-flight source is temporarily absent from the runnable view by
-            // design.  Retain enough local demand for its existing holders to drain
-            // naturally instead of collapsing it to a one-seat source mid-chapter.
+            // design. Retain enough local capacity for its existing holders to drain
+            // naturally without injecting ghost demand that starves real backlog providers.
             if (!this.fairDemandCounts.has(source) && slot.active > 0) {
-                this.fairDemandSources.add(source);
-                this.fairDemandCounts.set(source, slot.active);
+                slot.setCapacity(Math.max(slot.capacity, slot.active));
             }
         }
-        for (const [source, slot] of this.sourceSlots)
-            slot.setCapacity(this.sourceCapacity(source));
+        for (const [source, slot] of this.sourceSlots) {
+            if (this.fairDemandCounts.has(source)) {
+                slot.setCapacity(this.sourceCapacity(source));
+            }
+        }
     }
     /** Keep local source shares aligned with the runtime's durable chapter cap. */
     setEffectiveChapterAdmissionCap(capacity) {
@@ -561,7 +563,8 @@ export class LiteExecutor {
         let hasAvailableAlternative = false;
         for (const source of this.fairDemandSources) {
             const slot = this.sourceSlots.get(source);
-            const capacity = this.sourceCapacity(source);
+            const configuredFairMax = SOURCE_CONCURRENCY_LIMITS[source]?.fairMaxChapters ?? 2;
+            const capacity = Math.max(this.sourceCapacity(source), configuredFairMax);
             const active = slot ? slot.active : 0;
             if (active >= capacity)
                 saturated.push(source);
