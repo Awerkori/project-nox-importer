@@ -358,7 +358,6 @@ export class LiteRepository {
         WHERE m.source=$1 AND m.source_work_id>$2
           AND m.work_id IS NOT NULL
           AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-          AND w.published=true
           AND COALESCE(w.status,'ONGOING') IN ('ONGOING','HIATUS')
         ORDER BY m.source, m.source_work_id LIMIT $3`, [source, after, scanLimit]);
 
