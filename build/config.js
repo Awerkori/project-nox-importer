@@ -72,8 +72,8 @@ const ConfigSchema = z.object({
     // A 32-page production ramp regressed to 143 pages/min and increased RSS
     // without Telegram 429. Keep the measured 24-page fence until a distinct
     // bottleneck is proven; uploads remain bounded at 24 and buffers at 48.
-    DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(24),
-    BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(48),
+    DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(48).default(36),
+    BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(96).default(72),
     // Upstream adapter calls are network work, not a reason to monopolize a
     // chapter slot. The timeout is deliberately independent from the durable
     // task lease and results in capped retry/cooldown handling.
