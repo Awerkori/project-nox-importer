@@ -1689,8 +1689,8 @@ export class LiteRepository {
    * fairness + multi-source diversity, while detecting completed P1 works.
    */
   async refreshP1FocusGroup(options: { targetSize?: number; maxPerSource?: number } = {}): Promise<P1FocusGroupSnapshot> {
-    const desiredSize = Math.max(12, Math.min(32, Math.floor(options.targetSize || 18)));
-    const maxPerSource = Math.max(2, Math.min(8, Math.floor(options.maxPerSource || 3)));
+    const desiredSize = Math.max(12, Math.min(48, Math.floor(options.targetSize || 24)));
+    const maxPerSource = Math.max(2, Math.min(16, Math.floor(options.maxPerSource || 6)));
     this.p1FocusTargetSize = desiredSize;
     const metaDb = this.sourceMetadataDb || this.db;
 
@@ -1706,7 +1706,7 @@ export class LiteRepository {
           AND rw.work_key LIKE 'work:%'
           AND rw.next_run_at <= now() + interval '35 seconds'
         ORDER BY rw.last_claimed_at ASC NULLS FIRST, rw.next_run_at ASC, rw.work_key ASC
-        LIMIT 48
+        LIMIT 96
       ), work_stats AS (
         SELECT
           rpw.work_key,

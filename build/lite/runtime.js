@@ -1131,8 +1131,8 @@ export class ImporterLiteRuntime {
             return this.p1FocusRefreshInFlight;
         this.lastP1FocusRefreshAt = now;
         const effectiveCap = Math.max(12, this.executor.getEffectiveChapterAdmissionCap());
-        const targetSize = Math.max(18, Math.min(28, Math.round(effectiveCap * 1.5)));
-        this.p1FocusRefreshInFlight = this.queue.refreshP1FocusGroup({ targetSize, maxPerSource: 3 })
+        const targetSize = Math.max(24, Math.min(36, Math.round(effectiveCap * 1.6)));
+        this.p1FocusRefreshInFlight = this.queue.refreshP1FocusGroup({ targetSize, maxPerSource: 8 })
             .then(() => undefined)
             .catch((error) => {
             this.logger.warn('P1 focus group refresh deferred', { error: error?.message });
