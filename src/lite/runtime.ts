@@ -592,7 +592,7 @@ export class ImporterLiteRuntime {
     const memState = this.memoryPressureGuard.snapshot().state;
 
     const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
-      || (typeof siteLatencyMs === 'number' && siteLatencyMs > 2_500);
+      || (typeof siteLatencyMs === 'number' && siteLatencyMs > 3_500);
     const highYsqlPressure = poolWaiting >= 8 && sqlP95Ms > 2_500;
 
     if (highSitePressure || highYsqlPressure) {
@@ -607,7 +607,7 @@ export class ImporterLiteRuntime {
     }
 
     const healthyForRamp = (this.lastSiteProbe.state === 'HEALTHY' || this.lastSiteProbe.state === 'UNKNOWN')
-      && (siteLatencyMs === null || siteLatencyMs <= 2_000)
+      && (siteLatencyMs === null || siteLatencyMs <= 2_500)
       && poolWaiting <= 6
       && memState === 'NORMAL';
 
@@ -2996,12 +2996,12 @@ export class ImporterLiteRuntime {
     const started = Date.now();
     try {
       const response = await fetch(`${this.config.NOX_MANGA_URL.replace(/\/$/, '')}/api/releases?limit=1`, {
-        signal: AbortSignal.timeout(4_000),
+        signal: AbortSignal.timeout(5_000),
         headers: { 'Cache-Control': 'no-cache' },
       });
       await response.body?.cancel().catch(() => {});
       const latencyMs = Date.now() - started;
-      return { healthy: response.ok && latencyMs <= 2_500, latencyMs, status: response.status };
+      return { healthy: response.ok && latencyMs <= 3_500, latencyMs, status: response.status };
     } catch {
       return { healthy: false, latencyMs: null, status: null };
     }
