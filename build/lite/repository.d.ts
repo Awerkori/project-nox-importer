@@ -386,8 +386,8 @@ export declare class LiteRepository {
     /**
      * Discovery is a low-cost producer, never a reason to monopolize P2.  This
      * bounded startup repair only defers due DISCOVER rows; catalog and chapter
-     * tasks are untouched.  Each ready-work projection is refreshed in the
-     * same short transaction so a stale projection cannot create empty claims.
+     * tasks are untouched.  Discovery tasks are claimed directly without
+     * ready-work projections.
      */
     staggerReadyDiscoveries(spacingMs: number, limit?: number): Promise<number>;
     /**

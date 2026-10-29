@@ -2645,30 +2645,30 @@ export class LiteRepository {
   /**
    * Discovery is a low-cost producer, never a reason to monopolize P2.  This
    * bounded startup repair only defers due DISCOVER rows; catalog and chapter
-   * tasks are untouched.  Each ready-work projection is refreshed in the
-   * same short transaction so a stale projection cannot create empty claims.
+   * tasks are untouched.  Discovery tasks are claimed directly without
+   * ready-work projections.
    */
   async staggerReadyDiscoveries(spacingMs: number, limit = 64): Promise<number> {
-    const client = await this.db.connect();
-    try {
-      await client.query('BEGIN');
-      const candidates = await client.query<{ id: string; work_key: string }>(
-        `SELECT id,work_key FROM importer_lite_tasks
-         WHERE task_type='DISCOVER' AND state='READY' AND next_run_at<=now()
-         ORDER BY created_at,id LIMIT $1 FOR UPDATE SKIP LOCKED`, [Math.max(1, Math.min(limit, 256))],
-      );
-      const base = Date.now();
-      for (const [index, row] of candidates.rows.entries()) {
-        await client.query(`UPDATE importer_lite_tasks SET next_run_at=$2,updated_at=now() WHERE id=$1::uuid`,
-          [row.id, new Date(base + index * Math.max(1_000, spacingMs))]);
-      }
-      for (const workKey of new Set(candidates.rows.map((row) => row.work_key))) await this.refreshReadyWork(client, workKey);
-      await client.query('COMMIT');
-      return candidates.rowCount || 0;
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw error;
-    } finally { client.release(); }
+    const candidates = await this.db.query<{ id: string }>(
+      `SELECT id FROM importer_lite_tasks
+       WHERE task_type='DISCOVER' AND state='READY' AND next_run_at<=now()
+       ORDER BY created_at,id LIMIT $1`,
+      [Math.max(1, Math.min(limit, 256))],
+    );
+    if (!candidates.rows.length) return 0;
+    const base = Date.now();
+    const step = Math.max(1_000, spacingMs);
+    const ids = candidates.rows.map((row) => row.id);
+    const runAts = candidates.rows.map((_, index) => new Date(base + index * step));
+
+    const result = await this.db.query(
+      `UPDATE importer_lite_tasks AS t
+       SET next_run_at = v.next_run_at, updated_at = now()
+       FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::timestamptz[]) AS next_run_at) AS v
+       WHERE t.id = v.id`,
+      [ids, runAts],
+    );
+    return result.rowCount || 0;
   }
 
   /**

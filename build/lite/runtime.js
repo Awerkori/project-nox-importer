@@ -732,7 +732,12 @@ export class ImporterLiteRuntime {
             // A former runtime may have left every source observation due at once.
             // Stagger only discovery rows; executable catalog/chapter work remains
             // immediately eligible under the normal strict priority contract.
-            await this.queue.staggerReadyDiscoveries(60_000, 64);
+            try {
+                await this.queue.staggerReadyDiscoveries(60_000, 64);
+            }
+            catch (staggerError) {
+                this.logger.warn('Early discovery stagger deferred or failed non-fatally', { error: staggerError?.message });
+            }
             this.lastLegacyBlockedRepairAt = Date.now();
             await this.queue.recoverDuplicateCanonicalCatalogFailures();
             await this.queue.reopenP0MonitorsBlockedByDiscoveryPolicy();
