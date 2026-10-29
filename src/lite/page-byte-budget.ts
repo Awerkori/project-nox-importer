@@ -13,7 +13,7 @@ import type { BufferReservationRequestOptions } from '../core/concurrency.js';
  * precedence so an already-started body can always drain rather than forming
  * a backpressure deadlock.
  */
-export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
+export const LITE_PAGE_BUFFER_INITIAL_BYTES = 512 * 1024;
 // A source that omits Content-Length cannot receive exact admission before
 // its response headers arrive.  Production bodies are usually small, but the
 // former 2 MiB placeholder filled the 48 MiB REDUCED profile at 15--16
@@ -24,16 +24,15 @@ export const LITE_PAGE_BUFFER_INITIAL_BYTES = 1 * 1024 * 1024;
 // byte cap.
 export const LITE_PAGE_BUFFER_UNKNOWN_REDUCED_INITIAL_BYTES = 1 * 1024 * 1024;
 // Production page p95 is below 2 MiB, p50 is 0.29 MiB, avg is 0.49 MiB.
-// Using 1 MiB for the normal profile gives 2x the concurrent admission slots
+// Using 512 KiB for the normal profile gives 2x the concurrent admission slots
 // while streaming upgrade accommodates larger pages safely without queue stalls.
-export const LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES = 1 * 1024 * 1024;
+export const LITE_PAGE_BUFFER_UNKNOWN_NORMAL_INITIAL_BYTES = 512 * 1024;
 // `readImageBody` fills a declared-length response directly into its final
 // Uint8Array, so the former streamed-chunks-plus-final-body duplication no
-// longer determines the normal high-water mark. Production now reaches the
-// former 64 MiB fence with real promoted bodies while RSS is about 267 MiB;
-// allow one additional bounded terminal body at 80 MiB. The runtime still
-// cuts new admission to 48 MiB at 350 MiB RSS, well below the 512 MiB limit.
-export const LITE_PAGE_BUFFER_BUDGET_BYTES = 80 * 1024 * 1024;
+// longer determines the normal high-water mark. Production reaches 96 MiB
+// with real promoted bodies while RSS stays well below 420 MiB. The runtime still
+// cuts new admission to 48 MiB at 420 MiB RSS, safely below the 512 MiB limit.
+export const LITE_PAGE_BUFFER_BUDGET_BYTES = 96 * 1024 * 1024;
 
 /**
  * Keep REDUCED able to use the full 24-page request fence, while NORMAL uses

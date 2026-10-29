@@ -69,7 +69,7 @@ const CHAPTER_ADMISSION_CAP_KEY = 'importer_chapter_admission_cap';
 // idle behind a smaller count-only gate. The independent live-body
 // budget remains authoritative, and RSS pressure can cut both admissions
 // before the container approaches its 512 MiB limit.
-const SAFE_BUFFERED_PAGE_CAP = 80;
+const SAFE_BUFFERED_PAGE_CAP = 120;
 // Stored metadata replay is local and no-network. Keep replay admission
 // responsive, but poll the source-mapping producer less often: it uses the
 // same small YSQL pool as chapter work and only needs to refill a two-task
@@ -2973,21 +2973,25 @@ export class ImporterLiteRuntime {
             return;
         }
         const first = await this.probeSiteHealth();
-        if (first.healthy) {
+        if (first.healthy && (first.latencyMs === null || first.latencyMs <= 5_000)) {
             this.sitePausedUntil = 0;
             this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: first.latencyMs };
             this.updateAdaptiveAdmissionControl();
             return;
         }
-        // A one-off DIScloud egress failure previously halted every worker for
-        // thirty seconds even while Reader was healthy.  Confirm once, only on a
-        // failed probe; a real outage still pauses claims, while a transient does
-        // not masquerade as a site incident or collapse productive slots.
+        // A one-off DIScloud egress failure or network queueing spike can make a
+        // single probe slow (>5000ms) or fail even while Reader is healthy. Confirm
+        // once before pausing or reducing admission; a real outage or continuous
+        // degradation still triggers protection, while a transient container-side
+        // blip does not throttle healthy workers.
         const confirmation = await this.probeSiteHealth();
         if (confirmation.healthy) {
             this.sitePausedUntil = 0;
-            this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: confirmation.latencyMs };
-            this.logger.warn('Transient site-health probe recovered before pausing Lite claims', {
+            const effectiveLatency = (first.latencyMs !== null && first.latencyMs > 5_000 && confirmation.latencyMs !== null && confirmation.latencyMs <= 5_000)
+                ? confirmation.latencyMs
+                : (confirmation.latencyMs ?? first.latencyMs);
+            this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: effectiveLatency };
+            this.logger.warn('Transient site-health probe recovered on confirmation before throttling Lite claims', {
                 firstStatus: first.status, firstLatencyMs: first.latencyMs, confirmationLatencyMs: confirmation.latencyMs,
             });
             this.updateAdaptiveAdmissionControl();
