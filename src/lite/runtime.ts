@@ -79,7 +79,7 @@ const CHAPTER_ADMISSION_CAP_KEY = 'importer_chapter_admission_cap';
 // idle behind a smaller count-only gate. The independent live-body
 // budget remains authoritative, and RSS pressure can cut both admissions
 // before the container approaches its 512 MiB limit.
-const SAFE_BUFFERED_PAGE_CAP = 72;
+const SAFE_BUFFERED_PAGE_CAP = 80;
 // Stored metadata replay is local and no-network. Keep replay admission
 // responsive, but poll the source-mapping producer less often: it uses the
 // same small YSQL pool as chapter work and only needs to refill a two-task
