@@ -245,7 +245,7 @@ export class LiteRepository {
         WHERE m.source=$1 AND m.source_work_id>$2
           AND m.work_id IS NOT NULL
           AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-          AND COALESCE(w.status,'ONGOING') IN ('ONGOING','HIATUS')
+          AND COALESCE(w.status,'ONGOING') <> 'CANCELLED'
         ORDER BY m.source, m.source_work_id LIMIT $3`, [source, after, scanLimit]);
             const scanRows = await loadMappingWindow(lastSourceWorkId);
             const wrapped = scanRows.rowCount === 0 && lastSourceWorkId !== '';
