@@ -517,6 +517,10 @@ export class ImporterLiteRuntime {
      * ramps back +1 only after 2 consecutive healthy 30-second observations.
      */
     updateAdaptiveAdmissionControl() {
+        if (this.manualProtectiveStop.active) {
+            this.adaptiveHealthyStreak = 0;
+            return;
+        }
         const ceiling = this.operatorChapterAdmissionCap > 0
             ? this.operatorChapterAdmissionCap
             : this.chapterWorkerCapacity;
