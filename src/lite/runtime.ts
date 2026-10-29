@@ -592,7 +592,7 @@ export class ImporterLiteRuntime {
     const memState = this.memoryPressureGuard.snapshot().state;
 
     const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
-      || (typeof siteLatencyMs === 'number' && siteLatencyMs > 5_000);
+      || (this.lastSiteProbe.state !== 'HEALTHY' && typeof siteLatencyMs === 'number' && siteLatencyMs > 5_000);
     const highYsqlPressure = poolWaiting >= 12 && sqlP95Ms > 4_000;
 
     if (highSitePressure || highYsqlPressure) {
@@ -3048,9 +3048,9 @@ export class ImporterLiteRuntime {
     const confirmation = await this.probeSiteHealth();
     if (confirmation.healthy) {
       this.sitePausedUntil = 0;
-      const effectiveLatency = (first.latencyMs !== null && first.latencyMs > 5_000 && confirmation.latencyMs !== null && confirmation.latencyMs <= 5_000)
+      const effectiveLatency = (confirmation.latencyMs !== null && confirmation.latencyMs <= 5_000)
         ? confirmation.latencyMs
-        : (confirmation.latencyMs ?? first.latencyMs);
+        : (first.latencyMs !== null && first.latencyMs <= 5_000 ? first.latencyMs : Math.min(confirmation.latencyMs ?? 5_000, first.latencyMs ?? 5_000));
       this.lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: effectiveLatency };
       this.logger.warn('Transient site-health probe recovered on confirmation before throttling Lite claims', {
         firstStatus: first.status, firstLatencyMs: first.latencyMs, confirmationLatencyMs: confirmation.latencyMs,
