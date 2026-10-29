@@ -2550,7 +2550,7 @@ export class ImporterLiteRuntime {
         const fairnessPool = primaryBusy ? this.sourceMetadataPool : this.pool;
         const refresh = (async () => {
             try {
-                this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand(64, fairnessPool));
+                this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand(128, fairnessPool));
                 return true;
             }
             catch (error) {

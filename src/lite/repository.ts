@@ -2479,8 +2479,8 @@ export class LiteRepository {
    * The sample is outside claim; durable claim remains authority for task
    * existence, priority and work-level round-robin.
    */
-  private async readyImportSourceRows(limit = 64, db: Pick<Pool, 'query'> = this.db): Promise<string[]> {
-    const maximum = Math.max(1, Math.min(128, limit));
+  private async readyImportSourceRows(limit = 128, db: Pick<Pool, 'query'> = this.db): Promise<string[]> {
+    const maximum = Math.max(1, Math.min(256, limit));
     const result = await db.query<Row>(`WITH candidate_works AS (
         SELECT rw.work_key,rw.priority
         FROM importer_lite_ready_works rw
@@ -2560,7 +2560,7 @@ export class LiteRepository {
     return result.rows.map((row) => String(row.source));
   }
 
-  async readyImportSources(limit = 64, db: Pick<Pool, 'query'> = this.db): Promise<string[]> {
+  async readyImportSources(limit = 128, db: Pick<Pool, 'query'> = this.db): Promise<string[]> {
     return [...new Set(await this.readyImportSourceRows(limit, db))].sort();
   }
 
@@ -2570,7 +2570,7 @@ export class LiteRepository {
    * deep single-work P1 backlog cannot claim capacity reserved for unrelated
    * works or sources.
    */
-  async readyImportSourceDemand(limit = 64, db: Pick<Pool, 'query'> = this.db): Promise<Map<string, number>> {
+  async readyImportSourceDemand(limit = 128, db: Pick<Pool, 'query'> = this.db): Promise<Map<string, number>> {
     const demand = new Map<string, number>();
     for (const source of await this.readyImportSourceRows(limit, db)) {
       demand.set(source, (demand.get(source) || 0) + 1);

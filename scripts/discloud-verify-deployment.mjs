@@ -50,9 +50,14 @@ async function verify() {
     const res = await fetchJson(`${baseUrl}/status`);
     if (res.ok && res.data) {
       const app = res.data.apps || res.data;
-      lastStatus = app.status || (app.online ? 'Online' : 'Offline');
-      console.log(`  [Attempt ${attempt}/${maxAttempts}] Status: "${lastStatus}", Online: ${app.online}, RAM: ${app.ram || 'unknown'}`);
-      if (app.online === true || lastStatus.toLowerCase() === 'online') {
+      const isOnlineStatus = Boolean(
+        app.online === true ||
+        (typeof app.container === 'string' && app.container.toLowerCase() === 'online') ||
+        (typeof app.status === 'string' && app.status.toLowerCase() === 'online')
+      );
+      lastStatus = app.container || app.status || (app.online ? 'Online' : 'Offline');
+      console.log(`  [Attempt ${attempt}/${maxAttempts}] Container: "${app.container}", Status: "${lastStatus}", RAM: ${app.ram || 'unknown'}`);
+      if (isOnlineStatus) {
         isOnline = true;
         break;
       }
