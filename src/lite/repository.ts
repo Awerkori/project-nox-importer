@@ -358,18 +358,9 @@ export class LiteRepository {
         WHERE m.source=$1 AND m.source_work_id>$2
           AND m.work_id IS NOT NULL
           AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-          AND (
-            w.published=true
-            OR EXISTS (
-              SELECT 1 FROM importer_lite_tasks wt
-              WHERE wt.work_id=m.work_id
-                AND wt.monitoring=false
-                AND wt.task_type IN ('IMPORT_CHAPTER','PUBLISH')
-                AND wt.state IN ('READY','RUNNING','RETRY_WAIT','DONE')
-            )
-          )
-          AND COALESCE(to_jsonb(w)->>'status','ONGOING') IN ('ONGOING','HIATUS')
-        ORDER BY m.source_work_id LIMIT $3`, [source, after, scanLimit]);
+          AND w.published=true
+          AND COALESCE(w.status,'ONGOING') IN ('ONGOING','HIATUS')
+        ORDER BY m.source, m.source_work_id LIMIT $3`, [source, after, scanLimit]);
 
       const scanRows = await loadMappingWindow(lastSourceWorkId);
       const wrapped = scanRows.rowCount === 0 && lastSourceWorkId !== '';
