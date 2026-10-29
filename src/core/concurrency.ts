@@ -242,7 +242,7 @@ export const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig> 
   // New source validated through the shared Madara adapter. Start
   // conservatively: it is an opportunistic P2 provider, not a throughput lane.
   hentaiteca: { maxChapters: 1, maxPagesPerChapter: 2 },
-  imperiodabritannia: { maxChapters: 1, maxPagesPerChapter: 2 },
+  imperiodabritannia: { maxChapters: 4, fairMaxChapters: 3, maxPagesPerChapter: 6 },
   hentaitokyo: { maxChapters: 4, maxPagesPerChapter: 6 },
   universohentai: { maxChapters: 4, maxPagesPerChapter: 6 },
   hentaifusion: { maxChapters: 4, maxPagesPerChapter: 6 },
