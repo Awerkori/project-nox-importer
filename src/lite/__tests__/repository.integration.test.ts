@@ -2215,7 +2215,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     (runtime as any).queue = { readyImportSourceDemand };
 
     await expect((runtime as any).refreshSourceFairness()).resolves.toBe(true);
-    expect(readyImportSourceDemand).toHaveBeenCalledWith(64, metadataPool);
+    expect(readyImportSourceDemand).toHaveBeenCalledWith(128, metadataPool);
     expect((runtime as any).executor.getFairSourceDemand()).toEqual(['mangaflix', 'manhastro']);
   });
 
@@ -5535,7 +5535,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(visible.rows[0].published_at).toBeTruthy();
     expect(visible.rows[0].position).toBe(1);
     expect(storage.upload).toHaveBeenCalledOnce();
-    expect(acquire).toHaveBeenCalledWith('source-a.test');
+    expect(acquire).toHaveBeenCalledWith('source-a.test', expect.anything());
     expect(success).toHaveBeenCalledWith('source-a.test');
     expect((await db.query(`SELECT provider_key,bot_reference,storage_shard_id,channel_id,telegram_message_id
       FROM importer_lite_uploads ORDER BY created_at LIMIT 1`)).rows[0])
@@ -6313,7 +6313,7 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('uses a longer join only for deferred receipts, not pre-upload intents', () => {
-    expect(DURABLE_RESERVATION_BATCH_JOIN_MS).toBe(700);
+    expect(DURABLE_RESERVATION_BATCH_JOIN_MS).toBe(350);
     expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBe(900);
     expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBeGreaterThan(DURABLE_RESERVATION_BATCH_JOIN_MS);
     expect(DURABLE_RECEIPT_BATCH_JOIN_MS).toBeLessThan(1_000);
@@ -6641,17 +6641,17 @@ describe('LiteRepository against the additive Lite migration', () => {
     await (runtime as any).refreshManualProtectiveStop();
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(12);
 
-    // Simulate elevated Reader DB latency (>2500ms): steps down immediately (12 -> 9).
-    (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 2_600 };
+    // Simulate elevated Reader DB latency (>5000ms): steps down immediately (12 -> 9).
+    (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 5_200 };
     (runtime as any).updateAdaptiveAdmissionControl();
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(9);
 
-    // Healthy probe (<2000ms) steps up +2 (9 -> 11).
+    // Healthy probe (<4000ms) steps up +3 (9 -> 12).
     (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 220 };
     (runtime as any).updateAdaptiveAdmissionControl();
-    expect((runtime as any).chapterAdmissionGate.capacity).toBe(11);
+    expect((runtime as any).chapterAdmissionGate.capacity).toBe(12);
 
-    // Subsequent healthy probe restores operator ceiling (11 -> 12) and never exceeds it.
+    // Subsequent healthy probe restores operator ceiling (12 -> 12) and never exceeds it.
     (runtime as any).updateAdaptiveAdmissionControl();
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(12);
     (runtime as any).updateAdaptiveAdmissionControl();

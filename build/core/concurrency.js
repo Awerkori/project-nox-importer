@@ -178,18 +178,18 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     // while MangaFlix's long chapters spend their wall time in page waves.
     // Eight pages lets three admitted chapters occupy that existing hard fence;
     // it never widens the global download, buffer, byte, Telegram, or YSQL cap.
-    mangaflix: { maxChapters: 8, maxPagesPerChapter: 8 },
-    manhastro: { maxChapters: 4, fairMaxChapters: 3, maxPagesPerChapter: 6 },
-    mangotoons: { maxChapters: 4, fairMaxChapters: 3, maxPagesPerChapter: 4 },
-    taimumangas: { maxChapters: 4, fairMaxChapters: 3, maxPagesPerChapter: 6 },
-    hipercool: { maxChapters: 2, maxPagesPerChapter: 4 },
+    mangaflix: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 8 },
+    manhastro: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
+    mangotoons: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
+    taimumangas: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
+    hipercool: { maxChapters: 4, fairMaxChapters: 3, maxPagesPerChapter: 6 },
     // Nexus is the primary fast backlog provider with 6,000+ ready chapters.
     // Its CDN and Supabase host rate limiters (8 req/s burst 16, 4 req/s burst 8)
-    // comfortably pace up to 6 concurrent chapters without monopolizing.
-    nexus: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 4 },
+    // comfortably pace up to 10 concurrent chapters with 8 concurrent pages.
+    nexus: { maxChapters: 10, fairMaxChapters: 8, maxPagesPerChapter: 8 },
     instahentai: { maxChapters: 2, maxPagesPerChapter: 4 },
     euphoriascan: { maxChapters: 2, maxPagesPerChapter: 4 },
-    fleurblanche: { maxChapters: 3, maxPagesPerChapter: 6 },
+    fleurblanche: { maxChapters: 4, fairMaxChapters: 3, maxPagesPerChapter: 6 },
     littletyrant: { maxChapters: 2, maxPagesPerChapter: 4 },
     mangalivreto: { maxChapters: 3, maxPagesPerChapter: 6 },
     montetai: { maxChapters: 3, maxPagesPerChapter: 6 },
@@ -206,11 +206,11 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     borutoexplorer: { maxChapters: 4, maxPagesPerChapter: 6 },
     covenscan: { maxChapters: 4, maxPagesPerChapter: 6 },
     kamisamaexplorer: { maxChapters: 4, maxPagesPerChapter: 6 },
-    mrtenzus: { maxChapters: 4, maxPagesPerChapter: 6 },
+    mrtenzus: { maxChapters: 4, fairMaxChapters: 3, maxPagesPerChapter: 6 },
     ninjascan: { maxChapters: 4, maxPagesPerChapter: 6 },
     tiamanhwa: { maxChapters: 1, maxPagesPerChapter: 2 },
     apecomics: { maxChapters: 4, maxPagesPerChapter: 6 },
-    pizzariascan: { maxChapters: 4, maxPagesPerChapter: 6 },
+    pizzariascan: { maxChapters: 4, fairMaxChapters: 3, maxPagesPerChapter: 6 },
     mangaonlinetv: { maxChapters: 4, maxPagesPerChapter: 6 },
     pinkrosa: { maxChapters: 4, maxPagesPerChapter: 6 },
     galaxscanlator: { maxChapters: 4, maxPagesPerChapter: 6 },
