@@ -663,7 +663,7 @@ export class ImporterLiteRuntime {
         // MangaFlix may use an eight-page wave, while every other source retains
         // its source-scoped page cap. The hard global download/buffer/byte fences
         // remain unchanged; this only fills existing unused media permits.
-        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(8, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter, this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes, config.SOURCE_OPERATION_TIMEOUT_MS, async () => { await this.refreshSourceFairness(); });
+        this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(10, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter, this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes, config.SOURCE_OPERATION_TIMEOUT_MS, async () => { await this.refreshSourceFairness(); });
         this.dedupe = new DeduplicationEngine(catalogClient);
         this.historicalMetadataDedupe = sourceMetadataPool === pool
             ? this.dedupe
@@ -3096,7 +3096,7 @@ export class ImporterLiteRuntime {
     }
     /** Values after both the runtime and per-source clamps; no configuration secrets. */
     pageWaveLimits() {
-        const runtimeMaximum = Math.max(1, Math.min(8, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY));
+        const runtimeMaximum = Math.max(1, Math.min(10, this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY));
         return {
             configuredPagesPerChapter: this.config.BATCH_PAGE_DOWNLOAD_CONCURRENCY,
             runtimeMaximumPagesPerChapter: runtimeMaximum,
