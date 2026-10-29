@@ -1,0 +1,27 @@
+name: Discloud Status & Restart
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_restart:
+        description: 'Force container restart even if online'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    environment:
+      name: discloud-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check Status and Logs
+        env:
+          DISCLOUD_TOKEN: ${{ secrets.DISCLOUD_TOKEN }}
+          DISCLOUD_APP_ID: '1788873398156'
+          FORCE_RESTART: ${{ inputs.force_restart }}
+        run: node scripts/discloud-status.mjs
