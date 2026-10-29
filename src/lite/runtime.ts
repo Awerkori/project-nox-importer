@@ -592,7 +592,7 @@ export class ImporterLiteRuntime {
     const memState = this.memoryPressureGuard.snapshot().state;
 
     const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
-      || (typeof siteLatencyMs === 'number' && siteLatencyMs > 3_500);
+      || (typeof siteLatencyMs === 'number' && siteLatencyMs > 5_000);
     const highYsqlPressure = poolWaiting >= 8 && sqlP95Ms > 2_500;
 
     if (highSitePressure || highYsqlPressure) {
@@ -606,8 +606,8 @@ export class ImporterLiteRuntime {
       return;
     }
 
-    const healthyForRamp = (this.lastSiteProbe.state === 'HEALTHY' || this.lastSiteProbe.state === 'UNKNOWN')
-      && (siteLatencyMs === null || siteLatencyMs <= 2_500)
+    const healthyForRamp = (this.lastSiteProbe.state === 'HEALTHY' || this.lastSiteProbe.state === 'UNKNOWN' || this.lastSiteProbe.state === 'DEGRADED')
+      && (siteLatencyMs === null || siteLatencyMs <= 4_000)
       && poolWaiting <= 6
       && memState === 'NORMAL';
 
@@ -615,7 +615,7 @@ export class ImporterLiteRuntime {
       this.adaptiveHealthyStreak++;
       if (current < ceiling && this.adaptiveHealthyStreak >= 1) {
         this.adaptiveHealthyStreak = 0;
-        const steppedUp = Math.min(ceiling, current + 2);
+        const steppedUp = Math.min(ceiling, current + 3);
         this.adaptiveChapterAdmissionCap = steppedUp;
         this.adaptiveAdmissionReason = steppedUp === ceiling ? 'adaptive-restored-ceiling' : 'adaptive-step-up';
         this.applyEffectiveChapterAdmissionCap(steppedUp, this.adaptiveAdmissionReason, current);
@@ -2996,12 +2996,12 @@ export class ImporterLiteRuntime {
     const started = Date.now();
     try {
       const response = await fetch(`${this.config.NOX_MANGA_URL.replace(/\/$/, '')}/api/releases?limit=1`, {
-        signal: AbortSignal.timeout(5_000),
+        signal: AbortSignal.timeout(6_000),
         headers: { 'Cache-Control': 'no-cache' },
       });
       await response.body?.cancel().catch(() => {});
       const latencyMs = Date.now() - started;
-      return { healthy: response.ok && latencyMs <= 3_500, latencyMs, status: response.status };
+      return { healthy: response.ok, latencyMs, status: response.status };
     } catch {
       return { healthy: false, latencyMs: null, status: null };
     }
@@ -3279,6 +3279,7 @@ export class ImporterLiteRuntime {
         },
         sourceRate: this.sourceRateLimiter.getSummary(),
         liveness,
+        site: this.lastSiteProbe,
         observedAt: new Date().toISOString(),
       };
       this.logger.info('Lite operational heartbeat deferred', deferred);
