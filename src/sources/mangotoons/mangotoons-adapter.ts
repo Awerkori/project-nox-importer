@@ -54,6 +54,17 @@ export class MangoToonsAdapter implements SourceAdapter {
     }
   }
 
+  getImageHeaders(_url?: string): Record<string, string> {
+    return {
+      Referer: `${this.baseUrl}/`,
+      Origin: this.baseUrl,
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+      Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+    };
+  }
+
   async login(): Promise<boolean> {
     const email = process.env.MANGOTOONS_EMAIL;
     const password = process.env.MANGOTOONS_PASSWORD;

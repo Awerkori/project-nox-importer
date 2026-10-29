@@ -180,7 +180,7 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     // it never widens the global download, buffer, byte, Telegram, or YSQL cap.
     mangaflix: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 8 },
     manhastro: { maxChapters: 10, fairMaxChapters: 8, maxPagesPerChapter: 10 },
-    mangotoons: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 8 },
+    mangotoons: { maxChapters: 6, fairMaxChapters: 4, maxPagesPerChapter: 6 },
     taimumangas: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 8 },
     hipercool: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
     // Nexus is the primary fast backlog provider with 6,000+ ready chapters.
