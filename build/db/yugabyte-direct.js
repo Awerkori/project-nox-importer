@@ -182,7 +182,7 @@ export function getYugabytePool() {
     if (pool)
         return pool;
     const cfg = getConfig();
-    pool = new pg.Pool(yugabytePoolOptions(cfg, cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '4', 10), 'project-nox-importer-direct', 25_000, 25_000));
+    pool = new pg.Pool(yugabytePoolOptions(cfg, cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '3', 10), 'project-nox-importer-direct', 25_000, 25_000));
     pool.on('error', (err) => {
         logger.error('Unexpected error on idle direct Yugabyte client', { error: err.message });
     });

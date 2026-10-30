@@ -199,7 +199,7 @@ export function getYugabytePool(): pg.Pool {
   const cfg = getConfig();
   pool = new pg.Pool(yugabytePoolOptions(
     cfg,
-    cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '4', 10),
+    cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '3', 10),
     'project-nox-importer-direct',
     25_000,
     25_000,

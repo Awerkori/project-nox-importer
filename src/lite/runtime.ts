@@ -2236,7 +2236,6 @@ export class ImporterLiteRuntime {
           reason: p1Backlog.reason,
           checkedAt: new Date().toISOString(),
         };
-        if (p1Backlog.pending) return;
       } catch (error: any) {
         this.logger.warn('P1 backlog check for P2 subordination failed', { error: error?.message });
       }
@@ -3551,14 +3550,9 @@ export class ImporterLiteRuntime {
         reason: p1Backlog.reason,
         checkedAt: new Date().toISOString(),
       };
-      let skippedUnmappedForP1 = 0;
       const catalogInputs: EnqueueLiteTask[] = [];
       for (const work of candidateWorks) {
         const mappedWorkId = existingMappings.get(String(work.sourceWorkId));
-        if (!mappedWorkId && p1Backlog.pending) {
-          skippedUnmappedForP1++;
-          continue;
-        }
         catalogInputs.push({
           taskType: 'CATALOG',
           workId: mappedWorkId || undefined,
@@ -3579,7 +3573,7 @@ export class ImporterLiteRuntime {
       // A cursor asks for a later small batch, not an immediate unbounded
       // sweep. This leaves a one-worker cutover free to catalog materialized
       // works and prevents one source from filling every P2 admission slot.
-      const effectiveNextCursor = skippedUnmappedForP1 > 0 ? cursor : page.nextCursor;
+      const effectiveNextCursor = page.nextCursor;
       const nextDelay = effectiveNextCursor
         ? Math.max(60_000, Math.min(policy.syncIntervalMs, 5 * 60_000))
         : policy.syncIntervalMs;
