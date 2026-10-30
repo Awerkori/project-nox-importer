@@ -6,10 +6,10 @@ const MIB = 1024 * 1024;
 // healthy available memory into a permanent throughput cap.  Keep NORMAL
 // through 420 MiB, use REDUCED only as a measured warning band, and retain a
 // 62 MiB margin for the hard one-page brake at 450 MiB.
-const NORMAL_RSS_MIB = 420;
-const CRITICAL_RSS_MIB = 450;
-const REDUCED_RECOVERY_RSS_MIB = 400;
-const CRITICAL_RECOVERY_RSS_MIB = 425;
+const NORMAL_RSS_MIB = 370;
+const CRITICAL_RSS_MIB = 410;
+const REDUCED_RECOVERY_RSS_MIB = 340;
+const CRITICAL_RECOVERY_RSS_MIB = 380;
 // A process can retain libc/undici arenas after a media wave even after the
 // JS heap, ArrayBuffers and the authoritative page-byte budget have drained.
 // Keeping optional JSON-only metadata paused forever in that condition turns
@@ -18,11 +18,11 @@ const CRITICAL_RECOVERY_RSS_MIB = 425;
 // already one-seat metadata path back after a quiet, low-live-memory window,
 // and immediately closes again if RSS grows.
 const RETAINED_RSS_METADATA_RESUME_AFTER_MS = 60_000;
-// At the higher hard-media brake, a flat allocator plateau near 470 MiB must
+// At the higher hard-media brake, a flat allocator plateau near 415 MiB must
 // still be able to run the already-bounded one-seat metadata lane.  It does
 // not relax the page brake or admit media; live external/ArrayBuffer checks
 // and the growth check below remain mandatory.
-const RETAINED_RSS_METADATA_MAX_MIB = 480;
+const RETAINED_RSS_METADATA_MAX_MIB = 430;
 const RETAINED_RSS_METADATA_MAX_GROWTH_MIB = 4;
 const RETAINED_RSS_METADATA_MAX_EXTERNAL_MIB = 32;
 const RETAINED_RSS_METADATA_MAX_ARRAY_BUFFER_MIB = 16;

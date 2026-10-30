@@ -1,6 +1,8 @@
 name: Discloud Status & Restart
 
 on:
+  schedule:
+    - cron: '*/10 * * * *'
   workflow_dispatch:
     inputs:
       force_restart:

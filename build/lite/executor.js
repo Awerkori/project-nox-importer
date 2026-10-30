@@ -650,7 +650,7 @@ export class LiteExecutor {
         await this.refreshStaleSingletonDemand(source, sourceSlot);
         if (sourceSlot.tryAcquire())
             return { sourceSlot, waitMs: 0 };
-        const priorityReservation = (task.priority === 'STAFF' || task.priority === 'P0')
+        let priorityReservation = (task.priority === 'STAFF' || task.priority === 'P0')
             && this.prioritySourceWaitGate.tryAcquire();
         const sourcePermitStartedAt = performance.now();
         try {
@@ -660,17 +660,23 @@ export class LiteExecutor {
             return { sourceSlot, waitMs: performance.now() - sourcePermitStartedAt };
         }
         catch (error) {
-            if (priorityReservation)
-                this.prioritySourceWaitGate.release();
             if (!priorityReservation && this.hasFairAlternative(source)) {
                 await this.queue.yieldForSourceFairness(task, workerId, 3_000);
+                return null;
+            }
+            if (priorityReservation && this.hasFairAlternative(source)) {
+                // A priority reservation that times out on a saturated source yields briefly,
+                // preventing worker crashes and allowing fair progress across alternatives.
+                await this.queue.yieldForSourceFairness(task, workerId, 1_000);
                 return null;
             }
             throw error;
         }
         finally {
-            if (priorityReservation)
+            if (priorityReservation) {
+                priorityReservation = false;
                 this.prioritySourceWaitGate.release();
+            }
         }
     }
     async routes(task) {
