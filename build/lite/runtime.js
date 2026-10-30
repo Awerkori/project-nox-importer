@@ -3866,9 +3866,12 @@ export class ImporterLiteRuntime {
                 }
                 catch { }
             }
-            const isWeeklyWindow = Boolean(chapterReleaseAt && !Number.isNaN(Date.parse(chapterReleaseAt)) &&
-                ((Date.now() - Date.parse(chapterReleaseAt)) / (24 * 3600 * 1000) <= 8.5));
-            const monitorPriority = (isWeeklyWindow || newReleaseCount > 0) ? 'P0' : 'P2';
+            const daysSinceRelease = chapterReleaseAt && !Number.isNaN(Date.parse(chapterReleaseAt))
+                ? (Date.now() - Date.parse(chapterReleaseAt)) / (24 * 3600 * 1000)
+                : null;
+            const isWeeklyReleaseWindow = daysSinceRelease !== null && daysSinceRelease >= 5.5 && daysSinceRelease <= 8.5;
+            const isReferenceOrBurst = newReleaseCount > 0 || resolved.workId === '518d8cee-5b48-439e-ba41-c69eb7077efd';
+            const monitorPriority = (isWeeklyReleaseWindow || isReferenceOrBurst) ? 'P0' : 'P2';
             await this.queue.finish(task, workerId, monitored ? {
                 state: 'RETRY_WAIT', priority: monitorPriority, monitoring: true,
                 nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, newReleaseCount, chapterReleaseAt)),
@@ -4425,10 +4428,16 @@ export class ImporterLiteRuntime {
             const lastReleaseTime = Date.parse(lastReleaseRaw);
             if (!Number.isNaN(lastReleaseTime) && lastReleaseTime > 0) {
                 const daysSinceLastRelease = (Date.now() - lastReleaseTime) / (24 * 3600 * 1000);
-                // Active weekly release window: up to 8.5 days since the last chapter.
-                // Check every 25 minutes to catch the chapter promptly.
-                if (daysSinceLastRelease <= 8.5) {
+                // Nano Machine reference work or active weekly release window (5.5 to 8.5 days):
+                // check every 25 minutes without overloading sources or exceeding rate limits.
+                if (task.workId === '518d8cee-5b48-439e-ba41-c69eb7077efd' || (daysSinceLastRelease >= 5.5 && daysSinceLastRelease <= 8.5)) {
                     return 25 * 60_000;
+                }
+                // Work released recently (< 5.5 days ago): not due yet.
+                // Cap backoff at 4 hours to preserve source capacity.
+                if (daysSinceLastRelease < 5.5) {
+                    const emptyChecks = Math.max(0, Number(task.checkpoint?.emptyChecks || 0));
+                    return Math.min(4 * 60 * 60_000, 30 * 60_000 * 2 ** Math.min(emptyChecks, 3));
                 }
             }
         }
