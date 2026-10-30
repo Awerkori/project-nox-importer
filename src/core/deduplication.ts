@@ -1100,6 +1100,13 @@ export class DeduplicationEngine {
       // 4.5 UNKNOWN should never overwrite a known value
       if ((fieldName === 'kind' || fieldName === 'status') && candidateValue === 'UNKNOWN' && !isCurrentEmpty && currentVal !== 'UNKNOWN') return false;
 
+      // 4.6 Ongoing release promotion: if a work was previously marked COMPLETED,
+      // but an active source provides ONGOING status, promote back to ONGOING so
+      // new seasons, sequel arcs, and newly published chapters are not starved.
+      if (fieldName === 'status' && currentVal === 'COMPLETED' && candidateValue === 'ONGOING') {
+        return true;
+      }
+
       // Sources cannot overwrite populated fields.
       return false;
     };

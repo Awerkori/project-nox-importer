@@ -251,8 +251,15 @@ export class HipercoolAdapter implements SourceAdapter {
 
     let status: SourceWorkDetails['status'] = 'UNKNOWN';
     const rawStatus = (series.status || '').toLowerCase();
-    if (rawStatus.includes('complet') || rawStatus.includes('finish')) status = 'COMPLETED';
-    else if (rawStatus.includes('hiat')) status = 'HIATUS';
+    if (rawStatus.includes('ongo') || rawStatus.includes('andamento') || rawStatus.includes('releasing') || rawStatus.includes('ativo') || rawStatus.includes('lanç') || rawStatus.includes('lanc')) {
+      status = 'ONGOING';
+    } else if (rawStatus.includes('complet') || rawStatus.includes('finish') || rawStatus.includes('conclu')) {
+      status = 'COMPLETED';
+    } else if (rawStatus.includes('hiat') || rawStatus.includes('paus')) {
+      status = 'HIATUS';
+    } else if (rawStatus.includes('cancel')) {
+      status = 'CANCELLED';
+    }
 
     return {
       sourceWorkId: slug,

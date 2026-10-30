@@ -210,12 +210,18 @@ export class HanamiHeavenAdapter implements SourceAdapter {
     }
 
     let status: SourceWorkDetails['status'] = 'UNKNOWN';
-    if (/status[\s\S]*?complet/i.test(html) || /conclu[ií]d/i.test(html)) {
+    const statusMatch = html.match(/(?:summary-heading|post-content_item)[\s\S]*?(?:status|estado)[\s\S]*?<div[^>]*class="[^"]*summary-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+    const rawStatus = (statusMatch ? stripHtml(statusMatch[1]) : '').toLowerCase().trim();
+    if (rawStatus.includes('ongo') || rawStatus.includes('andamento') || rawStatus.includes('releasing') || rawStatus.includes('ativo') || rawStatus.includes('lanç') || rawStatus.includes('lanc')) {
+      status = 'ONGOING';
+    } else if (rawStatus.includes('complet') || rawStatus.includes('conclu') || rawStatus.includes('finaliz')) {
       status = 'COMPLETED';
-    } else if (/hiat/i.test(html)) {
+    } else if (rawStatus.includes('hiat') || rawStatus.includes('paus')) {
       status = 'HIATUS';
-    } else if (/cancel/i.test(html)) {
+    } else if (rawStatus.includes('cancel')) {
       status = 'CANCELLED';
+    } else if (statusMatch && rawStatus) {
+      status = 'ONGOING';
     }
 
     let alternativeTitles: string[] = [];

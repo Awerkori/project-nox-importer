@@ -275,13 +275,13 @@ export class LiteRepository {
                         || (catalogTask && catalogTask.monitoring && (catalogTask.state === 'READY' || catalogTask.state === 'RUNNING' || catalogTask.state === 'RETRY_WAIT')));
                     if (hasActiveMonitor)
                         continue;
-                    // Never race an active or blocked non-monitoring initial catalog task.
-                    if (catalogTask && !catalogTask.monitoring && catalogTask.state !== 'DONE')
+                    // Never race an actively running catalog task.
+                    if (catalogTask && catalogTask.state === 'RUNNING')
                         continue;
                     if (monitorTask) {
                         missing.push({ sourceWorkId, workId, reviveTaskId: String(monitorTask.id) });
                     }
-                    else if (catalogTask && (catalogTask.state === 'DONE' || catalogTask.monitoring)) {
+                    else if (catalogTask) {
                         missing.push({ sourceWorkId, workId, reviveTaskId: String(catalogTask.id) });
                     }
                     else {
@@ -305,7 +305,7 @@ export class LiteRepository {
                 AS v(task_id, work_id, work_key, payload_patch, checkpoint_patch)
             )
             UPDATE importer_lite_tasks t SET
-              work_id=i.work_id, work_key=i.work_key, priority=3, base_priority=3,
+              work_id=i.work_id, work_key=i.work_key, priority=1, base_priority=1,
               state='READY', next_run_at=now(), attempts=0, lease_owner=NULL,
               lease_until=NULL, reason=NULL, monitoring=true,
               payload=t.payload || i.payload_patch,
@@ -313,7 +313,7 @@ export class LiteRepository {
             FROM input i
             WHERE t.id=i.task_id
               AND (
-                (t.state='DONE' AND t.monitoring=false)
+                (t.monitoring=false AND t.state IN ('DONE','READY','RETRY_WAIT'))
                 OR (t.monitoring=true AND t.state IN ('DONE','BLOCKED'))
               )
             RETURNING t.id`, [
@@ -329,7 +329,7 @@ export class LiteRepository {
                     const inserted = await client.query(`
             INSERT INTO importer_lite_tasks
               (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
-            SELECT 'CATALOG', v.work_id, v.work_key, 3, 3, v.idem_key, now(), 32, v.payload, v.checkpoint, true
+            SELECT 'CATALOG', v.work_id, v.work_key, 1, 1, v.idem_key, now(), 32, v.payload, v.checkpoint, true
             FROM unnest($1::uuid[], $2::text[], $3::text[], $4::jsonb[], $5::jsonb[])
               AS v(work_id, work_key, idem_key, payload, checkpoint)
             ON CONFLICT(idempotency_key) DO NOTHING

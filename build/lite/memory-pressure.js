@@ -97,7 +97,7 @@ export class LiteMemoryPressureGuard {
             (observed.external || 0) / MIB <= RETAINED_RSS_METADATA_MAX_EXTERNAL_MIB &&
             (observed.arrayBuffers || 0) / MIB <= RETAINED_RSS_METADATA_MAX_ARRAY_BUFFER_MIB;
         const shouldCollect = this.state === 'NORMAL'
-            ? rssMiBBeforeGc >= NORMAL_RSS_MIB
+            ? rssMiBBeforeGc >= NORMAL_RSS_MIB || (rssMiBBeforeGc >= 330 && drainedPageWave)
             : this.state === 'REDUCED'
                 ? rssMiBBeforeGc >= CRITICAL_RSS_MIB || drainedPageWave
                 : false;

@@ -99,9 +99,11 @@ export class TaimuMangasAdapter {
         const data = await this.request(url);
         let status = 'UNKNOWN';
         const s = (data.status || '').toLowerCase();
-        if (s === 'completed' || s === 'finalizado')
+        if (s.includes('ongo') || s.includes('andamento') || s.includes('releasing') || s.includes('ativo') || s.includes('lanç') || s.includes('lanc'))
+            status = 'ONGOING';
+        else if (s === 'completed' || s === 'finalizado' || s.includes('conclu'))
             status = 'COMPLETED';
-        else if (s === 'hiatus' || s === 'hiato')
+        else if (s === 'hiatus' || s === 'hiato' || s.includes('paus'))
             status = 'HIATUS';
         else if (s === 'cancelled' || s === 'cancelado')
             status = 'CANCELLED';

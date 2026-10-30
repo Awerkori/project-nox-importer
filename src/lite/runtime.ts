@@ -3955,7 +3955,7 @@ export class ImporterLiteRuntime {
         const status = String(snapshot.details.status || 'UNKNOWN').toUpperCase();
         const monitored = task.monitoring || task.priority === 'P0' || task.priority === 'STAFF';
         await this.queue.finish(task, workerId, monitored ? {
-          state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
+          state: 'RETRY_WAIT', priority: 'P0', monitoring: true,
           nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, 0)),
           workId: resolved.workId,
           checkpoint: { workId: resolved.workId, presentationIncomplete: true, lastCheckedAt: new Date().toISOString() },
@@ -3978,11 +3978,12 @@ export class ImporterLiteRuntime {
       // evidence worth re-evaluating. This indexed, per-work wake-up replaces
       // the legacy global blocked-task sweeps.
       if (policy.chapterIngestionEnabled) await this.queue.wakeCatalogBlocked(resolved.workId, `work:${resolved.workId}`);
-      // Ongoing/hiatus works retain one cheap persistent monitor. The monitor
-      // remains base P2 and outside normal claims; only its newly inserted
-      // chapters are P0. Completed works remain available to discovery/repair.
+      // Active mapped works retain their persistent P0 monitor. Only explicitly
+      // CANCELLED works drop monitoring. Completed works remain monitored on a
+      // quiet, low-frequency interval so post-completion chapters or side stories
+      // are detected promptly without wasting bandwidth.
       const status = String(snapshot.details.status || 'UNKNOWN').toUpperCase();
-      const monitored = status === 'ONGOING' || status === 'HIATUS';
+      const monitored = status !== 'CANCELLED';
       let chapterReleaseAt: string | null = (task.checkpoint?.lastReleaseAt as string) || null;
       if (newReleaseCount > 0) {
         chapterReleaseAt = new Date().toISOString();
@@ -4004,16 +4005,8 @@ export class ImporterLiteRuntime {
           }
         } catch {}
       }
-      const daysSinceRelease = chapterReleaseAt && !Number.isNaN(Date.parse(chapterReleaseAt))
-        ? (Date.now() - Date.parse(chapterReleaseAt)) / (24 * 3600 * 1000)
-        : null;
-      // Universal weekly release window for any ONGOING work (5.0 to 9.0 days since last release)
-      // or recent new release burst:
-      const isWeeklyReleaseWindow = status === 'ONGOING' && daysSinceRelease !== null && daysSinceRelease >= 5.0 && daysSinceRelease <= 9.0;
-      const isRecentBurst = newReleaseCount > 0;
-      const monitorPriority = (isWeeklyReleaseWindow || isRecentBurst) ? 'P0' : 'P2';
       await this.queue.finish(task, workerId, monitored ? {
-        state: 'RETRY_WAIT', priority: monitorPriority, monitoring: true,
+        state: 'RETRY_WAIT', priority: 'P0', monitoring: true,
         nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, newReleaseCount, chapterReleaseAt)),
         workId: resolved.workId,
         checkpoint: {
@@ -4036,7 +4029,7 @@ export class ImporterLiteRuntime {
       // visible terminal block after its normal bounded attempts.
       await this.queue.finish(task, workerId, { state: monitorRetry ? 'RETRY_WAIT' : task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
         reason: String(error?.message || 'CATALOG_FAILED').slice(0,500), nextRunAt: new Date(Date.now() + retryDelay),
-        priority: monitorRetry ? 'P2' : undefined, monitoring: monitorRetry || undefined,
+        priority: monitorRetry ? 'P0' : undefined, monitoring: monitorRetry || undefined,
         checkpoint: monitorRetry ? { monitorFailures: Number(task.checkpoint.monitorFailures || 0) + 1 } : undefined });
     }
   }
@@ -4567,7 +4560,9 @@ export class ImporterLiteRuntime {
    * frequently (25 min) without overloading the sources or exceeding rate limits.
    */
   private monitorIntervalMs(task: LiteTask, status: string, newReleaseCount: number, effectiveReleaseAt?: string | null): number {
-    if (status === 'HIATUS' || status === 'COMPLETED' || status === 'CANCELLED') return 6 * 60 * 60_000;
+    if (status === 'CANCELLED') return 24 * 60 * 60_000;
+    if (status === 'COMPLETED') return 6 * 60 * 60_000;
+    if (status === 'HIATUS') return 4 * 60 * 60_000;
     if (newReleaseCount > 0) return 5 * 60_000;
 
     const lastReleaseRaw = effectiveReleaseAt || (task.checkpoint?.lastReleaseAt as string | undefined);
@@ -4575,22 +4570,25 @@ export class ImporterLiteRuntime {
       const lastReleaseTime = Date.parse(lastReleaseRaw);
       if (!Number.isNaN(lastReleaseTime) && lastReleaseTime > 0) {
         const daysSinceLastRelease = (Date.now() - lastReleaseTime) / (24 * 3600 * 1000);
-        // Universal intelligent cadence for any ONGOING work in its active weekly release window (5.0 to 9.0 days):
-        // check every 25 minutes without overloading sources or exceeding rate limits.
-        if (status === 'ONGOING' && daysSinceLastRelease >= 5.0 && daysSinceLastRelease <= 9.0) {
+        // Active weekly/bi-weekly release window (3.0 to 14.0 days since last release):
+        // check every 25 minutes for high freshness (~12.5m average delay, 25m P95).
+        if (daysSinceLastRelease >= 3.0 && daysSinceLastRelease <= 14.0) {
           return 25 * 60_000;
         }
-        // Work released recently (< 5.0 days ago): not due yet.
-        // Cap backoff at 4 hours to preserve source capacity.
-        if (daysSinceLastRelease < 5.0) {
+        // Work released very recently (< 3.0 days ago): pace gently between 45m and 90m.
+        if (daysSinceLastRelease < 3.0) {
           const emptyChecks = Math.max(0, Number(task.checkpoint?.emptyChecks || 0));
-          return Math.min(4 * 60 * 60_000, 30 * 60_000 * 2 ** Math.min(emptyChecks, 3));
+          return Math.min(90 * 60_000, 45 * 60_000 * 2 ** Math.min(emptyChecks, 1));
         }
+        // Work with longer gap (> 14.0 days): pace at 90m to 120m max, never 6h.
+        const emptyChecks = Math.max(0, Number(task.checkpoint?.emptyChecks || 0));
+        return Math.min(120 * 60_000, 60 * 60_000 * 1.5 ** Math.min(emptyChecks, 2));
       }
     }
 
+    // Default active cadence when release date is unknown: 25 minutes.
     const emptyChecks = Math.max(0, Number(task.checkpoint?.emptyChecks || 0));
-    return Math.min(6 * 60 * 60_000, 15 * 60_000 * 2 ** Math.min(emptyChecks, 5));
+    return Math.min(60 * 60_000, 25 * 60_000 * 1.5 ** Math.min(emptyChecks, 2));
   }
 
   /** Bounded health recovery for the two recurring observation task types. */
