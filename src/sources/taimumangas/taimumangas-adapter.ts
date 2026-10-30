@@ -140,8 +140,9 @@ export class TaimuMangasAdapter implements SourceAdapter {
 
     let status: SourceWorkDetails['status'] = 'UNKNOWN';
     const s = (data.status || '').toLowerCase();
-    if (s === 'completed' || s === 'finalizado') status = 'COMPLETED';
-    else if (s === 'hiatus' || s === 'hiato') status = 'HIATUS';
+    if (s.includes('ongo') || s.includes('andamento') || s.includes('releasing') || s.includes('ativo') || s.includes('lanç') || s.includes('lanc')) status = 'ONGOING';
+    else if (s === 'completed' || s === 'finalizado' || s.includes('conclu')) status = 'COMPLETED';
+    else if (s === 'hiatus' || s === 'hiato' || s.includes('paus')) status = 'HIATUS';
     else if (s === 'cancelled' || s === 'cancelado') status = 'CANCELLED';
 
     const rawTitle = decodeHtmlEntities(data.title || '').trim();

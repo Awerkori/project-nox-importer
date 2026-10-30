@@ -1164,7 +1164,7 @@ export class LiteExecutor {
             } finally {
               clearTimeout(admissionTimer);
             }
-            const { bytes, image } = downloaded;
+            let { bytes, image } = downloaded;
             totalBytes += bytes.byteLength;
             const sha256 = calculateSha256(bytes);
             // The page body has finished its only count-bound phase: HTTP
@@ -1195,9 +1195,17 @@ export class LiteExecutor {
                 // without waiting for the database receipt batch to flush.
                 byteReservation.value?.release();
                 byteReservation.value = null;
+                const pageByteLength = bytes.length;
+                const pageMime = image.mime;
+                const pageWidth = image.width;
+                const pageHeight = image.height;
+                // Eagerly release memory references so V8 GC can collect the raw image buffer immediately
+                (bytes as any) = null;
+                (downloaded as any).bytes = null;
+                (image as any).data = null;
                 const receipt = this.receiptBatcher.persist({
                   taskId: task.id, pagePosition: position, mediaId: reserved.mediaId, sha256,
-                  bytes: bytes.length, mime: image.mime, width: image.width, height: image.height, providerKey,
+                  bytes: pageByteLength, mime: pageMime, width: pageWidth, height: pageHeight, providerKey,
                   botReference: this.storage.getLastBotReference?.(reserved.mediaId) || null,
                   shardId: this.storage.getLastShardId?.(reserved.mediaId) || null,
                   channelId: this.storage.getLastChannelId?.(reserved.mediaId) || null, createdBy: this.importerUserId,
