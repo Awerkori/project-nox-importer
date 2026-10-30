@@ -29,13 +29,13 @@ async function check() {
     console.log(JSON.stringify(terminal, null, 2));
   }
 
-  // If app is offline, trigger restart
+  // If app is offline or restart forced, trigger restart
   const app = statusData.apps || statusData;
   const isOnline = app.online === true
     || (typeof app.container === 'string' && app.container.toLowerCase() === 'online')
     || (typeof app.status === 'string' && app.status.toLowerCase() === 'online');
-  if (!isOnline && process.env.FORCE_RESTART === 'true') {
-    console.log('\nApp is offline or FORCE_RESTART=true. Triggering restart via Discloud API...');
+  if (!isOnline || process.env.FORCE_RESTART === 'true') {
+    console.log(`\nApp status: isOnline=${isOnline}, FORCE_RESTART=${process.env.FORCE_RESTART}. Triggering restart via Discloud API...`);
     const restartRes = await fetch(`https://api.discloud.app/v2/app/${appId}/restart`, {
       method: 'PUT',
       headers,

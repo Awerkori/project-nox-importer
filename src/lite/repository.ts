@@ -2948,7 +2948,7 @@ export class LiteRepository {
    */
   async recoverDuplicateCanonicalCatalogFailures(limit = 32): Promise<number> {
     const maximum = Math.max(1, Math.min(64, limit));
-    const metaDb = this.sourceMetadataDb || this.db;
+    const metaDb = this.db;
     const client = await metaDb.connect();
     try {
       await client.query('BEGIN');
@@ -2982,7 +2982,7 @@ export class LiteRepository {
    */
   async reopenP0MonitorsBlockedByDiscoveryPolicy(limit = 64): Promise<number> {
     const maximum = Math.max(1, Math.min(64, limit));
-    const metaDb = this.sourceMetadataDb || this.db;
+    const metaDb = this.db;
     const client = await metaDb.connect();
     try {
       await client.query('BEGIN');

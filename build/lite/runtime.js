@@ -739,23 +739,91 @@ export class ImporterLiteRuntime {
                 this.logger.warn('Early discovery stagger deferred or failed non-fatally', { error: staggerError?.message });
             }
             this.lastLegacyBlockedRepairAt = Date.now();
-            await this.queue.recoverDuplicateCanonicalCatalogFailures();
-            await this.queue.reopenP0MonitorsBlockedByDiscoveryPolicy();
-            await this.refillP0MonitorCoverage();
-            await this.refreshSourceFairness();
-            await this.refillHistoricalP1Catalog();
-            await this.refillManifestProvenP1Imports();
-            await this.refreshP1FocusGroupNow(true);
+            try {
+                await this.queue.recoverDuplicateCanonicalCatalogFailures();
+            }
+            catch (err) {
+                this.logger.warn('Boot recoverDuplicateCanonicalCatalogFailures failed non-fatally', { error: err?.message });
+            }
+            try {
+                await this.queue.reopenP0MonitorsBlockedByDiscoveryPolicy();
+            }
+            catch (err) {
+                this.logger.warn('Boot reopenP0MonitorsBlockedByDiscoveryPolicy failed non-fatally', { error: err?.message });
+            }
+            try {
+                await this.refillP0MonitorCoverage();
+            }
+            catch (err) {
+                this.logger.warn('Boot refillP0MonitorCoverage failed non-fatally', { error: err?.message });
+            }
+            try {
+                await this.refreshSourceFairness();
+            }
+            catch (err) {
+                this.logger.warn('Boot refreshSourceFairness failed non-fatally', { error: err?.message });
+            }
+            try {
+                await this.refillHistoricalP1Catalog();
+            }
+            catch (err) {
+                this.logger.warn('Boot refillHistoricalP1Catalog failed non-fatally', { error: err?.message });
+            }
+            try {
+                await this.refillManifestProvenP1Imports();
+            }
+            catch (err) {
+                this.logger.warn('Boot refillManifestProvenP1Imports failed non-fatally', { error: err?.message });
+            }
+            try {
+                await this.refreshP1FocusGroupNow(true);
+            }
+            catch (err) {
+                this.logger.warn('Boot refreshP1FocusGroupNow failed non-fatally', { error: err?.message });
+            }
             void Promise.all([this.runHistoricalP1CatalogTurn(), this.runHistoricalP1CatalogTurn()]).catch(() => { });
-            await this.refillStoredMetadataEnrichment();
-            await this.refillSourceMetadataEnrichment();
-            await this.refillCrossSourceMetadataDiscovery();
-            // Fill both already-approved external seats at boot. Each call remains
-            // fenced by the dedicated source-metadata lane below.
-            await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
-            await Promise.all([this.runCrossSourceMetadataDiscovery(), this.runCrossSourceMetadataDiscovery()]);
-            await this.runNewWorkCatalog();
-            await this.runStoredMetadataReplay();
+            try {
+                await this.refillStoredMetadataEnrichment();
+            }
+            catch (err) {
+                this.logger.warn('Boot refillStoredMetadataEnrichment failed non-fatally', { error: err?.message });
+            }
+            try {
+                await this.refillSourceMetadataEnrichment();
+            }
+            catch (err) {
+                this.logger.warn('Boot refillSourceMetadataEnrichment failed non-fatally', { error: err?.message });
+            }
+            try {
+                await this.refillCrossSourceMetadataDiscovery();
+            }
+            catch (err) {
+                this.logger.warn('Boot refillCrossSourceMetadataDiscovery failed non-fatally', { error: err?.message });
+            }
+            try {
+                await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
+            }
+            catch (err) {
+                this.logger.warn('Boot runSourceMetadataRefresh failed non-fatally', { error: err?.message });
+            }
+            try {
+                await Promise.all([this.runCrossSourceMetadataDiscovery(), this.runCrossSourceMetadataDiscovery()]);
+            }
+            catch (err) {
+                this.logger.warn('Boot runCrossSourceMetadataDiscovery failed non-fatally', { error: err?.message });
+            }
+            try {
+                await this.runNewWorkCatalog();
+            }
+            catch (err) {
+                this.logger.warn('Boot runNewWorkCatalog failed non-fatally', { error: err?.message });
+            }
+            try {
+                await this.runStoredMetadataReplay();
+            }
+            catch (err) {
+                this.logger.warn('Boot runStoredMetadataReplay failed non-fatally', { error: err?.message });
+            }
         }
         // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
         // Lite cutover.  The Lite-specific cap begins safely and can only rise
