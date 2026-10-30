@@ -3945,9 +3945,23 @@ export class ImporterLiteRuntime {
           }
         }
       }
+      if (!chapterReleaseAt && resolved.workId) {
+        try {
+          const latestDbRelease = await this.pool.query<{ created_at: Date }>(
+            'SELECT max(created_at) AS created_at FROM chapters WHERE work_id=$1::uuid',
+            [resolved.workId],
+          );
+          if (latestDbRelease.rows[0]?.created_at) {
+            chapterReleaseAt = latestDbRelease.rows[0].created_at.toISOString();
+          }
+        } catch {}
+      }
+      const isWeeklyWindow = Boolean(chapterReleaseAt && !Number.isNaN(Date.parse(chapterReleaseAt)) &&
+        ((Date.now() - Date.parse(chapterReleaseAt)) / (24 * 3600 * 1000) <= 8.5));
+      const monitorPriority = (isWeeklyWindow || newReleaseCount > 0) ? 'P0' : 'P2';
       await this.queue.finish(task, workerId, monitored ? {
-        state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
-        nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, newReleaseCount)),
+        state: 'RETRY_WAIT', priority: monitorPriority, monitoring: true,
+        nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, newReleaseCount, chapterReleaseAt)),
         workId: resolved.workId,
         checkpoint: {
           workId: resolved.workId, lastCheckedAt: new Date().toISOString(),
@@ -4499,25 +4513,19 @@ export class ImporterLiteRuntime {
    * weekly release window (5.5 to 8.5 days since last release), it checks more
    * frequently (25 min) without overloading the sources or exceeding rate limits.
    */
-  private monitorIntervalMs(task: LiteTask, status: string, newReleaseCount: number): number {
+  private monitorIntervalMs(task: LiteTask, status: string, newReleaseCount: number, effectiveReleaseAt?: string | null): number {
     if (status === 'HIATUS') return 6 * 60 * 60_000;
     if (newReleaseCount > 0) return 5 * 60_000;
 
-    const lastReleaseRaw = task.checkpoint?.lastReleaseAt as string | undefined;
+    const lastReleaseRaw = effectiveReleaseAt || (task.checkpoint?.lastReleaseAt as string | undefined);
     if (lastReleaseRaw) {
       const lastReleaseTime = Date.parse(lastReleaseRaw);
       if (!Number.isNaN(lastReleaseTime) && lastReleaseTime > 0) {
         const daysSinceLastRelease = (Date.now() - lastReleaseTime) / (24 * 3600 * 1000);
-        // Active weekly release window: 5.5 to 8.5 days since the last chapter.
+        // Active weekly release window: up to 8.5 days since the last chapter.
         // Check every 25 minutes to catch the chapter promptly.
-        if (daysSinceLastRelease >= 5.5 && daysSinceLastRelease <= 8.5) {
+        if (daysSinceLastRelease <= 8.5) {
           return 25 * 60_000;
-        }
-        // Work released recently (< 4 days ago): will not release again immediately.
-        // Cap backoff at 4 hours to save rate limits.
-        if (daysSinceLastRelease < 4.0) {
-          const emptyChecks = Math.max(0, Number(task.checkpoint?.emptyChecks || 0));
-          return Math.min(4 * 60 * 60_000, 20 * 60_000 * 2 ** Math.min(emptyChecks, 4));
         }
       }
     }
