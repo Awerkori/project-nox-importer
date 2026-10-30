@@ -965,10 +965,23 @@ export class DeduplicationEngine {
             if ((fieldName === 'kind' || fieldName === 'status') && candidateValue === 'UNKNOWN' && !isCurrentEmpty && currentVal !== 'UNKNOWN')
                 return false;
             // 4.6 Ongoing release promotion: if a work was previously marked COMPLETED,
-            // but an active source provides ONGOING status, promote back to ONGOING so
-            // new seasons, sequel arcs, and newly published chapters are not starved.
+            // require reliable evidence before promoting back to ONGOING.
+            // Reliable evidence means rawMetadata explicitly confirms active ongoing status
+            // (e.g. 'lançando', 'ongoing', 'em andamento', 'publishing').
+            // Static fallback defaults or adapters without explicit ongoing proof must
+            // never reclassify truly completed works.
             if (fieldName === 'status' && currentVal === 'COMPLETED' && candidateValue === 'ONGOING') {
-                return true;
+                const rawStatus = String(candidate.rawMetadata?.status ||
+                    candidate.rawMetadata?.publication_status ||
+                    candidate.rawMetadata?.state ||
+                    '').toLowerCase().trim();
+                if (rawStatus) {
+                    const isExplicitOngoing = /ongoing|lan[çc]ando|andamento|ativo|publishing|releasing/i.test(rawStatus);
+                    const isExplicitCompleted = /complet|finaliz|conclu|terminad/i.test(rawStatus);
+                    if (!isExplicitCompleted && isExplicitOngoing)
+                        return true;
+                }
+                return false;
             }
             // Sources cannot overwrite populated fields.
             return false;
