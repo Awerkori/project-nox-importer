@@ -2176,7 +2176,7 @@ export class LiteRepository {
         FROM importer_lite_tasks t
         WHERE t.state='READY' AND t.task_type='CATALOG' AND t.monitoring=true
           AND t.next_run_at<=now()
-        ORDER BY COALESCE(NULLIF(t.payload->>'source',''),'~'),t.next_run_at,t.created_at,t.id
+        ORDER BY COALESCE(NULLIF(t.payload->>'source',''),'~'),t.priority ASC,t.next_run_at,t.created_at,t.id
       ), picked AS (
         SELECT sh.id,sh.source
         FROM source_heads sh
