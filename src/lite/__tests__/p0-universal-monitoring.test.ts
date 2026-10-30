@@ -88,4 +88,69 @@ describe('P0 Universal Monitoring & Status Integrity', () => {
     const olderDelay = fn.call({}, { checkpoint: { emptyChecks: 5 } } as any, 'ONGOING', 0, eighteenDaysAgo);
     expect(olderDelay).toBeLessThanOrEqual(120 * 60_000);
   });
+
+  it('protects COMPLETED works from improper ONGOING promotion without reliable evidence', async () => {
+    const { DeduplicationEngine } = await import('../../core/deduplication.js');
+    let updatedPayload: any = null;
+    const mockSupabase: any = {
+      from: (table: string) => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({
+              data: {
+                id: 'work-completed-1',
+                title: 'Truly Completed Work',
+                status: 'COMPLETED',
+                metadata_provenance: {},
+              },
+              error: null,
+            }),
+          }),
+        }),
+        update: (payload: any) => ({
+          eq: () => {
+            updatedPayload = payload;
+            return Promise.resolve({ error: null });
+          },
+        }),
+      }),
+    };
+
+    const engine = new DeduplicationEngine(mockSupabase);
+
+    // Case 1: Candidate with no rawMetadata or empty rawMetadata must NOT promote COMPLETED -> ONGOING
+    updatedPayload = null;
+    await engine.applyMetadataPrecedence('work-completed-1', {
+      source: 'test-source',
+      sourceWorkId: 'swid-1',
+      title: 'Truly Completed Work',
+      slug: 'truly-completed-work',
+      status: 'ONGOING',
+    }, 'test-source');
+    expect(updatedPayload?.status).toBeUndefined();
+
+    // Case 2: Candidate with rawMetadata explicitly saying 'Completo' must NOT promote
+    updatedPayload = null;
+    await engine.applyMetadataPrecedence('work-completed-1', {
+      source: 'test-source',
+      sourceWorkId: 'swid-1',
+      title: 'Truly Completed Work',
+      slug: 'truly-completed-work',
+      status: 'ONGOING',
+      rawMetadata: { status: 'Completo' },
+    }, 'test-source');
+    expect(updatedPayload?.status).toBeUndefined();
+
+    // Case 3: Candidate with reliable evidence ('Lançando' / 'ongoing') PROMOTES COMPLETED -> ONGOING
+    updatedPayload = null;
+    await engine.applyMetadataPrecedence('work-completed-1', {
+      source: 'test-source',
+      sourceWorkId: 'swid-1',
+      title: 'Truly Completed Work',
+      slug: 'truly-completed-work',
+      status: 'ONGOING',
+      rawMetadata: { status: 'Lançando' },
+    }, 'test-source');
+    expect(updatedPayload?.status).toBe('ONGOING');
+  });
 });

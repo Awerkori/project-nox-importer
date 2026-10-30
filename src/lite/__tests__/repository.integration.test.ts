@@ -74,6 +74,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
     CREATE TABLE works (
       id uuid PRIMARY KEY, title text, slug text, cover_id uuid,
       published boolean NOT NULL DEFAULT false, latest_chapter_published_at timestamptz,
+      status text NOT NULL DEFAULT 'ONGOING',
       aliases text[] NOT NULL DEFAULT ARRAY[]::text[], views_total integer NOT NULL DEFAULT 0,
       author text, artist text, synopsis text, description text, kind text, year integer,
       updated_at timestamptz
@@ -2756,6 +2757,7 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('rotates the one-seat P0 monitor lane across due sources instead of draining a hot source first', async () => {
+    await db.query(`INSERT INTO importer_sources (id) VALUES ('source-c') ON CONFLICT DO NOTHING`);
     await repo.enqueueMany([
       ...Array.from({ length: 12 }, (_, index) => ({
         taskType: 'CATALOG' as const, workKey: `source:source-a:watch:${index}`, priority: 'P2' as const,

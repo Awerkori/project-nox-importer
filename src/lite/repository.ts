@@ -435,7 +435,7 @@ export class LiteRepository {
                 AS v(task_id, work_id, work_key, payload_patch, checkpoint_patch)
             )
             UPDATE importer_lite_tasks t SET
-              work_id=i.work_id, work_key=i.work_key, priority=1, base_priority=1,
+              work_id=i.work_id, work_key=i.work_key, priority=3, base_priority=3,
               state='READY', next_run_at=now(), attempts=0, lease_owner=NULL,
               lease_until=NULL, reason=NULL, monitoring=true,
               payload=t.payload || i.payload_patch,
@@ -460,7 +460,7 @@ export class LiteRepository {
           const inserted = await client.query<Row>(`
             INSERT INTO importer_lite_tasks
               (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
-            SELECT 'CATALOG', v.work_id, v.work_key, 1, 1, v.idem_key, now(), 32, v.payload, v.checkpoint, true
+            SELECT 'CATALOG', v.work_id, v.work_key, 3, 3, v.idem_key, now(), 32, v.payload, v.checkpoint, true
             FROM unnest($1::uuid[], $2::text[], $3::text[], $4::jsonb[], $5::jsonb[])
               AS v(work_id, work_key, idem_key, payload, checkpoint)
             ON CONFLICT(idempotency_key) DO NOTHING
@@ -2373,24 +2373,33 @@ export class LiteRepository {
       this.p0MonitorCursorEnsured = true;
     }
     // Single-statement atomic round-robin monitor claim: locks the durable
-    // cursor row, selects the next due provider head, claims the task, and
-    // advances the cursor in one YSQL round trip instead of four.
+    // cursor row, selects the next due provider head using index seek across
+    // active sources in importer_sources, claims the task, and advances the cursor
+    // in one fast (<10ms) YSQL round trip using importer_lite_tasks_p0_source_due_idx.
     const result = await this.db.query<Row>(`
       WITH cur AS (
         SELECT last_source FROM importer_lite_metadata_source_cursor
         WHERE cursor_name=$1 FOR UPDATE
-      ), source_heads AS (
-        SELECT DISTINCT ON (COALESCE(NULLIF(t.payload->>'source',''),'~'))
-          t.id,COALESCE(NULLIF(t.payload->>'source',''),'~') AS source
-        FROM importer_lite_tasks t
-        WHERE t.state='READY' AND t.task_type='CATALOG' AND t.monitoring=true
-          AND t.next_run_at<=now()
-        ORDER BY COALESCE(NULLIF(t.payload->>'source',''),'~'),t.priority ASC,t.next_run_at,t.created_at,t.id
-      ), picked AS (
-        SELECT sh.id,sh.source
-        FROM source_heads sh
+      ), ordered_sources AS (
+        SELECT s.id as source
+        FROM importer_sources s
         LEFT JOIN cur ON true
-        ORDER BY CASE WHEN sh.source>COALESCE(cur.last_source,'') THEN 0 ELSE 1 END,sh.source
+        WHERE s.enabled = true
+        ORDER BY CASE WHEN s.id > COALESCE(cur.last_source, '') THEN 0 ELSE 1 END, s.id
+      ), picked AS (
+        SELECT t.id, os.source
+        FROM ordered_sources os
+        CROSS JOIN LATERAL (
+          SELECT t.id
+          FROM importer_lite_tasks t
+          WHERE t.state = 'READY'
+            AND t.task_type = 'CATALOG'
+            AND t.monitoring = true
+            AND (t.payload->>'source') = os.source
+            AND t.next_run_at <= now()
+          ORDER BY t.priority ASC, t.next_run_at ASC, t.created_at ASC, t.id ASC
+          LIMIT 1
+        ) t
         LIMIT 1
       ), claimed AS (
         UPDATE importer_lite_tasks task

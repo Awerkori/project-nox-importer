@@ -3955,7 +3955,7 @@ export class ImporterLiteRuntime {
         const status = String(snapshot.details.status || 'UNKNOWN').toUpperCase();
         const monitored = task.monitoring || task.priority === 'P0' || task.priority === 'STAFF';
         await this.queue.finish(task, workerId, monitored ? {
-          state: 'RETRY_WAIT', priority: 'P0', monitoring: true,
+          state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
           nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, 0)),
           workId: resolved.workId,
           checkpoint: { workId: resolved.workId, presentationIncomplete: true, lastCheckedAt: new Date().toISOString() },
@@ -4006,7 +4006,7 @@ export class ImporterLiteRuntime {
         } catch {}
       }
       await this.queue.finish(task, workerId, monitored ? {
-        state: 'RETRY_WAIT', priority: 'P0', monitoring: true,
+        state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
         nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, newReleaseCount, chapterReleaseAt)),
         workId: resolved.workId,
         checkpoint: {
