@@ -197,15 +197,15 @@ export const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig> 
   // while MangaFlix's long chapters spend their wall time in page waves.
   // Eight pages lets three admitted chapters occupy that existing hard fence;
   // it never widens the global download, buffer, byte, Telegram, or YSQL cap.
-  mangaflix: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 8 },
-  manhastro: { maxChapters: 10, fairMaxChapters: 8, maxPagesPerChapter: 10 },
+  mangaflix: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 10 },
+  manhastro: { maxChapters: 10, fairMaxChapters: 8, maxPagesPerChapter: 12 },
   mangotoons: { maxChapters: 6, fairMaxChapters: 4, maxPagesPerChapter: 6 },
   taimumangas: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 8 },
   hipercool: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
   // Nexus is the primary fast backlog provider with 6,000+ ready chapters.
   // Its CDN and Supabase host rate limiters (8 req/s burst 16, 4 req/s burst 8)
-  // comfortably pace up to 22 concurrent chapters with 10 concurrent pages.
-  nexus: { maxChapters: 22, fairMaxChapters: 18, maxPagesPerChapter: 10 },
+  // comfortably pace up to 22 concurrent chapters with 14 concurrent pages.
+  nexus: { maxChapters: 22, fairMaxChapters: 18, maxPagesPerChapter: 14 },
   instahentai: { maxChapters: 2, maxPagesPerChapter: 4 },
   euphoriascan: { maxChapters: 2, maxPagesPerChapter: 4 },
   fleurblanche: { maxChapters: 5, fairMaxChapters: 4, maxPagesPerChapter: 8 },
@@ -213,7 +213,7 @@ export const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig> 
   mangalivreto: { maxChapters: 3, maxPagesPerChapter: 6 },
   montetai: { maxChapters: 3, maxPagesPerChapter: 6 },
   nebulosascan: { maxChapters: 2, maxPagesPerChapter: 4 },
-  nocturnesummer: { maxChapters: 5, fairMaxChapters: 4, maxPagesPerChapter: 8 },
+  nocturnesummer: { maxChapters: 5, fairMaxChapters: 4, maxPagesPerChapter: 10 },
   tankouhentai: { maxChapters: 2, maxPagesPerChapter: 4 },
   cafecomyaoi: { maxChapters: 2, maxPagesPerChapter: 4 },
   // Production ramp 2026-10-11: the 1→2 step sustained healthy media work

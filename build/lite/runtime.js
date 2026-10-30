@@ -3859,9 +3859,9 @@ export class ImporterLiteRuntime {
             }
             if (!chapterReleaseAt && resolved.workId) {
                 try {
-                    const latestDbRelease = await this.pool.query('SELECT max(created_at) AS created_at FROM chapters WHERE work_id=$1::uuid', [resolved.workId]);
-                    if (latestDbRelease.rows[0]?.created_at) {
-                        chapterReleaseAt = latestDbRelease.rows[0].created_at.toISOString();
+                    const latestDbRelease = await this.pool.query('SELECT max(COALESCE(published_at, created_at)) AS release_at FROM chapters WHERE work_id=$1::uuid', [resolved.workId]);
+                    if (latestDbRelease.rows[0]?.release_at) {
+                        chapterReleaseAt = latestDbRelease.rows[0].release_at.toISOString();
                     }
                 }
                 catch { }
@@ -3869,9 +3869,11 @@ export class ImporterLiteRuntime {
             const daysSinceRelease = chapterReleaseAt && !Number.isNaN(Date.parse(chapterReleaseAt))
                 ? (Date.now() - Date.parse(chapterReleaseAt)) / (24 * 3600 * 1000)
                 : null;
-            const isWeeklyReleaseWindow = daysSinceRelease !== null && daysSinceRelease >= 5.5 && daysSinceRelease <= 8.5;
-            const isReferenceOrBurst = newReleaseCount > 0 || resolved.workId === '518d8cee-5b48-439e-ba41-c69eb7077efd';
-            const monitorPriority = (isWeeklyReleaseWindow || isReferenceOrBurst) ? 'P0' : 'P2';
+            // Universal weekly release window for any ONGOING work (5.0 to 9.0 days since last release)
+            // or recent new release burst:
+            const isWeeklyReleaseWindow = status === 'ONGOING' && daysSinceRelease !== null && daysSinceRelease >= 5.0 && daysSinceRelease <= 9.0;
+            const isRecentBurst = newReleaseCount > 0;
+            const monitorPriority = (isWeeklyReleaseWindow || isRecentBurst) ? 'P0' : 'P2';
             await this.queue.finish(task, workerId, monitored ? {
                 state: 'RETRY_WAIT', priority: monitorPriority, monitoring: true,
                 nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, newReleaseCount, chapterReleaseAt)),
@@ -4419,7 +4421,7 @@ export class ImporterLiteRuntime {
      * frequently (25 min) without overloading the sources or exceeding rate limits.
      */
     monitorIntervalMs(task, status, newReleaseCount, effectiveReleaseAt) {
-        if (status === 'HIATUS')
+        if (status === 'HIATUS' || status === 'COMPLETED' || status === 'CANCELLED')
             return 6 * 60 * 60_000;
         if (newReleaseCount > 0)
             return 5 * 60_000;
@@ -4428,14 +4430,14 @@ export class ImporterLiteRuntime {
             const lastReleaseTime = Date.parse(lastReleaseRaw);
             if (!Number.isNaN(lastReleaseTime) && lastReleaseTime > 0) {
                 const daysSinceLastRelease = (Date.now() - lastReleaseTime) / (24 * 3600 * 1000);
-                // Nano Machine reference work or active weekly release window (5.5 to 8.5 days):
+                // Universal intelligent cadence for any ONGOING work in its active weekly release window (5.0 to 9.0 days):
                 // check every 25 minutes without overloading sources or exceeding rate limits.
-                if (task.workId === '518d8cee-5b48-439e-ba41-c69eb7077efd' || (daysSinceLastRelease >= 5.5 && daysSinceLastRelease <= 8.5)) {
+                if (status === 'ONGOING' && daysSinceLastRelease >= 5.0 && daysSinceLastRelease <= 9.0) {
                     return 25 * 60_000;
                 }
-                // Work released recently (< 5.5 days ago): not due yet.
+                // Work released recently (< 5.0 days ago): not due yet.
                 // Cap backoff at 4 hours to preserve source capacity.
-                if (daysSinceLastRelease < 5.5) {
+                if (daysSinceLastRelease < 5.0) {
                     const emptyChecks = Math.max(0, Number(task.checkpoint?.emptyChecks || 0));
                     return Math.min(4 * 60 * 60_000, 30 * 60_000 * 2 ** Math.min(emptyChecks, 3));
                 }
