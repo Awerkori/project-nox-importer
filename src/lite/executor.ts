@@ -514,9 +514,10 @@ export class LiteExecutor {
     if (this.effectiveChapterAdmissionCap >= totalDemand) {
       return configured;
     }
+    const fairMax = sourceLimits?.fairMaxChapters ?? configured;
     const fairShare = Math.max(1, Math.ceil(this.effectiveChapterAdmissionCap /
       Math.min(5, this.fairDemandSources.size)));
-    return Math.min(sourceLimits?.fairMaxChapters ?? configured, fairShare);
+    return Math.max(fairShare, Math.min(configured, fairMax));
   }
 
   private demandAwareSourceCapacity(source: string, configured: number): number {
@@ -572,15 +573,14 @@ export class LiteExecutor {
   public getSaturatedFairSources(): string[] {
     if (this.fairDemandSources.size <= 1) return [];
     const saturated: string[] = [];
-    let hasAvailableAlternative = false;
     for (const source of this.fairDemandSources) {
       const slot = this.sourceSlots.get(source);
       const configuredFairMax = SOURCE_CONCURRENCY_LIMITS[source]?.fairMaxChapters ?? 2;
       const capacity = Math.max(this.sourceCapacity(source), configuredFairMax);
       const active = slot ? slot.active : 0;
       if (active >= capacity) saturated.push(source);
-      else hasAvailableAlternative = true;
     }
+    const hasAvailableAlternative = [...this.fairDemandSources].some((s) => !saturated.includes(s));
     return hasAvailableAlternative ? saturated : [];
   }
 
@@ -660,15 +660,20 @@ export class LiteExecutor {
 
     const priorityReservation = (task.priority === 'STAFF' || task.priority === 'P0')
       && this.prioritySourceWaitGate.tryAcquire();
-    if (!priorityReservation && this.hasFairAlternative(source)) {
-      await this.queue.yieldForSourceFairness(task, workerId);
-      return null;
-    }
 
     const sourcePermitStartedAt = performance.now();
     try {
-      await sourceSlot.acquire();
+      // Bounded wait up to 2.5s for an in-flight page wave to release a permit,
+      // avoiding claim/yield thrashing and keeping workers productive.
+      await sourceSlot.acquire(AbortSignal.timeout(2_500));
       return { sourceSlot, waitMs: performance.now() - sourcePermitStartedAt };
+    } catch (error: any) {
+      if (priorityReservation) this.prioritySourceWaitGate.release();
+      if (!priorityReservation && this.hasFairAlternative(source)) {
+        await this.queue.yieldForSourceFairness(task, workerId, 3_000);
+        return null;
+      }
+      throw error;
     } finally {
       if (priorityReservation) this.prioritySourceWaitGate.release();
     }
