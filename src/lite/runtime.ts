@@ -404,11 +404,11 @@ export class ImporterLiteRuntime {
   private sourceMetadataNoCandidateUntil = 0;
   private lastManifestP1RepairAt = 0;
   private manifestP1CatchupActive = false;
-  // P0 observation has two small network slots. They can keep independent
-  // source watches current while chapters run, but only one short SQL claim
-  // is ever in flight; the second slot is for an already claimed source
-  // snapshot, never a second scheduler or chapter admission.
-  private readonly monitorGate = new AsyncSemaphore(2, 'lite_p0_monitor');
+  // P0 observation has four bounded network slots. They keep independent
+  // source watches current across 43 sources while chapters run. Only one
+  // short SQL claim is ever in flight (monitorClaimGate); the remaining slots
+  // run independent source network fetches in parallel without YSQL contention.
+  private readonly monitorGate = new AsyncSemaphore(4, 'lite_p0_monitor');
   private readonly monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
   private readonly runtimeInstanceId: string;
   private readonly runtimeBootedAt = new Date();
@@ -3935,6 +3935,16 @@ export class ImporterLiteRuntime {
       // chapters are P0. Completed works remain available to discovery/repair.
       const status = String(snapshot.details.status || 'UNKNOWN').toUpperCase();
       const monitored = status === 'ONGOING' || status === 'HIATUS';
+      let chapterReleaseAt: string | null = (task.checkpoint?.lastReleaseAt as string) || null;
+      if (newReleaseCount > 0) {
+        chapterReleaseAt = new Date().toISOString();
+      } else if (!chapterReleaseAt && Array.isArray(snapshot.chapters)) {
+        for (const ch of snapshot.chapters) {
+          if (ch.createdAt && (!chapterReleaseAt || ch.createdAt > chapterReleaseAt)) {
+            chapterReleaseAt = ch.createdAt;
+          }
+        }
+      }
       await this.queue.finish(task, workerId, monitored ? {
         state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
         nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, newReleaseCount)),
@@ -3942,6 +3952,7 @@ export class ImporterLiteRuntime {
         checkpoint: {
           workId: resolved.workId, lastCheckedAt: new Date().toISOString(),
           lastNewReleaseCount: newReleaseCount,
+          lastReleaseAt: chapterReleaseAt,
           emptyChecks: newReleaseCount ? 0 : Number(task.checkpoint.emptyChecks || 0) + 1,
         },
         resetAttempts: true,
@@ -4482,11 +4493,36 @@ export class ImporterLiteRuntime {
     }
   }
 
-  /** Release bursts get a quick recheck; quiet works exponentially back off. */
+  /**
+   * Release bursts get a quick recheck; quiet works exponentially back off with
+   * an intelligent cadence for weekly ongoing works. If a work is in its expected
+   * weekly release window (5.5 to 8.5 days since last release), it checks more
+   * frequently (25 min) without overloading the sources or exceeding rate limits.
+   */
   private monitorIntervalMs(task: LiteTask, status: string, newReleaseCount: number): number {
     if (status === 'HIATUS') return 6 * 60 * 60_000;
     if (newReleaseCount > 0) return 5 * 60_000;
-    const emptyChecks = Math.max(0, Number(task.checkpoint.emptyChecks || 0));
+
+    const lastReleaseRaw = task.checkpoint?.lastReleaseAt as string | undefined;
+    if (lastReleaseRaw) {
+      const lastReleaseTime = Date.parse(lastReleaseRaw);
+      if (!Number.isNaN(lastReleaseTime) && lastReleaseTime > 0) {
+        const daysSinceLastRelease = (Date.now() - lastReleaseTime) / (24 * 3600 * 1000);
+        // Active weekly release window: 5.5 to 8.5 days since the last chapter.
+        // Check every 25 minutes to catch the chapter promptly.
+        if (daysSinceLastRelease >= 5.5 && daysSinceLastRelease <= 8.5) {
+          return 25 * 60_000;
+        }
+        // Work released recently (< 4 days ago): will not release again immediately.
+        // Cap backoff at 4 hours to save rate limits.
+        if (daysSinceLastRelease < 4.0) {
+          const emptyChecks = Math.max(0, Number(task.checkpoint?.emptyChecks || 0));
+          return Math.min(4 * 60 * 60_000, 20 * 60_000 * 2 ** Math.min(emptyChecks, 4));
+        }
+      }
+    }
+
+    const emptyChecks = Math.max(0, Number(task.checkpoint?.emptyChecks || 0));
     return Math.min(6 * 60 * 60_000, 15 * 60_000 * 2 ** Math.min(emptyChecks, 5));
   }
 

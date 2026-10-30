@@ -434,7 +434,12 @@ export declare class ImporterLiteRuntime {
     private refreshMappingMetadataFromSource;
     /** A no-network P2 pass over explicit metadata saved with a known mapping. */
     private enrichStoredMappingMetadata;
-    /** Release bursts get a quick recheck; quiet works exponentially back off. */
+    /**
+     * Release bursts get a quick recheck; quiet works exponentially back off with
+     * an intelligent cadence for weekly ongoing works. If a work is in its expected
+     * weekly release window (5.5 to 8.5 days since last release), it checks more
+     * frequently (25 min) without overloading the sources or exceeding rate limits.
+     */
     private monitorIntervalMs;
     /** Bounded health recovery for the two recurring observation task types. */
     private recurringRetryDelayMs;
