@@ -8,10 +8,10 @@ const MIB = 1024 * 1024;
 // healthy available memory into a permanent throughput cap.  Keep NORMAL
 // through 420 MiB, use REDUCED only as a measured warning band, and retain a
 // 62 MiB margin for the hard one-page brake at 450 MiB.
-const NORMAL_RSS_MIB = 370;
-const CRITICAL_RSS_MIB = 410;
-const REDUCED_RECOVERY_RSS_MIB = 340;
-const CRITICAL_RECOVERY_RSS_MIB = 380;
+const NORMAL_RSS_MIB = 390;
+const CRITICAL_RSS_MIB = 430;
+const REDUCED_RECOVERY_RSS_MIB = 365;
+const CRITICAL_RECOVERY_RSS_MIB = 405;
 // A process can retain libc/undici arenas after a media wave even after the
 // JS heap, ArrayBuffers and the authoritative page-byte budget have drained.
 // Keeping optional JSON-only metadata paused forever in that condition turns
@@ -24,7 +24,7 @@ const RETAINED_RSS_METADATA_RESUME_AFTER_MS = 60_000;
 // still be able to run the already-bounded one-seat metadata lane.  It does
 // not relax the page brake or admit media; live external/ArrayBuffer checks
 // and the growth check below remain mandatory.
-const RETAINED_RSS_METADATA_MAX_MIB = 430;
+const RETAINED_RSS_METADATA_MAX_MIB = 450;
 const RETAINED_RSS_METADATA_MAX_GROWTH_MIB = 4;
 const RETAINED_RSS_METADATA_MAX_EXTERNAL_MIB = 32;
 const RETAINED_RSS_METADATA_MAX_ARRAY_BUFFER_MIB = 16;
@@ -201,7 +201,7 @@ export class LiteMemoryPressureGuard {
         // measured 24-request fence made REDUCED a permanent source-download
         // bottleneck without reducing retained media. Keep the same 48 MiB
         // authoritative byte ceiling; CRITICAL remains the one-page brake.
-        pageBufferCapacity: Math.min(this.normalPageBufferCapacity, 24),
+        pageBufferCapacity: Math.min(this.normalPageBufferCapacity, 40),
         // Production showed the 32 MiB reduced budget itself saturated with
         // many small pages while RSS was stable around 310 MiB.  It left
         // capacity unused in the 512 MiB container and turned REDUCED into a
