@@ -381,7 +381,11 @@ export class ManhastroAdapter implements SourceAdapter {
       }>;
     }>(url);
 
-    const rawChapters = response.data || [];
+    if (response.success !== true || !Array.isArray(response.data)
+      || response.data.some((chapter) => chapter.capitulo_id === undefined || chapter.capitulo_id === null)) {
+      throw new Error('MANHASTRO_INVALID_CHAPTER_RESPONSE');
+    }
+    const rawChapters = response.data;
 
     const chapters: SourceChapterSummary[] = rawChapters.map((ch) => {
       const num = extractChapterNumber(ch.capitulo_nome);

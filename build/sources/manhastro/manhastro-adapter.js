@@ -305,7 +305,11 @@ export class ManhastroAdapter {
     async fetchChapters(sourceWorkId) {
         const url = `${this.apiUrl}/dados/${sourceWorkId}`;
         const response = await this.request(url);
-        const rawChapters = response.data || [];
+        if (response.success !== true || !Array.isArray(response.data)
+            || response.data.some((chapter) => chapter.capitulo_id === undefined || chapter.capitulo_id === null)) {
+            throw new Error('MANHASTRO_INVALID_CHAPTER_RESPONSE');
+        }
+        const rawChapters = response.data;
         const chapters = rawChapters.map((ch) => {
             const num = extractChapterNumber(ch.capitulo_nome);
             const displayNumber = ch.capitulo_nome?.match(/(\d+(?:\.\d+)?)/)?.[1] || String(num);
