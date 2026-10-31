@@ -13,6 +13,7 @@ import { telemetryCollector } from '../core/telemetry-collector.js';
 import { BoundedSamples } from '../core/bounded-samples.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { PageByteBudget, type PageByteReservation, unknownPageInitialReservationBytes } from './page-byte-budget.js';
+import type { SourcePerformanceSnapshot, SourcePerformanceTracker } from './source-performance.js';
 
 export const KNOWN_PLACEHOLDER_HASHES = new Set<string>([
   'bff6cd5561f14d02a0c831423cb3535997ed3f136de1aa6e34997c4eb28ee496', // Nocturne owl mascot (escolhida-1.webp)
@@ -411,6 +412,8 @@ export class LiteExecutor {
   // that effective chapter capacity or one fast source can occupy every
   // admitted slot despite a healthy alternative being ready.
   private effectiveChapterAdmissionCap: number;
+  private performanceTracker: SourcePerformanceTracker | null = null;
+  private readonly slowBackgroundGate: AsyncSemaphore;
   // Held from byte download through Telegram acknowledgement. Receipt
   // persistence retains only scalar metadata, never image bytes, so it can
   // overlap the next bounded page wave without weakening the memory budget.
@@ -441,6 +444,41 @@ export class LiteExecutor {
     this.receiptBatcher = new UploadReceiptBatcher(queue);
     this.reservationBatcher = new UploadReservationBatcher(queue);
     this.effectiveChapterAdmissionCap = Math.max(1, Math.floor(chapterWorkerCapacity));
+    this.slowBackgroundGate = new AsyncSemaphore(
+      Math.max(1, Math.floor(this.effectiveChapterAdmissionCap * 0.25)),
+      'lite_slow_source_background_pool',
+    );
+  }
+
+  public setPerformanceTracker(tracker: SourcePerformanceTracker | null): void {
+    this.performanceTracker = tracker;
+    this.recomputeSourceCapacities();
+  }
+
+  public getSourcePerformanceSnapshot(): (SourcePerformanceSnapshot & {
+    slowBackgroundPool: { active: number; capacity: number; waiters: number };
+  }) | null {
+    if (!this.performanceTracker) return null;
+    const snap = this.performanceTracker.snapshot(this.fairDemandSources);
+    return {
+      ...snap,
+      slowBackgroundPool: {
+        active: this.slowBackgroundGate.active,
+        capacity: this.slowBackgroundGate.capacity,
+        waiters: this.slowBackgroundGate.queued,
+      },
+    };
+  }
+
+  private recomputeSourceCapacities(): void {
+    this.slowBackgroundGate.setCapacity(this.computeSlowPoolBudget());
+    for (const [source, slot] of this.sourceSlots) {
+      if (this.fairDemandCounts && !this.fairDemandCounts.has(source) && slot.active > 0) {
+        slot.setCapacity(Math.max(slot.capacity, slot.active));
+      } else {
+        slot.setCapacity(this.sourceCapacity(source));
+      }
+    }
   }
 
   /**
@@ -451,7 +489,7 @@ export class LiteExecutor {
   setFairSourceDemand(sources: Iterable<string>): void {
     this.fairDemandSources = new Set([...sources].filter(Boolean));
     this.fairDemandCounts = null;
-    for (const [source, slot] of this.sourceSlots) slot.setCapacity(this.sourceCapacity(source));
+    this.recomputeSourceCapacities();
   }
 
   /**
@@ -468,19 +506,7 @@ export class LiteExecutor {
     }
     this.fairDemandSources = new Set(normalized.keys());
     this.fairDemandCounts = normalized;
-    for (const [source, slot] of this.sourceSlots) {
-      // An in-flight source is temporarily absent from the runnable view by
-      // design. Retain enough local capacity for its existing holders to drain
-      // naturally without injecting ghost demand that starves real backlog providers.
-      if (!this.fairDemandCounts.has(source) && slot.active > 0) {
-        slot.setCapacity(Math.max(slot.capacity, slot.active));
-      }
-    }
-    for (const [source, slot] of this.sourceSlots) {
-      if (this.fairDemandCounts.has(source)) {
-        slot.setCapacity(this.sourceCapacity(source));
-      }
-    }
+    this.recomputeSourceCapacities();
   }
 
   /** Keep local source shares aligned with the runtime's durable chapter cap. */
@@ -488,7 +514,7 @@ export class LiteExecutor {
     const next = Math.max(1, Math.floor(capacity));
     if (next === this.effectiveChapterAdmissionCap) return;
     this.effectiveChapterAdmissionCap = next;
-    for (const [source, slot] of this.sourceSlots) slot.setCapacity(this.sourceCapacity(source));
+    this.recomputeSourceCapacities();
   }
 
   getFairSourceDemand(): string[] { return [...this.fairDemandSources].sort(); }
@@ -510,6 +536,41 @@ export class LiteExecutor {
     return { reservations: this.reservationBatcher.snapshot(), receipts: this.receiptBatcher.snapshot() };
   }
 
+  private hasPrimaryAlternative(): boolean {
+    if (!this.performanceTracker || this.fairDemandSources.size <= 1) return false;
+    return [...this.fairDemandSources].some((s) => this.performanceTracker!.getTier(s) !== 'SLOW');
+  }
+
+  private computeSlowPoolBudget(): number {
+    if (!this.performanceTracker || this.fairDemandSources.size <= 1) {
+      return this.effectiveChapterAdmissionCap;
+    }
+    const baseSlowReserve = Math.max(2, Math.floor(this.effectiveChapterAdmissionCap * 0.25));
+    if (!this.fairDemandCounts) {
+      return this.hasPrimaryAlternative() ? Math.min(this.effectiveChapterAdmissionCap, baseSlowReserve) : this.effectiveChapterAdmissionCap;
+    }
+    let primaryMaxNeed = 0;
+    let hasSlow = false;
+    for (const [candidate, count] of this.fairDemandCounts) {
+      if (count <= 0) continue;
+      const tier = this.performanceTracker.getTier(candidate);
+      if (tier === 'SLOW') {
+        hasSlow = true;
+      } else {
+        const limits = SOURCE_CONCURRENCY_LIMITS[candidate];
+        const max = Math.max(1, Math.min(limits?.maxChapters ?? 2, limits?.fairMaxChapters ?? limits?.maxChapters ?? 2, count));
+        primaryMaxNeed += max;
+      }
+    }
+    if (!hasSlow || primaryMaxNeed === 0) return this.effectiveChapterAdmissionCap;
+    // Work-conserving expansion: reserve ~25% background capacity while fast/normal
+    // sources need >=75% of workers, and automatically expand as fast demand drops.
+    return Math.min(
+      this.effectiveChapterAdmissionCap,
+      Math.max(baseSlowReserve, this.effectiveChapterAdmissionCap - primaryMaxNeed),
+    );
+  }
+
   private sourceCapacity(source: string): number {
     const sourceLimits = SOURCE_CONCURRENCY_LIMITS[source];
     const configured = sourceLimits?.maxChapters ?? 2;
@@ -519,18 +580,26 @@ export class LiteExecutor {
     for (const s of this.fairDemandSources) {
       totalDemand += SOURCE_CONCURRENCY_LIMITS[s]?.maxChapters ?? 2;
     }
+    let baseShare: number;
     if (this.effectiveChapterAdmissionCap >= totalDemand) {
-      return configured;
+      baseShare = configured;
+    } else {
+      const fairMax = sourceLimits?.fairMaxChapters ?? configured;
+      const fairShare = Math.max(1, Math.ceil(this.effectiveChapterAdmissionCap /
+        Math.min(5, this.fairDemandSources.size)));
+      baseShare = Math.max(fairShare, Math.min(configured, fairMax));
     }
-    const fairMax = sourceLimits?.fairMaxChapters ?? configured;
-    const fairShare = Math.max(1, Math.ceil(this.effectiveChapterAdmissionCap /
-      Math.min(5, this.fairDemandSources.size)));
-    return Math.max(fairShare, Math.min(configured, fairMax));
+    if (this.performanceTracker && this.performanceTracker.getTier(source) === 'SLOW' && this.hasPrimaryAlternative()) {
+      const slowCap = Math.max(1, Math.min(2, Math.floor(this.effectiveChapterAdmissionCap / 2)));
+      return Math.min(baseShare, slowCap);
+    }
+    return baseShare;
   }
 
   private demandAwareSourceCapacity(source: string, configured: number): number {
     const demand = this.fairDemandCounts;
     if (!demand) return configured;
+    const tracker = this.performanceTracker;
     const entries = [...demand.entries()]
       .filter(([, count]) => count > 0)
       .map(([candidate, count]) => {
@@ -540,20 +609,98 @@ export class LiteExecutor {
           limits?.fairMaxChapters ?? limits?.maxChapters ?? 2,
           count,
         ));
-        return { source: candidate, demand: count, maximum, allocated: 1 };
+        const tier = tracker ? tracker.getTier(candidate) : 'NORMAL';
+        const weight = tracker ? tracker.getDemandWeight(candidate) : 1.0;
+        return { source: candidate, demand: count, maximum, allocated: 0, tier, weight };
       });
     if (entries.length <= 1) return configured;
 
-    let remaining = Math.max(0, this.effectiveChapterAdmissionCap - entries.length);
-    while (remaining > 0) {
-      const candidate = entries
+    if (!tracker) {
+      for (const entry of entries) entry.allocated = 1;
+      let remaining = Math.max(0, this.effectiveChapterAdmissionCap - entries.length);
+      while (remaining > 0) {
+        const candidate = entries
+          .filter((entry) => entry.allocated < entry.maximum)
+          .sort((left, right) => (right.demand / Math.max(1, right.allocated)) - (left.demand / Math.max(1, left.allocated))
+            || right.maximum - left.maximum || left.source.localeCompare(right.source))[0];
+        if (!candidate) break;
+        candidate.allocated++;
+        remaining--;
+      }
+      return entries.find((entry) => entry.source === source)?.allocated ?? configured;
+    }
+
+    const primaryEntries = entries.filter((e) => e.tier !== 'SLOW');
+    const slowEntries = entries.filter((e) => e.tier === 'SLOW');
+
+    if (primaryEntries.length === 0 || slowEntries.length === 0) {
+      for (const entry of entries) entry.allocated = 1;
+      let remaining = Math.max(0, this.effectiveChapterAdmissionCap - entries.length);
+      while (remaining > 0) {
+        const candidate = entries
+          .filter((entry) => entry.allocated < entry.maximum)
+          .sort((left, right) =>
+            ((right.demand * right.weight) / Math.max(1, right.allocated)) - ((left.demand * left.weight) / Math.max(1, left.allocated)) ||
+            right.maximum - left.maximum ||
+            left.source.localeCompare(right.source))[0];
+        if (!candidate) break;
+        candidate.allocated++;
+        remaining--;
+      }
+      return entries.find((entry) => entry.source === source)?.allocated ?? configured;
+    }
+
+    const primaryMaxNeed = primaryEntries.reduce((sum, e) => sum + e.maximum, 0);
+    const slowMaxNeed = slowEntries.reduce((sum, e) => sum + e.maximum, 0);
+    const baseSlowReserve = Math.max(2, Math.floor(this.effectiveChapterAdmissionCap * 0.25));
+    const fastDemandStrong = primaryMaxNeed > this.effectiveChapterAdmissionCap - baseSlowReserve;
+    const effectiveSlowBudget = Math.min(
+      slowMaxNeed,
+      Math.max(baseSlowReserve, this.effectiveChapterAdmissionCap - primaryMaxNeed),
+    );
+    const primaryBudget = Math.max(
+      primaryEntries.length,
+      this.effectiveChapterAdmissionCap - effectiveSlowBudget,
+    );
+
+    // 1. Allocate main worker pool across FAST and NORMAL sources (FAST weighted 3x).
+    for (const entry of primaryEntries) entry.allocated = 1;
+    let remainingPrimary = Math.max(0, primaryBudget - primaryEntries.length);
+    while (remainingPrimary > 0) {
+      const candidate = primaryEntries
         .filter((entry) => entry.allocated < entry.maximum)
-        .sort((left, right) => (right.demand / right.allocated) - (left.demand / left.allocated)
-          || right.maximum - left.maximum || left.source.localeCompare(right.source))[0];
+        .sort((left, right) =>
+          ((right.demand * right.weight) / Math.max(1, right.allocated)) - ((left.demand * left.weight) / Math.max(1, left.allocated)) ||
+          right.weight - left.weight ||
+          right.maximum - left.maximum ||
+          left.source.localeCompare(right.source))[0];
       if (!candidate) break;
       candidate.allocated++;
-      remaining--;
+      remainingPrimary--;
     }
+
+    // 2. Allocate background slow pool so slow sources keep steady warm progress
+    //    without monopolizing main workers, expanding seamlessly when fast demand drops.
+    const perSlowCap = fastDemandStrong
+      ? (slowEntries.length >= 3 ? 2 : Math.min(3, effectiveSlowBudget))
+      : this.effectiveChapterAdmissionCap;
+    for (const entry of slowEntries) {
+      entry.maximum = Math.max(1, Math.min(entry.maximum, perSlowCap));
+      entry.allocated = 1;
+    }
+    let remainingSlow = Math.max(0, effectiveSlowBudget - slowEntries.length);
+    while (remainingSlow > 0) {
+      const candidate = slowEntries
+        .filter((entry) => entry.allocated < entry.maximum)
+        .sort((left, right) =>
+          (right.demand / Math.max(1, right.allocated)) - (left.demand / Math.max(1, left.allocated)) ||
+          right.maximum - left.maximum ||
+          left.source.localeCompare(right.source))[0];
+      if (!candidate) break;
+      candidate.allocated++;
+      remainingSlow--;
+    }
+
     return entries.find((entry) => entry.source === source)?.allocated ?? configured;
   }
 
@@ -568,9 +715,21 @@ export class LiteExecutor {
    * exposed to the runtime heartbeat: a global configuration value alone is
    * not evidence that a source-specific cap was applied.
    */
-  public getPageConcurrencyForSource(source: string): number {
+  public getPageConcurrencyForSource(source: string, plannedPageCount?: number): number {
     const sourceLimit = SOURCE_CONCURRENCY_LIMITS[source]?.maxPagesPerChapter ?? 6;
-    return Math.max(1, Math.min(this.perChapterPageConcurrency, sourceLimit));
+    let limit = Math.max(1, Math.min(this.perChapterPageConcurrency, sourceLimit));
+    if (this.performanceTracker) {
+      const tier = this.performanceTracker.getTier(source);
+      if (tier === 'FAST' && this.perChapterPageConcurrency >= 8) {
+        limit = Math.max(limit, Math.min(12, sourceLimit));
+      } else if (tier === 'SLOW' && this.hasPrimaryAlternative()) {
+        limit = Math.min(limit, 4);
+      }
+    }
+    if (plannedPageCount && plannedPageCount > 45) {
+      limit = Math.min(limit, plannedPageCount > 80 ? 4 : 6);
+    }
+    return Math.max(1, limit);
   }
 
   private hasFairAlternative(source: string): boolean {
@@ -580,14 +739,27 @@ export class LiteExecutor {
 
   public getSaturatedFairSources(): string[] {
     if (this.fairDemandSources.size <= 1) return [];
-    const saturated: string[] = [];
+    const saturatedSet = new Set<string>();
     for (const source of this.fairDemandSources) {
       const slot = this.sourceSlots.get(source);
       const capacity = slot ? slot.capacity : this.sourceCapacity(source);
       const active = slot ? slot.active : 0;
-      if (active >= capacity) saturated.push(source);
+      if (active >= capacity) saturatedSet.add(source);
     }
-    const hasAvailableAlternative = [...this.fairDemandSources].some((s) => !saturated.includes(s));
+    if (this.performanceTracker && this.slowBackgroundGate.available <= 0) {
+      const hasUnsaturatedPrimary = [...this.fairDemandSources].some(
+        (s) => this.performanceTracker!.getTier(s) !== 'SLOW' && !saturatedSet.has(s),
+      );
+      if (hasUnsaturatedPrimary) {
+        for (const source of this.fairDemandSources) {
+          if (this.performanceTracker.getTier(source) === 'SLOW') {
+            saturatedSet.add(source);
+          }
+        }
+      }
+    }
+    const saturated = [...saturatedSet];
+    const hasAvailableAlternative = [...this.fairDemandSources].some((s) => !saturatedSet.has(s));
     return hasAvailableAlternative ? saturated : [];
   }
 
@@ -598,7 +770,7 @@ export class LiteExecutor {
     if (this.fairDemandSources.size > 0 && !this.fairDemandSources.has(source)) {
       this.fairDemandSources.add(source);
       if (this.fairDemandCounts) this.fairDemandCounts.set(source, 1);
-      for (const [knownSource, knownSlot] of this.sourceSlots) knownSlot.setCapacity(this.sourceCapacity(knownSource));
+      this.recomputeSourceCapacities();
     }
     let slot = this.sourceSlots.get(source);
     if (!slot) {
@@ -659,22 +831,67 @@ export class LiteExecutor {
    * preempts an in-flight chapter or expands source/global concurrency.
    */
   private async acquireSourcePermit(task: LiteTask, workerId: string, source: string): Promise<{
-    sourceSlot: AsyncSemaphore; waitMs: number;
+    sourceSlot: AsyncSemaphore; release: () => void; waitMs: number;
   } | null> {
     const sourceSlot = this.sourceSlot(source);
     await this.refreshStaleSingletonDemand(source, sourceSlot);
-    if (sourceSlot.tryAcquire()) return { sourceSlot, waitMs: 0 };
-
-    let priorityReservation = (task.priority === 'STAFF' || task.priority === 'P0')
-      && this.prioritySourceWaitGate.tryAcquire();
+    const urgent = task.priority === 'STAFF' || task.priority === 'P0';
+    const useSlowBackgroundPool = !urgent
+      && Boolean(this.performanceTracker)
+      && this.performanceTracker!.getTier(source) === 'SLOW'
+      && this.hasPrimaryAlternative();
 
     const sourcePermitStartedAt = performance.now();
+    let slowPermitHeld = false;
+    if (useSlowBackgroundPool) {
+      if (this.slowBackgroundGate.tryAcquire()) {
+        slowPermitHeld = true;
+      } else {
+        try {
+          await this.slowBackgroundGate.acquire(AbortSignal.timeout(1_500));
+          slowPermitHeld = true;
+        } catch {
+          if (this.hasPrimaryAlternative()) {
+            await this.queue.yieldForSourceFairness(task, workerId, 4_000);
+            return null;
+          }
+        }
+      }
+    }
+
+    const buildPermit = (waitMs: number) => {
+      let released = false;
+      return {
+        sourceSlot,
+        waitMs,
+        release: () => {
+          if (released) return;
+          released = true;
+          if (slowPermitHeld) {
+            slowPermitHeld = false;
+            this.slowBackgroundGate.release();
+          }
+          sourceSlot.release();
+        },
+      };
+    };
+
+    if (sourceSlot.tryAcquire()) {
+      return buildPermit(performance.now() - sourcePermitStartedAt);
+    }
+
+    let priorityReservation = urgent && this.prioritySourceWaitGate.tryAcquire();
+
     try {
       // Bounded wait up to 2.5s for an in-flight page wave to release a permit,
       // avoiding claim/yield thrashing and keeping workers productive.
       await sourceSlot.acquire(AbortSignal.timeout(2_500));
-      return { sourceSlot, waitMs: performance.now() - sourcePermitStartedAt };
+      return buildPermit(performance.now() - sourcePermitStartedAt);
     } catch (error: any) {
+      if (slowPermitHeld) {
+        slowPermitHeld = false;
+        this.slowBackgroundGate.release();
+      }
       if (!priorityReservation && this.hasFairAlternative(source)) {
         await this.queue.yieldForSourceFairness(task, workerId, 3_000);
         return null;
@@ -958,7 +1175,13 @@ export class LiteExecutor {
       : new Map<number, Awaited<ReturnType<LiteRepository['uploadReceipts']>> extends Map<number, infer V> ? V : never>();
     const hasPersistedUpload = [...uploadReceipts.values()].some((receipt) => receipt.state === 'PERSISTED');
     const routeSet = routeSnapshot.routes;
-    const selection = selectableChapterSources(routeSet, { language: String(task.payload.language || 'und'), edition: String(task.payload.edition || 'default') });
+    const speedRank = this.performanceTracker ? (s: string) => this.performanceTracker!.getSpeedRank(s) : undefined;
+    const selection = selectableChapterSources(
+      routeSet,
+      { language: String(task.payload.language || 'und'), edition: String(task.payload.edition || 'default') },
+      new Date(),
+      speedRank,
+    );
     if (!selection.routes.length) {
       const until = routeSet.map((route) => route.cooldownUntil?.getTime() || 0).filter(Boolean).sort()[0];
       await this.queue.finish(task, workerId, {
@@ -1001,7 +1224,7 @@ export class LiteExecutor {
       // yield; one STAFF/P0 task instead reserves the next source slot.
       const sourcePermit = await this.acquireSourcePermit(task, workerId, route.source);
       if (!sourcePermit) return;
-      const { sourceSlot } = sourcePermit;
+      const { release: releaseSourcePermit } = sourcePermit;
       sourcePermitWaitMs = sourcePermit.waitMs;
       try {
         // Telegram has accepted these pages, but their durable receipts still
@@ -1059,7 +1282,7 @@ export class LiteExecutor {
         let mediaIds: string[];
         const mediaPipelineStartedAt = performance.now();
         try {
-          mediaIds = await mapBounded(urls, this.getPageConcurrencyForSource(route.source), async (url, index) => {
+          mediaIds = await mapBounded(urls, this.getPageConcurrencyForSource(route.source, urls.length), async (url, index) => {
           const position = index + 1;
           const receipt = uploadReceipts.get(position);
           if (receipt?.state === 'PERSISTED' && receipt.storageReady === true && Number(receipt.bytes) > 0 &&
@@ -1155,7 +1378,11 @@ export class LiteExecutor {
                   reservation.completeBody(bytes.byteLength);
                   const image = inspectImage(bytes);
                   if (host) this.sourceRateLimiter.recordSuccess(host);
-                  telemetryCollector.recordImageDownload(route.source, performance.now() - startedAt, bytes.length);
+                  const pageElapsedMs = performance.now() - startedAt;
+                  telemetryCollector.recordImageDownload(route.source, pageElapsedMs, bytes.length);
+                  if (this.performanceTracker?.recordPageDownload(route.source, pageElapsedMs, bytes.length)) {
+                    this.recomputeSourceCapacities();
+                  }
                   return { bytes, image };
                 } finally {
                   pageDownloadDemandMs += performance.now() - startedAt;
@@ -1327,10 +1554,26 @@ export class LiteExecutor {
           other_wait_ms: Math.max(0, Math.round(totalDurationMs - routeLookupMs - sourceFetchMs - mediaPipelineWallMs - dbPreparationMs - dbPublishMs)),
           timestamp: new Date().toISOString(),
         });
+        if (this.performanceTracker?.recordChapterOutcome(route.source, {
+          succeeded: true,
+          durationMs: totalDurationMs,
+          pageCount: urls.length,
+          totalBytes,
+        })) {
+          this.recomputeSourceCapacities();
+        }
         return;
       } catch (error) {
         lastError = error;
         if (isSourceFailure(error)) {
+          if (this.performanceTracker?.recordChapterOutcome(route.source, {
+            succeeded: false,
+            durationMs: performance.now() - taskStartedAt,
+            pageCount: 0,
+            totalBytes,
+          })) {
+            this.recomputeSourceCapacities();
+          }
           await this.queue.recordSourceFailure(route.source, error);
           // Never blend a partially persisted chapter with an alternative
           // source. The task will retry the pinned route after its cooldown.
@@ -1338,7 +1581,7 @@ export class LiteExecutor {
           continue;
         }
         break;
-      } finally { sourceSlot.release(); }
+      } finally { releaseSourcePermit(); }
     }
     const message = String((lastError as Error | null)?.message || 'IMPORT_FAILED');
     const permanent = /UPLOAD_OUTCOME_UNKNOWN|CHAPTER_DISPLAY_NUMBER|CHAPTER_NUMBER_COLLISION|SOURCE_PAGE_MANIFEST_CHANGED_AFTER_PARTIAL_STORAGE|LEASE_LOST_BEFORE_MEDIA_STORAGE|SOURCE_CHAPTER_OWNERSHIP_UNVERIFIED|CHAPTER_CONTENT_INVALID_PLACEHOLDER|INVALID_PAGE_MANIFEST/.test(message);

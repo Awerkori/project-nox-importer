@@ -289,7 +289,14 @@ export async function readImageBody(
       if (reservation && newLength > reservation.reservedBytes) {
         const fromBytes = reservation.reservedBytes;
         const completionPromotion = contentLengthBytes === null || newLength > contentLengthBytes;
-        const targetBytes = completionPromotion ? maxBytes : newLength;
+        // Lengthless responses (e.g. MangaFlix) omit Content-Length even though 99.6%
+        // of real pages are <= 4 MiB. Promote lengthless streams first to a bounded
+        // 4 MiB ceiling so two slow lengthless pages never lock 40 MiB of PageByteBudget,
+        // escalating to maxBytes (20 MiB) only if a page exceeds 4 MiB or Content-Length lied.
+        const lengthlessMediumBytes = Math.min(maxBytes, 4 * 1024 * 1024);
+        const targetBytes = completionPromotion
+          ? (contentLengthBytes === null && newLength <= lengthlessMediumBytes ? lengthlessMediumBytes : maxBytes)
+          : newLength;
         const phase = completionPromotion ? 'COMPLETION' : 'STREAM';
         waitingOnReservationUpgrade = true;
         emitTrace(() => options.trace?.onReservationUpgrade?.({

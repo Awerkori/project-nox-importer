@@ -7,7 +7,7 @@ import type { ChapterSourceRoute, SourceSelection } from './types.js';
 export declare function selectChapterSource(routes: ChapterSourceRoute[], expected: {
     language?: string | null;
     edition?: string | null;
-}, now?: Date): SourceSelection;
+}, now?: Date, sourceSpeedRank?: (source: string) => number): SourceSelection;
 /**
  * Ordered alternatives for one already-canonical chapter.  The executor uses
  * this list to fail over in the same claim after a source-only failure; task
@@ -16,7 +16,7 @@ export declare function selectChapterSource(routes: ChapterSourceRoute[], expect
 export declare function selectableChapterSources(routes: ChapterSourceRoute[], expected: {
     language?: string | null;
     edition?: string | null;
-}, now?: Date): {
+}, now?: Date, sourceSpeedRank?: (source: string) => number): {
     routes: ChapterSourceRoute[];
     reason?: SourceSelection['reason'];
 };

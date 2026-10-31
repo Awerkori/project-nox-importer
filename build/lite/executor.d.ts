@@ -6,6 +6,7 @@ import type { LiteTask } from './types.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { PageByteBudget } from './page-byte-budget.js';
+import type { SourcePerformanceSnapshot, SourcePerformanceTracker } from './source-performance.js';
 export declare const KNOWN_PLACEHOLDER_HASHES: Set<string>;
 export declare const DURABLE_RESERVATION_BATCH_JOIN_MS = 100;
 export declare const DURABLE_RECEIPT_BATCH_JOIN_MS = 120;
@@ -102,7 +103,18 @@ export declare class LiteExecutor {
     private lastSourceBurstRefreshAt;
     private sourceBurstRefreshes;
     private effectiveChapterAdmissionCap;
+    private performanceTracker;
+    private readonly slowBackgroundGate;
     constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined, pageBytes?: PageByteBudget, chapterManifestTimeoutMs?: number, refreshFairDemandOnSourceBurst?: (() => Promise<void>) | undefined, pageAdmissionTimeoutMs?: number, pageTransferTimeoutMs?: number);
+    setPerformanceTracker(tracker: SourcePerformanceTracker | null): void;
+    getSourcePerformanceSnapshot(): (SourcePerformanceSnapshot & {
+        slowBackgroundPool: {
+            active: number;
+            capacity: number;
+            waiters: number;
+        };
+    }) | null;
+    private recomputeSourceCapacities;
     /**
      * A bounded runtime sample of sources with ready imports. It only controls
      * local execution permits; the durable queue remains authority for task
@@ -128,6 +140,8 @@ export declare class LiteExecutor {
         reservations: UploadBatchSnapshot;
         receipts: UploadBatchSnapshot;
     };
+    private hasPrimaryAlternative;
+    private computeSlowPoolBudget;
     private sourceCapacity;
     private demandAwareSourceCapacity;
     /**
@@ -141,7 +155,7 @@ export declare class LiteExecutor {
      * exposed to the runtime heartbeat: a global configuration value alone is
      * not evidence that a source-specific cap was applied.
      */
-    getPageConcurrencyForSource(source: string): number;
+    getPageConcurrencyForSource(source: string, plannedPageCount?: number): number;
     private hasFairAlternative;
     getSaturatedFairSources(): string[];
     private sourceSlot;
