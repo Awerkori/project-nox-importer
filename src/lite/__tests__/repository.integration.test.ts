@@ -6173,6 +6173,27 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(monitorClaim).toHaveBeenCalledTimes(1);
   });
 
+  it('limits one slow P0 source to two active checks while another source progresses', async () => {
+    const runtime=new ImporterLiteRuntime(poolFor(db) as Pool,{},{} as SourceRegistry,
+      {upload:async()=>'unused',healthCheck:async()=>true,getProviderKey:()=> 'telegram'},
+      {IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,QUEUE_LEASE_DURATION_SECONDS:120} as any);
+    (runtime as any).isRuntimeLeader=true;
+    const tasks=(source:string,count:number)=>Array.from({length:count},(_,i)=>({id:`${source}-${i}`,taskType:'CATALOG',payload:{source}}));
+    const claimMonitorBatch=vi.fn().mockResolvedValueOnce(tasks('slow',4)).mockResolvedValueOnce(tasks('fast',4));
+    (runtime as any).queue={claimMonitorBatch};
+    let release!:()=>void;
+    const blocked=new Promise<void>((resolve)=>{release=resolve;});
+    const handled:string[]=[];
+    (runtime as any).handle=vi.fn(async (task:any)=>{handled.push(task.payload.source);await blocked;});
+    const turns=Array.from({length:4},()=> (runtime as any).runMonitorTurn());
+    await vi.waitFor(()=>expect(handled).toHaveLength(4));
+    expect(handled.filter(source=>source==='slow')).toHaveLength(2);
+    expect(handled.filter(source=>source==='fast')).toHaveLength(2);
+    expect(claimMonitorBatch).toHaveBeenCalledTimes(2);
+    release(); await Promise.all(turns);
+    expect((runtime as any).monitorActiveBySource.size).toBe(0);
+  });
+
   it('keeps two independent P0 source probes in flight while serializing their queue claims', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,

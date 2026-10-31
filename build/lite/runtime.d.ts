@@ -101,6 +101,7 @@ export declare class ImporterLiteRuntime {
     private readonly monitorGate;
     private readonly monitorClaimGate;
     private readonly monitorClaimBuffer;
+    private readonly monitorActiveBySource;
     private readonly monitorFinishBatcher;
     private monitorClaimBatchCount;
     private readonly runtimeInstanceId;

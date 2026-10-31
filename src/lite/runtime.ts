@@ -420,6 +420,7 @@ export class ImporterLiteRuntime {
   private readonly monitorGate = new AsyncSemaphore(6, 'lite_p0_monitor');
   private readonly monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
   private readonly monitorClaimBuffer: LiteTask[] = [];
+  private readonly monitorActiveBySource = new Map<string, number>();
   private readonly monitorFinishBatcher: MonitorFinishBatcher;
   private monitorClaimBatchCount = 0;
   private readonly runtimeInstanceId: string;
@@ -3197,6 +3198,7 @@ export class ImporterLiteRuntime {
       || this.manualProtectiveStop.active || Date.now() < this.sitePausedUntil) return;
     if (!this.monitorGate.tryAcquire()) return;
     let hadTask = false;
+    let activeSource = '';
     try {
       if (Date.now() < this.idleMonitorUntil) return;
       // A second bounded source probe may wait only for the first short
@@ -3210,26 +3212,30 @@ export class ImporterLiteRuntime {
         // lane empty while this turn waited for its one bounded claim.
         if (Date.now() < this.idleMonitorUntil) return;
         const workerId = `${this.runtimeInstanceId}:lite-monitor`;
-        // Only the serialized claim section touches the buffer. Expired leases
-        // are left to the durable reconciler; stale workers never fetch them.
-        while (this.monitorClaimBuffer.length) {
-          const candidate = this.monitorClaimBuffer.shift()!;
-          if (candidate.leaseUntil && candidate.leaseUntil.getTime() <= Date.now() + 30_000) {
-            if (!await this.queue.renewLease(candidate, workerId, this.config.QUEUE_LEASE_DURATION_SECONDS)) continue;
+        // Keep at most two active checks per source. A slow provider cannot
+        // occupy the whole lane; at most eight other leases wait locally.
+        for (;;) {
+          const index = this.monitorClaimBuffer.findIndex((candidate) => {
+            const source = String(candidate.payload?.source || '');
+            return !source || (this.monitorActiveBySource.get(source) || 0) < 2;
+          });
+          if (index >= 0) {
+            const candidate = this.monitorClaimBuffer.splice(index, 1)[0];
+            if (candidate.leaseUntil && candidate.leaseUntil.getTime() <= Date.now() + 30_000
+              && !await this.queue.renewLease(candidate, workerId, this.config.QUEUE_LEASE_DURATION_SECONDS)) continue;
+            task = candidate;
+            activeSource = String(task.payload?.source || '');
+            if (activeSource) this.monitorActiveBySource.set(activeSource, (this.monitorActiveBySource.get(activeSource) || 0) + 1);
+            break;
           }
-          task = candidate;
-          break;
-        }
-        if (!task) {
-          // Three source-rotation batches guarantee participation; every
-          // fourth batch favors the oldest due source to drain large backlogs.
+          if (this.monitorClaimBuffer.length >= 8) break;
           this.monitorClaimBatchCount += 1;
-          const batch = await this.monitorSqlQueue().claimMonitorBatch(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, 4,
+          const batch = await this.monitorSqlQueue().claimMonitorBatch(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, Math.min(4, 8 - this.monitorClaimBuffer.length),
             this.monitorClaimBatchCount % 4 === 0);
-          task = batch.shift() || null;
+          if (!batch.length) break;
           this.monitorClaimBuffer.push(...batch);
         }
-        this.idleMonitorUntil = task ? 0 : Date.now() + 5_000;
+        this.idleMonitorUntil = task || this.monitorClaimBuffer.length ? 0 : Date.now() + 5_000;
       } finally {
         this.monitorClaimGate.release();
       }
@@ -3246,6 +3252,11 @@ export class ImporterLiteRuntime {
         await this.handle(task, `${this.runtimeInstanceId}:lite-monitor`);
       }
     } finally {
+      if (activeSource) {
+        const remaining = (this.monitorActiveBySource.get(activeSource) || 1) - 1;
+        if (remaining > 0) this.monitorActiveBySource.set(activeSource, remaining);
+        else this.monitorActiveBySource.delete(activeSource);
+      }
       this.monitorGate.release();
       if (
         hadTask
