@@ -2104,7 +2104,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       new AsyncSemaphore(24, 'fair-downloads'), 4, new AsyncSemaphore(48, 'fair-buffers'), new HostRateLimiter(2), 5);
     const mangaFlix = (executor as any).sourceSlot('mangaflix') as AsyncSemaphore;
     expect(mangaFlix.capacity).toBe(8);
-    executor.setFairSourceDemand(['mangaflix', 'source-b', 'source-c', 'source-d', 'source-e']);
+    executor.setFairSourceDemandCounts(new Map([['mangaflix',1],['source-b',1],['source-c',1],['source-d',1],['source-e',1]]));
     expect(mangaFlix.capacity).toBe(1);
     // A selected fallback is folded into the current bounded set rather than
     // bypassing source fairness until the next periodic sample.
@@ -2231,9 +2231,9 @@ describe('LiteRepository against the additive Lite migration', () => {
   it('uses the effective admission cap, not configured workers, for source shares', () => {
     const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
       new AsyncSemaphore(24, 'effective-cap-downloads'), 4, new AsyncSemaphore(48, 'effective-cap-buffers'), new HostRateLimiter(2), 20);
-    executor.setFairSourceDemand(['mangaflix', 'source-b']);
+    executor.setFairSourceDemandCounts(new Map([['mangaflix',100], ['source-b',100]]));
     const mangaFlix = (executor as any).sourceSlot('mangaflix') as AsyncSemaphore;
-    expect(mangaFlix.capacity).toBe(8);
+    expect(mangaFlix.capacity).toBe(6);
 
     executor.setEffectiveChapterAdmissionCap(3);
     expect(executor.getEffectiveChapterAdmissionCap()).toBe(3);
@@ -2248,16 +2248,16 @@ describe('LiteRepository against the additive Lite migration', () => {
       new AsyncSemaphore(24, 'nexus-fair-downloads'), 4, new AsyncSemaphore(48, 'nexus-fair-buffers'), new HostRateLimiter(2), 6);
     const nexus = (executor as any).sourceSlot('nexus') as AsyncSemaphore;
     // Scarcity must not penalize the sole healthy source.
-    expect(nexus.capacity).toBe(2);
+    expect(nexus.capacity).toBe(22);
 
-    executor.setFairSourceDemand(['nexus', 'mangaflix']);
+    executor.setFairSourceDemandCounts(new Map([['nexus',1], ['mangaflix',100]]));
     // The cap-six ramp published ten Nexus chapters from two works in one
     // minute while MangaFlix was ready. Its fair seat leaves concurrent room
     // for the alternative without widening global media limits.
     expect(nexus.capacity).toBe(1);
 
-    executor.setFairSourceDemand(['nexus']);
-    expect(nexus.capacity).toBe(2);
+    executor.setFairSourceDemandCounts(new Map([['nexus',1]]));
+    expect(nexus.capacity).toBe(22);
   });
 
   it('yields a source-capped claim without spending a retry attempt', async () => {
