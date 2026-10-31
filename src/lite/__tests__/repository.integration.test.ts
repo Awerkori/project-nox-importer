@@ -2143,11 +2143,13 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     try {
       const permit = await (executor as any).acquireSourcePermit({ priority: 'P1' }, 'burst-fair-worker', 'mangaflix');
-      expect(permit).toBeNull();
+      expect(permit).not.toBeNull();
       expect(refresh).toHaveBeenCalledTimes(1);
-      expect((queue as any).yieldForSourceFairness).toHaveBeenCalledTimes(1);
+      expect((queue as any).yieldForSourceFairness).not.toHaveBeenCalled();
       expect(executor.getSourceFairnessBurstSnapshot()).toMatchObject({ refreshes: 1, demandSources: 5, refreshInFlight: false });
-      expect(mangaFlix.capacity).toBe(3);
+      expect(mangaFlix.capacity).toBe(6);
+      expect(mangaFlix.capacity).toBeLessThan(executor.getEffectiveChapterAdmissionCap());
+      permit.release();
     } finally {
       mangaFlix.release(); mangaFlix.release(); mangaFlix.release();
     }
