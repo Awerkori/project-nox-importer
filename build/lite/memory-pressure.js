@@ -1,5 +1,28 @@
+import { readFileSync } from 'node:fs';
 import { LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
 const MIB = 1024 * 1024;
+const BASELINE_CONTAINER_RAM_MIB = 512;
+export function detectContainerRamMiB() {
+    const explicit = Number(process.env.DISCLOUD_RAM_MB || '');
+    if (Number.isFinite(explicit) && explicit >= BASELINE_CONTAINER_RAM_MIB) {
+        return Math.min(4096, Math.floor(explicit));
+    }
+    if (process.env.NODE_ENV === 'production') {
+        for (const cgroupPath of ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes']) {
+            try {
+                const raw = readFileSync(cgroupPath, 'utf8').trim();
+                const bytes = Number(raw);
+                if (Number.isFinite(bytes) && bytes >= BASELINE_CONTAINER_RAM_MIB * MIB && bytes <= 4096 * MIB) {
+                    return Math.floor(bytes / MIB);
+                }
+            }
+            catch {
+                // Ignore absent cgroup files outside Linux containers.
+            }
+        }
+    }
+    return BASELINE_CONTAINER_RAM_MIB;
+}
 // A 512 MiB container exists to absorb a bounded media wave.  Production has
 // already shown a stable native allocator plateau above 330 MiB; reducing
 // admission at 350 and collapsing to a one-page wave at 400 therefore turned
@@ -49,9 +72,26 @@ export class LiteMemoryPressureGuard {
     retainedCriticalSince = null;
     retainedCriticalBaselineMiB = 0;
     retainedRssMetadataResume = false;
-    constructor(pageBuffers, pageBytes, normalPageBufferCapacity, normalPageByteCapacity = LITE_PAGE_BUFFER_BUDGET_BYTES) {
+    normalRssMiB;
+    criticalRssMiB;
+    reducedRecoveryRssMiB;
+    criticalRecoveryRssMiB;
+    retainedRssMetadataMaxMiB;
+    idleGcRssMiB;
+    reducedPageBufferCap;
+    reducedPageByteCap;
+    constructor(pageBuffers, pageBytes, normalPageBufferCapacity, normalPageByteCapacity = LITE_PAGE_BUFFER_BUDGET_BYTES, containerRamMiB = BASELINE_CONTAINER_RAM_MIB) {
         this.pageBuffers = pageBuffers;
         this.pageBytes = pageBytes;
+        const extraMiB = Math.max(0, Math.min(1024, Math.floor(containerRamMiB) - BASELINE_CONTAINER_RAM_MIB));
+        this.normalRssMiB = NORMAL_RSS_MIB + Math.round(extraMiB * 0.88);
+        this.reducedRecoveryRssMiB = extraMiB > 0 ? this.normalRssMiB - 25 : REDUCED_RECOVERY_RSS_MIB;
+        this.criticalRssMiB = CRITICAL_RSS_MIB + Math.round(extraMiB * 0.90);
+        this.criticalRecoveryRssMiB = extraMiB > 0 ? this.criticalRssMiB - 25 : CRITICAL_RECOVERY_RSS_MIB;
+        this.retainedRssMetadataMaxMiB = extraMiB > 0 ? this.criticalRssMiB + 20 : RETAINED_RSS_METADATA_MAX_MIB;
+        this.idleGcRssMiB = 330 + Math.round(extraMiB * 0.75);
+        this.reducedPageBufferCap = containerRamMiB >= 600 ? 48 : 40;
+        this.reducedPageByteCap = (containerRamMiB >= 600 ? 64 : 48) * MIB;
         this.normalPageBufferCapacity = normalPageBufferCapacity;
         this.normalPageByteCapacity = normalPageByteCapacity;
         this.snapshotValue = this.buildSnapshot(process.memoryUsage());
@@ -97,9 +137,9 @@ export class LiteMemoryPressureGuard {
             (observed.external || 0) / MIB <= RETAINED_RSS_METADATA_MAX_EXTERNAL_MIB &&
             (observed.arrayBuffers || 0) / MIB <= RETAINED_RSS_METADATA_MAX_ARRAY_BUFFER_MIB;
         const shouldCollect = this.state === 'NORMAL'
-            ? rssMiBBeforeGc >= NORMAL_RSS_MIB || (rssMiBBeforeGc >= 330 && drainedPageWave)
+            ? rssMiBBeforeGc >= this.normalRssMiB || (rssMiBBeforeGc >= this.idleGcRssMiB && drainedPageWave)
             : this.state === 'REDUCED'
-                ? rssMiBBeforeGc >= CRITICAL_RSS_MIB || drainedPageWave
+                ? rssMiBBeforeGc >= this.criticalRssMiB || drainedPageWave
                 : false;
         if (!memory && shouldCollect && Date.now() - this.lastForcedGcAt >= FORCED_GC_COOLDOWN_MS) {
             const gc = globalThis.gc;
@@ -126,18 +166,18 @@ export class LiteMemoryPressureGuard {
     }
     nextState(rssMiB) {
         if (this.state === 'CRITICAL') {
-            if (rssMiB >= CRITICAL_RECOVERY_RSS_MIB)
+            if (rssMiB >= this.criticalRecoveryRssMiB)
                 return 'CRITICAL';
-            return rssMiB >= NORMAL_RSS_MIB ? 'REDUCED' : 'NORMAL';
+            return rssMiB >= this.normalRssMiB ? 'REDUCED' : 'NORMAL';
         }
         if (this.state === 'REDUCED') {
-            if (rssMiB >= CRITICAL_RSS_MIB)
+            if (rssMiB >= this.criticalRssMiB)
                 return 'CRITICAL';
-            return rssMiB >= REDUCED_RECOVERY_RSS_MIB ? 'REDUCED' : 'NORMAL';
+            return rssMiB >= this.reducedRecoveryRssMiB ? 'REDUCED' : 'NORMAL';
         }
-        if (rssMiB >= CRITICAL_RSS_MIB)
+        if (rssMiB >= this.criticalRssMiB)
             return 'CRITICAL';
-        if (rssMiB >= NORMAL_RSS_MIB)
+        if (rssMiB >= this.normalRssMiB)
             return 'REDUCED';
         return 'NORMAL';
     }
@@ -169,13 +209,13 @@ export class LiteMemoryPressureGuard {
                 // measured 24-request fence made REDUCED a permanent source-download
                 // bottleneck without reducing retained media. Keep the same 48 MiB
                 // authoritative byte ceiling; CRITICAL remains the one-page brake.
-                pageBufferCapacity: Math.min(this.normalPageBufferCapacity, 40),
+                pageBufferCapacity: Math.min(this.normalPageBufferCapacity, this.reducedPageBufferCap),
                 // Production showed the 32 MiB reduced budget itself saturated with
                 // many small pages while RSS was stable around 310 MiB.  It left
                 // capacity unused in the 512 MiB container and turned REDUCED into a
-                // permanent 3--6 chapter/minute state.  48 MiB is still below the
-                // normal 80 MiB fence and leaves the CRITICAL 20 MiB brake intact.
-                pageByteCapacity: 48 * MIB,
+                // permanent 3--6 chapter/minute state.  48 MiB (64 MiB on >=600 MiB
+                // containers) stays safely below the normal fence while keeping CRITICAL intact.
+                pageByteCapacity: Math.min(this.normalPageByteCapacity, this.reducedPageByteCap),
             };
         }
         return {
@@ -202,7 +242,7 @@ export class LiteMemoryPressureGuard {
         const lowLiveMemory = externalMiB <= RETAINED_RSS_METADATA_MAX_EXTERNAL_MIB
             && arrayBuffersMiB <= RETAINED_RSS_METADATA_MAX_ARRAY_BUFFER_MIB
             && pageBytes <= RETAINED_RSS_METADATA_MAX_RESERVED_PAGE_BYTES;
-        if (!lowLiveMemory || rssMiB >= RETAINED_RSS_METADATA_MAX_MIB) {
+        if (!lowLiveMemory || rssMiB >= this.retainedRssMetadataMaxMiB) {
             this.resetRetainedCriticalWindow();
             return false;
         }

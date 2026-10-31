@@ -25,7 +25,8 @@ import { isPtBrTitle } from '../core/ptbr-title-localization.js';
 import { inspectCoverForPtBrTitle } from '../core/cover-vision-inspector.js';
 import { CoverVisionQueue, type CoverCandidate } from '../core/cover-vision-queue.js';
 import { PageByteBudget, LITE_PAGE_BUFFER_BUDGET_BYTES } from './page-byte-budget.js';
-import { LiteMemoryPressureGuard, type LiteMemoryPressureSnapshot } from './memory-pressure.js';
+import { detectContainerRamMiB, LiteMemoryPressureGuard, type LiteMemoryPressureSnapshot } from './memory-pressure.js';
+import { SourcePerformanceTracker } from './source-performance.js';
 import {
   ALIAS_ONLY_SOURCE_IDS,
   AliasOnlyEnrichmentService,
@@ -266,6 +267,8 @@ export class ImporterLiteRuntime {
   private readonly bufferedPages: AsyncSemaphore;
   private readonly bufferedPageBytes: PageByteBudget;
   private readonly memoryPressureGuard: LiteMemoryPressureGuard;
+  private readonly containerRamMiB: number;
+  private readonly sourcePerformance = new SourcePerformanceTracker();
   private readonly configuredPageBufferCapacity: number;
   // Vitest shares one Node process across many integration fixtures, so its
   // host RSS is not the Lite runtime's container RSS. The guard itself is
@@ -700,7 +703,9 @@ export class ImporterLiteRuntime {
     }
     return {
       pageBufferCapacity: Math.min(this.configuredPageBufferCapacity, Math.max(8, normalizedCap * 8)),
-      pageByteCapacity: normalizedCap <= 2 ? 48 * 1024 * 1024 : LITE_PAGE_BUFFER_BUDGET_BYTES,
+      pageByteCapacity: normalizedCap <= 2
+        ? 48 * 1024 * 1024
+        : (this.containerRamMiB >= 600 ? 128 * 1024 * 1024 : LITE_PAGE_BUFFER_BUDGET_BYTES),
     };
   }
 
@@ -719,8 +724,18 @@ export class ImporterLiteRuntime {
     this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
     this.configuredPageBufferCapacity = Math.min(config.BUFFERED_PAGE_CONCURRENCY, SAFE_BUFFERED_PAGE_CAP);
     this.bufferedPages = new AsyncSemaphore(this.configuredPageBufferCapacity, 'lite_global_page_buffers');
-    this.bufferedPageBytes = new PageByteBudget(LITE_PAGE_BUFFER_BUDGET_BYTES);
-    this.memoryPressureGuard = new LiteMemoryPressureGuard(this.bufferedPages, this.bufferedPageBytes, this.bufferedPages.capacity);
+    this.containerRamMiB = detectContainerRamMiB();
+    const initialNormalPageBytes = this.containerRamMiB >= 600
+      ? 128 * 1024 * 1024
+      : LITE_PAGE_BUFFER_BUDGET_BYTES;
+    this.bufferedPageBytes = new PageByteBudget(initialNormalPageBytes);
+    this.memoryPressureGuard = new LiteMemoryPressureGuard(
+      this.bufferedPages,
+      this.bufferedPageBytes,
+      this.bufferedPages.capacity,
+      initialNormalPageBytes,
+      this.containerRamMiB,
+    );
     this.chapterWorkerCapacity = Math.max(1, Math.min(config.LITE_CHAPTER_WORKERS ?? 1,
       config.MAX_CONCURRENT_CHAPTERS, config.TESTED_CONCURRENCY_CEILING));
     this.operatorChapterAdmissionCap = this.chapterWorkerCapacity;
@@ -732,6 +747,7 @@ export class ImporterLiteRuntime {
       Math.max(1, Math.min(10, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter,
       this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes,
       config.SOURCE_OPERATION_TIMEOUT_MS, async () => { await this.refreshSourceFairness(); });
+    this.executor.setPerformanceTracker(this.sourcePerformance);
     this.dedupe = new DeduplicationEngine(catalogClient);
     this.historicalMetadataDedupe = sourceMetadataPool === pool
       ? this.dedupe
@@ -1236,12 +1252,17 @@ export class ImporterLiteRuntime {
     if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active) return;
     if (typeof (this.queue as any).refreshP1FocusGroup !== 'function') return;
     const now = Date.now();
-    if (!force && now - this.lastP1FocusRefreshAt < 60_000) return;
+    if (!force && now - this.lastP1FocusRefreshAt < 30_000) return;
     if (this.p1FocusRefreshInFlight) return this.p1FocusRefreshInFlight;
     this.lastP1FocusRefreshAt = now;
     const effectiveCap = Math.max(12, this.executor.getEffectiveChapterAdmissionCap());
     const targetSize = Math.max(24, Math.min(36, Math.round(effectiveCap * 1.6)));
-    this.p1FocusRefreshInFlight = this.queue.refreshP1FocusGroup({ targetSize, maxPerSource: 8 })
+    const sourceTiers = this.sourcePerformance.getTierMap([
+      ...this.executor.getFairSourceDemand(),
+      'nexus', 'taimumangas', 'tankouhentai', 'pizzariascan', 'nocturnesummer',
+      'mangaflix', 'mangotoons', 'hipercool', 'manhastro',
+    ]);
+    this.p1FocusRefreshInFlight = this.queue.refreshP1FocusGroup({ targetSize, maxPerSource: 8, sourceTiers })
       .then(() => undefined)
       .catch((error: any) => {
         this.logger.warn('P1 focus group refresh deferred', { error: error?.message });
@@ -2680,7 +2701,7 @@ export class ImporterLiteRuntime {
     const fairnessPool = primaryBusy ? this.sourceMetadataPool : this.pool;
     const refresh = (async (): Promise<boolean> => {
       try {
-        this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand(128, fairnessPool));
+        this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand(256, fairnessPool));
         return true;
       } catch (error: any) {
         this.logger.warn('Source fairness sample failed', { error: error?.message });
@@ -3505,6 +3526,7 @@ export class ImporterLiteRuntime {
         effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
         burst: this.executor.getSourceFairnessBurstSnapshot(),
         historicalP1Producer: this.historicalP1Producer,
+        sourcePerformance: this.executor.getSourcePerformanceSnapshot(),
       },
       liveness,
       site: this.lastSiteProbe,

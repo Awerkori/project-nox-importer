@@ -181,7 +181,7 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     mangaflix: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 10 },
     manhastro: { maxChapters: 10, fairMaxChapters: 8, maxPagesPerChapter: 12 },
     mangotoons: { maxChapters: 6, fairMaxChapters: 4, maxPagesPerChapter: 6 },
-    taimumangas: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 8 },
+    taimumangas: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 10 },
     hipercool: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
     // Nexus is the primary fast backlog provider with 6,000+ ready chapters.
     // Its CDN and Supabase host rate limiters (8 req/s burst 16, 4 req/s burst 8)
@@ -195,7 +195,7 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     montetai: { maxChapters: 3, maxPagesPerChapter: 6 },
     nebulosascan: { maxChapters: 2, maxPagesPerChapter: 4 },
     nocturnesummer: { maxChapters: 5, fairMaxChapters: 4, maxPagesPerChapter: 10 },
-    tankouhentai: { maxChapters: 2, maxPagesPerChapter: 4 },
+    tankouhentai: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
     cafecomyaoi: { maxChapters: 2, maxPagesPerChapter: 4 },
     // Production ramp 2026-10-11: the 1→2 step sustained healthy media work
     // with no 429, cooldown or failure streak. Keep the adapter's own 2→4
@@ -210,7 +210,7 @@ export const SOURCE_CONCURRENCY_LIMITS = {
     ninjascan: { maxChapters: 4, maxPagesPerChapter: 6 },
     tiamanhwa: { maxChapters: 1, maxPagesPerChapter: 2 },
     apecomics: { maxChapters: 4, maxPagesPerChapter: 6 },
-    pizzariascan: { maxChapters: 5, fairMaxChapters: 4, maxPagesPerChapter: 8 },
+    pizzariascan: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
     mangaonlinetv: { maxChapters: 4, maxPagesPerChapter: 6 },
     pinkrosa: { maxChapters: 4, maxPagesPerChapter: 6 },
     galaxscanlator: { maxChapters: 4, maxPagesPerChapter: 6 },

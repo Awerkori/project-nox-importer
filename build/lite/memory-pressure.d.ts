@@ -1,5 +1,6 @@
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { PageByteBudget } from './page-byte-budget.js';
+export declare function detectContainerRamMiB(): number;
 export type LiteMemoryPressureState = 'NORMAL' | 'REDUCED' | 'CRITICAL';
 export type LiteMemoryPressureSnapshot = {
     state: LiteMemoryPressureState;
@@ -38,7 +39,15 @@ export declare class LiteMemoryPressureGuard {
     private retainedCriticalSince;
     private retainedCriticalBaselineMiB;
     private retainedRssMetadataResume;
-    constructor(pageBuffers: AsyncSemaphore, pageBytes: PageByteBudget, normalPageBufferCapacity: number, normalPageByteCapacity?: number);
+    private readonly normalRssMiB;
+    private readonly criticalRssMiB;
+    private readonly reducedRecoveryRssMiB;
+    private readonly criticalRecoveryRssMiB;
+    private readonly retainedRssMetadataMaxMiB;
+    private readonly idleGcRssMiB;
+    private readonly reducedPageBufferCap;
+    private readonly reducedPageByteCap;
+    constructor(pageBuffers: AsyncSemaphore, pageBytes: PageByteBudget, normalPageBufferCapacity: number, normalPageByteCapacity?: number, containerRamMiB?: number);
     /**
      * The durable chapter-admission cap bounds how many page waves can exist at
      * once. Keep the normal media profile no wider than that cap needs, while

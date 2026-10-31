@@ -1582,6 +1582,26 @@ export class LiteRepository {
     async refreshP1FocusGroup(options = {}) {
         const desiredSize = Math.max(12, Math.min(48, Math.floor(options.targetSize || 24)));
         const maxPerSource = Math.max(2, Math.min(16, Math.floor(options.maxPerSource || 6)));
+        const sourceTiers = options.sourceTiers;
+        const maxFastPerSource = Math.max(maxPerSource, Math.ceil(desiredSize * 0.55));
+        const maxSlowPerSource = Math.min(maxPerSource, 2);
+        const maxTotalSlowInFocus = Math.max(3, Math.floor(desiredSize * 0.22));
+        const maxForSource = (source) => {
+            if (!sourceTiers)
+                return maxPerSource;
+            const tier = sourceTiers.get(source) || 'NORMAL';
+            if (tier === 'FAST')
+                return maxFastPerSource;
+            if (tier === 'SLOW')
+                return maxSlowPerSource;
+            return maxPerSource;
+        };
+        const speedRankFor = (source) => {
+            if (!sourceTiers)
+                return 1;
+            const tier = sourceTiers.get(source) || 'NORMAL';
+            return tier === 'FAST' ? 0 : tier === 'NORMAL' ? 1 : 2;
+        };
         this.p1FocusTargetSize = desiredSize;
         const metaDb = this.sourceMetadataDb || this.db;
         const candidatesRes = await metaDb.query(`
@@ -1596,7 +1616,7 @@ export class LiteRepository {
           AND rw.work_key LIKE 'work:%'
           AND rw.next_run_at <= now() + interval '35 seconds'
         ORDER BY rw.last_claimed_at ASC NULLS FIRST, rw.next_run_at ASC, rw.work_key ASC
-        LIMIT 96
+        LIMIT 160
       ), work_stats AS (
         SELECT
           rpw.work_key,
@@ -1632,7 +1652,7 @@ export class LiteRepository {
         ws.remaining_chapters,
         ws.oldest_task_at,
         (
-          SELECT cs.source
+          SELECT array_agg(cs.source ORDER BY cs.source_rank, cs.source)
           FROM importer_lite_chapter_sources cs
           JOIN importer_sources src ON src.id = cs.source
           LEFT JOIN importer_lite_source_health sh ON sh.source = src.id
@@ -1646,9 +1666,7 @@ export class LiteRepository {
             AND ${sourceExecutionEligibilitySql('src')}
             AND COALESCE(sh.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
             AND (sh.cooldown_until IS NULL OR sh.cooldown_until <= now())
-          ORDER BY cs.source_rank, cs.source
-          LIMIT 1
-        ) AS runnable_source,
+        ) AS runnable_sources,
         EXISTS (
           SELECT 1 FROM importer_lite_chapter_sources cs_any
           WHERE cs_any.work_id = ws.work_id::uuid
@@ -1663,9 +1681,14 @@ export class LiteRepository {
         const candidateByKey = new Map();
         for (const row of candidatesRes.rows) {
             const hasRecordedRoutes = Boolean(row.has_recorded_routes);
-            const runnableSource = row.runnable_source ? String(row.runnable_source) : null;
-            if (hasRecordedRoutes && !runnableSource)
+            const runnableList = Array.isArray(row.runnable_sources)
+                ? row.runnable_sources.map((item) => String(item || '')).filter(Boolean)
+                : (row.runnable_source ? [String(row.runnable_source)] : []);
+            if (hasRecordedRoutes && runnableList.length === 0)
                 continue;
+            const runnableSource = runnableList.length > 0
+                ? [...runnableList].sort((a, b) => speedRankFor(a) - speedRankFor(b))[0]
+                : null;
             const source = runnableSource || 'unattributed';
             const remaining = Math.max(1, Number(row.remaining_chapters || 1));
             const oldestMs = row.oldest_task_at ? new Date(row.oldest_task_at).getTime() : now;
@@ -1676,13 +1699,16 @@ export class LiteRepository {
                         : remaining <= 80 ? 10
                             : 0;
             const fairnessScore = Math.min(35, ageHours * 1.5);
+            const speedBonus = sourceTiers
+                ? (speedRankFor(source) === 0 ? 22 : speedRankFor(source) === 2 ? -12 : 0)
+                : 0;
             candidateByKey.set(String(row.work_key), {
                 workKey: String(row.work_key),
                 workId: String(row.work_id),
                 source,
                 remainingChapters: remaining,
                 oldestTaskMs: oldestMs,
-                score: completionScore + fairnessScore,
+                score: completionScore + fairnessScore + speedBonus,
             });
         }
         // Detect previous Focus works that exited because their backlog completed.
@@ -1712,6 +1738,7 @@ export class LiteRepository {
         const nextFocus = [];
         const selectedSet = new Set();
         const sourceCounts = new Map();
+        let totalSlowCount = 0;
         // 1. Keep sticky Focus works that remain runnable so works drain continuously
         //    to completion without thrashing every chapter.
         for (const prevKey of this.p1FocusWorkKeys) {
@@ -1722,15 +1749,22 @@ export class LiteRepository {
                 continue;
             const prevMeta = this.p1FocusMeta.get(prevKey);
             const enteredAt = prevMeta?.enteredAt || now;
-            // Rotate out after 25m only if it still has >35 chapters and fresher near-done alternatives wait.
-            if (now - enteredAt > 25 * 60_000 && cand.remainingChapters > 35 && candidateByKey.size > desiredSize) {
+            const isSlow = Boolean(sourceTiers && speedRankFor(cand.source) === 2);
+            const stickyRotateMs = isSlow ? 12 * 60_000 : 25 * 60_000;
+            const stickyRemainingThreshold = isSlow ? 25 : 35;
+            // Rotate out long backlogs only when fresher near-done alternatives wait.
+            if (now - enteredAt > stickyRotateMs && cand.remainingChapters > stickyRemainingThreshold && candidateByKey.size > desiredSize) {
                 continue;
             }
+            if (isSlow && totalSlowCount >= maxTotalSlowInFocus)
+                continue;
             const currentSourceCount = sourceCounts.get(cand.source) || 0;
-            if (currentSourceCount >= maxPerSource)
+            if (currentSourceCount >= maxForSource(cand.source))
                 continue;
             selectedSet.add(prevKey);
             sourceCounts.set(cand.source, currentSourceCount + 1);
+            if (isSlow)
+                totalSlowCount++;
             nextFocus.push({
                 workKey: cand.workKey,
                 workId: cand.workId,
@@ -1739,15 +1773,18 @@ export class LiteRepository {
                 enteredAt,
             });
         }
-        // 2. Fill remaining Focus slots favoring unrepresented sources + completion potential + age fairness.
+        // 2. Fill remaining Focus slots favoring fast throughput + unrepresented sources + completion potential + age fairness.
         const remainingCandidates = [...candidateByKey.values()].filter((c) => !selectedSet.has(c.workKey));
         while (nextFocus.length < desiredSize && remainingCandidates.length > 0) {
             let bestIdx = -1;
             let bestScore = -Infinity;
             for (let i = 0; i < remainingCandidates.length; i++) {
                 const cand = remainingCandidates[i];
+                const isSlow = Boolean(sourceTiers && speedRankFor(cand.source) === 2);
+                if (isSlow && totalSlowCount >= maxTotalSlowInFocus)
+                    continue;
                 const srcCount = sourceCounts.get(cand.source) || 0;
-                if (srcCount >= maxPerSource)
+                if (srcCount >= maxForSource(cand.source))
                     continue;
                 const diversityBonus = srcCount === 0 ? 25 : srcCount === 1 ? 10 : 0;
                 const effectiveScore = cand.score + diversityBonus;
@@ -1761,6 +1798,8 @@ export class LiteRepository {
             const chosen = remainingCandidates.splice(bestIdx, 1)[0];
             selectedSet.add(chosen.workKey);
             sourceCounts.set(chosen.source, (sourceCounts.get(chosen.source) || 0) + 1);
+            if (sourceTiers && speedRankFor(chosen.source) === 2)
+                totalSlowCount++;
             nextFocus.push({
                 workKey: chosen.workKey,
                 workId: chosen.workId,

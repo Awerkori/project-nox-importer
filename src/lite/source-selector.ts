@@ -9,8 +9,9 @@ export function selectChapterSource(
   routes: ChapterSourceRoute[],
   expected: { language?: string | null; edition?: string | null },
   now = new Date(),
+  sourceSpeedRank?: (source: string) => number,
 ): SourceSelection {
-  const candidates = selectableChapterSources(routes, expected, now);
+  const candidates = selectableChapterSources(routes, expected, now, sourceSpeedRank);
   if (candidates.routes.length) return { route: candidates.routes[0] };
   return { route: null, reason: candidates.reason };
 }
@@ -24,6 +25,7 @@ export function selectableChapterSources(
   routes: ChapterSourceRoute[],
   expected: { language?: string | null; edition?: string | null },
   now = new Date(),
+  sourceSpeedRank?: (source: string) => number,
 ): { routes: ChapterSourceRoute[]; reason?: SourceSelection['reason'] } {
   const matching = routes.filter((route) =>
     route.confirmed && route.hasChapter &&
@@ -39,7 +41,11 @@ export function selectableChapterSources(
     const anyCooldown = matching.some((route) => route.cooldownUntil && route.cooldownUntil > now);
     return { routes: [], reason: anyCooldown ? 'ALL_ROUTES_COOLDOWN' : 'ALL_ROUTES_UNHEALTHY' };
   }
-  eligible.sort((a, b) => a.sourceRank - b.sourceRank || a.source.localeCompare(b.source));
+  eligible.sort((a, b) =>
+    (sourceSpeedRank ? sourceSpeedRank(a.source) - sourceSpeedRank(b.source) : 0) ||
+    a.sourceRank - b.sourceRank ||
+    a.source.localeCompare(b.source),
+  );
   return { routes: eligible };
 }
 

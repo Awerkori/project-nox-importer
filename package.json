@@ -11,7 +11,7 @@
     "dev": "tsx watch src/index.ts",
     "prepare:discloud": "npm run test && npm run build",
     "build": "tsc && node scripts/build-id.mjs",
-    "start": "env UV_THREADPOOL_SIZE=8 MALLOC_ARENA_MAX=1 MALLOC_TRIM_THRESHOLD_=131072 MALLOC_MMAP_THRESHOLD_=1 node --expose-gc --max-old-space-size=288 build/index.js",
+    "start": "env DISCLOUD_RAM_MB=624 UV_THREADPOOL_SIZE=8 MALLOC_ARENA_MAX=1 MALLOC_TRIM_THRESHOLD_=131072 MALLOC_MMAP_THRESHOLD_=1 node --expose-gc --max-old-space-size=352 build/index.js",
     "package:discloud": "python3 scripts/package-discloud.py",
     "validate:lite:staging": "node scripts/validate-lite-migration-staging.mjs",
     "test": "vitest run",

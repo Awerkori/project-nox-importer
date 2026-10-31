@@ -41,6 +41,8 @@ export declare class ImporterLiteRuntime {
     private readonly bufferedPages;
     private readonly bufferedPageBytes;
     private readonly memoryPressureGuard;
+    private readonly containerRamMiB;
+    private readonly sourcePerformance;
     private readonly configuredPageBufferCapacity;
     private readonly memoryPressureEnabled;
     private readonly claimGate;

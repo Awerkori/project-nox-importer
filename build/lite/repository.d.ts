@@ -273,6 +273,7 @@ export declare class LiteRepository {
     refreshP1FocusGroup(options?: {
         targetSize?: number;
         maxPerSource?: number;
+        sourceTiers?: ReadonlyMap<string, 'FAST' | 'NORMAL' | 'SLOW'>;
     }): Promise<P1FocusGroupSnapshot>;
     getP1FocusWorkKeys(): string[];
     getP1FocusGroupSnapshot(): P1FocusGroupSnapshot;
