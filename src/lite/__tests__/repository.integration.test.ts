@@ -791,6 +791,30 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT aliases FROM works WHERE id=$1`, [ids.p1a])).rows[0].aliases).toContain('P1 A English');
     expect((await db.query(`SELECT work_id::text FROM importer_work_mappings
       WHERE source='source-a' AND source_work_id='cross-source-a'`)).rows).toEqual([{ work_id:ids.p1a }]);
+    expect((await db.query(`SELECT work_id::text,monitoring,state FROM importer_lite_tasks
+      WHERE idempotency_key='lite:p0-monitor:source-a:cross-source-a'`)).rows)
+      .toEqual([{ work_id: ids.p1a, monitoring: true, state: 'READY' }]);
+  });
+
+  it('does not attach a similarly named work without independent identity evidence', async () => {
+    await db.query(`UPDATE works SET published=true,title='The Return of the Iron Blooded Sword Hound',
+      slug='the-return-of-the-iron-blooded-sword-hound',aliases='{}'::text[] WHERE id=$1`, [ids.p1a]);
+    await repo.enqueue({taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:`lite:metadata:cross-source:v7:${ids.p1a}`,
+      payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:7}});
+    const task=await repo.claim('cross-source-worker',120);
+    const adapter={id:'source-a',baseUrl:'https://source-a.example',
+      searchWorks:async()=>[{sourceWorkId:'similar',title:'The Return of the Iron Blooded Sword Hounds',slug:'the-return-of-the-iron-blooded-sword-hounds'}],
+      fetchWorkDetails:async()=>({sourceWorkId:'similar',title:'The Return of the Iron Blooded Sword Hounds',slug:'the-return-of-the-iron-blooded-sword-hounds',genres:[],raw:{}})};
+    const runtime=new ImporterLiteRuntime(poolFor(db) as Pool,{sql:(text:string,values?:unknown[])=>db.query(text,values)},
+      {get:(source:string)=>source==='source-a'?adapter:undefined} as unknown as SourceRegistry,
+      {upload:async()=>'unused',healthCheck:async()=>true,getProviderKey:()=> 'telegram'},
+      {IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2000} as any);
+    const attachVerifiedMapping=vi.fn();
+    (runtime as any).dedupe={attachVerifiedMapping};
+    await (runtime as any).catalog(task,'cross-source-worker');
+    expect(attachVerifiedMapping).not.toHaveBeenCalled();
+    expect((await db.query(`SELECT count(*)::int n FROM importer_lite_tasks WHERE idempotency_key='lite:p0-monitor:source-a:similar'`)).rows[0].n).toBe(0);
   });
 
   it('persists aliases found by a V5 external recheck', async () => {
@@ -2835,6 +2859,64 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE cursor_name='p0_monitor'`)).rows).toEqual([{ last_source: 'source-c' }]);
   });
 
+  it('enrols only owned confirmed alternate mappings and checks them when the origin is disabled', async () => {
+    await db.query(`INSERT INTO importer_work_mappings
+      (id,source,source_work_id,work_id,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000351','source-a','origin',$1,'SYNCED'),
+      ('00000000-0000-4000-8000-000000000352','source-b','alternate',$1,'SYNCED'),
+      ('00000000-0000-4000-8000-000000000353','source-b','similar-other',$2,'SYNCED')`, [ids.p1a, ids.p1b]);
+    await db.query(`UPDATE importer_sources SET enabled=false WHERE id='source-a'`);
+    const mappings = [{source:'source-a',sourceWorkId:'origin'}, {source:'source-b',sourceWorkId:'alternate'},
+      {source:'source-b',sourceWorkId:'similar-other'}];
+    expect(await repo.enrollConfirmedP0Mappings(ids.p1a,mappings)).toBe(1);
+    expect(await repo.enrollConfirmedP0Mappings(ids.p1a,mappings)).toBe(0);
+    await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second' WHERE idempotency_key='lite:p0-monitor:source-b:alternate'`);
+    const watch = await repo.claimMonitor('alternate-worker',120);
+    expect(watch).toMatchObject({workId:ids.p1a,monitoring:true,payload:{source:'source-b',sourceWorkId:'alternate'}});
+    expect((await db.query(`SELECT count(*)::int AS n FROM importer_lite_tasks WHERE idempotency_key LIKE '%similar-other'`)).rows[0].n).toBe(0);
+  });
+
+  it('claims a bounded source batch once and rotates to the next source', async () => {
+    await repo.enqueueMany(['source-a', 'source-a', 'source-a', 'source-b'].map((source, i) => ({
+      taskType: 'CATALOG' as const, workKey: `source:${source}:batch:${i}`, priority: 'P2' as const,
+      idempotencyKey: `p0-batch:${i}`, monitoring: true, payload: { source, sourceWorkId: `work-${i}` },
+    })));
+    const batch = await repo.claimMonitorBatch('batch-worker', 120, 2);
+    expect(batch).toHaveLength(2);
+    expect(batch.every((task) => task.payload.source === 'source-a')).toBe(true);
+    expect(new Set(batch.map((task) => task.id)).size).toBe(2);
+    expect((await repo.claimMonitorBatch('next-worker', 120, 4)).map((task) => task.payload.source)).toEqual(['source-b']);
+    expect(await repo.finish(batch[0], 'wrong-owner', { state: 'DONE' })).toBe(false);
+    expect(await repo.finish(batch[0], 'batch-worker', { state: 'DONE' })).toBe(true);
+  });
+
+  it('batches unchanged successes while fencing expired or wrong-owner leases', async () => {
+    await repo.enqueueMany([0,1].map((i)=>({taskType:'CATALOG' as const,workId:ids.p1a,workKey:`batch-finish-${i}`,
+      idempotencyKey:`batch-finish-${i}`,priority:'P2' as const,monitoring:true,
+      payload:{source:'source-a',sourceWorkId:`batch-finish-${i}`}})));
+    const batch=await repo.claimMonitorBatch('owner',120,2);
+    expect(batch).toHaveLength(2);
+    const done=await repo.finishUnchangedMonitors(batch.map((task,i)=>({task,workerId:i?'wrong':'owner',
+      nextRunAt:new Date(Date.now()+1_800_000),checkpoint:{lastCheckedAt:'2026-10-31T23:00:00.000Z'}})));
+    expect(done).toEqual(new Set([batch[0].id]));
+    const rows=await db.query(`SELECT id::text,state,checkpoint->>'lastCheckedAt' checked FROM importer_lite_tasks WHERE id=ANY($1::uuid[])`,[batch.map(t=>t.id)]);
+    expect(rows.rows.find((r:any)=>r.id===batch[0].id)).toMatchObject({state:'RETRY_WAIT',checked:'2026-10-31T23:00:00.000Z'});
+    expect(rows.rows.find((r:any)=>r.id===batch[1].id)).toMatchObject({state:'RUNNING',checked:null});
+  });
+
+  it('can favor the oldest source head while retaining normal round-robin turns', async () => {
+    await repo.enqueueMany([
+      ...Array.from({length: 3}, (_, i) => ({taskType:'CATALOG' as const, workKey:`a-old-${i}`,
+        idempotencyKey:`a-old-${i}`, priority:'P2' as const, monitoring:true,
+        nextRunAt:new Date(Date.now()-3_600_000), payload:{source:'source-a',sourceWorkId:`old-${i}`}})),
+      {taskType:'CATALOG' as const,workKey:'b-new',idempotencyKey:'b-new',priority:'P2' as const,
+        monitoring:true,nextRunAt:new Date(Date.now()-1_000),payload:{source:'source-b',sourceWorkId:'new'}},
+    ]);
+    expect((await repo.claimMonitorBatch('first',120,1))[0].payload.source).toBe('source-a');
+    expect((await repo.claimMonitorBatch('oldest',120,1,true))[0].payload.source).toBe('source-a');
+    expect((await repo.claimMonitorBatch('fair',120,1))[0].payload.source).toBe('source-b');
+  });
+
   it('reads the established P0 cursor without rewriting it for every monitor claim', async () => {
     const queries: string[] = [];
     const trackedQuery = async (text: string, values?: unknown[]) => {
@@ -2900,7 +2982,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await repo.claimMonitor('recovered-p0-monitor', 30))?.id).toBe(watch!.id);
   });
 
-  it('uses quick rechecks for releases and bounded intervals for quiet or hiatus P0 watches', async () => {
+  it('schedules eligible P0 watches within 30 minutes after successful checks', async () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
@@ -2909,13 +2991,13 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     const interval = (checkpoint: Record<string, unknown>, status: string, releases: number) =>
       (runtime as any).monitorIntervalMs({ checkpoint }, status, releases);
-    expect(interval({}, 'ONGOING', 1)).toBe(5 * 60_000);
-    expect(interval({ emptyChecks: 0 }, 'ONGOING', 0)).toBe(25 * 60_000);
-    expect(interval({ emptyChecks: 5 }, 'ONGOING', 0)).toBe(56.25 * 60_000);
-    expect(interval({}, 'HIATUS', 0)).toBe(4 * 60 * 60_000);
-    expect(interval({}, 'COMPLETED', 0)).toBe(6 * 60 * 60_000);
+    expect(interval({}, 'ONGOING', 1)).toBe(30 * 60_000);
+    expect(interval({ emptyChecks: 0 }, 'ONGOING', 0)).toBe(30 * 60_000);
+    expect(interval({ emptyChecks: 5 }, 'ONGOING', 0)).toBe(30 * 60_000);
+    expect(interval({}, 'HIATUS', 0)).toBe(30 * 60_000);
+    expect(interval({}, 'COMPLETED', 0)).toBe(30 * 60_000);
     const lastWeek = new Date(Date.now() - 7 * 86400_000).toISOString();
-    expect(interval({ lastReleaseAt: lastWeek }, 'ONGOING', 0)).toBe(25 * 60_000);
+    expect(interval({ lastReleaseAt: lastWeek }, 'ONGOING', 0)).toBe(30 * 60_000);
   });
 
   it('fails closed before Lite acquires leadership when the Reader still uses numeric identity', async () => {
@@ -4413,6 +4495,46 @@ describe('LiteRepository against the additive Lite migration', () => {
       expect(visible.rows[0]).toMatchObject({ pages: 2 });
       expect(visible.rows[0].published_at).toBeTruthy();
     } finally { vi.stubGlobal('fetch', originalFetch); }
+  });
+
+  it('tracks a newer confirmed alternate source and deduplicates its releases across sources', async () => {
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status) VALUES
+      ('00000000-0000-4000-8000-000000000361','source-a','origin-100',$1,'SYNCED'),
+      ('00000000-0000-4000-8000-000000000362','source-b','alternate-200',$1,'SYNCED')`, [ids.p1a]);
+    await db.query(`UPDATE importer_sources SET enabled=false WHERE id='source-a'`);
+    await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,order_key,confirmed)
+      VALUES($1,'pt-br|default|chapter|100|-','source-a','a-100','pt-BR','default','n|000000000100|000000000000||||-',true)`, [ids.p1a]);
+    await repo.enrollConfirmedP0Mappings(ids.p1a,[{source:'source-b',sourceWorkId:'alternate-200'}]);
+    await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second' WHERE idempotency_key='lite:p0-monitor:source-b:alternate-200'`);
+    let latest = 200;
+    const adapter = { id:'source-b', fetchWorkSnapshot: async () => ({
+      details:{sourceWorkId:'alternate-200',title:'P1 A',slug:'p1-a',status:'ONGOING' as const,language:'pt-BR'},
+      chapters:[{sourceChapterId:`b-${latest}`,number:latest,displayNumber:String(latest),title:`Chapter ${latest}`}],
+    }) };
+    const runtime = new ImporterLiteRuntime(poolFor(db) as Pool, {},
+      { get: (source:string) => source==='source-b' ? adapter : undefined } as unknown as SourceRegistry,
+      {upload:async()=>'unused',healthCheck:async()=>true,getProviderKey:()=> 'telegram'},
+      {IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,BATCH_PAGE_DOWNLOAD_CONCURRENCY:1} as any);
+    (runtime as any).dedupe={resolveWork:async()=>({workId:ids.p1a,status:'CONFIRMED_EXISTING'})};
+    const first=await repo.claimMonitor('alternate',120);
+    await (runtime as any).catalog(first,'alternate');
+    expect((await db.query(`SELECT count(*)::int n FROM importer_lite_tasks WHERE work_id=$1 AND chapter_key='pt-br|default|chapter|200|-'`,[ids.p1a])).rows[0].n).toBe(1);
+    latest=201;
+    await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second' WHERE id=$1`,[first!.id]);
+    await repo.reconcile(10);
+    const second=await repo.claimMonitor('alternate',120);
+    await (runtime as any).catalog(second,'alternate');
+    expect((await db.query(`SELECT count(*)::int n FROM importer_lite_tasks WHERE work_id=$1 AND chapter_key='pt-br|default|chapter|201|-'`,[ids.p1a])).rows[0].n).toBe(1);
+    expect((await db.query(`SELECT source,source_chapter_id FROM importer_lite_chapter_sources WHERE work_id=$1 AND canonical_chapter_key='pt-br|default|chapter|201|-'`,[ids.p1a])).rows)
+      .toContainEqual({source:'source-b',source_chapter_id:'b-201'});
+    await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second' WHERE id=$1`,[first!.id]);
+    await repo.reconcile(10);
+    const third=await repo.claimMonitor('alternate',120);
+    await (runtime as any).catalog(third,'alternate');
+    const checkpoint=(await db.query(`SELECT checkpoint FROM importer_lite_tasks WHERE id=$1`,[first!.id])).rows[0].checkpoint as any;
+    expect(checkpoint.previousCheckedAt).toBeTruthy();
+    expect(checkpoint.lastCheckedAt).toBeTruthy();
+    expect(checkpoint.successfulChecksSinceTracking).toBe(3);
   });
 
   it('materializes newly observed chapters from a P0 monitoring pass as P0, without rebucketing initial P1 work', async () => {
@@ -5969,7 +6091,7 @@ describe('LiteRepository against the additive Lite migration', () => {
         BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
     (runtime as any).isRuntimeLeader = true;
-    const monitorClaim = vi.spyOn((runtime as any).queue, 'claimMonitor');
+    const monitorClaim = vi.spyOn((runtime as any).queue, 'claimMonitorBatch');
     const normalClaim = vi.spyOn((runtime as any).queue, 'claim');
     await Promise.all(Array.from({ length: 20 }, () => (runtime as any).runMonitorTurn()));
     await (runtime as any).runMonitorTurn();
@@ -5989,7 +6111,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     // lane remains capped by monitorGate/monitorClaimGate; it must not be
     // skipped indefinitely merely because those waiters exist.
     (runtime as any).pool.waitingCount = 3;
-    const monitorClaim = vi.spyOn((runtime as any).queue, 'claimMonitor').mockResolvedValue(null);
+    const monitorClaim = vi.spyOn((runtime as any).queue, 'claimMonitorBatch').mockResolvedValue([]);
 
     await (runtime as any).runMonitorTurn();
 
@@ -6005,7 +6127,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     (runtime as any).isRuntimeLeader = true;
     (runtime as any).metadataReplayV4Exclusive.enabled = true;
-    const monitorClaim = vi.spyOn((runtime as any).queue, 'claimMonitor').mockResolvedValue(null);
+    const monitorClaim = vi.spyOn((runtime as any).queue, 'claimMonitorBatch').mockResolvedValue([]);
 
     await (runtime as any).runMonitorTurn();
 
@@ -6021,9 +6143,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     (runtime as any).isRuntimeLeader = true;
     const claimMonitor = vi.fn()
-      .mockResolvedValueOnce({ id: 'p0-source-a', taskType: 'CATALOG' })
-      .mockResolvedValueOnce({ id: 'p0-source-b', taskType: 'CATALOG' });
-    (runtime as any).queue = { claimMonitor };
+      .mockResolvedValueOnce([{ id: 'p0-source-a', taskType: 'CATALOG' }])
+      .mockResolvedValueOnce([{ id: 'p0-source-b', taskType: 'CATALOG' }]);
+    (runtime as any).queue = { claimMonitorBatch: claimMonitor };
     let releaseSnapshots!: () => void;
     const snapshots = new Promise<void>((resolve) => { releaseSnapshots = resolve; });
     const handle = vi.fn(async () => snapshots);
