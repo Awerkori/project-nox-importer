@@ -33,4 +33,36 @@ describe('Madara reader manifests', () => {
       'https://mangalivre.to/manga/madrasta-vem-primeiro-sem-censura/capitulo-10/',
     )).toBe(false);
   });
+
+  it('detects prose web novel chapters and returns an empty manifest instead of scraping theme mascots', async () => {
+    const novelHtml = `
+      <div class="reading-content">
+        <div class="chapter-warning alert alert-warning">Sigam a gente</div>
+        <img class="img-responsive" src="https://nocfsb.com/wp-content/uploads/2023/06/escolhida-1.webp" alt="Nocturne Fansub"/>
+        <div class="text-left">
+          <div>Aproveitando a oportunidade enquanto a Serpente Alada estava ocupada com o Pássaro de Chama macho...</div>
+          <div>O sangue da serpente chovia do céu enquanto os dois guerreiros avançavam em direção ao centro do vale sagrado.</div>
+        </div>
+      </div>
+    `;
+    const adapter = new MangaOnlineTvAdapter(undefined, async () => new Response(novelHtml));
+    const pages = await adapter.fetchChapterPages('https://nocfsb.com/manga/aventura/capitulo-40/', 40);
+    expect(pages).toEqual([]);
+  });
+
+  it('filters out known mascot/banner filenames when real comic images are present', async () => {
+    const html = `
+      <div class="reading-content">
+        <img class="wp-manga-chapter-img" src="https://nocfsb.com/wp-content/uploads/2023/06/escolhida-1.webp"/>
+        <img class="wp-manga-chapter-img" src="https://nocfsb.com/wp-content/uploads/WP-manga/data/manga_123/page-1.webp"/>
+        <img class="wp-manga-chapter-img" src="https://nocfsb.com/wp-content/uploads/WP-manga/data/manga_123/page-2.webp"/>
+      </div>
+    `;
+    const adapter = new MangaOnlineTvAdapter(undefined, async () => new Response(html));
+    const pages = await adapter.fetchChapterPages('https://nocfsb.com/manga/test/capitulo-1/', 1);
+    expect(pages).toEqual([
+      'https://nocfsb.com/wp-content/uploads/WP-manga/data/manga_123/page-1.webp',
+      'https://nocfsb.com/wp-content/uploads/WP-manga/data/manga_123/page-2.webp',
+    ]);
+  });
 });

@@ -106,7 +106,8 @@ o1DZJoSu3+Cu5ZEv1xOCWs0bOoinIt45bqT0jrEXQDDhwGWR3gC64VMqffla1g==
 -----END CERTIFICATE-----`;
 
 function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, applicationName: string,
-  connectionTimeoutMillis: number, queryTimeoutMillis: number, sessionOptions = '', disableParallelWorkers = true): pg.PoolConfig {
+  connectionTimeoutMillis: number, queryTimeoutMillis: number, sessionOptions = '', disableParallelWorkers = true,
+  idleTimeoutMillis = 30000): pg.PoolConfig {
   if (!cfg.YUGABYTE_HOST || !cfg.YUGABYTE_USER || !cfg.YUGABYTE_PASSWORD) {
     throw new Error('Yugabyte direct connection requires YUGABYTE_HOST, YUGABYTE_USER, and YUGABYTE_PASSWORD');
   }
@@ -147,7 +148,7 @@ function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, app
     database: cfg.YUGABYTE_DATABASE,
     max,
     connectionTimeoutMillis,
-    idleTimeoutMillis: 30000,
+    idleTimeoutMillis,
     query_timeout: queryTimeoutMillis,
     keepAlive: true,
     keepAliveInitialDelayMillis: 10000,
@@ -180,7 +181,7 @@ export function createYugabyteMetadataPool(): pg.Pool {
   const poolMax = cfg.METADATA_DB_POOL_MAX;
   const metadataPool = new pg.Pool(yugabytePoolOptions(
     cfg, poolMax, 'project-nox-importer-metadata', 30_000, 15_000,
-    metadataSessionOptions, false,
+    metadataSessionOptions, false, 15_000,
   ));
   metadataPool.on('error', (err) => {
     logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });

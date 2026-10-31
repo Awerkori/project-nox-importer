@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { Pool } from 'pg';
 import { DeduplicationEngine } from '../core/deduplication.js';
@@ -460,6 +460,7 @@ export class ImporterLiteRuntime {
   private adaptiveHealthyStreak = 0;
   private adaptiveAdmissionReason = 'operator-ceiling';
   private lastLegacyBlockedRepairAt = 0;
+  private p0CoverageZeroStreak = 0;
   private p1ClaimCounter = 0;
   private lastP1FocusRefreshAt = 0;
   private p1FocusRefreshInFlight: Promise<void> | null = null;
@@ -888,7 +889,7 @@ export class ImporterLiteRuntime {
       if (this.isRuntimeLeader) void this.runRecoveryTurn();
     }, 30_000);
     timer.unref(); this.timers.push(timer);
-    const monitorTimer = setInterval(() => void this.runMonitorTurn().catch(() => {}), 1_000);
+    const monitorTimer = setInterval(() => void this.runMonitorTurn().catch(() => {}), 500);
     monitorTimer.unref(); this.timers.push(monitorTimer);
     // Sample RSS independently from the 60-second diagnostic heartbeat. The
     // fixed byte ceiling makes overshoot bounded; this one-second brake then
@@ -1197,7 +1198,7 @@ export class ImporterLiteRuntime {
     if (this.sourceMetadataPool.waitingCount > 0 || !this.p0MonitorCoverageRefillGate.tryAcquire()) return;
     let shouldContinueCatchup = false;
     try {
-      const refill = await this.queue.refillP0MonitorCoverage(64);
+      const refill = await this.queue.refillP0MonitorCoverage(256);
       this.p0MonitorCoverage = {
         observedAt: new Date().toISOString(),
         source: refill.source,
@@ -1207,8 +1208,12 @@ export class ImporterLiteRuntime {
         error: null,
       };
       if (refill.admitted || refill.revived) {
+        this.p0CoverageZeroStreak = 0;
         this.logger.info('Expanded durable P0 monitor coverage', refill);
         shouldContinueCatchup = true;
+      } else if (refill.source) {
+        this.p0CoverageZeroStreak += 1;
+        shouldContinueCatchup = this.p0CoverageZeroStreak < 46;
       }
     } catch (error: any) {
       this.p0MonitorCoverage = {
@@ -1221,7 +1226,7 @@ export class ImporterLiteRuntime {
     } finally {
       this.p0MonitorCoverageRefillGate.release();
       if (shouldContinueCatchup && !this.stopped && this.isRuntimeLeader && !this.hasSustainedSourceMetadataPoolPressure()) {
-        const timer = setTimeout(() => void this.refillP0MonitorCoverage(), 1_500);
+        const timer = setTimeout(() => void this.refillP0MonitorCoverage(), 500);
         timer.unref();
       }
     }
@@ -1231,7 +1236,7 @@ export class ImporterLiteRuntime {
     if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active) return;
     if (typeof (this.queue as any).refreshP1FocusGroup !== 'function') return;
     const now = Date.now();
-    if (!force && now - this.lastP1FocusRefreshAt < 30_000) return;
+    if (!force && now - this.lastP1FocusRefreshAt < 60_000) return;
     if (this.p1FocusRefreshInFlight) return this.p1FocusRefreshInFlight;
     this.lastP1FocusRefreshAt = now;
     const effectiveCap = Math.max(12, this.executor.getEffectiveChapterAdmissionCap());
@@ -1415,6 +1420,9 @@ export class ImporterLiteRuntime {
         await this.pool.query(`UPDATE importer_sources SET status='ACTIVE',cooldown_until=NULL,
           blocked_reason=NULL,blocked_details=$2::jsonb,last_health_check_at=$3,updated_at=now() WHERE id=$1`,
         [source.id,JSON.stringify({ recovered_at: checkedAt,probe_success: true,stages }),checkedAt]);
+        if (typeof (this.queue as any).invalidateSourcePolicyCache === 'function') {
+          (this.queue as any).invalidateSourcePolicyCache(source.id);
+        }
         await this.queue.recordSourceSuccess(source.id);
         this.logger.info('Source passed bounded recovery admission probe', { source: source.id });
         return;
@@ -1433,6 +1441,9 @@ export class ImporterLiteRuntime {
         cooldown_until=excluded.cooldown_until,consecutive_failures=importer_lite_source_health.consecutive_failures+1,
         last_error=excluded.last_error,updated_at=now()`,
       [source.id,health,nextProbe,classification]);
+      if (typeof (this.queue as any).invalidateSourcePolicyCache === 'function') {
+        (this.queue as any).invalidateSourcePolicyCache(source.id);
+      }
       this.logger.info('Source remains parked after bounded recovery probe', { source: source.id,classification,cooldownMs });
     } catch (error: any) {
       const checkedAt = new Date().toISOString();
@@ -1445,6 +1456,9 @@ export class ImporterLiteRuntime {
         cooldown_until=excluded.cooldown_until,consecutive_failures=importer_lite_source_health.consecutive_failures+1,
         last_error=excluded.last_error,updated_at=now()`,
       [source.id,nextProbe,String(error?.message || 'SOURCE_RECOVERY_PROBE_ERROR').slice(0,300)]);
+      if (typeof (this.queue as any).invalidateSourcePolicyCache === 'function') {
+        (this.queue as any).invalidateSourcePolicyCache(source.id);
+      }
     }
   }
 
@@ -1776,7 +1790,8 @@ export class ImporterLiteRuntime {
 
         const inspectedUrls = [...task.inspectedUrls];
         try {
-          const workRes = await this.pool.query<{
+          const visionPool = this.sourceMetadataPool || this.pool;
+          const workRes = await visionPool.query<{
             id: string;
             title: string;
             slug: string;
@@ -1853,7 +1868,7 @@ export class ImporterLiteRuntime {
                 },
               };
 
-              const updateRes = await this.pool.query(
+              const updateRes = await visionPool.query(
                 `UPDATE works
                  SET title = $1, aliases = $2, metadata_provenance = $3
                  WHERE id = $4::uuid
@@ -2224,10 +2239,10 @@ export class ImporterLiteRuntime {
     // A chapter receipt can leave a short-lived pool waiter on every busy
     // wave.  Treating that instantaneous sample as a hard stop recreated the
     // exact starvation this lane exists to prevent.  The lane is one task
-    // wide, performs no network inside a transaction, and the normal pool
-    // queue naturally serializes its short DB phases; site and memory remain
-    // the admission guardrails.
-    if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()) return;
+    // wide, performs no network inside a transaction, and uses the isolated
+    // metadata pool for claims/lookups; site, memory and sustained metadata
+    // pool pressure remain the admission guardrails.
+    if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata() || this.hasSustainedSourceMetadataPoolPressure()) return;
     if (typeof (this.queue as any).hasExecutableOrRecoverableP1Backlog === 'function') {
       try {
         const p1Backlog = await this.queue.hasExecutableOrRecoverableP1Backlog();
@@ -2240,10 +2255,7 @@ export class ImporterLiteRuntime {
         this.logger.warn('P1 backlog check for P2 subordination failed', { error: error?.message });
       }
     }
-    const releaseBackgroundBudget = this.tryAcquireBackgroundMetadataBudget();
-    if (!releaseBackgroundBudget) return;
     if (!this.newWorkCatalogGate.tryAcquire()) {
-      releaseBackgroundBudget();
       return;
     }
     try {
@@ -2255,7 +2267,7 @@ export class ImporterLiteRuntime {
       }
       if (
         typeof (this.queue as any).claimDueDiscovery === 'function' &&
-        Date.now() - this.lastNewWorkDiscoveryAt >= 15_000
+        Date.now() - this.lastNewWorkDiscoveryAt >= 10_000
       ) {
         this.lastNewWorkDiscoveryAt = Date.now();
         const discoveryTask = await (this.queue as any).claimDueDiscovery(
@@ -2270,7 +2282,6 @@ export class ImporterLiteRuntime {
       this.logger.warn('New-work catalog lane failed', { error: error?.message });
     } finally {
       this.newWorkCatalogGate.release();
-      releaseBackgroundBudget();
     }
   }
 
@@ -2719,7 +2730,16 @@ export class ImporterLiteRuntime {
         VALUES ${tuples.join(',')}
         ON CONFLICT(source,source_chapter_id) DO UPDATE SET canonical_chapter_key=excluded.canonical_chapter_key,
           source_work_id=excluded.source_work_id,language=excluded.language,edition=excluded.edition,order_key=excluded.order_key,source_rank=excluded.source_rank,
-          confirmed=true,has_chapter=true,last_verified_at=now(),updated_at=now()`, values);
+          confirmed=true,has_chapter=true,last_verified_at=now(),updated_at=now()
+        WHERE importer_lite_chapter_sources.work_id IS DISTINCT FROM excluded.work_id
+           OR importer_lite_chapter_sources.canonical_chapter_key IS DISTINCT FROM excluded.canonical_chapter_key
+           OR importer_lite_chapter_sources.source_work_id IS DISTINCT FROM excluded.source_work_id
+           OR importer_lite_chapter_sources.language IS DISTINCT FROM excluded.language
+           OR importer_lite_chapter_sources.edition IS DISTINCT FROM excluded.edition
+           OR importer_lite_chapter_sources.order_key IS DISTINCT FROM excluded.order_key
+           OR importer_lite_chapter_sources.source_rank IS DISTINCT FROM excluded.source_rank
+           OR importer_lite_chapter_sources.confirmed IS NOT TRUE
+           OR importer_lite_chapter_sources.has_chapter IS NOT TRUE`, values);
     }
   }
 
@@ -3014,16 +3034,17 @@ export class ImporterLiteRuntime {
    */
   private async runMonitorTurn(): Promise<void> {
     // A V4 metadata campaign is P2 work; it must not globally freeze P0
-    // release observation.  The monitor's own two network permits and serial
+    // release observation.  The monitor's own bounded network permits and serial
     // claim gate keep this higher-priority background service bounded.
     if (this.stopped || !this.isRuntimeLeader
       || this.manualProtectiveStop.active || Date.now() < this.sitePausedUntil) return;
     if (!this.monitorGate.tryAcquire()) return;
+    let hadTask = false;
     try {
       if (Date.now() < this.idleMonitorUntil) return;
       // A second bounded source probe may wait only for the first short
       // transactional claim, then fetch independently.  Dropping it here
-      // would turn the two network permits back into one whenever YSQL takes
+      // would turn the bounded network permits back into one whenever YSQL takes
       // more than a tick to return a claim.
       await this.monitorClaimGate.acquire();
       let task: LiteTask | null = null;
@@ -3037,6 +3058,7 @@ export class ImporterLiteRuntime {
         this.monitorClaimGate.release();
       }
       if (task) {
+        hadTask = true;
         if (this.monitorGate.available > 0 && Date.now() >= this.idleMonitorUntil && !this.stopped) {
           void this.runMonitorTurn().catch(() => {});
         }
@@ -3044,6 +3066,16 @@ export class ImporterLiteRuntime {
       }
     } finally {
       this.monitorGate.release();
+      if (
+        hadTask
+        && !this.stopped
+        && this.isRuntimeLeader
+        && Date.now() >= this.idleMonitorUntil
+        && !(process.env.NODE_ENV === 'test' || process.env.VITEST)
+      ) {
+        const nextTurn = setTimeout(() => void this.runMonitorTurn().catch(() => {}), 200);
+        nextTurn.unref();
+      }
     }
   }
 
@@ -3597,7 +3629,8 @@ export class ImporterLiteRuntime {
     if (task.payload.metadataEnrichment) return this.enrichStoredMappingMetadata(task, workerId, source, sourceWorkId);
     if (task.payload.metadataSourceRefresh) return this.refreshMappingMetadataFromSource(task, workerId, source, sourceWorkId, metadataTimings);
     const adapter = this.registry.get(source);
-    if (!adapter || !sourceWorkId) return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CATALOG_INPUT_INVALID' });
+    const isInvalidNexusId = source === 'nexus' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sourceWorkId);
+    if (!adapter || !sourceWorkId || isInvalidNexusId) return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CATALOG_INPUT_INVALID' });
     const policy = await this.queue.sourcePolicy(source);
     // `catalogDiscoveryEnabled` controls source-wide P2 DISCOVER only. A
     // CATALOG task already has a confirmed source-work mapping: blocking it
@@ -3629,6 +3662,131 @@ export class ImporterLiteRuntime {
       this.config.SOURCE_OPERATION_TIMEOUT_MS,
       'CATALOG_SOURCE_TIMEOUT');
       fetchedSnapshot = true;
+
+      const fpLanguage = String(snapshot.details.language || (snapshot.details.raw as any)?.language || 'pt-BR');
+      const fpEdition = String(snapshot.details.edition || (snapshot.details.raw as any)?.edition || 'default');
+      const fpStatus = String(snapshot.details.status || 'UNKNOWN').toUpperCase();
+      const seenFpChapterIds = new Set<string>();
+      const fpChapters: Array<[string, string, string]> = [];
+      for (const ch of snapshot.chapters) {
+        const cid = String(ch.sourceChapterId || '');
+        if (!cid || seenFpChapterIds.has(cid)) continue;
+        seenFpChapterIds.add(cid);
+        fpChapters.push([cid, String(ch.displayNumber || ch.number), String(ch.title || '')]);
+      }
+      const manifestFingerprint = createHash('sha256')
+        .update(JSON.stringify({
+          v: 1,
+          status: fpStatus,
+          language: fpLanguage,
+          edition: fpEdition,
+          ingest: Boolean(policy.chapterIngestionEnabled),
+          chapters: fpChapters,
+        }))
+        .digest('hex');
+
+      const finishUnchangedMonitor = async (knownReleaseAt: string | null): Promise<void> => {
+        const monitored = fpStatus !== 'CANCELLED';
+        let chapterReleaseAt: string | null = knownReleaseAt || (task.checkpoint?.lastReleaseAt as string) || null;
+        if (!chapterReleaseAt && Array.isArray(snapshot.chapters)) {
+          for (const ch of snapshot.chapters) {
+            if (ch.createdAt && (!chapterReleaseAt || ch.createdAt > chapterReleaseAt)) {
+              chapterReleaseAt = ch.createdAt;
+            }
+          }
+        }
+        const checkedAt = new Date().toISOString();
+        await this.queue.finish(task, workerId, monitored ? {
+          state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
+          nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, fpStatus, 0, chapterReleaseAt)),
+          workId: task.workId!,
+          checkpoint: {
+            workId: task.workId!,
+            lastCheckedAt: checkedAt,
+            lastNewReleaseCount: 0,
+            lastReleaseAt: chapterReleaseAt,
+            manifestFingerprint,
+            emptyChecks: Number(task.checkpoint.emptyChecks || 0) + 1,
+          },
+          resetAttempts: true,
+        } : {
+          state: 'DONE',
+          workId: task.workId!,
+          checkpoint: { workId: task.workId!, lastCheckedAt: checkedAt, manifestFingerprint },
+          resetAttempts: true,
+        });
+        await this.queue.recordSourceSuccess(source);
+      };
+
+      if (
+        task.monitoring === true
+        && Boolean(task.workId)
+        && !task.checkpoint?.presentationIncomplete
+        && typeof task.checkpoint?.manifestFingerprint === 'string'
+        && task.checkpoint.manifestFingerprint === manifestFingerprint
+      ) {
+        await finishUnchangedMonitor(null);
+        return;
+      }
+
+      if (
+        !(process.env.NODE_ENV === 'test' || process.env.VITEST)
+        && task.monitoring === true
+        && Boolean(task.workId)
+        && !task.checkpoint?.presentationIncomplete
+        && !task.checkpoint?.manifestFingerprint
+        && fpChapters.length > 0
+      ) {
+        try {
+          const checkPool = this.sourceMetadataPool || this.pool;
+          const dbManifest = await checkPool.query<{
+            work_status: string;
+            has_presentation: boolean;
+            matched_chapters: number;
+            has_blocked_tasks: boolean;
+            latest_release_at: Date | null;
+          }>(`
+            SELECT
+              UPPER(COALESCE(w.status, 'UNKNOWN')) AS work_status,
+              (w.title IS NOT NULL AND w.slug IS NOT NULL AND w.cover_id IS NOT NULL) AS has_presentation,
+              (SELECT count(*)::int
+               FROM importer_lite_chapter_sources cs
+               WHERE cs.work_id = w.id
+                 AND cs.source = $2
+                 AND cs.source_work_id = $3
+                 AND cs.confirmed = true
+                 AND cs.has_chapter = true
+                 AND cs.source_chapter_id = ANY($4::text[])) AS matched_chapters,
+              EXISTS (
+                SELECT 1 FROM importer_lite_tasks bt
+                WHERE bt.work_id = w.id AND bt.state = 'BLOCKED'
+              ) AS has_blocked_tasks,
+              (SELECT max(COALESCE(c.published_at, c.created_at))
+               FROM chapters c
+               WHERE c.work_id = w.id) AS latest_release_at
+            FROM works w
+            WHERE w.id = $1::uuid
+          `, [task.workId, source, sourceWorkId, fpChapters.map((c) => c[0])]);
+          const row = dbManifest.rows[0];
+          const statusMatches = row && (
+            row.work_status === fpStatus
+            || fpStatus === 'UNKNOWN'
+            || (row.work_status === 'COMPLETED' && fpStatus === 'ONGOING')
+          );
+          if (
+            row
+            && row.has_presentation
+            && !row.has_blocked_tasks
+            && statusMatches
+            && Number(row.matched_chapters) === fpChapters.length
+          ) {
+            await finishUnchangedMonitor(row.latest_release_at ? row.latest_release_at.toISOString() : null);
+            return;
+          }
+        } catch {
+          // Fall through to full materialization pass on any precheck error
+        }
+      }
       const rawDetails = snapshot.details.raw && typeof snapshot.details.raw === 'object' ? snapshot.details.raw : {};
       // Persist precisely the provider-declared fields alongside its raw
       // payload.  Some adapters expose these normalized arrays without
@@ -3778,7 +3936,7 @@ export class ImporterLiteRuntime {
         // If the work still has an international title and no PT-BR alias was found in metadata across all sources,
         // inspect cover images from confirmed Brazilian complementary sources and the origin source.
         try {
-          const workTitleCheck = await this.pool.query<{
+          const workTitleCheck = await (this.sourceMetadataPool || this.pool).query<{
             id: string;
             title: string;
             slug: string;
@@ -4005,18 +4163,21 @@ export class ImporterLiteRuntime {
           }
         } catch {}
       }
+      const checkedAt = new Date().toISOString();
       await this.queue.finish(task, workerId, monitored ? {
         state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
         nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, newReleaseCount, chapterReleaseAt)),
         workId: resolved.workId,
         checkpoint: {
-          workId: resolved.workId, lastCheckedAt: new Date().toISOString(),
+          workId: resolved.workId, lastCheckedAt: checkedAt,
           lastNewReleaseCount: newReleaseCount,
           lastReleaseAt: chapterReleaseAt,
+          manifestFingerprint,
+          presentationIncomplete: false,
           emptyChecks: newReleaseCount ? 0 : Number(task.checkpoint.emptyChecks || 0) + 1,
         },
         resetAttempts: true,
-      } : { state: 'DONE', workId: resolved.workId, checkpoint: { workId: resolved.workId }, resetAttempts: true });
+      } : { state: 'DONE', workId: resolved.workId, checkpoint: { workId: resolved.workId, lastCheckedAt: checkedAt, manifestFingerprint }, resetAttempts: true });
       await this.queue.recordSourceSuccess(source);
     } catch (error: any) {
       if (!fetchedSnapshot) await this.queue.recordSourceFailure(source, error);
@@ -4030,7 +4191,11 @@ export class ImporterLiteRuntime {
       await this.queue.finish(task, workerId, { state: monitorRetry ? 'RETRY_WAIT' : task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
         reason: String(error?.message || 'CATALOG_FAILED').slice(0,500), nextRunAt: new Date(Date.now() + retryDelay),
         priority: monitorRetry ? 'P0' : undefined, monitoring: monitorRetry || undefined,
-        checkpoint: monitorRetry ? { monitorFailures: Number(task.checkpoint.monitorFailures || 0) + 1 } : undefined });
+        checkpoint: monitorRetry ? {
+          monitorFailures: Number(task.checkpoint.monitorFailures || 0) + 1,
+          lastAttemptedAt: new Date().toISOString(),
+          lastError: String(error?.message || 'CATALOG_FAILED').slice(0, 240),
+        } : undefined });
     }
   }
 

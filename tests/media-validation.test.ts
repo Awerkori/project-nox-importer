@@ -64,4 +64,13 @@ describe('Media Validation & Inspection', () => {
     expect(hash1).toBe(hash2);
     expect(hash1).toHaveLength(64);
   });
+
+  it('contains known placeholder/mascot SHA-256 hashes in the rejection blocklist', async () => {
+    const { KNOWN_PLACEHOLDER_HASHES } = await import('../src/lite/executor.js');
+    expect(KNOWN_PLACEHOLDER_HASHES.has('bff6cd5561f14d02a0c831423cb3535997ed3f136de1aa6e34997c4eb28ee496')).toBe(true);
+    expect(KNOWN_PLACEHOLDER_HASHES.has('1ac47dbc0ccb5b20625eb9a8264fbcf6f76c7cf7851a14eb8516d3f27f88417c')).toBe(true);
+    expect(KNOWN_PLACEHOLDER_HASHES.has('d4037c32bc7444cd03b967e71bb411a7e4c88acbbd21e396a4beafdaf86189ff')).toBe(true);
+    expect(KNOWN_PLACEHOLDER_HASHES.has('d47f06f2a4a7e37891b5096f4256ae01aee2c15140fbaca1343c11d3765f02a3')).toBe(true);
+    expect(KNOWN_PLACEHOLDER_HASHES.has('1c52c84ed88f6b813b2c6b3e34bca86ba9733c3756b3e3c0fec5f1595fb0b046')).toBe(true);
+  });
 });
