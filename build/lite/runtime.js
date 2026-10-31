@@ -357,7 +357,7 @@ export class ImporterLiteRuntime {
     // source watches current across 43 sources while chapters run. Only one
     // short SQL claim is ever in flight (monitorClaimGate); the remaining slots
     // run independent source network fetches in parallel without YSQL contention.
-    monitorGate = new AsyncSemaphore(8, 'lite_p0_monitor');
+    monitorGate = new AsyncSemaphore(6, 'lite_p0_monitor');
     monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
     runtimeInstanceId;
     runtimeBootedAt = new Date();
@@ -3786,6 +3786,41 @@ export class ImporterLiteRuntime {
                 try {
                     const checkPool = this.sourceMetadataPool || this.pool;
                     const dbManifest = await checkPool.query(`
+            WITH work_known_chapters AS MATERIALIZED (
+              SELECT lc.canonical_chapter_key
+              FROM importer_lite_chapters lc
+              JOIN chapters c
+                ON c.id = lc.chapter_id
+               AND c.published_at IS NOT NULL
+              WHERE lc.work_id = $1::uuid
+              UNION
+              SELECT t.chapter_key
+              FROM importer_lite_tasks t
+              WHERE t.work_id = $1::uuid
+                AND t.chapter_key IS NOT NULL
+                AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+                AND t.state IN ('READY', 'RUNNING', 'RETRY_WAIT', 'DONE')
+            ),
+            matched_sources AS MATERIALIZED (
+              SELECT cs.source_chapter_id
+              FROM importer_lite_chapter_sources cs
+              JOIN work_known_chapters kc
+                ON kc.canonical_chapter_key = cs.canonical_chapter_key
+              WHERE cs.work_id = $1::uuid
+                AND cs.source = $2
+                AND cs.source_work_id = $3
+                AND cs.confirmed = true
+                AND COALESCE(cs.has_chapter, true) = true
+              UNION
+              SELECT cm.source_chapter_id
+              FROM importer_chapter_mappings cm
+              JOIN chapters c
+                ON c.id = cm.chapter_id
+               AND c.published_at IS NOT NULL
+              WHERE cm.work_id = $1::uuid
+                AND cm.source = $2
+                AND cm.source_chapter_id = ANY($4::text[])
+            )
             SELECT
               UPPER(COALESCE(w.status, 'UNKNOWN')) AS work_status,
               (
@@ -3802,52 +3837,17 @@ export class ImporterLiteRuntime {
               (SELECT count(*)::int
                FROM unnest($4::text[]) AS req(scid)
                WHERE EXISTS (
-                 SELECT 1
-                 FROM importer_lite_chapter_sources cs
-                 WHERE cs.work_id = w.id
-                   AND cs.source = $2
-                   AND cs.source_work_id = $3
-                   AND cs.confirmed = true
-                   AND COALESCE(cs.has_chapter, true) = true
-                   AND cs.source_chapter_id = req.scid
-                   AND (
-                     EXISTS (
-                       SELECT 1
-                       FROM importer_lite_chapters lc
-                       JOIN chapters c
-                         ON c.id = lc.chapter_id
-                        AND c.published_at IS NOT NULL
-                       WHERE lc.work_id = cs.work_id
-                         AND lc.canonical_chapter_key = cs.canonical_chapter_key
-                     )
-                     OR EXISTS (
-                       SELECT 1
-                       FROM importer_lite_tasks t
-                       WHERE t.work_key = ('work:' || w.id::text)
-                         AND t.chapter_key = cs.canonical_chapter_key
-                         AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
-                         AND t.state IN ('READY', 'RUNNING', 'RETRY_WAIT', 'DONE')
-                     )
-                   )
-               ) OR EXISTS (
-                 SELECT 1
-                 FROM importer_chapter_mappings cm
-                 JOIN chapters c
-                   ON c.id = cm.chapter_id
-                  AND c.published_at IS NOT NULL
-                 WHERE cm.work_id = w.id
-                   AND cm.source = $2
-                   AND cm.source_chapter_id = req.scid
+                 SELECT 1 FROM matched_sources ms WHERE ms.source_chapter_id = req.scid
                )) AS matched_chapters,
               EXISTS (
                 SELECT 1 FROM importer_lite_tasks bt
-                WHERE bt.work_key = ('work:' || w.id::text)
+                WHERE bt.work_id = $1::uuid
                   AND bt.state = 'BLOCKED'
                   AND bt.reason = 'WORK_PRESENTATION_INCOMPLETE'
               ) AS has_presentation_blocked_tasks,
               (SELECT max(COALESCE(c.published_at, c.created_at))
                FROM chapters c
-               WHERE c.work_id = w.id) AS latest_release_at
+               WHERE c.work_id = $1::uuid) AS latest_release_at
             FROM works w
             WHERE w.id = $1::uuid
           `, [task.workId, source, sourceWorkId, fpChapters.map((c) => c[0])]);
