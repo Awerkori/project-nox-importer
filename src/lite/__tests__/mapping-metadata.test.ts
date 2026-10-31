@@ -242,4 +242,26 @@ describe('stored mapping metadata enrichment', () => {
       'Ex Sponsor',
     ]);
   });
+
+  it('classifies placeholder and format-descriptor alternativeTitles as NO_ALIASES while flagging unsupported object shapes as PARSER_ERROR', () => {
+    for (const raw of [
+      { alternativeTitles: ['---'], genres: ['Romance'] },
+      { alternativeTitles: ['--'], genres: ['Drama'] },
+      { obr_outros_nomes: '[]', alternativeTitles: ['[]'], tags: [{ tag_nome: 'Fantasia' }] },
+      { alternativeTitles: ['One-shot'], genres: ['Aventura'] },
+      { alternativeTitles: ['Pre-Serialization', 'Digital Colored Comics'], genres: ['Ação'] },
+    ]) {
+      const classified = classifyExplicitSourceMetadata(raw, 'Obra Exemplo');
+      expect(classified.parserError).toBe(false);
+      expect(classified.aliasesState).toBe('NO_ALIASES');
+      expect(classified.tagsState).toBe('ENRICHED');
+    }
+
+    const broken = classifyExplicitSourceMetadata(
+      { alternativeTitles: { unsupportedNestedObject: 'Native Title' } },
+      'Obra Exemplo',
+    );
+    expect(broken.parserError).toBe(true);
+    expect(broken.aliasesState).toBe('PARSER_ERROR');
+  });
 });

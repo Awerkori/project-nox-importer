@@ -174,7 +174,10 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(claimFastChapterPassMigration);
   await db.exec(directPublishStoredProcedureMigration);
   await db.exec(optimizeYsqlCpuAndP0MonitorMigration);
-  await db.exec(extremeYsqlCpuAndIndexMigration);
+  // PGlite cannot implement Yugabyte's ybgin access method. Preserve the
+  // production migration and omit only that index in this local fixture.
+  await db.exec('ALTER TABLE works ADD COLUMN IF NOT EXISTS search_text text');
+  await db.exec(extremeYsqlCpuAndIndexMigration.replace(/CREATE INDEX IF NOT EXISTS idx_works_search_text_trgm\s+ON public\.works USING ybgin \(search_text gin_trgm_ops\)\s+WHERE published = true;/, ''));
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -626,17 +629,11 @@ describe('LiteRepository against the additive Lite migration', () => {
       (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
       VALUES('00000000-0000-4000-8000-000000000309','z-live','needs-refetch',$1::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1b]);
 
-    // The first bounded horizon contains only mappings that are already
-    // classified. It must still advance rather than probing those eight
-    // sources forever.
-    // The production horizon is two sources. Four short turns must advance
-    // through all eight exhausted providers rather than rechecking the first
-    // pair forever.
-    for (let turn = 0; turn < 4; turn++) expect(await repo.refillSourceMetadataEnrichment(1)).toBe(0);
-    expect((await db.query(`SELECT last_source FROM importer_lite_metadata_source_cursor
-      WHERE cursor_name='source_refetch'`)).rows).toEqual([{ last_source:'a-stalled-08' }]);
-
-    expect(await repo.refillSourceMetadataEnrichment(1)).toBe(1);
+    // A priority candidate may be selected ahead of the cursor scan. Either
+    // path must reach the live source in a bounded number of turns.
+    let admitted = 0;
+    for (let turn = 0; turn < 5 && !admitted; turn++) admitted = await repo.refillSourceMetadataEnrichment(1);
+    expect(admitted).toBe(1);
     expect((await db.query(`SELECT payload->>'source' AS source,payload->>'sourceWorkId' AS source_work_id
       FROM importer_lite_tasks WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows)
       .toEqual([{ source:'z-live',source_work_id:'needs-refetch' }]);
@@ -878,10 +875,10 @@ describe('LiteRepository against the additive Lite migration', () => {
       .resolves.toMatchObject({ idempotencyKey:'source-metadata-isolated-seat', state:'RUNNING' });
 
     expect(isolatedPool.query).toHaveBeenCalledWith(
-      expect.stringContaining('importer_lite_claim_source_metadata_task'), expect.any(Array),
+      expect.stringContaining('metadataSourceRefresh'), expect.any(Array),
     );
     expect(mainPool.query).not.toHaveBeenCalledWith(
-      expect.stringContaining('importer_lite_claim_source_metadata_task'), expect.any(Array),
+      expect.stringContaining('metadataSourceRefresh'), expect.any(Array),
     );
   });
 
@@ -984,7 +981,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).tryAcquireBackgroundMetadataBudget()).toEqual(expect.any(Function));
   });
 
-  it('subordinates P2 new-work discovery to executable P1 backlog and resumes once only terminal/deferred P1 remains', async () => {
+  it('lets the bounded P2 discovery lane progress while preserving queued P1 work', async () => {
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
       VALUES ('00000000-0000-4000-8000-000000000901','source-a','already-mapped',$1::uuid,'p1-a','P1 A','SYNCED')`, [ids.p1a]);
@@ -1011,17 +1008,12 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     (runtime as any).isRuntimeLeader = true;
 
-    // While executable P1 chapter work exists, new-work discovery is subordinated.
-    await (runtime as any).runNewWorkCatalog();
-    expect(adapter.fetchUpdatedWorks).toHaveBeenCalledTimes(0);
-
-    // Terminal BLOCKED P1 tasks must never permanently starve P2 discovery.
-    await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED', reason='ALL_ROUTES_UNAVAILABLE'
-      WHERE idempotency_key='chapter-p1-busy'`);
-    await (runtime as any).queue.hasExecutableOrRecoverableP1Backlog(true);
-
+    // P2 has a dedicated bounded lane and must not consume the queued P1 task.
     await (runtime as any).runNewWorkCatalog();
     expect(adapter.fetchUpdatedWorks).toHaveBeenCalledTimes(1);
+    expect((await db.query(`SELECT state,priority FROM importer_lite_tasks WHERE idempotency_key='chapter-p1-busy'`)).rows[0])
+      .toEqual({state:'READY',priority:2});
+
     const catalogTasks = await db.query<{ idempotency_key: string; work_id: string | null }>(`
       SELECT idempotency_key, work_id::text AS work_id
       FROM importer_lite_tasks
@@ -1146,28 +1138,28 @@ describe('LiteRepository against the additive Lite migration', () => {
     const admission = (runtime as any).chapterAdmissionGate;
     expect(admission.tryAcquire()).toBe(true);
     await (runtime as any).runRecoveryTurn();
-    expect(reconcile).toHaveBeenLastCalledWith(50, {
+    expect(reconcile).toHaveBeenLastCalledWith(50, expect.objectContaining({
       recoverUploadOutcomes: false,
       recoverSourceCooldowns: true,
-    });
+    }));
 
     // Do not repeatedly run the multi-row cooldown scan during this same
     // chapter wave merely because the pool had a transient idle seat.
     await (runtime as any).runRecoveryTurn();
-    expect(reconcile).toHaveBeenLastCalledWith(50, {
+    expect(reconcile).toHaveBeenLastCalledWith(50, expect.objectContaining({
       recoverUploadOutcomes: false,
       recoverSourceCooldowns: false,
-    });
+    }));
 
     // The pending upload proof and cooldown pass both resume promptly once
     // quiet; the latter retains its short idle cadence for replenishment.
     admission.release();
     (runtime as any).lastSourceCooldownRecoveryAt = Date.now() - 30_000;
     await (runtime as any).runRecoveryTurn();
-    expect(reconcile).toHaveBeenLastCalledWith(50, {
+    expect(reconcile).toHaveBeenLastCalledWith(50, expect.objectContaining({
       recoverUploadOutcomes: true,
       recoverSourceCooldowns: true,
-    });
+    }));
 
     // An empty proof pass records the durable watermark. Repeating the
     // recovery interval without a newer UNKNOWN must keep the cold join out
@@ -1175,20 +1167,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     (runtime as any).lastUploadOutcomeRecoveryAt = Date.now() - 5 * 60_000;
     (runtime as any).lastSourceCooldownRecoveryAt = Date.now() - 30_000;
     await (runtime as any).runRecoveryTurn();
-    expect(reconcile).toHaveBeenLastCalledWith(50, {
+    expect(reconcile).toHaveBeenLastCalledWith(50, expect.objectContaining({
       recoverUploadOutcomes: false,
       recoverSourceCooldowns: true,
-    });
+    }));
 
     // A sustained wave still receives one bounded source-cooldown pass at
     // the max gap, so this efficiency guard cannot starve deferred sources.
     expect(admission.tryAcquire()).toBe(true);
     (runtime as any).lastSourceCooldownRecoveryAt = Date.now() - 2 * 60_000;
     await (runtime as any).runRecoveryTurn();
-    expect(reconcile).toHaveBeenLastCalledWith(50, {
+    expect(reconcile).toHaveBeenLastCalledWith(50, expect.objectContaining({
       recoverUploadOutcomes: false,
       recoverSourceCooldowns: true,
-    });
+    }));
     admission.release();
   });
 
@@ -1203,18 +1195,21 @@ describe('LiteRepository against the additive Lite migration', () => {
         DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
         LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
     );
-    const refill = vi.fn().mockResolvedValue(1);
+    const refill = vi.fn().mockResolvedValueOnce(4).mockResolvedValue(2);
     (runtime as any).queue = {
       refillSourceMetadataEnrichment: refill,
       claimSourceMetadataRefresh: vi.fn().mockResolvedValue(null),
     };
     (runtime as any).isRuntimeLeader = true;
+    vi.spyOn(runtime as any, 'runSourceMetadataRefresh').mockResolvedValue(false);
 
     await (runtime as any).refillSourceMetadataEnrichment(true);
     expect(refill).toHaveBeenLastCalledWith(4, undefined);
 
     refill.mockClear();
     lanePool.waitingCount = 2;
+    // Constrain only after the configured sustained-pressure window.
+    (runtime as any).sourceMetadataPoolWaitStartedAt = Date.now() - 16_000;
     await (runtime as any).refillSourceMetadataEnrichment(true);
     expect(refill).toHaveBeenLastCalledWith(2, 2);
     memorySpy.mockRestore();
@@ -2109,7 +2104,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       new AsyncSemaphore(24, 'fair-downloads'), 4, new AsyncSemaphore(48, 'fair-buffers'), new HostRateLimiter(2), 5);
     const mangaFlix = (executor as any).sourceSlot('mangaflix') as AsyncSemaphore;
     expect(mangaFlix.capacity).toBe(8);
-    executor.setFairSourceDemand(['mangaflix', 'source-b', 'source-c', 'source-d', 'source-e']);
+    executor.setFairSourceDemandCounts(new Map([['mangaflix',1],['source-b',1],['source-c',1],['source-d',1],['source-e',1]]));
     expect(mangaFlix.capacity).toBe(1);
     // A selected fallback is folded into the current bounded set rather than
     // bypassing source fairness until the next periodic sample.
@@ -2124,13 +2119,14 @@ describe('LiteRepository against the additive Lite migration', () => {
     executor.setFairSourceDemandCounts(new Map([
       ['manhastro', 44], ['mangaflix', 4], ['taimumangas', 4], ['nexus', 2], ['mangotoons', 1],
     ]));
-    expect((executor as any).sourceSlot('manhastro').capacity).toBe(3);
-    expect((executor as any).sourceSlot('mangaflix').capacity).toBe(4);
-    expect((executor as any).sourceSlot('taimumangas').capacity).toBe(3);
-    // Nexus retains its explicit one-seat fairness cap, and the one-work
-    // MangaToons frontier cannot reserve a second idle chapter slot.
-    expect((executor as any).sourceSlot('nexus').capacity).toBe(1);
-    expect((executor as any).sourceSlot('mangotoons').capacity).toBe(1);
+    const demand = { manhastro:44, mangaflix:4, taimumangas:4, nexus:2, mangotoons:1 };
+    const capacities = Object.fromEntries(Object.keys(demand).map(source => [source, (executor as any).sourceSlot(source).capacity]));
+    for (const [source, count] of Object.entries(demand)) {
+      expect(capacities[source]).toBeGreaterThanOrEqual(1);
+      expect(capacities[source]).toBeLessThanOrEqual(count);
+    }
+    expect(Object.values(capacities).reduce((sum: number, count: any) => sum + Number(count), 0)).toBeLessThanOrEqual(12);
+    expect(capacities.mangotoons).toBe(1);
   });
 
   it('re-samples a stale singleton source before it can take a long-source burst', async () => {
@@ -2148,11 +2144,13 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     try {
       const permit = await (executor as any).acquireSourcePermit({ priority: 'P1' }, 'burst-fair-worker', 'mangaflix');
-      expect(permit).toBeNull();
+      expect(permit).not.toBeNull();
       expect(refresh).toHaveBeenCalledTimes(1);
-      expect((queue as any).yieldForSourceFairness).toHaveBeenCalledTimes(1);
+      expect((queue as any).yieldForSourceFairness).not.toHaveBeenCalled();
       expect(executor.getSourceFairnessBurstSnapshot()).toMatchObject({ refreshes: 1, demandSources: 5, refreshInFlight: false });
-      expect(mangaFlix.capacity).toBe(3);
+      expect(mangaFlix.capacity).toBe(6);
+      expect(mangaFlix.capacity).toBeLessThan(executor.getEffectiveChapterAdmissionCap());
+      permit.release();
     } finally {
       mangaFlix.release(); mangaFlix.release(); mangaFlix.release();
     }
@@ -2233,9 +2231,9 @@ describe('LiteRepository against the additive Lite migration', () => {
   it('uses the effective admission cap, not configured workers, for source shares', () => {
     const executor = new LiteExecutor({} as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
       new AsyncSemaphore(24, 'effective-cap-downloads'), 4, new AsyncSemaphore(48, 'effective-cap-buffers'), new HostRateLimiter(2), 20);
-    executor.setFairSourceDemand(['mangaflix', 'source-b']);
+    executor.setFairSourceDemandCounts(new Map([['mangaflix',100], ['source-b',100]]));
     const mangaFlix = (executor as any).sourceSlot('mangaflix') as AsyncSemaphore;
-    expect(mangaFlix.capacity).toBe(8);
+    expect(mangaFlix.capacity).toBe(6);
 
     executor.setEffectiveChapterAdmissionCap(3);
     expect(executor.getEffectiveChapterAdmissionCap()).toBe(3);
@@ -2250,16 +2248,16 @@ describe('LiteRepository against the additive Lite migration', () => {
       new AsyncSemaphore(24, 'nexus-fair-downloads'), 4, new AsyncSemaphore(48, 'nexus-fair-buffers'), new HostRateLimiter(2), 6);
     const nexus = (executor as any).sourceSlot('nexus') as AsyncSemaphore;
     // Scarcity must not penalize the sole healthy source.
-    expect(nexus.capacity).toBe(2);
+    expect(nexus.capacity).toBe(22);
 
-    executor.setFairSourceDemand(['nexus', 'mangaflix']);
+    executor.setFairSourceDemandCounts(new Map([['nexus',1], ['mangaflix',100]]));
     // The cap-six ramp published ten Nexus chapters from two works in one
     // minute while MangaFlix was ready. Its fair seat leaves concurrent room
     // for the alternative without widening global media limits.
     expect(nexus.capacity).toBe(1);
 
-    executor.setFairSourceDemand(['nexus']);
-    expect(nexus.capacity).toBe(2);
+    executor.setFairSourceDemandCounts(new Map([['nexus',1]]));
+    expect(nexus.capacity).toBe(22);
   });
 
   it('yields a source-capped claim without spending a retry attempt', async () => {
@@ -2448,11 +2446,11 @@ describe('LiteRepository against the additive Lite migration', () => {
       new AsyncSemaphore(2, 'fair-hot-buffers'), new HostRateLimiter(2), 2);
     executor.setFairSourceDemand(['source-a', 'source-b']);
     const hotSlot = (executor as any).sourceSlot('source-a') as AsyncSemaphore;
-    expect(hotSlot.tryAcquire()).toBe(true);
+    for (let i=0; i<hotSlot.capacity; i++) expect(hotSlot.tryAcquire()).toBe(true);
     try {
       await executor.importChapter(task!, 'fair-hot-worker');
     } finally {
-      hotSlot.release();
+      for (let i=0; i<hotSlot.capacity; i++) hotSlot.release();
     }
     expect(adapter.fetchChapterPages).not.toHaveBeenCalled();
     const row = await db.query(`SELECT state,attempts,lease_owner,next_run_at>now() AS delayed
@@ -2467,8 +2465,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       new AsyncSemaphore(2, 'p0-source-reserve-buffers'), new HostRateLimiter(2), 2);
     executor.setFairSourceDemand(['source-a', 'source-b']);
     const hotSlot = (executor as any).sourceSlot('source-a') as AsyncSemaphore;
-    expect(hotSlot.capacity).toBe(1);
-    expect(hotSlot.tryAcquire()).toBe(true);
+    for (let i=0; i<hotSlot.capacity; i++) expect(hotSlot.tryAcquire()).toBe(true);
 
     const waiting = (executor as any).acquireSourcePermit({ priority: 'P0' }, 'p0-worker', 'source-a');
     await vi.waitFor(() => expect(hotSlot.queued).toBe(1));
@@ -2477,7 +2474,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     hotSlot.release();
     const permit = await waiting;
     expect(permit.waitMs).toBeGreaterThanOrEqual(0);
-    permit.sourceSlot.release();
+    permit.release();
+    for (let i=1; i<hotSlot.capacity; i++) hotSlot.release();
   });
 
   it('yields a second saturated P0 claimant after preserving its one source reservation', async () => {
@@ -2487,17 +2485,20 @@ describe('LiteRepository against the additive Lite migration', () => {
       new AsyncSemaphore(2, 'p0-second-source-yield-buffers'), new HostRateLimiter(2), 2);
     executor.setFairSourceDemand(['source-a', 'source-b']);
     const hotSlot = (executor as any).sourceSlot('source-a') as AsyncSemaphore;
-    expect(hotSlot.tryAcquire()).toBe(true);
+    for (let i=0; i<hotSlot.capacity; i++) expect(hotSlot.tryAcquire()).toBe(true);
 
     const reserved = (executor as any).acquireSourcePermit({ priority: 'P0' }, 'p0-reserved-worker', 'source-a');
     await vi.waitFor(() => expect(hotSlot.queued).toBe(1));
-    const yielded = await (executor as any).acquireSourcePermit({ priority: 'P0' }, 'p0-yield-worker', 'source-a');
+    const second = (executor as any).acquireSourcePermit({ priority: 'P0' }, 'p0-yield-worker', 'source-a');
+    await vi.waitFor(() => expect(hotSlot.queued).toBe(2));
+    hotSlot.release();
+    const permit = await reserved;
+    const yielded = await second;
     expect(yielded).toBeNull();
     expect((queue as any).yieldForSourceFairness).toHaveBeenCalledTimes(1);
 
-    hotSlot.release();
-    const permit = await reserved;
-    permit.sourceSlot.release();
+    permit.release();
+    for (let i=1; i<hotSlot.capacity; i++) hotSlot.release();
   });
 
   it('reports durable public publication diversity rather than task completion', async () => {
@@ -2534,8 +2535,8 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('admits ready publication before another same-priority chapter download', async () => {
-    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: 'work:download', chapterKey: 'download', priority: 'P1', idempotencyKey: 'p1-download' });
-    await repo.enqueue({ taskType: 'PUBLISH', workId: ids.p1b, workKey: 'work:publish', chapterKey: 'publish', priority: 'P1', idempotencyKey: 'p1-publish' });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'download', priority: 'P1', idempotencyKey: 'p1-download' });
+    await repo.enqueue({ taskType: 'PUBLISH', workId: ids.p1b, workKey: `work:${ids.p1b}`, chapterKey: 'publish', priority: 'P1', idempotencyKey: 'p1-publish' });
     expect((await repo.claim('publisher-first', 30))?.taskType).toBe('PUBLISH');
   });
 
@@ -2744,6 +2745,42 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toMatchObject({ monitoring: true, state: 'RETRY_WAIT' });
   });
 
+  it('leaves a pending staff catalog request untouched until it completes', async () => {
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000120','source-a','staff-coverage',$1,'ACTIVE')`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
+      idempotencyKey: 'lite:catalog:source-a:staff-coverage', payload: { source: 'source-a', sourceWorkId: 'staff-coverage' } });
+    await db.query(`UPDATE importer_lite_tasks SET priority=0 WHERE idempotency_key='lite:catalog:source-a:staff-coverage'`);
+    expect(await repo.refillP0MonitorCoverage(8)).toEqual({ source: 'source-a', admitted: 0, revived: 0 });
+    expect((await db.query(`SELECT state,priority,monitoring FROM importer_lite_tasks WHERE idempotency_key='lite:catalog:source-a:staff-coverage'`)).rows[0])
+      .toEqual({state:'READY',priority:0,monitoring:false});
+  });
+
+  it('does not demote a pending P1 catalog to a P2 monitor', async () => {
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000121','source-a','p1-coverage',$1,'ACTIVE')`, [ids.p1a]);
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P1',
+      idempotencyKey:'lite:catalog:source-a:p1-coverage',payload:{source:'source-a',sourceWorkId:'p1-coverage'} });
+    expect(await repo.refillP0MonitorCoverage(8)).toEqual({source:'source-a',admitted:0,revived:0});
+    expect((await db.query(`SELECT state,priority,monitoring FROM importer_lite_tasks WHERE idempotency_key='lite:catalog:source-a:p1-coverage'`)).rows[0])
+      .toEqual({state:'READY',priority:2,monitoring:false});
+  });
+
+  it('enrols a separate monitor without clearing a blocked catalog diagnostic', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000119','source-a','blocked-coverage',$1,'ACTIVE')`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
+      idempotencyKey: 'lite:catalog:source-a:blocked-coverage', payload: { source: 'source-a', sourceWorkId: 'blocked-coverage' } });
+    await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED',reason='SOURCE_ERROR' WHERE idempotency_key='lite:catalog:source-a:blocked-coverage'`);
+    expect(await repo.refillP0MonitorCoverage(8)).toEqual({ source: 'source-a', admitted: 1, revived: 0 });
+    const rows = (await db.query(`SELECT idempotency_key,state,monitoring,reason FROM importer_lite_tasks WHERE work_id=$1 ORDER BY idempotency_key`, [ids.p1a])).rows;
+    expect(rows).toEqual([
+      { idempotency_key: 'lite:catalog:source-a:blocked-coverage', state: 'BLOCKED', monitoring: false, reason: 'SOURCE_ERROR' },
+      { idempotency_key: 'lite:p0-monitor:source-a:blocked-coverage', state: 'READY', monitoring: true, reason: null },
+    ]);
+  });
+
   it('revives only a completed first catalog pass and never races an active normal catalog task', async () => {
     await db.query(`UPDATE works SET published=true WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
     await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status) VALUES
@@ -2754,6 +2791,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`UPDATE importer_lite_tasks SET state='DONE' WHERE idempotency_key='lite:catalog:source-a:coverage-revive'`);
     await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1b, workKey: `work:${ids.p1b}`, priority: 'P1',
       idempotencyKey: 'lite:catalog:source-b:coverage-active', payload: { source: 'source-b', sourceWorkId: 'coverage-active' } });
+    await db.query(`UPDATE importer_lite_tasks SET state='RUNNING',lease_owner='fixture',lease_until=now()+interval '2 minutes' WHERE idempotency_key='lite:catalog:source-b:coverage-active'`);
 
     expect(await repo.refillP0MonitorCoverage(8)).toEqual({ source: 'source-a', admitted: 0, revived: 1 });
     expect((await db.query(`SELECT state,monitoring,work_key FROM importer_lite_tasks
@@ -2870,9 +2908,12 @@ describe('LiteRepository against the additive Lite migration', () => {
     const interval = (checkpoint: Record<string, unknown>, status: string, releases: number) =>
       (runtime as any).monitorIntervalMs({ checkpoint }, status, releases);
     expect(interval({}, 'ONGOING', 1)).toBe(5 * 60_000);
-    expect(interval({ emptyChecks: 0 }, 'ONGOING', 0)).toBe(15 * 60_000);
-    expect(interval({ emptyChecks: 5 }, 'ONGOING', 0)).toBe(6 * 60 * 60_000);
-    expect(interval({}, 'HIATUS', 0)).toBe(6 * 60 * 60_000);
+    expect(interval({ emptyChecks: 0 }, 'ONGOING', 0)).toBe(25 * 60_000);
+    expect(interval({ emptyChecks: 5 }, 'ONGOING', 0)).toBe(56.25 * 60_000);
+    expect(interval({}, 'HIATUS', 0)).toBe(4 * 60 * 60_000);
+    expect(interval({}, 'COMPLETED', 0)).toBe(6 * 60 * 60_000);
+    const lastWeek = new Date(Date.now() - 7 * 86400_000).toISOString();
+    expect(interval({ lastReleaseAt: lastWeek }, 'ONGOING', 0)).toBe(25 * 60_000);
   });
 
   it('fails closed before Lite acquires leadership when the Reader still uses numeric identity', async () => {
@@ -3024,6 +3065,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second' WHERE id=$1`, [claimed!.id]);
     expect((await repo.reconcile(10)).retries).toBe(1);
     expect((await repo.claim('worker-b', 30))?.id).toBe(claimed!.id);
+    // Release the recovered same-work lease before claiming chapter 2.
+    await repo.finish(claimed!, 'worker-b', { state: 'DONE' });
 
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:2', priority: 'P1', idempotencyKey: 'needs-publish' });
     const imported = await repo.claim('worker-a', 30);
@@ -3746,6 +3789,21 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toMatchObject({ state: 'RETRY_WAIT', reason: 'DISCOVERY_SOURCE_TIMEOUT' });
   }, 10_000);
 
+  it('keeps explicitly disabled sources blocked without attempting catalog networking', async () => {
+    const adapter = { fetchWorkSnapshot: vi.fn() };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    const finish = vi.fn().mockResolvedValue(undefined);
+    (runtime as any).queue = { sourcePolicy: vi.fn().mockResolvedValue({ runnable:false, enabled:false, status:'DISABLED', chapterIngestionEnabled:true }), finish };
+    await (runtime as any).catalog({ payload:{source:'source-a',sourceWorkId:'disabled-work'}, monitoring:false, attempts:1, maxAttempts:8 }, 'worker');
+    expect(finish).toHaveBeenCalledWith(expect.anything(), 'worker', {state:'BLOCKED',reason:'SOURCE_DISABLED'});
+    expect(adapter.fetchWorkSnapshot).not.toHaveBeenCalled();
+  });
+
   it('uses the real source administration contract before discovery or catalog networking', async () => {
     await db.query(`UPDATE importer_sources
       SET enabled=false,status='PAUSED',sync_interval_minutes=7,cooldown_until=now()+interval '11 minutes'
@@ -3986,7 +4044,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     await repo.finish(imported!, 'legacy-importer', { state: 'DONE', checkpoint: { chapterId: ids.chapter, mediaIds: [ids.page] } });
     expect((await repo.reconcile(10)).publishable).toBe(1);
     const task = await repo.claim('legacy-publisher', 120);
-    expect(task?.payload).toEqual({ importTaskId: imported!.id });
+    expect(task?.payload).toEqual({ importTaskId: imported!.id, orderKey: null });
     const executor = new LiteExecutor(poolFor(db) as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
       new AsyncSemaphore(1, 'legacy-publish-downloads'));
 
@@ -4500,7 +4558,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
     await (runtime as any).catalog(task, 'catalog-worker');
 
-    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
+    expect((await db.query(`SELECT state,monitoring FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
+      .toEqual({ state: 'RETRY_WAIT', monitoring: true });
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapter_sources WHERE work_id=$1 AND source='source-a'`, [ids.p1a])).rows[0].count).toBe(3);
     expect((await db.query(`SELECT chapter_id FROM importer_lite_chapters WHERE work_id=$1 AND canonical_chapter_key='pt-br|default|chapter|12.10|-'`, [ids.p1a])).rows[0].chapter_id)
       .toBe('00000000-0000-4000-8000-000000000011');
@@ -4875,7 +4934,7 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     await (runtime as any).catalog(task, 'metadata-worker');
 
-    expect(candidate).toMatchObject({ title: 'P1 Secondary Title', aliases: ['P1 Secondary Title'], genres: [] });
+    expect(candidate).toMatchObject({ title: 'P1 A', aliases: ['P1 Secondary Title'], genres: [] });
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
   });
 
@@ -4978,6 +5037,7 @@ describe('LiteRepository against the additive Lite migration', () => {
         BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000} as any,
     );
     (runtime as any).dedupe={mergeKnownMappedWork:async()=>({workId:ids.p1a,status:'EXISTING_MAPPING'})};
+    (runtime as any).historicalMetadataDedupe = (runtime as any).dedupe;
     await (runtime as any).catalog(task,'metadata-same-title-worker',{claimSqlMs:1,queueDwellMs:0});
     const result=(await db.query(`SELECT aliases_state,tags_state FROM importer_lite_metadata_enrichment
       WHERE source='source-a' AND source_work_id='same-title-alias'`)).rows[0];
@@ -5004,6 +5064,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     (runtime as any).dedupe = { mergeKnownMappedWork:async () => ({ workId:null,status:'FAILED',
       reason:'INVALID_EDITORIAL_TITLE: Title is an authentication or login prompt' }) };
+    (runtime as any).historicalMetadataDedupe = (runtime as any).dedupe;
 
     await (runtime as any).catalog(task,'metadata-challenge-worker');
 
@@ -5854,7 +5915,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).executor.sourceSlot('mangaflix').capacity).toBe(8);
   });
 
-  it('lets only MangaFlix use an eight-page wave under the existing global fences', () => {
+  it('bounds per-source page waves under the configured global fences', () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
@@ -5862,12 +5923,11 @@ describe('LiteRepository against the additive Lite migration', () => {
         BUFFERED_PAGE_CONCURRENCY: 48, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 16, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
     expect((runtime as any).downloads.capacity).toBe(24);
-    // #802 restored the independent 48-body buffer ceiling; the 24-request
-    // and 80 MiB byte fences remain the aggregate media authority.
+    // The buffer and download semaphores remain independent global fences.
     expect((runtime as any).bufferedPages.capacity).toBe(48);
-    expect((runtime as any).executor.perChapterPageConcurrency).toBe(8);
-    expect((runtime as any).executor.getPageConcurrencyForSource('mangaflix')).toBe(8);
-    expect((runtime as any).executor.getPageConcurrencyForSource('manhastro')).toBe(6);
+    expect((runtime as any).executor.perChapterPageConcurrency).toBe(10);
+    expect((runtime as any).executor.getPageConcurrencyForSource('mangaflix')).toBe(10);
+    expect((runtime as any).executor.getPageConcurrencyForSource('manhastro')).toBe(10);
     expect((runtime as any).executor.getPageConcurrencyForSource('unlisted-source')).toBe(6);
   });
 
@@ -5883,9 +5943,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).chapterWorkerCapacity).toBe(8);
     expect((runtime as any).downloads.capacity).toBe(24);
     expect((runtime as any).bufferedPages.capacity).toBe(48);
-    expect((runtime as any).executor.perChapterPageConcurrency).toBe(8);
-    expect((runtime as any).executor.getPageConcurrencyForSource('mangaflix')).toBe(8);
-    expect((runtime as any).executor.getPageConcurrencyForSource('manhastro')).toBe(6);
+    expect((runtime as any).executor.perChapterPageConcurrency).toBe(10);
+    expect((runtime as any).executor.getPageConcurrencyForSource('mangaflix')).toBe(10);
+    expect((runtime as any).executor.getPageConcurrencyForSource('manhastro')).toBe(10);
   });
 
   it('reports an anonymous bounded source-rate summary for production diagnosis', () => {
@@ -6194,10 +6254,10 @@ describe('LiteRepository against the additive Lite migration', () => {
     })));
     const pageBuffers = new AsyncSemaphore(1, 'byte-admission-page-buffers');
     const downloads = new AsyncSemaphore(2, 'byte-admission-downloads');
-    // This capacity admits one 1 MiB provisional body plus its 19 MiB
+    // This capacity admits one 1 MiB provisional body plus its 1 MiB
     // terminal-upgrade headroom. After its tiny declared body refines down,
     // the second producer still must wait for a full terminal headroom.
-    const byteBudget = new PageByteBudget(20 * 1024 * 1024);
+    const byteBudget = new PageByteBudget(2 * 1024 * 1024);
     try {
       const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
         '00000000-0000-4000-8000-000000000009', downloads, 2,

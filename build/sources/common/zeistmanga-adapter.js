@@ -185,9 +185,21 @@ export class ZeistMangaAdapter {
                 html.match(/class=["'][^"']*synopsis[^"']*["'][^>]*>([\s\S]*?)<\/div>/i) ||
                 html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
             const synopsis = descMatch ? decodeHtmlEntities(stripHtml(descMatch[1])).trim() : undefined;
+            const isDecorativeImage = (u) => /(?:iconify\.design|ads\.png|embed|logo|banner|avatar|capa-oculta|doacao|recrutamento|discord|telegram)/i.test(u);
+            const dataOrigMatch = html.match(/<img[^>]+data-original-height=["']\d+["'][^>]+src=["']([^"']+)["']/i)
+                || html.match(/<img[^>]+src=["']([^"']+)["'][^>]+data-original-height=["']\d+["']/i);
+            const bgStyleMatch = [...html.matchAll(/background-image:\s*url\((?:&quot;|["'])?(https?:\/\/(?:blogger\.googleusercontent\.com|\d+\.bp\.blogspot\.com)[^"')\s&]+)(?:&quot;|["'])?\)/gi)]
+                .map((m) => decodeHtmlEntities(m[1]).trim())
+                .find((u) => !isDecorativeImage(u));
             const coverMatch = html.match(/data-image=["']([^"']+)["']/i) ||
-                html.match(/class=["'][^"']*entry-content[^"']*["'][\s\S]*?<img[^>]+src=["']([^"']+)["']/i);
-            const coverUrl = metaContent(html, ['og:image', 'twitter:image']) || (coverMatch ? coverMatch[1] : undefined);
+                html.match(/class=["'][^"']*entry-content[^"']*["'][\s\S]*?<img[^>]+src=["']([^"']+)["']/i) ||
+                dataOrigMatch;
+            const rawCoverUrl = metaContent(html, ['og:image', 'twitter:image'])
+                || (coverMatch ? decodeHtmlEntities(coverMatch[1]).trim() : undefined)
+                || bgStyleMatch;
+            const coverUrl = rawCoverUrl && !isDecorativeImage(rawCoverUrl)
+                ? rawCoverUrl.replace(/\/s72(?:-c)?\//, '/s1600/')
+                : bgStyleMatch?.replace(/\/s72(?:-c)?\//, '/s1600/');
             const genres = [];
             const genreMatches = html.matchAll(/rel=["']tag["'][^>]*>([^<]+)<\/a>/gi);
             for (const m of genreMatches) {
@@ -400,7 +412,9 @@ export class ZeistMangaAdapter {
                     sourceWorkId: altLink || slugify(title),
                     title,
                     slug: slugify(title),
-                    coverUrl: entry.media$thumbnail?.url || null,
+                    coverUrl: entry.media$thumbnail?.url?.replace(/\/s72(?:-c)?\//, '/s600/') ||
+                        this.extractCoverFromContent(entry.content?.['$t'] || entry.summary?.['$t'] || '') ||
+                        null,
                 };
             });
         }

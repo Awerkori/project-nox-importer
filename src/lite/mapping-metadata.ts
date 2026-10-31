@@ -200,27 +200,31 @@ function asTextList(value: unknown, objectKeys: string[] = [], depth = 0): strin
   });
 }
 
+function isPlaceholderMetadataString(rawValue: string): boolean {
+  const trimmed = rawValue.trim();
+  if (!trimmed) return true;
+  if (['[]', '{}', 'null', 'undefined', 'none', 'n/a', 'na'].includes(trimmed.toLowerCase())) return true;
+  return /^(?:[-–—_./\\|?*\s]+|nenhum(?:a)?|sem\s+(?:t[ií]tulo|nome|sin[oô]nimo|informa[cç][aã]o).*|desconhecido|unknown)$/i.test(trimmed);
+}
+
 function hasExplicitValue(metadata: RawRecord, fieldPattern: RegExp): boolean {
   return Object.entries(metadata).some(([key, value]) => {
     if (!fieldPattern.test(key)) return false;
-    if (Array.isArray(value)) return value.length > 0;
-    if (typeof value === 'string') return value.trim().length > 0 && !['[]', '{}', 'null'].includes(value.trim().toLowerCase());
+    if (Array.isArray(value)) {
+      return value.some((item) => {
+        if (typeof item === 'string') return !isPlaceholderMetadataString(item);
+        if (item && typeof item === 'object') return Object.keys(item as object).length > 0;
+        return item !== null && item !== undefined;
+      });
+    }
+    if (typeof value === 'string') return !isPlaceholderMetadataString(value);
     if (value && typeof value === 'object') return Object.keys(value as object).length > 0;
     return value !== null && value !== undefined;
   });
 }
 
-/**
- * Only explicitly named upstream metadata fields are eligible for the
- * no-network historical enrichment pass. It must never mine prose, URLs, or
- * a page title into a fabricated alias or tag.
- */
-export function extractStoredMappingMetadata(raw: unknown, primaryTitle: string): {
-  aliases: string[];
-  genres: string[];
-} {
-  const metadata = raw && typeof raw === 'object' ? raw as RawRecord : {};
-  const aliases = [
+function extractRawAliasStrings(metadata: RawRecord): string[] {
+  return [
     ...STORED_MAPPING_ALIAS_FIELDS.flatMap((field) => asTextList(metadata[field], [
       'title', 'name', 'value', 'nome', 'titulo', 'valor',
       'alternativeTitle', 'alternative_title', 'nativeTitle', 'native_title',
@@ -235,10 +239,26 @@ export function extractStoredMappingMetadata(raw: unknown, primaryTitle: string)
       return typeof val === 'string' && val.trim() ? [val.trim()] : [];
     }),
   ];
-  // Legacy Portuguese adapters persisted tag records with `nome`; accept it
-  // alongside the common English keys so the no-network replay can recover
-  // metadata already stored in YSQL.
-  const genres = STORED_MAPPING_TAG_FIELDS.flatMap((field) => asTextList(metadata[field], ['name', 'nome', 'title', 'label']));
+}
+
+function extractRawGenreStrings(metadata: RawRecord): string[] {
+  return STORED_MAPPING_TAG_FIELDS.flatMap((field) =>
+    asTextList(metadata[field], ['name', 'nome', 'title', 'label', 'tag_nome', 'gen_nome']),
+  );
+}
+
+/**
+ * Only explicitly named upstream metadata fields are eligible for the
+ * no-network historical enrichment pass. It must never mine prose, URLs, or
+ * a page title into a fabricated alias or tag.
+ */
+export function extractStoredMappingMetadata(raw: unknown, primaryTitle: string): {
+  aliases: string[];
+  genres: string[];
+} {
+  const metadata = raw && typeof raw === 'object' ? raw as RawRecord : {};
+  const aliases = extractRawAliasStrings(metadata);
+  const genres = extractRawGenreStrings(metadata);
   return {
     aliases: mergeAlternativeTitles([], aliases, primaryTitle),
     genres: [...new Set(genres.map((value) => value.normalize('NFKC').replace(/\s+/g, ' ').trim()).filter(Boolean))],
@@ -258,16 +278,18 @@ export function classifyExplicitSourceMetadata(raw: unknown, primaryTitle: strin
   parserError: boolean;
 } {
   const metadata = raw && typeof raw === 'object' ? raw as RawRecord : {};
+  const rawAliasStrings = extractRawAliasStrings(metadata).map((s) => s.trim()).filter(Boolean);
   const extracted = extractStoredMappingMetadata(metadata, primaryTitle);
-  // An upstream alias field containing only the primary title is an explicit
-  // and valid NO_ALIASES result, not evidence of a parser defect.
-  const parsedAliasEvidence = extracted.aliases.length > 0
-    ? extracted.aliases
-    : extractStoredMappingMetadata(metadata, '').aliases;
+  // An upstream alias field containing only the primary title, placeholder
+  // dashes, or editorial format labels (e.g. "One-shot", "Pre-Serialization")
+  // that were cleanly parsed as strings and then intentionally filtered by
+  // mergeAlternativeTitles is a valid NO_ALIASES outcome, not a parser error.
+  // Only an explicit metadata structure that failed string extraction (e.g. an
+  // unknown nested object shape) is flagged as PARSER_ERROR.
   const rawAliasEvidence = hasExplicitValue(metadata,
     /^(alternative.?titles?|aliases|alternative.?names|other.?names|also.?known.?as|original.?title|native.?(title|name)|english.?title|romanized.?title|romaji.?title|titulo.?alternative|titulos?.?alternativos?|titulo.?original|nome.?original|titulo.?nativo|nome.?nativo|titulo.?(em.)?ingles|titulo.?romanizado|romaji|nome.?alternativo|nomes?.?alternativos?|outros?.?nomes?|outro.?nome|obr.?outros?.?nomes?|obr.?nome.?alternativo|obr.?titulo.?alternativo|alt|alt.?(names?|titles?)|synonyms?|sin[oô]nimos?|japanese.?title|korean.?title|chinese.?title|titulo.?(japones|japonês|coreano|chines|chinês))$/i);
   const rawTagEvidence = hasExplicitValue(metadata, /^(genres?|tags?|categories|generos?|categorias?)$/i);
-  const aliasesParserError = rawAliasEvidence && parsedAliasEvidence.length === 0;
+  const aliasesParserError = rawAliasEvidence && rawAliasStrings.length === 0 && extracted.aliases.length === 0;
   const tagsParserError = rawTagEvidence && extracted.genres.length === 0;
   return {
     ...extracted,

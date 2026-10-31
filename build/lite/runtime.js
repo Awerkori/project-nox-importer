@@ -353,11 +353,11 @@ export class ImporterLiteRuntime {
     sourceMetadataNoCandidateUntil = 0;
     lastManifestP1RepairAt = 0;
     manifestP1CatchupActive = false;
-    // P0 observation has four bounded network slots. They keep independent
+    // P0 observation has six bounded network slots. They keep independent
     // source watches current across 43 sources while chapters run. Only one
     // short SQL claim is ever in flight (monitorClaimGate); the remaining slots
     // run independent source network fetches in parallel without YSQL contention.
-    monitorGate = new AsyncSemaphore(4, 'lite_p0_monitor');
+    monitorGate = new AsyncSemaphore(6, 'lite_p0_monitor');
     monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
     runtimeInstanceId;
     runtimeBootedAt = new Date();
@@ -1139,7 +1139,8 @@ export class ImporterLiteRuntime {
             return;
         try {
             const now = Date.now();
-            if (this.pool.waitingCount > 0 && now - this.lastHistoricalP1ProducerAttemptAt < HISTORICAL_P1_BUSY_MAX_GAP_MS) {
+            const producerPool = this.sourceMetadataPool !== this.pool ? this.sourceMetadataPool : this.pool;
+            if ((producerPool.waitingCount || 0) > 0 && now - this.lastHistoricalP1ProducerAttemptAt < HISTORICAL_P1_BUSY_MAX_GAP_MS) {
                 this.historicalP1Producer = {
                     observedAt: new Date(now).toISOString(),
                     admitted: 0,
@@ -1275,10 +1276,11 @@ export class ImporterLiteRuntime {
         return this.p1FocusRefreshInFlight;
     }
     async runHistoricalP1CatalogTurn() {
+        const producerPool = this.sourceMetadataPool !== this.pool ? this.sourceMetadataPool : this.pool;
         if (this.stopped || !this.isRuntimeLeader
             || Date.now() < this.idleHistoricalP1CatalogUntil
-            || (this.sourceMetadataPool.waitingCount || 0) > 0
-            || (this.pool.waitingCount || 0) > 0
+            || (producerPool.waitingCount || 0) > 0
+            || (this.pool.waitingCount || 0) > 3
             || this.manualProtectiveStop.active
             || this.metadataReplayV4Exclusive.enabled
             || this.metadataTurboMode.enabled
@@ -2845,8 +2847,19 @@ export class ImporterLiteRuntime {
     }
     /** Persist the exact legacy identity without rewriting any Reader chapter. */
     async upsertLegacyChapterMappings(rows) {
-        for (let offset = 0; offset < rows.length; offset += 500) {
-            const batch = rows.slice(offset, offset + 500);
+        const seenChapterKeys = new Set();
+        const seenChapterIds = new Set();
+        const dedupedRows = [];
+        for (const row of rows) {
+            const wkKey = `${row.workId}:${row.chapterKey}`;
+            if (seenChapterKeys.has(wkKey) || seenChapterIds.has(row.chapterId))
+                continue;
+            seenChapterKeys.add(wkKey);
+            seenChapterIds.add(row.chapterId);
+            dedupedRows.push(row);
+        }
+        for (let offset = 0; offset < dedupedRows.length; offset += 500) {
+            const batch = dedupedRows.slice(offset, offset + 500);
             const values = [];
             const tuples = batch.map((row, index) => {
                 const start = index * 7;
@@ -2855,9 +2868,14 @@ export class ImporterLiteRuntime {
             });
             await this.getAvailablePool().query(`INSERT INTO importer_lite_chapters
         (work_id,canonical_chapter_key,chapter_id,display_number,order_key,edition,language)
-        VALUES ${tuples.join(',')}
-        ON CONFLICT(work_id,canonical_chapter_key) DO UPDATE
-          SET chapter_id=importer_lite_chapters.chapter_id`, values);
+        SELECT v.work_id,v.canonical_chapter_key,v.chapter_id,v.display_number,v.order_key,v.edition,v.language
+        FROM (VALUES ${tuples.join(',')})
+          AS v(work_id,canonical_chapter_key,chapter_id,display_number,order_key,edition,language)
+        WHERE NOT EXISTS (
+          SELECT 1 FROM importer_lite_chapters existing
+          WHERE existing.chapter_id = v.chapter_id
+        )
+        ON CONFLICT(work_id,canonical_chapter_key) DO NOTHING`, values);
         }
     }
     async worker(workerId, slotIndex) {
@@ -3111,7 +3129,8 @@ export class ImporterLiteRuntime {
                 && this.isRuntimeLeader
                 && Date.now() >= this.idleMonitorUntil
                 && !(process.env.NODE_ENV === 'test' || process.env.VITEST)) {
-                const nextTurn = setTimeout(() => void this.runMonitorTurn().catch(() => { }), 350);
+                const nextDelayMs = (this.pool.waitingCount || 0) > 0 ? 250 : 80;
+                const nextTurn = setTimeout(() => void this.runMonitorTurn().catch(() => { }), nextDelayMs);
                 nextTurn.unref();
             }
         }
@@ -3667,7 +3686,9 @@ export class ImporterLiteRuntime {
         // because the provider opts out of new-work discovery also blocks P0
         // release checks (and P1 repairs) for existing Reader works.
         if (!policy?.runnable) {
-            if (!task.monitoring && policy && (!policy.enabled || String(policy.status || '').toUpperCase() === 'DISABLED' || !policy.chapterIngestionEnabled)) {
+            const policyStatus = String(policy?.status || '').toUpperCase();
+            if (!task.monitoring && policy && (policyStatus === 'DISABLED'
+                || (!policy.enabled && policyStatus !== 'PAUSED') || !policy.chapterIngestionEnabled)) {
                 await this.queue.finish(task, workerId, {
                     state: 'BLOCKED',
                     reason: 'SOURCE_DISABLED',
@@ -3765,13 +3786,32 @@ export class ImporterLiteRuntime {
               UPPER(COALESCE(w.status, 'UNKNOWN')) AS work_status,
               (w.title IS NOT NULL AND w.slug IS NOT NULL AND w.cover_id IS NOT NULL) AS has_presentation,
               (SELECT count(*)::int
-               FROM importer_lite_chapter_sources cs
-               WHERE cs.work_id = w.id
-                 AND cs.source = $2
-                 AND cs.source_work_id = $3
-                 AND cs.confirmed = true
-                 AND cs.has_chapter = true
-                 AND cs.source_chapter_id = ANY($4::text[])) AS matched_chapters,
+               FROM unnest($4::text[]) AS req(scid)
+               WHERE EXISTS (
+                 SELECT 1
+                 FROM importer_lite_chapter_sources cs
+                 JOIN importer_lite_chapters lc
+                   ON lc.work_id = cs.work_id
+                  AND lc.canonical_chapter_key = cs.canonical_chapter_key
+                 JOIN chapters c
+                   ON c.id = lc.chapter_id
+                  AND c.published_at IS NOT NULL
+                 WHERE cs.work_id = w.id
+                   AND cs.source = $2
+                   AND cs.source_work_id = $3
+                   AND cs.confirmed = true
+                   AND cs.has_chapter = true
+                   AND cs.source_chapter_id = req.scid
+               ) OR EXISTS (
+                 SELECT 1
+                 FROM importer_chapter_mappings cm
+                 JOIN chapters c
+                   ON c.id = cm.chapter_id
+                  AND c.published_at IS NOT NULL
+                 WHERE cm.work_id = w.id
+                   AND cm.source = $2
+                   AND cm.source_chapter_id = req.scid
+               )) AS matched_chapters,
               EXISTS (
                 SELECT 1 FROM importer_lite_tasks bt
                 WHERE bt.work_id = w.id AND bt.state = 'BLOCKED'
@@ -3817,7 +3857,18 @@ export class ImporterLiteRuntime {
                 status: snapshot.details.status, year: snapshot.details.year, ageRating: snapshot.details.ageRating,
                 contentRating: rawContentRating === 'ADULT_18' || Number(snapshot.details.ageRating || 0) >= 18 ? 'ADULT_18' : undefined,
                 rawMetadata: sourceMetadata,
-                loadCoverId: snapshot.details.coverUrl ? () => this.loadCover(adapter, snapshot.details.coverUrl) : undefined });
+                loadCoverId: snapshot.details.coverUrl ? async () => {
+                    const primaryId = await this.loadCover(adapter, snapshot.details.coverUrl);
+                    if (primaryId)
+                        return primaryId;
+                    const fallbackUrl = typeof rawDetails.fallbackCoverUrl === 'string'
+                        ? rawDetails.fallbackCoverUrl
+                        : null;
+                    if (fallbackUrl && fallbackUrl !== snapshot.details.coverUrl) {
+                        return this.loadCover(adapter, fallbackUrl);
+                    }
+                    return null;
+                } : undefined });
             if (!resolved.workId || resolved.status === 'AMBIGUOUS') {
                 await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: resolved.reason || 'AMBIGUOUS_CATALOG_MATCH' });
                 return;
@@ -3864,7 +3915,7 @@ export class ImporterLiteRuntime {
                             ageRating: snapshot.details.ageRating ?? null,
                             contentRating: rawContentRating === 'ADULT_18' || Number(snapshot.details.ageRating || 0) >= 18 ? 'ADULT_18' : null,
                         };
-                        const aliasOnlyOutcome = await this.aliasOnlyService.enrichWork(aliasOnlyTarget);
+                        const aliasOnlyOutcome = await withTimeout(this.aliasOnlyService.enrichWork(aliasOnlyTarget), 20_000, 'ONBOARDING_ALIAS_ONLY_TIMEOUT');
                         await this.aliasOnlyRepo.persistBatchResults('runtime_onboarding_v1', [{
                                 target: aliasOnlyTarget,
                                 priorityBucket: 1,
@@ -3886,11 +3937,24 @@ export class ImporterLiteRuntime {
                 else {
                     this.triggerAsyncAliasOnlyEnrichment(resolved.workId);
                 }
-                const complementaryOutcome = await this.enrichNewWorkFromComplementarySources({
+                const complementaryOutcome = await withTimeout(this.enrichNewWorkFromComplementarySources({
                     workId: resolved.workId, originSource: source, title: snapshot.details.title, slug: snapshot.details.slug,
                     aliases: onboardingAliases, author: snapshot.details.author, artist: snapshot.details.artist,
                     synopsis: sanitizeSynopsis(snapshot.details.synopsis) || undefined, kind: snapshot.details.kind, year: snapshot.details.year,
                     allowFallbackDetailProbe: true,
+                }), 45_000, 'ONBOARDING_COMPLEMENTARY_TIMEOUT').catch((error) => {
+                    this.logger.warn('Onboarding complementary cross-source pass timed out or failed; deferring to V7 background lane', {
+                        workId: resolved.workId, source, error: error?.message,
+                    });
+                    return {
+                        busy: true,
+                        attemptedSources: [],
+                        deferredSources: [],
+                        attached: [],
+                        sourceProbes: [],
+                        discoveredAliases: [],
+                        matchedCovers: [],
+                    };
                 });
                 if (typeof this.queue.recordOnboardingCrossSourceDiscovery === 'function') {
                     await this.queue.recordOnboardingCrossSourceDiscovery({
@@ -3959,7 +4023,7 @@ export class ImporterLiteRuntime {
                             ageRating: snapshot.details.ageRating ?? null,
                             contentRating: rawContentRating === 'ADULT_18' || Number(snapshot.details.ageRating || 0) >= 18 ? 'ADULT_18' : null,
                         };
-                        const wave2Outcome = await this.aliasOnlyService.enrichWork(wave2Target, initialNotFoundAliasOnly);
+                        const wave2Outcome = await withTimeout(this.aliasOnlyService.enrichWork(wave2Target, initialNotFoundAliasOnly), 20_000, 'ONBOARDING_WAVE2_ALIAS_ONLY_TIMEOUT');
                         await this.aliasOnlyRepo.persistBatchResults('runtime_onboarding_v1', [{
                                 target: wave2Target,
                                 priorityBucket: 1,

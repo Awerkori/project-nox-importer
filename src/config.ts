@@ -52,10 +52,10 @@ const ConfigSchema = z.object({
   // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
   BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(16),
-  // Keep the direct pool at max=2 in production so the shared 9-connection
-  // non-superuser budget stays well below the 80% alert threshold even under
-  // simultaneous Reader + Hyperdrive + metadata pool activity.
-  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(2),
+  // Keep the direct pool at max=3 in production so the shared 9-connection
+  // non-superuser budget (3 direct + 1 metadata + 1-2 Hyperdrive <= 6/9 = 66%)
+  // stays safely below the 80% alert threshold while avoiding 2-seat YSQL queueing.
+  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(3),
   // The cluster has a very small connection budget shared with Hyperdrive and
   // reader traffic. P2 metadata keeps one durable seat so aliases/tags/new
   // works progress, but it cannot reserve a second backend from the reader.
