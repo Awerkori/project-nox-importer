@@ -1547,7 +1547,9 @@ export class LiteExecutor {
             catch (error) {
                 lastError = error;
                 if (isSourceFailure(error)) {
-                    if (this.performanceTracker?.recordChapterOutcome(route.source, {
+                    const errMessage = String(error?.message || '');
+                    const isContentDefect = /^(?:INVALID_PAGE_MANIFEST|PAGE_HTTP_404|CHAPTER_CONTENT_INVALID_PLACEHOLDER)/.test(errMessage);
+                    if (!isContentDefect && this.performanceTracker?.recordChapterOutcome(route.source, {
                         succeeded: false,
                         durationMs: performance.now() - taskStartedAt,
                         pageCount: 0,

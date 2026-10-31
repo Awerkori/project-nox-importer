@@ -599,8 +599,9 @@ export class ImporterLiteRuntime {
     const memState = this.memoryPressureGuard.snapshot().state;
 
     const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
-      || (typeof siteLatencyMs === 'number' && siteLatencyMs > 1_800);
-    const highYsqlPressure = poolWaiting >= 3 && sqlP95Ms > 1_800;
+      || (this.lastSiteProbe.state !== 'HEALTHY' && typeof siteLatencyMs === 'number' && siteLatencyMs > 5_000)
+      || (typeof siteLatencyMs === 'number' && siteLatencyMs > 4_500);
+    const highYsqlPressure = poolWaiting >= 6 && sqlP95Ms > 3_500;
 
     if (highSitePressure || highYsqlPressure) {
       this.adaptiveHealthyStreak = 0;
@@ -614,8 +615,8 @@ export class ImporterLiteRuntime {
     }
 
     const healthyForRamp = (this.lastSiteProbe.state === 'HEALTHY' || this.lastSiteProbe.state === 'UNKNOWN' || this.lastSiteProbe.state === 'DEGRADED')
-      && (siteLatencyMs === null || siteLatencyMs <= 1_200)
-      && poolWaiting <= 2
+      && (siteLatencyMs === null || siteLatencyMs <= 3_800)
+      && poolWaiting <= 4
       && memState === 'NORMAL';
 
     if (healthyForRamp) {

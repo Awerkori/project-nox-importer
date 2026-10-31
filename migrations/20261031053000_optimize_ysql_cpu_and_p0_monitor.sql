@@ -11,6 +11,14 @@ WHERE health = 'DEGRADED'
   AND cooldown_until IS NOT NULL
   AND last_error ~ '^(INVALID_PAGE_MANIFEST|PAGE_HTTP_404|CHAPTER_CONTENT_INVALID_PLACEHOLDER|CATALOG_SOURCE_TIMEOUT|METADATA_SOURCE_TIMEOUT)';
 
+CREATE INDEX IF NOT EXISTS importer_lite_tasks_historical_p1_backfill_idx
+ON public.importer_lite_tasks (state ASC, next_run_at ASC, created_at ASC, id ASC)
+WHERE task_type = 'CATALOG'
+  AND monitoring = false
+  AND priority = 2
+  AND state IN ('READY', 'RUNNING', 'RETRY_WAIT')
+  AND (payload ? 'historicalP1Backfill');
+
 CREATE OR REPLACE FUNCTION public.importer_lite_claim_task_focused(
   p_worker_id text,
   p_lease interval,
