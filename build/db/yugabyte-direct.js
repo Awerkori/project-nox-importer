@@ -100,7 +100,7 @@ jx6IbjAj2tCrnaE1XPsWR3B3nL6aFtfIYtLMu4vb6HXQ8aYSbocyBO788o7g4vBm
 uHYiQRE3S9hMRqpUOUMmWRRpqHTxYl/FUrqOR8k4g1mN34ZqOpJZOwNnVMOsa+fh
 o1DZJoSu3+Cu5ZEv1xOCWs0bOoinIt45bqT0jrEXQDDhwGWR3gC64VMqffla1g==
 -----END CERTIFICATE-----`;
-function yugabytePoolOptions(cfg, max, applicationName, connectionTimeoutMillis, queryTimeoutMillis, sessionOptions = '', disableParallelWorkers = true) {
+function yugabytePoolOptions(cfg, max, applicationName, connectionTimeoutMillis, queryTimeoutMillis, sessionOptions = '', disableParallelWorkers = true, idleTimeoutMillis = 30000) {
     if (!cfg.YUGABYTE_HOST || !cfg.YUGABYTE_USER || !cfg.YUGABYTE_PASSWORD) {
         throw new Error('Yugabyte direct connection requires YUGABYTE_HOST, YUGABYTE_USER, and YUGABYTE_PASSWORD');
     }
@@ -137,7 +137,7 @@ function yugabytePoolOptions(cfg, max, applicationName, connectionTimeoutMillis,
         database: cfg.YUGABYTE_DATABASE,
         max,
         connectionTimeoutMillis,
-        idleTimeoutMillis: 30000,
+        idleTimeoutMillis,
         query_timeout: queryTimeoutMillis,
         keepAlive: true,
         keepAliveInitialDelayMillis: 10000,
@@ -167,7 +167,7 @@ export function createYugabyteMetadataPool() {
     // for aliases/tags/new works without reserving capacity needed by chapters
     // or Hyperdrive. Network work still happens outside a DB checkout.
     const poolMax = cfg.METADATA_DB_POOL_MAX;
-    const metadataPool = new pg.Pool(yugabytePoolOptions(cfg, poolMax, 'project-nox-importer-metadata', 30_000, 15_000, metadataSessionOptions, false));
+    const metadataPool = new pg.Pool(yugabytePoolOptions(cfg, poolMax, 'project-nox-importer-metadata', 30_000, 15_000, metadataSessionOptions, false, 15_000));
     metadataPool.on('error', (err) => {
         logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });
     });

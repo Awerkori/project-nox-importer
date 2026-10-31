@@ -122,8 +122,11 @@ export declare class LiteRepository {
     private lastHistoricalP1CatalogSource;
     private p1BacklogCache;
     private p0MonitorCursorEnsured;
+    private readonly sourcePolicyCache;
+    private readonly lastHealthyRecordAt;
     hasAbundantHistoricalP1Reserve(): boolean;
     invalidateP1BacklogCache(): void;
+    invalidateSourcePolicyCache(source?: string): void;
     getActiveCoolingSources(): string[];
     private clearNonRateLimitedCoolingSource;
     /**
@@ -241,6 +244,7 @@ export declare class LiteRepository {
      */
     materializeConfirmedMissingP1Tasks(maximum?: number): Promise<number>;
     private refreshReadyWork;
+    private refreshReadyWorks;
     enqueue(input: EnqueueLiteTask): Promise<{
         inserted: boolean;
         task: LiteTask | null;

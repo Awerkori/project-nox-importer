@@ -124,8 +124,20 @@ export class LiteRepository {
     lastHistoricalP1CatalogSource = '';
     p1BacklogCache = null;
     p0MonitorCursorEnsured = false;
+    sourcePolicyCache = new Map();
+    lastHealthyRecordAt = new Map();
     hasAbundantHistoricalP1Reserve() { return this.historicalP1ReserveAbundant; }
     invalidateP1BacklogCache() { this.p1BacklogCache = null; }
+    invalidateSourcePolicyCache(source) {
+        if (source) {
+            this.sourcePolicyCache.delete(source);
+            this.lastHealthyRecordAt.delete(source);
+        }
+        else {
+            this.sourcePolicyCache.clear();
+            this.lastHealthyRecordAt.clear();
+        }
+    }
     getActiveCoolingSources() {
         const now = Date.now();
         const active = [];
@@ -170,7 +182,7 @@ export class LiteRepository {
      * transaction occurs here.
      */
     async refillP0MonitorCoverage(limit = 16) {
-        const maximum = Math.max(1, Math.min(64, Math.floor(limit)));
+        const maximum = Math.max(1, Math.min(256, Math.floor(limit)));
         const client = await this.sourceMetadataDb.connect();
         try {
             await client.query('BEGIN');
@@ -192,6 +204,9 @@ export class LiteRepository {
             // There are only a few dozen providers.  Pick one source first and run
             // the mapping query only for that source; a global anti-join over every
             // work was the kind of catalogue scan that previously hurt YSQL.
+            // Enrol durable monitors for all enabled chapter-ingestion sources even
+            // if a provider is temporarily cooling down; claimMonitor enforces
+            // runnable health and cooldown boundaries at check execution time.
             const selected = await client.query(`
         WITH after_cursor AS (
           SELECT s.id AS source
@@ -199,10 +214,9 @@ export class LiteRepository {
           LEFT JOIN importer_lite_source_health h ON h.source=s.id
           WHERE s.enabled=true AND s.id>$1::text
             AND s.id NOT IN ('mangaball','mangadex','mangafire')
-            AND ${sourceExecutionEligibilitySql('s')}
+            AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING','COOLDOWN')
             AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)=true
             AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-            AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
           ORDER BY s.id LIMIT 1
         ), wrapped AS (
           SELECT s.id AS source
@@ -210,10 +224,9 @@ export class LiteRepository {
           LEFT JOIN importer_lite_source_health h ON h.source=s.id
           WHERE s.enabled=true AND s.id<=$1::text
             AND s.id NOT IN ('mangaball','mangadex','mangafire')
-            AND ${sourceExecutionEligibilitySql('s')}
+            AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING','COOLDOWN')
             AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)=true
             AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
-            AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
           ORDER BY s.id LIMIT 1
         )
         SELECT source FROM after_cursor
@@ -237,15 +250,16 @@ export class LiteRepository {
             // Inspect a small deterministic slice, not only currently-missing
             // rows. Advancing over healthy rows is what makes a 30k catalogue stay
             // bounded after coverage reaches 100%.
-            const scanLimit = Math.min(256, maximum * P0_MONITOR_COVERAGE_SCAN_MULTIPLIER);
+            const scanLimit = Math.min(512, maximum * P0_MONITOR_COVERAGE_SCAN_MULTIPLIER);
             const loadMappingWindow = async (after) => client.query(`
         SELECT m.source_work_id, m.work_id::text AS work_id
         FROM importer_work_mappings m
         JOIN works w ON w.id=m.work_id
         WHERE m.source=$1 AND m.source_work_id>$2
           AND m.work_id IS NOT NULL
-          AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+          AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE','PENDING')
           AND COALESCE(w.status,'ONGOING') <> 'CANCELLED'
+          AND NOT (m.source='nexus' AND m.source_work_id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
         ORDER BY m.source, m.source_work_id LIMIT $3`, [source, after, scanLimit]);
             const scanRows = await loadMappingWindow(lastSourceWorkId);
             const wrapped = scanRows.rowCount === 0 && lastSourceWorkId !== '';
@@ -296,17 +310,18 @@ export class LiteRepository {
                     ? toProcess.at(-1).sourceWorkId
                     : lastScanned;
                 const enrolledAt = new Date().toISOString();
+                const shouldStagger = !(process.env.NODE_ENV === 'test' || process.env.VITEST) && toProcess.length > 16;
                 const toRevive = toProcess.filter((item) => item.reviveTaskId !== null);
                 const toInsert = toProcess.filter((item) => item.reviveTaskId === null);
                 if (toRevive.length > 0) {
                     const reopened = await client.query(`
             WITH input AS (
-              SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::jsonb[], $5::jsonb[])
-                AS v(task_id, work_id, work_key, payload_patch, checkpoint_patch)
+              SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::jsonb[], $5::jsonb[], $6::int[])
+                AS v(task_id, work_id, work_key, payload_patch, checkpoint_patch, offset_sec)
             )
             UPDATE importer_lite_tasks t SET
               work_id=i.work_id, work_key=i.work_key, priority=3, base_priority=3,
-              state='READY', next_run_at=now(), attempts=0, lease_owner=NULL,
+              state='READY', next_run_at=now() + make_interval(secs => i.offset_sec), attempts=0, lease_owner=NULL,
               lease_until=NULL, reason=NULL, monitoring=true,
               payload=t.payload || i.payload_patch,
               checkpoint=t.checkpoint || i.checkpoint_patch, updated_at=now()
@@ -322,6 +337,7 @@ export class LiteRepository {
                         toRevive.map((item) => `work:${item.workId}`),
                         toRevive.map((item) => JSON.stringify({ source, sourceWorkId: item.sourceWorkId, p0MonitorCoverage: true })),
                         toRevive.map(() => JSON.stringify({ p0MonitorCoverageEnrolledAt: enrolledAt })),
+                        toRevive.map((_, idx) => shouldStagger ? (idx % 20) * 30 : 0),
                     ]);
                     revived += reopened.rowCount || 0;
                 }
@@ -329,9 +345,9 @@ export class LiteRepository {
                     const inserted = await client.query(`
             INSERT INTO importer_lite_tasks
               (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
-            SELECT 'CATALOG', v.work_id, v.work_key, 3, 3, v.idem_key, now(), 32, v.payload, v.checkpoint, true
-            FROM unnest($1::uuid[], $2::text[], $3::text[], $4::jsonb[], $5::jsonb[])
-              AS v(work_id, work_key, idem_key, payload, checkpoint)
+            SELECT 'CATALOG', v.work_id, v.work_key, 3, 3, v.idem_key, now() + make_interval(secs => v.offset_sec), 32, v.payload, v.checkpoint, true
+            FROM unnest($1::uuid[], $2::text[], $3::text[], $4::jsonb[], $5::jsonb[], $6::int[])
+              AS v(work_id, work_key, idem_key, payload, checkpoint, offset_sec)
             ON CONFLICT(idempotency_key) DO NOTHING
             RETURNING id`, [
                         toInsert.map((item) => item.workId),
@@ -339,6 +355,7 @@ export class LiteRepository {
                         toInsert.map((item) => `lite:p0-monitor:${source}:${item.sourceWorkId}`),
                         toInsert.map((item) => JSON.stringify({ source, sourceWorkId: item.sourceWorkId, p0MonitorCoverage: true })),
                         toInsert.map(() => JSON.stringify({ p0MonitorCoverageEnrolledAt: enrolledAt })),
+                        toInsert.map((_, idx) => shouldStagger ? (idx % 20) * 30 : 0),
                     ]);
                     admitted += inserted.rowCount || 0;
                 }
@@ -1352,6 +1369,16 @@ export class LiteRepository {
     async refreshReadyWork(client, workKey) {
         await client.query('SELECT public.importer_lite_refresh_ready_work($1)', [workKey]);
     }
+    async refreshReadyWorks(client, workKeys) {
+        const unique = [...new Set([...workKeys].map((k) => String(k || '').trim()).filter(Boolean))];
+        if (unique.length === 0)
+            return;
+        if (unique.length === 1) {
+            await this.refreshReadyWork(client, unique[0]);
+            return;
+        }
+        await client.query('SELECT public.importer_lite_refresh_ready_work(wk) FROM unnest($1::text[]) AS wk', [unique]);
+    }
     async enqueue(input) {
         const client = await this.db.connect();
         try {
@@ -1409,6 +1436,7 @@ export class LiteRepository {
             const staffWorkIds = new Set(staff.rows.map((row) => String(row.work_id)));
             let inserted = 0;
             const insertedKeys = new Set();
+            const insertedWorkKeys = new Set();
             // Keep far below PostgreSQL's parameter limit even if a source returns
             // an unusually large manifest.
             for (let offset = 0; offset < uniqueInputs.length; offset += 500) {
@@ -1422,13 +1450,14 @@ export class LiteRepository {
                 const result = await client.query(`INSERT INTO importer_lite_tasks
           (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
           VALUES ${rows.join(',')}
-          ON CONFLICT (idempotency_key) DO NOTHING RETURNING idempotency_key`, values);
+          ON CONFLICT (idempotency_key) DO NOTHING RETURNING idempotency_key, work_key`, values);
                 inserted += result.rowCount || 0;
-                for (const row of result.rows)
+                for (const row of result.rows) {
                     insertedKeys.add(String(row.idempotency_key));
+                    insertedWorkKeys.add(String(row.work_key));
+                }
             }
-            for (const workKey of new Set(uniqueInputs.map((input) => input.workKey)))
-                await this.refreshReadyWork(client, workKey);
+            await this.refreshReadyWorks(client, insertedWorkKeys);
             await client.query('COMMIT');
             if (inserted > 0)
                 this.invalidateP1BacklogCache();
@@ -2077,7 +2106,8 @@ export class LiteRepository {
         // consume the only first-catalog seat before a healthy new discovery.
         // This remains a short claim-only YSQL operation: no adapter or network
         // work occurs until after the returned lease has committed.
-        const result = await this.db.query(`
+        const metaDb = this.sourceMetadataDb || this.db;
+        const result = await metaDb.query(`
       WITH picked AS (
         SELECT task.id
         FROM importer_lite_tasks task
@@ -2113,7 +2143,8 @@ export class LiteRepository {
      * waiting for the entire historical chapter backlog to drain.
      */
     async claimDueDiscovery(workerId, leaseSeconds) {
-        const result = await this.db.query(`
+        const metaDb = this.sourceMetadataDb || this.db;
+        const result = await metaDb.query(`
       WITH picked AS (
         SELECT task.id
         FROM importer_lite_tasks task
@@ -2156,7 +2187,8 @@ export class LiteRepository {
         const ids = [...new Set(sourceWorkIds.map((id) => String(id || '').trim()).filter(Boolean))];
         if (!source || !ids.length)
             return new Map();
-        const result = await this.db.query(`SELECT source_work_id, work_id::text AS work_id
+        const metaDb = this.sourceMetadataDb || this.db;
+        const result = await metaDb.query(`SELECT source_work_id, work_id::text AS work_id
        FROM importer_work_mappings
        WHERE source=$1 AND source_work_id=ANY($2::text[]) AND work_id IS NOT NULL`, [source, ids]);
         const map = new Map();
@@ -2216,11 +2248,19 @@ export class LiteRepository {
         SELECT last_source FROM importer_lite_metadata_source_cursor
         WHERE cursor_name=$1 FOR UPDATE
       ), ordered_sources AS (
-        SELECT s.id as source
+        SELECT s.id AS source,
+          ROW_NUMBER() OVER (
+            ORDER BY CASE WHEN s.id > COALESCE(cur.last_source, '') THEN 0 ELSE 1 END, s.id
+          ) AS ord
         FROM importer_sources s
+        LEFT JOIN importer_lite_source_health h ON h.source = s.id
         LEFT JOIN cur ON true
         WHERE s.enabled = true
-        ORDER BY CASE WHEN s.id > COALESCE(cur.last_source, '') THEN 0 ELSE 1 END, s.id
+          AND s.id NOT IN ('mangaball','mangadex','mangafire')
+          AND ${sourceExecutionEligibilitySql('s')}
+          AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = true
+          AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
+          AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
       ), picked AS (
         SELECT t.id, os.source
         FROM ordered_sources os
@@ -2235,6 +2275,7 @@ export class LiteRepository {
           ORDER BY t.priority ASC, t.next_run_at ASC, t.created_at ASC, t.id ASC
           LIMIT 1
         ) t
+        ORDER BY os.ord ASC
         LIMIT 1
       ), claimed AS (
         UPDATE importer_lite_tasks task
@@ -2713,8 +2754,7 @@ export class LiteRepository {
         VALUES ${tuples.join(',')}
         ON CONFLICT(idempotency_key) DO NOTHING
         RETURNING work_key`, values);
-            for (const workKey of new Set(inserted.rows.map((row) => String(row.work_key))))
-                await this.refreshReadyWork(client, workKey);
+            await this.refreshReadyWorks(client, inserted.rows.map((row) => String(row.work_key)));
             await client.query('COMMIT');
             return inserted.rowCount || 0;
         }
@@ -2796,8 +2836,7 @@ export class LiteRepository {
            lease_owner=NULL,lease_until=NULL,updated_at=now()
          FROM picked WHERE task.id=picked.id
          RETURNING picked.work_key`, [DUPLICATE_CANONICAL_BATCH_REASON, maximum]);
-            for (const row of recovered.rows)
-                await this.refreshReadyWork(client, String(row.work_key));
+            await this.refreshReadyWorks(client, recovered.rows.map((row) => String(row.work_key)));
             await client.query('COMMIT');
             return recovered.rowCount || 0;
         }
@@ -2874,15 +2913,40 @@ export class LiteRepository {
         const normalized = [...new Set(sources.map((s) => String(s || '').trim()).filter(Boolean))];
         if (!normalized.length)
             return new Map();
-        const result = await this.db.query(`SELECT s.id,s.enabled,s.status,s.sync_interval_minutes,
+        const cacheTtlMs = (process.env.NODE_ENV === 'test' || process.env.VITEST) ? 0 : 15_000;
+        const nowMs = Date.now();
+        const now = new Date(nowMs);
+        const map = new Map();
+        const missing = [];
+        if (cacheTtlMs > 0) {
+            for (const id of normalized) {
+                const cached = this.sourcePolicyCache.get(id);
+                if (cached && nowMs - cached.at <= cacheTtlMs) {
+                    const p = cached.policy;
+                    const expiredAdminCooldown = p.status === 'COOLDOWN' && Boolean(p.cooldownUntil && p.cooldownUntil <= now);
+                    const adminActive = p.enabled && (['ACTIVE', 'DEGRADED', 'RECOVERING'].includes(p.status) || expiredAdminCooldown);
+                    const healthAllowed = !['BROKEN', 'DISABLED'].includes(p.health);
+                    const runnable = adminActive && healthAllowed && (!p.cooldownUntil || p.cooldownUntil <= now);
+                    map.set(id, { ...p, runnable });
+                }
+                else {
+                    missing.push(id);
+                }
+            }
+        }
+        else {
+            missing.push(...normalized);
+        }
+        if (!missing.length)
+            return map;
+        const policyDb = this.sourceMetadataDb || this.db;
+        const result = await policyDb.query(`SELECT s.id,s.enabled,s.status,s.sync_interval_minutes,
         COALESCE((to_jsonb(s)->>'catalog_discovery_enabled')::boolean,true) AS catalog_discovery_enabled,
         COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true) AS chapter_ingestion_enabled,
         s.cooldown_until AS source_cooldown,h.health,h.cooldown_until AS health_cooldown
       FROM importer_sources s
       LEFT JOIN importer_lite_source_health h ON h.source=s.id
-      WHERE s.id = ANY($1::text[])`, [normalized]);
-        const map = new Map();
-        const now = new Date();
+      WHERE s.id = ANY($1::text[])`, [missing]);
         for (const row of result.rows) {
             const sourceCooldown = row.source_cooldown ? new Date(row.source_cooldown) : null;
             const healthCooldown = row.health_cooldown ? new Date(row.health_cooldown) : null;
@@ -2897,14 +2961,18 @@ export class LiteRepository {
             const healthAllowed = !['BROKEN', 'DISABLED'].includes(health);
             const runnable = administrativelyActive && healthAllowed && (!cooldownUntil || cooldownUntil <= now);
             const minutes = Number(row.sync_interval_minutes);
-            map.set(String(row.id), {
+            const policy = {
                 enabled: row.enabled === true,
                 status, health, cooldownUntil,
                 syncIntervalMs: Math.max(5, Math.min(24 * 60, Number.isFinite(minutes) ? minutes : 30)) * 60_000,
                 catalogDiscoveryEnabled: row.catalog_discovery_enabled !== false,
                 chapterIngestionEnabled: row.chapter_ingestion_enabled !== false,
                 runnable,
-            });
+            };
+            const id = String(row.id);
+            map.set(id, policy);
+            if (cacheTtlMs > 0)
+                this.sourcePolicyCache.set(id, { at: nowMs, policy });
         }
         return map;
     }
@@ -2915,7 +2983,8 @@ export class LiteRepository {
      * read, and mappings already attached to the work are not searched again.
      */
     async complementaryCatalogSources(workId, originSource) {
-        const result = await this.db.query(`
+        const metaDb = this.sourceMetadataDb || this.db;
+        const result = await metaDb.query(`
       SELECT s.id AS source
       FROM importer_sources s
       LEFT JOIN importer_lite_source_health health ON health.source=s.id
@@ -2942,9 +3011,7 @@ export class LiteRepository {
      * its outcome can be recorded as deferred rather than silently skipped.
      */
     async crossSourceDiscoverySources(workId) {
-        const dbToUse = (this.sourceMetadataDb && this.sourceMetadataDb !== this.db && (this.sourceMetadataDb.waitingCount || 0) > 0 && (this.db.idleCount || 0) > 0)
-            ? this.db
-            : this.sourceMetadataDb;
+        const dbToUse = this.sourceMetadataDb || this.db;
         const result = await dbToUse.query(`
       SELECT s.id AS source
       FROM importer_sources s
@@ -3402,9 +3469,7 @@ export class LiteRepository {
             || task.payload?.metadataEnrichmentVersion === 7
             || Boolean(task.payload?.metadataCrossSourceDiscovery)
             || Boolean(task.payload?.metadataSourceRefresh);
-        const dbToUse = (this.sourceMetadataDb && this.sourceMetadataDb !== this.db && (this.sourceMetadataDb.waitingCount || 0) > 0 && (this.db.idleCount || 0) > 0)
-            ? this.db
-            : (isMetadataTask ? this.sourceMetadataDb : this.db);
+        const dbToUse = isMetadataTask ? (this.sourceMetadataDb || this.db) : this.db;
         const params = [
             task.id,
             workerId,
@@ -3447,10 +3512,9 @@ export class LiteRepository {
      * blocked until an operator changes the underlying condition.
      */
     async wakeCatalogBlocked(workId, workKey) {
-        const client = await this.db.connect();
-        try {
-            await client.query('BEGIN');
-            const result = await client.query(`UPDATE importer_lite_tasks
+        const result = await this.db.query(`
+      WITH woken AS (
+        UPDATE importer_lite_tasks
         SET state='READY',reason=NULL,next_run_at=now(),updated_at=now()
         WHERE work_id=$1::uuid AND state='BLOCKED' AND (
           (task_type='IMPORT_CHAPTER' AND COALESCE(reason,'') NOT LIKE 'UPLOAD_OUTCOME_UNKNOWN%'
@@ -3459,18 +3523,18 @@ export class LiteRepository {
              AND COALESCE(reason,'') NOT LIKE 'SOURCE_PAGE_MANIFEST_CHANGED_AFTER_PARTIAL_STORAGE%'
              AND COALESCE(reason,'') NOT LIKE 'PARTIAL_UPLOAD_SOURCE_ROUTE_UNAVAILABLE%') OR
           (task_type='PUBLISH' AND reason='WORK_PRESENTATION_INCOMPLETE')
-        )`, [workId]);
-            await this.refreshReadyWork(client, workKey);
-            await client.query('COMMIT');
-            return result.rowCount || 0;
-        }
-        catch (error) {
-            await client.query('ROLLBACK').catch(() => { });
-            throw error;
-        }
-        finally {
-            client.release();
-        }
+        )
+        RETURNING id
+      ), refreshed AS (
+        SELECT public.importer_lite_refresh_ready_work($2)
+        WHERE EXISTS (SELECT 1 FROM woken)
+      )
+      SELECT (SELECT count(*)::int FROM woken) AS woken_count, (SELECT count(*)::int FROM refreshed) AS refreshed_count
+    `, [workId, workKey]);
+        const count = Number(result.rows[0]?.woken_count || 0);
+        if (count > 0)
+            this.invalidateP1BacklogCache();
+        return count;
     }
     /**
      * Source health is durable operational evidence, shared by discovery,
@@ -3479,6 +3543,7 @@ export class LiteRepository {
      * confirmed healthy alternative.
      */
     async recordSourceFailure(source, error) {
+        this.invalidateSourcePolicyCache(source);
         const detail = error;
         const retryAfter = Number(detail?.retryAfter || detail?.parameters?.retry_after || 0);
         const cooldownSeconds = retryAfter > 0 ? Math.min(3600, retryAfter + 2) : 60;
@@ -3585,7 +3650,19 @@ export class LiteRepository {
     }
     async recordSourceSuccess(source) {
         this.clearNonRateLimitedCoolingSource(source);
-        await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+        const throttleMs = (process.env.NODE_ENV === 'test' || process.env.VITEST) ? 0 : 60_000;
+        const nowMs = Date.now();
+        if (throttleMs > 0) {
+            const lastWrite = this.lastHealthyRecordAt.get(source) || 0;
+            const cached = this.sourcePolicyCache.get(source);
+            if (nowMs - lastWrite < throttleMs
+                && (!cached || (cached.policy.health === 'HEALTHY' && !cached.policy.cooldownUntil))) {
+                return;
+            }
+            this.lastHealthyRecordAt.set(source, nowMs);
+        }
+        const healthDb = this.sourceMetadataDb || this.db;
+        await healthDb.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
       VALUES($1,'HEALTHY',NULL,0,NULL)
       ON CONFLICT(source) DO UPDATE SET health='HEALTHY',cooldown_until=NULL,
         consecutive_failures=0,last_error=NULL,updated_at=now()
@@ -3658,28 +3735,59 @@ export class LiteRepository {
             // refreshed work first, earliest canonical chapter within each work),
             // then a few routes per source. This runs only in the 30-second
             // reconciler and refreshes the normal ready-work projection.
-            const sourceCooldownRecovery = recoverSourceCooldowns ? await client.query(`/*+ IndexScan(task importer_lite_tasks_source_cooldown_due_idx) */ WITH runnable_due AS MATERIALIZED (
+            const sourceCooldownRecovery = recoverSourceCooldowns ? await client.query(`/*+ Set(enable_nestloop off) IndexScan(task importer_lite_tasks_source_cooldown_due_idx) */ WITH due_window AS MATERIALIZED (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,task.updated_at
            FROM importer_lite_tasks task
            WHERE task.state='RETRY_WAIT' AND task.monitoring=false AND task.task_type='IMPORT_CHAPTER'
              AND task.reason='SOURCE_RATE_LIMITED' AND task.next_run_at<=now()
-             AND EXISTS (
-               SELECT 1
-               FROM importer_lite_chapter_sources route
-               JOIN importer_sources s ON s.id=route.source
-               LEFT JOIN importer_lite_source_health h ON h.source=route.source
-               WHERE route.work_id=task.work_id AND route.canonical_chapter_key=task.chapter_key
-                 AND route.confirmed=true AND route.has_chapter=true
-                 AND route.language=COALESCE(NULLIF(task.payload->>'language',''),'und')
-                 AND route.edition=COALESCE(NULLIF(task.payload->>'edition',''),'default')
-                 AND s.enabled=true
-                 AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-                 AND ${sourceExecutionEligibilitySql('s')}
-                 AND COALESCE(h.health,'HEALTHY') IN ('HEALTHY','DEGRADED','RATE_LIMITED')
-                 AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
-             )
            ORDER BY task.next_run_at ASC, task.work_key ASC, task.created_at ASC, task.id ASC
+           LIMIT 256
+         ), window_routes AS MATERIALIZED (
+           SELECT dw.id AS task_id, route.source, route.source_rank,
+             (s.enabled=true
+               AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+               AND ${sourceExecutionEligibilitySql('s')}
+               AND COALESCE(h.health,'HEALTHY') IN ('HEALTHY','DEGRADED','RATE_LIMITED')
+               AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
+             ) AS is_runnable,
+             GREATEST(
+               COALESCE(s.cooldown_until, '-infinity'::timestamptz),
+               COALESCE(h.cooldown_until, '-infinity'::timestamptz)
+             ) AS active_cooldown_until
+           FROM due_window dw
+           JOIN importer_lite_chapter_sources route
+             ON route.work_id=dw.work_id AND route.canonical_chapter_key=dw.chapter_key
+           JOIN importer_sources s ON s.id=route.source
+           LEFT JOIN importer_lite_source_health h ON h.source=route.source
+           WHERE route.confirmed=true AND route.has_chapter=true
+             AND route.language=COALESCE(NULLIF(dw.payload->>'language',''),'und')
+             AND route.edition=COALESCE(NULLIF(dw.payload->>'edition',''),'default')
+         ), cooldown_aligned_candidates AS (
+           SELECT wr.task_id AS id, min(wr.active_cooldown_until) AS next_due
+           FROM window_routes wr
+           GROUP BY wr.task_id
+           HAVING bool_or(wr.is_runnable)=false AND min(wr.active_cooldown_until)>now()
+         ), locked_aligned AS (
+           SELECT t.id, c.next_due
+           FROM importer_lite_tasks t
+           JOIN cooldown_aligned_candidates c ON c.id=t.id
+           WHERE t.state='RETRY_WAIT' AND t.reason='SOURCE_RATE_LIMITED' AND t.next_run_at<c.next_due
+           FOR UPDATE OF t SKIP LOCKED
+         ), cooldown_aligned AS (
+           UPDATE importer_lite_tasks t
+           SET next_run_at=la.next_due, updated_at=now()
+           FROM locked_aligned la
+           WHERE t.id=la.id
+           RETURNING t.id
+         ), runnable_due AS MATERIALIZED (
+           SELECT dw.id,dw.work_key,dw.work_id,dw.chapter_key,dw.payload,dw.next_run_at,
+             dw.created_at,dw.updated_at
+           FROM due_window dw
+           WHERE EXISTS (
+             SELECT 1 FROM window_routes wr WHERE wr.task_id=dw.id AND wr.is_runnable=true
+           )
+           ORDER BY dw.next_run_at ASC, dw.work_key ASC, dw.created_at ASC, dw.id ASC
            LIMIT 128
          ), due_candidates AS MATERIALIZED (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
@@ -3710,21 +3818,10 @@ export class LiteRepository {
            FOR UPDATE OF task SKIP LOCKED
          ), routes AS (
            SELECT DISTINCT ON (due.id) due.id,due.work_key,due.next_run_at,due.created_at,
-             due.work_position,route.source
+             due.work_position,wr.source
            FROM due
-           JOIN importer_lite_chapter_sources route
-             ON route.work_id=due.work_id AND route.canonical_chapter_key=due.chapter_key
-           JOIN importer_sources s ON s.id=route.source
-           LEFT JOIN importer_lite_source_health h ON h.source=route.source
-           WHERE route.confirmed=true AND route.has_chapter=true
-             AND route.language=COALESCE(NULLIF(due.payload->>'language',''),'und')
-             AND route.edition=COALESCE(NULLIF(due.payload->>'edition',''),'default')
-             AND s.enabled=true
-             AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
-             AND ${sourceExecutionEligibilitySql('s')}
-             AND COALESCE(h.health,'HEALTHY') IN ('HEALTHY','DEGRADED','RATE_LIMITED')
-             AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
-           ORDER BY due.id,route.source_rank,route.source
+           JOIN window_routes wr ON wr.task_id=due.id AND wr.is_runnable=true
+           ORDER BY due.id,wr.source_rank,wr.source
          ), source_lanes AS (
            SELECT source,min(next_run_at) AS oldest_due
            FROM routes GROUP BY source
@@ -3939,9 +4036,7 @@ export class LiteRepository {
            FROM picked
           WHERE t.id = picked.id
          RETURNING picked.work_key`, [Math.min(64, Math.max(16, limit))]) : noUploadOutcomeRecovery;
-            for (const key of new Set([...leases.rows, ...retries.rows, ...sourceCooldownRecovery.rows, ...uploads.rows, ...reopenedUnknownTasks.rows, ...ready.rows, ...repairedPublishes.rows, ...disabledBackfillCatalogs.rows, ...demotedOutOfSequenceP0.rows].map((row) => row.work_key))) {
-                await this.refreshReadyWork(client, key);
-            }
+            await this.refreshReadyWorks(client, [...leases.rows, ...retries.rows, ...sourceCooldownRecovery.rows, ...uploads.rows, ...reopenedUnknownTasks.rows, ...ready.rows, ...repairedPublishes.rows, ...disabledBackfillCatalogs.rows, ...demotedOutOfSequenceP0.rows].map((row) => row.work_key));
             await client.query('COMMIT');
             this.invalidateP1BacklogCache();
             const leaseRetries = leases.rows.filter((row) => row.state === 'RETRY_WAIT').length;

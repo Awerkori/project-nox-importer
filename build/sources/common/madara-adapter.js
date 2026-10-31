@@ -383,6 +383,15 @@ export class MadaraAdapter {
             ? sourceChapterId
             : `${this.baseUrl}${sourceChapterId.startsWith('/') ? '' : '/'}${sourceChapterId}`;
         const html = await this.fetchHtml(chapterUrl);
+        // 0. Detect text novel chapters disguised as manga
+        // In WordPress Madara, web novel chapters render text in reading-content/text-left
+        // with decorative mascots/banners and zero manga page images.
+        const isProseNovel = /class="[^"]*(?:text-left|reading-text|reading-content-text)[^"]*"|reading-content[\s\S]*?<p>[^<]{100,}<\/p>/i.test(html)
+            && !/wp-manga-chapter-img/i.test(html);
+        if (isProseNovel) {
+            this.logger.warn('Skipping novel chapter without comic pages', { sourceChapterId });
+            return [];
+        }
         // Madara's paged reader renders only its first image in HTML. The complete
         // chapter is a JSON array; sidebar thumbnails must never become chapter pages.
         const pagedManifest = html.match(/\b(?:var|let|const)\s+chapter_preloaded_images\s*=\s*(\[[\s\S]*?\])\s*(?=[,;])/i);
@@ -400,12 +409,19 @@ export class MadaraAdapter {
         }
         // Extract all img tags
         const imgTags = html.match(/<img[^>]+>/gi) || [];
+        const hasWpMangaImg = imgTags.some((tag) => /wp-manga-chapter-img/i.test(tag));
         const seen = new Set();
         const pages = [];
         for (const tag of imgTags) {
-            if (!/wp-manga-chapter-img|page-break|reading-content|read-container|chapter-image/i.test(tag) &&
-                !/wp-content\/uploads\/(?:WP-manga\/data\/|\d{4}\/\d{2}\/)/i.test(tag)) {
-                continue;
+            if (hasWpMangaImg) {
+                if (!/wp-manga-chapter-img/i.test(tag))
+                    continue;
+            }
+            else {
+                if (!/wp-manga-chapter-img|page-break|chapter-image/i.test(tag) &&
+                    !/wp-content\/uploads\/WP-manga\/data\//i.test(tag)) {
+                    continue;
+                }
             }
             // Priority: data-lzl-src -> data-lazy-src -> data-src -> data-full-url -> data-orig-src -> src
             const dataLzl = (tag.match(/data-lzl-src=["']([^"']+)["']/i) || [])[1];
@@ -429,7 +445,7 @@ export class MadaraAdapter {
                 }
             }
             const filename = candidate.split('/').pop()?.split('?')[0] || '';
-            if (/(?:^|[_\-.])(logo|avatar|icon|banner|ads|advert|discord|telegram|capa|thumb|thun|fechar|loading|credit)(?:[_\-.]|$)/i.test(filename))
+            if (/(?:^|[_\-.])(logo|avatar|icon|banner|ads|advert|discord|telegram|capa|thumb|thun|fechar|loading|credit|escolhida|AddText|Blog|cachorrinhocapa|doacao|recrutamento)(?:[_\-.]|$)/i.test(filename))
                 continue;
             if (/-\d+x\d+\.(?:jpe?g|png|webp|avif)/i.test(filename))
                 continue;

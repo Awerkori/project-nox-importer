@@ -414,8 +414,8 @@ export class ZeistMangaAdapter implements SourceAdapter {
       const base = m[1];
       const filename = m[2];
       if (seen.has(base)) continue;
-      // Skip cover/thumbnail-only images by filename
-      if (/(?:capa|cover|thumbnail|banner|logo|icon|avatar)/i.test(filename)) continue;
+      // Skip cover/thumbnail-only images, banners and blog mascots by filename
+      if (/(?:capa|cover|thumbnail|banner|logo|icon|avatar|Blog|doacao|recrutamento|discord|telegram)/i.test(filename)) continue;
       seen.add(base);
       pages.push(`${base}/s0/${filename}`);
     }
@@ -432,6 +432,11 @@ export class ZeistMangaAdapter implements SourceAdapter {
         !src.includes('logo') &&
         !src.includes('icon') &&
         !src.includes('avatar') &&
+        !src.includes('Blog') &&
+        !src.includes('doacao') &&
+        !src.includes('recrutamento') &&
+        !src.includes('discord') &&
+        !src.includes('telegram') &&
         (src.includes('blogger.googleusercontent.com') ||
           src.includes('.bp.blogspot.com') ||
           src.includes('imgur.com') ||

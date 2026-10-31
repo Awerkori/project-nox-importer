@@ -14,6 +14,14 @@ import { BoundedSamples } from '../core/bounded-samples.js';
 import { chapterKind, chapterOrderKey } from './chapter-identity.js';
 import { PageByteBudget, type PageByteReservation, unknownPageInitialReservationBytes } from './page-byte-budget.js';
 
+export const KNOWN_PLACEHOLDER_HASHES = new Set<string>([
+  'bff6cd5561f14d02a0c831423cb3535997ed3f136de1aa6e34997c4eb28ee496', // Nocturne owl mascot (escolhida-1.webp)
+  '1ac47dbc0ccb5b20625eb9a8264fbcf6f76c7cf7851a14eb8516d3f27f88417c', // MrTenzus AddText banner 1
+  'd4037c32bc7444cd03b967e71bb411a7e4c88acbbd21e396a4beafdaf86189ff', // MrTenzus AddText banner 2
+  'd47f06f2a4a7e37891b5096f4256ae01aee2c15140fbaca1343c11d3765f02a3', // Tiraninha cachorrinhocapa
+  '1c52c84ed88f6b813b2c6b3e34bca86ba9733c3756b3e3c0fec5f1595fb0b046', // Galax Scanlator Blog.png
+]);
+
 const withTimeout = async <T>(operation: Promise<T>, timeoutMs: number, code: string): Promise<T> => {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -575,8 +583,7 @@ export class LiteExecutor {
     const saturated: string[] = [];
     for (const source of this.fairDemandSources) {
       const slot = this.sourceSlots.get(source);
-      const configuredFairMax = SOURCE_CONCURRENCY_LIMITS[source]?.fairMaxChapters ?? 2;
-      const capacity = Math.max(this.sourceCapacity(source), configuredFairMax);
+      const capacity = slot ? slot.capacity : this.sourceCapacity(source);
       const active = slot ? slot.active : 0;
       if (active >= capacity) saturated.push(source);
     }
@@ -1167,6 +1174,9 @@ export class LiteExecutor {
             let { bytes, image } = downloaded;
             totalBytes += bytes.byteLength;
             const sha256 = calculateSha256(bytes);
+            if (urls.length === 1 && KNOWN_PLACEHOLDER_HASHES.has(sha256)) {
+              throw new Error(`CHAPTER_CONTENT_INVALID_PLACEHOLDER:${sha256}`);
+            }
             // The page body has finished its only count-bound phase: HTTP
             // read and image validation.  It remains fully byte-reserved
             // until its receipt is durable, so a slow pre-upload intent
@@ -1331,7 +1341,7 @@ export class LiteExecutor {
       } finally { sourceSlot.release(); }
     }
     const message = String((lastError as Error | null)?.message || 'IMPORT_FAILED');
-    const permanent = /UPLOAD_OUTCOME_UNKNOWN|CHAPTER_DISPLAY_NUMBER|CHAPTER_NUMBER_COLLISION|SOURCE_PAGE_MANIFEST_CHANGED_AFTER_PARTIAL_STORAGE|LEASE_LOST_BEFORE_MEDIA_STORAGE|SOURCE_CHAPTER_OWNERSHIP_UNVERIFIED/.test(message);
+    const permanent = /UPLOAD_OUTCOME_UNKNOWN|CHAPTER_DISPLAY_NUMBER|CHAPTER_NUMBER_COLLISION|SOURCE_PAGE_MANIFEST_CHANGED_AFTER_PARTIAL_STORAGE|LEASE_LOST_BEFORE_MEDIA_STORAGE|SOURCE_CHAPTER_OWNERSHIP_UNVERIFIED|CHAPTER_CONTENT_INVALID_PLACEHOLDER|INVALID_PAGE_MANIFEST/.test(message);
     const retryAfter = Number((lastError as SourceFailure | null)?.retryAfter || (lastError as any)?.parameters?.retry_after || 0);
     await this.queue.finish(task, workerId, {
       state: permanent || task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT', reason: message.slice(0, 500),

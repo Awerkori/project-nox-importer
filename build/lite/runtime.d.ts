@@ -119,6 +119,7 @@ export declare class ImporterLiteRuntime {
     private adaptiveHealthyStreak;
     private adaptiveAdmissionReason;
     private lastLegacyBlockedRepairAt;
+    private p0CoverageZeroStreak;
     private p1ClaimCounter;
     private lastP1FocusRefreshAt;
     private p1FocusRefreshInFlight;

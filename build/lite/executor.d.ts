@@ -6,6 +6,7 @@ import type { LiteTask } from './types.js';
 import { AsyncSemaphore } from '../core/concurrency.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
 import { PageByteBudget } from './page-byte-budget.js';
+export declare const KNOWN_PLACEHOLDER_HASHES: Set<string>;
 export declare const DURABLE_RESERVATION_BATCH_JOIN_MS = 100;
 export declare const DURABLE_RECEIPT_BATCH_JOIN_MS = 120;
 export declare const UPLOAD_BATCH_FLUSH_THRESHOLD = 8;
