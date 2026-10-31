@@ -23,6 +23,17 @@ const metadataValues = (value: unknown): string[] => {
   return raw.map(cleanMetadataValue).filter((item): item is string => Boolean(item));
 };
 
+const extractFirstWpContentImage = (contentHtml: unknown): string | null => {
+  if (typeof contentHtml !== 'string' || !contentHtml) return null;
+  for (const match of contentHtml.matchAll(/<img[^>]+(?:src|data-src)=["']([^"']+)["'][^>]*>/gi)) {
+    const url = decodeHtmlEntities(match[1] || '').trim();
+    if (!url || !/^https?:\/\//i.test(url)) continue;
+    if (/(?:logo-site|logo|banner|icon|avatar|discord|telegram|gravatar|emoji|smilies)/i.test(url)) continue;
+    return url;
+  }
+  return null;
+};
+
 /**
  * WordPress exposes post categories/tags through the embedded `wp:term`
  * relation.  These are provider-declared taxonomy values, not terms guessed
@@ -162,11 +173,14 @@ export class WpGalleryAdapter implements SourceAdapter {
       const works: SourceWorkSummary[] = [];
 
       for (const p of posts) {
+        const rawSlug = String(p.slug || '');
+        if (/^https?-/i.test(rawSlug)) continue;
         const title = decodeHtmlEntities(stripHtml(p.title?.rendered || '')).trim();
         const id = String(p.id);
         const link = p.link || '';
         const coverUrl =
           p._embedded?.['wp:featuredmedia']?.[0]?.source_url ||
+          extractFirstWpContentImage(p.content?.rendered) ||
           p.yoast_head_json?.og_image?.[0]?.url ||
           null;
 
@@ -196,12 +210,16 @@ export class WpGalleryAdapter implements SourceAdapter {
 
     try {
       const p = await this.fetchJson<any>(url);
+      if (/^https?-/i.test(String(p.slug || ''))) {
+        throw new Error(`PROMO_LINK_POST_NOT_A_WORK:${sourceWorkId}`);
+      }
       const title = decodeHtmlEntities(stripHtml(p.title?.rendered || '')).trim();
       const synopsis = p.excerpt?.rendered ? decodeHtmlEntities(stripHtml(p.excerpt.rendered)).trim() : undefined;
-      const coverUrl =
-        p._embedded?.['wp:featuredmedia']?.[0]?.source_url ||
-        p.yoast_head_json?.og_image?.[0]?.url ||
-        null;
+      const featuredCoverUrl = p._embedded?.['wp:featuredmedia']?.[0]?.source_url || null;
+      const contentCoverUrl = extractFirstWpContentImage(p.content?.rendered);
+      const yoastCoverUrl = p.yoast_head_json?.og_image?.[0]?.url || null;
+      const coverUrl = featuredCoverUrl || contentCoverUrl || yoastCoverUrl || null;
+      const fallbackCoverUrl = [contentCoverUrl, yoastCoverUrl].find((u) => u && u !== coverUrl) || undefined;
       const genres = extractWpGenres(p);
       const alternativeTitles = extractWpAlternativeTitles(p);
 
@@ -214,6 +232,7 @@ export class WpGalleryAdapter implements SourceAdapter {
         status: 'UNKNOWN',
         genres: genres.length ? genres : undefined,
         alternativeTitles: alternativeTitles.length ? alternativeTitles : undefined,
+        raw: fallbackCoverUrl ? { fallbackCoverUrl } : undefined,
       };
     } catch (err: any) {
       this.logger.error(`fetchWorkDetails failed for ${sourceWorkId}: ${err.message}`);

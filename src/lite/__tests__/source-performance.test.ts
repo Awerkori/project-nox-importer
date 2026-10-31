@@ -237,4 +237,14 @@ describe('SourcePerformanceTracker & Dynamic Fast/Slow Scheduling', () => {
     expect(snap.focusSources.mangaflix || 0).toBeLessThanOrEqual(2);
     expect((snap.focusSources.nocturnesummer || 0) + (snap.focusSources.mrtenzus || 0)).toBeGreaterThanOrEqual(26);
   });
+
+  it('normalizes multi-page webtoon chapter wall time so fast CDNs with 60-page chapters are not misclassified as SLOW', () => {
+    const tracker = new SourcePerformanceTracker({ useWarmStartPriors: false });
+    for (let i = 0; i < 60; i++) {
+      tracker.recordPageDownload('fast-webtoon-scan', 950, 420_000);
+    }
+    tracker.recordChapterOutcome('fast-webtoon-scan', { succeeded: true, durationMs: 42_000, pageCount: 60 });
+    tracker.recordChapterOutcome('fast-webtoon-scan', { succeeded: true, durationMs: 44_000, pageCount: 60 });
+    expect(tracker.getTier('fast-webtoon-scan')).toBe('FAST');
+  });
 });

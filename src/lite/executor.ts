@@ -771,7 +771,9 @@ export class LiteExecutor {
       const active = slot ? slot.active : 0;
       if (active >= capacity) saturatedSet.add(source);
     }
-    if (this.performanceTracker && this.slowBackgroundGate.available <= 0) {
+    const totalActive = [...this.sourceSlots.values()].reduce((sum, slot) => sum + slot.active, 0);
+    const hasAmpleIdleGlobalCapacity = totalActive < Math.max(4, this.effectiveChapterAdmissionCap - 3);
+    if (this.performanceTracker && this.slowBackgroundGate.available <= 0 && !hasAmpleIdleGlobalCapacity) {
       const hasUnsaturatedPrimary = [...this.fairDemandSources].some(
         (s) => this.performanceTracker!.getTier(s) !== 'SLOW' && !saturatedSet.has(s),
       );
@@ -876,7 +878,9 @@ export class LiteExecutor {
           await this.slowBackgroundGate.acquire(AbortSignal.timeout(1_500));
           slowPermitHeld = true;
         } catch {
-          if (this.hasPrimaryAlternative()) {
+          const totalActive = [...this.sourceSlots.values()].reduce((sum, slot) => sum + slot.active, 0);
+          const hasAmpleIdleGlobalCapacity = totalActive < Math.max(4, this.effectiveChapterAdmissionCap - 3);
+          if (this.hasPrimaryAlternative() && !hasAmpleIdleGlobalCapacity) {
             await this.queue.yieldForSourceFairness(task, workerId, 4_000);
             return null;
           }
@@ -1585,9 +1589,19 @@ export class LiteExecutor {
           other_wait_ms: Math.max(0, Math.round(totalDurationMs - routeLookupMs - sourceFetchMs - mediaPipelineWallMs - dbPreparationMs - dbPublishMs)),
           timestamp: new Date().toISOString(),
         });
+        const effectiveWaveConcurrency = this.getPageConcurrencyForSource(route.source, urls.length);
+        const estimatedWaveCount = urls.length > 0
+          ? Math.max(1, Math.ceil(urls.length / Math.max(1, effectiveWaveConcurrency)))
+          : 0;
+        const originChapterWallMs = Math.max(
+          250,
+          sourceFetchMs
+            + rateLimitWaitMs
+            + (urls.length > 0 ? (pageDownloadDemandMs / urls.length) * estimatedWaveCount : 0),
+        );
         if (this.performanceTracker?.recordChapterOutcome(route.source, {
           succeeded: true,
-          durationMs: totalDurationMs,
+          durationMs: originChapterWallMs,
           pageCount: urls.length,
           totalBytes,
         })) {

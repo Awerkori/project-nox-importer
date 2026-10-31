@@ -190,20 +190,23 @@ export class SourcePerformanceTracker {
     const p95Ms = state.pageLatencySamples.length >= 6
       ? percentile(state.pageLatencySamples, 0.95)
       : state.ewmaPageMs * 1.35;
+    const normalizedChapterMs = state.ewmaPagesPerChapter > 24
+      ? state.ewmaChapterMs * (24 / state.ewmaPagesPerChapter)
+      : state.ewmaChapterMs;
 
     // 1. Check SLOW conditions (with recovery hysteresis if currently SLOW).
     if (state.tier === 'SLOW') {
       const stillSlow =
         state.ewmaPageMs >= 5_200 ||
         (state.pageLatencySamples.length >= 8 && p95Ms >= 11_500 && state.ewmaPageMs >= 3_200) ||
-        (state.sampleChapters >= 2 && state.ewmaChapterMs >= 95_000) ||
+        (state.sampleChapters >= 2 && normalizedChapterMs >= 95_000) ||
         state.ewmaSuccessRate < 0.84;
       if (stillSlow) return 'SLOW';
     } else {
       const enterSlow =
         state.ewmaPageMs >= 7_000 ||
         (state.pageLatencySamples.length >= 8 && p95Ms >= 15_000 && state.ewmaPageMs >= 4_500) ||
-        (state.sampleChapters >= 2 && state.ewmaChapterMs >= 135_000) ||
+        (state.sampleChapters >= 2 && normalizedChapterMs >= 135_000) ||
         ((state.sampleChapters + state.sampleFailures) >= 3 && state.ewmaSuccessRate < 0.72);
       if (enterSlow) return 'SLOW';
     }
@@ -214,7 +217,7 @@ export class SourcePerformanceTracker {
         state.ewmaPageMs <= 3_500 &&
         (state.pageLatencySamples.length < 8 || p95Ms <= 7_800 || state.ewmaPageMs <= 2_000) &&
         state.ewmaSuccessRate >= 0.85 &&
-        (state.sampleChapters === 0 || state.ewmaChapterMs <= 70_000);
+        (state.sampleChapters === 0 || normalizedChapterMs <= 70_000);
       if (retainFast) return 'FAST';
       return 'NORMAL';
     }
@@ -223,7 +226,7 @@ export class SourcePerformanceTracker {
       state.ewmaPageMs <= 2_800 &&
       (state.pageLatencySamples.length < 8 || p95Ms <= 6_500 || state.ewmaPageMs <= 1_800) &&
       state.ewmaSuccessRate >= 0.90 &&
-      (state.sampleChapters === 0 || state.ewmaChapterMs <= 55_000);
+      (state.sampleChapters === 0 || normalizedChapterMs <= 55_000);
     return enterFast ? 'FAST' : 'NORMAL';
   }
 

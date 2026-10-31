@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { SOURCE_CONCURRENCY_LIMITS } from '../core/concurrency.js';
 import { LITE_PRIORITY_RANK } from './types.js';
 import { parseCanonicalChapterKey } from './chapter-identity.js';
 import { STORED_MAPPING_ALIAS_FIELDS, STORED_MAPPING_TAG_FIELDS } from './mapping-metadata.js';
@@ -275,7 +276,7 @@ export class LiteRepository {
                     const swid = String(row.source_work_id);
                     lookupKeys.push(`lite:catalog:${source}:${swid}`, `lite:p0-monitor:${source}:${swid}`);
                 }
-                const existingRows = await client.query(`SELECT id, idempotency_key, state, monitoring
+                const existingRows = await client.query(`SELECT id, idempotency_key, state, monitoring, priority
             FROM importer_lite_tasks
             WHERE idempotency_key = ANY($1::text[])`, [lookupKeys]);
                 const existingByKey = new Map(existingRows.rows.map((r) => [String(r.idempotency_key), r]));
@@ -285,20 +286,27 @@ export class LiteRepository {
                     const workId = String(row.work_id);
                     const catalogTask = existingByKey.get(`lite:catalog:${source}:${sourceWorkId}`);
                     const monitorTask = existingByKey.get(`lite:p0-monitor:${source}:${sourceWorkId}`);
-                    const hasActiveMonitor = Boolean((monitorTask && (monitorTask.state === 'READY' || monitorTask.state === 'RUNNING' || monitorTask.state === 'RETRY_WAIT'))
+                    const hasActiveMonitor = Boolean((monitorTask && monitorTask.monitoring && (monitorTask.state === 'READY' || monitorTask.state === 'RUNNING' || monitorTask.state === 'RETRY_WAIT'))
                         || (catalogTask && catalogTask.monitoring && (catalogTask.state === 'READY' || catalogTask.state === 'RUNNING' || catalogTask.state === 'RETRY_WAIT')));
                     if (hasActiveMonitor)
                         continue;
                     // Never race an actively running catalog task.
                     if (catalogTask && catalogTask.state === 'RUNNING')
                         continue;
+                    // Pending STAFF/P0/P1 work must retain its priority before this
+                    // producer can reuse the catalog identity as a P2 observation.
+                    if (catalogTask && Number(catalogTask.priority) < 3
+                        && (catalogTask.state === 'READY' || catalogTask.state === 'RETRY_WAIT'))
+                        continue;
                     if (monitorTask) {
                         missing.push({ sourceWorkId, workId, reviveTaskId: String(monitorTask.id) });
                     }
-                    else if (catalogTask) {
+                    else if (catalogTask && !(catalogTask.state === 'BLOCKED' && !catalogTask.monitoring)) {
                         missing.push({ sourceWorkId, workId, reviveTaskId: String(catalogTask.id) });
                     }
                     else {
+                        // Preserve a blocked onboarding task and its diagnostic reason;
+                        // its state cannot be revived by the guarded UPDATE below.
                         missing.push({ sourceWorkId, workId, reviveTaskId: null });
                     }
                 }
@@ -328,7 +336,7 @@ export class LiteRepository {
             FROM input i
             WHERE t.id=i.task_id
               AND (
-                (t.monitoring=false AND t.state IN ('DONE','READY','RETRY_WAIT'))
+                (t.monitoring=false AND (t.state='DONE' OR (t.state IN ('READY','RETRY_WAIT') AND t.priority=3)))
                 OR (t.monitoring=true AND t.state IN ('DONE','BLOCKED'))
               )
             RETURNING t.id`, [
@@ -386,8 +394,7 @@ export class LiteRepository {
      * Selection rotates across sources, honors source cooldown/eligibility, and
      * records PENDING durably before inserting an idempotent catalog task.
      */
-    async refillSourceMetadataEnrichment(maxPending = 2, sourceProbeLimit = SOURCE_METADATA_SOURCE_PROBE_LIMIT, preferredSource) {
-        const probeLimit = Math.max(1, Math.min(SOURCE_METADATA_SOURCE_PROBE_LIMIT, sourceProbeLimit));
+    async refillSourceMetadataEnrichment(maxPending = 2, sourceProbeLimit, preferredSource) {
         const client = await this.sourceMetadataDb.connect();
         try {
             await client.query('BEGIN');
@@ -409,6 +416,8 @@ export class LiteRepository {
             })();
             const coverageVersion = replay.rows[0]?.value === 'complete' ? METADATA_ALIAS_COVERAGE_V5_VERSION : 3;
             const isCoverageV5 = coverageVersion === METADATA_ALIAS_COVERAGE_V5_VERSION;
+            const defaultProbeLimit = isCoverageV5 ? SOURCE_METADATA_SOURCE_PROBE_LIMIT : 8;
+            const probeLimit = Math.max(1, Math.min(defaultProbeLimit, sourceProbeLimit ?? defaultProbeLimit));
             const ceiling = Math.max(1, Math.min(isCoverageV5 ? (isTurbo ? 48 : 8) : 2, maxPending));
             const sourceTaskPrefix = `lite:metadata:source:v${coverageVersion}:`;
             const stateEligible = isCoverageV5
@@ -460,7 +469,7 @@ export class LiteRepository {
             ), candidates AS (
               SELECT m.source,m.source_work_id,m.work_id,popular.views_total,
               true AS selected_aliasless,
-              NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=m.work_id) AS selected_tagless
+              NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=m.work_id AND COALESCE(wt.system_generated,false)=false) AS selected_tagless
               FROM popular
               CROSS JOIN LATERAL (
                 SELECT m.source,m.source_work_id,m.work_id
@@ -594,32 +603,80 @@ export class LiteRepository {
                 await client.query('SAVEPOINT v5_source_candidate');
                 try {
                     await client.query(`SET LOCAL statement_timeout = '6000ms'`);
-                    const hist = await client.query(`
-            SELECT task.payload->>'sourceWorkId' AS last_source_work_id
-            FROM importer_lite_tasks task
-            WHERE task.task_type='CATALOG' AND task.payload ? 'metadataSourceRefresh'
-              AND task.payload->>'source'=$1
-            ORDER BY task.created_at DESC LIMIT 1
-          `, [source]);
-                    const lastSourceWorkId = hist.rows[0]?.last_source_work_id || null;
-                    const fwd = await client.query(`
-            SELECT m.source,m.source_work_id,m.work_id,
-              COALESCE(cardinality(w.aliases),0)=0 AS selected_aliasless,
-              false AS selected_tagless
-            FROM importer_work_mappings m
-            JOIN works w ON w.id=m.work_id AND w.published=true
-            LEFT JOIN importer_lite_metadata_enrichment status
-              ON status.source=m.source AND status.source_work_id=m.source_work_id
-            WHERE m.source=$1 AND ($2::text IS NULL OR m.source_work_id > $2::text) AND m.work_id IS NOT NULL
-              AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-              AND ${stateEligible}
-            ORDER BY m.source_work_id LIMIT $3
-          `, [source, lastSourceWorkId, needed]);
-                    for (const r of fwd.rows)
-                        candidates.push(r);
-                    if (fwd.rows.length < needed && lastSourceWorkId) {
-                        const wrapNeeded = needed - fwd.rows.length;
-                        const wrap = await client.query(`
+                    if (!isCoverageV5) {
+                        const v3Candidate = await client.query(`
+              WITH history AS (
+                SELECT task.created_at AS last_admitted_at,
+                  task.payload->>'sourceWorkId' AS last_source_work_id
+                FROM importer_lite_tasks task
+                WHERE task.task_type='CATALOG' AND task.payload ? 'metadataSourceRefresh'
+                  AND task.payload->>'source'=$1
+                ORDER BY task.created_at DESC LIMIT 1
+              ), productivity AS (
+                SELECT
+                  EXISTS (SELECT 1 FROM importer_lite_tasks rich
+                    WHERE rich.task_type='CATALOG' AND rich.state='DONE'
+                      AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=$1
+                      AND rich.checkpoint->>'aliasDelta' ~ '^[1-9][0-9]*$') AS alias_productive_source,
+                  EXISTS (SELECT 1 FROM importer_lite_tasks rich
+                    WHERE rich.task_type='CATALOG' AND rich.state='DONE'
+                      AND rich.payload ? 'metadataSourceRefresh' AND rich.payload->>'source'=$1
+                      AND rich.checkpoint->>'tagDelta' ~ '^[1-9][0-9]*$') AS tag_productive_source
+              ), after_cursor AS (
+                SELECT m.source,m.source_work_id,m.work_id,
+                  COALESCE(cardinality(w.aliases),0)=0 AS selected_aliasless,
+                  NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=m.work_id AND COALESCE(wt.system_generated,false)=false) AS selected_tagless,
+                  0 AS cursor_turn
+                FROM importer_work_mappings m
+                JOIN works w ON w.id=m.work_id AND w.published=true
+                LEFT JOIN importer_lite_metadata_enrichment status
+                  ON status.source=m.source AND status.source_work_id=m.source_work_id
+                LEFT JOIN history ON true
+                WHERE m.source=$1 AND m.work_id IS NOT NULL
+                  AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+                  AND (history.last_source_work_id IS NULL OR m.source_work_id>history.last_source_work_id)
+                  AND ${stateEligible}
+                ORDER BY m.source_work_id LIMIT 32
+              ), wrapped AS (
+                SELECT m.source,m.source_work_id,m.work_id,
+                  COALESCE(cardinality(w.aliases),0)=0 AS selected_aliasless,
+                  NOT EXISTS (SELECT 1 FROM work_tags wt WHERE wt.work_id=m.work_id AND COALESCE(wt.system_generated,false)=false) AS selected_tagless,
+                  1 AS cursor_turn
+                FROM importer_work_mappings m
+                JOIN works w ON w.id=m.work_id AND w.published=true
+                LEFT JOIN importer_lite_metadata_enrichment status
+                  ON status.source=m.source AND status.source_work_id=m.source_work_id
+                JOIN history ON history.last_source_work_id IS NOT NULL
+                WHERE m.source=$1 AND m.work_id IS NOT NULL
+                  AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+                  AND m.source_work_id<=history.last_source_work_id
+                  AND ${stateEligible}
+                ORDER BY m.source_work_id LIMIT 32
+              )
+              SELECT candidate.source,candidate.source_work_id,candidate.work_id,
+                candidate.selected_aliasless,candidate.selected_tagless,
+                productivity.alias_productive_source,productivity.tag_productive_source,
+                history.last_admitted_at
+              FROM (SELECT * FROM after_cursor UNION ALL SELECT * FROM wrapped) candidate
+              CROSS JOIN productivity
+              LEFT JOIN history ON true
+              ORDER BY candidate.selected_aliasless DESC,candidate.selected_tagless DESC,
+                candidate.cursor_turn,candidate.source_work_id
+              LIMIT $2
+            `, [source, needed]);
+                        for (const r of v3Candidate.rows)
+                            candidates.push(r);
+                    }
+                    else {
+                        const hist = await client.query(`
+              SELECT task.payload->>'sourceWorkId' AS last_source_work_id
+              FROM importer_lite_tasks task
+              WHERE task.task_type='CATALOG' AND task.payload ? 'metadataSourceRefresh'
+                AND task.payload->>'source'=$1
+              ORDER BY task.created_at DESC LIMIT 1
+            `, [source]);
+                        const lastSourceWorkId = hist.rows[0]?.last_source_work_id || null;
+                        const fwd = await client.query(`
               SELECT m.source,m.source_work_id,m.work_id,
                 COALESCE(cardinality(w.aliases),0)=0 AS selected_aliasless,
                 false AS selected_tagless
@@ -627,13 +684,31 @@ export class LiteRepository {
               JOIN works w ON w.id=m.work_id AND w.published=true
               LEFT JOIN importer_lite_metadata_enrichment status
                 ON status.source=m.source AND status.source_work_id=m.source_work_id
-              WHERE m.source=$1 AND m.source_work_id <= $2 AND m.work_id IS NOT NULL
+              WHERE m.source=$1 AND ($2::text IS NULL OR m.source_work_id > $2::text) AND m.work_id IS NOT NULL
                 AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
                 AND ${stateEligible}
               ORDER BY m.source_work_id LIMIT $3
-            `, [source, lastSourceWorkId, wrapNeeded]);
-                        for (const r of wrap.rows)
+            `, [source, lastSourceWorkId, needed]);
+                        for (const r of fwd.rows)
                             candidates.push(r);
+                        if (fwd.rows.length < needed && lastSourceWorkId) {
+                            const wrapNeeded = needed - fwd.rows.length;
+                            const wrap = await client.query(`
+                SELECT m.source,m.source_work_id,m.work_id,
+                  COALESCE(cardinality(w.aliases),0)=0 AS selected_aliasless,
+                  false AS selected_tagless
+                FROM importer_work_mappings m
+                JOIN works w ON w.id=m.work_id AND w.published=true
+                LEFT JOIN importer_lite_metadata_enrichment status
+                  ON status.source=m.source AND status.source_work_id=m.source_work_id
+                WHERE m.source=$1 AND m.source_work_id <= $2 AND m.work_id IS NOT NULL
+                  AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+                  AND ${stateEligible}
+                ORDER BY m.source_work_id LIMIT $3
+              `, [source, lastSourceWorkId, wrapNeeded]);
+                            for (const r of wrap.rows)
+                                candidates.push(r);
+                        }
                     }
                     await client.query('RELEASE SAVEPOINT v5_source_candidate');
                 }
@@ -644,8 +719,16 @@ export class LiteRepository {
                     await client.query(`SET LOCAL statement_timeout = '12000ms'`);
                 }
             }
-            candidates.sort((left, right) => Number(right.selected_aliasless) - Number(left.selected_aliasless)
-                || Number(right.selected_tagless) - Number(left.selected_tagless));
+            candidates.sort((left, right) => {
+                const leftAdmitted = left.last_admitted_at ? new Date(left.last_admitted_at).getTime() : -1;
+                const rightAdmitted = right.last_admitted_at ? new Date(right.last_admitted_at).getTime() : -1;
+                return Number(right.selected_aliasless) - Number(left.selected_aliasless)
+                    || Number(Boolean(right.alias_productive_source)) - Number(Boolean(left.alias_productive_source))
+                    || Number(right.selected_tagless) - Number(left.selected_tagless)
+                    || Number(Boolean(right.tag_productive_source)) - Number(Boolean(left.tag_productive_source))
+                    || (leftAdmitted - rightAdmitted)
+                    || String(left.source).localeCompare(String(right.source));
+            });
             const allDeduplicatedCandidates = [...new Map([...priorityCandidates, ...candidates].map((candidate) => [`${candidate.source}:${candidate.source_work_id}`, candidate])).values()];
             // Candidate windows are deliberately source-indexed.  Correlating an
             // active-task lookup for every mapping in those windows made YSQL scan
@@ -1579,8 +1662,10 @@ export class LiteRepository {
             if (!sourceTiers)
                 return maxPerSource;
             const tier = sourceTiers.get(source) || 'NORMAL';
-            if (tier === 'FAST')
-                return maxFastPerSource;
+            if (tier === 'FAST') {
+                const sourceMaxChapters = SOURCE_CONCURRENCY_LIMITS[source]?.maxChapters ?? 6;
+                return Math.max(maxPerSource, Math.min(maxFastPerSource, sourceMaxChapters + 2));
+            }
             if (tier === 'SLOW')
                 return maxSlowPerSource;
             return maxPerSource;
@@ -1790,15 +1875,30 @@ export class LiteRepository {
             });
         }
         // 3. Never leave capacity idle if fewer sources have eligible works: relax per-source cap for FAST/NORMAL
-        //    sources first, keeping SLOW sources bounded by maxTotalSlowInFocus while any FAST/NORMAL works remain.
+        //    sources first using source-count penalty so no single FAST source monopolizes relaxed slots,
+        //    keeping SLOW sources bounded by maxTotalSlowInFocus while any FAST/NORMAL works remain.
         if (nextFocus.length < desiredSize && remainingCandidates.length > 0) {
-            remainingCandidates.sort((a, b) => b.score - a.score || a.oldestTaskMs - b.oldestTaskMs);
-            for (const chosen of remainingCandidates) {
-                if (nextFocus.length >= desiredSize)
+            while (nextFocus.length < desiredSize) {
+                let bestIdx = -1;
+                let bestEffectiveScore = -Infinity;
+                for (let i = 0; i < remainingCandidates.length; i++) {
+                    const cand = remainingCandidates[i];
+                    if (selectedSet.has(cand.workKey))
+                        continue;
+                    const isSlow = Boolean(sourceTiers && speedRankFor(cand.source) === 2);
+                    if (isSlow)
+                        continue;
+                    const count = sourceCounts.get(cand.source) || 0;
+                    const effectiveScore = cand.score - count * 4;
+                    if (effectiveScore > bestEffectiveScore
+                        || (effectiveScore === bestEffectiveScore && bestIdx >= 0 && cand.oldestTaskMs < remainingCandidates[bestIdx].oldestTaskMs)) {
+                        bestEffectiveScore = effectiveScore;
+                        bestIdx = i;
+                    }
+                }
+                if (bestIdx === -1)
                     break;
-                const isSlow = Boolean(sourceTiers && speedRankFor(chosen.source) === 2);
-                if (isSlow)
-                    continue;
+                const chosen = remainingCandidates.splice(bestIdx, 1)[0];
                 selectedSet.add(chosen.workKey);
                 sourceCounts.set(chosen.source, (sourceCounts.get(chosen.source) || 0) + 1);
                 nextFocus.push({
@@ -1810,6 +1910,7 @@ export class LiteRepository {
                 });
             }
             if (nextFocus.length < desiredSize) {
+                remainingCandidates.sort((a, b) => b.score - a.score || a.oldestTaskMs - b.oldestTaskMs);
                 for (const chosen of remainingCandidates) {
                     if (nextFocus.length >= desiredSize)
                         break;
@@ -2609,6 +2710,27 @@ export class LiteRepository {
          AND t.priority = 2
          AND t.task_type = 'IMPORT_CHAPTER'
          AND t.next_run_at <= now()
+         AND (
+           NOT EXISTS (
+             SELECT 1 FROM importer_lite_chapter_sources cs
+             WHERE cs.work_id = t.work_id AND cs.canonical_chapter_key = t.chapter_key
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM importer_lite_chapter_sources cs
+             JOIN importer_sources s ON s.id = cs.source
+             LEFT JOIN importer_lite_source_health h ON h.source = cs.source
+             WHERE cs.work_id = t.work_id
+               AND cs.canonical_chapter_key = t.chapter_key
+               AND cs.confirmed = true
+               AND cs.has_chapter = true
+               AND s.enabled = true
+               AND ${sourceExecutionEligibilitySql('s')}
+               AND COALESCE(s.chapter_ingestion_enabled, true)
+               AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
+               AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
+           )
+         )
         LIMIT $1
       ) AS bounded_ready`, [abundantFloor]);
             const current = Number(reserve.rows[0]?.count || 0);
@@ -3468,7 +3590,9 @@ export class LiteRepository {
             || task.payload?.metadataEnrichmentVersion === 7
             || Boolean(task.payload?.metadataCrossSourceDiscovery)
             || Boolean(task.payload?.metadataSourceRefresh);
-        const dbToUse = isMetadataTask ? (this.sourceMetadataDb || this.db) : this.db;
+        const isRecurringMonitor = task.monitoring === true && outcome.monitoring !== false;
+        const useIsolatedFastFinish = isMetadataTask || isRecurringMonitor;
+        const dbToUse = useIsolatedFastFinish ? (this.sourceMetadataDb || this.db) : this.db;
         const params = [
             task.id,
             workerId,
@@ -3481,9 +3605,9 @@ export class LiteRepository {
             outcome.workId || null,
             Boolean(outcome.resetAttempts),
         ];
-        if (isMetadataTask) {
-            const targetDb = isMetadataTask ? this.sourceMetadataDb : this.db;
-            const result = await (targetDb || this.db).query(`UPDATE importer_lite_tasks
+        if (useIsolatedFastFinish) {
+            const targetDb = this.sourceMetadataDb || this.db;
+            const result = await targetDb.query(`UPDATE importer_lite_tasks
             SET state=$3, reason=$4, next_run_at=COALESCE($5::timestamptz,next_run_at),
                 base_priority=COALESCE($7::smallint,base_priority),
                 priority=CASE WHEN EXISTS (
@@ -3497,7 +3621,7 @@ export class LiteRepository {
                 attempts=CASE WHEN $10::boolean THEN 0 ELSE attempts END,
                 lease_owner=NULL, lease_until=NULL, updated_at=now()
           WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`, params);
-            if (result.rowCount === 1 && !isMetadataTask)
+            if (result.rowCount === 1 && !useIsolatedFastFinish)
                 await this.refreshReadyWork(this.db, task.workKey);
             return result.rowCount === 1;
         }
@@ -3737,10 +3861,10 @@ export class LiteRepository {
              AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND (picked.monitoring OR picked.payload ? 'metadataCrossSourceDiscovery')))
              THEN 'LEASE_EXPIRED_MAX_ATTEMPTS' ELSE 'LEASE_EXPIRED' END,
            updated_at=now()
-         FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state`, [limit]);
+         FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state,picked.monitoring`, [limit]);
             const retries = await client.query(`WITH picked AS (
            SELECT id,work_key,attempts,max_attempts,task_type,monitoring,payload FROM importer_lite_tasks
-           WHERE state='RETRY_WAIT' AND next_run_at<=now()
+           WHERE state='RETRY_WAIT' AND monitoring=false AND next_run_at<=now()
              -- Explicit provider cooldown work is admitted only by the
              -- per-source pass below. A later 429 may extend health cooldown
              -- after this task received its own retry timestamp.
@@ -3754,7 +3878,35 @@ export class LiteRepository {
              AND NOT (picked.task_type='DISCOVER' OR (picked.task_type='CATALOG' AND (picked.monitoring OR picked.payload ? 'metadataCrossSourceDiscovery')))
              THEN 'MAX_ATTEMPTS_EXHAUSTED' ELSE t.reason END,
            updated_at=now()
-         FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state`, [limit]);
+         FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state,picked.monitoring`, [limit]);
+            const dueMonitorLimit = limit >= 20 ? Math.max(limit, 512) : limit;
+            const dueMonitors = await client.query(`WITH picked AS (
+           SELECT t.id
+           FROM importer_lite_tasks t
+           LEFT JOIN importer_sources s ON s.id = t.payload->>'source'
+           LEFT JOIN importer_lite_source_health h ON h.source = t.payload->>'source'
+           WHERE t.state='RETRY_WAIT'
+             AND t.monitoring=true
+             AND t.task_type='CATALOG'
+             AND t.next_run_at<=now()
+             AND COALESCE(t.reason,'')<>'SOURCE_RATE_LIMITED'
+             AND (
+               s.id IS NULL
+               OR (
+                 s.enabled = true
+                 AND s.id NOT IN ('mangaball','mangadex','mangafire')
+                 AND ${sourceExecutionEligibilitySql('s')}
+                 AND COALESCE(s.chapter_ingestion_enabled, true) = true
+                 AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
+                 AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
+               )
+             )
+           ORDER BY t.next_run_at LIMIT $1 FOR UPDATE OF t SKIP LOCKED
+         ) UPDATE importer_lite_tasks t
+            SET state='READY', updated_at=now()
+           FROM picked
+          WHERE t.id=picked.id
+          RETURNING t.id`, [dueMonitorLimit]);
             // `recordSourceFailure` moves only sole-route work to a durable
             // SOURCE_RATE_LIMITED cooldown. The normal retry pass above is kept
             // deliberately small for crash recovery, so it must not be the only
@@ -3770,7 +3922,7 @@ export class LiteRepository {
            WHERE task.state='RETRY_WAIT' AND task.monitoring=false AND task.task_type='IMPORT_CHAPTER'
              AND task.reason='SOURCE_RATE_LIMITED' AND task.next_run_at<=now()
            ORDER BY task.next_run_at ASC, task.work_key ASC, task.created_at ASC, task.id ASC
-           LIMIT 64
+           LIMIT 512
          ), window_routes AS MATERIALIZED (
            SELECT dw.id AS task_id, route.source, route.source_rank,
              (s.enabled=true
@@ -3816,7 +3968,7 @@ export class LiteRepository {
              SELECT 1 FROM window_routes wr WHERE wr.task_id=dw.id AND wr.is_runnable=true
            )
            ORDER BY dw.next_run_at ASC, dw.work_key ASC, dw.created_at ASC, dw.id ASC
-           LIMIT 64
+           LIMIT 512
          ), due_candidates AS MATERIALIZED (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,
@@ -4062,11 +4214,21 @@ export class LiteRepository {
            FROM picked
           WHERE t.id = picked.id
          RETURNING picked.work_key`, [Math.min(64, Math.max(16, limit))]) : noUploadOutcomeRecovery;
-            await this.refreshReadyWorks(client, [...leases.rows, ...retries.rows, ...sourceCooldownRecovery.rows, ...uploads.rows, ...reopenedUnknownTasks.rows, ...ready.rows, ...repairedPublishes.rows, ...disabledBackfillCatalogs.rows, ...demotedOutOfSequenceP0.rows].map((row) => row.work_key));
+            await this.refreshReadyWorks(client, [
+                ...leases.rows.filter((row) => !row.monitoring),
+                ...retries.rows.filter((row) => !row.monitoring),
+                ...sourceCooldownRecovery.rows,
+                ...uploads.rows,
+                ...reopenedUnknownTasks.rows,
+                ...ready.rows,
+                ...repairedPublishes.rows,
+                ...disabledBackfillCatalogs.rows,
+                ...demotedOutOfSequenceP0.rows,
+            ].map((row) => row.work_key));
             await client.query('COMMIT');
             this.invalidateP1BacklogCache();
             const leaseRetries = leases.rows.filter((row) => row.state === 'RETRY_WAIT').length;
-            const readyRetries = retries.rows.filter((row) => row.state === 'READY').length;
+            const readyRetries = retries.rows.filter((row) => row.state === 'READY').length + (dueMonitors.rowCount || 0);
             const exhausted = [...leases.rows, ...retries.rows].filter((row) => row.state === 'BLOCKED').length;
             return { leases: leaseRetries, retries: readyRetries, exhausted, uploads: uploads.rowCount || 0,
                 uploadReceiptRecoveries: provenUploadReceipts.rowCount || 0,
