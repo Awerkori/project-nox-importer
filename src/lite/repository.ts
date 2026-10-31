@@ -1800,7 +1800,7 @@ export class LiteRepository {
           AND rw.work_key LIKE 'work:%'
           AND rw.next_run_at <= now() + interval '35 seconds'
         ORDER BY rw.last_claimed_at ASC NULLS FIRST, rw.next_run_at ASC, rw.work_key ASC
-        LIMIT 96
+        LIMIT 256
       ), work_stats AS (
         SELECT
           rpw.work_key,
@@ -2000,11 +2000,14 @@ export class LiteRepository {
       });
     }
 
-    // 3. Never leave capacity idle if fewer sources have eligible works: relax per-source cap to fill desiredSize.
+    // 3. Never leave capacity idle if fewer sources have eligible works: relax per-source cap for FAST/NORMAL
+    //    sources first, keeping SLOW sources bounded by maxTotalSlowInFocus while any FAST/NORMAL works remain.
     if (nextFocus.length < desiredSize && remainingCandidates.length > 0) {
       remainingCandidates.sort((a, b) => b.score - a.score || a.oldestTaskMs - b.oldestTaskMs);
       for (const chosen of remainingCandidates) {
         if (nextFocus.length >= desiredSize) break;
+        const isSlow = Boolean(sourceTiers && speedRankFor(chosen.source) === 2);
+        if (isSlow) continue;
         selectedSet.add(chosen.workKey);
         sourceCounts.set(chosen.source, (sourceCounts.get(chosen.source) || 0) + 1);
         nextFocus.push({
@@ -2014,6 +2017,24 @@ export class LiteRepository {
           remainingChapters: chosen.remainingChapters,
           enteredAt: now,
         });
+      }
+      if (nextFocus.length < desiredSize) {
+        for (const chosen of remainingCandidates) {
+          if (nextFocus.length >= desiredSize) break;
+          if (selectedSet.has(chosen.workKey)) continue;
+          const isSlow = Boolean(sourceTiers && speedRankFor(chosen.source) === 2);
+          if (isSlow && totalSlowCount >= maxTotalSlowInFocus && nextFocus.length > 0) continue;
+          selectedSet.add(chosen.workKey);
+          sourceCounts.set(chosen.source, (sourceCounts.get(chosen.source) || 0) + 1);
+          if (isSlow) totalSlowCount++;
+          nextFocus.push({
+            workKey: chosen.workKey,
+            workId: chosen.workId,
+            source: chosen.source,
+            remainingChapters: chosen.remainingChapters,
+            enteredAt: now,
+          });
+        }
       }
     }
 
@@ -2498,11 +2519,8 @@ export class LiteRepository {
       WITH cur AS (
         SELECT last_source FROM importer_lite_metadata_source_cursor
         WHERE cursor_name=$1 FOR UPDATE
-      ), ordered_sources AS (
-        SELECT s.id AS source,
-          ROW_NUMBER() OVER (
-            ORDER BY CASE WHEN s.id > COALESCE(cur.last_source, '') THEN 0 ELSE 1 END, s.id
-          ) AS ord
+      ), ordered_sources AS MATERIALIZED (
+        SELECT s.id AS source
         FROM importer_sources s
         LEFT JOIN importer_lite_source_health h ON h.source = s.id
         LEFT JOIN cur ON true
@@ -2512,6 +2530,7 @@ export class LiteRepository {
           AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = true
           AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
           AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
+        ORDER BY CASE WHEN s.id > COALESCE(cur.last_source, '') THEN 0 ELSE 1 END, s.id
       ), picked AS (
         SELECT t.id, os.source
         FROM ordered_sources os
@@ -2523,10 +2542,9 @@ export class LiteRepository {
             AND t.monitoring = true
             AND (t.payload->>'source') = os.source
             AND t.next_run_at <= now()
-          ORDER BY t.priority ASC, t.next_run_at ASC, t.created_at ASC, t.id ASC
+          ORDER BY t.priority ASC, t.next_run_at ASC
           LIMIT 1
         ) t
-        ORDER BY os.ord ASC
         LIMIT 1
       ), claimed AS (
         UPDATE importer_lite_tasks task
@@ -2616,6 +2634,11 @@ export class LiteRepository {
    */
   private async readyImportSourceRows(limit = 128, db: Pick<Pool, 'query'> = this.db): Promise<string[]> {
     const maximum = Math.max(1, Math.min(256, limit));
+    const hasFocus = this.p1FocusWorkKeys.length > 0;
+    const focusOrderSql = hasFocus
+      ? 'CASE WHEN rw.work_key = ANY($2::text[]) THEN 0 ELSE 1 END,'
+      : '';
+    const params: unknown[] = hasFocus ? [maximum, this.p1FocusWorkKeys] : [maximum];
     const result = await db.query<Row>(`WITH candidate_works AS (
         SELECT rw.work_key,rw.priority
         FROM importer_lite_ready_works rw
@@ -2634,7 +2657,7 @@ export class LiteRepository {
               AND active_work.task_type IN ('IMPORT_CHAPTER','PUBLISH')
               AND active_work.state='RUNNING'
           )
-        ORDER BY rw.priority,rw.last_claimed_at NULLS FIRST,rw.next_run_at,rw.work_key
+        ORDER BY rw.priority,${focusOrderSql}rw.last_claimed_at NULLS FIRST,rw.next_run_at,rw.work_key
         LIMIT $1
       ), raw_candidates AS (
         SELECT t.id,t.work_id,t.chapter_key,rw.priority
@@ -2691,7 +2714,7 @@ export class LiteRepository {
         routes.priority=lane.priority
         OR (lane.priority=1 AND routes.priority=2)
       )
-      ORDER BY routes.id, routes.source_rank, routes.created_at, routes.source`, [maximum]);
+      ORDER BY routes.id, routes.source_rank, routes.created_at, routes.source`, params);
     return result.rows.map((row) => String(row.source));
   }
 
@@ -3875,12 +3898,17 @@ export class LiteRepository {
     // Isolated 1-off transient failures (timeouts, aborts) do not immediately
     // cool down the entire source across all workers unless 3 consecutive failures occur.
     if (!(retryAfter > 0)) {
+      const isChapterContentDefect = /^(?:INVALID_PAGE_MANIFEST|PAGE_HTTP_404|CHAPTER_CONTENT_INVALID_PLACEHOLDER|CATALOG_SOURCE_TIMEOUT|METADATA_SOURCE_TIMEOUT)/.test(message);
       await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
         VALUES($1,$2,NULL,1,$3)
         ON CONFLICT(source) DO UPDATE SET health=excluded.health,
-          cooldown_until=CASE WHEN importer_lite_source_health.consecutive_failures + 1 >= 3 THEN now()+($4 || ' seconds')::interval ELSE importer_lite_source_health.cooldown_until END,
+          cooldown_until=CASE
+            WHEN $5::boolean THEN importer_lite_source_health.cooldown_until
+            WHEN importer_lite_source_health.consecutive_failures + 1 >= 3 THEN now()+($4 || ' seconds')::interval
+            ELSE importer_lite_source_health.cooldown_until
+          END,
           consecutive_failures=importer_lite_source_health.consecutive_failures+1,last_error=excluded.last_error,updated_at=now()`,
-      [source, health, message, String(cooldownSeconds)]).catch(() => {});
+      [source, health, message, String(cooldownSeconds), isChapterContentDefect]).catch(() => {});
       return;
     }
 

@@ -203,4 +203,23 @@ describe('YugabyteDB pool & query optimization invariants', () => {
     expect(queries.some((q) => q.includes('publishIntegrityRepairV1'))).toBe(true);
     expect(queries.some((q) => q.includes('candidate_p0'))).toBe(true);
   });
+
+  it('does not globally cool down a fast source when a single chapter has a content defect (PAGE_HTTP_404 / INVALID_PAGE_MANIFEST)', async () => {
+    const capturedParams: unknown[][] = [];
+    const mockDb = {
+      query: vi.fn(async (_sql: string, params: unknown[]) => {
+        capturedParams.push(params);
+        return { rows: [], rowCount: 1 };
+      }),
+    } as unknown as Pool;
+    const repo = new LiteRepository(mockDb);
+
+    await repo.recordSourceFailure('nocturnesummer', new Error('INVALID_PAGE_MANIFEST'));
+    await repo.recordSourceFailure('mrtenzus', new Error('PAGE_HTTP_404'));
+    await repo.recordSourceFailure('mangaflix', new Error('The operation was aborted due to timeout'));
+
+    expect(capturedParams[0]?.[4]).toBe(true);
+    expect(capturedParams[1]?.[4]).toBe(true);
+    expect(capturedParams[2]?.[4]).toBe(false);
+  });
 });

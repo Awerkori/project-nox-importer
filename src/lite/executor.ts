@@ -414,6 +414,7 @@ export class LiteExecutor {
   private effectiveChapterAdmissionCap: number;
   private performanceTracker: SourcePerformanceTracker | null = null;
   private readonly slowBackgroundGate: AsyncSemaphore;
+  private readonly recentPublishTimestamps: number[] = [];
   // Held from byte download through Telegram acknowledgement. Receipt
   // persistence retains only scalar metadata, never image bytes, so it can
   // overlap the next bounded page wave without weakening the memory budget.
@@ -1516,6 +1517,24 @@ export class LiteExecutor {
           && typeof this.queue.completeImportAndPublish === 'function'
           && this.queue.completeImportAndEnqueuePublish === LiteRepository.prototype.completeImportAndEnqueuePublish
           && !('mock' in (this.queue.completeImportAndEnqueuePublish as object));
+        if (
+          canInlinePublish
+          && !(process.env.NODE_ENV === 'test' || process.env.VITEST)
+          && task.priority !== 'P0'
+          && task.priority !== 'STAFF'
+        ) {
+          const nowMs = Date.now();
+          while (this.recentPublishTimestamps.length > 0 && nowMs - this.recentPublishTimestamps[0] > 55_000) {
+            this.recentPublishTimestamps.shift();
+          }
+          if (this.recentPublishTimestamps.length >= 11) {
+            const staggerMs = Math.min(4_000, (this.recentPublishTimestamps.length - 10) * 1_100);
+            await new Promise<void>((resolve) => {
+              const t = setTimeout(resolve, staggerMs);
+              t.unref();
+            });
+          }
+        }
         const completed = canInlinePublish
           ? await this.queue.completeImportAndPublish(
               task,
@@ -1525,6 +1544,11 @@ export class LiteExecutor {
             )
           : await this.queue.completeImportAndEnqueuePublish(task, workerId, completionPayload);
         if (!completed) throw new Error('LEASE_LOST_AFTER_MEDIA_STORAGE');
+        if (canInlinePublish) {
+          const nowMs = Date.now();
+          this.recentPublishTimestamps.push(nowMs);
+          while (this.recentPublishTimestamps.length > 64) this.recentPublishTimestamps.shift();
+        }
         const dbPublishMs = performance.now() - dbPublishStartedAt;
         const totalDurationMs = performance.now() - taskStartedAt;
         // This stays entirely in the existing bounded in-memory telemetry
@@ -1567,7 +1591,9 @@ export class LiteExecutor {
       } catch (error) {
         lastError = error;
         if (isSourceFailure(error)) {
-          if (this.performanceTracker?.recordChapterOutcome(route.source, {
+          const errMessage = String((error as any)?.message || '');
+          const isContentDefect = /^(?:INVALID_PAGE_MANIFEST|PAGE_HTTP_404|CHAPTER_CONTENT_INVALID_PLACEHOLDER)/.test(errMessage);
+          if (!isContentDefect && this.performanceTracker?.recordChapterOutcome(route.source, {
             succeeded: false,
             durationMs: performance.now() - taskStartedAt,
             pageCount: 0,

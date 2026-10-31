@@ -6,7 +6,7 @@ import { HostRateLimiter } from '../../core/rate-limiter.js';
 import type { SourceRegistry } from '../../sources/registry.js';
 import type { StorageProvider } from '../../storage/provider.js';
 import { LiteExecutor } from '../executor.js';
-import type { LiteRepository } from '../repository.js';
+import { LiteRepository } from '../repository.js';
 import { LiteMemoryPressureGuard } from '../memory-pressure.js';
 import { PageByteBudget } from '../page-byte-budget.js';
 import { SourcePerformanceTracker } from '../source-performance.js';
@@ -189,5 +189,52 @@ describe('SourcePerformanceTracker & Dynamic Fast/Slow Scheduling', () => {
     expect(reducedAt495.state).toBe('REDUCED');
     expect(buffers.capacity).toBe(48);
     expect(bytes.capacityBytes).toBe(64 * MIB);
+  });
+
+  it('includes manhastro in warm-start slow priors and bounds slow sources in P1 Focus Group relaxation', async () => {
+    const tracker = new SourcePerformanceTracker();
+    expect(tracker.getTier('manhastro')).toBe('SLOW');
+    expect(tracker.getTier('nocturnesummer')).toBe('FAST');
+    expect(tracker.getTier('taimumangas')).toBe('FAST');
+    expect(tracker.getTier('mrtenzus')).toBe('NORMAL');
+
+    const rows = [
+      ...Array.from({ length: 20 }, (_, idx) => ({
+        work_key: `work:00000000-0000-4000-8000-0000000001${String(idx).padStart(2, '0')}`,
+        work_id: `00000000-0000-4000-8000-0000000001${String(idx).padStart(2, '0')}`,
+        remaining_chapters: 10,
+        oldest_task_at: new Date(Date.now() - 3600_000).toISOString(),
+        runnable_sources: ['mangaflix'],
+        has_recorded_routes: true,
+      })),
+      ...Array.from({ length: 15 }, (_, idx) => ({
+        work_key: `work:00000000-0000-4000-8000-0000000002${String(idx).padStart(2, '0')}`,
+        work_id: `00000000-0000-4000-8000-0000000002${String(idx).padStart(2, '0')}`,
+        remaining_chapters: 10,
+        oldest_task_at: new Date(Date.now() - 3600_000).toISOString(),
+        runnable_sources: ['nocturnesummer'],
+        has_recorded_routes: true,
+      })),
+      ...Array.from({ length: 15 }, (_, idx) => ({
+        work_key: `work:00000000-0000-4000-8000-0000000003${String(idx).padStart(2, '0')}`,
+        work_id: `00000000-0000-4000-8000-0000000003${String(idx).padStart(2, '0')}`,
+        remaining_chapters: 10,
+        oldest_task_at: new Date(Date.now() - 3600_000).toISOString(),
+        runnable_sources: ['mrtenzus'],
+        has_recorded_routes: true,
+      })),
+    ];
+    const mockDb = {
+      query: async () => ({ rows }),
+    } as unknown as Pool;
+    const repo = new LiteRepository(mockDb, mockDb);
+    const snap = await repo.refreshP1FocusGroup({
+      targetSize: 28,
+      maxPerSource: 8,
+      sourceTiers: tracker.getTierMap(['mangaflix', 'nocturnesummer', 'mrtenzus']),
+    });
+    expect(snap.focusWorkCount).toBe(28);
+    expect(snap.focusSources.mangaflix || 0).toBeLessThanOrEqual(2);
+    expect((snap.focusSources.nocturnesummer || 0) + (snap.focusSources.mrtenzus || 0)).toBeGreaterThanOrEqual(26);
   });
 });
