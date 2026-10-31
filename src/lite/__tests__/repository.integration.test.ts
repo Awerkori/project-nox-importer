@@ -968,6 +968,32 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toMatchObject({ state:'RUNNING' });
   });
 
+  it('admits bounded alternating P2 discovery and onboarding turns under sustained metadata pressure', async () => {
+    const runtime=new ImporterLiteRuntime(poolFor(db) as Pool,{}, {get:()=>undefined} as unknown as SourceRegistry,
+      {upload:async()=>'unused',healthCheck:async()=>true,getProviderKey:()=> 'telegram'},
+      {IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,BATCH_PAGE_DOWNLOAD_CONCURRENCY:1} as any);
+    (runtime as any).isRuntimeLeader=true;
+    (runtime as any).hasSustainedSourceMetadataPoolPressure=()=>true;
+    (runtime as any).shouldPauseLowPriorityMetadata=()=>false;
+    const discovery={id:'p2-discovery'};
+    const catalog={id:'p2-catalog'};
+    const claimDueDiscovery=vi.fn().mockResolvedValue(discovery);
+    const claimNewWorkCatalog=vi.fn().mockResolvedValue(catalog);
+    (runtime as any).queue={claimDueDiscovery,claimNewWorkCatalog};
+    const discover=vi.fn().mockResolvedValue(undefined);
+    const handleCatalog=vi.fn().mockResolvedValue(undefined);
+    (runtime as any).discover=discover;
+    (runtime as any).withCatalogLeaseHeartbeat=async (_task:any,_worker:string,fn:()=>Promise<void>)=>fn();
+    (runtime as any).catalog=handleCatalog;
+    await (runtime as any).runNewWorkCatalog();
+    await (runtime as any).runNewWorkCatalog();
+    expect(discover).toHaveBeenCalledTimes(1);
+    expect(claimNewWorkCatalog).not.toHaveBeenCalled();
+    (runtime as any).lastNewWorkPressureTurnAt=0;
+    await (runtime as any).runNewWorkCatalog();
+    expect(handleCatalog).toHaveBeenCalledTimes(1);
+  });
+
   it('retains exactly one P2 metadata seat while chapter demand is admitted or ready, and fully opens P2 once idle', () => {
     const pool = Object.assign(poolFor(db), { waitingCount: 0 });
     const runtime = new ImporterLiteRuntime(

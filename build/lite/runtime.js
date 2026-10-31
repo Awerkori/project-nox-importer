@@ -272,6 +272,8 @@ export class ImporterLiteRuntime {
     // reserves the remaining shared YSQL capacity for publication.
     backgroundMetadataUnderChapterLoadGate = new AsyncSemaphore(1, 'lite_background_metadata_under_chapter_load');
     lastNewWorkDiscoveryAt = 0;
+    lastNewWorkPressureTurnAt = 0;
+    pressureDiscoveryTurn = true;
     // Reserve 3 permits (2 for background V7 discovery + 1 for NEW_WORK onboarding)
     // so background V7 tasks can never starve a newly created work's onboarding pass.
     crossSourceMetadataGate = new AsyncSemaphore(3, 'lite_cross_source_metadata');
@@ -2300,9 +2302,14 @@ export class ImporterLiteRuntime {
         // wide, performs no network inside a transaction, and uses the isolated
         // metadata pool for claims/lookups; site, memory and sustained metadata
         // pool pressure remain the admission guardrails.
-        if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata() || this.hasSustainedSourceMetadataPoolPressure())
+        if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata())
             return;
-        if (typeof this.queue.hasExecutableOrRecoverableP1Backlog === 'function') {
+        const pressured = this.hasSustainedSourceMetadataPoolPressure();
+        // One single-flight P2 turn every two minutes prevents permanent
+        // discovery starvation without competing in every chapter wave.
+        if (pressured && Date.now() - this.lastNewWorkPressureTurnAt < 120_000)
+            return;
+        if (!pressured && typeof this.queue.hasExecutableOrRecoverableP1Backlog === 'function') {
             try {
                 const p1Backlog = await this.queue.hasExecutableOrRecoverableP1Backlog();
                 this.p2SubordinationState = {
@@ -2320,6 +2327,18 @@ export class ImporterLiteRuntime {
         }
         try {
             const workerId = `${this.runtimeInstanceId}:new-work-catalog`;
+            if (pressured) {
+                this.lastNewWorkPressureTurnAt = Date.now();
+                const preferDiscovery = this.pressureDiscoveryTurn;
+                this.pressureDiscoveryTurn = !this.pressureDiscoveryTurn;
+                if (preferDiscovery) {
+                    this.lastNewWorkDiscoveryAt = Date.now();
+                    const discovery = await this.queue.claimDueDiscovery(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS || CATALOG_TASK_LEASE_SECONDS);
+                    if (discovery)
+                        await this.discover(discovery, workerId);
+                    return;
+                }
+            }
             const task = await this.queue.claimNewWorkCatalog(workerId, CATALOG_TASK_LEASE_SECONDS);
             if (task) {
                 await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
