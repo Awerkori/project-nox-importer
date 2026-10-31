@@ -421,9 +421,9 @@ export class LiteRepository {
 
           // Never race an actively running catalog task.
           if (catalogTask && catalogTask.state === 'RUNNING') continue;
-          // A pending staff request must finish at its original priority before
-          // the coverage producer can reuse its catalog identity as a watch.
-          if (catalogTask && Number(catalogTask.priority) === 0
+          // Pending STAFF/P0/P1 work must retain its priority before this
+          // producer can reuse the catalog identity as a P2 observation.
+          if (catalogTask && Number(catalogTask.priority) < 3
             && (catalogTask.state === 'READY' || catalogTask.state === 'RETRY_WAIT')) continue;
 
           if (monitorTask) {
@@ -465,7 +465,7 @@ export class LiteRepository {
             FROM input i
             WHERE t.id=i.task_id
               AND (
-                (t.monitoring=false AND (t.state='DONE' OR (t.state IN ('READY','RETRY_WAIT') AND t.priority<>0)))
+                (t.monitoring=false AND (t.state='DONE' OR (t.state IN ('READY','RETRY_WAIT') AND t.priority=3)))
                 OR (t.monitoring=true AND t.state IN ('DONE','BLOCKED'))
               )
             RETURNING t.id`, [

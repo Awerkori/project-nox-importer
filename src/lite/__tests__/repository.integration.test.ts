@@ -2462,8 +2462,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       new AsyncSemaphore(2, 'p0-source-reserve-buffers'), new HostRateLimiter(2), 2);
     executor.setFairSourceDemand(['source-a', 'source-b']);
     const hotSlot = (executor as any).sourceSlot('source-a') as AsyncSemaphore;
-    expect(hotSlot.capacity).toBe(1);
-    expect(hotSlot.tryAcquire()).toBe(true);
+    for (let i=0; i<hotSlot.capacity; i++) expect(hotSlot.tryAcquire()).toBe(true);
 
     const waiting = (executor as any).acquireSourcePermit({ priority: 'P0' }, 'p0-worker', 'source-a');
     await vi.waitFor(() => expect(hotSlot.queued).toBe(1));
@@ -2472,7 +2471,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     hotSlot.release();
     const permit = await waiting;
     expect(permit.waitMs).toBeGreaterThanOrEqual(0);
-    permit.sourceSlot.release();
+    permit.release();
+    for (let i=1; i<hotSlot.capacity; i++) hotSlot.release();
   });
 
   it('yields a second saturated P0 claimant after preserving its one source reservation', async () => {
@@ -2482,17 +2482,20 @@ describe('LiteRepository against the additive Lite migration', () => {
       new AsyncSemaphore(2, 'p0-second-source-yield-buffers'), new HostRateLimiter(2), 2);
     executor.setFairSourceDemand(['source-a', 'source-b']);
     const hotSlot = (executor as any).sourceSlot('source-a') as AsyncSemaphore;
-    expect(hotSlot.tryAcquire()).toBe(true);
+    for (let i=0; i<hotSlot.capacity; i++) expect(hotSlot.tryAcquire()).toBe(true);
 
     const reserved = (executor as any).acquireSourcePermit({ priority: 'P0' }, 'p0-reserved-worker', 'source-a');
     await vi.waitFor(() => expect(hotSlot.queued).toBe(1));
-    const yielded = await (executor as any).acquireSourcePermit({ priority: 'P0' }, 'p0-yield-worker', 'source-a');
+    const second = (executor as any).acquireSourcePermit({ priority: 'P0' }, 'p0-yield-worker', 'source-a');
+    await vi.waitFor(() => expect(hotSlot.queued).toBe(2));
+    hotSlot.release();
+    const permit = await reserved;
+    const yielded = await second;
     expect(yielded).toBeNull();
     expect((queue as any).yieldForSourceFairness).toHaveBeenCalledTimes(1);
 
-    hotSlot.release();
-    const permit = await reserved;
-    permit.sourceSlot.release();
+    permit.release();
+    for (let i=1; i<hotSlot.capacity; i++) hotSlot.release();
   });
 
   it('reports durable public publication diversity rather than task completion', async () => {
@@ -2748,6 +2751,16 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(await repo.refillP0MonitorCoverage(8)).toEqual({ source: 'source-a', admitted: 0, revived: 0 });
     expect((await db.query(`SELECT state,priority,monitoring FROM importer_lite_tasks WHERE idempotency_key='lite:catalog:source-a:staff-coverage'`)).rows[0])
       .toEqual({state:'READY',priority:0,monitoring:false});
+  });
+
+  it('does not demote a pending P1 catalog to a P2 monitor', async () => {
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000121','source-a','p1-coverage',$1,'ACTIVE')`, [ids.p1a]);
+    await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P1',
+      idempotencyKey:'lite:catalog:source-a:p1-coverage',payload:{source:'source-a',sourceWorkId:'p1-coverage'} });
+    expect(await repo.refillP0MonitorCoverage(8)).toEqual({source:'source-a',admitted:0,revived:0});
+    expect((await db.query(`SELECT state,priority,monitoring FROM importer_lite_tasks WHERE idempotency_key='lite:catalog:source-a:p1-coverage'`)).rows[0])
+      .toEqual({state:'READY',priority:2,monitoring:false});
   });
 
   it('enrols a separate monitor without clearing a blocked catalog diagnostic', async () => {
