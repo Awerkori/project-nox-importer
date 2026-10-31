@@ -2532,8 +2532,8 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('admits ready publication before another same-priority chapter download', async () => {
-    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: 'work:download', chapterKey: 'download', priority: 'P1', idempotencyKey: 'p1-download' });
-    await repo.enqueue({ taskType: 'PUBLISH', workId: ids.p1b, workKey: 'work:publish', chapterKey: 'publish', priority: 'P1', idempotencyKey: 'p1-publish' });
+    await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'download', priority: 'P1', idempotencyKey: 'p1-download' });
+    await repo.enqueue({ taskType: 'PUBLISH', workId: ids.p1b, workKey: `work:${ids.p1b}`, chapterKey: 'publish', priority: 'P1', idempotencyKey: 'p1-publish' });
     expect((await repo.claim('publisher-first', 30))?.taskType).toBe('PUBLISH');
   });
 
@@ -4031,7 +4031,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     await repo.finish(imported!, 'legacy-importer', { state: 'DONE', checkpoint: { chapterId: ids.chapter, mediaIds: [ids.page] } });
     expect((await repo.reconcile(10)).publishable).toBe(1);
     const task = await repo.claim('legacy-publisher', 120);
-    expect(task?.payload).toEqual({ importTaskId: imported!.id });
+    expect(task?.payload).toEqual({ importTaskId: imported!.id, orderKey: null });
     const executor = new LiteExecutor(poolFor(db) as Pool, repo, {} as SourceRegistry, {} as StorageProvider, ids.staff,
       new AsyncSemaphore(1, 'legacy-publish-downloads'));
 
