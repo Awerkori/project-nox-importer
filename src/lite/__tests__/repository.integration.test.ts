@@ -987,7 +987,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).tryAcquireBackgroundMetadataBudget()).toEqual(expect.any(Function));
   });
 
-  it('subordinates P2 new-work discovery to executable P1 backlog and resumes once only terminal/deferred P1 remains', async () => {
+  it('lets the bounded P2 discovery lane progress while preserving queued P1 work', async () => {
     await db.query(`INSERT INTO importer_work_mappings
       (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
       VALUES ('00000000-0000-4000-8000-000000000901','source-a','already-mapped',$1::uuid,'p1-a','P1 A','SYNCED')`, [ids.p1a]);
@@ -1014,17 +1014,12 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     (runtime as any).isRuntimeLeader = true;
 
-    // While executable P1 chapter work exists, new-work discovery is subordinated.
-    await (runtime as any).runNewWorkCatalog();
-    expect(adapter.fetchUpdatedWorks).toHaveBeenCalledTimes(0);
-
-    // Terminal BLOCKED P1 tasks must never permanently starve P2 discovery.
-    await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED', reason='ALL_ROUTES_UNAVAILABLE'
-      WHERE idempotency_key='chapter-p1-busy'`);
-    await (runtime as any).queue.hasExecutableOrRecoverableP1Backlog(true);
-
+    // P2 has a dedicated bounded lane and must not consume the queued P1 task.
     await (runtime as any).runNewWorkCatalog();
     expect(adapter.fetchUpdatedWorks).toHaveBeenCalledTimes(1);
+    expect((await db.query(`SELECT state,priority FROM importer_lite_tasks WHERE idempotency_key='chapter-p1-busy'`)).rows[0])
+      .toEqual({state:'READY',priority:2});
+
     const catalogTasks = await db.query<{ idempotency_key: string; work_id: string | null }>(`
       SELECT idempotency_key, work_id::text AS work_id
       FROM importer_lite_tasks
@@ -3780,6 +3775,21 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((await db.query(`SELECT state,reason FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
       .toMatchObject({ state: 'RETRY_WAIT', reason: 'DISCOVERY_SOURCE_TIMEOUT' });
   }, 10_000);
+
+  it('keeps explicitly disabled sources blocked without attempting catalog networking', async () => {
+    const adapter = { fetchWorkSnapshot: vi.fn() };
+    const runtime = new ImporterLiteRuntime(
+      poolFor(db) as Pool, {}, { get: () => adapter } as unknown as SourceRegistry,
+      { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
+      { IMPORTER_USER_ID: '00000000-0000-4000-8000-000000000009', DOWNLOAD_INFLIGHT_CONCURRENCY: 1,
+        BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1 } as any,
+    );
+    const finish = vi.fn().mockResolvedValue(undefined);
+    (runtime as any).queue = { sourcePolicy: vi.fn().mockResolvedValue({ runnable:false, enabled:false, status:'DISABLED', chapterIngestionEnabled:true }), finish };
+    await (runtime as any).catalog({ payload:{source:'source-a',sourceWorkId:'disabled-work'}, monitoring:false, attempts:1, maxAttempts:8 }, 'worker');
+    expect(finish).toHaveBeenCalledWith(expect.anything(), 'worker', {state:'BLOCKED',reason:'SOURCE_DISABLED'});
+    expect(adapter.fetchWorkSnapshot).not.toHaveBeenCalled();
+  });
 
   it('uses the real source administration contract before discovery or catalog networking', async () => {
     await db.query(`UPDATE importer_sources
