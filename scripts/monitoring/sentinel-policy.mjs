@@ -9,6 +9,10 @@ export function incidents(sample, now = Date.now()) {
   if (Number.isFinite(rss) && rss >= 550) result.memory_high = `rssMiB=${rss}; configured historical cap=624MiB`;
   const pool = Number(h?.ysql?.poolWaiting);
   if (Number.isFinite(pool) && pool >= 8) result.sql_waiters = `primaryPoolWaiters=${pool}`;
+  const receiptsFresh = Number.isFinite(Date.parse(sample.receipts?.at || '')) && now-Date.parse(sample.receipts.at)<=900000;
+  const oldestReceipt = Date.parse(sample.receipts?.oldest || '');
+  if (receiptsFresh && Number(sample.receipts.count)>0 && Number.isFinite(oldestReceipt) && now-oldestReceipt>30*60_000)
+    result.unpublished_receipts = `${sample.receipts.count} completed imports lack a publication marker; may include legitimate presentation blocks; inspect before recovery`;
   const catalogFresh = Number.isFinite(Date.parse(sample.catalog?.at || '')) && now-Date.parse(sample.catalog.at)<=900000;
   const long = Object.entries(catalogFresh ? sample.catalog.tasks : {}).filter(([,task]) => now-Number(task.firstSeen) >= 30*60_000);
   if (long.length) result.catalog_prolonged = `${long.length} catalog task(s) held by the same owner for at least 30 minutes; inspect before recovery` ;

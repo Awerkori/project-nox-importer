@@ -18,6 +18,11 @@ describe('sentinel incident handling',()=>{
   expect(trackCatalog(tasks,[{id:'a',lease_owner:'new'}],2000).a.firstSeen).toBe(2000);
   expect(incidents({heartbeat:{observedAt:new Date(2000000).toISOString()},catalog:{at:new Date(2000000).toISOString(),tasks}},2000000).catalog_prolonged).toContain('inspect before recovery');
  });
+ it('flags old missing publication markers without assuming they are defects',()=>{
+  const now=10000000;
+  const out=incidents({heartbeat:{observedAt:new Date(now).toISOString()},receipts:{at:new Date(now).toISOString(),oldest:new Date(1).toISOString(),count:2}},now);
+  expect(out.unpublished_receipts).toContain('may include legitimate presentation blocks');
+ });
  it('does not infer healthy state from missing heartbeat',()=>{
   expect(incidents({heartbeat:null},10000000)).toHaveProperty('heartbeat_stale');
   expect(incidents({error:'timeout'},10000000)).toHaveProperty('database_unreachable');

@@ -10,6 +10,7 @@ for (;;) {
   const old=await readJson(path.join(dir,'state.json'),{});
   sample.p0=old.p0 || null;
   sample.catalog=old.catalog || null;
+  sample.receipts=old.receipts || null;
   try { sample.heartbeat=await withPostgresClient(async c=>{
     const v=(await c.query("SELECT value FROM settings WHERE key='importer_heartbeat'")).rows[0]?.value;
     if (!sample.p0 || Date.now()-Date.parse(sample.p0.at)>600000) {
@@ -21,11 +22,17 @@ for (;;) {
         sample.catalog=r.rows.length>20 ? null : {at:new Date().toISOString(),tasks:trackCatalog(old.catalog?.tasks || {},r.rows,Date.now())};
       } catch { sample.catalog=null; }
     }
+    if (!sample.receipts || Date.now()-Date.parse(sample.receipts.at)>600000) {
+      try { const r=await c.query("SELECT count(*)::int AS count,min(updated_at) AS oldest FROM importer_lite_tasks WHERE state='DONE' AND task_type='IMPORT_CHAPTER' AND checkpoint ? 'mediaIds' AND NOT checkpoint ? 'publishedAt'");
+        sample.receipts={at:new Date().toISOString(),...r.rows[0]};
+      } catch { sample.receipts=null; }
+    }
     return typeof v==='string'?JSON.parse(v):v;}); }
   catch(e){sample.error=String(e.message).slice(0,240);}
   const h=sample.heartbeat;
   const unknown=[];
   if (sample.error) unknown.push('heartbeat_stale');
+  if (sample.error || !sample.receipts || Date.now()-Date.parse(sample.receipts.at)>900000) unknown.push('unpublished_receipts');
   if (sample.error || !sample.catalog || Date.now()-Date.parse(sample.catalog.at)>900000) unknown.push('catalog_prolonged');
   if (sample.error || !h) unknown.push('p0_overdue','memory_high','sql_waiters');
   else {
@@ -35,6 +42,6 @@ for (;;) {
   }
   const result=transitions(old.incidents || {},incidents(sample),Date.now(),3600000,unknown);
   for(const event of result.events) {await fs.appendFile(path.join(dir,'incidents.jsonl'),JSON.stringify(event)+'\n',{mode:0o600});console.error(JSON.stringify(event));}
-  await atomicWriteJson(path.join(dir,'state.json'),{updatedAt:sample.at,heartbeatAt:h?.observedAt ?? null,p0:sample.p0,catalog:sample.catalog,unknown,incidents:result.state});
+  await atomicWriteJson(path.join(dir,'state.json'),{updatedAt:sample.at,heartbeatAt:h?.observedAt ?? null,p0:sample.p0,catalog:sample.catalog,receipts:sample.receipts,unknown,incidents:result.state});
   await sleep(120000);
 }
