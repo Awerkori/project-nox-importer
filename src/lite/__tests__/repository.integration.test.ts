@@ -174,7 +174,10 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(claimFastChapterPassMigration);
   await db.exec(directPublishStoredProcedureMigration);
   await db.exec(optimizeYsqlCpuAndP0MonitorMigration);
-  await db.exec(extremeYsqlCpuAndIndexMigration);
+  // PGlite cannot implement Yugabyte's ybgin access method. Preserve the
+  // production migration and omit only that index in this local fixture.
+  await db.exec('ALTER TABLE works ADD COLUMN IF NOT EXISTS search_text text');
+  await db.exec(extremeYsqlCpuAndIndexMigration.replace(/CREATE INDEX IF NOT EXISTS idx_works_search_text_trgm\s+ON public\.works USING ybgin \(search_text gin_trgm_ops\)\s+WHERE published = true;/, ''));
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -2744,6 +2747,21 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toMatchObject({ monitoring: true, state: 'RETRY_WAIT' });
   });
 
+  it('enrols a separate monitor without clearing a blocked catalog diagnostic', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1a]);
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000119','source-a','blocked-coverage',$1,'ACTIVE')`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
+      idempotencyKey: 'lite:catalog:source-a:blocked-coverage', payload: { source: 'source-a', sourceWorkId: 'blocked-coverage' } });
+    await db.query(`UPDATE importer_lite_tasks SET state='BLOCKED',reason='SOURCE_ERROR' WHERE idempotency_key='lite:catalog:source-a:blocked-coverage'`);
+    expect(await repo.refillP0MonitorCoverage(8)).toEqual({ source: 'source-a', admitted: 1, revived: 0 });
+    const rows = (await db.query(`SELECT idempotency_key,state,monitoring,reason FROM importer_lite_tasks WHERE work_id=$1 ORDER BY idempotency_key`, [ids.p1a])).rows;
+    expect(rows).toEqual([
+      { idempotency_key: 'lite:catalog:source-a:blocked-coverage', state: 'BLOCKED', monitoring: false, reason: 'SOURCE_ERROR' },
+      { idempotency_key: 'lite:p0-monitor:source-a:blocked-coverage', state: 'READY', monitoring: true, reason: null },
+    ]);
+  });
+
   it('revives only a completed first catalog pass and never races an active normal catalog task', async () => {
     await db.query(`UPDATE works SET published=true WHERE id IN ($1,$2)`, [ids.p1a, ids.p1b]);
     await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status) VALUES
@@ -2754,6 +2772,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`UPDATE importer_lite_tasks SET state='DONE' WHERE idempotency_key='lite:catalog:source-a:coverage-revive'`);
     await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1b, workKey: `work:${ids.p1b}`, priority: 'P1',
       idempotencyKey: 'lite:catalog:source-b:coverage-active', payload: { source: 'source-b', sourceWorkId: 'coverage-active' } });
+    await db.query(`UPDATE importer_lite_tasks SET state='RUNNING',lease_owner='fixture',lease_until=now()+interval '2 minutes' WHERE idempotency_key='lite:catalog:source-b:coverage-active'`);
 
     expect(await repo.refillP0MonitorCoverage(8)).toEqual({ source: 'source-a', admitted: 0, revived: 1 });
     expect((await db.query(`SELECT state,monitoring,work_key FROM importer_lite_tasks

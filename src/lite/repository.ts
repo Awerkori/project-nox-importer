@@ -423,9 +423,11 @@ export class LiteRepository {
 
           if (monitorTask) {
             missing.push({ sourceWorkId, workId, reviveTaskId: String(monitorTask.id) });
-          } else if (catalogTask) {
+          } else if (catalogTask && !(catalogTask.state === 'BLOCKED' && !catalogTask.monitoring)) {
             missing.push({ sourceWorkId, workId, reviveTaskId: String(catalogTask.id) });
           } else {
+            // Preserve a blocked onboarding task and its diagnostic reason;
+            // its state cannot be revived by the guarded UPDATE below.
             missing.push({ sourceWorkId, workId, reviveTaskId: null });
           }
         }
