@@ -4545,7 +4545,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     (runtime as any).dedupe = { resolveWork: async () => ({ workId: ids.p1a, status: 'CONFIRMED_EXISTING' }) };
     await (runtime as any).catalog(task, 'catalog-worker');
 
-    expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
+    expect((await db.query(`SELECT state,monitoring FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0])
+      .toEqual({ state: 'RETRY_WAIT', monitoring: true });
     expect((await db.query(`SELECT count(*)::int AS count FROM importer_lite_chapter_sources WHERE work_id=$1 AND source='source-a'`, [ids.p1a])).rows[0].count).toBe(3);
     expect((await db.query(`SELECT chapter_id FROM importer_lite_chapters WHERE work_id=$1 AND canonical_chapter_key='pt-br|default|chapter|12.10|-'`, [ids.p1a])).rows[0].chapter_id)
       .toBe('00000000-0000-4000-8000-000000000011');
@@ -4920,7 +4921,7 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     await (runtime as any).catalog(task, 'metadata-worker');
 
-    expect(candidate).toMatchObject({ title: 'P1 Secondary Title', aliases: ['P1 Secondary Title'], genres: [] });
+    expect(candidate).toMatchObject({ title: 'P1 A', aliases: ['P1 Secondary Title'], genres: [] });
     expect((await db.query(`SELECT state FROM importer_lite_tasks WHERE id=$1`, [task!.id])).rows[0].state).toBe('DONE');
   });
 
@@ -5023,6 +5024,7 @@ describe('LiteRepository against the additive Lite migration', () => {
         BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2_000} as any,
     );
     (runtime as any).dedupe={mergeKnownMappedWork:async()=>({workId:ids.p1a,status:'EXISTING_MAPPING'})};
+    (runtime as any).historicalMetadataDedupe = (runtime as any).dedupe;
     await (runtime as any).catalog(task,'metadata-same-title-worker',{claimSqlMs:1,queueDwellMs:0});
     const result=(await db.query(`SELECT aliases_state,tags_state FROM importer_lite_metadata_enrichment
       WHERE source='source-a' AND source_work_id='same-title-alias'`)).rows[0];
@@ -5049,6 +5051,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     );
     (runtime as any).dedupe = { mergeKnownMappedWork:async () => ({ workId:null,status:'FAILED',
       reason:'INVALID_EDITORIAL_TITLE: Title is an authentication or login prompt' }) };
+    (runtime as any).historicalMetadataDedupe = (runtime as any).dedupe;
 
     await (runtime as any).catalog(task,'metadata-challenge-worker');
 
