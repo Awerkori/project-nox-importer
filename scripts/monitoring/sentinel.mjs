@@ -19,6 +19,7 @@ for (;;) {
   catch(e){sample.error=String(e.message).slice(0,240);}
   const h=sample.heartbeat;
   const unknown=[];
+  if (sample.error) unknown.push('heartbeat_stale');
   if (sample.error || !h) unknown.push('p0_overdue','memory_high','sql_waiters');
   else {
     if (!h.nextP0MonitorAt && (!sample.p0 || Date.now()-Date.parse(sample.p0.at)>900000)) unknown.push('p0_overdue');
