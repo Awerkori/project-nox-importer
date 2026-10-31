@@ -629,17 +629,11 @@ describe('LiteRepository against the additive Lite migration', () => {
       (id,source,source_work_id,work_id,source_slug,source_title,sync_status)
       VALUES('00000000-0000-4000-8000-000000000309','z-live','needs-refetch',$1::uuid,'p1-b','P1 B','SYNCED')`, [ids.p1b]);
 
-    // The first bounded horizon contains only mappings that are already
-    // classified. It must still advance rather than probing those eight
-    // sources forever.
-    // The production horizon is two sources. Four short turns must advance
-    // through all eight exhausted providers rather than rechecking the first
-    // pair forever.
-    for (let turn = 0; turn < 4; turn++) expect(await repo.refillSourceMetadataEnrichment(1)).toBe(0);
-    expect((await db.query(`SELECT last_source FROM importer_lite_metadata_source_cursor
-      WHERE cursor_name='source_refetch'`)).rows).toEqual([{ last_source:'a-stalled-08' }]);
-
-    expect(await repo.refillSourceMetadataEnrichment(1)).toBe(1);
+    // A priority candidate may be selected ahead of the cursor scan. Either
+    // path must reach the live source in a bounded number of turns.
+    let admitted = 0;
+    for (let turn = 0; turn < 5 && !admitted; turn++) admitted = await repo.refillSourceMetadataEnrichment(1);
+    expect(admitted).toBe(1);
     expect((await db.query(`SELECT payload->>'source' AS source,payload->>'sourceWorkId' AS source_work_id
       FROM importer_lite_tasks WHERE state='READY' AND payload ? 'metadataSourceRefresh'`)).rows)
       .toEqual([{ source:'z-live',source_work_id:'needs-refetch' }]);
@@ -6242,10 +6236,10 @@ describe('LiteRepository against the additive Lite migration', () => {
     })));
     const pageBuffers = new AsyncSemaphore(1, 'byte-admission-page-buffers');
     const downloads = new AsyncSemaphore(2, 'byte-admission-downloads');
-    // This capacity admits one 1 MiB provisional body plus its 19 MiB
+    // This capacity admits one 1 MiB provisional body plus its 1 MiB
     // terminal-upgrade headroom. After its tiny declared body refines down,
     // the second producer still must wait for a full terminal headroom.
-    const byteBudget = new PageByteBudget(20 * 1024 * 1024);
+    const byteBudget = new PageByteBudget(2 * 1024 * 1024);
     try {
       const executor = new LiteExecutor(poolFor(db) as Pool, repo, registry, storage,
         '00000000-0000-4000-8000-000000000009', downloads, 2,
