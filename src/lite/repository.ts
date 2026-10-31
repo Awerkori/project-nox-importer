@@ -396,7 +396,8 @@ export class LiteRepository {
           idempotency_key: string;
           state: string;
           monitoring: boolean;
-        }>(`SELECT id, idempotency_key, state, monitoring
+          priority: number;
+        }>(`SELECT id, idempotency_key, state, monitoring, priority
             FROM importer_lite_tasks
             WHERE idempotency_key = ANY($1::text[])`, [lookupKeys]);
         const existingByKey = new Map(existingRows.rows.map((r) => [String(r.idempotency_key), r]));
@@ -420,6 +421,10 @@ export class LiteRepository {
 
           // Never race an actively running catalog task.
           if (catalogTask && catalogTask.state === 'RUNNING') continue;
+          // A pending staff request must finish at its original priority before
+          // the coverage producer can reuse its catalog identity as a watch.
+          if (catalogTask && Number(catalogTask.priority) === 0
+            && (catalogTask.state === 'READY' || catalogTask.state === 'RETRY_WAIT')) continue;
 
           if (monitorTask) {
             missing.push({ sourceWorkId, workId, reviveTaskId: String(monitorTask.id) });
@@ -460,7 +465,7 @@ export class LiteRepository {
             FROM input i
             WHERE t.id=i.task_id
               AND (
-                (t.monitoring=false AND t.state IN ('DONE','READY','RETRY_WAIT'))
+                (t.monitoring=false AND (t.state='DONE' OR (t.state IN ('READY','RETRY_WAIT') AND t.priority<>0)))
                 OR (t.monitoring=true AND t.state IN ('DONE','BLOCKED'))
               )
             RETURNING t.id`, [

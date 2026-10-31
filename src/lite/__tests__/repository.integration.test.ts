@@ -2747,6 +2747,17 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toMatchObject({ monitoring: true, state: 'RETRY_WAIT' });
   });
 
+  it('leaves a pending staff catalog request untouched until it completes', async () => {
+    await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
+      VALUES('00000000-0000-4000-8000-000000000120','source-a','staff-coverage',$1,'ACTIVE')`, [ids.p1a]);
+    await repo.enqueue({ taskType: 'CATALOG', workId: ids.p1a, workKey: `work:${ids.p1a}`, priority: 'P2',
+      idempotencyKey: 'lite:catalog:source-a:staff-coverage', payload: { source: 'source-a', sourceWorkId: 'staff-coverage' } });
+    await db.query(`UPDATE importer_lite_tasks SET priority=0 WHERE idempotency_key='lite:catalog:source-a:staff-coverage'`);
+    expect(await repo.refillP0MonitorCoverage(8)).toEqual({ source: 'source-a', admitted: 0, revived: 0 });
+    expect((await db.query(`SELECT state,priority,monitoring FROM importer_lite_tasks WHERE idempotency_key='lite:catalog:source-a:staff-coverage'`)).rows[0])
+      .toEqual({state:'READY',priority:0,monitoring:false});
+  });
+
   it('enrols a separate monitor without clearing a blocked catalog diagnostic', async () => {
     await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1a]);
     await db.query(`INSERT INTO importer_work_mappings(id,source,source_work_id,work_id,sync_status)
@@ -2889,9 +2900,12 @@ describe('LiteRepository against the additive Lite migration', () => {
     const interval = (checkpoint: Record<string, unknown>, status: string, releases: number) =>
       (runtime as any).monitorIntervalMs({ checkpoint }, status, releases);
     expect(interval({}, 'ONGOING', 1)).toBe(5 * 60_000);
-    expect(interval({ emptyChecks: 0 }, 'ONGOING', 0)).toBe(15 * 60_000);
-    expect(interval({ emptyChecks: 5 }, 'ONGOING', 0)).toBe(6 * 60 * 60_000);
-    expect(interval({}, 'HIATUS', 0)).toBe(6 * 60 * 60_000);
+    expect(interval({ emptyChecks: 0 }, 'ONGOING', 0)).toBe(25 * 60_000);
+    expect(interval({ emptyChecks: 5 }, 'ONGOING', 0)).toBe(56.25 * 60_000);
+    expect(interval({}, 'HIATUS', 0)).toBe(4 * 60 * 60_000);
+    expect(interval({}, 'COMPLETED', 0)).toBe(6 * 60 * 60_000);
+    const lastWeek = new Date(Date.now() - 7 * 86400_000).toISOString();
+    expect(interval({ lastReleaseAt: lastWeek }, 'ONGOING', 0)).toBe(25 * 60_000);
   });
 
   it('fails closed before Lite acquires leadership when the Reader still uses numeric identity', async () => {
