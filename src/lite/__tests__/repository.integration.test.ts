@@ -1195,18 +1195,21 @@ describe('LiteRepository against the additive Lite migration', () => {
         DOWNLOAD_INFLIGHT_CONCURRENCY: 1, BUFFERED_PAGE_CONCURRENCY: 1, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 1,
         LITE_CHAPTER_WORKERS: 1, MAX_CONCURRENT_CHAPTERS: 1, TESTED_CONCURRENCY_CEILING: 1 } as any,
     );
-    const refill = vi.fn().mockResolvedValue(1);
+    const refill = vi.fn().mockResolvedValueOnce(4).mockResolvedValue(2);
     (runtime as any).queue = {
       refillSourceMetadataEnrichment: refill,
       claimSourceMetadataRefresh: vi.fn().mockResolvedValue(null),
     };
     (runtime as any).isRuntimeLeader = true;
+    vi.spyOn(runtime as any, 'runSourceMetadataRefresh').mockResolvedValue(false);
 
     await (runtime as any).refillSourceMetadataEnrichment(true);
     expect(refill).toHaveBeenLastCalledWith(4, undefined);
 
     refill.mockClear();
     lanePool.waitingCount = 2;
+    // Constrain only after the configured sustained-pressure window.
+    (runtime as any).sourceMetadataPoolWaitStartedAt = Date.now() - 16_000;
     await (runtime as any).refillSourceMetadataEnrichment(true);
     expect(refill).toHaveBeenLastCalledWith(2, 2);
     memorySpy.mockRestore();
