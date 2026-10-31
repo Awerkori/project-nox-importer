@@ -544,7 +544,9 @@ export class ImporterLiteRuntime {
         const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
             || (this.lastSiteProbe.state !== 'HEALTHY' && typeof siteLatencyMs === 'number' && siteLatencyMs > 5_000)
             || (typeof siteLatencyMs === 'number' && siteLatencyMs > 4_500);
-        const highYsqlPressure = poolWaiting >= 6 && sqlP95Ms > 3_500;
+        const highYsqlPressure = (poolWaiting >= 4 && sqlP95Ms > 1_800)
+            || (poolWaiting >= 6 && sqlP95Ms > 1_200)
+            || sqlP95Ms > 3_200;
         if (highSitePressure || highYsqlPressure) {
             this.adaptiveHealthyStreak = 0;
             const reduced = Math.max(floor, Math.min(current - 1, Math.floor(current * 0.75)));
@@ -1091,7 +1093,7 @@ export class ImporterLiteRuntime {
           COALESCE(status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
           (status='COOLDOWN' AND cooldown_until IS NOT NULL AND cooldown_until<=now())
         )
-          AND COALESCE((to_jsonb(importer_sources)->>'catalog_discovery_enabled')::boolean,true)
+          AND COALESCE(catalog_discovery_enabled,true)
         ORDER BY id`);
         }
         catch (error) {
@@ -1241,7 +1243,10 @@ export class ImporterLiteRuntime {
         if (typeof this.queue.refreshP1FocusGroup !== 'function')
             return;
         const now = Date.now();
-        if (!force && now - this.lastP1FocusRefreshAt < 45_000)
+        const hasWarmFocusGroup = typeof this.queue.getP1FocusWorkKeys === 'function'
+            && this.queue.getP1FocusWorkKeys().length >= 12;
+        const minFocusRefreshIntervalMs = hasWarmFocusGroup ? 60_000 : 45_000;
+        if (!force && now - this.lastP1FocusRefreshAt < minFocusRefreshIntervalMs)
             return;
         if (!force && (this.sourceMetadataPool.waitingCount || 0) > 0 && typeof this.queue.getP1FocusWorkKeys === 'function' && this.queue.getP1FocusWorkKeys().length >= 8) {
             return;
@@ -2685,10 +2690,10 @@ export class ImporterLiteRuntime {
     }
     /** A bounded source view refreshes on recovery and at import-priority boundaries. */
     async refreshSourceFairness(force = false) {
-        if (!force
-            && !(process.env.NODE_ENV === 'test' || process.env.VITEST)
+        const isTestEnv = Boolean(process.env.NODE_ENV === 'test' || process.env.VITEST);
+        if (!isTestEnv
             && this.lastSourceFairnessRefreshAt > 0
-            && Date.now() - this.lastSourceFairnessRefreshAt < 25_000) {
+            && Date.now() - this.lastSourceFairnessRefreshAt < (force ? 12_000 : 25_000)) {
             return true;
         }
         if (this.sourceFairnessRefresh)
@@ -4023,10 +4028,6 @@ export class ImporterLiteRuntime {
             // A source can reveal historical chapters later; those are P1 repairs,
             // not P0, without inferring that every numeric gap is a missing chapter.
             const p0Monitoring = task.monitoring || task.priority === 'P0' || task.priority === 'STAFF';
-            const workHasPendingBacklog = (p0Monitoring && resolved.status !== 'NEW_WORK' && task.priority !== 'STAFF'
-                && typeof this.queue.hasPendingWorkChapterBacklog === 'function')
-                ? await this.queue.hasPendingWorkChapterBacklog(resolved.workId)
-                : false;
             const knownFrontier = p0Monitoring
                 ? await this.pool.query(`SELECT max(order_key) AS order_key
           FROM importer_lite_chapter_sources WHERE work_id=$1::uuid AND order_key LIKE 'n|%'`, [resolved.workId])
@@ -4036,16 +4037,33 @@ export class ImporterLiteRuntime {
             // or after the source repairs an incomplete listing. Only its newest
             // normal chapter is a P0 release; earlier positively listed chapters
             // enter P1 together so the importer cannot keep moving the gap forward.
+            let hasNonNormalChapter = false;
             const normalOrderKeys = snapshot.chapters
-                .map((chapter) => chapterOrderKey({
-                displayNumber: chapter.displayNumber || String(chapter.number),
-                title: chapter.title || '',
-                kind: chapterKind({ displayNumber: chapter.displayNumber || String(chapter.number), title: chapter.title || '' }),
-            }))
+                .map((chapter) => {
+                const displayNumber = chapter.displayNumber || String(chapter.number);
+                const orderKey = chapterOrderKey({
+                    displayNumber,
+                    title: chapter.title || '',
+                    kind: chapterKind({ displayNumber, title: chapter.title || '' }),
+                });
+                if (!orderKey.startsWith('n|'))
+                    hasNonNormalChapter = true;
+                return orderKey;
+            })
                 .filter((orderKey) => orderKey.startsWith('n|'))
                 .sort();
             const newestManifestNormalOrder = normalOrderKeys.at(-1) || null;
             const oldestManifestNormalOrder = normalOrderKeys[0] || null;
+            const hasCandidateBeyondKnownFrontier = hasNonNormalChapter
+                || !knownNormalOrder
+                || (newestManifestNormalOrder !== null && newestManifestNormalOrder > knownNormalOrder);
+            const workHasPendingBacklog = (p0Monitoring
+                && resolved.status !== 'NEW_WORK'
+                && task.priority !== 'STAFF'
+                && hasCandidateBeyondKnownFrontier
+                && typeof this.queue.hasPendingWorkChapterBacklog === 'function')
+                ? await this.queue.hasPendingWorkChapterBacklog(resolved.workId)
+                : false;
             const manifestSourceIds = [...new Set(snapshot.chapters
                     .map((chapter) => String(chapter.sourceChapterId || ''))
                     .filter(Boolean))];
