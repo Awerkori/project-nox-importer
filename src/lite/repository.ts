@@ -1791,7 +1791,7 @@ export class LiteRepository {
           AND rw.work_key LIKE 'work:%'
           AND rw.next_run_at <= $1::timestamptz
         ORDER BY rw.last_claimed_at ASC NULLS FIRST, rw.next_run_at ASC, rw.work_key ASC
-        LIMIT 64
+        LIMIT 256
       ), active_sources AS MATERIALIZED (
         SELECT src.id AS source,
           (src.enabled = true
@@ -2453,8 +2453,9 @@ export class LiteRepository {
    * succeeds. It neither changes chapter priority nor admits media work.
    */
   async claimMonitor(workerId: string, leaseSeconds: number): Promise<LiteTask | null> {
+    const metaDb = this.sourceMetadataDb || this.db;
     if (!this.p0MonitorCursorEnsured) {
-      await this.db.query(
+      await metaDb.query(
         `INSERT INTO importer_lite_metadata_source_cursor(cursor_name,last_source)
          VALUES($1,NULL) ON CONFLICT(cursor_name) DO NOTHING`,
         [P0_MONITOR_SOURCE_CURSOR],
@@ -2465,7 +2466,7 @@ export class LiteRepository {
     // cursor row, selects the next due provider head using index seek across
     // active sources in importer_sources, claims the task, and advances the cursor
     // in one fast (<10ms) YSQL round trip using importer_lite_tasks_p0_source_due_idx.
-    const result = await this.db.query<Row>(`
+    const result = await metaDb.query<Row>(`
       WITH cur AS (
         SELECT last_source FROM importer_lite_metadata_source_cursor
         WHERE cursor_name=$1 FOR UPDATE

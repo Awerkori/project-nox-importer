@@ -350,24 +350,24 @@ BEGIN
               AND active_work.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
               AND active_work.state = 'RUNNING'
           )
-        ORDER BY
-          rw.priority ASC,
-          rw.operation_rank ASC,
-          CASE
-            WHEN v_has_focus AND rw.priority = 2 AND rw.operation_rank = 1 THEN
+            ORDER BY
+              rw.priority ASC,
+              rw.operation_rank ASC,
               CASE
-                WHEN COALESCE(p_prefer_focus, true) THEN
-                  CASE WHEN rw.work_key = ANY(p_focus_work_keys) THEN 0 ELSE 1 END
-                ELSE
-                  CASE WHEN rw.work_key = ANY(p_focus_work_keys) THEN 1 ELSE 0 END
-              END
-            ELSE 0
-          END ASC,
-          rw.last_claimed_at ASC NULLS FIRST,
-          rw.next_run_at ASC,
-          rw.work_key ASC
-        LIMIT 24
-      ) cand;
+                WHEN v_has_focus AND rw.priority = 2 AND rw.operation_rank = 1 THEN
+                  CASE
+                    WHEN COALESCE(p_prefer_focus, true) THEN
+                      CASE WHEN rw.work_key = ANY(p_focus_work_keys) THEN 0 ELSE 1 END
+                    ELSE
+                      CASE WHEN rw.work_key = ANY(p_focus_work_keys) THEN 1 ELSE 0 END
+                  END
+                ELSE 0
+              END ASC,
+              rw.last_claimed_at ASC NULLS FIRST,
+              rw.next_run_at ASC,
+              rw.work_key ASC
+            LIMIT 32
+          ) cand;
     ELSE
       IF COALESCE(p_chapters_only, false) THEN
         SELECT array_agg(cand2.work_key)
@@ -590,13 +590,15 @@ BEGIN
              AND v_task_priority >= 2
              AND v_has_confirmed
              AND NOT v_has_unexcluded_runnable_route THEN
-            IF v_fallback_task_id IS NULL THEN
+            IF NOT COALESCE(p_chapters_only, false) AND v_fallback_task_id IS NULL THEN
               v_fallback_task_id := v_task_id;
               v_fallback_work_key := v_work_key;
             END IF;
+            UPDATE public.importer_lite_ready_works
+            SET last_claimed_at = v_now
+            WHERE work_key = v_work_key;
             v_excluded_skips := v_excluded_skips + 1;
-            IF v_excluded_skips >= 8
-               AND v_fallback_task_id IS NOT NULL
+            IF v_excluded_skips >= 16
                AND NOT (v_has_focus AND COALESCE(p_prefer_focus, true) AND v_work_key = ANY(p_focus_work_keys)) THEN
               EXIT;
             END IF;
