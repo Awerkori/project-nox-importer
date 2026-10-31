@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {incidents,transitions} from '../scripts/monitoring/sentinel-policy.mjs';
+import {incidents,transitions,trackCatalog} from '../scripts/monitoring/sentinel-policy.mjs';
 describe('sentinel incident handling',()=>{
  it('opens, deduplicates, reminds and recovers',()=>{
   let a=transitions({}, {heartbeat_stale:'old'}, 10000000);expect(a.events[0].type).toBe('opened');
@@ -10,7 +10,13 @@ describe('sentinel incident handling',()=>{
  });
  it('detects a due monitor without claiming source availability',()=>{
   const h={observedAt:new Date(10000000).toISOString()};
-  expect(incidents({heartbeat:h,p0:{next:new Date(1).toISOString()}},10000000).p0_overdue).toContain('may include cooled sources');
+  expect(incidents({heartbeat:h,p0:{at:new Date(10000000).toISOString(),next:new Date(1).toISOString()}},10000000).p0_overdue).toContain('may include cooled sources');
+ });
+ it('tracks a catalog owner without treating a lease renewal as proof of progress',()=>{
+  const tasks=trackCatalog({},[{id:'a',lease_owner:'worker'}],1000);
+  expect(trackCatalog(tasks,[{id:'a',lease_owner:'worker'}],2000).a.firstSeen).toBe(1000);
+  expect(trackCatalog(tasks,[{id:'a',lease_owner:'new'}],2000).a.firstSeen).toBe(2000);
+  expect(incidents({heartbeat:{observedAt:new Date(2000000).toISOString()},catalog:{at:new Date(2000000).toISOString(),tasks}},2000000).catalog_prolonged).toContain('inspect before recovery');
  });
  it('does not infer healthy state from missing heartbeat',()=>{
   expect(incidents({heartbeat:null},10000000)).toHaveProperty('heartbeat_stale');
