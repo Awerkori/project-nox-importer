@@ -509,6 +509,27 @@ export class LiteExecutor {
     this.recomputeSourceCapacities();
   }
 
+  mergeFairSourceDemandCounts(counts: Record<string, number>): void {
+    if (!counts) return;
+    let changed = false;
+    for (const [source, rawCount] of Object.entries(counts)) {
+      const count = Math.max(0, Math.floor(Number(rawCount) || 0));
+      if (!source || count <= 0) continue;
+      if (!this.fairDemandSources.has(source)) {
+        this.fairDemandSources.add(source);
+        changed = true;
+      }
+      if (this.fairDemandCounts) {
+        const prev = this.fairDemandCounts.get(source) ?? 0;
+        if (count > prev) {
+          this.fairDemandCounts.set(source, count);
+          changed = true;
+        }
+      }
+    }
+    if (changed) this.recomputeSourceCapacities();
+  }
+
   /** Keep local source shares aligned with the runtime's durable chapter cap. */
   setEffectiveChapterAdmissionCap(capacity: number): void {
     const next = Math.max(1, Math.floor(capacity));
@@ -740,7 +761,11 @@ export class LiteExecutor {
   public getSaturatedFairSources(): string[] {
     if (this.fairDemandSources.size <= 1) return [];
     const saturatedSet = new Set<string>();
-    for (const source of this.fairDemandSources) {
+    const candidateSources = new Set<string>([
+      ...this.fairDemandSources,
+      ...this.sourceSlots.keys(),
+    ]);
+    for (const source of candidateSources) {
       const slot = this.sourceSlots.get(source);
       const capacity = slot ? slot.capacity : this.sourceCapacity(source);
       const active = slot ? slot.active : 0;
@@ -751,7 +776,7 @@ export class LiteExecutor {
         (s) => this.performanceTracker!.getTier(s) !== 'SLOW' && !saturatedSet.has(s),
       );
       if (hasUnsaturatedPrimary) {
-        for (const source of this.fairDemandSources) {
+        for (const source of new Set([...candidateSources, ...Object.keys(SOURCE_CONCURRENCY_LIMITS)])) {
           if (this.performanceTracker.getTier(source) === 'SLOW') {
             saturatedSet.add(source);
           }

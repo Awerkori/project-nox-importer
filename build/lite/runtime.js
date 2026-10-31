@@ -544,9 +544,8 @@ export class ImporterLiteRuntime {
         const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
             || (this.lastSiteProbe.state !== 'HEALTHY' && typeof siteLatencyMs === 'number' && siteLatencyMs > 5_000)
             || (typeof siteLatencyMs === 'number' && siteLatencyMs > 4_500);
-        const highYsqlPressure = (poolWaiting >= 4 && sqlP95Ms > 1_800)
-            || (poolWaiting >= 6 && sqlP95Ms > 1_200)
-            || sqlP95Ms > 3_200;
+        const highYsqlPressure = (poolWaiting >= 8 && sqlP95Ms > 2_500)
+            || sqlP95Ms > 4_000;
         if (highSitePressure || highYsqlPressure) {
             this.adaptiveHealthyStreak = 0;
             const reduced = Math.max(floor, Math.min(current - 1, Math.floor(current * 0.75)));
@@ -559,7 +558,7 @@ export class ImporterLiteRuntime {
         }
         const healthyForRamp = (this.lastSiteProbe.state === 'HEALTHY' || this.lastSiteProbe.state === 'UNKNOWN' || this.lastSiteProbe.state === 'DEGRADED')
             && (siteLatencyMs === null || siteLatencyMs <= 3_800)
-            && poolWaiting <= 4
+            && !highYsqlPressure
             && memState === 'NORMAL';
         if (healthyForRamp) {
             this.adaptiveHealthyStreak++;
@@ -1262,7 +1261,11 @@ export class ImporterLiteRuntime {
             'mangaflix', 'mangotoons', 'hipercool', 'manhastro',
         ]);
         this.p1FocusRefreshInFlight = this.queue.refreshP1FocusGroup({ targetSize, maxPerSource: 8, sourceTiers })
-            .then(() => undefined)
+            .then((snap) => {
+            if (snap?.focusSources && typeof this.executor.mergeFairSourceDemandCounts === 'function') {
+                this.executor.mergeFairSourceDemandCounts(snap.focusSources);
+            }
+        })
             .catch((error) => {
             this.logger.warn('P1 focus group refresh deferred', { error: error?.message });
         })
@@ -2758,7 +2761,7 @@ export class ImporterLiteRuntime {
                 values.push(row.workId, row.chapterKey, row.source, row.sourceWorkId, row.sourceChapterId, row.language, row.edition, row.orderKey, row.sourceRank);
                 return `($${start + 1}::uuid,$${start + 2},$${start + 3},$${start + 4},$${start + 5},$${start + 6},$${start + 7},$${start + 8},$${start + 9},true,true,now())`;
             });
-            await this.pool.query(`INSERT INTO importer_lite_chapter_sources
+            await this.getAvailablePool().query(`INSERT INTO importer_lite_chapter_sources
         (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter,last_verified_at)
         VALUES ${tuples.join(',')}
         ON CONFLICT(source,source_chapter_id) DO UPDATE SET canonical_chapter_key=excluded.canonical_chapter_key,
@@ -2785,7 +2788,7 @@ export class ImporterLiteRuntime {
     async legacyPublishedChapterMap(source, workId, sourceChapterIds) {
         const mapped = new Map();
         for (let offset = 0; offset < sourceChapterIds.length; offset += 500) {
-            const result = await this.pool.query(`SELECT m.source_chapter_id,m.chapter_id
+            const result = await this.getAvailablePool().query(`SELECT m.source_chapter_id,m.chapter_id
          FROM importer_chapter_mappings m
          JOIN chapters c ON c.id=m.chapter_id
          WHERE m.source=$1 AND m.source_chapter_id=ANY($2::text[])
@@ -2820,7 +2823,7 @@ export class ImporterLiteRuntime {
         });
         const mapped = new Map();
         for (let offset = 0; offset < requested.length; offset += 500) {
-            const result = await this.pool.query(`WITH requested AS (
+            const result = await this.getAvailablePool().query(`WITH requested AS (
           SELECT chapter_key,split_part(chapter_key,'|',4) AS whole_number
           FROM unnest($2::text[]) AS item(chapter_key)
         )
@@ -2850,7 +2853,7 @@ export class ImporterLiteRuntime {
                 values.push(row.workId, row.chapterKey, row.chapterId, row.displayNumber, row.orderKey, row.edition, row.language);
                 return `($${start + 1}::uuid,$${start + 2},$${start + 3}::uuid,$${start + 4},$${start + 5},$${start + 6},$${start + 7})`;
             });
-            await this.pool.query(`INSERT INTO importer_lite_chapters
+            await this.getAvailablePool().query(`INSERT INTO importer_lite_chapters
         (work_id,canonical_chapter_key,chapter_id,display_number,order_key,edition,language)
         VALUES ${tuples.join(',')}
         ON CONFLICT(work_id,canonical_chapter_key) DO UPDATE
@@ -4029,7 +4032,7 @@ export class ImporterLiteRuntime {
             // not P0, without inferring that every numeric gap is a missing chapter.
             const p0Monitoring = task.monitoring || task.priority === 'P0' || task.priority === 'STAFF';
             const knownFrontier = p0Monitoring
-                ? await this.pool.query(`SELECT max(order_key) AS order_key
+                ? await this.getAvailablePool().query(`SELECT max(order_key) AS order_key
           FROM importer_lite_chapter_sources WHERE work_id=$1::uuid AND order_key LIKE 'n|%'`, [resolved.workId])
                 : { rows: [{ order_key: null }] };
             const knownNormalOrder = knownFrontier.rows[0]?.order_key || null;
@@ -4191,7 +4194,7 @@ export class ImporterLiteRuntime {
             }
             if (!chapterReleaseAt && resolved.workId) {
                 try {
-                    const latestDbRelease = await this.pool.query('SELECT max(COALESCE(published_at, created_at)) AS release_at FROM chapters WHERE work_id=$1::uuid', [resolved.workId]);
+                    const latestDbRelease = await this.getAvailablePool().query('SELECT max(COALESCE(published_at, created_at)) AS release_at FROM chapters WHERE work_id=$1::uuid', [resolved.workId]);
                     if (latestDbRelease.rows[0]?.release_at) {
                         chapterReleaseAt = latestDbRelease.rows[0].release_at.toISOString();
                     }

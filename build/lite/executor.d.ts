@@ -128,6 +128,7 @@ export declare class LiteExecutor {
      * first seat before demand-weighted seats are distributed.
      */
     setFairSourceDemandCounts(demand: ReadonlyMap<string, number>): void;
+    mergeFairSourceDemandCounts(counts: Record<string, number>): void;
     /** Keep local source shares aligned with the runtime's durable chapter cap. */
     setEffectiveChapterAdmissionCap(capacity: number): void;
     getFairSourceDemand(): string[];
