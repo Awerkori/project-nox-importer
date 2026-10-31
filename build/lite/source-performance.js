@@ -137,20 +137,24 @@ export class SourcePerformanceTracker {
         const normalizedChapterMs = state.ewmaPagesPerChapter > 24
             ? state.ewmaChapterMs * (24 / state.ewmaPagesPerChapter)
             : state.ewmaChapterMs;
+        const provenProductiveChapters = state.sampleChapters >= 2 &&
+            normalizedChapterMs <= 75_000 &&
+            state.ewmaSuccessRate >= 0.90 &&
+            state.ewmaPageMs < 7_500;
         // 1. Check SLOW conditions (with recovery hysteresis if currently SLOW).
         if (state.tier === 'SLOW') {
-            const stillSlow = state.ewmaPageMs >= 5_200 ||
+            const stillSlow = !provenProductiveChapters && (state.ewmaPageMs >= 5_200 ||
                 (state.pageLatencySamples.length >= 8 && p95Ms >= 11_500 && state.ewmaPageMs >= 3_200) ||
                 (state.sampleChapters >= 2 && normalizedChapterMs >= 95_000) ||
-                state.ewmaSuccessRate < 0.84;
+                state.ewmaSuccessRate < 0.84);
             if (stillSlow)
                 return 'SLOW';
         }
         else {
-            const enterSlow = state.ewmaPageMs >= 7_000 ||
+            const enterSlow = !provenProductiveChapters && (state.ewmaPageMs >= 7_000 ||
                 (state.pageLatencySamples.length >= 8 && p95Ms >= 15_000 && state.ewmaPageMs >= 4_500) ||
                 (state.sampleChapters >= 2 && normalizedChapterMs >= 135_000) ||
-                ((state.sampleChapters + state.sampleFailures) >= 3 && state.ewmaSuccessRate < 0.72);
+                ((state.sampleChapters + state.sampleFailures) >= 3 && state.ewmaSuccessRate < 0.72));
             if (enterSlow)
                 return 'SLOW';
         }

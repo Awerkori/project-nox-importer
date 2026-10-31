@@ -1850,7 +1850,9 @@ export class LiteRepository {
     const maxFastPerSource = Math.max(maxPerSource, Math.ceil(desiredSize * 0.55));
     const maxSlowPerSource = Math.min(maxPerSource, 2);
     const maxTotalSlowInFocus = Math.max(3, Math.floor(desiredSize * 0.22));
+    const degradedSources = new Set<string>();
     const maxForSource = (source: string): number => {
+      if (degradedSources.has(source)) return 1;
       if (!sourceTiers) return maxPerSource;
       const tier = sourceTiers.get(source) || 'NORMAL';
       if (tier === 'FAST') {
@@ -1861,6 +1863,7 @@ export class LiteRepository {
       return maxPerSource;
     };
     const speedRankFor = (source: string): number => {
+      if (degradedSources.has(source)) return 2;
       if (!sourceTiers) return 1;
       const tier = sourceTiers.get(source) || 'NORMAL';
       return tier === 'FAST' ? 0 : tier === 'NORMAL' ? 1 : 2;
@@ -1890,7 +1893,8 @@ export class LiteRepository {
             AND ${sourceExecutionEligibilitySql('src')}
             AND COALESCE(sh.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
             AND (sh.cooldown_until IS NULL OR sh.cooldown_until <= now())
-          ) AS is_runnable
+          ) AS is_runnable,
+          (COALESCE(sh.consecutive_failures, 0) >= 3) AS is_degraded
         FROM importer_sources src
         LEFT JOIN importer_lite_source_health sh ON sh.source = src.id
       ), work_stats AS MATERIALIZED (
@@ -1912,7 +1916,8 @@ export class LiteRepository {
         SELECT
           ws.work_key,
           count(cs.source) > 0 AS has_recorded_routes,
-          array_agg(cs.source ORDER BY cs.source_rank, cs.source) FILTER (WHERE s.is_runnable = true) AS runnable_sources
+          array_agg(cs.source ORDER BY cs.source_rank, cs.source) FILTER (WHERE s.is_runnable = true) AS runnable_sources,
+          array_agg(cs.source ORDER BY cs.source_rank, cs.source) FILTER (WHERE s.is_runnable = true AND NOT s.is_degraded) AS healthy_runnable_sources
         FROM work_stats ws
         LEFT JOIN importer_lite_chapter_sources cs
           ON cs.work_id = ws.work_id
@@ -1928,6 +1933,7 @@ export class LiteRepository {
         ws.remaining_chapters,
         ws.oldest_task_at,
         rs.runnable_sources,
+        rs.healthy_runnable_sources,
         COALESCE(rs.has_recorded_routes, false) AS has_recorded_routes
       FROM work_stats ws
       LEFT JOIN route_stats rs ON rs.work_key = ws.work_key
@@ -1939,6 +1945,7 @@ export class LiteRepository {
       workKey: string;
       workId: string;
       source: string;
+      isDegraded: boolean;
       remainingChapters: number;
       oldestTaskMs: number;
       score: number;
@@ -1950,10 +1957,17 @@ export class LiteRepository {
         ? row.runnable_sources.map((item: unknown) => String(item || '')).filter(Boolean)
         : (row.runnable_source ? [String(row.runnable_source)] : []);
       if (hasRecordedRoutes && runnableList.length === 0) continue;
-      const runnableSource = runnableList.length > 0
-        ? [...runnableList].sort((a, b) => speedRankFor(a) - speedRankFor(b))[0]
+      const hasHealthyColumn = row.healthy_runnable_sources !== undefined;
+      const healthyList = Array.isArray(row.healthy_runnable_sources)
+        ? row.healthy_runnable_sources.map((item: unknown) => String(item || '')).filter(Boolean)
+        : [];
+      const isDegraded = hasHealthyColumn && runnableList.length > 0 && healthyList.length === 0;
+      const effectivePool = healthyList.length > 0 ? healthyList : runnableList;
+      const runnableSource = effectivePool.length > 0
+        ? [...effectivePool].sort((a, b) => speedRankFor(a) - speedRankFor(b))[0]
         : null;
       const source = runnableSource || 'unattributed';
+      if (isDegraded && source !== 'unattributed') degradedSources.add(source);
       const remaining = Math.max(1, Number(row.remaining_chapters || 1));
       const oldestMs = row.oldest_task_at ? new Date(row.oldest_task_at).getTime() : now;
       const ageHours = Math.max(0, (now - oldestMs) / 3_600_000);
@@ -1963,13 +1977,14 @@ export class LiteRepository {
         : remaining <= 80 ? 10
         : 0;
       const fairnessScore = Math.min(35, ageHours * 1.5);
-      const speedBonus = sourceTiers
-        ? (speedRankFor(source) === 0 ? 22 : speedRankFor(source) === 2 ? -12 : 0)
-        : 0;
+      const speedBonus = isDegraded
+        ? -25
+        : (sourceTiers ? (speedRankFor(source) === 0 ? 22 : speedRankFor(source) === 2 ? -12 : 0) : 0);
       candidateByKey.set(String(row.work_key), {
         workKey: String(row.work_key),
         workId: String(row.work_id),
         source,
+        isDegraded,
         remainingChapters: remaining,
         oldestTaskMs: oldestMs,
         score: completionScore + fairnessScore + speedBonus,
@@ -2013,7 +2028,7 @@ export class LiteRepository {
       if (!cand) continue;
       const prevMeta = this.p1FocusMeta.get(prevKey);
       const enteredAt = prevMeta?.enteredAt || now;
-      const isSlow = Boolean(sourceTiers && speedRankFor(cand.source) === 2);
+      const isSlow = Boolean((sourceTiers && speedRankFor(cand.source) === 2) || cand.isDegraded);
       const stickyRotateMs = isSlow ? 12 * 60_000 : 25 * 60_000;
       const stickyRemainingThreshold = isSlow ? 25 : 35;
       // Rotate out long backlogs only when fresher near-done alternatives wait.
@@ -2042,7 +2057,7 @@ export class LiteRepository {
       let bestScore = -Infinity;
       for (let i = 0; i < remainingCandidates.length; i++) {
         const cand = remainingCandidates[i];
-        const isSlow = Boolean(sourceTiers && speedRankFor(cand.source) === 2);
+        const isSlow = Boolean((sourceTiers && speedRankFor(cand.source) === 2) || cand.isDegraded);
         if (isSlow && totalSlowCount >= maxTotalSlowInFocus) continue;
         const srcCount = sourceCounts.get(cand.source) || 0;
         if (srcCount >= maxForSource(cand.source)) continue;
@@ -2057,7 +2072,7 @@ export class LiteRepository {
       const chosen = remainingCandidates.splice(bestIdx, 1)[0];
       selectedSet.add(chosen.workKey);
       sourceCounts.set(chosen.source, (sourceCounts.get(chosen.source) || 0) + 1);
-      if (sourceTiers && speedRankFor(chosen.source) === 2) totalSlowCount++;
+      if ((sourceTiers && speedRankFor(chosen.source) === 2) || chosen.isDegraded) totalSlowCount++;
       nextFocus.push({
         workKey: chosen.workKey,
         workId: chosen.workId,
@@ -2077,7 +2092,7 @@ export class LiteRepository {
         for (let i = 0; i < remainingCandidates.length; i++) {
           const cand = remainingCandidates[i];
           if (selectedSet.has(cand.workKey)) continue;
-          const isSlow = Boolean(sourceTiers && speedRankFor(cand.source) === 2);
+          const isSlow = Boolean((sourceTiers && speedRankFor(cand.source) === 2) || cand.isDegraded);
           if (isSlow) continue;
           const count = sourceCounts.get(cand.source) || 0;
           const effectiveScore = cand.score - count * 4;
@@ -3913,14 +3928,14 @@ export class LiteRepository {
           (task_type='PUBLISH' AND reason='WORK_PRESENTATION_INCOMPLETE')
         )
         RETURNING id
-      ), refreshed AS (
-        SELECT public.importer_lite_refresh_ready_work($2)
-        WHERE EXISTS (SELECT 1 FROM woken)
       )
-      SELECT (SELECT count(*)::int FROM woken) AS woken_count, (SELECT count(*)::int FROM refreshed) AS refreshed_count
-    `, [workId, workKey]);
+      SELECT count(*)::int AS woken_count FROM woken
+    `, [workId]);
     const count = Number(result.rows[0]?.woken_count || 0);
-    if (count > 0) this.invalidateP1BacklogCache();
+    if (count > 0) {
+      await this.db.query('SELECT public.importer_lite_refresh_ready_work($1)', [workKey]);
+      this.invalidateP1BacklogCache();
+    }
     return count;
   }
 
@@ -3945,23 +3960,14 @@ export class LiteRepository {
         rateLimited: true,
       });
     }
-    // Ordinary transient failures retain the one-statement health update: a
-    // failure must never make the error path compete with normal imports for
-    // extra pool time. A provider-specified retry boundary is different. If
-    // a source has explicitly rate-limited us, leaving thousands of its
-    // single-route tasks READY makes workers repeatedly claim, inspect and
-    // immediately defer them while lower executable work waits. Move only
-    // those tasks to the same durable cooldown in one bounded event. Tasks
-    // with a healthy confirmed alternative stay READY for executor fallback.
-    // Isolated 1-off transient failures (timeouts, aborts) do not immediately
-    // cool down the entire source across all workers unless 3 consecutive failures occur.
     if (!(retryAfter > 0)) {
       const isChapterContentDefect = /^(?:INVALID_PAGE_MANIFEST|PAGE_HTTP_404|CHAPTER_CONTENT_INVALID_PLACEHOLDER|CATALOG_SOURCE_TIMEOUT|METADATA_SOURCE_TIMEOUT)/.test(message);
-      await this.db.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
+      const healthDb = this.sourceMetadataDb || this.db;
+      await healthDb.query(`INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
         VALUES($1,$2,NULL,1,$3)
         ON CONFLICT(source) DO UPDATE SET health=excluded.health,
           cooldown_until=CASE
-            WHEN $5::boolean THEN importer_lite_source_health.cooldown_until
+            WHEN $5::boolean AND importer_lite_source_health.consecutive_failures + 1 < 6 THEN importer_lite_source_health.cooldown_until
             WHEN importer_lite_source_health.consecutive_failures + 1 >= 3 THEN now()+($4 || ' seconds')::interval
             ELSE importer_lite_source_health.cooldown_until
           END,
@@ -4872,15 +4878,14 @@ export class LiteRepository {
           FROM publication p
           WHERE t.id=$7::uuid AND t.state='RUNNING' AND t.lease_owner=$8 AND t.lease_until>now()
           RETURNING t.work_key
-        ), refreshed AS (
-          SELECT public.importer_lite_refresh_ready_work(work_key) FROM done
-        ) SELECT count(*)::int AS done,(SELECT count(*)::int FROM refreshed) AS refreshed FROM done`, [input.chapterId,input.fresh,
+        ) SELECT count(*)::int AS done, (SELECT work_key FROM done LIMIT 1) AS work_key FROM done`, [input.chapterId,input.fresh,
         typeof input.task.payload.source === 'string' ? input.task.payload.source : null,
         input.workId,LITE_PRIORITY_RANK[input.task.priority],importTaskId,input.task.id,input.workerId]);
       // The CTE retains the final lease fence. Throwing rolls back the page
       // replacement too, so a stale owner can never leave a visible chapter
       // with an unfinished durable PUBLISH task.
       if (Number(result.rows[0]?.done || 0) !== 1) throw new Error('LEASE_LOST_DURING_PUBLISH');
+      await client.query('SELECT public.importer_lite_refresh_ready_work($1)', [input.task.workKey]);
       await client.query('COMMIT');
       return true;
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; } finally { client.release(); }

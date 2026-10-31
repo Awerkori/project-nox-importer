@@ -190,7 +190,7 @@ export class UploadReceiptBatcher {
     queue;
     pending = [];
     flushTimer = null;
-    flushing = false;
+    activeFlushes = 0;
     stats = new UploadBatchStats();
     constructor(queue) {
         this.queue = queue;
@@ -199,27 +199,24 @@ export class UploadReceiptBatcher {
         return new Promise((resolve, reject) => {
             this.pending.push({ input, resolve, reject });
             if (this.pending.length >= UPLOAD_BATCH_FLUSH_THRESHOLD) {
-                void this.flush();
+                void this.flush(true);
             }
             else if (!this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_RECEIPT_BATCH_JOIN_MS);
+                this.flushTimer = setTimeout(() => void this.flush(false), DURABLE_RECEIPT_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         });
     }
     snapshot() { return this.stats.snapshot(); }
-    async flush() {
+    async flush(allowParallelFullBatch = false) {
         if (this.flushTimer) {
             clearTimeout(this.flushTimer);
             this.flushTimer = null;
         }
-        // A timer can fire while a previous database flush is still awaiting its
-        // reply. Clear that consumed timer before returning, otherwise the first
-        // flush sees a non-null (already-fired) handle and leaves later receipts
-        // stranded in memory.
-        if (this.flushing)
+        const maxFlushes = allowParallelFullBatch && this.pending.length >= UPLOAD_BATCH_FLUSH_THRESHOLD ? 2 : 1;
+        if (this.activeFlushes >= maxFlushes)
             return;
-        this.flushing = true;
+        this.activeFlushes++;
         try {
             if (this.pending.length) {
                 const batch = this.pending.splice(0, 48);
@@ -234,10 +231,6 @@ export class UploadReceiptBatcher {
                     succeeded = true;
                 }
                 catch (error) {
-                    // Telegram has already confirmed these exact media ids. Retrying the
-                    // idempotent YSQL receipt write once is safe and avoids turning a
-                    // transient pool/serialization failure into an ambiguous re-upload.
-                    // A second failure still reaches the existing UNKNOWN safety fence.
                     try {
                         writes++;
                         await this.queue.recordUploadReceipts(batch.map((entry) => entry.input));
@@ -256,15 +249,12 @@ export class UploadReceiptBatcher {
             }
         }
         finally {
-            this.flushing = false;
-            // Arrivals collected while YSQL was busy deserve the same bounded join
-            // window as the first arrival.  Draining them immediately made the
-            // configured join interval ineffective for sustained page waves.
+            this.activeFlushes--;
             if (this.pending.length >= UPLOAD_BATCH_FLUSH_THRESHOLD) {
-                void this.flush();
+                void this.flush(true);
             }
             else if (this.pending.length && !this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_RECEIPT_BATCH_JOIN_MS);
+                this.flushTimer = setTimeout(() => void this.flush(false), DURABLE_RECEIPT_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         }
@@ -279,7 +269,7 @@ export class UploadReservationBatcher {
     queue;
     pending = [];
     flushTimer = null;
-    flushing = false;
+    activeFlushes = 0;
     stats = new UploadBatchStats();
     constructor(queue) {
         this.queue = queue;
@@ -288,25 +278,24 @@ export class UploadReservationBatcher {
         return new Promise((resolve, reject) => {
             this.pending.push({ input, resolve, reject });
             if (this.pending.length >= UPLOAD_BATCH_FLUSH_THRESHOLD) {
-                void this.flush();
+                void this.flush(true);
             }
             else if (!this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_RESERVATION_BATCH_JOIN_MS);
+                this.flushTimer = setTimeout(() => void this.flush(false), DURABLE_RESERVATION_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         });
     }
     snapshot() { return this.stats.snapshot(); }
-    async flush() {
+    async flush(allowParallelFullBatch = false) {
         if (this.flushTimer) {
             clearTimeout(this.flushTimer);
             this.flushTimer = null;
         }
-        // See UploadReceiptBatcher: a fired timer must not suppress the follow-up
-        // batch while an earlier YSQL write is still in flight.
-        if (this.flushing)
+        const maxFlushes = allowParallelFullBatch && this.pending.length >= UPLOAD_BATCH_FLUSH_THRESHOLD ? 2 : 1;
+        if (this.activeFlushes >= maxFlushes)
             return;
-        this.flushing = true;
+        this.activeFlushes++;
         try {
             if (this.pending.length) {
                 const batch = this.pending.splice(0, 48);
@@ -330,14 +319,12 @@ export class UploadReservationBatcher {
             }
         }
         finally {
-            this.flushing = false;
-            // See UploadReceiptBatcher: queue a bounded next join after an in-flight
-            // YSQL write instead of serialising every arriving page immediately.
+            this.activeFlushes--;
             if (this.pending.length >= UPLOAD_BATCH_FLUSH_THRESHOLD) {
-                void this.flush();
+                void this.flush(true);
             }
             else if (this.pending.length && !this.flushTimer) {
-                this.flushTimer = setTimeout(() => void this.flush(), DURABLE_RESERVATION_BATCH_JOIN_MS);
+                this.flushTimer = setTimeout(() => void this.flush(false), DURABLE_RESERVATION_BATCH_JOIN_MS);
                 this.flushTimer.unref();
             }
         }
@@ -439,8 +426,10 @@ export class LiteExecutor {
         this.effectiveChapterAdmissionCap = Math.max(1, Math.floor(chapterWorkerCapacity));
         this.slowBackgroundGate = new AsyncSemaphore(Math.max(1, Math.floor(this.effectiveChapterAdmissionCap * 0.25)), 'lite_slow_source_background_pool');
     }
-    setPerformanceTracker(tracker) {
+    onTierChanged;
+    setPerformanceTracker(tracker, onTierChanged) {
         this.performanceTracker = tracker;
+        this.onTierChanged = onTierChanged;
         this.recomputeSourceCapacities();
     }
     getSourcePerformanceSnapshot() {
@@ -1384,6 +1373,7 @@ export class LiteExecutor {
                                         telemetryCollector.recordImageDownload(route.source, pageElapsedMs, bytes.length);
                                         if (this.performanceTracker?.recordPageDownload(route.source, pageElapsedMs, bytes.length)) {
                                             this.recomputeSourceCapacities();
+                                            this.onTierChanged?.(route.source);
                                         }
                                         return { bytes, image };
                                     }
@@ -1583,6 +1573,7 @@ export class LiteExecutor {
                     totalBytes,
                 })) {
                     this.recomputeSourceCapacities();
+                    this.onTierChanged?.(route.source);
                 }
                 return;
             }
@@ -1598,6 +1589,7 @@ export class LiteExecutor {
                         totalBytes,
                     })) {
                         this.recomputeSourceCapacities();
+                        this.onTierChanged?.(route.source);
                     }
                     await this.queue.recordSourceFailure(route.source, error);
                     // Never blend a partially persisted chapter with an alternative

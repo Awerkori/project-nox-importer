@@ -357,7 +357,7 @@ export class ImporterLiteRuntime {
     // source watches current across 43 sources while chapters run. Only one
     // short SQL claim is ever in flight (monitorClaimGate); the remaining slots
     // run independent source network fetches in parallel without YSQL contention.
-    monitorGate = new AsyncSemaphore(6, 'lite_p0_monitor');
+    monitorGate = new AsyncSemaphore(8, 'lite_p0_monitor');
     monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
     runtimeInstanceId;
     runtimeBootedAt = new Date();
@@ -544,8 +544,8 @@ export class ImporterLiteRuntime {
         const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
             || (this.lastSiteProbe.state !== 'HEALTHY' && typeof siteLatencyMs === 'number' && siteLatencyMs > 5_000)
             || (typeof siteLatencyMs === 'number' && siteLatencyMs > 4_500);
-        const highYsqlPressure = (poolWaiting >= 8 && sqlP95Ms > 2_500)
-            || sqlP95Ms > 4_000;
+        const highYsqlPressure = (poolWaiting >= 6 && sqlP95Ms > 2_500)
+            || (poolWaiting >= 2 && sqlP95Ms > 4_500);
         if (highSitePressure || highYsqlPressure) {
             this.adaptiveHealthyStreak = 0;
             const reduced = Math.max(floor, Math.min(current - 1, Math.floor(current * 0.75)));
@@ -675,11 +675,15 @@ export class ImporterLiteRuntime {
         this.chapterWorkerCapacity = Math.max(1, Math.min(config.LITE_CHAPTER_WORKERS ?? 1, config.MAX_CONCURRENT_CHAPTERS, config.TESTED_CONCURRENCY_CEILING));
         this.operatorChapterAdmissionCap = this.chapterWorkerCapacity;
         this.chapterAdmissionGate = new AsyncSemaphore(this.chapterWorkerCapacity, 'lite_chapter_admission');
-        // MangaFlix may use an eight-page wave, while every other source retains
-        // its source-scoped page cap. The hard global download/buffer/byte fences
-        // remain unchanged; this only fills existing unused media permits.
+        // Fast/normal sources use their measured source-scoped page wave up to 10
+        // inside the unchanged global download (40), buffer (80), byte (128 MiB),
+        // and Telegram (24) hard fences.
         this.executor = new LiteExecutor(pool, this.queue, registry, storage, config.IMPORTER_USER_ID, this.downloads, Math.max(1, Math.min(10, config.BATCH_PAGE_DOWNLOAD_CONCURRENCY)), this.bufferedPages, sourceRateLimiter, this.chapterWorkerCapacity, (taskId, source) => this.setWorkerSource(taskId, source), this.bufferedPageBytes, config.SOURCE_OPERATION_TIMEOUT_MS, async () => { await this.refreshSourceFairness(); });
-        this.executor.setPerformanceTracker(this.sourcePerformance);
+        this.executor.setPerformanceTracker(this.sourcePerformance, () => {
+            if (Date.now() - this.lastP1FocusRefreshAt >= 15_000) {
+                void this.refreshP1FocusGroupNow(true).catch(() => { });
+            }
+        });
         this.dedupe = new DeduplicationEngine(catalogClient);
         this.historicalMetadataDedupe = sourceMetadataPool === pool
             ? this.dedupe
@@ -1140,7 +1144,7 @@ export class ImporterLiteRuntime {
         try {
             const now = Date.now();
             const producerPool = this.sourceMetadataPool !== this.pool ? this.sourceMetadataPool : this.pool;
-            if ((producerPool.waitingCount || 0) > 0 && now - this.lastHistoricalP1ProducerAttemptAt < HISTORICAL_P1_BUSY_MAX_GAP_MS) {
+            if ((producerPool.waitingCount || 0) > 1 && now - this.lastHistoricalP1ProducerAttemptAt < HISTORICAL_P1_BUSY_MAX_GAP_MS) {
                 this.historicalP1Producer = {
                     observedAt: new Date(now).toISOString(),
                     admitted: 0,
@@ -1190,10 +1194,10 @@ export class ImporterLiteRuntime {
     async refillP0MonitorCoverage() {
         if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active)
             return;
-        // Do not turn an optional coverage write into a queued checkout while its
-        // isolated pool is already serving a source-metadata commit.  The next
+        // Do not turn an optional coverage write into a queued pileup while its
+        // isolated pool already has multiple queued checkouts.  The next
         // 30-second recovery turn continues from the durable source cursor.
-        if (this.sourceMetadataPool.waitingCount > 0 || !this.p0MonitorCoverageRefillGate.tryAcquire())
+        if (this.sourceMetadataPool.waitingCount > 1 || !this.p0MonitorCoverageRefillGate.tryAcquire())
             return;
         let shouldContinueCatchup = false;
         try {
@@ -1229,7 +1233,7 @@ export class ImporterLiteRuntime {
             this.p0MonitorCoverageRefillGate.release();
             if (shouldContinueCatchup && !this.stopped && this.isRuntimeLeader && !this.hasSustainedSourceMetadataPoolPressure()) {
                 const timer = setTimeout(() => {
-                    if (this.sourceMetadataPool.waitingCount === 0 && this.pool.waitingCount === 0) {
+                    if (this.sourceMetadataPool.waitingCount <= 1 && this.pool.waitingCount === 0) {
                         void this.refillP0MonitorCoverage();
                     }
                 }, 2_500);
@@ -1248,7 +1252,7 @@ export class ImporterLiteRuntime {
         const minFocusRefreshIntervalMs = hasWarmFocusGroup ? 60_000 : 45_000;
         if (!force && now - this.lastP1FocusRefreshAt < minFocusRefreshIntervalMs)
             return;
-        if (!force && (this.sourceMetadataPool.waitingCount || 0) > 0 && typeof this.queue.getP1FocusWorkKeys === 'function' && this.queue.getP1FocusWorkKeys().length >= 8) {
+        if (!force && (this.sourceMetadataPool.waitingCount || 0) > 1 && typeof this.queue.getP1FocusWorkKeys === 'function' && this.queue.getP1FocusWorkKeys().length >= 8) {
             return;
         }
         if (this.p1FocusRefreshInFlight)
@@ -1279,7 +1283,7 @@ export class ImporterLiteRuntime {
         const producerPool = this.sourceMetadataPool !== this.pool ? this.sourceMetadataPool : this.pool;
         if (this.stopped || !this.isRuntimeLeader
             || Date.now() < this.idleHistoricalP1CatalogUntil
-            || (producerPool.waitingCount || 0) > 0
+            || (producerPool.waitingCount || 0) > 1
             || (this.pool.waitingCount || 0) > 3
             || this.manualProtectiveStop.active
             || this.metadataReplayV4Exclusive.enabled
@@ -3129,7 +3133,7 @@ export class ImporterLiteRuntime {
                 && this.isRuntimeLeader
                 && Date.now() >= this.idleMonitorUntil
                 && !(process.env.NODE_ENV === 'test' || process.env.VITEST)) {
-                const nextDelayMs = (this.pool.waitingCount || 0) > 0 ? 250 : 80;
+                const nextDelayMs = (this.sourceMetadataPool.waitingCount || 0) > 1 ? 180 : 40;
                 const nextTurn = setTimeout(() => void this.runMonitorTurn().catch(() => { }), nextDelayMs);
                 nextTurn.unref();
             }
@@ -3784,24 +3788,47 @@ export class ImporterLiteRuntime {
                     const dbManifest = await checkPool.query(`
             SELECT
               UPPER(COALESCE(w.status, 'UNKNOWN')) AS work_status,
-              (w.title IS NOT NULL AND w.slug IS NOT NULL AND w.cover_id IS NOT NULL) AS has_presentation,
+              (
+                w.title IS NOT NULL
+                AND w.slug IS NOT NULL
+                AND w.cover_id IS NOT NULL
+                AND EXISTS (
+                  SELECT 1 FROM media m
+                  WHERE m.id = w.cover_id
+                    AND m.storage_ready = true
+                    AND COALESCE(m.bytes, 0) >= 1500
+                )
+              ) AS has_presentation,
               (SELECT count(*)::int
                FROM unnest($4::text[]) AS req(scid)
                WHERE EXISTS (
                  SELECT 1
                  FROM importer_lite_chapter_sources cs
-                 JOIN importer_lite_chapters lc
-                   ON lc.work_id = cs.work_id
-                  AND lc.canonical_chapter_key = cs.canonical_chapter_key
-                 JOIN chapters c
-                   ON c.id = lc.chapter_id
-                  AND c.published_at IS NOT NULL
                  WHERE cs.work_id = w.id
                    AND cs.source = $2
                    AND cs.source_work_id = $3
                    AND cs.confirmed = true
-                   AND cs.has_chapter = true
+                   AND COALESCE(cs.has_chapter, true) = true
                    AND cs.source_chapter_id = req.scid
+                   AND (
+                     EXISTS (
+                       SELECT 1
+                       FROM importer_lite_chapters lc
+                       JOIN chapters c
+                         ON c.id = lc.chapter_id
+                        AND c.published_at IS NOT NULL
+                       WHERE lc.work_id = cs.work_id
+                         AND lc.canonical_chapter_key = cs.canonical_chapter_key
+                     )
+                     OR EXISTS (
+                       SELECT 1
+                       FROM importer_lite_tasks t
+                       WHERE t.work_key = ('work:' || w.id::text)
+                         AND t.chapter_key = cs.canonical_chapter_key
+                         AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+                         AND t.state IN ('READY', 'RUNNING', 'RETRY_WAIT', 'DONE')
+                     )
+                   )
                ) OR EXISTS (
                  SELECT 1
                  FROM importer_chapter_mappings cm
@@ -3814,8 +3841,10 @@ export class ImporterLiteRuntime {
                )) AS matched_chapters,
               EXISTS (
                 SELECT 1 FROM importer_lite_tasks bt
-                WHERE bt.work_id = w.id AND bt.state = 'BLOCKED'
-              ) AS has_blocked_tasks,
+                WHERE bt.work_key = ('work:' || w.id::text)
+                  AND bt.state = 'BLOCKED'
+                  AND bt.reason = 'WORK_PRESENTATION_INCOMPLETE'
+              ) AS has_presentation_blocked_tasks,
               (SELECT max(COALESCE(c.published_at, c.created_at))
                FROM chapters c
                WHERE c.work_id = w.id) AS latest_release_at
@@ -3823,13 +3852,10 @@ export class ImporterLiteRuntime {
             WHERE w.id = $1::uuid
           `, [task.workId, source, sourceWorkId, fpChapters.map((c) => c[0])]);
                     const row = dbManifest.rows[0];
-                    const statusMatches = row && (row.work_status === fpStatus
-                        || fpStatus === 'UNKNOWN'
-                        || (row.work_status === 'COMPLETED' && fpStatus === 'ONGOING'));
                     if (row
                         && row.has_presentation
-                        && !row.has_blocked_tasks
-                        && statusMatches
+                        && !row.has_presentation_blocked_tasks
+                        && fpStatus !== 'CANCELLED'
                         && Number(row.matched_chapters) === fpChapters.length) {
                         await finishUnchangedMonitor(row.latest_release_at ? row.latest_release_at.toISOString() : null);
                         return;

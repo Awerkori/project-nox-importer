@@ -50,7 +50,7 @@ export declare class UploadReceiptBatcher {
     private readonly queue;
     private pending;
     private flushTimer;
-    private flushing;
+    private activeFlushes;
     private readonly stats;
     constructor(queue: LiteRepository);
     persist(input: UploadReceiptInput): Promise<void>;
@@ -66,7 +66,7 @@ export declare class UploadReservationBatcher {
     private readonly queue;
     private pending;
     private flushTimer;
-    private flushing;
+    private activeFlushes;
     private readonly stats;
     constructor(queue: LiteRepository);
     reserve(input: UploadReservationInput): Promise<{
@@ -106,7 +106,8 @@ export declare class LiteExecutor {
     private performanceTracker;
     private readonly slowBackgroundGate;
     constructor(db: Pool, queue: LiteRepository, registry: SourceRegistry, storage: StorageProvider, importerUserId: string, downloads: AsyncSemaphore, perChapterPageConcurrency?: number, bufferedPages?: AsyncSemaphore, sourceRateLimiter?: HostRateLimiter, chapterWorkerCapacity?: number, onRouteSelected?: ((taskId: string, source: string) => void) | undefined, pageBytes?: PageByteBudget, chapterManifestTimeoutMs?: number, refreshFairDemandOnSourceBurst?: (() => Promise<void>) | undefined, pageAdmissionTimeoutMs?: number, pageTransferTimeoutMs?: number);
-    setPerformanceTracker(tracker: SourcePerformanceTracker | null): void;
+    private onTierChanged?;
+    setPerformanceTracker(tracker: SourcePerformanceTracker | null, onTierChanged?: (source: string) => void): void;
     getSourcePerformanceSnapshot(): (SourcePerformanceSnapshot & {
         slowBackgroundPool: {
             active: number;
