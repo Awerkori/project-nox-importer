@@ -785,97 +785,141 @@ export class LiteRepository {
      */
     async refillStoredMetadataEnrichment(maxPending = 2) {
         const ceiling = Math.max(1, Math.min(4, maxPending));
-        const client = await this.db.connect();
+        const metaDb = this.sourceMetadataDb || this.db;
+        const client = await metaDb.connect();
         try {
             await client.query('BEGIN');
-            const pending = await client.query(`SELECT count(*)::int AS count
-        FROM importer_lite_tasks
+            const pending = await client.query(`SELECT count(*)::int AS count FROM (
+        SELECT 1 FROM importer_lite_tasks
         WHERE task_type='CATALOG' AND state IN ('READY','RUNNING','RETRY_WAIT')
-          AND payload->>'metadataEnrichmentVersion' IN ('2','3')`);
+          AND (payload->>'metadataEnrichmentVersion') IN ('2','3')
+        LIMIT $1
+      ) AS bounded_v23`, [ceiling]);
             if (Number(pending.rows[0]?.count || 0) >= ceiling) {
                 await client.query('COMMIT');
                 return 0;
             }
-            // Select one source seat per turn. A provider with hundreds of old
-            // mappings must not win every bounded P2 turn, so choose one pending
-            // mapping per source and rotate sources by their last enrichment turn.
-            // This scans only explicit metadata mappings (currently a small indexed
-            // subset), never chapter/page work and never the claim path.
-            const candidate = await client.query(`WITH candidate_rows AS (
-        SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id,evidence.alias_evidence,
-          CASE WHEN evidence.legacy_pt_tags THEN 3 ELSE 2 END AS metadata_version,
-          (COALESCE(array_length(w.aliases,1),0)=0 AND evidence.alias_evidence) AS missing_alias_evidence
-        FROM importer_work_mappings m
-        JOIN works w ON w.id=m.work_id
+            // Select one source seat per turn. Use a recursive index skip-scan on
+            // active mappings plus a bounded index-only per-source probe before
+            // reading `m.metadata` JSONB blobs, and resolve source_history via an
+            // indexed LATERAL lookup instead of scanning importer_lite_tasks.
+            const candidate = await client.query(`WITH RECURSIVE distinct_sources AS (
+        (SELECT m.source
+         FROM importer_work_mappings m
+         WHERE m.work_id IS NOT NULL
+           AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+         ORDER BY m.source ASC
+         LIMIT 1)
+        UNION ALL
+        SELECT next_src.source
+        FROM distinct_sources prev
         CROSS JOIN LATERAL (
-          SELECT
-            EXISTS (
-              SELECT 1 FROM jsonb_each(m.metadata) AS metadata_entry(key,value)
-              WHERE metadata_entry.key = ANY(ARRAY['alternativeTitles','alternative_titles','aliases','alternativeNames','alternative_names',
-                                                    'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
-                                                    'romanizedTitle','romanized_title','genres','tags','categories']::text[])
-                AND CASE jsonb_typeof(metadata_entry.value)
-                  WHEN 'array' THEN jsonb_array_length(metadata_entry.value)>0
-                  WHEN 'string' THEN COALESCE(NULLIF(lower(btrim(metadata_entry.value #>> '{}')),''),'') NOT IN ('[]','{}','null')
-                  WHEN 'object' THEN metadata_entry.value<>'{}'::jsonb
-                  ELSE false
-                END
-            ) AS metadata_evidence,
-            EXISTS (
-              SELECT 1 FROM jsonb_each(m.metadata) AS alias_entry(key,value)
-              WHERE alias_entry.key = ANY(ARRAY['alternativeTitles','alternative_titles','aliases','alternativeNames','alternative_names',
-                                                'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
-                                                'romanizedTitle','romanized_title']::text[])
-                AND CASE jsonb_typeof(alias_entry.value)
-                  WHEN 'array' THEN jsonb_array_length(alias_entry.value)>0
-                  WHEN 'string' THEN COALESCE(NULLIF(lower(btrim(alias_entry.value #>> '{}')),''),'') NOT IN ('[]','{}','null')
-                  ELSE false
-                END
-            ) AS alias_evidence,
-            EXISTS (
-              SELECT 1
-              FROM jsonb_each(m.metadata) AS tag_field(key,value)
-              CROSS JOIN LATERAL jsonb_array_elements(
-                CASE WHEN jsonb_typeof(tag_field.value)='array' THEN tag_field.value ELSE '[]'::jsonb END
-              ) AS tag_entry(value)
-              WHERE tag_field.key=ANY(ARRAY['genres','tags','categories']::text[])
-                AND jsonb_typeof(tag_entry.value)='object'
-                AND NULLIF(btrim(tag_entry.value->>'nome'),'') IS NOT NULL
-            ) AS legacy_pt_tags
-        ) evidence
-        WHERE m.work_id IS NOT NULL AND w.published=true
-          AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
-          AND evidence.metadata_evidence
-          AND NOT EXISTS (
-            -- v2 replays the bounded no-network pass because legacy adapters
-            -- sometimes saved an explicit JSON array as a string. The older
-            -- task may already be DONE after treating that string as one
-            -- alias; a versioned key lets the corrected parser enrich it once
-            -- without reopening chapters or overwriting editorial fields.
-            SELECT 1 FROM importer_lite_tasks t
-            WHERE t.idempotency_key='lite:metadata:v' || CASE WHEN evidence.legacy_pt_tags THEN '3' ELSE '2' END
-              || ':' || m.source || ':' || m.source_work_id
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM importer_lite_tasks t
-            WHERE t.task_type='CATALOG' AND t.state IN ('READY','RUNNING','RETRY_WAIT')
-              AND t.payload->>'metadataEnrichmentVersion' IN ('2','3')
-              AND t.payload->>'source'=m.source
-          )
+          SELECT m.source
+          FROM importer_work_mappings m
+          WHERE m.work_id IS NOT NULL
+            AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+            AND m.source > prev.source
+          ORDER BY m.source ASC
+          LIMIT 1
+        ) next_src
+      ), active_v23_sources AS MATERIALIZED (
+        SELECT DISTINCT t.payload->>'source' AS source
+        FROM importer_lite_tasks t
+        WHERE t.task_type='CATALOG' AND t.state IN ('READY','RUNNING','RETRY_WAIT')
+          AND (t.payload->>'metadataEnrichmentVersion') IN ('2','3')
       ), candidates AS (
-        SELECT DISTINCT ON (source) source,source_work_id,work_id,updated_at,id,missing_alias_evidence,metadata_version
-        FROM candidate_rows ORDER BY source,missing_alias_evidence DESC,alias_evidence DESC,updated_at,id
-      ), source_history AS (
-        SELECT payload->>'source' AS source,max(updated_at) AS enriched_at
-        FROM importer_lite_tasks
-        WHERE payload ? 'metadataEnrichment'
-        GROUP BY payload->>'source'
+        SELECT cand.*
+        FROM distinct_sources ds
+        CROSS JOIN LATERAL (
+          SELECT m.source,m.source_work_id,m.work_id,m.updated_at,m.id,evidence.alias_evidence,
+            CASE WHEN evidence.legacy_pt_tags THEN 3 ELSE 2 END AS metadata_version,
+            (COALESCE(array_length(w.aliases,1),0)=0 AND evidence.alias_evidence) AS missing_alias_evidence
+          FROM (
+            (SELECT m_idx.source, m_idx.source_work_id
+             FROM importer_work_mappings m_idx
+             WHERE m_idx.source=ds.source
+               AND m_idx.work_id IS NOT NULL
+               AND m_idx.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+               AND NOT EXISTS (
+                 SELECT 1 FROM importer_lite_tasks t
+                 WHERE t.idempotency_key='lite:metadata:v2:' || m_idx.source || ':' || m_idx.source_work_id
+               )
+             ORDER BY m_idx.source_work_id ASC
+             LIMIT 16)
+            UNION
+            (SELECT m_idx.source, m_idx.source_work_id
+             FROM importer_work_mappings m_idx
+             WHERE ds.source='mangotoons'
+               AND m_idx.source=ds.source
+               AND m_idx.work_id IS NOT NULL
+               AND m_idx.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+               AND NOT EXISTS (
+                 SELECT 1 FROM importer_lite_tasks t
+                 WHERE t.idempotency_key='lite:metadata:v3:' || m_idx.source || ':' || m_idx.source_work_id
+               )
+             ORDER BY m_idx.source_work_id ASC
+             LIMIT 16)
+          ) idx
+          JOIN importer_work_mappings m ON m.source=idx.source AND m.source_work_id=idx.source_work_id
+          JOIN works w ON w.id=m.work_id
+          CROSS JOIN LATERAL (
+            SELECT
+              EXISTS (
+                SELECT 1 FROM jsonb_each(m.metadata) AS metadata_entry(key,value)
+                WHERE metadata_entry.key = ANY(ARRAY['alternativeTitles','alternative_titles','aliases','alternativeNames','alternative_names',
+                                                      'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
+                                                      'romanizedTitle','romanized_title','genres','tags','categories']::text[])
+                  AND CASE jsonb_typeof(metadata_entry.value)
+                    WHEN 'array' THEN jsonb_array_length(metadata_entry.value)>0
+                    WHEN 'string' THEN COALESCE(NULLIF(lower(btrim(metadata_entry.value #>> '{}')),''),'') NOT IN ('[]','{}','null')
+                    WHEN 'object' THEN metadata_entry.value<>'{}'::jsonb
+                    ELSE false
+                  END
+              ) AS metadata_evidence,
+              EXISTS (
+                SELECT 1 FROM jsonb_each(m.metadata) AS alias_entry(key,value)
+                WHERE alias_entry.key = ANY(ARRAY['alternativeTitles','alternative_titles','aliases','alternativeNames','alternative_names',
+                                                  'originalTitle','original_title','nativeTitle','native_title','englishTitle','english_title',
+                                                  'romanizedTitle','romanized_title']::text[])
+                  AND CASE jsonb_typeof(alias_entry.value)
+                    WHEN 'array' THEN jsonb_array_length(alias_entry.value)>0
+                    WHEN 'string' THEN COALESCE(NULLIF(lower(btrim(alias_entry.value #>> '{}')),''),'') NOT IN ('[]','{}','null')
+                    ELSE false
+                  END
+              ) AS alias_evidence,
+              EXISTS (
+                SELECT 1
+                FROM jsonb_each(m.metadata) AS tag_field(key,value)
+                CROSS JOIN LATERAL jsonb_array_elements(
+                  CASE WHEN jsonb_typeof(tag_field.value)='array' THEN tag_field.value ELSE '[]'::jsonb END
+                ) AS tag_entry(value)
+                WHERE tag_field.key=ANY(ARRAY['genres','tags','categories']::text[])
+                  AND jsonb_typeof(tag_entry.value)='object'
+                  AND NULLIF(btrim(tag_entry.value->>'nome'),'') IS NOT NULL
+              ) AS legacy_pt_tags
+          ) evidence
+          WHERE m.work_id IS NOT NULL AND w.published=true
+            AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
+            AND evidence.metadata_evidence
+            AND NOT EXISTS (
+              SELECT 1 FROM importer_lite_tasks t
+              WHERE t.idempotency_key='lite:metadata:v' || CASE WHEN evidence.legacy_pt_tags THEN '3' ELSE '2' END
+                || ':' || m.source || ':' || m.source_work_id
+            )
+          ORDER BY (COALESCE(array_length(w.aliases,1),0)=0 AND evidence.alias_evidence) DESC,
+            evidence.alias_evidence DESC, m.updated_at, m.id
+          LIMIT 1
+        ) cand
+        WHERE NOT EXISTS (SELECT 1 FROM active_v23_sources a WHERE a.source = ds.source)
       )
       SELECT candidates.source,candidates.source_work_id,candidates.work_id,candidates.metadata_version
-      FROM candidates LEFT JOIN source_history USING(source)
-      -- A mapping that can add a missing alias is more useful than replaying
-      -- metadata already represented on its work. Source rotation still
-      -- decides ties, so one provider cannot monopolize the bounded lane.
+      FROM candidates
+      LEFT JOIN LATERAL (
+        SELECT max(t.updated_at) AS enriched_at
+        FROM importer_lite_tasks t
+        WHERE t.payload ? 'metadataEnrichment'
+          AND (t.payload->>'source') = candidates.source
+      ) source_history ON true
       ORDER BY candidates.missing_alias_evidence DESC,
         source_history.enriched_at NULLS FIRST,candidates.updated_at,candidates.source LIMIT 1`);
             const row = candidate.rows[0];
@@ -2285,7 +2329,7 @@ export class LiteRepository {
         const result = await db.query(`WITH candidate_works AS (
         SELECT rw.work_key,rw.priority
         FROM importer_lite_ready_works rw
-        WHERE rw.operation_rank=1 AND rw.next_run_at<=now()
+        WHERE rw.operation_rank<=1 AND rw.next_run_at<=now()
           -- Match the claim function's in-flight work fence.  A later P0
           -- task is deliberately visible in the durable projection while an
           -- earlier P1 chapter for the same work runs, but it is not an
@@ -2300,7 +2344,7 @@ export class LiteRepository {
               AND active_work.task_type IN ('IMPORT_CHAPTER','PUBLISH')
               AND active_work.state='RUNNING'
           )
-        ORDER BY rw.priority,rw.operation_rank,rw.last_claimed_at NULLS FIRST,rw.next_run_at,rw.work_key
+        ORDER BY rw.priority,rw.last_claimed_at NULLS FIRST,rw.next_run_at,rw.work_key
         LIMIT $1
       ), raw_candidates AS (
         SELECT t.id,t.work_id,t.chapter_key,rw.priority
@@ -3614,7 +3658,7 @@ export class LiteRepository {
             // refreshed work first, earliest canonical chapter within each work),
             // then a few routes per source. This runs only in the 30-second
             // reconciler and refreshes the normal ready-work projection.
-            const sourceCooldownRecovery = recoverSourceCooldowns ? await client.query(`/*+ IndexScan(task importer_lite_tasks_source_cooldown_due_idx) */ WITH runnable_due AS (
+            const sourceCooldownRecovery = recoverSourceCooldowns ? await client.query(`/*+ IndexScan(task importer_lite_tasks_source_cooldown_due_idx) */ WITH runnable_due AS MATERIALIZED (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,task.updated_at
            FROM importer_lite_tasks task
@@ -3637,7 +3681,7 @@ export class LiteRepository {
              )
            ORDER BY task.next_run_at ASC, task.work_key ASC, task.created_at ASC, task.id ASC
            LIMIT 128
-         ), due_candidates AS (
+         ), due_candidates AS MATERIALIZED (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,
              row_number() OVER (PARTITION BY task.work_key
