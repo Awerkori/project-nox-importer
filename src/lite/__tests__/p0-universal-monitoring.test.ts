@@ -7,6 +7,18 @@ import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { ImporterLiteRuntime } from '../runtime.js';
 
 describe('P0 Universal Monitoring & Status Integrity', () => {
+  it('borrows a spare SQL connection only when the Reader is fast and capacity remains', () => {
+    const canBorrow=(ImporterLiteRuntime.prototype as any).mayBorrowPrimaryForMonitor;
+    const ctx:any={pool:{idleCount:2,waitingCount:0},sourceMetadataPool:{waitingCount:3},
+      lastSiteProbe:{state:'HEALTHY',checkedAt:new Date().toISOString(),latencyMs:300}};
+    expect(canBorrow.call(ctx)).toBe(true);
+    ctx.pool.idleCount=1; expect(canBorrow.call(ctx)).toBe(false);
+    ctx.pool.idleCount=2; ctx.pool.waitingCount=1; expect(canBorrow.call(ctx)).toBe(false);
+    ctx.pool.waitingCount=0; ctx.lastSiteProbe.latencyMs=2500; expect(canBorrow.call(ctx)).toBe(false);
+    ctx.lastSiteProbe.latencyMs=300; ctx.lastSiteProbe.checkedAt=new Date(Date.now()-181_000).toISOString();
+    expect(canBorrow.call(ctx)).toBe(false);
+  });
+
   it('keeps the previous success and a bounded counter for recurring checks', () => {
     const checkpoint = (ImporterLiteRuntime.prototype as any).successfulMonitorCheckpoint;
     const first = checkpoint({ checkpoint: {} }, '2026-10-31T12:00:00.000Z');

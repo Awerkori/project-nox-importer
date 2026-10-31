@@ -51,6 +51,16 @@ describe('ManhastroAdapter', () => {
     expect(chapters[1].number).toBe(106);
   });
 
+  it('does not count upstream errors or malformed chapter manifests as successful checks', async () => {
+    const adapter = new ManhastroAdapter(new HostRateLimiter(10));
+    for (const response of [{success:false,data:[]}, {success:true}, {success:true,data:[{capitulo_nome:'Chapter 1'}]}]) {
+      (adapter as any).request = vi.fn().mockResolvedValue(response);
+      await expect(adapter.fetchChapters('123')).rejects.toThrow('MANHASTRO_INVALID_CHAPTER_RESPONSE');
+    }
+    (adapter as any).request = vi.fn().mockResolvedValue({success:true,data:[]});
+    await expect(adapter.fetchChapters('123')).resolves.toEqual([]);
+  });
+
   it('correctly constructs page URLs from baseUrl, hash and filename array', async () => {
     const pagesJson = `{"success":true,"data":{"chapter":{"baseUrl":"https://albums.manhastro.net/t/123/temp","hash":"manga_abc/cap-1","data":["1.webp","2.webp","3.webp"]}}}`;
 

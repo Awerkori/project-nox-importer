@@ -22,6 +22,8 @@ export declare class ImporterLiteRuntime {
     private timers;
     private metadataTurnTimer;
     private readonly queue;
+    private readonly spareMonitorQueue;
+    private monitorSqlBorrowedOperations;
     private readonly executor;
     private readonly dedupe;
     private readonly historicalMetadataDedupe;
@@ -198,6 +200,9 @@ export declare class ImporterLiteRuntime {
      */
     private mediaProfileForChapterAdmissionCap;
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter, sourceMetadataPool?: Pool);
+    /** Borrow only an already-idle connection, preserving a seat and a fast Reader. */
+    private mayBorrowPrimaryForMonitor;
+    private monitorSqlQueue;
     private getAvailablePool;
     start(): Promise<void>;
     private assertReaderCanonicalIdentitySchema;

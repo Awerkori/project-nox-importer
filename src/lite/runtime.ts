@@ -239,6 +239,8 @@ export class ImporterLiteRuntime {
   private timers: NodeJS.Timeout[] = [];
   private metadataTurnTimer: NodeJS.Timeout | null = null;
   private readonly queue: LiteRepository;
+  private readonly spareMonitorQueue: LiteRepository;
+  private monitorSqlBorrowedOperations = 0;
   private readonly executor: LiteExecutor;
   private readonly dedupe: DeduplicationEngine;
   private readonly historicalMetadataDedupe: DeduplicationEngine;
@@ -732,7 +734,8 @@ export class ImporterLiteRuntime {
     if (!config.IMPORTER_USER_ID) throw new Error('IMPORTER_USER_ID is required when IMPORTER_RUNTIME_MODE=lite');
     this.runtimeInstanceId = `${config.WORKER_ID}@${process.pid}-${randomUUID().slice(0, 8)}`;
     this.queue = new LiteRepository(pool, sourceMetadataPool);
-    this.monitorFinishBatcher = new MonitorFinishBatcher((batch) => this.queue.finishUnchangedMonitors(batch));
+    this.spareMonitorQueue = new LiteRepository(pool, pool);
+    this.monitorFinishBatcher = new MonitorFinishBatcher((batch) => this.monitorSqlQueue().finishUnchangedMonitors(batch));
     this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
     this.configuredPageBufferCapacity = Math.min(config.BUFFERED_PAGE_CONCURRENCY, SAFE_BUFFERED_PAGE_CAP);
     this.bufferedPages = new AsyncSemaphore(this.configuredPageBufferCapacity, 'lite_global_page_buffers');
@@ -774,6 +777,25 @@ export class ImporterLiteRuntime {
     this.aliasOnlyService = new AliasOnlyEnrichmentService();
     this.aliasOnlyRepo = new AliasOnlyRepository(sourceMetadataPool);
     this.coverVisionQueue = new CoverVisionQueue(sourceMetadataPool);
+  }
+
+  /** Borrow only an already-idle connection, preserving a seat and a fast Reader. */
+  private mayBorrowPrimaryForMonitor(): boolean {
+    const probe = this.lastSiteProbe;
+    const checkedAt = Date.parse(probe.checkedAt);
+    return this.sourceMetadataPool !== this.pool
+      && (this.sourceMetadataPool.waitingCount || 0) > 1
+      && (this.pool.waitingCount || 0) === 0
+      && (this.pool.idleCount || 0) >= 2
+      && probe.state === 'HEALTHY'
+      && Number.isFinite(checkedAt) && Date.now() - checkedAt <= 180_000
+      && probe.latencyMs !== null && probe.latencyMs <= 2_000;
+  }
+
+  private monitorSqlQueue(): LiteRepository {
+    if (!this.mayBorrowPrimaryForMonitor()) return this.queue;
+    this.monitorSqlBorrowedOperations += 1;
+    return this.spareMonitorQueue;
   }
 
   private getAvailablePool(): Pool {
@@ -3202,7 +3224,7 @@ export class ImporterLiteRuntime {
           // Three source-rotation batches guarantee participation; every
           // fourth batch favors the oldest due source to drain large backlogs.
           this.monitorClaimBatchCount += 1;
-          const batch = await this.queue.claimMonitorBatch(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, 4,
+          const batch = await this.monitorSqlQueue().claimMonitorBatch(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, 4,
             this.monitorClaimBatchCount % 4 === 0);
           task = batch.shift() || null;
           this.monitorClaimBuffer.push(...batch);
@@ -3497,6 +3519,7 @@ export class ImporterLiteRuntime {
         },
         sourceMetadataProducer: this.sourceMetadataProducer,
         p0MonitorCoverage: this.p0MonitorCoverage,
+        p0BorrowedSqlOperations: this.monitorSqlBorrowedOperations,
         p1FocusGroup: typeof (this.queue as any).getP1FocusGroupSnapshot === 'function'
           ? this.queue.getP1FocusGroupSnapshot()
           : null,
@@ -3622,6 +3645,7 @@ export class ImporterLiteRuntime {
       },
       sourceMetadataProducer: this.sourceMetadataProducer,
       p0MonitorCoverage: this.p0MonitorCoverage,
+      p0BorrowedSqlOperations: this.monitorSqlBorrowedOperations,
       aliasOnlyEnrichment: {
         enabled: true,
         category: 'ALIAS_ONLY',
@@ -3902,7 +3926,7 @@ export class ImporterLiteRuntime {
         && fpChapters.length > 0
       ) {
         try {
-          const checkPool = this.sourceMetadataPool || this.pool;
+          const checkPool = this.mayBorrowPrimaryForMonitor() ? this.pool : (this.sourceMetadataPool || this.pool);
           const dbManifest = await checkPool.query<{
             work_status: string;
             has_presentation: boolean;
