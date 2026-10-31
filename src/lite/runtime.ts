@@ -3736,7 +3736,9 @@ export class ImporterLiteRuntime {
     // because the provider opts out of new-work discovery also blocks P0
     // release checks (and P1 repairs) for existing Reader works.
     if (!policy?.runnable) {
-      if (!task.monitoring && policy && (!policy.enabled || String(policy.status || '').toUpperCase() === 'DISABLED' || !policy.chapterIngestionEnabled)) {
+      const policyStatus = String(policy?.status || '').toUpperCase();
+      if (!task.monitoring && policy && (policyStatus === 'DISABLED'
+        || (!policy.enabled && policyStatus !== 'PAUSED') || !policy.chapterIngestionEnabled)) {
         await this.queue.finish(task, workerId, {
           state: 'BLOCKED',
           reason: 'SOURCE_DISABLED',

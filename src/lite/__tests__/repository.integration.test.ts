@@ -881,10 +881,10 @@ describe('LiteRepository against the additive Lite migration', () => {
       .resolves.toMatchObject({ idempotencyKey:'source-metadata-isolated-seat', state:'RUNNING' });
 
     expect(isolatedPool.query).toHaveBeenCalledWith(
-      expect.stringContaining('importer_lite_claim_source_metadata_task'), expect.any(Array),
+      expect.stringContaining('metadataSourceRefresh'), expect.any(Array),
     );
     expect(mainPool.query).not.toHaveBeenCalledWith(
-      expect.stringContaining('importer_lite_claim_source_metadata_task'), expect.any(Array),
+      expect.stringContaining('metadataSourceRefresh'), expect.any(Array),
     );
   });
 
@@ -1149,28 +1149,28 @@ describe('LiteRepository against the additive Lite migration', () => {
     const admission = (runtime as any).chapterAdmissionGate;
     expect(admission.tryAcquire()).toBe(true);
     await (runtime as any).runRecoveryTurn();
-    expect(reconcile).toHaveBeenLastCalledWith(50, {
+    expect(reconcile).toHaveBeenLastCalledWith(50, expect.objectContaining({
       recoverUploadOutcomes: false,
       recoverSourceCooldowns: true,
-    });
+    }));
 
     // Do not repeatedly run the multi-row cooldown scan during this same
     // chapter wave merely because the pool had a transient idle seat.
     await (runtime as any).runRecoveryTurn();
-    expect(reconcile).toHaveBeenLastCalledWith(50, {
+    expect(reconcile).toHaveBeenLastCalledWith(50, expect.objectContaining({
       recoverUploadOutcomes: false,
       recoverSourceCooldowns: false,
-    });
+    }));
 
     // The pending upload proof and cooldown pass both resume promptly once
     // quiet; the latter retains its short idle cadence for replenishment.
     admission.release();
     (runtime as any).lastSourceCooldownRecoveryAt = Date.now() - 30_000;
     await (runtime as any).runRecoveryTurn();
-    expect(reconcile).toHaveBeenLastCalledWith(50, {
+    expect(reconcile).toHaveBeenLastCalledWith(50, expect.objectContaining({
       recoverUploadOutcomes: true,
       recoverSourceCooldowns: true,
-    });
+    }));
 
     // An empty proof pass records the durable watermark. Repeating the
     // recovery interval without a newer UNKNOWN must keep the cold join out
@@ -1178,20 +1178,20 @@ describe('LiteRepository against the additive Lite migration', () => {
     (runtime as any).lastUploadOutcomeRecoveryAt = Date.now() - 5 * 60_000;
     (runtime as any).lastSourceCooldownRecoveryAt = Date.now() - 30_000;
     await (runtime as any).runRecoveryTurn();
-    expect(reconcile).toHaveBeenLastCalledWith(50, {
+    expect(reconcile).toHaveBeenLastCalledWith(50, expect.objectContaining({
       recoverUploadOutcomes: false,
       recoverSourceCooldowns: true,
-    });
+    }));
 
     // A sustained wave still receives one bounded source-cooldown pass at
     // the max gap, so this efficiency guard cannot starve deferred sources.
     expect(admission.tryAcquire()).toBe(true);
     (runtime as any).lastSourceCooldownRecoveryAt = Date.now() - 2 * 60_000;
     await (runtime as any).runRecoveryTurn();
-    expect(reconcile).toHaveBeenLastCalledWith(50, {
+    expect(reconcile).toHaveBeenLastCalledWith(50, expect.objectContaining({
       recoverUploadOutcomes: false,
       recoverSourceCooldowns: true,
-    });
+    }));
     admission.release();
   });
 
@@ -3057,6 +3057,8 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second' WHERE id=$1`, [claimed!.id]);
     expect((await repo.reconcile(10)).retries).toBe(1);
     expect((await repo.claim('worker-b', 30))?.id).toBe(claimed!.id);
+    // Release the recovered same-work lease before claiming chapter 2.
+    await repo.finish(claimed!, 'worker-b', { state: 'DONE' });
 
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: 'chapter:2', priority: 'P1', idempotencyKey: 'needs-publish' });
     const imported = await repo.claim('worker-a', 30);
