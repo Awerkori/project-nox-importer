@@ -128,6 +128,7 @@ export class TelemetryCollector {
   private flushing = false;
   private nextSessionCheck = 0;
   private lastFlushWarningAt = 0;
+  private lastSuccessfulFlushAt = 0;
   private gcObserver: PerformanceObserver | null = null;
   private runtimeFingerprint: Record<string, unknown> = {};
   private cpuProfile: Record<string, unknown> | null = null;
@@ -693,6 +694,13 @@ export class TelemetryCollector {
 
     // Session polling is separately paced to 30s; diagnostic flushes use 5s.
     this.flushTimer = setInterval(async () => {
+      if (
+        !this.activeSessionId
+        && (this.poolRef?.waitingCount || 0) > 0
+        && Date.now() - this.lastSuccessfulFlushAt < 180_000
+      ) {
+        return;
+      }
       await this.flushTelemetryToDb();
     }, 5000);
     this.flushTimer.unref();
@@ -1168,7 +1176,7 @@ export class TelemetryCollector {
       const settingRes = await this.poolRef.query(
         "SELECT value FROM settings WHERE key = 'active_diagnostic_session' LIMIT 1"
       );
-      this.nextSessionCheck = Date.now() + 30_000;
+      this.nextSessionCheck = Date.now() + (this.activeSessionId ? 30_000 : 60_000);
       const persistedValue = settingRes.rows[0]?.value;
       let requestedSession = persistedValue;
       if (typeof requestedSession === 'string' && (requestedSession.startsWith('"') || requestedSession.startsWith('{'))) {
@@ -1198,6 +1206,7 @@ export class TelemetryCollector {
         VALUES ($1, $2, $3::jsonb, NOW())
         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, created_at = NOW()
       `, [`session-${this.activeSessionId || 'runtime'}`, this.activeSessionId || 'runtime', JSON.stringify(report)]);
+      this.lastSuccessfulFlushAt = Date.now();
     } catch (err: any) {
       if (Date.now() - this.lastFlushWarningAt >= 60_000) {
         this.lastFlushWarningAt = Date.now();

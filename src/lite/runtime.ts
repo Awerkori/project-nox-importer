@@ -99,7 +99,7 @@ const STORED_METADATA_REPLAY_INTERVAL_MS = 2_000;
 const STORED_METADATA_REPLAY_V4_IDLE_INTERVAL_MS = 5_000;
 const STORED_METADATA_REPLAY_V4_PRESSURED_INTERVAL_MS = 20_000;
 const STORED_METADATA_REPLAY_V4_EXCLUSIVE_DEFAULT_INTERVAL_MS = 2_000;
-const STORED_METADATA_REPLAY_V4_EXCLUSIVE_REFRESH_MS = 5_000;
+const STORED_METADATA_REPLAY_V4_EXCLUSIVE_REFRESH_MS = 30_000;
 const STORED_METADATA_REPLAY_V4_EXCLUSIVE_SOURCE_WINDOWS_PER_TURN = 12;
 // A v4 merge performs several local, idempotent YSQL operations.  During
 // observed production contention each operation may consume the database
@@ -174,7 +174,7 @@ const UPLOAD_OUTCOME_RECOVERY_INTERVAL_MS = 5 * 60_000;
 /** Re-admit due source-cooldown work promptly once the chapter lane is quiet. */
 const SOURCE_COOLDOWN_RECOVERY_IDLE_INTERVAL_MS = 30_000;
 /** Max gap between SOURCE_RATE_LIMITED re-admission passes during a chapter wave. */
-const SOURCE_COOLDOWN_RECOVERY_MAX_GAP_MS = 30_000;
+const SOURCE_COOLDOWN_RECOVERY_MAX_GAP_MS = 90_000;
 /** Pause between V5 source-metadata producer chains that found no candidate. */
 const SOURCE_METADATA_NO_CANDIDATE_BACKOFF_MS = 5 * 60_000;
 // Confirmed manifest rows are the durable evidence for a historical chapter.
@@ -390,6 +390,7 @@ export class ImporterLiteRuntime {
   // historical UNKNOWN receipt to media even after an empty pass.
   private lastUnknownUploadRecoverySeenAt = 0;
   private lastSourceCooldownRecoveryAt = 0;
+  private lastColdReconcileMaintenanceAt = 0;
   // Source discovery rows are durable and idempotent. A transient YSQL
   // timeout while seeding them must never take down a freshly elected daemon;
   // retain the failed seed for a bounded retry after workers/heartbeats start.
@@ -762,7 +763,7 @@ export class ImporterLiteRuntime {
 
   private getAvailablePool(): Pool {
     if (!this.sourceMetadataPool || this.sourceMetadataPool === this.pool) return this.pool;
-    if (this.sourceMetadataPool.waitingCount > 0 && this.pool.idleCount > 0) {
+    if (this.metadataTurboMode.enabled && this.sourceMetadataPool.waitingCount > 0 && this.pool.idleCount > 0) {
       return this.pool;
     }
     return this.sourceMetadataPool;
@@ -985,6 +986,24 @@ export class ImporterLiteRuntime {
     if (this.sourceMetadataPool !== this.pool) void this.sourceMetadataPool.end().catch(() => {});
   }
 
+  async shutdown(): Promise<void> {
+    this.stopped = true;
+    if (this.metadataTurnTimer) clearTimeout(this.metadataTurnTimer);
+    this.metadataTurnTimer = null;
+    for (const timer of this.timers) clearInterval(timer);
+    this.timers = [];
+    await Promise.race([
+      this.releaseRuntimeLeadership(),
+      sleep(3_000),
+    ]);
+    if (this.sourceMetadataPool !== this.pool) {
+      await Promise.race([
+        this.sourceMetadataPool.end().catch(() => {}),
+        sleep(3_000),
+      ]);
+    }
+  }
+
   /**
    * The normal importer retains its two-second metadata cadence. During the
    * explicit V4 campaign the durable one-second admission fence must not be
@@ -996,11 +1015,14 @@ export class ImporterLiteRuntime {
    */
   private scheduleMetadataTurn(): void {
     if (this.stopped) return;
+    const chapterBusy = this.chapterAdmissionGate.active > 0
+      || (this.pool.waitingCount || 0) > 0
+      || (this.sourceMetadataPool.waitingCount || 0) > 0;
     const delayMs = this.metadataTurboMode.enabled
       ? 250
       : (this.metadataReplayV4Exclusive.enabled
         ? Math.max(250, Math.min(STORED_METADATA_REPLAY_INTERVAL_MS, this.metadataReplayV4Exclusive.intervalMs))
-        : STORED_METADATA_REPLAY_INTERVAL_MS);
+        : (chapterBusy ? 10_000 : STORED_METADATA_REPLAY_INTERVAL_MS));
     this.metadataTurnTimer = setTimeout(() => {
       this.scheduleMetadataTurn();
       if (this.isRuntimeLeader) void this.runMetadataTurn();
@@ -1252,7 +1274,10 @@ export class ImporterLiteRuntime {
     if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active) return;
     if (typeof (this.queue as any).refreshP1FocusGroup !== 'function') return;
     const now = Date.now();
-    if (!force && now - this.lastP1FocusRefreshAt < 30_000) return;
+    if (!force && now - this.lastP1FocusRefreshAt < 45_000) return;
+    if (!force && (this.sourceMetadataPool.waitingCount || 0) > 0 && typeof (this.queue as any).getP1FocusWorkKeys === 'function' && this.queue.getP1FocusWorkKeys().length >= 8) {
+      return;
+    }
     if (this.p1FocusRefreshInFlight) return this.p1FocusRefreshInFlight;
     this.lastP1FocusRefreshAt = now;
     const effectiveCap = Math.max(12, this.executor.getEffectiveChapterAdmissionCap());
@@ -1358,10 +1383,22 @@ export class ImporterLiteRuntime {
     const sourceCooldownIntervalMs = chapterOrPoolBusy
       ? SOURCE_COOLDOWN_RECOVERY_MAX_GAP_MS
       : SOURCE_COOLDOWN_RECOVERY_IDLE_INTERVAL_MS;
-    const recoverSourceCooldowns = now - this.lastSourceCooldownRecoveryAt >= sourceCooldownIntervalMs;
-    if (recoverSourceCooldowns) this.lastSourceCooldownRecoveryAt = now;
+    let recoverSourceCooldowns = now - this.lastSourceCooldownRecoveryAt >= sourceCooldownIntervalMs;
+    if (recoverSourceCooldowns) {
+      this.lastSourceCooldownRecoveryAt = now;
+      if (typeof (this.queue as any).hasDueSourceCooldowns === 'function') {
+        try {
+          recoverSourceCooldowns = await this.queue.hasDueSourceCooldowns();
+        } catch {
+          recoverSourceCooldowns = false;
+        }
+      }
+    }
+    const coldMaintenanceIntervalMs = chapterOrPoolBusy ? 20 * 60_000 : 10 * 60_000;
+    const recoverLegacyMaintenance = now - this.lastColdReconcileMaintenanceAt >= coldMaintenanceIntervalMs;
+    if (recoverLegacyMaintenance) this.lastColdReconcileMaintenanceAt = now;
     try {
-      const recovery = await this.queue.reconcile(50, { recoverUploadOutcomes, recoverSourceCooldowns });
+      const recovery = await this.queue.reconcile(50, { recoverUploadOutcomes, recoverSourceCooldowns, recoverLegacyMaintenance });
       if (recoverUploadOutcomes && Number(recovery.uploadReceiptRecoveries || 0) === 0 && newestUnknownUploadAt > 0) {
         this.lastUnknownUploadRecoverySeenAt = newestUnknownUploadAt;
       }
@@ -1607,14 +1644,15 @@ export class ImporterLiteRuntime {
       this.logger.warn('Updated exclusive V4 metadata mode', next);
     }
     this.metadataReplayV4Exclusive = next;
-    this.sourceMetadataRefreshDeferredForV4 = next.enabled || (await this.queue.isStoredMetadataReplayV4Enabled());
+    this.sourceMetadataRefreshDeferredForV4 = next.enabled
+      || ((force || this.sourceMetadataRefreshDeferredForV4) ? await this.queue.isStoredMetadataReplayV4Enabled() : false);
   }
 
   /** Refresh the durable turbo campaign switch without relying on process-local state. */
   private async refreshMetadataTurboMode(force = false): Promise<void> {
     if (!this.isRuntimeLeader) return;
     const now = Date.now();
-    if (!force && now - this.lastMetadataTurboModeRefreshAt < 5_000) return;
+    if (!force && now - this.lastMetadataTurboModeRefreshAt < 30_000) return;
     this.lastMetadataTurboModeRefreshAt = now;
     const next = await this.queue.metadataTurboExclusiveMode();
     const hasConfigChanged = force
@@ -2701,7 +2739,7 @@ export class ImporterLiteRuntime {
     const fairnessPool = primaryBusy ? this.sourceMetadataPool : this.pool;
     const refresh = (async (): Promise<boolean> => {
       try {
-        this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand(256, fairnessPool));
+        this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand(128, fairnessPool));
         return true;
       } catch (error: any) {
         this.logger.warn('Source fairness sample failed', { error: error?.message });
@@ -4421,7 +4459,7 @@ export class ImporterLiteRuntime {
     }
     await this.queue.finish(task, workerId, {
       state: 'RETRY_WAIT', reason: null,
-      nextRunAt: addedAliases > 0 ? new Date('2026-10-22T00:00:00Z') : new Date(Date.now() + 100),
+      nextRunAt: addedAliases > 0 ? new Date(Date.now() - 3600_000) : new Date(Date.now() + 100),
       resetAttempts: true,
       checkpoint: {
         metadataCrossSourceDiscovery: true, checkedSources: [...checked], deferredSources: [...deferred],

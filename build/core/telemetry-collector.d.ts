@@ -83,6 +83,7 @@ export declare class TelemetryCollector {
     private flushing;
     private nextSessionCheck;
     private lastFlushWarningAt;
+    private lastSuccessfulFlushAt;
     private gcObserver;
     private runtimeFingerprint;
     private cpuProfile;

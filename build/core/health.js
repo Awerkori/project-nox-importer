@@ -2,6 +2,7 @@ import { db } from '../db/index.js';
 import * as schema from '../db/schema.js';
 import { safeQuery } from '../db/safe.js';
 import { Logger } from './logger.js';
+import { detectContainerRamMiB } from '../lite/memory-pressure.js';
 export class HealthMonitor {
     storage;
     supabase;
@@ -116,6 +117,7 @@ export class HealthMonitor {
         const upHours = Math.floor(report.uptimeSeconds / 3600);
         const upMins = Math.floor((report.uptimeSeconds % 3600) / 60);
         const uptime = `${upHours}h ${upMins}m`;
-        return `[Health ${report.status}] Mem: ${mem} (512MB RAM) | ${q} | Storage: ${report.storage.provider} (${report.storage.healthy ? 'OK' : 'ERR'}) | Uptime: ${uptime}`;
+        const ramCapMb = detectContainerRamMiB();
+        return `[Health ${report.status}] Mem: ${mem} (${ramCapMb}MB RAM) | ${q} | Storage: ${report.storage.provider} (${report.storage.healthy ? 'OK' : 'ERR'}) | Uptime: ${uptime}`;
     }
 }
