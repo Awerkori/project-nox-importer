@@ -551,10 +551,12 @@ export declare class LiteRepository {
      * when no ambiguous receipt has appeared since the last empty pass.
      */
     newestUnknownUploadAt(): Promise<Date | null>;
+    hasDueSourceCooldowns(): Promise<boolean>;
     /** One bounded recovery turn; it cannot consume the claim path or scan works. */
     reconcile(limit?: number, options?: {
         recoverUploadOutcomes?: boolean;
         recoverSourceCooldowns?: boolean;
+        recoverLegacyMaintenance?: boolean;
     }): Promise<{
         leases: number;
         retries: number;

@@ -43,9 +43,9 @@ const withTimeout = async (operation, timeoutMs, code) => {
 // intent is committed, reducing contention on the three-seat pool without
 // changing the durable-before-Telegram fence. Receipts remain scalar-only
 // after Telegram has confirmed the page.
-export const DURABLE_RESERVATION_BATCH_JOIN_MS = 100;
-export const DURABLE_RECEIPT_BATCH_JOIN_MS = 120;
-export const UPLOAD_BATCH_FLUSH_THRESHOLD = 8;
+export const DURABLE_RESERVATION_BATCH_JOIN_MS = 350;
+export const DURABLE_RECEIPT_BATCH_JOIN_MS = 900;
+export const UPLOAD_BATCH_FLUSH_THRESHOLD = 24;
 async function mapBounded(items, limit, fn) {
     const result = new Array(items.length);
     let cursor = 0;
@@ -882,21 +882,22 @@ export class LiteExecutor {
         }
     }
     async routes(task) {
+        const checkReceipts = task.attempts > 1 || Boolean(task.checkpoint.selectedSource);
         if (!task.workId || !task.chapterKey) {
-            return { routes: [], legacy: null, hasUploadReceipts: task.attempts > 1 || Boolean(task.checkpoint.selectedSource) };
+            return { routes: [], legacy: null, hasUploadReceipts: checkReceipts };
         }
         const result = await this.db.query(`SELECT s.source,s.source_work_id,s.source_chapter_id,s.canonical_chapter_key,s.work_id,s.language,s.edition,s.source_rank,
          s.confirmed,s.has_chapter,s.created_at,COALESCE(h.health,'HEALTHY') health,h.cooldown_until,
          p.enabled,p.status,p.cooldown_until AS source_cooldown,
          COALESCE((to_jsonb(p)->>'chapter_ingestion_enabled')::boolean,true) AS chapter_ingestion_enabled,
          c.id AS legacy_chapter_id,c.published_at AS legacy_published_at,
-         EXISTS(SELECT 1 FROM importer_lite_uploads u WHERE u.task_id=$3::uuid) AS has_upload_receipts
+         CASE WHEN $4::boolean THEN EXISTS(SELECT 1 FROM importer_lite_uploads u WHERE u.task_id=$3::uuid) ELSE false END AS has_upload_receipts
        FROM importer_lite_chapter_sources s
        JOIN importer_sources p ON p.id=s.source
        LEFT JOIN importer_lite_source_health h ON h.source=s.source
        LEFT JOIN importer_chapter_mappings m ON m.source=s.source AND m.source_chapter_id=s.source_chapter_id
        LEFT JOIN chapters c ON c.id=m.chapter_id AND c.work_id=s.work_id
-       WHERE s.work_id=$1::uuid AND s.canonical_chapter_key=$2`, [task.workId, task.chapterKey, task.id]);
+       WHERE s.work_id=$1::uuid AND s.canonical_chapter_key=$2`, [task.workId, task.chapterKey, task.id, checkReceipts]);
         // Every import formerly issued a second, almost-identical indexed lookup
         // solely to find an exact legacy mapping.  Carry that scalar through the
         // route snapshot instead.  It is still constrained to the canonical work

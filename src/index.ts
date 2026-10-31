@@ -10,7 +10,7 @@ dns.setDefaultResultOrder?.('ipv4first');
 import { ImporterGatewayClient } from './core/gateway-client.js';
 import { GatewaySupabaseClient } from './core/gateway-supabase.js';
 import { DirectSupabaseClient } from './db/direct-supabase-client.js';
-import { createYugabyteMetadataPool } from './db/yugabyte-direct.js';
+import { closeYugabytePool, createYugabyteMetadataPool } from './db/yugabyte-direct.js';
 import { getConfig } from './config.js';
 
 // Polyfill native WebSocket for Node environments (e.g. Node 20 on DIScloud) where native WebSocket is missing
@@ -36,7 +36,7 @@ async function main() {
   // This is intentionally a release-observability marker, not a scheduling
   // knob.  It lets the durable Lite heartbeat distinguish a rebuilt rollout
   // from an older process when the hosting platform has delayed replacement.
-  const rolloutRevision = 'r840';
+  const rolloutRevision = 'r841';
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   let buildCommit = 'unknown';
   try {
@@ -145,11 +145,23 @@ async function main() {
   // 6. Graceful Shutdown & Forensics Handlers
   diagnostics.initProcessHandlers(async (signal: string) => {
     rootLogger.info(`Received ${signal}, initiating graceful shutdown...`);
-    engine.stop();
-    setTimeout(() => {
+    const forceExitTimer = setTimeout(() => {
       diagnostics.dumpForensics(`Forced shutdown after timeout (15s limit reached during ${signal})`);
       process.exit(1);
-    }, 15_000).unref();
+    }, 15_000);
+    forceExitTimer.unref();
+    try {
+      if ('shutdown' in engine && typeof (engine as any).shutdown === 'function') {
+        await (engine as any).shutdown();
+      } else {
+        engine.stop();
+      }
+      telemetryCollector.stop();
+      await closeYugabytePool().catch(() => {});
+    } finally {
+      clearTimeout(forceExitTimer);
+    }
+    process.exit(0);
   });
 
   // 7. Start Engine

@@ -88,6 +88,7 @@ export declare class ImporterLiteRuntime {
     private lastUploadOutcomeRecoveryAt;
     private lastUnknownUploadRecoverySeenAt;
     private lastSourceCooldownRecoveryAt;
+    private lastColdReconcileMaintenanceAt;
     private nextDiscoverySeedRetryAt;
     private discoverySeed;
     private sourceMetadataNoCandidateUntil;
@@ -194,6 +195,7 @@ export declare class ImporterLiteRuntime {
     start(): Promise<void>;
     private assertReaderCanonicalIdentitySchema;
     stop(): void;
+    shutdown(): Promise<void>;
     /**
      * The normal importer retains its two-second metadata cadence. During the
      * explicit V4 campaign the durable one-second admission fence must not be

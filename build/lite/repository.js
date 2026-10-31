@@ -1616,7 +1616,7 @@ export class LiteRepository {
           AND rw.work_key LIKE 'work:%'
           AND rw.next_run_at <= now() + interval '35 seconds'
         ORDER BY rw.last_claimed_at ASC NULLS FIRST, rw.next_run_at ASC, rw.work_key ASC
-        LIMIT 160
+        LIMIT 96
       ), work_stats AS (
         SELECT
           rpw.work_key,
@@ -1636,14 +1636,19 @@ export class LiteRepository {
           LIMIT 1
         ) ft ON true
         LEFT JOIN LATERAL (
-          SELECT count(p.id)::int AS remaining_chapters,
-                 min(p.created_at) AS oldest_task_at
-          FROM importer_lite_tasks p
-          WHERE p.work_key = rpw.work_key
-            AND p.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
-            AND p.state IN ('RUNNING', 'READY', 'RETRY_WAIT')
-            AND p.monitoring = false
-            AND (p.state <> 'RETRY_WAIT' OR p.attempts < p.max_attempts)
+          SELECT count(*)::int AS remaining_chapters,
+                 min(sample.created_at) AS oldest_task_at
+          FROM (
+            SELECT p.created_at
+            FROM importer_lite_tasks p
+            WHERE p.work_key = rpw.work_key
+              AND p.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+              AND p.state IN ('RUNNING', 'READY', 'RETRY_WAIT')
+              AND p.monitoring = false
+              AND (p.state <> 'RETRY_WAIT' OR p.attempts < p.max_attempts)
+            ORDER BY p.created_at ASC
+            LIMIT 85
+          ) sample
         ) pend ON true
       )
       SELECT
@@ -2101,7 +2106,7 @@ export class LiteRepository {
      * normal task claim remains the authority for all chapter/catalog work.
      */
     async claimCrossSourceMetadataDiscovery(workerId, leaseSeconds) {
-        const dbToUse = (this.sourceMetadataDb && this.sourceMetadataDb !== this.db && (this.sourceMetadataDb.waitingCount || 0) > 0 && (this.db.idleCount || 0) > 0)
+        const dbToUse = (process.env.METADATA_TURBO_MODE === 'true' && this.sourceMetadataDb && this.sourceMetadataDb !== this.db && (this.sourceMetadataDb.waitingCount || 0) > 0 && (this.db.idleCount || 0) > 0)
             ? this.db
             : this.sourceMetadataDb;
         const result = await dbToUse.query(`
@@ -3522,7 +3527,8 @@ export class LiteRepository {
             Boolean(outcome.resetAttempts),
         ];
         if (isMetadataTask) {
-            const result = await dbToUse.query(`UPDATE importer_lite_tasks
+            const targetDb = isMetadataTask ? this.sourceMetadataDb : this.db;
+            const result = await (targetDb || this.db).query(`UPDATE importer_lite_tasks
             SET state=$3, reason=$4, next_run_at=COALESCE($5::timestamptz,next_run_at),
                 base_priority=COALESCE($7::smallint,base_priority),
                 priority=CASE WHEN EXISTS (
@@ -3536,6 +3542,8 @@ export class LiteRepository {
                 attempts=CASE WHEN $10::boolean THEN 0 ELSE attempts END,
                 lease_owner=NULL, lease_until=NULL, updated_at=now()
           WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()`, params);
+            if (result.rowCount === 1 && !isMetadataTask)
+                await this.refreshReadyWork(this.db, task.workKey);
             return result.rowCount === 1;
         }
         const result = await dbToUse.query('SELECT public.importer_lite_finish_task($1::uuid, $2, $3, $4, $5::timestamptz, $6::jsonb, $7::smallint, $8::boolean, $9::uuid, $10::boolean) AS finished', params);
@@ -3726,10 +3734,25 @@ export class LiteRepository {
       LIMIT 1`);
         return result.rows[0]?.updated_at ? new Date(result.rows[0].updated_at) : null;
     }
+    async hasDueSourceCooldowns() {
+        const checkDb = this.sourceMetadataDb || this.db;
+        const result = await checkDb.query(`SELECT /*+ IndexScan(task importer_lite_tasks_source_cooldown_due_idx) */ EXISTS (
+         SELECT 1
+         FROM importer_lite_tasks task
+         WHERE task.state = 'RETRY_WAIT'
+           AND task.monitoring = false
+           AND task.task_type = 'IMPORT_CHAPTER'
+           AND task.reason = 'SOURCE_RATE_LIMITED'
+           AND task.next_run_at <= now()
+         LIMIT 1
+       ) AS due`);
+        return result.rows[0]?.due === true;
+    }
     /** One bounded recovery turn; it cannot consume the claim path or scan works. */
     async reconcile(limit = 50, options = {}) {
         const recoverUploadOutcomes = options.recoverUploadOutcomes !== false;
         const recoverSourceCooldowns = options.recoverSourceCooldowns !== false;
+        const recoverLegacyMaintenance = options.recoverLegacyMaintenance !== false;
         const client = await this.db.connect();
         try {
             await client.query('BEGIN');
@@ -3781,7 +3804,7 @@ export class LiteRepository {
            WHERE task.state='RETRY_WAIT' AND task.monitoring=false AND task.task_type='IMPORT_CHAPTER'
              AND task.reason='SOURCE_RATE_LIMITED' AND task.next_run_at<=now()
            ORDER BY task.next_run_at ASC, task.work_key ASC, task.created_at ASC, task.id ASC
-           LIMIT 256
+           LIMIT 64
          ), window_routes AS MATERIALIZED (
            SELECT dw.id AS task_id, route.source, route.source_rank,
              (s.enabled=true
@@ -3827,7 +3850,7 @@ export class LiteRepository {
              SELECT 1 FROM window_routes wr WHERE wr.task_id=dw.id AND wr.is_runnable=true
            )
            ORDER BY dw.next_run_at ASC, dw.work_key ASC, dw.created_at ASC, dw.id ASC
-           LIMIT 128
+           LIMIT 64
          ), due_candidates AS MATERIALIZED (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,
@@ -3956,7 +3979,7 @@ export class LiteRepository {
             // once after verifying presentation and every *positional* media
             // reference. This is bounded and fenced in the checkpoint so another
             // genuine publish error never becomes a retry loop.
-            const repairedPublishes = await client.query(`WITH completed_imports AS (
+            const repairedPublishes = recoverLegacyMaintenance ? await client.query(`WITH completed_imports AS (
           SELECT i.id, i.work_id, i.work_key, i.chapter_key, i.checkpoint
           FROM importer_lite_tasks i
           WHERE i.state='DONE' AND i.task_type='IMPORT_CHAPTER'
@@ -3984,8 +4007,8 @@ export class LiteRepository {
           SET state='READY',attempts=0,lease_owner=NULL,lease_until=NULL,next_run_at=now(),
               reason='PUBLISH_INTEGRITY_REPAIRED',
               checkpoint=p.checkpoint || '{"publishIntegrityRepairV1":true}'::jsonb,updated_at=now()
-          FROM picked WHERE p.id=picked.id RETURNING picked.work_key`, [limit]);
-            const disabledBackfillCatalogs = recoverSourceCooldowns ? await client.query(`WITH picked AS (
+          FROM picked WHERE p.id=picked.id RETURNING picked.work_key`, [limit]) : noUploadOutcomeRecovery;
+            const disabledBackfillCatalogs = (recoverSourceCooldowns && recoverLegacyMaintenance) ? await client.query(`WITH picked AS (
            SELECT t.id, t.work_key
            FROM (
              SELECT work_key FROM importer_lite_ready_works
@@ -4015,13 +4038,13 @@ export class LiteRepository {
            FROM picked
           WHERE t.id = picked.id
          RETURNING picked.work_key`, [Math.min(64, Math.max(16, limit))]) : noUploadOutcomeRecovery;
-            const demotedOutOfSequenceP0 = recoverSourceCooldowns ? await client.query(`WITH candidate_p0 AS (
+            const demotedOutOfSequenceP0 = (recoverSourceCooldowns && recoverLegacyMaintenance) ? await client.query(`WITH candidate_p0 AS (
            SELECT t.id, t.work_id, t.work_key, t.payload
            FROM (
              SELECT work_key FROM importer_lite_ready_works
              WHERE priority <= 2 AND operation_rank = 1
              ORDER BY priority ASC, next_run_at ASC
-             LIMIT 128
+             LIMIT 96
            ) rw
            JOIN importer_lite_tasks t
              ON t.work_key = rw.work_key
@@ -4033,16 +4056,20 @@ export class LiteRepository {
             AND t.work_id IS NOT NULL
             AND NULLIF(t.payload->>'orderKey', '') IS NOT NULL
            UNION ALL
-           SELECT t.id, t.work_id, t.work_key, t.payload
-           FROM importer_lite_tasks t
-           WHERE t.state IN ('RUNNING', 'RETRY_WAIT')
-             AND t.state = 'RETRY_WAIT'
-             AND t.monitoring = false
-             AND t.priority = 1
-             AND t.base_priority = 1
-             AND t.task_type = 'IMPORT_CHAPTER'
-             AND t.work_id IS NOT NULL
-             AND NULLIF(t.payload->>'orderKey', '') IS NOT NULL
+           SELECT r.id, r.work_id, r.work_key, r.payload
+           FROM (
+             SELECT t.id, t.work_id, t.work_key, t.payload
+             FROM importer_lite_tasks t
+             WHERE t.state IN ('RUNNING', 'RETRY_WAIT')
+               AND t.state = 'RETRY_WAIT'
+               AND t.monitoring = false
+               AND t.priority = 1
+               AND t.base_priority = 1
+               AND t.task_type = 'IMPORT_CHAPTER'
+               AND t.work_id IS NOT NULL
+               AND NULLIF(t.payload->>'orderKey', '') IS NOT NULL
+             LIMIT 64
+           ) r
          ), picked AS (
            SELECT c.id, c.work_key
            FROM candidate_p0 c
