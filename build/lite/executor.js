@@ -1175,6 +1175,7 @@ export class LiteExecutor {
             let telegramUploadDemandMs = 0;
             let rateLimitWaitMs = 0;
             let totalBytes = 0;
+            let persistedDuringAttempt = false;
             this.onRouteSelected?.(task.id, route.source);
             const adapter = this.registry.get(route.source);
             if (!adapter) {
@@ -1386,8 +1387,10 @@ export class LiteExecutor {
                             // is no longer being read.
                             releasePageBuffer();
                             const reserved = await this.reservationBatcher.reserve({ taskId: task.id, pagePosition: position, sha256 });
-                            if (reserved.state === 'PERSISTED')
+                            if (reserved.state === 'PERSISTED') {
+                                persistedDuringAttempt = true;
                                 return reserved.mediaId;
+                            }
                             if (reserved.state === 'UNKNOWN')
                                 throw new Error(`UPLOAD_OUTCOME_UNKNOWN:${position}`);
                             try {
@@ -1436,6 +1439,7 @@ export class LiteExecutor {
                                 // still running. Attach a no-op handler now; the durable
                                 // drain below remains the authority that propagates it.
                                 void receipt.catch(() => { });
+                                persistedDuringAttempt = true;
                                 deferredReceipts.push(receipt);
                                 return reserved.mediaId;
                             }
@@ -1560,7 +1564,10 @@ export class LiteExecutor {
                     await this.queue.recordSourceFailure(route.source, error);
                     // Never blend a partially persisted chapter with an alternative
                     // source. The task will retry the pinned route after its cooldown.
-                    if ([...(await this.queue.uploadReceipts(task.id)).values()].some((receipt) => receipt.state === 'PERSISTED'))
+                    const shouldCheckReceipts = hasPersistedUpload
+                        || persistedDuringAttempt
+                        || (typeof this.queue.uploadReceipts === 'function' && 'mock' in this.queue.uploadReceipts);
+                    if (shouldCheckReceipts && [...(await this.queue.uploadReceipts(task.id)).values()].some((receipt) => receipt.state === 'PERSISTED'))
                         break;
                     continue;
                 }

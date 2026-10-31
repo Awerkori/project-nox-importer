@@ -83,9 +83,9 @@ const METADATA_REPLAY_V4_EXCLUSIVE_SOURCE_WINDOWS_PER_TURN = 12;
 const sourceExecutionEligibilitySql = (alias) => `(
   (COALESCE(${alias}.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING') OR
    (${alias}.status='COOLDOWN' AND ${alias}.cooldown_until IS NOT NULL AND ${alias}.cooldown_until<=now()))
-  AND (to_jsonb(${alias})->>'blocked_reason' IS NULL
-    OR to_jsonb(${alias})->'blocked_details'->>'probe_success'='true'
-    OR to_jsonb(${alias})->'blocked_details'->>'recovered_at' IS NOT NULL)
+  AND (${alias}.blocked_reason IS NULL
+    OR ${alias}.blocked_details->>'probe_success'='true'
+    OR ${alias}.blocked_details->>'recovered_at' IS NOT NULL)
 )`;
 const priorityName = (value) => ['STAFF', 'P0', 'P1', 'P2'][value] || 'P2';
 const asTask = (row) => ({
@@ -215,7 +215,7 @@ export class LiteRepository {
           WHERE s.enabled=true AND s.id>$1::text
             AND s.id NOT IN ('mangaball','mangadex','mangafire')
             AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING','COOLDOWN')
-            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)=true
+            AND COALESCE(s.chapter_ingestion_enabled,true)=true
             AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
           ORDER BY s.id LIMIT 1
         ), wrapped AS (
@@ -225,7 +225,7 @@ export class LiteRepository {
           WHERE s.enabled=true AND s.id<=$1::text
             AND s.id NOT IN ('mangaball','mangadex','mangafire')
             AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING','COOLDOWN')
-            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)=true
+            AND COALESCE(s.chapter_ingestion_enabled,true)=true
             AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
           ORDER BY s.id LIMIT 1
         )
@@ -587,12 +587,10 @@ export class LiteRepository {
             // a time. A pathological provider is skipped by a savepoint instead of
             // stalling every other V5 candidate behind it.
             const candidates = [];
-            const candidateCapacity = admissionLimit - priorityCandidates.length;
+            const candidateCapacity = Math.max(1, admissionLimit - priorityCandidates.length);
             const perSourceLimit = isTurbo ? candidateCapacity : 1;
             for (const source of probeSources) {
-                if (candidates.length >= candidateCapacity)
-                    break;
-                const needed = Math.min(perSourceLimit, candidateCapacity - candidates.length);
+                const needed = perSourceLimit;
                 await client.query('SAVEPOINT v5_source_candidate');
                 try {
                     await client.query(`SET LOCAL statement_timeout = '6000ms'`);
@@ -619,8 +617,8 @@ export class LiteRepository {
           `, [source, lastSourceWorkId, needed]);
                     for (const r of fwd.rows)
                         candidates.push(r);
-                    if (candidates.length < candidateCapacity && fwd.rows.length < needed && lastSourceWorkId) {
-                        const wrapNeeded = Math.min(needed - fwd.rows.length, candidateCapacity - candidates.length);
+                    if (fwd.rows.length < needed && lastSourceWorkId) {
+                        const wrapNeeded = needed - fwd.rows.length;
                         const wrap = await client.query(`
               SELECT m.source,m.source_work_id,m.work_id,
                 COALESCE(cardinality(w.aliases),0)=0 AS selected_aliasless,
@@ -648,14 +646,14 @@ export class LiteRepository {
             }
             candidates.sort((left, right) => Number(right.selected_aliasless) - Number(left.selected_aliasless)
                 || Number(right.selected_tagless) - Number(left.selected_tagless));
-            const selectedCandidates = [...new Map([...priorityCandidates, ...candidates].map((candidate) => [`${candidate.source}:${candidate.source_work_id}`, candidate])).values()].slice(0, admissionLimit);
+            const allDeduplicatedCandidates = [...new Map([...priorityCandidates, ...candidates].map((candidate) => [`${candidate.source}:${candidate.source_work_id}`, candidate])).values()];
             // Candidate windows are deliberately source-indexed.  Correlating an
             // active-task lookup for every mapping in those windows made YSQL scan
             // the queue until its 2.5 s guard expired, despite viable V5 debt.
             // The idempotency index makes one bounded lookup for this tiny admitted
             // batch both faster and equivalent: active v3/v5 siblings are excluded
             // before INSERT, and the unique key remains the final race-safe fence.
-            const candidateTaskKeys = selectedCandidates.flatMap((candidate) => {
+            const candidateTaskKeys = allDeduplicatedCandidates.flatMap((candidate) => {
                 const source = String(candidate.source);
                 const sourceWorkId = String(candidate.source_work_id);
                 return [
@@ -670,12 +668,12 @@ export class LiteRepository {
               AND state IN ('READY','RUNNING','RETRY_WAIT')`, [candidateTaskKeys])
                 : { rows: [] };
             const activeCandidateKeySet = new Set(activeCandidateKeys.rows.map((row) => row.idempotency_key));
-            const insertableCandidates = selectedCandidates.filter((candidate) => {
+            const insertableCandidates = allDeduplicatedCandidates.filter((candidate) => {
                 const source = String(candidate.source);
                 const sourceWorkId = String(candidate.source_work_id);
                 return !activeCandidateKeySet.has(`lite:metadata:source:v3:${source}:${sourceWorkId}`)
                     && !activeCandidateKeySet.has(`lite:metadata:source:v5:${source}:${sourceWorkId}`);
-            });
+            }).slice(0, admissionLimit);
             let admitted = 0;
             for (const row of insertableCandidates) {
                 const source = String(row.source);
@@ -1294,7 +1292,7 @@ export class LiteRepository {
         WHERE cs.confirmed=true AND cs.has_chapter=true
           AND src.enabled=true
           AND COALESCE(src.status,'ACTIVE')<>'DISABLED'
-          AND COALESCE((to_jsonb(src)->>'chapter_ingestion_enabled')::boolean,true)=true
+          AND COALESCE(src.chapter_ingestion_enabled,true)=true
           AND NOT EXISTS (
             SELECT 1 FROM importer_lite_chapters chapter
             WHERE chapter.work_id=cs.work_id AND chapter.canonical_chapter_key=cs.canonical_chapter_key
@@ -1523,7 +1521,7 @@ export class LiteRepository {
           AND s.enabled = true
           AND s.id NOT IN ('mangaball','mangadex','mangafire')
           AND COALESCE(s.status, 'ACTIVE') <> 'DISABLED'
-          AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = true
+          AND COALESCE(s.chapter_ingestion_enabled, true) = true
           AND ${sourceExecutionEligibilitySql('s')}
           AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
           AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
@@ -1595,8 +1593,9 @@ export class LiteRepository {
         };
         this.p1FocusTargetSize = desiredSize;
         const metaDb = this.sourceMetadataDb || this.db;
+        const horizonIso = new Date(Date.now() + 35_000).toISOString();
         const candidatesRes = await metaDb.query(`
-      WITH ready_p1_works AS (
+      WITH ready_p1_works AS MATERIALIZED (
         SELECT rw.work_key,
                NULLIF(substring(rw.work_key from 6), '')::uuid AS work_id,
                rw.next_run_at,
@@ -1605,74 +1604,60 @@ export class LiteRepository {
         WHERE rw.priority = 2
           AND rw.operation_rank <= 1
           AND rw.work_key LIKE 'work:%'
-          AND rw.next_run_at <= now() + interval '35 seconds'
+          AND rw.next_run_at <= $1::timestamptz
         ORDER BY rw.last_claimed_at ASC NULLS FIRST, rw.next_run_at ASC, rw.work_key ASC
-        LIMIT 256
-      ), work_stats AS (
-        SELECT
-          rpw.work_key,
-          rpw.work_id::text AS work_id,
-          COALESCE(pend.remaining_chapters, 0)::int AS remaining_chapters,
-          pend.oldest_task_at,
-          ft.chapter_key AS frontier_chapter_key
-        FROM ready_p1_works rpw
-        LEFT JOIN LATERAL (
-          SELECT t.chapter_key
-          FROM importer_lite_tasks t
-          WHERE t.work_key = rpw.work_key
-            AND t.state = 'READY'
-            AND t.monitoring = false
-            AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
-          ORDER BY t.priority ASC, t.next_run_at ASC, t.created_at ASC
-          LIMIT 1
-        ) ft ON true
-        LEFT JOIN LATERAL (
-          SELECT count(*)::int AS remaining_chapters,
-                 min(sample.created_at) AS oldest_task_at
-          FROM (
-            SELECT p.created_at
-            FROM importer_lite_tasks p
-            WHERE p.work_key = rpw.work_key
-              AND p.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
-              AND p.state IN ('RUNNING', 'READY', 'RETRY_WAIT')
-              AND p.monitoring = false
-              AND (p.state <> 'RETRY_WAIT' OR p.attempts < p.max_attempts)
-            ORDER BY p.created_at ASC
-            LIMIT 85
-          ) sample
-        ) pend ON true
-      )
-      SELECT
-        ws.work_key,
-        ws.work_id,
-        ws.remaining_chapters,
-        ws.oldest_task_at,
-        (
-          SELECT array_agg(cs.source ORDER BY cs.source_rank, cs.source)
-          FROM importer_lite_chapter_sources cs
-          JOIN importer_sources src ON src.id = cs.source
-          LEFT JOIN importer_lite_source_health sh ON sh.source = src.id
-          WHERE cs.work_id = ws.work_id::uuid
-            AND cs.canonical_chapter_key = ws.frontier_chapter_key
-            AND cs.confirmed = true
-            AND COALESCE(cs.has_chapter, true) = true
-            AND src.enabled = true
+        LIMIT 64
+      ), active_sources AS MATERIALIZED (
+        SELECT src.id AS source,
+          (src.enabled = true
             AND COALESCE(src.status, 'ACTIVE') <> 'DISABLED'
-            AND COALESCE((to_jsonb(src)->>'chapter_ingestion_enabled')::boolean, true) = true
+            AND COALESCE(src.chapter_ingestion_enabled, true) = true
             AND ${sourceExecutionEligibilitySql('src')}
             AND COALESCE(sh.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
             AND (sh.cooldown_until IS NULL OR sh.cooldown_until <= now())
-        ) AS runnable_sources,
-        EXISTS (
-          SELECT 1 FROM importer_lite_chapter_sources cs_any
-          WHERE cs_any.work_id = ws.work_id::uuid
-            AND cs_any.canonical_chapter_key = ws.frontier_chapter_key
-            AND cs_any.confirmed = true
-            AND COALESCE(cs_any.has_chapter, true) = true
-        ) AS has_recorded_routes
+          ) AS is_runnable
+        FROM importer_sources src
+        LEFT JOIN importer_lite_source_health sh ON sh.source = src.id
+      ), work_stats AS MATERIALIZED (
+        SELECT
+          rpw.work_key,
+          rpw.work_id,
+          count(t.id)::int AS remaining_chapters,
+          min(t.created_at) AS oldest_task_at,
+          (array_agg(t.chapter_key ORDER BY t.priority ASC, t.next_run_at ASC, t.created_at ASC))[1] AS frontier_chapter_key
+        FROM ready_p1_works rpw
+        JOIN importer_lite_tasks t
+          ON t.work_key = rpw.work_key
+         AND t.state = 'READY'
+         AND t.priority = 2
+         AND t.monitoring = false
+         AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
+        GROUP BY rpw.work_key, rpw.work_id
+      ), route_stats AS MATERIALIZED (
+        SELECT
+          ws.work_key,
+          count(cs.source) > 0 AS has_recorded_routes,
+          array_agg(cs.source ORDER BY cs.source_rank, cs.source) FILTER (WHERE s.is_runnable = true) AS runnable_sources
+        FROM work_stats ws
+        LEFT JOIN importer_lite_chapter_sources cs
+          ON cs.work_id = ws.work_id
+         AND cs.canonical_chapter_key = ws.frontier_chapter_key
+         AND cs.confirmed = true
+         AND COALESCE(cs.has_chapter, true) = true
+        LEFT JOIN active_sources s ON s.source = cs.source
+        GROUP BY ws.work_key
+      )
+      SELECT
+        ws.work_key,
+        ws.work_id::text AS work_id,
+        ws.remaining_chapters,
+        ws.oldest_task_at,
+        rs.runnable_sources,
+        COALESCE(rs.has_recorded_routes, false) AS has_recorded_routes
       FROM work_stats ws
+      LEFT JOIN route_stats rs ON rs.work_key = ws.work_key
       WHERE ws.remaining_chapters > 0
-    `);
+    `, [horizonIso]);
         const now = Date.now();
         const candidateByKey = new Map();
         for (const row of candidatesRes.rows) {
@@ -1879,7 +1864,7 @@ export class LiteRepository {
      */
     async hasExecutableOrRecoverableP1Backlog(forceFresh = false) {
         const now = Date.now();
-        if (!forceFresh && this.p1BacklogCache && now - this.p1BacklogCache.at < 15_000) {
+        if (!forceFresh && this.p1BacklogCache && now - this.p1BacklogCache.at < 30_000) {
             return { pending: this.p1BacklogCache.pending, reason: this.p1BacklogCache.reason };
         }
         const metaDb = this.sourceMetadataDb || this.db;
@@ -1888,11 +1873,10 @@ export class LiteRepository {
         (
           SELECT 'P1_RUNNING'
           FROM importer_lite_tasks t
-          WHERE t.state IN ('RUNNING', 'RETRY_WAIT')
-            AND t.state = 'RUNNING'
+          WHERE t.state = 'RUNNING'
+            AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH')
             AND t.monitoring = false
             AND t.priority = 2
-            AND t.task_type IN ('IMPORT_CHAPTER', 'PUBLISH', 'CATALOG')
             AND (t.lease_until IS NULL OR t.lease_until > now())
           LIMIT 1
         ),
@@ -1962,16 +1946,15 @@ export class LiteRepository {
           JOIN importer_sources s ON s.id = t.payload->>'source'
           LEFT JOIN importer_lite_source_health h ON h.source = s.id
           WHERE t.state IN ('READY', 'RUNNING', 'RETRY_WAIT')
-            AND t.state IN ('READY', 'RETRY_WAIT')
             AND t.monitoring = false
             AND t.priority = 2
             AND t.task_type = 'CATALOG'
             AND t.payload ? 'historicalP1Backfill'
-            AND t.attempts < t.max_attempts
+            AND (t.state = 'RUNNING' OR t.attempts < t.max_attempts)
             AND s.enabled = true
             AND s.id NOT IN ('mangaball', 'mangadex', 'mangafire')
             AND COALESCE(s.status, 'ACTIVE') <> 'DISABLED'
-            AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = true
+            AND COALESCE(s.chapter_ingestion_enabled, true) = true
             AND ${sourceExecutionEligibilitySql('s')}
             AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
           LIMIT 1
@@ -1991,6 +1974,19 @@ export class LiteRepository {
     async hasPendingWorkChapterBacklog(workId) {
         const metaDb = this.sourceMetadataDb || this.db;
         const result = await metaDb.query(`
+      WITH unimported_keys AS MATERIALIZED (
+        SELECT cs_idx.canonical_chapter_key
+        FROM (
+          SELECT DISTINCT canonical_chapter_key
+          FROM importer_lite_chapter_sources
+          WHERE work_id = $1::uuid AND confirmed = true
+        ) cs_idx
+        WHERE NOT EXISTS (
+          SELECT 1 FROM importer_lite_chapters ch
+          WHERE ch.work_id = $1::uuid
+            AND ch.canonical_chapter_key = cs_idx.canonical_chapter_key
+        )
+      )
       SELECT (
         EXISTS (
           SELECT 1
@@ -2010,22 +2006,12 @@ export class LiteRepository {
           SELECT 1
           FROM importer_lite_tasks t
           WHERE t.work_key = ('work:' || $1::text)
-            AND t.state = 'READY'
+            AND t.state IN ('READY', 'RUNNING', 'RETRY_WAIT')
             AND t.monitoring = false
             AND t.task_type = 'CATALOG'
             AND t.base_priority = 2
             AND NOT (t.payload ? 'metadataEnrichment')
-        )
-        OR EXISTS (
-          SELECT 1
-          FROM importer_lite_tasks t
-          WHERE t.state IN ('RUNNING', 'RETRY_WAIT')
-            AND t.work_key = ('work:' || $1::text)
-            AND t.monitoring = false
-            AND t.task_type = 'CATALOG'
-            AND t.base_priority = 2
-            AND NOT (t.payload ? 'metadataEnrichment')
-            AND (t.state = 'RUNNING' OR t.attempts < t.max_attempts)
+            AND (t.state <> 'RETRY_WAIT' OR t.attempts < t.max_attempts)
         )
         OR (
           EXISTS (
@@ -2034,30 +2020,28 @@ export class LiteRepository {
           )
           AND EXISTS (
             SELECT 1
-            FROM importer_lite_chapter_sources cs
+            FROM unimported_keys uk
+            JOIN importer_lite_chapter_sources cs
+              ON cs.work_id = $1::uuid
+             AND cs.canonical_chapter_key = uk.canonical_chapter_key
+             AND cs.confirmed = true
             JOIN importer_sources s ON s.id = cs.source
             LEFT JOIN importer_lite_source_health h ON h.source = s.id
-            WHERE cs.work_id = $1::uuid
-              AND cs.confirmed = true
-              AND COALESCE(cs.has_chapter, true) = true
+            WHERE COALESCE(cs.has_chapter, true) = true
               AND s.enabled = true
               AND COALESCE(s.status, 'ACTIVE') <> 'DISABLED'
-              AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = true
+              AND COALESCE(s.chapter_ingestion_enabled, true) = true
               AND ${sourceExecutionEligibilitySql('s')}
               AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
               AND NOT EXISTS (
-                SELECT 1 FROM importer_lite_chapters ch
-                WHERE ch.work_id = cs.work_id AND ch.canonical_chapter_key = cs.canonical_chapter_key
-              )
-              AND NOT EXISTS (
                 SELECT 1 FROM chapters c
-                WHERE c.work_id = cs.work_id
-                  AND c.canonical_chapter_key = cs.canonical_chapter_key
+                WHERE c.work_id = $1::uuid
+                  AND c.canonical_chapter_key = uk.canonical_chapter_key
                   AND c.published_at IS NOT NULL
               )
               AND NOT EXISTS (
                 SELECT 1 FROM importer_lite_tasks blk
-                WHERE blk.idempotency_key = 'lite:chapter:' || cs.work_id::text || ':' || cs.canonical_chapter_key
+                WHERE blk.idempotency_key = 'lite:chapter:' || $1::text || ':' || uk.canonical_chapter_key
                   AND blk.state = 'BLOCKED'
               )
           )
@@ -2192,7 +2176,7 @@ export class LiteRepository {
             OR (task.state='RUNNING' AND task.lease_until<now())
           )
           AND source.enabled=true
-          AND COALESCE((to_jsonb(source)->>'catalog_discovery_enabled')::boolean,true)
+          AND COALESCE(source.catalog_discovery_enabled,true)
           AND (COALESCE(source.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING')
             OR (source.status='COOLDOWN' AND source.cooldown_until IS NOT NULL AND source.cooldown_until<=now()))
           AND COALESCE(health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
@@ -2290,7 +2274,7 @@ export class LiteRepository {
         WHERE s.enabled = true
           AND s.id NOT IN ('mangaball','mangadex','mangafire')
           AND ${sourceExecutionEligibilitySql('s')}
-          AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = true
+          AND COALESCE(s.chapter_ingestion_enabled, true) = true
           AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
           AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
         ORDER BY CASE WHEN s.id > COALESCE(cur.last_source, '') THEN 0 ELSE 1 END, s.id
@@ -2424,17 +2408,13 @@ export class LiteRepository {
           )
         ORDER BY rw.priority,${focusOrderSql}rw.last_claimed_at NULLS FIRST,rw.next_run_at,rw.work_key
         LIMIT $1
-      ), raw_candidates AS (
-        SELECT t.id,t.work_id,t.chapter_key,rw.priority
+      ), raw_candidates AS MATERIALIZED (
+        SELECT DISTINCT ON (rw.work_key) t.id,t.work_id,t.chapter_key,rw.priority
         FROM candidate_works rw
-        JOIN LATERAL (
-          SELECT id,work_id,chapter_key
-          FROM importer_lite_tasks t
-          WHERE t.work_key=rw.work_key AND t.state='READY' AND t.monitoring=false
-            AND t.priority=rw.priority AND t.task_type='IMPORT_CHAPTER' AND t.next_run_at<=now()
-          ORDER BY t.next_run_at,t.created_at
-          LIMIT 1
-        ) t ON true
+        JOIN importer_lite_tasks t
+          ON t.work_key=rw.work_key AND t.state='READY' AND t.monitoring=false
+         AND t.priority=rw.priority AND t.task_type='IMPORT_CHAPTER' AND t.next_run_at<=now()
+        ORDER BY rw.work_key,t.next_run_at,t.created_at
       ), import_routes AS (
         -- Pick the priority lane only after routing evidence is available.
         -- A durable P0 task may be READY while its confirmed route is in a
@@ -2455,7 +2435,7 @@ export class LiteRepository {
           AND cover.storage_ready=true AND cover.bytes>=1500
           AND cs.confirmed=true AND cs.has_chapter=true
           AND s.enabled=true
-          AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+          AND COALESCE(s.chapter_ingestion_enabled,true)
           AND ${sourceExecutionEligibilitySql('s')}
           AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
           AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
@@ -2697,7 +2677,7 @@ export class LiteRepository {
         LEFT JOIN importer_lite_source_health h ON h.source=s.id
         WHERE s.enabled=true AND ${cursorPredicate}
           AND ${sourceExecutionEligibilitySql('s')}
-          AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+          AND COALESCE(s.chapter_ingestion_enabled,true)
           AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
           AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
         ORDER BY s.id LIMIT $2`;
@@ -2739,7 +2719,7 @@ export class LiteRepository {
               AND m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE')
               AND s.enabled=true
               AND ${sourceExecutionEligibilitySql('s')}
-              AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+              AND COALESCE(s.chapter_ingestion_enabled,true)
               AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
               AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
               AND NOT EXISTS (
@@ -2890,7 +2870,7 @@ export class LiteRepository {
             AND t.state IN ('BLOCKED','RETRY_WAIT')
             AND t.reason='SOURCE_NOT_READY:ACTIVE'
             AND s.enabled=true
-            AND COALESCE((to_jsonb(s)->>'catalog_discovery_enabled')::boolean,true)=false
+            AND COALESCE(s.catalog_discovery_enabled,true)=false
             AND ${sourceExecutionEligibilitySql('s')}
             AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
             AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
@@ -2959,8 +2939,8 @@ export class LiteRepository {
             return map;
         const policyDb = this.sourceMetadataDb || this.db;
         const result = await policyDb.query(`SELECT s.id,s.enabled,s.status,s.sync_interval_minutes,
-        COALESCE((to_jsonb(s)->>'catalog_discovery_enabled')::boolean,true) AS catalog_discovery_enabled,
-        COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true) AS chapter_ingestion_enabled,
+        COALESCE(s.catalog_discovery_enabled,true) AS catalog_discovery_enabled,
+        COALESCE(s.chapter_ingestion_enabled,true) AS chapter_ingestion_enabled,
         s.cooldown_until AS source_cooldown,h.health,h.cooldown_until AS health_cooldown
       FROM importer_sources s
       LEFT JOIN importer_lite_source_health h ON h.source=s.id
@@ -3649,7 +3629,7 @@ export class LiteRepository {
                   AND alternative.language=COALESCE(NULLIF(r.payload->>'language',''),'und')
                   AND alternative.edition=COALESCE(NULLIF(r.payload->>'edition',''),'default')
                   AND source_policy.enabled=true
-                  AND COALESCE((to_jsonb(source_policy)->>'chapter_ingestion_enabled')::boolean,true)
+                  AND COALESCE(source_policy.chapter_ingestion_enabled,true)
                   AND ${sourceExecutionEligibilitySql('source_policy')}
                   AND COALESCE(alternative_health.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
                   AND (alternative_health.cooldown_until IS NULL OR alternative_health.cooldown_until<=now())
@@ -3793,7 +3773,7 @@ export class LiteRepository {
          ), window_routes AS MATERIALIZED (
            SELECT dw.id AS task_id, route.source, route.source_rank,
              (s.enabled=true
-               AND COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean,true)
+               AND COALESCE(s.chapter_ingestion_enabled, true)
                AND ${sourceExecutionEligibilitySql('s')}
                AND COALESCE(h.health,'HEALTHY') IN ('HEALTHY','DEGRADED','RATE_LIMITED')
                AND (h.cooldown_until IS NULL OR h.cooldown_until<=now())
@@ -4006,7 +3986,7 @@ export class LiteRepository {
              AND (
                s.enabled = false
                OR COALESCE(s.status, 'ACTIVE') = 'DISABLED'
-               OR COALESCE((to_jsonb(s)->>'chapter_ingestion_enabled')::boolean, true) = false
+               OR COALESCE(s.chapter_ingestion_enabled, true) = false
                OR s.id IN ('mangaball', 'mangadex', 'mangafire')
              )
            LIMIT $1
@@ -4206,7 +4186,11 @@ export class LiteRepository {
                 // A conflict can be a recovery race or a historical invalid media
                 // reference.  Defer it to the proven single-row repair path; this is
                 // uncommon and never lets an ambiguous intent proceed to Telegram.
-                if (!row?.media_id || row.existing === true) {
+                // When the existing row is explicitly RETRYABLE (after a prior HTTP 429
+                // or transient upload error), the batch lookup already returned its
+                // valid reserved media_id and RETRYABLE state without needing a second
+                // per-page round trip.
+                if (!row?.media_id || (row.existing === true && row.state !== 'RETRYABLE')) {
                     output.push(await this.reserveUpload(input.taskId, input.pagePosition, input.sha256));
                 }
                 else {

@@ -45,6 +45,7 @@ const p1FocusGroupsAndFrontierFixMigration = readFileSync(resolve(process.cwd(),
 const claimFastChapterPassMigration = readFileSync(resolve(process.cwd(), 'migrations/20261028202000_lite_claim_fast_chapter_pass.sql'), 'utf8');
 const directPublishStoredProcedureMigration = readFileSync(resolve(process.cwd(), 'migrations/20261029170000_lite_direct_publish_stored_procedure.sql'), 'utf8');
 const optimizeYsqlCpuAndP0MonitorMigration = readFileSync(resolve(process.cwd(), 'migrations/20261031053000_optimize_ysql_cpu_and_p0_monitor.sql'), 'utf8');
+const extremeYsqlCpuAndIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261031163000_extreme_ysql_cpu_and_index_optimization.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -104,7 +105,11 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
     CREATE TABLE importer_sources (
       id text PRIMARY KEY, enabled boolean NOT NULL DEFAULT true,
       status text NOT NULL DEFAULT 'ACTIVE', sync_interval_minutes integer NOT NULL DEFAULT 30,
-      cooldown_until timestamptz NULL
+      cooldown_until timestamptz NULL,
+      catalog_discovery_enabled boolean NOT NULL DEFAULT true,
+      chapter_ingestion_enabled boolean NOT NULL DEFAULT true,
+      blocked_reason text NULL,
+      blocked_details jsonb NULL
     );
     CREATE TABLE importer_staff_requests (work_id uuid NOT NULL REFERENCES works(id), status text NOT NULL);
     CREATE TABLE importer_chapter_mappings (
@@ -169,6 +174,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(claimFastChapterPassMigration);
   await db.exec(directPublishStoredProcedureMigration);
   await db.exec(optimizeYsqlCpuAndP0MonitorMigration);
+  await db.exec(extremeYsqlCpuAndIndexMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -356,7 +362,7 @@ describe('LiteRepository against the additive Lite migration', () => {
   it('lets a newer P0 proceed when older manifest evidence has no currently eligible source', async () => {
     const workId = ids.p1a;
     await db.query(`UPDATE works SET published=true WHERE id=$1`, [workId]);
-    await db.exec(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS blocked_reason text, ADD COLUMN IF NOT EXISTS blocked_details jsonb`);
     for (const number of [2, 37]) await db.query(`INSERT INTO importer_lite_chapter_sources
       (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,confirmed,has_chapter)
       VALUES($1::uuid,$2,'source-a','work-a',$3,'pt-BR','default',$4,true,true)`, [workId,
@@ -1726,7 +1732,7 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('materializes confirmed gaps even when their only source is externally blocked', async () => {
-    await db.query(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
+    await db.query(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS blocked_reason text, ADD COLUMN IF NOT EXISTS blocked_details jsonb`);
     await db.query(`UPDATE works SET published=true WHERE id=$1`, [ids.p1a]);
     await db.query(`INSERT INTO importer_lite_chapter_sources
       (work_id,canonical_chapter_key,source,source_work_id,source_chapter_id,language,edition,order_key,source_rank,confirmed,has_chapter)
@@ -2011,7 +2017,7 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('samples multiple ready P1 source routes outside the claim path', async () => {
-    await db.query(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
+    await db.query(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS blocked_reason text, ADD COLUMN IF NOT EXISTS blocked_details jsonb`);
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`,
       chapterKey: 'source-fair-a', priority: 'P1', idempotencyKey: 'source-fair-a' });
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1b, workKey: `work:${ids.p1b}`,
@@ -2287,7 +2293,7 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('reopens an expired source cooldown fairly across works and in canonical chapter order', async () => {
-    await db.query(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
+    await db.query(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS blocked_reason text, ADD COLUMN IF NOT EXISTS blocked_details jsonb`);
     // Keep generic recovery occupied with an older unrelated retry. The
     // source-specific pass must then admit only its small bounded wave rather
     // than leaving a recovered rate-limited source to wait behind thousands
@@ -2349,7 +2355,7 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('does not let an unrouteable cooldown head hide a later healthy gap', async () => {
-    await db.query(`ALTER TABLE importer_sources ADD COLUMN blocked_reason text, ADD COLUMN blocked_details jsonb`);
+    await db.query(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS blocked_reason text, ADD COLUMN IF NOT EXISTS blocked_details jsonb`);
     // More than the bounded recovery horizon are older on source-a, but that
     // provider is still externally blocked. They must not prevent a due
     // source-b chapter with a healthy route from returning to READY.
@@ -3776,7 +3782,7 @@ describe('LiteRepository against the additive Lite migration', () => {
 
     // These controls are optional in older schemas. The Lite query reads them
     // safely when present without requiring them for migration compatibility.
-    await db.exec(`ALTER TABLE importer_sources ADD COLUMN catalog_discovery_enabled boolean NOT NULL DEFAULT true`);
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS catalog_discovery_enabled boolean NOT NULL DEFAULT true`);
     await db.query(`UPDATE importer_sources SET catalog_discovery_enabled=false WHERE id='source-b'`);
     expect((await repo.sourcePolicy('source-b'))?.catalogDiscoveryEnabled).toBe(false);
     await (runtime as any).seedDiscovery();
@@ -4073,7 +4079,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     await db.query(`INSERT INTO importer_lite_chapter_sources(work_id,canonical_chapter_key,source,source_chapter_id,language,edition,source_rank,confirmed)
       VALUES ($1,$2,'source-a','disabled-a','pt-BR','default',10,true),
              ($1,$2,'source-b','enabled-b','pt-BR','default',20,true)`, [ids.p1a, key]);
-    await db.exec(`ALTER TABLE importer_sources ADD COLUMN chapter_ingestion_enabled boolean NOT NULL DEFAULT true`);
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS chapter_ingestion_enabled boolean NOT NULL DEFAULT true`);
     await db.query(`UPDATE importer_sources SET chapter_ingestion_enabled=false WHERE id='source-a'`);
     await repo.enqueue({ taskType: 'IMPORT_CHAPTER', workId: ids.p1a, workKey: `work:${ids.p1a}`, chapterKey: key,
       priority: 'P1', idempotencyKey: 'admin-source-fallback',
@@ -5011,12 +5017,12 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('probes one expired Turnstile cooldown and keeps it parked when the provider still challenges', async () => {
-    await db.exec(`ALTER TABLE importer_sources ADD COLUMN name text NOT NULL DEFAULT '';
-      ALTER TABLE importer_sources ADD COLUMN base_url text NOT NULL DEFAULT 'https://source-a.example';
-      ALTER TABLE importer_sources ADD COLUMN last_health_check_at timestamptz;
-      ALTER TABLE importer_sources ADD COLUMN blocked_reason text;
-      ALTER TABLE importer_sources ADD COLUMN blocked_details jsonb;
-      ALTER TABLE importer_sources ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now()`);
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS name text NOT NULL DEFAULT '';
+      ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS base_url text NOT NULL DEFAULT 'https://source-a.example';
+      ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS last_health_check_at timestamptz;
+      ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS blocked_reason text;
+      ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS blocked_details jsonb;
+      ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`);
     await db.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()-interval '1 hour',
       blocked_reason='TURNSTILE',blocked_details='{}'::jsonb,last_health_check_at=now()-interval '6 hours'
       WHERE id='source-a'`);
@@ -5042,12 +5048,12 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('releases an expired source only after every admission probe stage passes', async () => {
-    await db.exec(`ALTER TABLE importer_sources ADD COLUMN name text NOT NULL DEFAULT '';
-      ALTER TABLE importer_sources ADD COLUMN base_url text NOT NULL DEFAULT 'https://source-a.example';
-      ALTER TABLE importer_sources ADD COLUMN last_health_check_at timestamptz;
-      ALTER TABLE importer_sources ADD COLUMN blocked_reason text;
-      ALTER TABLE importer_sources ADD COLUMN blocked_details jsonb;
-      ALTER TABLE importer_sources ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now()`);
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS name text NOT NULL DEFAULT '';
+      ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS base_url text NOT NULL DEFAULT 'https://source-a.example';
+      ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS last_health_check_at timestamptz;
+      ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS blocked_reason text;
+      ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS blocked_details jsonb;
+      ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`);
     await db.query(`UPDATE importer_sources SET status='COOLDOWN',cooldown_until=now()-interval '1 hour',
       blocked_reason='TEMPORARY_WAF',blocked_details='{}'::jsonb,last_health_check_at=now()-interval '6 hours'
       WHERE id='source-a'`);
@@ -5434,7 +5440,7 @@ describe('LiteRepository against the additive Lite migration', () => {
   });
 
   it('classifies normal catalog metadata immediately while honoring chapter ingestion disablement', async () => {
-    await db.exec(`ALTER TABLE importer_sources ADD COLUMN chapter_ingestion_enabled boolean NOT NULL DEFAULT true`);
+    await db.exec(`ALTER TABLE importer_sources ADD COLUMN IF NOT EXISTS chapter_ingestion_enabled boolean NOT NULL DEFAULT true`);
     await db.query(`UPDATE importer_sources SET chapter_ingestion_enabled=false WHERE id='source-a'`);
     await repo.enqueue({ taskType: 'CATALOG', workKey: 'source:source-a:metadata-only', priority: 'P2',
       idempotencyKey: 'metadata-only-catalog', payload: { source: 'source-a', sourceWorkId: 'metadata-only' } });
