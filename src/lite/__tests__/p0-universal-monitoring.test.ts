@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { AsyncSemaphore } from '../../core/concurrency.js';
 import { HanamiHeavenAdapter } from '../../sources/hanamiheaven/hanamiheaven-adapter.js';
 import { HipercoolAdapter } from '../../sources/hipercool/hipercool-adapter.js';
 import { TaimuMangasAdapter } from '../../sources/taimumangas/taimumangas-adapter.js';
@@ -6,6 +7,31 @@ import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { ImporterLiteRuntime } from '../runtime.js';
 
 describe('P0 Universal Monitoring & Status Integrity', () => {
+  it('keeps the previous success and a bounded counter for recurring checks', () => {
+    const checkpoint = (ImporterLiteRuntime.prototype as any).successfulMonitorCheckpoint;
+    const first = checkpoint({ checkpoint: {} }, '2026-10-31T12:00:00.000Z');
+    const second = checkpoint({ checkpoint: first }, '2026-10-31T12:30:00.000Z');
+    expect(second).toEqual({ lastCheckedAt: '2026-10-31T12:30:00.000Z',
+      previousCheckedAt: '2026-10-31T12:00:00.000Z', successfulChecksSinceTracking: 2 });
+  });
+
+  it('admits at most one coverage producer under sustained pool pressure', async () => {
+    const runtime = Object.create(ImporterLiteRuntime.prototype) as any;
+    let resolve!: (value: unknown) => void;
+    const pending = new Promise((done) => { resolve = done; });
+    const refill = vi.fn(() => pending);
+    Object.assign(runtime, { isRuntimeLeader: true, stopped: false, manualProtectiveStop: { active: false },
+      sourceMetadataPool: { waitingCount: 14 }, pool: { waitingCount: 0 },
+      p0MonitorCoverageRefillGate: new AsyncSemaphore(1), queue: { refillP0MonitorCoverage: refill },
+      p0CoverageZeroStreak: 46 });
+    const first = runtime.refillP0MonitorCoverage();
+    await runtime.refillP0MonitorCoverage();
+    expect(refill).toHaveBeenCalledTimes(1);
+    resolve({ source: 'healthy', admitted: 0, revived: 0 });
+    await first;
+    expect(runtime.p0MonitorCoverage.outcome).toBe('SOURCE_ALREADY_COVERED');
+  });
+
   it('correctly parses ONGOING status from HanamiHeaven Portuguese Lançando metadata', async () => {
     const adapter = new HanamiHeavenAdapter(new HostRateLimiter());
     const mockHtml = `
@@ -70,23 +96,12 @@ describe('P0 Universal Monitoring & Status Integrity', () => {
     const fn = (ImporterLiteRuntime.prototype as any).monitorIntervalMs;
     const dummyTask: any = { checkpoint: {} };
 
-    // 1. Release burst: 5 minutes
-    expect(fn.call({}, dummyTask, 'ONGOING', 1)).toBe(5 * 60_000);
-
-    // 2. Active weekly release window (8 days ago): exactly 25 minutes
-    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString();
-    expect(fn.call({}, dummyTask, 'ONGOING', 0, eightDaysAgo)).toBe(25 * 60_000);
-
-    // 3. Very recent release (2 days ago): paced at 45 to 90 min (never 25m, never 6h)
-    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString();
-    const recentDelay = fn.call({}, dummyTask, 'ONGOING', 0, twoDaysAgo);
-    expect(recentDelay).toBeGreaterThanOrEqual(45 * 60_000);
-    expect(recentDelay).toBeLessThanOrEqual(90 * 60_000);
-
-    // 4. Overdue/older release (18 days ago): capped at 120 minutes (never 360m / 6h)
-    const eighteenDaysAgo = new Date(Date.now() - 18 * 24 * 3600 * 1000).toISOString();
-    const olderDelay = fn.call({}, { checkpoint: { emptyChecks: 5 } } as any, 'ONGOING', 0, eighteenDaysAgo);
-    expect(olderDelay).toBeLessThanOrEqual(120 * 60_000);
+    for (const status of ['ONGOING', 'HIATUS', 'COMPLETED', 'UNKNOWN']) {
+      for (const releases of [0, 1]) {
+        expect(fn.call({}, dummyTask, status, releases)).toBe(30 * 60_000);
+        expect(fn.call({}, { checkpoint: { emptyChecks: 10, lastReleaseAt: '2020-01-01T00:00:00Z' } }, status, releases)).toBe(30 * 60_000);
+      }
+    }
   });
 
   it('protects COMPLETED works from improper ONGOING promotion without reliable evidence', async () => {

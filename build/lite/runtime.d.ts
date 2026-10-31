@@ -63,6 +63,8 @@ export declare class ImporterLiteRuntime {
     private readonly newWorkCatalogGate;
     private readonly backgroundMetadataUnderChapterLoadGate;
     private lastNewWorkDiscoveryAt;
+    private lastNewWorkPressureTurnAt;
+    private pressureDiscoveryTurn;
     private readonly crossSourceMetadataGate;
     private readonly crossSourceDiscoveryLaneGate;
     private sourceMetadataPoolWaitStartedAt;
@@ -96,6 +98,9 @@ export declare class ImporterLiteRuntime {
     private manifestP1CatchupActive;
     private readonly monitorGate;
     private readonly monitorClaimGate;
+    private readonly monitorClaimBuffer;
+    private readonly monitorFinishBatcher;
+    private monitorClaimBatchCount;
     private readonly runtimeInstanceId;
     private readonly runtimeBootedAt;
     private readonly chapterWorkerCapacity;
@@ -441,12 +446,9 @@ export declare class ImporterLiteRuntime {
     private refreshMappingMetadataFromSource;
     /** A no-network P2 pass over explicit metadata saved with a known mapping. */
     private enrichStoredMappingMetadata;
-    /**
-     * Release bursts get a quick recheck; quiet works exponentially back off with
-     * an intelligent cadence for weekly ongoing works. If a work is in its expected
-     * weekly release window (5.5 to 8.5 days since last release), it checks more
-     * frequently (25 min) without overloading the sources or exceeding rate limits.
-     */
+    /** Two successful timestamps prove a revisit without an unbounded event table. */
+    private successfulMonitorCheckpoint;
+    /** Reschedule every eligible watch within the target window after a successful check. */
     private monitorIntervalMs;
     /** Bounded health recovery for the two recurring observation task types. */
     private recurringRetryDelayMs;

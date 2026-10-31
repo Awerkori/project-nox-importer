@@ -1,3 +1,4 @@
+import { MonitorFinishBatcher } from './monitor-finish-batcher.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { Pool } from 'pg';
@@ -320,6 +321,8 @@ export class ImporterLiteRuntime {
   // reserves the remaining shared YSQL capacity for publication.
   private readonly backgroundMetadataUnderChapterLoadGate = new AsyncSemaphore(1, 'lite_background_metadata_under_chapter_load');
   private lastNewWorkDiscoveryAt = 0;
+  private lastNewWorkPressureTurnAt = 0;
+  private pressureDiscoveryTurn = true;
   // Reserve 3 permits (2 for background V7 discovery + 1 for NEW_WORK onboarding)
   // so background V7 tasks can never starve a newly created work's onboarding pass.
   private readonly crossSourceMetadataGate = new AsyncSemaphore(3, 'lite_cross_source_metadata');
@@ -414,6 +417,9 @@ export class ImporterLiteRuntime {
   // run independent source network fetches in parallel without YSQL contention.
   private readonly monitorGate = new AsyncSemaphore(6, 'lite_p0_monitor');
   private readonly monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
+  private readonly monitorClaimBuffer: LiteTask[] = [];
+  private readonly monitorFinishBatcher: MonitorFinishBatcher;
+  private monitorClaimBatchCount = 0;
   private readonly runtimeInstanceId: string;
   private readonly runtimeBootedAt = new Date();
   private readonly chapterWorkerCapacity: number;
@@ -726,6 +732,7 @@ export class ImporterLiteRuntime {
     if (!config.IMPORTER_USER_ID) throw new Error('IMPORTER_USER_ID is required when IMPORTER_RUNTIME_MODE=lite');
     this.runtimeInstanceId = `${config.WORKER_ID}@${process.pid}-${randomUUID().slice(0, 8)}`;
     this.queue = new LiteRepository(pool, sourceMetadataPool);
+    this.monitorFinishBatcher = new MonitorFinishBatcher((batch) => this.queue.finishUnchangedMonitors(batch));
     this.downloads = new AsyncSemaphore(config.DOWNLOAD_INFLIGHT_CONCURRENCY, 'lite_global_page_downloads');
     this.configuredPageBufferCapacity = Math.min(config.BUFFERED_PAGE_CONCURRENCY, SAFE_BUFFERED_PAGE_CAP);
     this.bufferedPages = new AsyncSemaphore(this.configuredPageBufferCapacity, 'lite_global_page_buffers');
@@ -1242,10 +1249,9 @@ export class ImporterLiteRuntime {
    */
   private async refillP0MonitorCoverage(): Promise<void> {
     if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active) return;
-    // Do not turn an optional coverage write into a queued pileup while its
-    // isolated pool already has multiple queued checkouts.  The next
-    // 30-second recovery turn continues from the durable source cursor.
-    if (this.sourceMetadataPool.waitingCount > 1 || !this.p0MonitorCoverageRefillGate.tryAcquire()) return;
+    // A single queued producer must eventually get a pool turn even under
+    // sustained pressure. The gate bounds outstanding work to one checkout.
+    if (!this.p0MonitorCoverageRefillGate.tryAcquire()) return;
     let shouldContinueCatchup = false;
     try {
       const refill = await this.queue.refillP0MonitorCoverage(256);
@@ -1368,7 +1374,9 @@ export class ImporterLiteRuntime {
     // metadata campaign must not silently freeze the enrolment of existing
     // ongoing works; this tiny producer still yields under real pool pressure
     // and respects the durable manual protective stop.
-    await this.refillP0MonitorCoverage();
+    // Never delay lease recovery or P1/P2 while the single-flight coverage
+    // producer waits for the metadata pool.
+    void this.refillP0MonitorCoverage();
     if (this.metadataTurboMode.enabled) {
       // Turbo mode dedicates all worker and database resources to V5 and Global Discovery.
       // Do not run P1 catalog refills, P1 manifests, or legacy replay.
@@ -2332,8 +2340,12 @@ export class ImporterLiteRuntime {
     // wide, performs no network inside a transaction, and uses the isolated
     // metadata pool for claims/lookups; site, memory and sustained metadata
     // pool pressure remain the admission guardrails.
-    if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata() || this.hasSustainedSourceMetadataPoolPressure()) return;
-    if (typeof (this.queue as any).hasExecutableOrRecoverableP1Backlog === 'function') {
+    if (!this.isRuntimeLeader || this.manualProtectiveStop.active || this.metadataReplayV4Exclusive.enabled || Date.now() < this.sitePausedUntil || this.shouldPauseLowPriorityMetadata()) return;
+    const pressured = this.hasSustainedSourceMetadataPoolPressure();
+    // One single-flight P2 turn every two minutes prevents permanent
+    // discovery starvation without competing in every chapter wave.
+    if (pressured && Date.now() - this.lastNewWorkPressureTurnAt < 120_000) return;
+    if (!pressured && typeof (this.queue as any).hasExecutableOrRecoverableP1Backlog === 'function') {
       try {
         const p1Backlog = await this.queue.hasExecutableOrRecoverableP1Backlog();
         this.p2SubordinationState = {
@@ -2350,6 +2362,17 @@ export class ImporterLiteRuntime {
     }
     try {
       const workerId = `${this.runtimeInstanceId}:new-work-catalog`;
+      if (pressured) {
+        this.lastNewWorkPressureTurnAt = Date.now();
+        const preferDiscovery = this.pressureDiscoveryTurn;
+        this.pressureDiscoveryTurn = !this.pressureDiscoveryTurn;
+        if (preferDiscovery) {
+          this.lastNewWorkDiscoveryAt = Date.now();
+          const discovery = await this.queue.claimDueDiscovery(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS || CATALOG_TASK_LEASE_SECONDS);
+          if (discovery) await this.discover(discovery, workerId);
+          return;
+        }
+      }
       const task = await this.queue.claimNewWorkCatalog(workerId, CATALOG_TASK_LEASE_SECONDS);
       if (task) {
         await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
@@ -2553,14 +2576,12 @@ export class ImporterLiteRuntime {
               return Boolean(na && nta && na === nta && !/^(manga|manhwa|manhua|webtoon|comic|novel|feed|scan)$/i.test(na));
             }));
             const titleIsSpecific = (targetTitle.length >= 1 && !isGenericWord);
-            const isHighConfidenceMatch = (detailMatch.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE
-              || (detailMatch.matchMethod === 'FUZZY_HIGH' && detailMatch.confidenceScore >= 0.85))
-              && (summaryMatch ? (summaryMatch.confidenceScore >= CROSS_SOURCE_METADATA_MIN_CONFIDENCE || summaryMatch.matchMethod === 'FUZZY_HIGH') : true);
-            const exactOrHighConfidence = ((summaryMatch ? ['EXACT_TITLE', 'EXACT_SLUG'].includes(summaryMatch.matchMethod) : true)
-              && ['EXACT_TITLE', 'EXACT_SLUG'].includes(detailMatch.matchMethod))
-              || isHighConfidenceMatch;
+            const exactTitleOrSlug = (summaryMatch ? ['EXACT_TITLE', 'EXACT_SLUG'].includes(summaryMatch.matchMethod) : true)
+              && ['EXACT_TITLE', 'EXACT_SLUG'].includes(detailMatch.matchMethod);
+            // Fuzzy similarity is useful for finding candidates, but it is
+            // not independent identity evidence for a new source mapping.
             const independentlyCorroborated = isKnownWorkMapping || detailEvidence.autoMatch || explicitCrossAlias
-              || (titleIsSpecific && exactOrHighConfidence);
+              || (titleIsSpecific && exactTitleOrSlug);
             if ((!isKnownWorkMapping && (!detailMatch.matched || (detailMatch.confidenceScore < CROSS_SOURCE_METADATA_MIN_CONFIDENCE && (detailMatch.matchMethod !== 'FUZZY_HIGH' || detailMatch.confidenceScore < 0.85))))
               || !independentlyCorroborated) {
               this.logger.info('Rejected complementary metadata candidate after detail verification', {
@@ -3166,7 +3187,26 @@ export class ImporterLiteRuntime {
         // Recheck after taking the claim gate: a sibling may have found the
         // lane empty while this turn waited for its one bounded claim.
         if (Date.now() < this.idleMonitorUntil) return;
-        task = await this.queue.claimMonitor(`${this.runtimeInstanceId}:lite-monitor`, this.config.QUEUE_LEASE_DURATION_SECONDS);
+        const workerId = `${this.runtimeInstanceId}:lite-monitor`;
+        // Only the serialized claim section touches the buffer. Expired leases
+        // are left to the durable reconciler; stale workers never fetch them.
+        while (this.monitorClaimBuffer.length) {
+          const candidate = this.monitorClaimBuffer.shift()!;
+          if (candidate.leaseUntil && candidate.leaseUntil.getTime() <= Date.now() + 30_000) {
+            if (!await this.queue.renewLease(candidate, workerId, this.config.QUEUE_LEASE_DURATION_SECONDS)) continue;
+          }
+          task = candidate;
+          break;
+        }
+        if (!task) {
+          // Three source-rotation batches guarantee participation; every
+          // fourth batch favors the oldest due source to drain large backlogs.
+          this.monitorClaimBatchCount += 1;
+          const batch = await this.queue.claimMonitorBatch(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, 4,
+            this.monitorClaimBatchCount % 4 === 0);
+          task = batch.shift() || null;
+          this.monitorClaimBuffer.push(...batch);
+        }
         this.idleMonitorUntil = task ? 0 : Date.now() + 5_000;
       } finally {
         this.monitorClaimGate.release();
@@ -3819,25 +3859,26 @@ export class ImporterLiteRuntime {
           }
         }
         const checkedAt = new Date().toISOString();
-        await this.queue.finish(task, workerId, monitored ? {
-          state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
-          nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, fpStatus, 0, chapterReleaseAt)),
-          workId: task.workId!,
-          checkpoint: {
-            workId: task.workId!,
-            lastCheckedAt: checkedAt,
-            lastNewReleaseCount: 0,
-            lastReleaseAt: chapterReleaseAt,
-            manifestFingerprint,
-            emptyChecks: Number(task.checkpoint.emptyChecks || 0) + 1,
-          },
-          resetAttempts: true,
-        } : {
-          state: 'DONE',
-          workId: task.workId!,
-          checkpoint: { workId: task.workId!, lastCheckedAt: checkedAt, manifestFingerprint },
-          resetAttempts: true,
-        });
+        if (monitored) {
+          await this.monitorFinishBatcher.submit({
+            task, workerId,
+            nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, fpStatus, 0, chapterReleaseAt)),
+            checkpoint: {
+              workId: task.workId!,
+              ...this.successfulMonitorCheckpoint(task, checkedAt),
+              lastNewReleaseCount: 0,
+              lastReleaseAt: chapterReleaseAt,
+              manifestFingerprint,
+              emptyChecks: Number(task.checkpoint.emptyChecks || 0) + 1,
+            },
+          });
+        } else {
+          await this.queue.finish(task, workerId, {
+            state: 'DONE', workId: task.workId!,
+            checkpoint: { workId: task.workId!, ...this.successfulMonitorCheckpoint(task, checkedAt), manifestFingerprint },
+            resetAttempts: true,
+          });
+        }
         await this.queue.recordSourceSuccess(source);
       };
 
@@ -4091,31 +4132,12 @@ export class ImporterLiteRuntime {
 
         const complementaryAddedAliases = complementaryOutcome.attached.reduce((sum, item) => sum + (item.aliasesAdded || 0), 0);
         if (complementaryOutcome.attached.length > 0 && fpStatus !== 'CANCELLED') {
-          const monitorInputs: EnqueueLiteTask[] = complementaryOutcome.attached
-            .filter((att) => att.source && att.sourceWorkId && !['mangaball', 'mangadex', 'mangafire'].includes(att.source))
-            .map((att, idx) => ({
-              taskType: 'CATALOG' as const,
-              workId: resolved.workId,
-              workKey: `work:${resolved.workId}`,
-              priority: 'P2' as const,
-              monitoring: true,
-              initialState: 'RETRY_WAIT' as const,
-              skipReadyWorkRefresh: true,
-              nextRunAt: new Date(Date.now() + (15 + idx * 5) * 60_000),
-              idempotencyKey: `lite:p0-monitor:${att.source}:${att.sourceWorkId}`,
-              payload: { source: att.source, sourceWorkId: att.sourceWorkId },
-              checkpoint: { workId: resolved.workId, enrolledBy: 'new-work-complementary-onboarding' },
-            }));
-          if (monitorInputs.length > 0) {
-            try {
-              if (monitorInputs.length > 1 && typeof (this.queue as any).enqueueMany === 'function') {
-                await this.queue.enqueueMany(monitorInputs);
-              } else {
-                for (const item of monitorInputs) await this.queue.enqueue(item);
-              }
-            } catch {
-              // Best-effort immediate P0 monitor enrollment; refillP0MonitorCoverage remains fallback
-            }
+          try {
+            // The discovered ID may already belong to a different canonical
+            // work. Enrol only mappings whose persisted owner is this work.
+            await this.queue.enrollConfirmedP0Mappings(resolved.workId, complementaryOutcome.attached);
+          } catch (error: any) {
+            this.logger.warn('Immediate onboarding monitor enrollment deferred', { workId: resolved.workId, error: error?.message });
           }
         }
         for (const extra of complementaryOutcome.discoveredAliases || []) {
@@ -4353,14 +4375,14 @@ export class ImporterLiteRuntime {
           state: 'RETRY_WAIT', priority: 'P2', monitoring: true,
           nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, 0)),
           workId: resolved.workId,
-          checkpoint: { workId: resolved.workId, presentationIncomplete: true, lastCheckedAt: new Date().toISOString() },
+          checkpoint: { workId: resolved.workId, presentationIncomplete: true, ...this.successfulMonitorCheckpoint(task, new Date().toISOString()) },
           resetAttempts: true,
         } : {
           state: task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
           reason: 'WORK_PRESENTATION_INCOMPLETE',
           nextRunAt: new Date(Date.now() + this.recurringRetryDelayMs(task.attempts)),
           workId: resolved.workId,
-          checkpoint: { workId: resolved.workId, presentationIncomplete: true, lastCheckedAt: new Date().toISOString() },
+          checkpoint: { workId: resolved.workId, presentationIncomplete: true, ...this.successfulMonitorCheckpoint(task, new Date().toISOString()) },
         });
         await this.queue.recordSourceSuccess(source);
         return;
@@ -4374,9 +4396,8 @@ export class ImporterLiteRuntime {
       // the legacy global blocked-task sweeps.
       if (policy.chapterIngestionEnabled) await this.queue.wakeCatalogBlocked(resolved.workId, `work:${resolved.workId}`);
       // Active mapped works retain their persistent P0 monitor. Only explicitly
-      // CANCELLED works drop monitoring. Completed works remain monitored on a
-      // quiet, low-frequency interval so post-completion chapters or side stories
-      // are detected promptly without wasting bandwidth.
+      // CANCELLED works drop monitoring. Completed works remain monitored so post-completion chapters and side
+      // stories are detected on the same cadence as other eligible works.
       const status = String(snapshot.details.status || 'UNKNOWN').toUpperCase();
       const monitored = status !== 'CANCELLED';
       let chapterReleaseAt: string | null = (task.checkpoint?.lastReleaseAt as string) || null;
@@ -4406,7 +4427,7 @@ export class ImporterLiteRuntime {
         nextRunAt: new Date(Date.now() + this.monitorIntervalMs(task, status, newReleaseCount, chapterReleaseAt)),
         workId: resolved.workId,
         checkpoint: {
-          workId: resolved.workId, lastCheckedAt: checkedAt,
+          workId: resolved.workId, ...this.successfulMonitorCheckpoint(task, checkedAt),
           lastNewReleaseCount: newReleaseCount,
           lastReleaseAt: chapterReleaseAt,
           manifestFingerprint,
@@ -4414,7 +4435,7 @@ export class ImporterLiteRuntime {
           emptyChecks: newReleaseCount ? 0 : Number(task.checkpoint.emptyChecks || 0) + 1,
         },
         resetAttempts: true,
-      } : { state: 'DONE', workId: resolved.workId, checkpoint: { workId: resolved.workId, lastCheckedAt: checkedAt, manifestFingerprint }, resetAttempts: true });
+      } : { state: 'DONE', workId: resolved.workId, checkpoint: { workId: resolved.workId, ...this.successfulMonitorCheckpoint(task, checkedAt), manifestFingerprint }, resetAttempts: true });
       await this.queue.recordSourceSuccess(source);
     } catch (error: any) {
       if (!fetchedSnapshot) await this.queue.recordSourceFailure(source, error);
@@ -4570,6 +4591,15 @@ export class ImporterLiteRuntime {
       await this.queue.finish(task, workerId, { state: 'RETRY_WAIT', reason: 'CROSS_SOURCE_LANE_BUSY',
         nextRunAt: new Date(Date.now() + 1_000) });
       return;
+    }
+    // The coverage cursor is a durable fallback, but a newly confirmed
+    // alternate source should not wait an entire cursor rotation to enter P0.
+    if (outcome.attached.length) {
+      try {
+        await this.queue.enrollConfirmedP0Mappings(target.id, outcome.attached);
+      } catch (error: any) {
+        this.logger.warn('Immediate cross-source monitor enrollment deferred', { workId: target.id, error: error?.message });
+      }
     }
     for (const source of sourceBatch) checked.add(source);
     // A provider that became runnable has now received a fresh attempt.  Only
@@ -4955,42 +4985,21 @@ export class ImporterLiteRuntime {
     }
   }
 
-  /**
-   * Release bursts get a quick recheck; quiet works exponentially back off with
-   * an intelligent cadence for weekly ongoing works. If a work is in its expected
-   * weekly release window (5.5 to 8.5 days since last release), it checks more
-   * frequently (25 min) without overloading the sources or exceeding rate limits.
-   */
-  private monitorIntervalMs(task: LiteTask, status: string, newReleaseCount: number, effectiveReleaseAt?: string | null): number {
+  /** Two successful timestamps prove a revisit without an unbounded event table. */
+  private successfulMonitorCheckpoint(task: LiteTask, checkedAt: string): Record<string, unknown> {
+    const previous = task.checkpoint?.lastCheckedAt;
+    const count = Number(task.checkpoint?.successfulChecksSinceTracking || 0);
+    return {
+      lastCheckedAt: checkedAt,
+      previousCheckedAt: typeof previous === 'string' ? previous : null,
+      successfulChecksSinceTracking: Number.isSafeInteger(count) && count >= 0 ? count + 1 : 1,
+    };
+  }
+
+  /** Reschedule every eligible watch within the target window after a successful check. */
+  private monitorIntervalMs(_task: LiteTask, status: string, _newReleaseCount: number, _effectiveReleaseAt?: string | null): number {
     if (status === 'CANCELLED') return 24 * 60 * 60_000;
-    if (status === 'COMPLETED') return 6 * 60 * 60_000;
-    if (status === 'HIATUS') return 4 * 60 * 60_000;
-    if (newReleaseCount > 0) return 5 * 60_000;
-
-    const lastReleaseRaw = effectiveReleaseAt || (task.checkpoint?.lastReleaseAt as string | undefined);
-    if (lastReleaseRaw) {
-      const lastReleaseTime = Date.parse(lastReleaseRaw);
-      if (!Number.isNaN(lastReleaseTime) && lastReleaseTime > 0) {
-        const daysSinceLastRelease = (Date.now() - lastReleaseTime) / (24 * 3600 * 1000);
-        // Active weekly/bi-weekly release window (3.0 to 14.0 days since last release):
-        // check every 25 minutes for high freshness (~12.5m average delay, 25m P95).
-        if (daysSinceLastRelease >= 3.0 && daysSinceLastRelease <= 14.0) {
-          return 25 * 60_000;
-        }
-        // Work released very recently (< 3.0 days ago): pace gently between 45m and 90m.
-        if (daysSinceLastRelease < 3.0) {
-          const emptyChecks = Math.max(0, Number(task.checkpoint?.emptyChecks || 0));
-          return Math.min(90 * 60_000, 45 * 60_000 * 2 ** Math.min(emptyChecks, 1));
-        }
-        // Work with longer gap (> 14.0 days): pace at 90m to 120m max, never 6h.
-        const emptyChecks = Math.max(0, Number(task.checkpoint?.emptyChecks || 0));
-        return Math.min(120 * 60_000, 60 * 60_000 * 1.5 ** Math.min(emptyChecks, 2));
-      }
-    }
-
-    // Default active cadence when release date is unknown: 25 minutes.
-    const emptyChecks = Math.max(0, Number(task.checkpoint?.emptyChecks || 0));
-    return Math.min(60 * 60_000, 25 * 60_000 * 1.5 ** Math.min(emptyChecks, 2));
+    return 30 * 60_000;
   }
 
   /** Bounded health recovery for the two recurring observation task types. */

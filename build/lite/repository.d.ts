@@ -152,6 +152,11 @@ export declare class LiteRepository {
      * existing two-permit P0 monitor lane.  No network operation or long-lived
      * transaction occurs here.
      */
+    /** Enrol newly confirmed mappings without waiting for the coverage cursor. */
+    enrollConfirmedP0Mappings(workId: string, mappings: Array<{
+        source: string;
+        sourceWorkId: string;
+    }>): Promise<number>;
     refillP0MonitorCoverage(limit?: number): Promise<P0MonitorCoverageRefill>;
     /**
      * Admit at most two low-priority source-backed metadata reads at a time.
@@ -345,6 +350,8 @@ export declare class LiteRepository {
      * succeeds. It neither changes chapter priority nor admits media work.
      */
     claimMonitor(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
+    /** A small, fenced batch amortizes the source cursor and SQL round trip. */
+    claimMonitorBatch(workerId: string, leaseSeconds: number, limit: number, preferOldest?: boolean): Promise<LiteTask[]>;
     /**
      * Claims one already-durable, no-network metadata replay.  This deliberately
      * is not a second chapter-admission policy: it can only advance the bounded
@@ -517,6 +524,8 @@ export declare class LiteRepository {
      * uploads are never lost.
      */
     completeImportAndPublish(task: LiteTask, workerId: string, completion: CompleteImportInput, fresh: boolean): Promise<boolean>;
+    /** Persist successful unchanged observations in one owner-fenced SQL write. */
+    finishUnchangedMonitors(batch: import('./monitor-finish-batcher.js').MonitorFinish[]): Promise<Set<string>>;
     finish(task: LiteTask, workerId: string, outcome: {
         state: Extract<LiteTaskState, 'DONE' | 'RETRY_WAIT' | 'BLOCKED'>;
         reason?: string | null;

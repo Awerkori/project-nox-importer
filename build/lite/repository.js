@@ -182,6 +182,46 @@ export class LiteRepository {
      * existing two-permit P0 monitor lane.  No network operation or long-lived
      * transaction occurs here.
      */
+    /** Enrol newly confirmed mappings without waiting for the coverage cursor. */
+    async enrollConfirmedP0Mappings(workId, mappings) {
+        if (!mappings.length)
+            return 0;
+        const result = await this.sourceMetadataDb.query(`
+      WITH input AS (
+        SELECT DISTINCT * FROM unnest($2::text[], $3::text[]) AS v(source, source_work_id)
+      ), eligible AS (
+        SELECT m.source, m.source_work_id, m.work_id
+        FROM input i
+        JOIN importer_work_mappings m ON m.source=i.source AND m.source_work_id=i.source_work_id AND m.work_id=$1::uuid
+        JOIN works w ON w.id=m.work_id
+        JOIN importer_sources s ON s.id=m.source
+        LEFT JOIN importer_lite_source_health h ON h.source=s.id
+        WHERE m.sync_status IN ('WAITING_ADMISSION','SYNCED','ACTIVE','PENDING')
+          AND COALESCE(w.status,'ONGOING') <> 'CANCELLED'
+          AND s.enabled=true AND COALESCE(s.chapter_ingestion_enabled,true)=true
+          AND COALESCE(s.status,'ACTIVE') IN ('ACTIVE','DEGRADED','RECOVERING','COOLDOWN')
+          AND COALESCE(h.health,'HEALTHY') NOT IN ('BROKEN','DISABLED')
+          AND m.source NOT IN ('mangaball','mangadex','mangafire')
+          AND NOT (m.source='nexus' AND m.source_work_id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+          AND NOT EXISTS (
+            SELECT 1 FROM importer_lite_tasks t
+            WHERE t.idempotency_key IN ('lite:catalog:'||m.source||':'||m.source_work_id,
+                                       'lite:p0-monitor:'||m.source||':'||m.source_work_id)
+              AND t.state IN ('READY','RUNNING','RETRY_WAIT')
+          )
+      )
+      INSERT INTO importer_lite_tasks
+        (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
+      SELECT 'CATALOG', e.work_id, 'work:'||e.work_id::text,
+        CASE WHEN EXISTS (SELECT 1 FROM importer_staff_requests r WHERE r.work_id=e.work_id
+          AND r.status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE')) THEN 0 ELSE 3 END,
+        3, 'lite:p0-monitor:'||e.source||':'||e.source_work_id,
+        now()+interval '1 minute',32,
+        jsonb_build_object('source',e.source,'sourceWorkId',e.source_work_id,'p0MonitorCoverage',true),
+        jsonb_build_object('workId',e.work_id::text,'enrolledBy','verified-cross-source'),true
+      FROM eligible e ON CONFLICT(idempotency_key) DO NOTHING`, [workId, mappings.map((m) => m.source), mappings.map((m) => m.sourceWorkId)]);
+        return result.rowCount || 0;
+    }
     async refillP0MonitorCoverage(limit = 16) {
         const maximum = Math.max(1, Math.min(256, Math.floor(limit)));
         const client = await this.sourceMetadataDb.connect();
@@ -2371,6 +2411,11 @@ export class LiteRepository {
      * succeeds. It neither changes chapter priority nor admits media work.
      */
     async claimMonitor(workerId, leaseSeconds) {
+        return (await this.claimMonitorBatch(workerId, leaseSeconds, 1))[0] || null;
+    }
+    /** A small, fenced batch amortizes the source cursor and SQL round trip. */
+    async claimMonitorBatch(workerId, leaseSeconds, limit, preferOldest = false) {
+        const maximum = Math.max(1, Math.min(4, Math.floor(limit) || 1));
         const metaDb = this.sourceMetadataDb || this.db;
         if (!this.p0MonitorCursorEnsured) {
             await metaDb.query(`INSERT INTO importer_lite_metadata_source_cursor(cursor_name,last_source)
@@ -2397,21 +2442,25 @@ export class LiteRepository {
           AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
           AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
         ORDER BY CASE WHEN s.id > COALESCE(cur.last_source, '') THEN 0 ELSE 1 END, s.id
-      ), picked AS (
-        SELECT t.id, os.source
+      ), head AS MATERIALIZED (
+        SELECT os.source
         FROM ordered_sources os
         CROSS JOIN LATERAL (
-          SELECT t.id
-          FROM importer_lite_tasks t
-          WHERE t.state = 'READY'
-            AND t.task_type = 'CATALOG'
-            AND t.monitoring = true
-            AND (t.payload->>'source') = os.source
-            AND t.next_run_at <= now()
-          ORDER BY t.priority ASC, t.next_run_at ASC
-          LIMIT 1
+          SELECT t.id,t.priority,t.next_run_at FROM importer_lite_tasks t
+          WHERE t.state = 'READY' AND t.task_type = 'CATALOG' AND t.monitoring = true
+            AND (t.payload->>'source') = os.source AND t.next_run_at <= now()
+          ORDER BY t.priority ASC, t.next_run_at ASC LIMIT 1
         ) t
+        ${preferOldest ? 'ORDER BY t.priority ASC, t.next_run_at ASC, os.source ASC' : ''}
         LIMIT 1
+      ), picked AS MATERIALIZED (
+        SELECT t.id, head.source FROM head
+        CROSS JOIN LATERAL (
+          SELECT t.id FROM importer_lite_tasks t
+          WHERE t.state = 'READY' AND t.task_type = 'CATALOG' AND t.monitoring = true
+            AND (t.payload->>'source') = head.source AND t.next_run_at <= now()
+          ORDER BY t.priority ASC, t.next_run_at ASC LIMIT $4
+        ) t
       ), claimed AS (
         UPDATE importer_lite_tasks task
         SET state='RUNNING',lease_owner=$2,lease_until=now()+$3::interval,
@@ -2421,14 +2470,14 @@ export class LiteRepository {
         RETURNING task.*
       ), advanced AS (
         UPDATE importer_lite_metadata_source_cursor cursor
-        SET last_source=picked.source,updated_at=now()
-        FROM picked
+        SET last_source=head.source,updated_at=now()
+        FROM head
         WHERE cursor.cursor_name=$1
           AND EXISTS (SELECT 1 FROM claimed)
         RETURNING cursor.last_source
       )
-      SELECT * FROM claimed`, [P0_MONITOR_SOURCE_CURSOR, workerId, `${Math.max(30, leaseSeconds)} seconds`]);
-        return result.rows[0] ? asTask(result.rows[0]) : null;
+      SELECT * FROM claimed`, [P0_MONITOR_SOURCE_CURSOR, workerId, `${Math.max(30, leaseSeconds)} seconds`, maximum]);
+        return result.rows.map(asTask);
     }
     /**
      * Claims one already-durable, no-network metadata replay.  This deliberately
@@ -3599,6 +3648,28 @@ export class LiteRepository {
         catch {
             return this.completeImportAndEnqueuePublish(task, workerId, completion);
         }
+    }
+    /** Persist successful unchanged observations in one owner-fenced SQL write. */
+    async finishUnchangedMonitors(batch) {
+        if (!batch.length)
+            return new Set();
+        const result = await this.sourceMetadataDb.query(`
+      WITH input AS (
+        SELECT * FROM unnest($1::uuid[], $2::text[], $3::timestamptz[], $4::jsonb[], $5::uuid[])
+          AS v(id, owner, next_run_at, checkpoint, work_id)
+      )
+      UPDATE importer_lite_tasks t SET
+        state='RETRY_WAIT', reason=NULL, next_run_at=i.next_run_at, base_priority=3,
+        priority=CASE WHEN EXISTS (SELECT 1 FROM importer_staff_requests s
+          WHERE s.work_id=COALESCE(i.work_id,t.work_id) AND s.status IN ('QUEUED','IMPORTING','RETRYING','ACTIVE'))
+          THEN 0 ELSE 3 END,
+        checkpoint=t.checkpoint || i.checkpoint, monitoring=true, work_id=COALESCE(i.work_id,t.work_id),
+        attempts=0, lease_owner=NULL, lease_until=NULL, updated_at=now()
+      FROM input i WHERE t.id=i.id AND t.state='RUNNING' AND t.lease_owner=i.owner AND t.lease_until>now()
+      RETURNING t.id`, [batch.map((e) => e.task.id), batch.map((e) => e.workerId),
+            batch.map((e) => e.nextRunAt), batch.map((e) => JSON.stringify(e.checkpoint)),
+            batch.map((e) => e.task.workId)]);
+        return new Set(result.rows.map((row) => String(row.id)));
     }
     async finish(task, workerId, outcome) {
         if (!task)
