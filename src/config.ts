@@ -52,14 +52,12 @@ const ConfigSchema = z.object({
   // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
   TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
   BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(16),
-  // Keep the direct pool at max=3 in production so the shared 9-connection
-  // non-superuser budget (3 direct + 1 metadata + 1-2 Hyperdrive <= 6/9 = 66%)
-  // stays safely below the 80% alert threshold while avoiding 2-seat YSQL queueing.
-  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(3),
-  // The cluster has a very small connection budget shared with Hyperdrive and
-  // reader traffic. P2 metadata keeps one durable seat so aliases/tags/new
-  // works progress, but it cannot reserve a second backend from the reader.
-  METADATA_DB_POOL_MAX: z.coerce.number().int().min(1).max(4).default(1),
+  // Keep the direct pool at max=4 and metadata pool at max=2 in production so
+  // the shared 9-connection non-superuser budget (4 direct + 2 metadata = 6/9 = 66.7%,
+  // leaving 3 seats + yb-conn-mgr multiplexing for Hyperdrive Reader queries)
+  // stays safely below the 80% alert threshold while eliminating pool starvation.
+  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(4),
+  METADATA_DB_POOL_MAX: z.coerce.number().int().min(1).max(4).default(2),
   // At the measured 52.75 MiB median chapter size, the former 4 MiB/s global
   // ceiling could never reach the 8/min acceptance floor (4.55/min before
   // network and publication overhead). Eight MiB/s is the first reversible

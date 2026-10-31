@@ -46,6 +46,7 @@ const claimFastChapterPassMigration = readFileSync(resolve(process.cwd(), 'migra
 const directPublishStoredProcedureMigration = readFileSync(resolve(process.cwd(), 'migrations/20261029170000_lite_direct_publish_stored_procedure.sql'), 'utf8');
 const optimizeYsqlCpuAndP0MonitorMigration = readFileSync(resolve(process.cwd(), 'migrations/20261031053000_optimize_ysql_cpu_and_p0_monitor.sql'), 'utf8');
 const extremeYsqlCpuAndIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261031163000_extreme_ysql_cpu_and_index_optimization.sql'), 'utf8');
+const fixReadyWorkPublishPriorityMigration = readFileSync(resolve(process.cwd(), 'migrations/20261031210000_fix_ready_work_publish_priority.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -178,6 +179,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   // production migration and omit only that index in this local fixture.
   await db.exec('ALTER TABLE works ADD COLUMN IF NOT EXISTS search_text text');
   await db.exec(extremeYsqlCpuAndIndexMigration.replace(/CREATE INDEX IF NOT EXISTS idx_works_search_text_trgm\s+ON public\.works USING ybgin \(search_text gin_trgm_ops\)\s+WHERE published = true;/, ''));
+  await db.exec(fixReadyWorkPublishPriorityMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
@@ -6728,5 +6730,83 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(12);
     (runtime as any).updateAdaptiveAdmissionControl();
     expect((runtime as any).chapterAdmissionGate.capacity).toBe(12);
+  });
+
+  it('projects operation_rank=0 and claims woken legacy PUBLISH tasks (orderKey IS NULL) ahead of orderKey-bearing IMPORT_CHAPTER tasks', async () => {
+    const workId = '00000000-0000-4000-8000-000000000846';
+    const coverId = '00000000-0000-4000-8000-000000001846';
+    const workKey = `work:${workId}`;
+
+    await db.query(`INSERT INTO importer_sources(id, enabled, status) VALUES('nexus', true, 'ACTIVE') ON CONFLICT (id) DO NOTHING`);
+    await db.query(
+      `INSERT INTO media(id, storage_ready, bytes, mime, purpose, provider, provider_key)
+       VALUES($1, true, 4096, 'image/webp', 'COVER', 'telegram', 'cover-846')`,
+      [coverId],
+    );
+    await db.query(
+      `INSERT INTO works(id, slug, title, cover_id, status)
+       VALUES($1, 'legacy-publish-woken-work', 'Legacy Publish Woken Work', $2, 'ONGOING')`,
+      [workId, coverId],
+    );
+
+    // Enqueue a pre-uploaded PUBLISH task WITHOUT payload.orderKey that starts BLOCKED on WORK_PRESENTATION_INCOMPLETE,
+    // plus an orderKey-bearing READY IMPORT_CHAPTER task on the same work.
+    const publishEnqueued = await repo.enqueue({
+      taskType: 'PUBLISH',
+      workId,
+      workKey,
+      chapterKey: 'c|1|pt-BR|default',
+      priority: 'P1',
+      idempotencyKey: `lite:publish:${workId}:c|1|pt-BR|default`,
+      payload: {
+        displayNumber: '1',
+        chapterTitle: 'Capítulo 1',
+        chapterKind: 'CHAPTER',
+        language: 'pt-BR',
+        edition: 'default',
+      },
+    });
+    expect(publishEnqueued.task?.id).toBeTruthy();
+    await db.query(
+      `UPDATE importer_lite_tasks SET state = 'BLOCKED', reason = 'WORK_PRESENTATION_INCOMPLETE' WHERE id = $1::uuid`,
+      [publishEnqueued.task!.id],
+    );
+
+    await db.query(
+      `INSERT INTO importer_lite_chapter_sources(work_id, canonical_chapter_key, source, source_work_id, source_chapter_id, language, edition, order_key, source_rank, confirmed, has_chapter)
+       VALUES($1::uuid, 'c|2|pt-BR|default', 'nexus', 'nexus-w-846', 'ch-2', 'pt-BR', 'default', 'n|000002|000000|', 10, true, true)`,
+      [workId],
+    );
+    await repo.enqueue({
+      taskType: 'IMPORT_CHAPTER',
+      workId,
+      workKey,
+      chapterKey: 'c|2|pt-BR|default',
+      priority: 'P1',
+      idempotencyKey: `lite:chapter:${workId}:c|2|pt-BR|default`,
+      payload: {
+        displayNumber: '2',
+        chapterTitle: 'Capítulo 2',
+        chapterKind: 'CHAPTER',
+        orderKey: 'n|000002|000000|',
+        language: 'pt-BR',
+        edition: 'default',
+      },
+    });
+
+    // Wake catalog-blocked tasks on the work now that presentation is complete.
+    const woken = await repo.wakeCatalogBlocked(workId, workKey);
+    expect(woken).toBe(1);
+
+    const readyRow = await db.query<{ operation_rank: number; priority: number }>(
+      `SELECT operation_rank, priority FROM importer_lite_ready_works WHERE work_key = $1`,
+      [workKey],
+    );
+    expect(readyRow.rows).toHaveLength(1);
+    expect(Number(readyRow.rows[0].operation_rank)).toBe(0);
+
+    const claimed = await repo.claim('worker-r846', 60);
+    expect(claimed?.id).toBe(publishEnqueued.task!.id);
+    expect(claimed?.taskType).toBe('PUBLISH');
   });
 });

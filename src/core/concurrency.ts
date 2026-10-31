@@ -199,8 +199,8 @@ export const SOURCE_CONCURRENCY_LIMITS: Record<string, SourceConcurrencyConfig> 
   // it never widens the global download, buffer, byte, Telegram, or YSQL cap.
   mangaflix: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 10 },
   manhastro: { maxChapters: 10, fairMaxChapters: 8, maxPagesPerChapter: 12 },
-  mangotoons: { maxChapters: 6, fairMaxChapters: 4, maxPagesPerChapter: 6 },
-  taimumangas: { maxChapters: 8, fairMaxChapters: 6, maxPagesPerChapter: 10 },
+  mangotoons: { maxChapters: 8, fairMaxChapters: 4, maxPagesPerChapter: 10 },
+  taimumangas: { maxChapters: 10, fairMaxChapters: 8, maxPagesPerChapter: 12 },
   hipercool: { maxChapters: 6, fairMaxChapters: 5, maxPagesPerChapter: 8 },
   // Nexus is the primary fast backlog provider with 6,000+ ready chapters.
   // Its CDN and Supabase host rate limiters (8 req/s burst 16, 4 req/s burst 8)
