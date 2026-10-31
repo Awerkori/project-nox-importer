@@ -8,6 +8,10 @@ describe('sentinel incident handling',()=>{
   expect(transitions(c.state,{},14001000,3600000,['heartbeat_stale']).events).toEqual([]);
   expect(transitions(c.state,{},14001000).events[0].type).toBe('recovered');
  });
+ it('detects a due monitor without claiming source availability',()=>{
+  const h={observedAt:new Date(10000000).toISOString()};
+  expect(incidents({heartbeat:h,p0:{next:new Date(1).toISOString()}},10000000).p0_overdue).toContain('may include cooled sources');
+ });
  it('does not infer healthy state from missing heartbeat',()=>{
   expect(incidents({heartbeat:null},10000000)).toHaveProperty('heartbeat_stale');
   expect(incidents({error:'timeout'},10000000)).toHaveProperty('database_unreachable');

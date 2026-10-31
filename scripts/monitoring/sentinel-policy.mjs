@@ -9,8 +9,8 @@ export function incidents(sample, now = Date.now()) {
   if (Number.isFinite(rss) && rss >= 550) result.memory_high = `rssMiB=${rss}; configured historical cap=624MiB`;
   const pool = Number(h?.ysql?.poolWaiting);
   if (Number.isFinite(pool) && pool >= 8) result.sql_waiters = `primaryPoolWaiters=${pool}`;
-  const next = Date.parse(h?.nextP0MonitorAt || '');
-  if (Number.isFinite(next) && now-next > 60*60_000) result.p0_overdue = `earliest=${h.nextP0MonitorAt}`;
+  const next = Date.parse(sample.p0?.next || h?.nextP0MonitorAt || '');
+  if (Number.isFinite(next) && now-next > 60*60_000) result.p0_overdue = `oldest READY P0 observation=${sample.p0?.next || h.nextP0MonitorAt}; may include cooled sources`;
   return result;
 }
 export function transitions(previous, current, now = Date.now(), cooldown = 60*60_000, unknown = []) {
