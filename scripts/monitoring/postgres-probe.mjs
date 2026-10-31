@@ -41,7 +41,7 @@ export function makeClientConfig(env = process.env, overrides = {}) {
     statement_timeout: overrides.statement_timeout ?? DB_TIMEOUTS.statementMs,
     query_timeout: overrides.query_timeout ?? DB_TIMEOUTS.queryMs,
     idle_in_transaction_session_timeout: overrides.idle_in_transaction_session_timeout ?? DB_TIMEOUTS.statementMs,
-    options: `-c statement_timeout=${overrides.statement_timeout ?? DB_TIMEOUTS.statementMs} -c idle_in_transaction_session_timeout=${overrides.idle_in_transaction_session_timeout ?? DB_TIMEOUTS.statementMs}`,
+    options: `-c default_transaction_read_only=on -c statement_timeout=${overrides.statement_timeout ?? DB_TIMEOUTS.statementMs} -c idle_in_transaction_session_timeout=${overrides.idle_in_transaction_session_timeout ?? DB_TIMEOUTS.statementMs}`,
   };
 }
 
@@ -101,6 +101,8 @@ export async function probeYugabyte(options = {}) {
   const started = monotonicMs();
   try {
     return await withPostgresClient(async (client) => {
+      let freshnessOk = false;
+      let queueOk = false;
       const result = {
         status: 'PASS',
         durationMs: null,
@@ -151,11 +153,15 @@ export async function probeYugabyte(options = {}) {
 
       try {
         const freshness = await scalarQuery(client, `
-          SELECT MAX(published_at) AS last_fresh,
-                 COUNT(*) FILTER (WHERE published_at >= NOW() - INTERVAL '5 minutes')::int AS fresh_5m,
-                 COUNT(*) FILTER (WHERE published_at >= NOW() - INTERVAL '30 minutes')::int AS fresh_30m
-          FROM chapters
+          SELECT MAX(c.published_at) AS last_fresh,
+                 COUNT(*) FILTER (WHERE c.published_at >= NOW() - INTERVAL '5 minutes')::int AS fresh_5m,
+                 COUNT(*)::int AS fresh_30m
+          FROM chapters c JOIN works w ON w.id=c.work_id
+          WHERE c.published_at >= NOW() - INTERVAL '30 minutes' AND w.published=true
         `);
+        freshnessOk = true;
+        result.importer.publicationEvidence = 'SQL_PUBLIC_VISIBILITY_ONLY';
+        result.importer.readerPagesVerified = false;
         result.importer.lastFresh = freshness.last_fresh ?? null;
         result.importer.freshLast5m = Number(freshness.fresh_5m ?? 0);
         result.importer.freshLast30m = Number(freshness.fresh_30m ?? 0);
@@ -167,19 +173,29 @@ export async function probeYugabyte(options = {}) {
 
       try {
         const queue = await scalarQuery(client, `
-          SELECT COUNT(*) FILTER (WHERE status IN ('QUEUED','RETRY'))::int AS queue_debt,
-                 COUNT(*) FILTER (WHERE status = 'QUEUED' AND (next_run_at IS NULL OR next_run_at <= NOW()))::int AS effective_claimable,
-                 COUNT(*) FILTER (WHERE status = 'IMPORTING')::int AS current_capacity,
-                 COUNT(*) FILTER (WHERE status = 'STAGED')::int AS staged,
-                 COUNT(*) FILTER (WHERE status = 'IMPORTING' AND lease_expires_at < NOW())::int AS expired_leases
-          FROM importer_queue
+          SELECT COUNT(*) FILTER (WHERE state IN ('READY','RETRY_WAIT') AND monitoring=false)::int AS queue_debt,
+                 (SELECT count(*)::int FROM importer_lite_ready_works WHERE next_run_at<=now()) AS ready_work_candidates,
+                 COUNT(*) FILTER (WHERE state='RUNNING' AND task_type='IMPORT_CHAPTER')::int AS current_capacity,
+                 COUNT(*) FILTER (WHERE state='READY' AND task_type='PUBLISH')::int AS pending_publish_tasks,
+                 COUNT(*) FILTER (WHERE state='RUNNING' AND lease_until<now())::int AS expired_leases,
+                 COUNT(*) FILTER (WHERE monitoring AND task_type='CATALOG' AND state IN ('READY','RETRY_WAIT','RUNNING'))::int AS monitors,
+                 COUNT(*) FILTER (WHERE monitoring AND task_type='CATALOG' AND state IN ('READY','RETRY_WAIT') AND next_run_at<now())::int AS overdue_monitors,
+                 MIN(next_run_at) FILTER (WHERE monitoring AND task_type='CATALOG' AND state IN ('READY','RETRY_WAIT')) AS earliest_monitor_due
+          FROM importer_lite_tasks WHERE state IN ('READY','RETRY_WAIT','RUNNING')
         `);
         result.importer.queueDebt = Number(queue.queue_debt ?? 0);
-        result.importer.effectiveClaimable = Number(queue.effective_claimable ?? 0);
+        queueOk = true;
+        result.importer.runtime = 'lite';
+        // Projection candidates may still be blocked by source health or barriers.
+        result.importer.readyWorkCandidates = Number(queue.ready_work_candidates ?? 0);
+        result.importer.monitors = Number(queue.monitors ?? 0);
+        result.importer.overdueMonitors = Number(queue.overdue_monitors ?? 0);
+        result.importer.earliestMonitorDue = queue.earliest_monitor_due ?? null;
         result.importer.currentCapacity = Number(queue.current_capacity ?? 0);
-        result.importer.staged = Number(queue.staged ?? 0);
+        // Ready PUBLISH tasks are not proof of stored media or of all unpublished receipts.
+        result.importer.pendingPublishTasks = Number(queue.pending_publish_tasks ?? 0);
         result.importer.expiredLeases = Number(queue.expired_leases ?? 0);
-        result.importer.status = 'PASS';
+        result.importer.status = freshnessOk && queueOk ? 'PASS' : 'UNKNOWN';
       } catch (error) {
         result.importer.status = 'UNKNOWN';
         result.importer.reason = String(error?.message ?? error);
@@ -201,6 +217,7 @@ export async function probeYugabyte(options = {}) {
         result.adaptive = { status: 'UNKNOWN', reason: String(error?.message ?? error), events: [] };
       }
 
+      if (!freshnessOk || !queueOk || typeof result.connections !== 'number') result.status = 'UNKNOWN';
       result.durationMs = Math.round(monotonicMs() - started);
       return result;
     }, options);
