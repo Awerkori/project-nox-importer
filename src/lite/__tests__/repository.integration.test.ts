@@ -4561,6 +4561,19 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect(checkpoint.previousCheckedAt).toBeTruthy();
     expect(checkpoint.lastCheckedAt).toBeTruthy();
     expect(checkpoint.successfulChecksSinceTracking).toBe(3);
+
+    // The original source later publishes the same canonical chapter. Its
+    // provenance is retained, but the importer must not enqueue it twice.
+    await db.query(`UPDATE importer_sources SET enabled=true WHERE id='source-a'`);
+    expect(await repo.enrollConfirmedP0Mappings(ids.p1a,[{source:'source-a',sourceWorkId:'origin-100'}])).toBe(1);
+    await db.query(`UPDATE importer_lite_tasks SET next_run_at=now()-interval '1 second' WHERE idempotency_key='lite:p0-monitor:source-a:origin-100'`);
+    (runtime as any).registry={get:(source:string)=>source==='source-a'?{
+      id:'source-a',fetchWorkSnapshot:async()=>({details:{sourceWorkId:'origin-100',title:'P1 A',slug:'p1-a',status:'ONGOING',language:'pt-BR'},
+        chapters:[{sourceChapterId:'a-201',number:201,displayNumber:'201',title:'Chapter 201'}]})}:adapter};
+    const origin=await repo.claimMonitor('original',120);
+    await (runtime as any).catalog(origin,'original');
+    expect((await db.query(`SELECT count(*)::int n FROM importer_lite_tasks WHERE work_id=$1 AND chapter_key='pt-br|default|chapter|201|-'`,[ids.p1a])).rows[0].n).toBe(1);
+    expect((await db.query(`SELECT count(DISTINCT source)::int n FROM importer_lite_chapter_sources WHERE work_id=$1 AND canonical_chapter_key='pt-br|default|chapter|201|-'`,[ids.p1a])).rows[0].n).toBe(2);
   });
 
   it('materializes newly observed chapters from a P0 monitoring pass as P0, without rebucketing initial P1 work', async () => {
