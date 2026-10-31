@@ -60,6 +60,7 @@ const WARM_START_SLOW_PRIORS = new Set<string>([
   'mangaflix',
   'mangotoons',
   'hipercool',
+  'manhastro',
 ]);
 
 function percentile(samples: BoundedSamples<number>, q: number): number {

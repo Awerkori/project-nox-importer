@@ -126,6 +126,8 @@ export declare class ImporterLiteRuntime {
     private p1ClaimCounter;
     private lastP1FocusRefreshAt;
     private p1FocusRefreshInFlight;
+    private lastSourceFairnessRefreshAt;
+    private idleHistoricalP1CatalogUntil;
     private readonly historicalP1CatalogExecGate;
     private readonly historicalP1CatalogClaimGate;
     private p2SubordinationState;

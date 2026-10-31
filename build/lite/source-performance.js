@@ -18,6 +18,7 @@ const WARM_START_SLOW_PRIORS = new Set([
     'mangaflix',
     'mangotoons',
     'hipercool',
+    'manhastro',
 ]);
 function percentile(samples, q) {
     if (!samples.length)

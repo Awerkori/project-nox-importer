@@ -413,6 +413,8 @@ export class ImporterLiteRuntime {
     p1ClaimCounter = 0;
     lastP1FocusRefreshAt = 0;
     p1FocusRefreshInFlight = null;
+    lastSourceFairnessRefreshAt = 0;
+    idleHistoricalP1CatalogUntil = 0;
     historicalP1CatalogExecGate = new AsyncSemaphore(2, 'lite_historical_p1_catalog_exec');
     historicalP1CatalogClaimGate = new AsyncSemaphore(1, 'lite_historical_p1_catalog_claim');
     p2SubordinationState = {
@@ -540,8 +542,9 @@ export class ImporterLiteRuntime {
         const poolWaiting = Number(this.pool.waitingCount || 0);
         const memState = this.memoryPressureGuard.snapshot().state;
         const highSitePressure = this.lastSiteProbe.state === 'PAUSED'
-            || (this.lastSiteProbe.state !== 'HEALTHY' && typeof siteLatencyMs === 'number' && siteLatencyMs > 5_000);
-        const highYsqlPressure = poolWaiting >= 12 && sqlP95Ms > 4_000;
+            || (this.lastSiteProbe.state !== 'HEALTHY' && typeof siteLatencyMs === 'number' && siteLatencyMs > 5_000)
+            || (typeof siteLatencyMs === 'number' && siteLatencyMs > 4_500);
+        const highYsqlPressure = poolWaiting >= 6 && sqlP95Ms > 3_500;
         if (highSitePressure || highYsqlPressure) {
             this.adaptiveHealthyStreak = 0;
             const reduced = Math.max(floor, Math.min(current - 1, Math.floor(current * 0.75)));
@@ -553,8 +556,8 @@ export class ImporterLiteRuntime {
             return;
         }
         const healthyForRamp = (this.lastSiteProbe.state === 'HEALTHY' || this.lastSiteProbe.state === 'UNKNOWN' || this.lastSiteProbe.state === 'DEGRADED')
-            && (siteLatencyMs === null || siteLatencyMs <= 4_000)
-            && poolWaiting <= 9
+            && (siteLatencyMs === null || siteLatencyMs <= 3_800)
+            && poolWaiting <= 4
             && memState === 'NORMAL';
         if (healthyForRamp) {
             this.adaptiveHealthyStreak++;
@@ -853,7 +856,7 @@ export class ImporterLiteRuntime {
         }, 30_000);
         timer.unref();
         this.timers.push(timer);
-        const monitorTimer = setInterval(() => void this.runMonitorTurn().catch(() => { }), 500);
+        const monitorTimer = setInterval(() => void this.runMonitorTurn().catch(() => { }), 800);
         monitorTimer.unref();
         this.timers.push(monitorTimer);
         // Sample RSS independently from the 60-second diagnostic heartbeat. The
@@ -1158,8 +1161,10 @@ export class ImporterLiteRuntime {
                 promoted,
                 error: null,
             };
-            if (admitted || promoted)
+            if (admitted || promoted) {
+                this.idleHistoricalP1CatalogUntil = 0;
                 this.logger.info('Advanced bounded historical P1 catalog producer', { admitted, promoted });
+            }
         }
         catch (error) {
             this.historicalP1Producer = {
@@ -1221,7 +1226,11 @@ export class ImporterLiteRuntime {
         finally {
             this.p0MonitorCoverageRefillGate.release();
             if (shouldContinueCatchup && !this.stopped && this.isRuntimeLeader && !this.hasSustainedSourceMetadataPoolPressure()) {
-                const timer = setTimeout(() => void this.refillP0MonitorCoverage(), 500);
+                const timer = setTimeout(() => {
+                    if (this.sourceMetadataPool.waitingCount === 0 && this.pool.waitingCount === 0) {
+                        void this.refillP0MonitorCoverage();
+                    }
+                }, 2_500);
                 timer.unref();
             }
         }
@@ -1259,6 +1268,9 @@ export class ImporterLiteRuntime {
     }
     async runHistoricalP1CatalogTurn() {
         if (this.stopped || !this.isRuntimeLeader
+            || Date.now() < this.idleHistoricalP1CatalogUntil
+            || (this.sourceMetadataPool.waitingCount || 0) > 0
+            || (this.pool.waitingCount || 0) > 0
             || this.manualProtectiveStop.active
             || this.metadataReplayV4Exclusive.enabled
             || this.metadataTurboMode.enabled
@@ -1273,8 +1285,11 @@ export class ImporterLiteRuntime {
         try {
             const workerId = `${this.runtimeInstanceId}:p1-catalog`;
             const task = await this.historicalP1CatalogClaimGate.runExclusive(() => this.queue.claimHistoricalP1Catalog(workerId, CATALOG_TASK_LEASE_SECONDS));
-            if (!task)
+            if (!task) {
+                this.idleHistoricalP1CatalogUntil = Date.now() + 30_000;
                 return false;
+            }
+            this.idleHistoricalP1CatalogUntil = 0;
             claimed = true;
             await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
         }
@@ -1284,9 +1299,9 @@ export class ImporterLiteRuntime {
         finally {
             this.historicalP1CatalogExecGate.release();
             if (claimed && !this.stopped && this.isRuntimeLeader) {
-                void this.refreshSourceFairness();
+                void this.refreshSourceFairness(true);
                 void this.refreshP1FocusGroupNow();
-                const timer = setTimeout(() => void this.runHistoricalP1CatalogTurn(), 250);
+                const timer = setTimeout(() => void this.runHistoricalP1CatalogTurn(), 500);
                 timer.unref();
             }
         }
@@ -2669,7 +2684,13 @@ export class ImporterLiteRuntime {
         }
     }
     /** A bounded source view refreshes on recovery and at import-priority boundaries. */
-    async refreshSourceFairness() {
+    async refreshSourceFairness(force = false) {
+        if (!force
+            && !(process.env.NODE_ENV === 'test' || process.env.VITEST)
+            && this.lastSourceFairnessRefreshAt > 0
+            && Date.now() - this.lastSourceFairnessRefreshAt < 25_000) {
+            return true;
+        }
         if (this.sourceFairnessRefresh)
             return this.sourceFairnessRefresh;
         // Claims, checkpoints and public publication use the small primary pool.
@@ -2688,6 +2709,7 @@ export class ImporterLiteRuntime {
         const refresh = (async () => {
             try {
                 this.executor.setFairSourceDemandCounts(await this.queue.readyImportSourceDemand(128, fairnessPool));
+                this.lastSourceFairnessRefreshAt = Date.now();
                 return true;
             }
             catch (error) {
@@ -3016,7 +3038,7 @@ export class ImporterLiteRuntime {
                 // second worker can begin a stale P0-sized source wave while the
                 // first task of the new priority updates the local source caps.
                 // It is one bounded read per transition, never per page or task.
-                if (await this.refreshSourceFairness())
+                if (await this.refreshSourceFairness(true))
                     this.fairDemandImportPriority = task.priority;
             }
             this.idleClaimUntil = task ? 0 : Date.now() + 150;
@@ -3065,7 +3087,10 @@ export class ImporterLiteRuntime {
             }
             if (task) {
                 hadTask = true;
-                if (this.monitorGate.available > 0 && Date.now() >= this.idleMonitorUntil && !this.stopped) {
+                if (this.monitorGate.available > 0
+                    && Date.now() >= this.idleMonitorUntil
+                    && !this.stopped
+                    && !(process.env.NODE_ENV === 'test' || process.env.VITEST)) {
                     void this.runMonitorTurn().catch(() => { });
                 }
                 await this.handle(task, `${this.runtimeInstanceId}:lite-monitor`);
@@ -3078,7 +3103,7 @@ export class ImporterLiteRuntime {
                 && this.isRuntimeLeader
                 && Date.now() >= this.idleMonitorUntil
                 && !(process.env.NODE_ENV === 'test' || process.env.VITEST)) {
-                const nextTurn = setTimeout(() => void this.runMonitorTurn().catch(() => { }), 200);
+                const nextTurn = setTimeout(() => void this.runMonitorTurn().catch(() => { }), 350);
                 nextTurn.unref();
             }
         }
@@ -3093,7 +3118,6 @@ export class ImporterLiteRuntime {
         try {
             const response = await fetch(`${this.config.NOX_MANGA_URL.replace(/\/$/, '')}/api/releases?limit=1`, {
                 signal: AbortSignal.timeout(6_000),
-                headers: { 'Cache-Control': 'no-cache' },
             });
             await response.body?.cancel().catch(() => { });
             const latencyMs = Date.now() - started;
@@ -3345,6 +3369,7 @@ export class ImporterLiteRuntime {
                     effectiveChapterAdmissionCap: this.executor.getEffectiveChapterAdmissionCap(),
                     burst: this.executor.getSourceFairnessBurstSnapshot(),
                     historicalP1Producer: this.historicalP1Producer,
+                    sourcePerformance: this.executor.getSourcePerformanceSnapshot(),
                 },
                 memoryPressure: liveness.memoryPressure,
                 // In-memory stage telemetry is safe to sample while the two YSQL
@@ -3875,6 +3900,37 @@ export class ImporterLiteRuntime {
                     });
                 }
                 const complementaryAddedAliases = complementaryOutcome.attached.reduce((sum, item) => sum + (item.aliasesAdded || 0), 0);
+                if (complementaryOutcome.attached.length > 0 && fpStatus !== 'CANCELLED') {
+                    const monitorInputs = complementaryOutcome.attached
+                        .filter((att) => att.source && att.sourceWorkId && !['mangaball', 'mangadex', 'mangafire'].includes(att.source))
+                        .map((att, idx) => ({
+                        taskType: 'CATALOG',
+                        workId: resolved.workId,
+                        workKey: `work:${resolved.workId}`,
+                        priority: 'P2',
+                        monitoring: true,
+                        initialState: 'RETRY_WAIT',
+                        skipReadyWorkRefresh: true,
+                        nextRunAt: new Date(Date.now() + (15 + idx * 5) * 60_000),
+                        idempotencyKey: `lite:p0-monitor:${att.source}:${att.sourceWorkId}`,
+                        payload: { source: att.source, sourceWorkId: att.sourceWorkId },
+                        checkpoint: { workId: resolved.workId, enrolledBy: 'new-work-complementary-onboarding' },
+                    }));
+                    if (monitorInputs.length > 0) {
+                        try {
+                            if (monitorInputs.length > 1 && typeof this.queue.enqueueMany === 'function') {
+                                await this.queue.enqueueMany(monitorInputs);
+                            }
+                            else {
+                                for (const item of monitorInputs)
+                                    await this.queue.enqueue(item);
+                            }
+                        }
+                        catch {
+                            // Best-effort immediate P0 monitor enrollment; refillP0MonitorCoverage remains fallback
+                        }
+                    }
+                }
                 for (const extra of complementaryOutcome.discoveredAliases || []) {
                     if (!onboardingAliases.includes(extra))
                         onboardingAliases.push(extra);

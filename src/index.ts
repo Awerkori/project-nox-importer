@@ -36,7 +36,7 @@ async function main() {
   // This is intentionally a release-observability marker, not a scheduling
   // knob.  It lets the durable Lite heartbeat distinguish a rebuilt rollout
   // from an older process when the hosting platform has delayed replacement.
-  const rolloutRevision = 'r841';
+  const rolloutRevision = 'r842';
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   let buildCommit = 'unknown';
   try {

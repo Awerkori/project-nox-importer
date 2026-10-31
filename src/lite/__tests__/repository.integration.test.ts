@@ -43,6 +43,8 @@ const earliestPendingChapterClaimMigration = readFileSync(resolve(process.cwd(),
 const readyWorkCanonicalFrontierMigration = readFileSync(resolve(process.cwd(), 'migrations/20261028043000_lite_ready_work_canonical_frontier.sql'), 'utf8');
 const p1FocusGroupsAndFrontierFixMigration = readFileSync(resolve(process.cwd(), 'migrations/20261028190000_lite_p1_focus_groups_and_frontier_fix.sql'), 'utf8');
 const claimFastChapterPassMigration = readFileSync(resolve(process.cwd(), 'migrations/20261028202000_lite_claim_fast_chapter_pass.sql'), 'utf8');
+const directPublishStoredProcedureMigration = readFileSync(resolve(process.cwd(), 'migrations/20261029170000_lite_direct_publish_stored_procedure.sql'), 'utf8');
+const optimizeYsqlCpuAndP0MonitorMigration = readFileSync(resolve(process.cwd(), 'migrations/20261031053000_optimize_ysql_cpu_and_p0_monitor.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -165,6 +167,8 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(readyWorkCanonicalFrontierMigration);
   await db.exec(p1FocusGroupsAndFrontierFixMigration);
   await db.exec(claimFastChapterPassMigration);
+  await db.exec(directPublishStoredProcedureMigration);
+  await db.exec(optimizeYsqlCpuAndP0MonitorMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
