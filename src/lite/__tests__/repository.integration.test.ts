@@ -5896,7 +5896,7 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).executor.sourceSlot('mangaflix').capacity).toBe(8);
   });
 
-  it('lets only MangaFlix use an eight-page wave under the existing global fences', () => {
+  it('bounds per-source page waves under the configured global fences', () => {
     const runtime = new ImporterLiteRuntime(
       poolFor(db) as Pool, {}, { get: () => undefined } as unknown as SourceRegistry,
       { upload: async () => 'unused', healthCheck: async () => true, getProviderKey: () => 'telegram' },
@@ -5904,12 +5904,11 @@ describe('LiteRepository against the additive Lite migration', () => {
         BUFFERED_PAGE_CONCURRENCY: 48, BATCH_PAGE_DOWNLOAD_CONCURRENCY: 16, QUEUE_LEASE_DURATION_SECONDS: 30 } as any,
     );
     expect((runtime as any).downloads.capacity).toBe(24);
-    // #802 restored the independent 48-body buffer ceiling; the 24-request
-    // and 80 MiB byte fences remain the aggregate media authority.
+    // The buffer and download semaphores remain independent global fences.
     expect((runtime as any).bufferedPages.capacity).toBe(48);
-    expect((runtime as any).executor.perChapterPageConcurrency).toBe(8);
-    expect((runtime as any).executor.getPageConcurrencyForSource('mangaflix')).toBe(8);
-    expect((runtime as any).executor.getPageConcurrencyForSource('manhastro')).toBe(6);
+    expect((runtime as any).executor.perChapterPageConcurrency).toBe(10);
+    expect((runtime as any).executor.getPageConcurrencyForSource('mangaflix')).toBe(10);
+    expect((runtime as any).executor.getPageConcurrencyForSource('manhastro')).toBe(10);
     expect((runtime as any).executor.getPageConcurrencyForSource('unlisted-source')).toBe(6);
   });
 
@@ -5925,9 +5924,9 @@ describe('LiteRepository against the additive Lite migration', () => {
     expect((runtime as any).chapterWorkerCapacity).toBe(8);
     expect((runtime as any).downloads.capacity).toBe(24);
     expect((runtime as any).bufferedPages.capacity).toBe(48);
-    expect((runtime as any).executor.perChapterPageConcurrency).toBe(8);
-    expect((runtime as any).executor.getPageConcurrencyForSource('mangaflix')).toBe(8);
-    expect((runtime as any).executor.getPageConcurrencyForSource('manhastro')).toBe(6);
+    expect((runtime as any).executor.perChapterPageConcurrency).toBe(10);
+    expect((runtime as any).executor.getPageConcurrencyForSource('mangaflix')).toBe(10);
+    expect((runtime as any).executor.getPageConcurrencyForSource('manhastro')).toBe(10);
   });
 
   it('reports an anonymous bounded source-rate summary for production diagnosis', () => {
