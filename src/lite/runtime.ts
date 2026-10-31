@@ -933,7 +933,7 @@ export class ImporterLiteRuntime {
       void this.runHistoricalP1CatalogTurn();
     }, 3_000);
     historicalP1CatalogTimer.unref(); this.timers.push(historicalP1CatalogTimer);
-    const healthTimer = setInterval(() => void this.probeSharedResources(), 30_000);
+    const healthTimer = setInterval(() => void this.probeSharedResources(), 120_000);
     healthTimer.unref(); this.timers.push(healthTimer);
     const metricsTimer = setInterval(() => void this.emitOperationalSnapshot().catch(() => {}), 60_000);
     metricsTimer.unref(); this.timers.push(metricsTimer);
