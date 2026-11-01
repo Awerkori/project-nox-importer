@@ -2896,6 +2896,26 @@ describe('LiteRepository against the additive Lite migration', () => {
       WHERE payload->>'source'='source-b' AND payload->>'sourceWorkId'='coverage-active'`)).rows[0].count).toBe(1);
   });
 
+  it('retries a failed monitor without elevating it above older unchecked watches', async () => {
+    await repo.enqueue({taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',monitoring:true,
+      idempotencyKey:'failed-watch-rank',payload:{source:'source-a',sourceWorkId:'fail'}});
+    const watch=await repo.claimMonitor('monitor',120);
+    const runtime=new ImporterLiteRuntime(poolFor(db) as Pool,{},
+      {get:()=>({fetchWorkSnapshot:async()=>{throw new Error('upstream unavailable');}})} as unknown as SourceRegistry,
+      {upload:async()=>'unused',healthCheck:async()=>true,getProviderKey:()=> 'telegram'},
+      {IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,BATCH_PAGE_DOWNLOAD_CONCURRENCY:1,SOURCE_OPERATION_TIMEOUT_MS:2000} as any);
+    let completeHealth!:()=>void;
+    const pending=new Promise<void>((resolve)=>{completeHealth=resolve;});
+    (runtime as any).queue.recordSourceFailure=vi.fn(()=>pending);
+    await (runtime as any).catalog(watch,'monitor');
+    const row=(await db.query(`SELECT state,priority,checkpoint FROM importer_lite_tasks WHERE id=$1`,[watch!.id])).rows[0] as any;
+    expect(row.state).toBe('RETRY_WAIT');
+    expect(row.priority).toBe(3);
+    expect(row.checkpoint.lastCheckedAt).toBeUndefined();
+    expect(row.checkpoint.monitorFailures).toBe(1);
+    completeHealth();
+  });
+
   it('rotates the one-seat P0 monitor lane across due sources instead of draining a hot source first', async () => {
     await db.query(`INSERT INTO importer_sources (id) VALUES ('source-c') ON CONFLICT DO NOTHING`);
     await repo.enqueueMany([
