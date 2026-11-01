@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { slugify } from '../common/html-utils.js';
@@ -278,9 +278,18 @@ export class HipercoolAdapter implements SourceAdapter {
     };
   }
 
+  async fetchWorkSnapshot(sourceWorkId: string): Promise<SourceWorkSnapshot> {
+    const details = await this.fetchWorkDetails(sourceWorkId);
+    return { details, chapters: await this.fetchChaptersForDetails(sourceWorkId, details) };
+  }
+
   async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
+    const details = await this.fetchWorkDetails(sourceWorkId);
+    return this.fetchChaptersForDetails(sourceWorkId, details);
+  }
+
+  private async fetchChaptersForDetails(sourceWorkId: string, details: SourceWorkDetails): Promise<SourceChapterSummary[]> {
     const slug = sourceWorkId.replace(/^\//, '').replace(/\/$/, '');
-    const details = await this.fetchWorkDetails(slug);
     const seriesId = details.raw?.id;
 
     if (!seriesId) {

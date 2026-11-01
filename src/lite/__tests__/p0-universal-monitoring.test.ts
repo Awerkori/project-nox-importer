@@ -111,6 +111,18 @@ describe('P0 Universal Monitoring & Status Integrity', () => {
     expect(details.status).toBe('ONGOING');
   });
 
+  it('fetches Hipercool work metadata once per complete snapshot', async () => {
+    const adapter = new HipercoolAdapter(new HostRateLimiter());
+    const fetchJson = vi.fn(async (url:string) => url.includes('series.bySlugWithGenres')
+      ? [{},{result:{data:{json:{id:123,title:'Example',slug:'example',status:'ongoing'}}}}]
+      : [{},{result:{data:{json:[{id:7,number:1,title:'Chapter 1'}]}}}]);
+    (adapter as any).fetchJson=fetchJson;
+    const snapshot=await adapter.fetchWorkSnapshot('example');
+    expect(snapshot.details.sourceWorkId).toBe('example');
+    expect(fetchJson).toHaveBeenCalledTimes(2);
+    expect(fetchJson.mock.calls.filter(([url])=>url.includes('series.bySlugWithGenres'))).toHaveLength(1);
+  });
+
   it('correctly parses ONGOING status from TaimuMangas api json', async () => {
     const adapter = new TaimuMangasAdapter(new HostRateLimiter());
     (adapter as any).request = async () => ({

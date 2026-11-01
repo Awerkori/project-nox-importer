@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 export declare class HipercoolAdapter implements SourceAdapter {
     private rateLimiter;
@@ -22,7 +22,9 @@ export declare class HipercoolAdapter implements SourceAdapter {
         nextCursor: string | null;
     }>;
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
+    fetchWorkSnapshot(sourceWorkId: string): Promise<SourceWorkSnapshot>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
+    private fetchChaptersForDetails;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
 }
