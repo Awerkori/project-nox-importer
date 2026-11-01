@@ -2,7 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 export interface DeduplicationResult {
     workId: string | null;
     mappingId: string;
-    status: 'EXISTING_MAPPING' | 'NEW_WORK' | 'AMBIGUOUS' | 'FAILED';
+    status: 'EXISTING_MAPPING' | 'NEW_WORK' | 'AMBIGUOUS' | 'FAILED' | 'ADMISSION_SUSPENDED';
     slug: string;
     reason?: string;
     metadataDelta?: {
@@ -86,7 +86,9 @@ export declare class DeduplicationEngine {
      * Resolve or register a work conservatively.
      * Never blindly overwrite or perform destructive merges on fuzzy matches.
      */
-    resolveWork(candidate: CandidateWork): Promise<DeduplicationResult>;
+    resolveWork(candidate: CandidateWork, options?: {
+        suspendNewWorkAdmission?: boolean;
+    }): Promise<DeduplicationResult>;
     /**
      * Applies field-level metadata precedence:
      * Priority: MANUAL (Admin/Editor) > source data for empty fields
