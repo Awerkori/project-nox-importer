@@ -140,7 +140,10 @@ const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // A durable global task checkpoints several independent providers at once.
 // The shared source gate still caps aggregate external I/O, while batching
 // avoids spending one task turn per provider for a 43-source coverage pass.
-const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 48;
+// Bound cross-source discovery independently of the 43-provider catalogue.
+// Durable checkedSources resumes the remaining providers in later turns.
+const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 2;
+const CROSS_SOURCE_DISCOVERY_TURN_DELAY_MS = 30_000;
 const CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS = 15_000;
 // The direct importer pool is intentionally tiny and short chapter commits
 // can produce two queued checkouts momentarily.  Treat only a persistent
@@ -2403,7 +2406,12 @@ export class ImporterLiteRuntime {
         if (!this.crossSourceMetadataGate.tryAcquire())
             return { ...result, busy: true };
         try {
-            const sourceIds = input.sourceIds || await this.queue.complementaryCatalogSources(input.workId, input.originSource);
+            const candidates = input.sourceIds || await this.queue.complementaryCatalogSources(input.workId, input.originSource);
+            const offset = !input.sourceIds && candidates.length
+                ? (parseInt(input.workId.replace(/-/g, '').slice(0, 4), 16) || 0) % candidates.length : 0;
+            const rotated = offset ? [...candidates.slice(offset), ...candidates.slice(0, offset)] : candidates;
+            const sourceIds = input.sourceIds ? rotated : rotated.slice(0, CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN);
+            result.incomplete = !input.sourceIds && candidates.length > sourceIds.length;
             if (!sourceIds.length)
                 return result;
             const target = {
@@ -4057,6 +4065,7 @@ export class ImporterLiteRuntime {
                     });
                     return {
                         busy: true,
+                        incomplete: true,
                         attemptedSources: [],
                         deferredSources: [],
                         attached: [],
@@ -4070,6 +4079,7 @@ export class ImporterLiteRuntime {
                         workId: resolved.workId,
                         originSource: source,
                         busy: complementaryOutcome.busy,
+                        incomplete: complementaryOutcome.incomplete,
                         attemptedSources: complementaryOutcome.attemptedSources,
                         deferredSources: complementaryOutcome.deferredSources,
                         attached: complementaryOutcome.attached,
@@ -4594,7 +4604,7 @@ export class ImporterLiteRuntime {
         }
         await this.queue.finish(task, workerId, {
             state: 'RETRY_WAIT', reason: null,
-            nextRunAt: addedAliases > 0 ? new Date(Date.now() - 3600_000) : new Date(Date.now() + 100),
+            nextRunAt: new Date(Date.now() + CROSS_SOURCE_DISCOVERY_TURN_DELAY_MS),
             resetAttempts: true,
             checkpoint: {
                 metadataCrossSourceDiscovery: true, checkedSources: [...checked], deferredSources: [...deferred],

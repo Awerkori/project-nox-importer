@@ -756,6 +756,46 @@ describe('LiteRepository against the additive Lite migration', () => {
       .toEqual([{ state:'READY',checked:['source-a'],rounds:'1' }]);
   });
 
+  it('limits onboarding probes and persists the remaining source search for later', async () => {
+    const adapter={id:'source',baseUrl:'https://source.example',searchWorks:vi.fn().mockResolvedValue([])};
+    const runtime=new ImporterLiteRuntime(poolFor(db) as Pool,{}, {get:()=>adapter} as unknown as SourceRegistry,
+      {upload:async()=>'unused',healthCheck:async()=>true,getProviderKey:()=> 'telegram'},
+      {IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,BATCH_PAGE_DOWNLOAD_CONCURRENCY:1} as any);
+    vi.spyOn((runtime as any).queue,'complementaryCatalogSources').mockResolvedValue(['source-a','source-b','source-c','source-d']);
+    const outcome=await (runtime as any).enrichNewWorkFromComplementarySources({workId:ids.p1a,originSource:'origin',title:'Specific Work',slug:'specific-work',aliases:[]});
+    expect(outcome.incomplete).toBe(true);
+    expect(outcome.attemptedSources).toHaveLength(2);
+    await repo.recordOnboardingCrossSourceDiscovery({workId:ids.p1a,originSource:'origin',busy:false,incomplete:outcome.incomplete,
+      attemptedSources:outcome.attemptedSources,deferredSources:[],attached:[]});
+    const row=(await db.query(`SELECT state,checkpoint FROM importer_lite_tasks WHERE idempotency_key=$1`,[`lite:metadata:cross-source:v7:${ids.p1a}`])).rows[0] as any;
+    expect(row.state).toBe('RETRY_WAIT');
+    expect(row.checkpoint.coverage).toBe('CROSS_SOURCE_IN_PROGRESS');
+    expect(row.checkpoint.checkedSources).toHaveLength(3);
+    expect(row.checkpoint.completedAt).toBeUndefined();
+  });
+
+  it('persists small spaced cross-source discovery batches instead of probing every source at once', async () => {
+    await db.query(`UPDATE works SET published=true WHERE id=$1`,[ids.p1a]);
+    await db.query(`INSERT INTO importer_sources(id) VALUES ('source-c'),('source-d') ON CONFLICT DO NOTHING`);
+    await repo.enqueue({taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',
+      idempotencyKey:`lite:metadata:cross-source:v7:${ids.p1a}`,payload:{metadataCrossSourceDiscovery:true,metadataEnrichmentVersion:7}});
+    const task=await repo.claim('cross-source-worker',120);
+    const adapter={id:'source-a',baseUrl:'https://example.invalid'};
+    const runtime=new ImporterLiteRuntime(poolFor(db) as Pool,{}, {get:()=>adapter} as unknown as SourceRegistry,
+      {upload:async()=>'unused',healthCheck:async()=>true,getProviderKey:()=> 'telegram'},
+      {IMPORTER_USER_ID:'00000000-0000-4000-8000-000000000009',DOWNLOAD_INFLIGHT_CONCURRENCY:1,BATCH_PAGE_DOWNLOAD_CONCURRENCY:1} as any);
+    const enrich=vi.fn(async(input:any)=>({busy:false,attemptedSources:input.sourceIds,deferredSources:[],attached:[]}));
+    (runtime as any).enrichNewWorkFromComplementarySources=enrich;
+    const before=Date.now();
+    await (runtime as any).catalog(task,'cross-source-worker');
+    expect(enrich).toHaveBeenCalledTimes(1);
+    expect(enrich.mock.calls[0][0].sourceIds).toHaveLength(2);
+    const row=(await db.query(`SELECT state,next_run_at,checkpoint FROM importer_lite_tasks WHERE id=$1`,[task!.id])).rows[0] as any;
+    expect(row.state).toBe('RETRY_WAIT');
+    expect(row.checkpoint.checkedSources).toHaveLength(2);
+    expect(new Date(row.next_run_at).getTime()).toBeGreaterThanOrEqual(before+29_000);
+  });
+
   it('attaches only detail-confirmed cross-source metadata and persists its alias delta', async () => {
     await db.query(`UPDATE works SET published=true,aliases='{}'::text[],title='The Specific P1 A Work',slug='the-specific-p1-a-work' WHERE id=$1`, [ids.p1a]);
     await repo.enqueue({ taskType:'CATALOG',workId:ids.p1a,workKey:`work:${ids.p1a}`,priority:'P2',

@@ -482,6 +482,7 @@ export declare class LiteRepository {
         workId: string;
         originSource: string;
         busy: boolean;
+        incomplete?: boolean;
         attemptedSources: string[];
         deferredSources: string[];
         attached: Array<{
