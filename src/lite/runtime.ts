@@ -872,7 +872,7 @@ export class ImporterLiteRuntime {
     historicalP1CatalogTimer.unref(); this.timers.push(historicalP1CatalogTimer);
     const healthTimer = setInterval(() => void this.probeSharedResources(), 120_000);
     healthTimer.unref(); this.timers.push(healthTimer);
-    const metricsTimer = setInterval(() => void this.emitOperationalSnapshot().catch(() => {}), 60_000);
+    const metricsTimer = setInterval(() => void this.emitOperationalSnapshot().catch(() => {}), 120_000);
     metricsTimer.unref(); this.timers.push(metricsTimer);
     void this.bootstrapRuntime().catch((err: any) => {
       this.logger.warn('Background startup maintenance failed', { error: err?.message });
@@ -3439,7 +3439,7 @@ export class ImporterLiteRuntime {
     // and start a new claim.
     const recentFullSnapshot = Boolean(
       this.lastFullOperationalSnapshotAt
-      && Date.now() - Date.parse(this.lastFullOperationalSnapshotAt) < 5 * 60_000,
+      && Date.now() - Date.parse(this.lastFullOperationalSnapshotAt) < 15 * 60_000,
     );
     if (this.pool.waitingCount > 0 || this.chapterAdmissionGate.active > 0 || recentFullSnapshot) {
       await this.emitOperationalSnapshotOnce();
@@ -3528,7 +3528,7 @@ export class ImporterLiteRuntime {
     });
     const recentFullSnapshot = Boolean(
       this.lastFullOperationalSnapshotAt
-      && Date.now() - Date.parse(this.lastFullOperationalSnapshotAt) < 5 * 60_000,
+      && Date.now() - Date.parse(this.lastFullOperationalSnapshotAt) < 15 * 60_000,
     );
     const snapshotDeferred = this.pool.waitingCount > 0
       ? 'POOL_BUSY'
