@@ -1,4 +1,4 @@
-import { HostRateLimiter } from '../../core/rate-limiter.js';
+import { HostRateLimiter, abortableDelay } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { slugify, decodeHtmlEntities, stripHtml, extractChapterNumber } from './html-utils.js';
 export class MadaraAdapter {
@@ -48,7 +48,7 @@ export class MadaraAdapter {
     }
     async fetchHtml(url, options = {}) {
         const host = new URL(url).host;
-        await this.rateLimiter.acquire(host);
+        await this.rateLimiter.acquire(host, options.signal || undefined);
         let attempts = 0;
         const maxAttempts = 3;
         while (attempts < maxAttempts) {
@@ -60,14 +60,14 @@ export class MadaraAdapter {
                         ...this.headers,
                         ...(options.headers || {}),
                     },
-                    signal: AbortSignal.timeout(20_000),
+                    signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
                 });
                 if (res.status === 429) {
                     const retryAfter = res.headers.get('Retry-After');
                     this.rateLimiter.handle429(host, retryAfter, attempts);
                     if (attempts >= maxAttempts)
                         throw new Error(`Rate limited (429) for ${host}`);
-                    await new Promise((r) => setTimeout(r, 1000 * attempts));
+                    await abortableDelay(1000 * attempts, options.signal || undefined);
                     continue;
                 }
                 if (!res.ok) {
@@ -77,9 +77,9 @@ export class MadaraAdapter {
                 return await res.text();
             }
             catch (err) {
-                if (attempts >= maxAttempts)
+                if (options.signal?.aborted || attempts >= maxAttempts)
                     throw err;
-                await new Promise((r) => setTimeout(r, 600 * attempts));
+                await abortableDelay(600 * attempts, options.signal || undefined);
             }
         }
         throw new Error(`Failed to fetch ${url} after ${maxAttempts} attempts`);
@@ -281,7 +281,7 @@ export class MadaraAdapter {
             alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
         };
     }
-    async extractChaptersFromHtml(sourceWorkId, workUrl, html) {
+    async extractChaptersFromHtml(sourceWorkId, workUrl, html, signal) {
         // 1. First extract chapters from standard wp-manga-chapter list items
         const wpMangaChapterRegex = /<li[^>]*class="[^"]*wp-manga-chapter[^"]*"[\s\S]*?<a[^>]+href="([^"]+)"/gi;
         let chapterMatches = Array.from(html.matchAll(wpMangaChapterRegex)).map((m) => m[1]);
@@ -289,11 +289,12 @@ export class MadaraAdapter {
         if (chapterMatches.length === 0) {
             chapterMatches = Array.from(html.matchAll(/href="([^"]*(?:\/capitulo|\/cap-|\/ch-|\/chapter)[^"]*)"/gi)).map((m) => m[1]);
         }
+        let ajaxError = null;
         // 3. Modern Madara AJAX endpoint: /ajax/chapters/
         if (chapterMatches.length === 0) {
             try {
                 const ajaxHtml = await this.fetchHtml(`${workUrl}ajax/chapters/`, {
-                    method: 'POST',
+                    method: 'POST', signal,
                     headers: {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
                         Referer: workUrl,
@@ -304,7 +305,11 @@ export class MadaraAdapter {
                     chapterMatches = Array.from(ajaxHtml.matchAll(/href="([^"]*(?:\/capitulo|\/cap-|\/ch-|\/chapter)[^"]*)"/gi)).map((m) => m[1]);
                 }
             }
-            catch { }
+            catch (error) {
+                if (signal?.aborted)
+                    throw error;
+                ajaxError = error;
+            }
         }
         // 4. Legacy Madara AJAX endpoint: /wp-admin/admin-ajax.php
         if (chapterMatches.length === 0) {
@@ -314,7 +319,7 @@ export class MadaraAdapter {
             if (postIdMatch) {
                 try {
                     const ajaxHtml = await this.fetchHtml(`${this.baseUrl}/wp-admin/admin-ajax.php`, {
-                        method: 'POST',
+                        method: 'POST', signal,
                         headers: {
                             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
                             'X-Requested-With': 'XMLHttpRequest',
@@ -327,9 +332,15 @@ export class MadaraAdapter {
                         chapterMatches = Array.from(ajaxHtml.matchAll(/href="([^"]*(?:\/capitulo|\/cap-|\/ch-|\/chapter)[^"]*)"/gi)).map((m) => m[1]);
                     }
                 }
-                catch { }
+                catch (error) {
+                    if (signal?.aborted)
+                        throw error;
+                    ajaxError = error;
+                }
             }
         }
+        if (!chapterMatches.length && ajaxError)
+            throw ajaxError;
         const seenUrls = new Set();
         const chapters = [];
         for (let chapUrl of chapterMatches) {
@@ -366,12 +377,12 @@ export class MadaraAdapter {
      * HTML document. A sync previously fetched that document once per value,
      * serializing two identical source reads through the catalog lane.
      */
-    async fetchWorkSnapshot(sourceWorkId) {
+    async fetchWorkSnapshot(sourceWorkId, signal) {
         const workUrl = `${this.baseUrl}/${this.mangaSubString}/${sourceWorkId}/`;
-        const html = await this.fetchHtml(workUrl);
+        const html = await this.fetchHtml(workUrl, { signal });
         return {
             details: this.parseWorkDetails(sourceWorkId, html),
-            chapters: await this.extractChaptersFromHtml(sourceWorkId, workUrl, html),
+            chapters: await this.extractChaptersFromHtml(sourceWorkId, workUrl, html, signal),
         };
     }
     async fetchChapters(sourceWorkId) {

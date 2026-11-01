@@ -3800,10 +3800,17 @@ export class ImporterLiteRuntime {
         }
         let fetchedSnapshot = false;
         try {
-            const snapshot = await withTimeout(adapter.fetchWorkSnapshot
-                ? adapter.fetchWorkSnapshot(sourceWorkId)
-                : Promise.all([adapter.fetchWorkDetails(sourceWorkId), adapter.fetchChapters(sourceWorkId)])
-                    .then(([details, chapters]) => ({ details, chapters })), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'CATALOG_SOURCE_TIMEOUT');
+            const sourceAbort = new AbortController();
+            let snapshot;
+            try {
+                snapshot = await withTimeout(adapter.fetchWorkSnapshot
+                    ? adapter.fetchWorkSnapshot(sourceWorkId, sourceAbort.signal)
+                    : Promise.all([adapter.fetchWorkDetails(sourceWorkId), adapter.fetchChapters(sourceWorkId)])
+                        .then(([details, chapters]) => ({ details, chapters })), this.config.SOURCE_OPERATION_TIMEOUT_MS, 'CATALOG_SOURCE_TIMEOUT');
+            }
+            finally {
+                sourceAbort.abort();
+            }
             fetchedSnapshot = true;
             const fpLanguage = String(snapshot.details.language || snapshot.details.raw?.language || 'pt-BR');
             const fpEdition = String(snapshot.details.edition || snapshot.details.raw?.edition || 'default');

@@ -50,7 +50,7 @@ export declare class MadaraAdapter implements SourceAdapter {
      * HTML document. A sync previously fetched that document once per value,
      * serializing two identical source reads through the catalog lane.
      */
-    fetchWorkSnapshot(sourceWorkId: string): Promise<SourceWorkSnapshot>;
+    fetchWorkSnapshot(sourceWorkId: string, signal?: AbortSignal): Promise<SourceWorkSnapshot>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
