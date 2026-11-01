@@ -829,6 +829,59 @@ export class ImporterLiteRuntime {
     await this.refreshManualProtectiveStop();
     await this.refreshMetadataReplayV4ExclusiveMode(true);
     await this.refreshMetadataTurboMode(true);
+    // Probe before admitting work, then bring durable workers online without
+    // waiting for optional catalog/metadata bootstrap to finish.
+    await this.probeSharedResources();
+    // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
+    // Lite cutover.  The Lite-specific cap begins safely and can only rise
+    // through an explicit, benchmarked staging configuration.
+    const workers = this.chapterWorkerCapacity;
+    telemetryCollector.configureChapterSlots(workers, () => this.chapterAdmissionGate.capacity);
+    // Queue lease owners include the per-boot leader identity. A process that
+    // lost leadership can never checkpoint or finish a lease reclaimed by a
+    // successor which happens to use the same configured WORKER_ID.
+    for (let i = 0; i < workers; i++) void this.worker(`${this.runtimeInstanceId}:lite:${i + 1}`, i);
+    const timer = setInterval(() => {
+      if (this.isRuntimeLeader) void this.runRecoveryTurn();
+    }, 30_000);
+    timer.unref(); this.timers.push(timer);
+    const monitorTimer = setInterval(() => void this.runMonitorTurn().catch(() => {}), 800);
+    monitorTimer.unref(); this.timers.push(monitorTimer);
+    // Sample RSS independently from the 60-second diagnostic heartbeat. The
+    // fixed byte ceiling makes overshoot bounded; this one-second brake then
+    // prevents the next page wave from rebuilding pressure.
+    const memoryTimer = setInterval(() => this.refreshMemoryPressure(), 1_000);
+    memoryTimer.unref(); this.timers.push(memoryTimer);
+    this.scheduleMetadataTurn();
+    const sourceMetadataTimer = setInterval(() => {
+      if (!this.isRuntimeLeader) return;
+      void this.runSourceMetadataRefresh();
+    }, SOURCE_METADATA_LANE_INTERVAL_MS);
+    sourceMetadataTimer.unref(); this.timers.push(sourceMetadataTimer);
+    const newWorkCatalogTimer = setInterval(() => {
+      if (!this.isRuntimeLeader) return;
+      void this.runNewWorkCatalog();
+    }, NEW_WORK_CATALOG_LANE_INTERVAL_MS);
+    newWorkCatalogTimer.unref(); this.timers.push(newWorkCatalogTimer);
+    const historicalP1CatalogTimer = setInterval(() => {
+      if (!this.isRuntimeLeader) return;
+      void this.runHistoricalP1CatalogTurn();
+    }, 3_000);
+    historicalP1CatalogTimer.unref(); this.timers.push(historicalP1CatalogTimer);
+    const healthTimer = setInterval(() => void this.probeSharedResources(), 120_000);
+    healthTimer.unref(); this.timers.push(healthTimer);
+    const metricsTimer = setInterval(() => void this.emitOperationalSnapshot().catch(() => {}), 60_000);
+    metricsTimer.unref(); this.timers.push(metricsTimer);
+    void this.bootstrapRuntime().catch((err: any) => {
+      this.logger.warn('Background startup maintenance failed', { error: err?.message });
+    });
+    await this.emitOperationalSnapshot().catch((err: any) => {
+      this.logger.warn('Initial operational snapshot deferred', { error: err?.message });
+    });
+  }
+
+  /** Optional bootstrap must not hold P0 or chapter workers offline. */
+  private async bootstrapRuntime(): Promise<void> {
     if (this.metadataReplayV4Exclusive.enabled) {
       // Do not create discovery/catalog/chapter work while a durable
       // exclusive campaign is active. Existing in-flight operations retain
@@ -935,50 +988,6 @@ export class ImporterLiteRuntime {
         this.logger.warn('Boot runStoredMetadataReplay failed non-fatally', { error: err?.message });
       }
     }
-    // Do not inherit an unmeasured legacy MAX_CONCURRENT_CHAPTERS during a
-    // Lite cutover.  The Lite-specific cap begins safely and can only rise
-    // through an explicit, benchmarked staging configuration.
-    const workers = this.chapterWorkerCapacity;
-    telemetryCollector.configureChapterSlots(workers, () => this.chapterAdmissionGate.capacity);
-    // Queue lease owners include the per-boot leader identity. A process that
-    // lost leadership can never checkpoint or finish a lease reclaimed by a
-    // successor which happens to use the same configured WORKER_ID.
-    for (let i = 0; i < workers; i++) void this.worker(`${this.runtimeInstanceId}:lite:${i + 1}`, i);
-    const timer = setInterval(() => {
-      if (this.isRuntimeLeader) void this.runRecoveryTurn();
-    }, 30_000);
-    timer.unref(); this.timers.push(timer);
-    const monitorTimer = setInterval(() => void this.runMonitorTurn().catch(() => {}), 800);
-    monitorTimer.unref(); this.timers.push(monitorTimer);
-    // Sample RSS independently from the 60-second diagnostic heartbeat. The
-    // fixed byte ceiling makes overshoot bounded; this one-second brake then
-    // prevents the next page wave from rebuilding pressure.
-    const memoryTimer = setInterval(() => this.refreshMemoryPressure(), 1_000);
-    memoryTimer.unref(); this.timers.push(memoryTimer);
-    this.scheduleMetadataTurn();
-    const sourceMetadataTimer = setInterval(() => {
-      if (!this.isRuntimeLeader) return;
-      void this.runSourceMetadataRefresh();
-    }, SOURCE_METADATA_LANE_INTERVAL_MS);
-    sourceMetadataTimer.unref(); this.timers.push(sourceMetadataTimer);
-    const newWorkCatalogTimer = setInterval(() => {
-      if (!this.isRuntimeLeader) return;
-      void this.runNewWorkCatalog();
-    }, NEW_WORK_CATALOG_LANE_INTERVAL_MS);
-    newWorkCatalogTimer.unref(); this.timers.push(newWorkCatalogTimer);
-    const historicalP1CatalogTimer = setInterval(() => {
-      if (!this.isRuntimeLeader) return;
-      void this.runHistoricalP1CatalogTurn();
-    }, 3_000);
-    historicalP1CatalogTimer.unref(); this.timers.push(historicalP1CatalogTimer);
-    const healthTimer = setInterval(() => void this.probeSharedResources(), 120_000);
-    healthTimer.unref(); this.timers.push(healthTimer);
-    const metricsTimer = setInterval(() => void this.emitOperationalSnapshot().catch(() => {}), 60_000);
-    metricsTimer.unref(); this.timers.push(metricsTimer);
-    await this.probeSharedResources();
-    await this.emitOperationalSnapshot().catch((err: any) => {
-      this.logger.warn('Initial operational snapshot deferred', { error: err?.message });
-    });
   }
 
   private async assertReaderCanonicalIdentitySchema(): Promise<void> {
