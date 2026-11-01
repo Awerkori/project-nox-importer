@@ -4491,17 +4491,25 @@ export class ImporterLiteRuntime {
       } : { state: 'DONE', workId: resolved.workId, checkpoint: { workId: resolved.workId, ...this.successfulMonitorCheckpoint(task, checkedAt), manifestFingerprint }, resetAttempts: true });
       await this.queue.recordSourceSuccess(source);
     } catch (error: any) {
-      if (!fetchedSnapshot) await this.queue.recordSourceFailure(source, error);
       const monitorRetry = task.monitoring;
+      // Keep a slow health write from occupying every P0 slot after an HTTP
+      // timeout. Successful observations still own their durable finish.
+      if (!fetchedSnapshot) {
+        if (monitorRetry) void this.queue.recordSourceFailure(source, error).catch((failure: any) =>
+          this.logger.warn('Monitor source health update deferred', { source, error: failure?.message }));
+        else await this.queue.recordSourceFailure(source, error);
+      }
       const retryDelay = monitorRetry ? this.recurringRetryDelayMs(task.attempts) : 60_000;
       // A monitoring row is an ongoing P0 observation, not a failed chapter.
       // Keep exactly one durable row with a capped cadence; its successful
       // next observation resets the failure window. A manually-awakened
       // STAFF catalog task is no longer marked monitoring and still obtains a
       // visible terminal block after its normal bounded attempts.
+      // A retry is not a fresh release. Retain the normal monitor rank so a
+      // failed watch cannot repeatedly outrank older never-checked works.
       await this.queue.finish(task, workerId, { state: monitorRetry ? 'RETRY_WAIT' : task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
         reason: String(error?.message || 'CATALOG_FAILED').slice(0,500), nextRunAt: new Date(Date.now() + retryDelay),
-        priority: monitorRetry ? 'P0' : undefined, monitoring: monitorRetry || undefined,
+        priority: monitorRetry ? 'P2' : undefined, monitoring: monitorRetry || undefined,
         checkpoint: monitorRetry ? {
           monitorFailures: Number(task.checkpoint.monitorFailures || 0) + 1,
           lastAttemptedAt: new Date().toISOString(),
