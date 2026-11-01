@@ -3648,6 +3648,7 @@ export class LiteRepository {
     workId: string;
     originSource: string;
     busy: boolean;
+    incomplete?: boolean;
     attemptedSources: string[];
     deferredSources: string[];
     attached: Array<{ source: string; sourceWorkId: string; aliasesAdded: number; tagsAdded: number }>;
@@ -3657,15 +3658,16 @@ export class LiteRepository {
     const deferredSources = [...new Set(input.deferredSources.filter(Boolean))];
     const aliasesAdded = input.attached.reduce((sum, item) => sum + Math.max(0, item.aliasesAdded || 0), 0);
     const tagsAdded = input.attached.reduce((sum, item) => sum + Math.max(0, item.tagsAdded || 0), 0);
-    const state = input.busy ? 'RETRY_WAIT' : 'DONE';
-    const nextRunOffsetSeconds = input.busy ? 5 : (deferredSources.length > 0 ? 900 : 0);
+    const state = input.busy || input.incomplete ? 'RETRY_WAIT' : 'DONE';
+    const nextRunOffsetSeconds = input.busy ? 5 : input.incomplete ? 30 : (deferredSources.length > 0 ? 900 : 0);
     const checkpoint = {
       metadataCrossSourceDiscovery: true,
       coverage: input.busy
         ? 'CROSS_SOURCE_ONBOARDING_BUSY_RETRY'
-        : deferredSources.length > 0
-          ? 'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED'
-          : 'CROSS_SOURCE_PROBES_COMPLETE',
+        : input.incomplete ? 'CROSS_SOURCE_IN_PROGRESS'
+          : deferredSources.length > 0
+            ? 'CROSS_SOURCE_PARTIAL_EXTERNAL_DEFERRED'
+            : 'CROSS_SOURCE_PROBES_COMPLETE',
       checkedSources,
       deferredSources,
       matchedSources: input.attached.slice(0, 64),
@@ -3673,7 +3675,7 @@ export class LiteRepository {
       aliasesAdded,
       tagsAdded,
       deferredRounds: 0,
-      completedAt: new Date().toISOString(),
+      ...(input.busy || input.incomplete ? {} : { completedAt: new Date().toISOString() }),
     };
     const payload = {
       metadataCrossSourceDiscovery: true,

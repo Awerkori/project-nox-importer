@@ -140,7 +140,10 @@ const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // A durable global task checkpoints several independent providers at once.
 // The shared source gate still caps aggregate external I/O, while batching
 // avoids spending one task turn per provider for a 43-source coverage pass.
-const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 48;
+// Bound cross-source discovery independently of the 43-provider catalogue.
+// Durable checkedSources resumes the remaining providers in later turns.
+const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 2;
+const CROSS_SOURCE_DISCOVERY_TURN_DELAY_MS = 30_000;
 const CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS = 15_000;
 // The direct importer pool is intentionally tiny and short chapter commits
 // can produce two queued checkouts momentarily.  Treat only a persistent
@@ -365,6 +368,7 @@ export class ImporterLiteRuntime {
     monitorGate = new AsyncSemaphore(6, 'lite_p0_monitor');
     monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
     monitorClaimBuffer = [];
+    monitorActiveBySource = new Map();
     monitorFinishBatcher;
     monitorClaimBatchCount = 0;
     runtimeInstanceId;
@@ -705,14 +709,14 @@ export class ImporterLiteRuntime {
         this.aliasOnlyRepo = new AliasOnlyRepository(sourceMetadataPool);
         this.coverVisionQueue = new CoverVisionQueue(sourceMetadataPool);
     }
-    /** Borrow only an already-idle connection, preserving a seat and a fast Reader. */
-    mayBorrowPrimaryForMonitor() {
+    /** Borrow only idle SQL capacity while a recent Reader probe is fast. */
+    mayBorrowPrimaryForMonitor(minimumIdle = 1) {
         const probe = this.lastSiteProbe;
         const checkedAt = Date.parse(probe.checkedAt);
         return this.sourceMetadataPool !== this.pool
             && (this.sourceMetadataPool.waitingCount || 0) > 1
             && (this.pool.waitingCount || 0) === 0
-            && (this.pool.idleCount || 0) >= 2
+            && (this.pool.idleCount || 0) >= minimumIdle
             && probe.state === 'HEALTHY'
             && Number.isFinite(checkedAt) && Date.now() - checkedAt <= 180_000
             && probe.latencyMs !== null && probe.latencyMs <= 2_000;
@@ -2402,7 +2406,12 @@ export class ImporterLiteRuntime {
         if (!this.crossSourceMetadataGate.tryAcquire())
             return { ...result, busy: true };
         try {
-            const sourceIds = input.sourceIds || await this.queue.complementaryCatalogSources(input.workId, input.originSource);
+            const candidates = input.sourceIds || await this.queue.complementaryCatalogSources(input.workId, input.originSource);
+            const offset = !input.sourceIds && candidates.length
+                ? (parseInt(input.workId.replace(/-/g, '').slice(0, 4), 16) || 0) % candidates.length : 0;
+            const rotated = offset ? [...candidates.slice(offset), ...candidates.slice(0, offset)] : candidates;
+            const sourceIds = input.sourceIds ? rotated : rotated.slice(0, CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN);
+            result.incomplete = !input.sourceIds && candidates.length > sourceIds.length;
             if (!sourceIds.length)
                 return result;
             const target = {
@@ -3139,6 +3148,7 @@ export class ImporterLiteRuntime {
         if (!this.monitorGate.tryAcquire())
             return;
         let hadTask = false;
+        let activeSource = '';
         try {
             if (Date.now() < this.idleMonitorUntil)
                 return;
@@ -3154,26 +3164,33 @@ export class ImporterLiteRuntime {
                 if (Date.now() < this.idleMonitorUntil)
                     return;
                 const workerId = `${this.runtimeInstanceId}:lite-monitor`;
-                // Only the serialized claim section touches the buffer. Expired leases
-                // are left to the durable reconciler; stale workers never fetch them.
-                while (this.monitorClaimBuffer.length) {
-                    const candidate = this.monitorClaimBuffer.shift();
-                    if (candidate.leaseUntil && candidate.leaseUntil.getTime() <= Date.now() + 30_000) {
-                        if (!await this.queue.renewLease(candidate, workerId, this.config.QUEUE_LEASE_DURATION_SECONDS))
+                // Keep at most two active checks per source. A slow provider cannot
+                // occupy the whole lane; at most eight other leases wait locally.
+                for (;;) {
+                    const index = this.monitorClaimBuffer.findIndex((candidate) => {
+                        const source = String(candidate.payload?.source || '');
+                        return !source || (this.monitorActiveBySource.get(source) || 0) < 2;
+                    });
+                    if (index >= 0) {
+                        const candidate = this.monitorClaimBuffer.splice(index, 1)[0];
+                        if (candidate.leaseUntil && candidate.leaseUntil.getTime() <= Date.now() + 30_000
+                            && !await this.queue.renewLease(candidate, workerId, this.config.QUEUE_LEASE_DURATION_SECONDS))
                             continue;
+                        task = candidate;
+                        activeSource = String(task.payload?.source || '');
+                        if (activeSource)
+                            this.monitorActiveBySource.set(activeSource, (this.monitorActiveBySource.get(activeSource) || 0) + 1);
+                        break;
                     }
-                    task = candidate;
-                    break;
-                }
-                if (!task) {
-                    // Three source-rotation batches guarantee participation; every
-                    // fourth batch favors the oldest due source to drain large backlogs.
+                    if (this.monitorClaimBuffer.length >= 8)
+                        break;
                     this.monitorClaimBatchCount += 1;
-                    const batch = await this.monitorSqlQueue().claimMonitorBatch(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, 4, this.monitorClaimBatchCount % 4 === 0);
-                    task = batch.shift() || null;
+                    const batch = await this.monitorSqlQueue().claimMonitorBatch(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, Math.min(4, 8 - this.monitorClaimBuffer.length), this.monitorClaimBatchCount % 4 === 0);
+                    if (!batch.length)
+                        break;
                     this.monitorClaimBuffer.push(...batch);
                 }
-                this.idleMonitorUntil = task ? 0 : Date.now() + 5_000;
+                this.idleMonitorUntil = task || this.monitorClaimBuffer.length ? 0 : Date.now() + 5_000;
             }
             finally {
                 this.monitorClaimGate.release();
@@ -3190,6 +3207,13 @@ export class ImporterLiteRuntime {
             }
         }
         finally {
+            if (activeSource) {
+                const remaining = (this.monitorActiveBySource.get(activeSource) || 1) - 1;
+                if (remaining > 0)
+                    this.monitorActiveBySource.set(activeSource, remaining);
+                else
+                    this.monitorActiveBySource.delete(activeSource);
+            }
             this.monitorGate.release();
             if (hadTask
                 && !this.stopped
@@ -3851,7 +3875,7 @@ export class ImporterLiteRuntime {
                 && !task.checkpoint?.manifestFingerprint
                 && fpChapters.length > 0) {
                 try {
-                    const checkPool = this.mayBorrowPrimaryForMonitor() ? this.pool : (this.sourceMetadataPool || this.pool);
+                    const checkPool = this.mayBorrowPrimaryForMonitor(2) ? this.pool : (this.sourceMetadataPool || this.pool);
                     const dbManifest = await checkPool.query(`
             WITH work_known_chapters AS MATERIALIZED (
               SELECT lc.canonical_chapter_key
@@ -4041,6 +4065,7 @@ export class ImporterLiteRuntime {
                     });
                     return {
                         busy: true,
+                        incomplete: true,
                         attemptedSources: [],
                         deferredSources: [],
                         attached: [],
@@ -4054,6 +4079,7 @@ export class ImporterLiteRuntime {
                         workId: resolved.workId,
                         originSource: source,
                         busy: complementaryOutcome.busy,
+                        incomplete: complementaryOutcome.incomplete,
                         attemptedSources: complementaryOutcome.attemptedSources,
                         deferredSources: complementaryOutcome.deferredSources,
                         attached: complementaryOutcome.attached,
@@ -4578,7 +4604,7 @@ export class ImporterLiteRuntime {
         }
         await this.queue.finish(task, workerId, {
             state: 'RETRY_WAIT', reason: null,
-            nextRunAt: addedAliases > 0 ? new Date(Date.now() - 3600_000) : new Date(Date.now() + 100),
+            nextRunAt: new Date(Date.now() + CROSS_SOURCE_DISCOVERY_TURN_DELAY_MS),
             resetAttempts: true,
             checkpoint: {
                 metadataCrossSourceDiscovery: true, checkedSources: [...checked], deferredSources: [...deferred],

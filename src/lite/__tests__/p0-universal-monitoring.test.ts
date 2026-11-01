@@ -12,7 +12,9 @@ describe('P0 Universal Monitoring & Status Integrity', () => {
     const ctx:any={pool:{idleCount:2,waitingCount:0},sourceMetadataPool:{waitingCount:3},
       lastSiteProbe:{state:'HEALTHY',checkedAt:new Date().toISOString(),latencyMs:300}};
     expect(canBorrow.call(ctx)).toBe(true);
-    ctx.pool.idleCount=1; expect(canBorrow.call(ctx)).toBe(false);
+    ctx.pool.idleCount=1; expect(canBorrow.call(ctx)).toBe(true);
+    expect(canBorrow.call(ctx,2)).toBe(false);
+    ctx.pool.idleCount=0; expect(canBorrow.call(ctx)).toBe(false);
     ctx.pool.idleCount=2; ctx.pool.waitingCount=1; expect(canBorrow.call(ctx)).toBe(false);
     ctx.pool.waitingCount=0; ctx.lastSiteProbe.latencyMs=2500; expect(canBorrow.call(ctx)).toBe(false);
     ctx.lastSiteProbe.latencyMs=300; ctx.lastSiteProbe.checkedAt=new Date(Date.now()-181_000).toISOString();

@@ -101,6 +101,7 @@ export declare class ImporterLiteRuntime {
     private readonly monitorGate;
     private readonly monitorClaimGate;
     private readonly monitorClaimBuffer;
+    private readonly monitorActiveBySource;
     private readonly monitorFinishBatcher;
     private monitorClaimBatchCount;
     private readonly runtimeInstanceId;
@@ -200,7 +201,7 @@ export declare class ImporterLiteRuntime {
      */
     private mediaProfileForChapterAdmissionCap;
     constructor(pool: Pool, catalogClient: any, registry: SourceRegistry, storage: StorageProvider, config: Config, sourceRateLimiter?: HostRateLimiter, sourceMetadataPool?: Pool);
-    /** Borrow only an already-idle connection, preserving a seat and a fast Reader. */
+    /** Borrow only idle SQL capacity while a recent Reader probe is fast. */
     private mayBorrowPrimaryForMonitor;
     private monitorSqlQueue;
     private getAvailablePool;
