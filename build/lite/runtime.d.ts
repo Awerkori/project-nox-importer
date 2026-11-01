@@ -206,6 +206,8 @@ export declare class ImporterLiteRuntime {
     private monitorSqlQueue;
     private getAvailablePool;
     start(): Promise<void>;
+    /** Optional bootstrap must not hold P0 or chapter workers offline. */
+    private bootstrapRuntime;
     private assertReaderCanonicalIdentitySchema;
     stop(): void;
     shutdown(): Promise<void>;

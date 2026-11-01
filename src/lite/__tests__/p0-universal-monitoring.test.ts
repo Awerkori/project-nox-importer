@@ -7,6 +7,23 @@ import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { ImporterLiteRuntime } from '../runtime.js';
 
 describe('P0 Universal Monitoring & Status Integrity', () => {
+  it('starts durable workers without waiting for optional startup maintenance', async () => {
+    let finishBootstrap!:()=>void;
+    const pending=new Promise<void>((resolve)=>{finishBootstrap=resolve;});
+    const worker=vi.fn().mockResolvedValue(undefined);
+    const ctx:any={armStartupProtectiveStop:vi.fn(),assertReaderCanonicalIdentitySchema:vi.fn().mockResolvedValue(undefined),
+      waitForRuntimeLeadership:vi.fn().mockResolvedValue(true),refreshManualProtectiveStop:vi.fn().mockResolvedValue(undefined),
+      refreshMetadataReplayV4ExclusiveMode:vi.fn().mockResolvedValue(undefined),refreshMetadataTurboMode:vi.fn().mockResolvedValue(undefined),
+      probeSharedResources:vi.fn().mockResolvedValue(undefined),emitOperationalSnapshot:vi.fn().mockResolvedValue(undefined),
+      bootstrapRuntime:vi.fn(()=>pending),worker,chapterWorkerCapacity:1,chapterAdmissionGate:{capacity:1},
+      runtimeInstanceId:'test',timers:[],scheduleMetadataTurn:vi.fn(),logger:{warn:vi.fn()}};
+    await (ImporterLiteRuntime.prototype as any).start.call(ctx);
+    expect(worker).toHaveBeenCalledTimes(1);
+    expect(ctx.bootstrapRuntime).toHaveBeenCalledTimes(1);
+    for (const timer of ctx.timers) clearInterval(timer);
+    finishBootstrap();
+  });
+
   it('borrows a spare SQL connection only when the Reader is fast and capacity remains', () => {
     const canBorrow=(ImporterLiteRuntime.prototype as any).mayBorrowPrimaryForMonitor;
     const ctx:any={pool:{idleCount:2,waitingCount:0},sourceMetadataPool:{waitingCount:3},
