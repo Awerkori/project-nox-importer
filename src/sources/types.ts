@@ -112,7 +112,7 @@ export interface SourceAdapter {
    * Optional combined work read. This avoids issuing two identical upstream
    * requests when a provider's work-detail response already contains chapters.
    */
-  fetchWorkSnapshot?(sourceWorkId: string): Promise<SourceWorkSnapshot>;
+  fetchWorkSnapshot?(sourceWorkId: string, signal?: AbortSignal): Promise<SourceWorkSnapshot>;
 
   /**
    * Fetch image page URLs for a specific chapter
