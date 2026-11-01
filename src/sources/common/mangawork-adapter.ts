@@ -245,9 +245,9 @@ export class MangaWorkAdapter implements SourceAdapter {
     return this.parseChapters(html);
   }
 
-  async fetchWorkSnapshot(sourceWorkId: string): Promise<SourceWorkSnapshot> {
+  async fetchWorkSnapshot(sourceWorkId: string, signal?: AbortSignal): Promise<SourceWorkSnapshot> {
     const workUrl = sourceWorkId.startsWith('http') ? sourceWorkId : `${this.baseUrl}/manga/${sourceWorkId}/`;
-    const html = await this.fetchHtml(workUrl);
+    const html = await this.fetchHtml(workUrl, { signal });
     return { details: this.parseWorkDetails(sourceWorkId, html), chapters: this.parseChapters(html) };
   }
 

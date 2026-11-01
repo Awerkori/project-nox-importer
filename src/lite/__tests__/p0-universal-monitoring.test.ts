@@ -227,4 +227,33 @@ describe('P0 Universal Monitoring & Status Integrity', () => {
     }, 'test-source');
     expect(updatedPayload?.status).toBe('ONGOING');
   });
+
+  it('passes busy sources to claimMonitorBatch to prevent buffer blocking', async () => {
+    const runtime = Object.create(ImporterLiteRuntime.prototype) as any;
+    const claimMonitorBatch = vi.fn().mockResolvedValue([]);
+    const monitorSqlQueue = vi.fn().mockReturnValue({ claimMonitorBatch });
+    Object.assign(runtime, {
+      stopped: false,
+      isRuntimeLeader: true,
+      manualProtectiveStop: { active: false },
+      sitePausedUntil: 0,
+      idleMonitorUntil: 0,
+      runtimeInstanceId: 'test-inst',
+      config: { QUEUE_LEASE_DURATION_SECONDS: 60 },
+      monitorGate: new AsyncSemaphore(10),
+      monitorClaimGate: new AsyncSemaphore(1),
+      monitorClaimBuffer: [{ payload: { source: 'buffered-src' } }],
+      monitorActiveBySource: new Map([['busy-src', 2], ['buffered-src', 2]]),
+      monitorClaimBatchCount: 0,
+      monitorSqlQueue,
+      handle: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await runtime.runMonitorTurn();
+    expect(claimMonitorBatch).toHaveBeenCalledTimes(1);
+    const passedBusySources = claimMonitorBatch.mock.calls[0][4];
+    expect(passedBusySources).toContain('busy-src');
+    expect(passedBusySources).toContain('buffered-src');
+    expect(passedBusySources).not.toContain('light-src');
+  });
 });

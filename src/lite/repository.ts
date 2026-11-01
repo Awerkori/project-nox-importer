@@ -2620,8 +2620,8 @@ export class LiteRepository {
   }
 
   /** A small, fenced batch amortizes the source cursor and SQL round trip. */
-  async claimMonitorBatch(workerId: string, leaseSeconds: number, limit: number, preferOldest = false): Promise<LiteTask[]> {
-    const maximum = Math.max(1, Math.min(4, Math.floor(limit) || 1));
+  async claimMonitorBatch(workerId: string, leaseSeconds: number, limit: number, preferOldest = false, busySources: string[] = []): Promise<LiteTask[]> {
+    const maximum = Math.max(1, Math.min(8, Math.floor(limit) || 1));
     const metaDb = this.sourceMetadataDb || this.db;
     if (!this.p0MonitorCursorEnsured) {
       await metaDb.query(
@@ -2631,10 +2631,14 @@ export class LiteRepository {
       );
       this.p0MonitorCursorEnsured = true;
     }
+    const cleanBusySources = Array.isArray(busySources)
+      ? busySources.map((s) => String(s || '').trim()).filter(Boolean)
+      : [];
     // Single-statement atomic round-robin monitor claim: locks the durable
     // cursor row, selects the next due provider head using index seek across
     // active sources in importer_sources, claims the task, and advances the cursor
     // in one fast (<10ms) YSQL round trip using importer_lite_tasks_p0_source_due_idx.
+    // Sources currently at their in-flight concurrency limit are skipped so other providers never starve.
     const result = await metaDb.query<Row>(`
       WITH cur AS (
         SELECT last_source FROM importer_lite_metadata_source_cursor
@@ -2650,6 +2654,7 @@ export class LiteRepository {
           AND COALESCE(s.chapter_ingestion_enabled, true) = true
           AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
           AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
+          AND ($5::text[] IS NULL OR cardinality($5::text[]) = 0 OR NOT (s.id = ANY($5::text[])))
         ORDER BY CASE WHEN s.id > COALESCE(cur.last_source, '') THEN 0 ELSE 1 END, s.id
       ), head AS MATERIALIZED (
         SELECT os.source
@@ -2685,7 +2690,7 @@ export class LiteRepository {
           AND EXISTS (SELECT 1 FROM claimed)
         RETURNING cursor.last_source
       )
-      SELECT * FROM claimed`, [P0_MONITOR_SOURCE_CURSOR, workerId, `${Math.max(30, leaseSeconds)} seconds`, maximum]);
+      SELECT * FROM claimed`, [P0_MONITOR_SOURCE_CURSOR, workerId, `${Math.max(30, leaseSeconds)} seconds`, maximum, cleanBusySources]);
     return result.rows.map(asTask);
   }
 
@@ -4043,6 +4048,10 @@ export class LiteRepository {
         ON CONFLICT(source) DO UPDATE SET health=excluded.health,
           cooldown_until=CASE
             WHEN $5::boolean AND importer_lite_source_health.consecutive_failures + 1 < 6 THEN importer_lite_source_health.cooldown_until
+            WHEN importer_lite_source_health.consecutive_failures + 1 >= 500 THEN now() + interval '3600 seconds'
+            WHEN importer_lite_source_health.consecutive_failures + 1 >= 100 THEN now() + interval '1800 seconds'
+            WHEN importer_lite_source_health.consecutive_failures + 1 >= 50 THEN now() + interval '900 seconds'
+            WHEN importer_lite_source_health.consecutive_failures + 1 >= 10 THEN now() + interval '300 seconds'
             WHEN importer_lite_source_health.consecutive_failures + 1 >= 3 THEN now()+($4 || ' seconds')::interval
             ELSE importer_lite_source_health.cooldown_until
           END,
