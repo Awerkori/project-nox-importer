@@ -66,6 +66,7 @@ const liteTables = ['importer_lite_tasks', 'importer_lite_ready_works', 'importe
 const expectedIndexes = [
   'importer_lite_tasks_ready_work_idx', 'importer_lite_tasks_monitor_ready_idx', 'importer_lite_tasks_recovery_idx',
   'importer_lite_tasks_work_chapter_idx', 'importer_lite_tasks_blocked_work_idx', 'importer_lite_tasks_publish_recovery_idx',
+  'importer_lite_tasks_progress_unpublished_idx',
   'importer_lite_ready_works_claim_idx', 'importer_lite_chapter_sources_select_idx', 'importer_lite_chapter_sources_order_idx',
   'importer_lite_chapter_sources_manifest_repair_idx',
   'importer_lite_chapters_order_idx', 'importer_lite_uploads_recovery_idx',
