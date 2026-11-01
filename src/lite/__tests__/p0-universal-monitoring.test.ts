@@ -55,13 +55,18 @@ describe('P0 Universal Monitoring & Status Integrity', () => {
     Object.assign(runtime, { isRuntimeLeader: true, stopped: false, manualProtectiveStop: { active: false },
       sourceMetadataPool: { waitingCount: 14 }, pool: { waitingCount: 0 },
       p0MonitorCoverageRefillGate: new AsyncSemaphore(1), queue: { refillP0MonitorCoverage: refill },
-      p0CoverageZeroStreak: 46 });
+      p0CoverageZeroStreak: 46, lastP0CoverageRefillAt: 0 });
     const first = runtime.refillP0MonitorCoverage();
     await runtime.refillP0MonitorCoverage();
     expect(refill).toHaveBeenCalledTimes(1);
     resolve({ source: 'healthy', admitted: 0, revived: 0 });
     await first;
     expect(runtime.p0MonitorCoverage.outcome).toBe('SOURCE_ALREADY_COVERED');
+    await runtime.refillP0MonitorCoverage();
+    expect(refill).toHaveBeenCalledTimes(1);
+    runtime.lastP0CoverageRefillAt=Date.now()-120_001;
+    await runtime.refillP0MonitorCoverage();
+    expect(refill).toHaveBeenCalledTimes(2);
   });
 
   it('correctly parses ONGOING status from HanamiHeaven Portuguese Lançando metadata', async () => {

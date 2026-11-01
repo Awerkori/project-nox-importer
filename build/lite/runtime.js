@@ -422,6 +422,7 @@ export class ImporterLiteRuntime {
     adaptiveAdmissionReason = 'operator-ceiling';
     lastLegacyBlockedRepairAt = 0;
     p0CoverageZeroStreak = 0;
+    lastP0CoverageRefillAt = 0;
     p1ClaimCounter = 0;
     lastP1FocusRefreshAt = 0;
     p1FocusRefreshInFlight = null;
@@ -1234,13 +1235,15 @@ export class ImporterLiteRuntime {
     async refillP0MonitorCoverage() {
         if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active)
             return;
-        // A single queued producer must eventually get a pool turn even under
-        // sustained pressure. The gate bounds outstanding work to one checkout.
+        // Coverage is already nearly complete. Keep enrollment progressing but do
+        // not let repeated mapping scans monopolize the only metadata connection.
+        if (Date.now() - this.lastP0CoverageRefillAt < 120_000)
+            return;
         if (!this.p0MonitorCoverageRefillGate.tryAcquire())
             return;
-        let shouldContinueCatchup = false;
+        this.lastP0CoverageRefillAt = Date.now();
         try {
-            const refill = await this.queue.refillP0MonitorCoverage(256);
+            const refill = await this.queue.refillP0MonitorCoverage(32);
             this.p0MonitorCoverage = {
                 observedAt: new Date().toISOString(),
                 source: refill.source,
@@ -1252,11 +1255,9 @@ export class ImporterLiteRuntime {
             if (refill.admitted || refill.revived) {
                 this.p0CoverageZeroStreak = 0;
                 this.logger.info('Expanded durable P0 monitor coverage', refill);
-                shouldContinueCatchup = true;
             }
             else if (refill.source) {
                 this.p0CoverageZeroStreak += 1;
-                shouldContinueCatchup = this.p0CoverageZeroStreak < 46;
             }
         }
         catch (error) {
@@ -1270,14 +1271,6 @@ export class ImporterLiteRuntime {
         }
         finally {
             this.p0MonitorCoverageRefillGate.release();
-            if (shouldContinueCatchup && !this.stopped && this.isRuntimeLeader && !this.hasSustainedSourceMetadataPoolPressure()) {
-                const timer = setTimeout(() => {
-                    if (this.sourceMetadataPool.waitingCount <= 1 && this.pool.waitingCount === 0) {
-                        void this.refillP0MonitorCoverage();
-                    }
-                }, 2_500);
-                timer.unref();
-            }
         }
     }
     async refreshP1FocusGroupNow(force = false) {
