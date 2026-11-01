@@ -3837,7 +3837,10 @@ export class ImporterLiteRuntime {
     const adapter = this.registry.get(source);
     const isInvalidNexusId = source === 'nexus' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sourceWorkId);
     if (!adapter || !sourceWorkId || isInvalidNexusId) return void await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: 'CATALOG_INPUT_INVALID' });
-    const policy = await this.queue.sourcePolicy(source);
+    // A previously claimed monitor may use idle primary capacity only while
+    // the Reader is healthy; otherwise retain the isolated metadata pool.
+    const monitorQueue = task.monitoring ? this.monitorSqlQueue() : this.queue;
+    const policy = await monitorQueue.sourcePolicy(source);
     // `catalogDiscoveryEnabled` controls source-wide P2 DISCOVER only. A
     // CATALOG task already has a confirmed source-work mapping: blocking it
     // because the provider opts out of new-work discovery also blocks P0
@@ -4507,7 +4510,7 @@ export class ImporterLiteRuntime {
       // visible terminal block after its normal bounded attempts.
       // A retry is not a fresh release. Retain the normal monitor rank so a
       // failed watch cannot repeatedly outrank older never-checked works.
-      await this.queue.finish(task, workerId, { state: monitorRetry ? 'RETRY_WAIT' : task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
+      await (monitorRetry ? this.monitorSqlQueue() : this.queue).finish(task, workerId, { state: monitorRetry ? 'RETRY_WAIT' : task.attempts >= task.maxAttempts ? 'BLOCKED' : 'RETRY_WAIT',
         reason: String(error?.message || 'CATALOG_FAILED').slice(0,500), nextRunAt: new Date(Date.now() + retryDelay),
         priority: monitorRetry ? 'P2' : undefined, monitoring: monitorRetry || undefined,
         checkpoint: monitorRetry ? {
