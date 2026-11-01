@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   const pool = getYugabytePool();
   try {
     await pool.query(`SET lock_timeout = '5s'`);
-    await pool.query(`SET statement_timeout = '20s'`);
+    await pool.query(`SET statement_timeout = '120s'`);
     await pool.query(`CREATE INDEX IF NOT EXISTS importer_lite_tasks_progress_unpublished_idx
       ON public.importer_lite_tasks (updated_at ASC)
       WHERE state = 'DONE'
