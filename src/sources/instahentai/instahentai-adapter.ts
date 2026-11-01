@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { slugify, decodeHtmlEntities, stripHtml, extractChapterNumber } from '../common/html-utils.js';
@@ -113,7 +113,7 @@ export class InstaHentaiAdapter implements SourceAdapter {
     return { works, nextCursor };
   }
 
-  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+  async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
     const slug = sourceWorkId.replace(/^\//, '').replace(/\/$/, '').replace(/^serie\//, '');
     const url = `${this.baseUrl}/serie/${slug}/`;
     const html = await this.fetchHtml(url);
@@ -159,10 +159,10 @@ export class InstaHentaiAdapter implements SourceAdapter {
           : rawAlt.includes(' / ')
             ? rawAlt.split(/\s+\/\s+/)
             : [rawAlt];
-      alternativeTitles = lines.map((s) => decodeHtmlEntities(stripHtml(s).trim())).filter((s) => s.length >= 1 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
+      alternativeTitles = lines.map((s) => decodeHtmlEntities(stripHtml(s)).trim()).filter((s) => s.length >= 1 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
     }
 
-    return {
+    const details: SourceWorkDetails = {
       sourceWorkId: slug,
       title,
       slug,
@@ -177,12 +177,6 @@ export class InstaHentaiAdapter implements SourceAdapter {
       alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
       raw: { sourceWorkId: slug, ...(alternativeTitles.length > 0 ? { alternativeTitles } : {}) },
     };
-  }
-
-  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
-    const slug = sourceWorkId.replace(/^\//, '').replace(/\/$/, '').replace(/^serie\//, '');
-    const url = `${this.baseUrl}/serie/${slug}/`;
-    const html = await this.fetchHtml(url);
 
     const chapters: SourceChapterSummary[] = [];
     const seenNumbers = new Set<number>();
@@ -205,7 +199,16 @@ export class InstaHentaiAdapter implements SourceAdapter {
     }
 
     chapters.sort((a, b) => a.number - b.number);
-    return chapters;
+
+    return { details, chapters };
+  }
+
+  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+    return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+  }
+
+  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
+    return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
   }
 
   async fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]> {

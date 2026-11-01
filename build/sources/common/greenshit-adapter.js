@@ -126,7 +126,7 @@ export class GreenShitAdapter {
             return { works: [], nextCursor: null };
         }
     }
-    async fetchWorkDetails(sourceWorkId) {
+    async fetchWorkSnapshot(sourceWorkId, _signal) {
         const url = `${this.apiUrl}/obras/${sourceWorkId}`;
         try {
             const data = await this.fetchJson(url);
@@ -163,7 +163,7 @@ export class GreenShitAdapter {
                         : cleaned.includes(' / ') ? cleaned.split(/\s+\/\s+/)
                             : [cleaned]).map((s) => s.trim()).filter(Boolean);
             }
-            return {
+            const details = {
                 sourceWorkId,
                 title,
                 slug: obra.obr_slug || slugify(title),
@@ -174,32 +174,33 @@ export class GreenShitAdapter {
                 status: obra.obr_status === 12 ? 'COMPLETED' : 'UNKNOWN',
                 raw: obra,
             };
-        }
-        catch (err) {
-            this.logger.error(`fetchWorkDetails failed for ${sourceWorkId}: ${err.message}`);
-            throw err;
-        }
-    }
-    async fetchChapters(sourceWorkId) {
-        const url = `${this.apiUrl}/obras/${sourceWorkId}`;
-        try {
-            const data = await this.fetchJson(url);
-            const obra = data?.obra || data;
             const rawChapters = obra?.capitulos || data?.capitulos || [];
             const chapters = [];
             for (const ch of rawChapters) {
                 const id = String(ch.cap_id);
                 const num = parseFloat(String(ch.cap_numero)) || 0;
-                const title = ch.cap_nome || `Capítulo ${num}`;
+                const chapTitle = ch.cap_nome || `Capítulo ${num}`;
                 chapters.push({
                     sourceChapterId: id,
                     number: num,
-                    title,
+                    title: chapTitle,
                     createdAt: ch.cap_criado_em,
                 });
             }
             chapters.sort((a, b) => b.number - a.number);
-            return chapters;
+            return { details, chapters };
+        }
+        catch (err) {
+            this.logger.error(`fetchWorkSnapshot failed for ${sourceWorkId}: ${err.message}`);
+            throw err;
+        }
+    }
+    async fetchWorkDetails(sourceWorkId) {
+        return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+    }
+    async fetchChapters(sourceWorkId) {
+        try {
+            return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
         }
         catch (err) {
             this.logger.error(`fetchChapters failed for ${sourceWorkId}: ${err.message}`);

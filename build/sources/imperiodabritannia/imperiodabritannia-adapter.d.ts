@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceChapterSummary, SourceWorkDetails, SourceWorkSummary } from '../types.js';
+import { SourceAdapter, SourceChapterSummary, SourceWorkDetails, SourceWorkSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 /**
  * Current implementation of the public MangoTheme API used by Sagrado
@@ -42,6 +42,7 @@ export declare class ImperioDaBritanniaAdapter implements SourceAdapter {
     private searchCatalog;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
     private work;
+    fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot>;
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     isChapterOwnedByWork(sourceWorkId: string, sourceChapterId: string): boolean;

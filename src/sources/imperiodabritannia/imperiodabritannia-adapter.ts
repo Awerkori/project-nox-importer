@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { SourceAdapter, SourceChapterSummary, SourceWorkDetails, SourceWorkSummary } from '../types.js';
+import { SourceAdapter, SourceChapterSummary, SourceWorkDetails, SourceWorkSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { decryptMangoPayload } from '../mangotoons/mangotoons-decryptor.js';
@@ -241,7 +241,7 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
     return response.obra || response.dados || response.data || response;
   }
 
-  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+  async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
     const work = await this.work(sourceWorkId);
     const title = String(work.nome || work.title || sourceWorkId);
     const status = String(work.status_nome || '').toLowerCase();
@@ -275,7 +275,7 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
         }
       }
     }
-    return {
+    const details: SourceWorkDetails = {
       sourceWorkId: String(work.id || sourceWorkId),
       title,
       slug: String(work.slug || slugify(title)),
@@ -289,11 +289,8 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
       alternativeTitles: alternativeTitles && alternativeTitles.length > 0 ? alternativeTitles : undefined,
       raw: work,
     };
-  }
 
-  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
-    const work = await this.work(sourceWorkId);
-    return (work.capitulos || []).map((chapter: any) => {
+    const chapters: SourceChapterSummary[] = (work.capitulos || []).map((chapter: any) => {
       const display = String(chapter.numero ?? chapter.id);
       return {
         sourceChapterId: `${sourceWorkId}:${encodeURIComponent(display)}`,
@@ -304,6 +301,16 @@ export class ImperioDaBritanniaAdapter implements SourceAdapter {
         pageCount: chapter.total_paginas ?? null,
       };
     }).sort((a: SourceChapterSummary, b: SourceChapterSummary) => a.number - b.number);
+
+    return { details, chapters };
+  }
+
+  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+    return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+  }
+
+  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
+    return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
   }
 
   isChapterOwnedByWork(sourceWorkId: string, sourceChapterId: string): boolean {

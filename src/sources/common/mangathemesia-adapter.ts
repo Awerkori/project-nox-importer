@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { slugify, decodeHtmlEntities, stripHtml, extractChapterNumber } from './html-utils.js';
@@ -162,7 +162,7 @@ export class MangaThemesiaAdapter implements SourceAdapter {
     };
   }
 
-  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+  async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
     const workUrl = sourceWorkId.startsWith('http')
       ? sourceWorkId
       : `${this.baseUrl}/${sourceWorkId}/`;
@@ -216,7 +216,7 @@ export class MangaThemesiaAdapter implements SourceAdapter {
       alternativeTitles = lines.map(s => decodeHtmlEntities(stripHtml(s).trim())).filter(s => s.length >= 1 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
     }
 
-    return {
+    const details: SourceWorkDetails = {
       sourceWorkId,
       title,
       slug: sourceWorkId,
@@ -227,14 +227,6 @@ export class MangaThemesiaAdapter implements SourceAdapter {
       status: 'ONGOING',
       alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
     };
-  }
-
-  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
-    const workUrl = sourceWorkId.startsWith('http')
-      ? sourceWorkId
-      : `${this.baseUrl}/${sourceWorkId}/`;
-
-    const html = await this.fetchHtml(workUrl);
 
     // Look for chapters inside chapterlist
     const chapterMatches = Array.from(html.matchAll(/href="([^"]+)"\s+class="chapternum"/gi));
@@ -255,7 +247,16 @@ export class MangaThemesiaAdapter implements SourceAdapter {
     }
 
     chapters.sort((a, b) => a.number - b.number);
-    return chapters;
+
+    return { details, chapters };
+  }
+
+  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+    return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+  }
+
+  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
+    return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
   }
 
   async fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]> {

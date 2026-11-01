@@ -361,11 +361,11 @@ export class ImporterLiteRuntime {
     sourceMetadataNoCandidateUntil = 0;
     lastManifestP1RepairAt = 0;
     manifestP1CatchupActive = false;
-    // P0 observation has ten bounded network slots. They keep independent
+    // P0 observation has eighteen bounded network slots. They keep independent
     // source watches current across 43 sources while chapters run. Only one
     // short SQL claim is ever in flight (monitorClaimGate); the remaining slots
     // run independent source network fetches in parallel without YSQL contention.
-    monitorGate = new AsyncSemaphore(10, 'lite_p0_monitor');
+    monitorGate = new AsyncSemaphore(18, 'lite_p0_monitor');
     monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
     monitorClaimBuffer = [];
     monitorActiveBySource = new Map();
@@ -3193,7 +3193,7 @@ export class ImporterLiteRuntime {
                             this.monitorActiveBySource.set(activeSource, (this.monitorActiveBySource.get(activeSource) || 0) + 1);
                         break;
                     }
-                    if (this.monitorClaimBuffer.length >= 16)
+                    if (this.monitorClaimBuffer.length >= 24)
                         break;
                     this.monitorClaimBatchCount += 1;
                     const busySources = [];
@@ -3206,7 +3206,7 @@ export class ImporterLiteRuntime {
                         if (source && !busySources.includes(source))
                             busySources.push(source);
                     }
-                    const batch = await this.monitorSqlQueue().claimMonitorBatch(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, Math.min(2, 16 - this.monitorClaimBuffer.length), this.monitorClaimBatchCount % 4 === 0, busySources);
+                    const batch = await this.monitorSqlQueue().claimMonitorBatch(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, Math.min(3, 24 - this.monitorClaimBuffer.length), this.monitorClaimBatchCount % 4 === 0, busySources);
                     if (!batch.length)
                         break;
                     this.monitorClaimBuffer.push(...batch);
@@ -3906,7 +3906,7 @@ export class ImporterLiteRuntime {
                 && !task.checkpoint?.manifestFingerprint
                 && fpChapters.length > 0) {
                 try {
-                    const checkPool = this.mayBorrowPrimaryForMonitor(2) ? this.pool : (this.sourceMetadataPool || this.pool);
+                    const checkPool = this.mayBorrowPrimaryForMonitor(1) ? this.pool : (this.sourceMetadataPool || this.pool);
                     const dbManifest = await checkPool.query(`
             WITH work_known_chapters AS MATERIALIZED (
               SELECT lc.canonical_chapter_key

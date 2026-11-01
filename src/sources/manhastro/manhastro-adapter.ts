@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { extractStoredMappingMetadata } from '../../lite/mapping-metadata.js';
@@ -401,6 +401,12 @@ export class ManhastroAdapter implements SourceAdapter {
     });
 
     return chapters.sort((a, b) => a.number - b.number);
+  }
+
+  async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
+    const details = await this.fetchWorkDetails(sourceWorkId);
+    const chapters = await this.fetchChapters(sourceWorkId);
+    return { details, chapters };
   }
 
   async fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]> {

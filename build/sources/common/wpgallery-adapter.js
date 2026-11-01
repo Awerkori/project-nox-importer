@@ -174,7 +174,7 @@ export class WpGalleryAdapter {
             return { works: [], nextCursor: null };
         }
     }
-    async fetchWorkDetails(sourceWorkId) {
+    async fetchWorkSnapshot(sourceWorkId, _signal) {
         const url = `${this.baseUrl}/wp-json/wp/v2/posts/${sourceWorkId}?_embed=wp:featuredmedia,wp:term`;
         try {
             const p = await this.fetchJson(url);
@@ -190,7 +190,7 @@ export class WpGalleryAdapter {
             const fallbackCoverUrl = [contentCoverUrl, yoastCoverUrl].find((u) => u && u !== coverUrl) || undefined;
             const genres = extractWpGenres(p);
             const alternativeTitles = extractWpAlternativeTitles(p);
-            return {
+            const details = {
                 sourceWorkId,
                 title,
                 slug: p.slug || slugify(title),
@@ -201,21 +201,7 @@ export class WpGalleryAdapter {
                 alternativeTitles: alternativeTitles.length ? alternativeTitles : undefined,
                 raw: fallbackCoverUrl ? { fallbackCoverUrl } : undefined,
             };
-        }
-        catch (err) {
-            this.logger.error(`fetchWorkDetails failed for ${sourceWorkId}: ${err.message}`);
-            // Returning a placeholder made an inaccessible source look like a
-            // successful metadata audit with no aliases or genres. Let the durable
-            // catalog task classify and retry the real provider failure instead.
-            throw err;
-        }
-    }
-    async fetchChapters(sourceWorkId) {
-        // Each post in WP gallery is a single complete chapter / oneshot
-        const url = `${this.baseUrl}/wp-json/wp/v2/posts/${sourceWorkId}`;
-        try {
-            const p = await this.fetchJson(url);
-            return [
+            const chapters = [
                 {
                     sourceChapterId: `${sourceWorkId}|${p.link || ''}`,
                     number: 1,
@@ -223,6 +209,19 @@ export class WpGalleryAdapter {
                     createdAt: p.date,
                 },
             ];
+            return { details, chapters };
+        }
+        catch (err) {
+            this.logger.error(`fetchWorkSnapshot failed for ${sourceWorkId}: ${err.message}`);
+            throw err;
+        }
+    }
+    async fetchWorkDetails(sourceWorkId) {
+        return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+    }
+    async fetchChapters(sourceWorkId) {
+        try {
+            return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
         }
         catch (err) {
             this.logger.error(`fetchChapters failed for ${sourceWorkId}: ${err.message}`);

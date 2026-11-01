@@ -129,7 +129,7 @@ export class MangaThemesiaAdapter {
             nextCursor: hasNext && !isMaintenance ? (page + 1).toString() : null,
         };
     }
-    async fetchWorkDetails(sourceWorkId) {
+    async fetchWorkSnapshot(sourceWorkId, _signal) {
         const workUrl = sourceWorkId.startsWith('http')
             ? sourceWorkId
             : `${this.baseUrl}/${sourceWorkId}/`;
@@ -178,7 +178,7 @@ export class MangaThemesiaAdapter {
                         : [normalizedRaw];
             alternativeTitles = lines.map(s => decodeHtmlEntities(stripHtml(s).trim())).filter(s => s.length >= 1 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
         }
-        return {
+        const details = {
             sourceWorkId,
             title,
             slug: sourceWorkId,
@@ -189,12 +189,6 @@ export class MangaThemesiaAdapter {
             status: 'ONGOING',
             alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
         };
-    }
-    async fetchChapters(sourceWorkId) {
-        const workUrl = sourceWorkId.startsWith('http')
-            ? sourceWorkId
-            : `${this.baseUrl}/${sourceWorkId}/`;
-        const html = await this.fetchHtml(workUrl);
         // Look for chapters inside chapterlist
         const chapterMatches = Array.from(html.matchAll(/href="([^"]+)"\s+class="chapternum"/gi));
         const seenUrls = new Set();
@@ -212,7 +206,13 @@ export class MangaThemesiaAdapter {
             });
         }
         chapters.sort((a, b) => a.number - b.number);
-        return chapters;
+        return { details, chapters };
+    }
+    async fetchWorkDetails(sourceWorkId) {
+        return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+    }
+    async fetchChapters(sourceWorkId) {
+        return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
     }
     async fetchChapterPages(sourceChapterId, _chapterNumber) {
         const chapterUrl = sourceChapterId.startsWith('http')

@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { slugify, decodeHtmlEntities, stripHtml, extractChapterNumber } from './html-utils.js';
@@ -160,7 +160,7 @@ export class GreenShitAdapter implements SourceAdapter {
     }
   }
 
-  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+  async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
     const url = `${this.apiUrl}/obras/${sourceWorkId}`;
 
     try {
@@ -198,7 +198,7 @@ export class GreenShitAdapter implements SourceAdapter {
           : [cleaned]).map((s) => s.trim()).filter(Boolean);
       }
 
-      return {
+      const details: SourceWorkDetails = {
         sourceWorkId,
         title,
         slug: obra.obr_slug || slugify(title),
@@ -209,36 +209,39 @@ export class GreenShitAdapter implements SourceAdapter {
         status: obra.obr_status === 12 ? 'COMPLETED' : 'UNKNOWN',
         raw: obra,
       };
-    } catch (err: any) {
-      this.logger.error(`fetchWorkDetails failed for ${sourceWorkId}: ${err.message}`);
-      throw err;
-    }
-  }
 
-  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
-    const url = `${this.apiUrl}/obras/${sourceWorkId}`;
-
-    try {
-      const data = await this.fetchJson(url);
-      const obra = data?.obra || data;
       const rawChapters = obra?.capitulos || data?.capitulos || [];
       const chapters: SourceChapterSummary[] = [];
 
       for (const ch of rawChapters) {
         const id = String(ch.cap_id);
         const num = parseFloat(String(ch.cap_numero)) || 0;
-        const title = ch.cap_nome || `Capítulo ${num}`;
+        const chapTitle = ch.cap_nome || `Capítulo ${num}`;
 
         chapters.push({
           sourceChapterId: id,
           number: num,
-          title,
+          title: chapTitle,
           createdAt: ch.cap_criado_em,
         });
       }
 
       chapters.sort((a, b) => b.number - a.number);
-      return chapters;
+
+      return { details, chapters };
+    } catch (err: any) {
+      this.logger.error(`fetchWorkSnapshot failed for ${sourceWorkId}: ${err.message}`);
+      throw err;
+    }
+  }
+
+  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+    return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+  }
+
+  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
+    try {
+      return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
     } catch (err: any) {
       this.logger.error(`fetchChapters failed for ${sourceWorkId}: ${err.message}`);
       return [];
