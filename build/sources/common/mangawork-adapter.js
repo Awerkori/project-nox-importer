@@ -121,6 +121,9 @@ export class MangaWorkAdapter {
             ? sourceWorkId
             : `${this.baseUrl}/manga/${sourceWorkId}/`;
         const html = await this.fetchHtml(workUrl);
+        return this.parseWorkDetails(sourceWorkId, html);
+    }
+    parseWorkDetails(sourceWorkId, html) {
         // Title
         const titleMatch = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
         let title = titleMatch ? stripHtml(decodeHtmlEntities(titleMatch[1])).trim() : sourceWorkId;
@@ -197,6 +200,14 @@ export class MangaWorkAdapter {
             ? sourceWorkId
             : `${this.baseUrl}/manga/${sourceWorkId}/`;
         const html = await this.fetchHtml(workUrl);
+        return this.parseChapters(html);
+    }
+    async fetchWorkSnapshot(sourceWorkId) {
+        const workUrl = sourceWorkId.startsWith('http') ? sourceWorkId : `${this.baseUrl}/manga/${sourceWorkId}/`;
+        const html = await this.fetchHtml(workUrl);
+        return { details: this.parseWorkDetails(sourceWorkId, html), chapters: this.parseChapters(html) };
+    }
+    parseChapters(html) {
         const chapterMatches = Array.from(html.matchAll(/href="([^"]*(?:capitulo|chapter)[^"]*)"/gi));
         const seenUrls = new Set();
         const chapters = [];

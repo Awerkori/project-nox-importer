@@ -253,9 +253,16 @@ export class HipercoolAdapter {
             raw: series,
         };
     }
+    async fetchWorkSnapshot(sourceWorkId) {
+        const details = await this.fetchWorkDetails(sourceWorkId);
+        return { details, chapters: await this.fetchChaptersForDetails(sourceWorkId, details) };
+    }
     async fetchChapters(sourceWorkId) {
+        const details = await this.fetchWorkDetails(sourceWorkId);
+        return this.fetchChaptersForDetails(sourceWorkId, details);
+    }
+    async fetchChaptersForDetails(sourceWorkId, details) {
         const slug = sourceWorkId.replace(/^\//, '').replace(/\/$/, '');
-        const details = await this.fetchWorkDetails(slug);
         const seriesId = details.raw?.id;
         if (!seriesId) {
             throw new Error(`Hipercool series ID not found for ${slug}`);

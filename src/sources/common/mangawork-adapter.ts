@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { slugify, decodeHtmlEntities, stripHtml, extractChapterNumber } from './html-utils.js';
@@ -156,7 +156,10 @@ export class MangaWorkAdapter implements SourceAdapter {
       : `${this.baseUrl}/manga/${sourceWorkId}/`;
 
     const html = await this.fetchHtml(workUrl);
+    return this.parseWorkDetails(sourceWorkId, html);
+  }
 
+  private parseWorkDetails(sourceWorkId: string, html: string): SourceWorkDetails {
     // Title
     const titleMatch = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
     let title = titleMatch ? stripHtml(decodeHtmlEntities(titleMatch[1])).trim() : sourceWorkId;
@@ -239,7 +242,16 @@ export class MangaWorkAdapter implements SourceAdapter {
       : `${this.baseUrl}/manga/${sourceWorkId}/`;
 
     const html = await this.fetchHtml(workUrl);
+    return this.parseChapters(html);
+  }
 
+  async fetchWorkSnapshot(sourceWorkId: string): Promise<SourceWorkSnapshot> {
+    const workUrl = sourceWorkId.startsWith('http') ? sourceWorkId : `${this.baseUrl}/manga/${sourceWorkId}/`;
+    const html = await this.fetchHtml(workUrl);
+    return { details: this.parseWorkDetails(sourceWorkId, html), chapters: this.parseChapters(html) };
+  }
+
+  private parseChapters(html: string): SourceChapterSummary[] {
     const chapterMatches = Array.from(html.matchAll(/href="([^"]*(?:capitulo|chapter)[^"]*)"/gi));
     const seenUrls = new Set<string>();
     const chapters: SourceChapterSummary[] = [];
