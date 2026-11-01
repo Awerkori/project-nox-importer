@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 export interface MangaWorkOptions {
@@ -30,7 +30,10 @@ export declare class MangaWorkAdapter implements SourceAdapter {
         nextCursor: string | null;
     }>;
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
+    private parseWorkDetails;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
+    fetchWorkSnapshot(sourceWorkId: string): Promise<SourceWorkSnapshot>;
+    private parseChapters;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
     getImageHeaders(_url?: string): Record<string, string>;

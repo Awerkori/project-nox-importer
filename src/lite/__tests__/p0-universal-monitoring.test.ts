@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { AsyncSemaphore } from '../../core/concurrency.js';
 import { HanamiHeavenAdapter } from '../../sources/hanamiheaven/hanamiheaven-adapter.js';
 import { HipercoolAdapter } from '../../sources/hipercool/hipercool-adapter.js';
+import { PizzariaScanAdapter } from '../../sources/pizzariascan/pizzariascan-adapter.js';
 import { TaimuMangasAdapter } from '../../sources/taimumangas/taimumangas-adapter.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { ImporterLiteRuntime } from '../runtime.js';
@@ -109,6 +110,16 @@ describe('P0 Universal Monitoring & Status Integrity', () => {
 
     const details = await adapter.fetchWorkDetails('regressed-warriors-female-dominance-diary');
     expect(details.status).toBe('ONGOING');
+  });
+
+  it('parses MangaWork details and chapters from one shared work page', async () => {
+    const adapter=new PizzariaScanAdapter(new HostRateLimiter());
+    const fetchHtml=vi.fn().mockResolvedValue('<html><h1>Example Work</h1><a href="/manga/example/capitulo-1/">Chapter 1</a></html>');
+    (adapter as any).fetchHtml=fetchHtml;
+    const result=await adapter.fetchWorkSnapshot('example');
+    expect(result.details.title).toBe('Example Work');
+    expect(result.chapters).toHaveLength(1);
+    expect(fetchHtml).toHaveBeenCalledTimes(1);
   });
 
   it('fetches Hipercool work metadata once per complete snapshot', async () => {
