@@ -47,6 +47,7 @@ const directPublishStoredProcedureMigration = readFileSync(resolve(process.cwd()
 const optimizeYsqlCpuAndP0MonitorMigration = readFileSync(resolve(process.cwd(), 'migrations/20261031053000_optimize_ysql_cpu_and_p0_monitor.sql'), 'utf8');
 const extremeYsqlCpuAndIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261031163000_extreme_ysql_cpu_and_index_optimization.sql'), 'utf8');
 const fixReadyWorkPublishPriorityMigration = readFileSync(resolve(process.cwd(), 'migrations/20261031210000_fix_ready_work_publish_priority.sql'), 'utf8');
+const progressUnpublishedIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261101010000_lite_progress_unpublished_index.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -180,6 +181,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec('ALTER TABLE works ADD COLUMN IF NOT EXISTS search_text text');
   await db.exec(extremeYsqlCpuAndIndexMigration.replace(/CREATE INDEX IF NOT EXISTS idx_works_search_text_trgm\s+ON public\.works USING ybgin \(search_text gin_trgm_ops\)\s+WHERE published = true;/, ''));
   await db.exec(fixReadyWorkPublishPriorityMigration);
+  await db.exec(progressUnpublishedIndexMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
