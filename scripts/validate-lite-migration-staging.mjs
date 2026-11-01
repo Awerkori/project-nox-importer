@@ -42,6 +42,7 @@ const migrationPaths = [
   'migrations/20261015194000_lite_public_presentation_admission.sql',
   'migrations/20261015230000_lite_admit_presentable_unpublished_work.sql',
   'migrations/20261101010000_lite_progress_unpublished_index.sql',
+  'migrations/20261101020000_drop_redundant_done_tasks_index.sql',
 ];
 const migration = migrationPaths.map((migrationPath) => fs.readFileSync(path.resolve(migrationPath), 'utf8')).join('\n');
 const migrationSha256 = crypto.createHash('sha256').update(migration).digest('hex');
@@ -67,7 +68,6 @@ const liteTables = ['importer_lite_tasks', 'importer_lite_ready_works', 'importe
 const expectedIndexes = [
   'importer_lite_tasks_ready_work_idx', 'importer_lite_tasks_monitor_ready_idx', 'importer_lite_tasks_recovery_idx',
   'importer_lite_tasks_work_chapter_idx', 'importer_lite_tasks_blocked_work_idx', 'importer_lite_tasks_publish_recovery_idx',
-  'importer_lite_tasks_progress_unpublished_idx',
   'importer_lite_ready_works_claim_idx', 'importer_lite_chapter_sources_select_idx', 'importer_lite_chapter_sources_order_idx',
   'importer_lite_chapter_sources_manifest_repair_idx',
   'importer_lite_chapters_order_idx', 'importer_lite_uploads_recovery_idx',
