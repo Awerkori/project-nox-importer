@@ -23,7 +23,7 @@ for (;;) {
       } catch { sample.catalog=null; }
     }
     if (!sample.receipts || Date.now()-Date.parse(sample.receipts.at)>600000) {
-      try { const r=await c.query("SELECT count(*)::int AS count,min(updated_at) AS oldest FROM importer_lite_tasks WHERE state='DONE' AND task_type='IMPORT_CHAPTER' AND checkpoint ? 'mediaIds' AND NOT checkpoint ? 'publishedAt'");
+      try { const r=await c.query("SELECT count(*)::int AS count,min(updated_at) AS oldest FROM importer_lite_tasks WHERE state='DONE' AND task_type='IMPORT_CHAPTER' AND updated_at >= now() - interval '2 hours' AND checkpoint ? 'mediaIds' AND NOT checkpoint ? 'publishedAt'");
         sample.receipts={at:new Date().toISOString(),...r.rows[0]};
       } catch { sample.receipts=null; }
     }

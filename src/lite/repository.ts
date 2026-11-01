@@ -4620,11 +4620,19 @@ export class LiteRepository {
   }
 
   async operationalSnapshot(): Promise<Array<{ priority: LitePriority; state: LiteTaskState; monitoring: boolean; count: number; oldestReadyAt: Date | null }>> {
-    const result = await this.db.query<Row>(`SELECT priority,state,monitoring,count(*)::int AS count,
-      min(created_at) FILTER (WHERE state='READY' AND monitoring=false) AS oldest_ready_at
-      FROM importer_lite_tasks GROUP BY priority,state,monitoring ORDER BY priority,state,monitoring`);
-    return result.rows.map((row) => ({ priority: priorityName(row.priority), state: row.state,
-      monitoring: Boolean(row.monitoring), count: Number(row.count), oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null }));
+    const client = await this.db.connect();
+    try {
+      await client.query("SET LOCAL statement_timeout = '2000ms'");
+      const result = await client.query<Row>(`SELECT priority,state,monitoring,count(*)::int AS count,
+        min(created_at) FILTER (WHERE state='READY' AND monitoring=false) AS oldest_ready_at
+        FROM importer_lite_tasks GROUP BY priority,state,monitoring ORDER BY priority,state,monitoring`);
+      return result.rows.map((row) => ({ priority: priorityName(row.priority), state: row.state,
+        monitoring: Boolean(row.monitoring), count: Number(row.count), oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null }));
+    } catch {
+      return [];
+    } finally {
+      client.release();
+    }
   }
 
   /** Small, indexed progress probe used for a human-operable Lite heartbeat. */
@@ -4634,29 +4642,51 @@ export class LiteRepository {
     oldestStoredUnpublishedAt: Date | null;
     nextMonitorAt: Date | null;
   }> {
-    const result = await this.db.query<Row>(`SELECT
-      (SELECT count(*)::int FROM importer_publication_events
-        WHERE transition_at >= now() - interval '1 minute') AS published_last_minute,
-      (SELECT min(created_at) FROM importer_lite_tasks WHERE state='READY' AND monitoring=false) AS oldest_ready_at,
-      (SELECT min(next_run_at) FROM importer_lite_tasks
-        WHERE state IN ('READY','RETRY_WAIT') AND task_type='CATALOG' AND monitoring=true) AS next_monitor_at,
-      (SELECT min(updated_at) FROM importer_lite_tasks
-        WHERE state='DONE' AND task_type='IMPORT_CHAPTER'
-          AND checkpoint ? 'mediaIds' AND NOT checkpoint ? 'publishedAt') AS oldest_stored_unpublished_at`);
-    const row = result.rows[0] || {};
-    return {
-      publishedLastMinute: Number(row.published_last_minute || 0),
-      oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null,
-      oldestStoredUnpublishedAt: row.oldest_stored_unpublished_at ? new Date(row.oldest_stored_unpublished_at) : null,
-      nextMonitorAt: row.next_monitor_at ? new Date(row.next_monitor_at) : null,
-    };
+    const client = await this.db.connect();
+    try {
+      await client.query("SET LOCAL statement_timeout = '2000ms'");
+      const result = await client.query<Row>(`SELECT
+        (SELECT count(*)::int FROM importer_publication_events
+          WHERE transition_at >= now() - interval '1 minute') AS published_last_minute,
+        (SELECT min(created_at) FROM importer_lite_tasks WHERE state='READY' AND monitoring=false) AS oldest_ready_at,
+        (SELECT min(next_run_at) FROM importer_lite_tasks
+          WHERE state IN ('READY','RETRY_WAIT') AND task_type='CATALOG' AND monitoring=true) AS next_monitor_at,
+        (SELECT min(updated_at) FROM importer_lite_tasks
+          WHERE state='DONE' AND task_type='IMPORT_CHAPTER'
+            AND updated_at >= now() - interval '2 hours'
+            AND checkpoint ? 'mediaIds' AND NOT checkpoint ? 'publishedAt') AS oldest_stored_unpublished_at`);
+      const row = result.rows[0] || {};
+      return {
+        publishedLastMinute: Number(row.published_last_minute || 0),
+        oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null,
+        oldestStoredUnpublishedAt: row.oldest_stored_unpublished_at ? new Date(row.oldest_stored_unpublished_at) : null,
+        nextMonitorAt: row.next_monitor_at ? new Date(row.next_monitor_at) : null,
+      };
+    } catch {
+      return {
+        publishedLastMinute: 0,
+        oldestReadyAt: null,
+        oldestStoredUnpublishedAt: null,
+        nextMonitorAt: null,
+      };
+    } finally {
+      client.release();
+    }
   }
 
   async blockedReasonSnapshot(limit = 8): Promise<Array<{ reason: string; count: number }>> {
-    const result = await this.db.query<Row>(`SELECT COALESCE(reason,'UNSPECIFIED') AS reason,count(*)::int AS count
-      FROM importer_lite_tasks WHERE state='BLOCKED'
-      GROUP BY reason ORDER BY count DESC,reason LIMIT $1`, [Math.max(1, Math.min(limit, 20))]);
-    return result.rows.map((row) => ({ reason: String(row.reason), count: Number(row.count) }));
+    const client = await this.db.connect();
+    try {
+      await client.query("SET LOCAL statement_timeout = '2000ms'");
+      const result = await client.query<Row>(`SELECT COALESCE(reason,'UNSPECIFIED') AS reason,count(*)::int AS count
+        FROM importer_lite_tasks WHERE state='BLOCKED'
+        GROUP BY reason ORDER BY count DESC,reason LIMIT $1`, [Math.max(1, Math.min(limit, 20))]);
+      return result.rows.map((row) => ({ reason: String(row.reason), count: Number(row.count) }));
+    } catch {
+      return [];
+    } finally {
+      client.release();
+    }
   }
 
   async sourceHealthSnapshot(): Promise<Array<{ health: string; count: number }>> {
