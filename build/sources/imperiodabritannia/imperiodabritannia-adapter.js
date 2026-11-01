@@ -231,7 +231,7 @@ export class ImperioDaBritanniaAdapter {
         const response = await this.request(`/obras/${encodeURIComponent(sourceWorkId)}`);
         return response.obra || response.dados || response.data || response;
     }
-    async fetchWorkDetails(sourceWorkId) {
+    async fetchWorkSnapshot(sourceWorkId, _signal) {
         const work = await this.work(sourceWorkId);
         const title = String(work.nome || work.title || sourceWorkId);
         const status = String(work.status_nome || '').toLowerCase();
@@ -270,7 +270,7 @@ export class ImperioDaBritanniaAdapter {
                 }
             }
         }
-        return {
+        const details = {
             sourceWorkId: String(work.id || sourceWorkId),
             title,
             slug: String(work.slug || slugify(title)),
@@ -284,10 +284,7 @@ export class ImperioDaBritanniaAdapter {
             alternativeTitles: alternativeTitles && alternativeTitles.length > 0 ? alternativeTitles : undefined,
             raw: work,
         };
-    }
-    async fetchChapters(sourceWorkId) {
-        const work = await this.work(sourceWorkId);
-        return (work.capitulos || []).map((chapter) => {
+        const chapters = (work.capitulos || []).map((chapter) => {
             const display = String(chapter.numero ?? chapter.id);
             return {
                 sourceChapterId: `${sourceWorkId}:${encodeURIComponent(display)}`,
@@ -298,6 +295,13 @@ export class ImperioDaBritanniaAdapter {
                 pageCount: chapter.total_paginas ?? null,
             };
         }).sort((a, b) => a.number - b.number);
+        return { details, chapters };
+    }
+    async fetchWorkDetails(sourceWorkId) {
+        return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+    }
+    async fetchChapters(sourceWorkId) {
+        return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
     }
     isChapterOwnedByWork(sourceWorkId, sourceChapterId) {
         return sourceChapterId.startsWith(`${sourceWorkId}:`);

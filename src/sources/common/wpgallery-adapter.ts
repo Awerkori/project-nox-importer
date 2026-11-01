@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { slugify, decodeHtmlEntities, stripHtml } from './html-utils.js';
@@ -205,7 +205,7 @@ export class WpGalleryAdapter implements SourceAdapter {
     }
   }
 
-  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+  async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
     const url = `${this.baseUrl}/wp-json/wp/v2/posts/${sourceWorkId}?_embed=wp:featuredmedia,wp:term`;
 
     try {
@@ -223,7 +223,7 @@ export class WpGalleryAdapter implements SourceAdapter {
       const genres = extractWpGenres(p);
       const alternativeTitles = extractWpAlternativeTitles(p);
 
-      return {
+      const details: SourceWorkDetails = {
         sourceWorkId,
         title,
         slug: p.slug || slugify(title),
@@ -234,22 +234,8 @@ export class WpGalleryAdapter implements SourceAdapter {
         alternativeTitles: alternativeTitles.length ? alternativeTitles : undefined,
         raw: fallbackCoverUrl ? { fallbackCoverUrl } : undefined,
       };
-    } catch (err: any) {
-      this.logger.error(`fetchWorkDetails failed for ${sourceWorkId}: ${err.message}`);
-      // Returning a placeholder made an inaccessible source look like a
-      // successful metadata audit with no aliases or genres. Let the durable
-      // catalog task classify and retry the real provider failure instead.
-      throw err;
-    }
-  }
 
-  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
-    // Each post in WP gallery is a single complete chapter / oneshot
-    const url = `${this.baseUrl}/wp-json/wp/v2/posts/${sourceWorkId}`;
-
-    try {
-      const p = await this.fetchJson<any>(url);
-      return [
+      const chapters: SourceChapterSummary[] = [
         {
           sourceChapterId: `${sourceWorkId}|${p.link || ''}`,
           number: 1,
@@ -257,6 +243,21 @@ export class WpGalleryAdapter implements SourceAdapter {
           createdAt: p.date,
         },
       ];
+
+      return { details, chapters };
+    } catch (err: any) {
+      this.logger.error(`fetchWorkSnapshot failed for ${sourceWorkId}: ${err.message}`);
+      throw err;
+    }
+  }
+
+  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+    return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+  }
+
+  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
+    try {
+      return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
     } catch (err: any) {
       this.logger.error(`fetchChapters failed for ${sourceWorkId}: ${err.message}`);
       return [];

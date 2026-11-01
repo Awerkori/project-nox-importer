@@ -417,11 +417,11 @@ export class ImporterLiteRuntime {
   private sourceMetadataNoCandidateUntil = 0;
   private lastManifestP1RepairAt = 0;
   private manifestP1CatchupActive = false;
-  // P0 observation has ten bounded network slots. They keep independent
+  // P0 observation has eighteen bounded network slots. They keep independent
   // source watches current across 43 sources while chapters run. Only one
   // short SQL claim is ever in flight (monitorClaimGate); the remaining slots
   // run independent source network fetches in parallel without YSQL contention.
-  private readonly monitorGate = new AsyncSemaphore(10, 'lite_p0_monitor');
+  private readonly monitorGate = new AsyncSemaphore(18, 'lite_p0_monitor');
   private readonly monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
   private readonly monitorClaimBuffer: LiteTask[] = [];
   private readonly monitorActiveBySource = new Map<string, number>();
@@ -3248,7 +3248,7 @@ export class ImporterLiteRuntime {
             if (activeSource) this.monitorActiveBySource.set(activeSource, (this.monitorActiveBySource.get(activeSource) || 0) + 1);
             break;
           }
-          if (this.monitorClaimBuffer.length >= 16) break;
+          if (this.monitorClaimBuffer.length >= 24) break;
           this.monitorClaimBatchCount += 1;
           const busySources: string[] = [];
           for (const [source, count] of this.monitorActiveBySource.entries()) {
@@ -3261,7 +3261,7 @@ export class ImporterLiteRuntime {
           const batch = await this.monitorSqlQueue().claimMonitorBatch(
             workerId,
             this.config.QUEUE_LEASE_DURATION_SECONDS,
-            Math.min(2, 16 - this.monitorClaimBuffer.length),
+            Math.min(3, 24 - this.monitorClaimBuffer.length),
             this.monitorClaimBatchCount % 4 === 0,
             busySources,
           );
@@ -3979,7 +3979,7 @@ export class ImporterLiteRuntime {
         && fpChapters.length > 0
       ) {
         try {
-          const checkPool = this.mayBorrowPrimaryForMonitor(2) ? this.pool : (this.sourceMetadataPool || this.pool);
+          const checkPool = this.mayBorrowPrimaryForMonitor(1) ? this.pool : (this.sourceMetadataPool || this.pool);
           const dbManifest = await checkPool.query<{
             work_status: string;
             has_presentation: boolean;

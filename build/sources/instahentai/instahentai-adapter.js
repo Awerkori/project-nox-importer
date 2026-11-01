@@ -92,7 +92,7 @@ export class InstaHentaiAdapter {
         const nextCursor = hasNext && works.length > 0 ? String(page + 1) : null;
         return { works, nextCursor };
     }
-    async fetchWorkDetails(sourceWorkId) {
+    async fetchWorkSnapshot(sourceWorkId, _signal) {
         const slug = sourceWorkId.replace(/^\//, '').replace(/\/$/, '').replace(/^serie\//, '');
         const url = `${this.baseUrl}/serie/${slug}/`;
         const html = await this.fetchHtml(url);
@@ -132,9 +132,9 @@ export class InstaHentaiAdapter {
                     : rawAlt.includes(' / ')
                         ? rawAlt.split(/\s+\/\s+/)
                         : [rawAlt];
-            alternativeTitles = lines.map((s) => decodeHtmlEntities(stripHtml(s).trim())).filter((s) => s.length >= 1 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
+            alternativeTitles = lines.map((s) => decodeHtmlEntities(stripHtml(s)).trim()).filter((s) => s.length >= 1 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
         }
-        return {
+        const details = {
             sourceWorkId: slug,
             title,
             slug,
@@ -149,11 +149,6 @@ export class InstaHentaiAdapter {
             alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
             raw: { sourceWorkId: slug, ...(alternativeTitles.length > 0 ? { alternativeTitles } : {}) },
         };
-    }
-    async fetchChapters(sourceWorkId) {
-        const slug = sourceWorkId.replace(/^\//, '').replace(/\/$/, '').replace(/^serie\//, '');
-        const url = `${this.baseUrl}/serie/${slug}/`;
-        const html = await this.fetchHtml(url);
         const chapters = [];
         const seenNumbers = new Set();
         const linkMatches = [...html.matchAll(/<a[^>]+href="([^"]*\/ler\/([^"/]+)\/?)"[^>]*>([\s\S]*?)<\/a>/gi)];
@@ -171,7 +166,13 @@ export class InstaHentaiAdapter {
             });
         }
         chapters.sort((a, b) => a.number - b.number);
-        return chapters;
+        return { details, chapters };
+    }
+    async fetchWorkDetails(sourceWorkId) {
+        return (await this.fetchWorkSnapshot(sourceWorkId)).details;
+    }
+    async fetchChapters(sourceWorkId) {
+        return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
     }
     async fetchChapterPages(sourceChapterId, _chapterNumber) {
         const chSlug = sourceChapterId.replace(/^\//, '').replace(/\/$/, '').replace(/^ler\//, '');
