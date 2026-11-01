@@ -340,9 +340,8 @@ export class LiteRepository {
     try {
       await client.query('BEGIN');
       // Coverage work is optional while the old monitor lane keeps serving
-      // existing watches.  A short statement timeout makes a pathological
-      // provider slice a deferred turn, never a boot or chapter failure.
-      await client.query(`SET LOCAL statement_timeout = '3500ms'`);
+      // existing watches. A safe statement timeout protects against brief lock waits.
+      await client.query(`SET LOCAL statement_timeout = '8000ms'`);
       let cursor = await client.query<{ last_source: string | null }>(`
         SELECT last_source FROM importer_lite_metadata_source_cursor
         WHERE cursor_name=$1 FOR UPDATE`, [P0_MONITOR_COVERAGE_CURSOR]);
@@ -541,12 +540,14 @@ export class LiteRepository {
         }
       }
 
-      // Advance even when the selected provider had no missing watches.  It
-      // prevents an exhausted source from hiding every later provider during
-      // an otherwise healthy long-running importer.
-      await client.query(`UPDATE importer_lite_metadata_source_cursor
-        SET last_source=$2,updated_at=now() WHERE cursor_name=$1`,
-      [P0_MONITOR_COVERAGE_CURSOR, source]);
+      // Advance cursor to next provider when this provider has completed its current missing window.
+      // Retaining the cursor on this provider while missing.length > maximum allows backlogged
+      // providers to drain rapidly in consecutive bounded batches.
+      if (effectiveScanRows.rows.length === 0 || (admitted === 0 && revived === 0) || (effectiveScanRows.rows.length > 0 && nextMappingCursor === lastScanned)) {
+        await client.query(`UPDATE importer_lite_metadata_source_cursor
+          SET last_source=$2,updated_at=now() WHERE cursor_name=$1`,
+        [P0_MONITOR_COVERAGE_CURSOR, source]);
+      }
       // `settings` is a legacy shared table.  Production intentionally has
       // only the key/value contract, whereas isolated test databases may add
       // an `updated_at` convenience column.  Coverage cursors must not turn
