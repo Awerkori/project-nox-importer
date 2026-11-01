@@ -202,9 +202,9 @@ export class MangaWorkAdapter {
         const html = await this.fetchHtml(workUrl);
         return this.parseChapters(html);
     }
-    async fetchWorkSnapshot(sourceWorkId) {
+    async fetchWorkSnapshot(sourceWorkId, signal) {
         const workUrl = sourceWorkId.startsWith('http') ? sourceWorkId : `${this.baseUrl}/manga/${sourceWorkId}/`;
-        const html = await this.fetchHtml(workUrl);
+        const html = await this.fetchHtml(workUrl, { signal });
         return { details: this.parseWorkDetails(sourceWorkId, html), chapters: this.parseChapters(html) };
     }
     parseChapters(html) {

@@ -351,7 +351,7 @@ export declare class LiteRepository {
      */
     claimMonitor(workerId: string, leaseSeconds: number): Promise<LiteTask | null>;
     /** A small, fenced batch amortizes the source cursor and SQL round trip. */
-    claimMonitorBatch(workerId: string, leaseSeconds: number, limit: number, preferOldest?: boolean): Promise<LiteTask[]>;
+    claimMonitorBatch(workerId: string, leaseSeconds: number, limit: number, preferOldest?: boolean, busySources?: string[]): Promise<LiteTask[]>;
     /**
      * Claims one already-durable, no-network metadata replay.  This deliberately
      * is not a second chapter-admission policy: it can only advance the bounded

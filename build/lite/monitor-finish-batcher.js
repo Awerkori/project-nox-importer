@@ -9,10 +9,10 @@ export class MonitorFinishBatcher {
     submit(value) {
         return new Promise((resolve, reject) => {
             this.pending.push({ value, resolve, reject });
-            if (this.pending.length >= 6)
+            if (this.pending.length >= 12)
                 void this.flush();
             else if (!this.timer) {
-                this.timer = setTimeout(() => void this.flush(), 40);
+                this.timer = setTimeout(() => void this.flush(), 25);
                 this.timer.unref();
             }
         });
@@ -21,7 +21,7 @@ export class MonitorFinishBatcher {
         if (this.timer)
             clearTimeout(this.timer);
         this.timer = null;
-        const batch = this.pending.splice(0, 6);
+        const batch = this.pending.splice(0, 12);
         if (!batch.length)
             return;
         try {

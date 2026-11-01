@@ -32,7 +32,7 @@ export declare class MangaWorkAdapter implements SourceAdapter {
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     private parseWorkDetails;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
-    fetchWorkSnapshot(sourceWorkId: string): Promise<SourceWorkSnapshot>;
+    fetchWorkSnapshot(sourceWorkId: string, signal?: AbortSignal): Promise<SourceWorkSnapshot>;
     private parseChapters;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;

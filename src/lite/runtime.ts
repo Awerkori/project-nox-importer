@@ -417,11 +417,11 @@ export class ImporterLiteRuntime {
   private sourceMetadataNoCandidateUntil = 0;
   private lastManifestP1RepairAt = 0;
   private manifestP1CatchupActive = false;
-  // P0 observation has six bounded network slots. They keep independent
+  // P0 observation has ten bounded network slots. They keep independent
   // source watches current across 43 sources while chapters run. Only one
   // short SQL claim is ever in flight (monitorClaimGate); the remaining slots
   // run independent source network fetches in parallel without YSQL contention.
-  private readonly monitorGate = new AsyncSemaphore(6, 'lite_p0_monitor');
+  private readonly monitorGate = new AsyncSemaphore(10, 'lite_p0_monitor');
   private readonly monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
   private readonly monitorClaimBuffer: LiteTask[] = [];
   private readonly monitorActiveBySource = new Map<string, number>();
@@ -1286,13 +1286,15 @@ export class ImporterLiteRuntime {
    */
   private async refillP0MonitorCoverage(): Promise<void> {
     if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active) return;
-    // Coverage is already nearly complete. Keep enrollment progressing but do
-    // not let repeated mapping scans monopolize the only metadata connection.
-    if (Date.now() - this.lastP0CoverageRefillAt < 120_000) return;
+    // Coverage enrollment runs dynamically: while works are being enrolled,
+    // progress rapidly in bounded batches. In steady-state with all sources covered,
+    // it relaxes to a two-minute cadence to preserve SQL headroom.
+    const minInterval = (this.p0CoverageZeroStreak >= 43) ? 120_000 : 5_000;
+    if (Date.now() - this.lastP0CoverageRefillAt < minInterval) return;
     if (!this.p0MonitorCoverageRefillGate.tryAcquire()) return;
     this.lastP0CoverageRefillAt = Date.now();
     try {
-      const refill = await this.queue.refillP0MonitorCoverage(32);
+      const refill = await this.queue.refillP0MonitorCoverage(128);
       this.p0MonitorCoverage = {
         observedAt: new Date().toISOString(),
         source: refill.source,
@@ -1304,6 +1306,10 @@ export class ImporterLiteRuntime {
       if (refill.admitted || refill.revived) {
         this.p0CoverageZeroStreak = 0;
         this.logger.info('Expanded durable P0 monitor coverage', refill);
+        if (!this.stopped && this.isRuntimeLeader && !(process.env.NODE_ENV === 'test' || process.env.VITEST)) {
+          const nextRefill = setTimeout(() => void this.refillP0MonitorCoverage().catch(() => {}), 1_000);
+          nextRefill.unref();
+        }
       } else if (refill.source) {
         this.p0CoverageZeroStreak += 1;
       }
@@ -3238,14 +3244,27 @@ export class ImporterLiteRuntime {
             if (activeSource) this.monitorActiveBySource.set(activeSource, (this.monitorActiveBySource.get(activeSource) || 0) + 1);
             break;
           }
-          if (this.monitorClaimBuffer.length >= 8) break;
+          if (this.monitorClaimBuffer.length >= 16) break;
           this.monitorClaimBatchCount += 1;
-          const batch = await this.monitorSqlQueue().claimMonitorBatch(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, Math.min(4, 8 - this.monitorClaimBuffer.length),
-            this.monitorClaimBatchCount % 4 === 0);
+          const busySources: string[] = [];
+          for (const [source, count] of this.monitorActiveBySource.entries()) {
+            if (count >= 2) busySources.push(source);
+          }
+          for (const buffered of this.monitorClaimBuffer) {
+            const source = String(buffered.payload?.source || '');
+            if (source && !busySources.includes(source)) busySources.push(source);
+          }
+          const batch = await this.monitorSqlQueue().claimMonitorBatch(
+            workerId,
+            this.config.QUEUE_LEASE_DURATION_SECONDS,
+            Math.min(2, 16 - this.monitorClaimBuffer.length),
+            this.monitorClaimBatchCount % 4 === 0,
+            busySources,
+          );
           if (!batch.length) break;
           this.monitorClaimBuffer.push(...batch);
         }
-        this.idleMonitorUntil = task || this.monitorClaimBuffer.length ? 0 : Date.now() + 5_000;
+        this.idleMonitorUntil = task || this.monitorClaimBuffer.length ? 0 : Date.now() + 2_000;
       } finally {
         this.monitorClaimGate.release();
       }
@@ -3275,7 +3294,7 @@ export class ImporterLiteRuntime {
         && Date.now() >= this.idleMonitorUntil
         && !(process.env.NODE_ENV === 'test' || process.env.VITEST)
       ) {
-        const nextDelayMs = (this.sourceMetadataPool.waitingCount || 0) > 1 ? 180 : 40;
+        const nextDelayMs = (this.sourceMetadataPool.waitingCount || 0) > 1 ? 120 : 25;
         const nextTurn = setTimeout(() => void this.runMonitorTurn().catch(() => {}), nextDelayMs);
         nextTurn.unref();
       }
