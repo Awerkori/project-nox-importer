@@ -66,6 +66,7 @@ export declare class ImporterLiteRuntime {
     private readonly backgroundMetadataUnderChapterLoadGate;
     private lastNewWorkDiscoveryAt;
     private lastNewWorkPressureTurnAt;
+    private lastNewWorkCatalogTurnAt;
     private pressureDiscoveryTurn;
     private readonly crossSourceMetadataGate;
     private readonly crossSourceDiscoveryLaneGate;

@@ -1913,9 +1913,20 @@ export class LiteRepository {
     this.p1FocusTargetSize = desiredSize;
     const metaDb = this.sourceMetadataDb || this.db;
     const horizonIso = new Date(Date.now() + 35_000).toISOString();
+    const currentFocusKeys = this.p1FocusWorkKeys || [];
 
     const candidatesRes = await metaDb.query<Row>(`
-      WITH ready_p1_works AS MATERIALIZED (
+      WITH current_focus_works AS (
+        SELECT rw.work_key,
+               NULLIF(substring(rw.work_key from 6), '')::uuid AS work_id,
+               rw.next_run_at,
+               rw.last_claimed_at
+        FROM importer_lite_ready_works rw
+        WHERE rw.priority = 2
+          AND rw.operation_rank <= 1
+          AND rw.work_key = ANY($2::text[])
+          AND rw.next_run_at <= $1::timestamptz
+      ), candidate_ready_works AS (
         SELECT rw.work_key,
                NULLIF(substring(rw.work_key from 6), '')::uuid AS work_id,
                rw.next_run_at,
@@ -1927,6 +1938,10 @@ export class LiteRepository {
           AND rw.next_run_at <= $1::timestamptz
         ORDER BY rw.last_claimed_at ASC NULLS FIRST, rw.next_run_at ASC, rw.work_key ASC
         LIMIT 256
+      ), ready_p1_works AS MATERIALIZED (
+        SELECT * FROM current_focus_works
+        UNION
+        SELECT * FROM candidate_ready_works
       ), active_sources AS MATERIALIZED (
         SELECT src.id AS source,
           (src.enabled = true
@@ -1980,7 +1995,7 @@ export class LiteRepository {
       FROM work_stats ws
       LEFT JOIN route_stats rs ON rs.work_key = ws.work_key
       WHERE ws.remaining_chapters > 0
-    `, [horizonIso]);
+    `, [horizonIso, currentFocusKeys]);
 
     const now = Date.now();
     const candidateByKey = new Map<string, {
@@ -2013,10 +2028,11 @@ export class LiteRepository {
       const remaining = Math.max(1, Number(row.remaining_chapters || 1));
       const oldestMs = row.oldest_task_at ? new Date(row.oldest_task_at).getTime() : now;
       const ageHours = Math.max(0, (now - oldestMs) / 3_600_000);
-      const completionScore = remaining <= 5 ? 50
-        : remaining <= 15 ? 35
-        : remaining <= 35 ? 20
-        : remaining <= 80 ? 10
+      const completionScore = remaining <= 3 ? 120
+        : remaining <= 7 ? 85
+        : remaining <= 15 ? 55
+        : remaining <= 30 ? 30
+        : remaining <= 60 ? 15
         : 0;
       const fairnessScore = Math.min(35, ageHours * 1.5);
       const speedBonus = isDegraded
@@ -2074,7 +2090,8 @@ export class LiteRepository {
       const stickyRotateMs = isSlow ? 12 * 60_000 : 25 * 60_000;
       const stickyRemainingThreshold = isSlow ? 25 : 35;
       // Rotate out long backlogs only when fresher near-done alternatives wait.
-      if (now - enteredAt > stickyRotateMs && cand.remainingChapters > stickyRemainingThreshold && candidateByKey.size > desiredSize) {
+      // Works close to completion (<= 15 chapters remaining) remain sticky until finished.
+      if (cand.remainingChapters > 15 && now - enteredAt > stickyRotateMs && cand.remainingChapters > stickyRemainingThreshold && candidateByKey.size > desiredSize) {
         continue;
       }
       if (isSlow && totalSlowCount >= maxTotalSlowInFocus) continue;
@@ -2179,6 +2196,8 @@ export class LiteRepository {
       }
     }
 
+    // Prioritize works with fewest remaining chapters at the front of the focus group
+    nextFocus.sort((a, b) => a.remainingChapters - b.remainingChapters);
     this.p1FocusWorkKeys = nextFocus.map((item) => item.workKey);
     this.p1FocusMeta = new Map(nextFocus.map((item) => [item.workKey, item]));
     this.p1FocusRefreshedAt = new Date(now).toISOString();
@@ -2993,39 +3012,8 @@ export class LiteRepository {
       await client.query('BEGIN');
       const reserve = await client.query<{ count: string }>(`SELECT count(*)::int AS count FROM (
         SELECT 1
-        FROM (
-          SELECT work_key FROM importer_lite_ready_works
-          WHERE priority = 2 AND operation_rank = 1 AND next_run_at <= now()
-          LIMIT $1
-        ) rw
-        JOIN importer_lite_tasks t
-          ON t.work_key = rw.work_key
-         AND t.state = 'READY'
-         AND t.monitoring = false
-         AND t.priority = 2
-         AND t.task_type = 'IMPORT_CHAPTER'
-         AND t.next_run_at <= now()
-         AND (
-           NOT EXISTS (
-             SELECT 1 FROM importer_lite_chapter_sources cs
-             WHERE cs.work_id = t.work_id AND cs.canonical_chapter_key = t.chapter_key
-           )
-           OR EXISTS (
-             SELECT 1
-             FROM importer_lite_chapter_sources cs
-             JOIN importer_sources s ON s.id = cs.source
-             LEFT JOIN importer_lite_source_health h ON h.source = cs.source
-             WHERE cs.work_id = t.work_id
-               AND cs.canonical_chapter_key = t.chapter_key
-               AND cs.confirmed = true
-               AND cs.has_chapter = true
-               AND s.enabled = true
-               AND ${sourceExecutionEligibilitySql('s')}
-               AND COALESCE(s.chapter_ingestion_enabled, true)
-               AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
-               AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
-           )
-         )
+        FROM importer_lite_ready_works rw
+        WHERE rw.priority = 2 AND rw.operation_rank = 1 AND rw.next_run_at <= now()
         LIMIT $1
       ) AS bounded_ready`, [abundantFloor]);
       const current = Number(reserve.rows[0]?.count || 0);

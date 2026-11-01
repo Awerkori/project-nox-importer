@@ -278,6 +278,7 @@ export class ImporterLiteRuntime {
     backgroundMetadataUnderChapterLoadGate = new AsyncSemaphore(1, 'lite_background_metadata_under_chapter_load');
     lastNewWorkDiscoveryAt = 0;
     lastNewWorkPressureTurnAt = 0;
+    lastNewWorkCatalogTurnAt = 0;
     pressureDiscoveryTurn = true;
     // Reserve 3 permits (2 for background V7 discovery + 1 for NEW_WORK onboarding)
     // so background V7 tasks can never starve a newly created work's onboarding pass.
@@ -1301,13 +1302,13 @@ export class ImporterLiteRuntime {
             return this.p1FocusRefreshInFlight;
         this.lastP1FocusRefreshAt = now;
         const effectiveCap = Math.max(12, this.executor.getEffectiveChapterAdmissionCap());
-        const targetSize = Math.max(24, Math.min(36, Math.round(effectiveCap * 1.6)));
+        const targetSize = Math.max(8, Math.min(16, Math.round(effectiveCap * 0.8)));
         const sourceTiers = this.sourcePerformance.getTierMap([
             ...this.executor.getFairSourceDemand(),
             'nexus', 'taimumangas', 'tankouhentai', 'pizzariascan', 'nocturnesummer',
             'mangaflix', 'mangotoons', 'hipercool', 'manhastro',
         ]);
-        this.p1FocusRefreshInFlight = this.queue.refreshP1FocusGroup({ targetSize, maxPerSource: 8, sourceTiers })
+        this.p1FocusRefreshInFlight = this.queue.refreshP1FocusGroup({ targetSize, maxPerSource: 4, sourceTiers })
             .then((snap) => {
             if (snap?.focusSources && typeof this.executor.mergeFairSourceDemandCounts === 'function') {
                 this.executor.mergeFairSourceDemandCounts(snap.focusSources);
@@ -2375,6 +2376,29 @@ export class ImporterLiteRuntime {
                     return;
                 }
             }
+            if (this.p2SubordinationState.subordinated) {
+                // While P2 is subordinated to P1 backlog, new canonical works are never admitted (blocked by resolveWork).
+                // However, unmapped catalog tasks are safely checked at a throttled cadence (every 15s) to allow multi-source
+                // discovery for existing canonical works to complete without delay.
+                if (Date.now() - this.lastNewWorkCatalogTurnAt >= 15_000) {
+                    this.lastNewWorkCatalogTurnAt = Date.now();
+                    const task = await this.queue.claimNewWorkCatalog(workerId, CATALOG_TASK_LEASE_SECONDS);
+                    if (task) {
+                        await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
+                        return;
+                    }
+                }
+                // Throttled discovery: at most once every 5 minutes while subordinated to prevent queue congestion
+                if (typeof this.queue.claimDueDiscovery === 'function' &&
+                    Date.now() - this.lastNewWorkDiscoveryAt >= 300_000) {
+                    this.lastNewWorkDiscoveryAt = Date.now();
+                    const discoveryTask = await this.queue.claimDueDiscovery(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS || CATALOG_TASK_LEASE_SECONDS);
+                    if (discoveryTask) {
+                        await this.discover(discoveryTask, workerId);
+                    }
+                }
+                return;
+            }
             const task = await this.queue.claimNewWorkCatalog(workerId, CATALOG_TASK_LEASE_SECONDS);
             if (task) {
                 await this.withCatalogLeaseHeartbeat(task, workerId, () => this.catalog(task, workerId));
@@ -3116,7 +3140,7 @@ export class ImporterLiteRuntime {
             const excludedSources = typeof this.executor.getSaturatedFairSources === 'function'
                 ? this.executor.getSaturatedFairSources()
                 : [];
-            const preferFocus = (this.p1ClaimCounter++ % 4) !== 3;
+            const preferFocus = (this.p1ClaimCounter++ % 10) !== 9;
             const task = (focusWorkKeys.length > 0 || excludedSources.length > 0)
                 ? await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, {
                     focusWorkKeys,
@@ -4014,7 +4038,18 @@ export class ImporterLiteRuntime {
                         return this.loadCover(adapter, fallbackUrl);
                     }
                     return null;
-                } : undefined });
+                } : undefined }, {
+                suspendNewWorkAdmission: Boolean(this.p2SubordinationState.subordinated),
+            });
+            if (resolved.status === 'ADMISSION_SUSPENDED') {
+                await this.queue.finish(task, workerId, {
+                    state: 'RETRY_WAIT',
+                    reason: 'P2_NEW_WORK_ADMISSION_SUSPENDED_P1_BACKLOG',
+                    nextRunAt: new Date(Date.now() + 60 * 60_000),
+                    resetAttempts: true,
+                });
+                return;
+            }
             if (!resolved.workId || resolved.status === 'AMBIGUOUS') {
                 await this.queue.finish(task, workerId, { state: 'BLOCKED', reason: resolved.reason || 'AMBIGUOUS_CATALOG_MATCH' });
                 return;

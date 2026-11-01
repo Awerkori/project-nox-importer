@@ -14,7 +14,7 @@ import {
 export interface DeduplicationResult {
   workId: string | null;
   mappingId: string;
-  status: 'EXISTING_MAPPING' | 'NEW_WORK' | 'AMBIGUOUS' | 'FAILED';
+  status: 'EXISTING_MAPPING' | 'NEW_WORK' | 'AMBIGUOUS' | 'FAILED' | 'ADMISSION_SUSPENDED';
   slug: string;
   reason?: string;
   metadataDelta?: { aliasesAdded: number; tagsAdded: number };
@@ -457,7 +457,7 @@ export class DeduplicationEngine {
    * Resolve or register a work conservatively.
    * Never blindly overwrite or perform destructive merges on fuzzy matches.
    */
-  async resolveWork(candidate: CandidateWork): Promise<DeduplicationResult> {
+  async resolveWork(candidate: CandidateWork, options?: { suspendNewWorkAdmission?: boolean }): Promise<DeduplicationResult> {
     const { source, sourceWorkId, title, slug } = candidate;
 
     // Validate title against non-editorial garbage (Cloudflare, login walls, HTTP errors)
@@ -846,8 +846,24 @@ export class DeduplicationEngine {
       }
     }
 
-    // 3. No match exists anywhere -> Genuinely new candidate. Only this path
-    // needs a source cover before the canonical work is created.
+    // 3. No match exists anywhere -> Genuinely new candidate.
+    if (options?.suspendNewWorkAdmission) {
+      this.logger.info('Suspended new work admission due to active P1 backlog', {
+        source,
+        sourceWorkId,
+        title,
+        slug: cleanSlug,
+      });
+      return {
+        workId: null,
+        mappingId: '',
+        status: 'ADMISSION_SUSPENDED',
+        slug: cleanSlug,
+        reason: 'P2_NEW_WORK_ADMISSION_SUSPENDED_P1_BACKLOG',
+      };
+    }
+
+    // Only this path needs a source cover before the canonical work is created.
     await this.resolveCandidateCover(candidate);
     // Acquire transactional advisory lock to prevent race condition between concurrent workers.
     let uniqueSlug = cleanSlug;
