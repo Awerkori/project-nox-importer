@@ -4651,7 +4651,7 @@ export class LiteRepository {
         (SELECT min(created_at) FROM importer_lite_tasks WHERE state='READY' AND monitoring=false) AS oldest_ready_at,
         (SELECT min(next_run_at) FROM importer_lite_tasks
           WHERE state IN ('READY','RETRY_WAIT') AND task_type='CATALOG' AND monitoring=true) AS next_monitor_at,
-        (SELECT /*+ IndexScan(task importer_lite_tasks_progress_unpublished_idx) */ task.updated_at
+        (SELECT /*+ IndexScan(task importer_lite_tasks_publish_recovery_idx) */ task.updated_at
           FROM importer_lite_tasks task
           WHERE task.state='DONE' AND task.task_type='IMPORT_CHAPTER'
             AND task.updated_at >= now() - interval '2 hours'
