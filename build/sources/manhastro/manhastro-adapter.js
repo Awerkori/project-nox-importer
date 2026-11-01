@@ -325,8 +325,10 @@ export class ManhastroAdapter {
         return chapters.sort((a, b) => a.number - b.number);
     }
     async fetchWorkSnapshot(sourceWorkId, _signal) {
-        const details = await this.fetchWorkDetails(sourceWorkId);
-        const chapters = await this.fetchChapters(sourceWorkId);
+        const [details, chapters] = await Promise.all([
+            this.fetchWorkDetails(sourceWorkId),
+            this.fetchChapters(sourceWorkId),
+        ]);
         return { details, chapters };
     }
     async fetchChapterPages(sourceChapterId, _chapterNumber) {

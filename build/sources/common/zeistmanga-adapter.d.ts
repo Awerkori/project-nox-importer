@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 export interface ZeistMangaOptions {
@@ -27,6 +27,9 @@ export declare class ZeistMangaAdapter implements SourceAdapter {
         works: SourceWorkSummary[];
         nextCursor: string | null;
     }>;
+    private parseWorkDetailsFromHtml;
+    private fetchChaptersFromHtmlAndFeed;
+    fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot>;
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
     fetchChapterPages(sourceChapterId: string): Promise<string[]>;

@@ -47,35 +47,31 @@ describe('MangoToonsAdapter & Decryptor', () => {
       ok: true,
       headers: new Headers({ 'content-type': 'application/json' }),
       text: async () =>
-        JSON.stringify({
-          obras: [
-            {
-              id: 101,
-              nome: 'Solo Leveling Mango',
-              slug: 'solo-leveling-mango',
-              imagem: 'https://cdn.mangotoons.com/covers/101.jpg',
-              atualizada_em: '2026-09-08T10:00:00Z',
-            },
-          ],
-          pagination: { hasNextPage: true },
-        }),
+        JSON.stringify([
+          {
+            id: 1,
+            obra_id: 101,
+            obra_nome: 'Solo Leveling Mango',
+            obra_slug: 'solo-leveling-mango',
+            imagem: 'https://cdn.mangotoons.com/covers/101.jpg',
+            published_at: '2026-09-08T10:00:00Z',
+          },
+        ]),
     });
 
     const limiter = new HostRateLimiter(10);
     const adapter = new MangoToonsAdapter(limiter, mockTransport as any);
 
-    const result = await adapter.fetchUpdatedWorks('1', { mode: 'bootstrap' });
+    const result = await adapter.fetchUpdatedWorks('2026-09-08T09:00:00Z|0', { mode: 'bootstrap' });
 
     expect(result.works.length).toBe(1);
     expect(result.works[0].sourceWorkId).toBe('101');
     expect(result.works[0].title).toBe('Solo Leveling Mango');
-    expect(result.nextCursor).toBe('2');
+    expect(result.nextCursor).toBe('2026-09-08T10:00:00Z|1');
 
-    // Verify request headers
-    const [callUrl, callInit] = mockTransport.mock.calls[0];
-    expect(callUrl).toContain('/obras?pagina=1&limite=24');
-    expect(callInit.headers['User-Agent']).toBe('-');
-    expect(callInit.headers['sec-fetch-mode']).toBe('none');
+    // Verify request URL
+    const [callUrl] = mockTransport.mock.calls[0];
+    expect(callUrl).toContain('/obras/lancamentos?limite=48');
   });
 
   it('fetches work details and maps kind, status, and genres', async () => {
@@ -112,35 +108,26 @@ describe('MangoToonsAdapter & Decryptor', () => {
   it('fetches chapters and chapter pages correctly', async () => {
     const mockTransport = vi
       .fn()
-      // First call: /obras/202
+      // First call: /obras/202/capitulos
       .mockResolvedValueOnce({
         ok: true,
         headers: new Headers({ 'content-type': 'application/json' }),
         text: async () =>
-          JSON.stringify({
-            obra: {
-              id: 202,
-              capitulos: [
-                { id: 1001, numero: 2, nome: 'Capítulo 2', total_paginas: 20 },
-                { id: 1000, numero: 1, nome: 'Capítulo 1', total_paginas: 18 },
-              ],
-            },
-          }),
+          JSON.stringify([
+            { id: 1001, numero: 2, nome: 'Capítulo 2', total_paginas: 20 },
+            { id: 1000, numero: 1, nome: 'Capítulo 1', total_paginas: 18 },
+          ]),
       })
-      // Second call: /obras/202/capitulos/1
+      // Second call: /leitor/obras/202/capitulos/1/manifest
       .mockResolvedValueOnce({
         ok: true,
         headers: new Headers({ 'content-type': 'application/json' }),
         text: async () =>
           JSON.stringify({
-            capitulo: {
-              id: 1000,
-              numero: 1,
-              paginas: [
-                { numero: 2, url: 'https://cdn.mangotoons.com/p2.jpg' },
-                { numero: 1, url: '/p1.jpg' },
-              ],
-            },
+            pages: [
+              { index: 1, url: 'https://cdn.mangotoons.com/p2.jpg' },
+              { index: 0, url: '/p1.jpg' },
+            ],
           }),
       });
 
@@ -155,7 +142,7 @@ describe('MangoToonsAdapter & Decryptor', () => {
 
     const pages = await adapter.fetchChapterPages(chapters[0].sourceChapterId, 1);
     expect(pages.length).toBe(2);
-    // Should be sorted ascending by numero: page 1 first, then page 2
+    // Should be sorted ascending by index: page 1 first, then page 2
     expect(pages[0]).toBe('https://cdn.mangotoons.com/p1.jpg');
     expect(pages[1]).toBe('https://cdn.mangotoons.com/p2.jpg');
   });

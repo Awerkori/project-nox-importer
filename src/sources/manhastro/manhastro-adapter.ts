@@ -404,8 +404,10 @@ export class ManhastroAdapter implements SourceAdapter {
   }
 
   async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
-    const details = await this.fetchWorkDetails(sourceWorkId);
-    const chapters = await this.fetchChapters(sourceWorkId);
+    const [details, chapters] = await Promise.all([
+      this.fetchWorkDetails(sourceWorkId),
+      this.fetchChapters(sourceWorkId),
+    ]);
     return { details, chapters };
   }
 

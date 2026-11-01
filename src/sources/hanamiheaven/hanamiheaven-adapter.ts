@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { slugify, decodeHtmlEntities, stripHtml, extractChapterNumber } from '../common/html-utils.js';
@@ -297,6 +297,14 @@ export class HanamiHeavenAdapter implements SourceAdapter {
 
     chapters.sort((a, b) => a.number - b.number);
     return chapters;
+  }
+
+  async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
+    const [details, chapters] = await Promise.all([
+      this.fetchWorkDetails(sourceWorkId),
+      this.fetchChapters(sourceWorkId),
+    ]);
+    return { details, chapters };
   }
 
   async fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]> {

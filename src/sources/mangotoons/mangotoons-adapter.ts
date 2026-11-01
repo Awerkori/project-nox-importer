@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { decryptMangoPayload, DEFAULT_MANGOTOONS_ENC_KEY, DEFAULT_MANGOTOONS_SALT } from './mangotoons-decryptor.js';
@@ -232,7 +232,7 @@ export class MangoToonsAdapter implements SourceAdapter {
 
   async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
     const data = await this.requestApi(`/obras/${sourceWorkId}/capitulos?pagina=1&limite=500`);
-    const chaptersList = Array.isArray(data) ? data : data.capitulos || data.items || data.dados || [];
+    const chaptersList = Array.isArray(data) ? data : data.capitulos || data.items || data.dados || data.obra?.capitulos || [];
 
     const summaries: SourceChapterSummary[] = chaptersList.map((ch: any) => {
       const num = typeof ch.numero === 'number' ? ch.numero : parseFloat(ch.numero);
@@ -250,6 +250,14 @@ export class MangoToonsAdapter implements SourceAdapter {
 
     // Return chapters sorted by chapter number ascending for clarity
     return summaries.sort((a, b) => a.number - b.number);
+  }
+
+  async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
+    const [details, chapters] = await Promise.all([
+      this.fetchWorkDetails(sourceWorkId),
+      this.fetchChapters(sourceWorkId),
+    ]);
+    return { details, chapters };
   }
 
   async fetchChapterPages(sourceChapterId: string, chapterNumber?: number): Promise<string[]> {

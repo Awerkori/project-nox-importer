@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 export declare class MangoToonsAdapter implements SourceAdapter {
     private rateLimiter;
@@ -24,6 +24,7 @@ export declare class MangoToonsAdapter implements SourceAdapter {
     }>;
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
+    fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot>;
     fetchChapterPages(sourceChapterId: string, chapterNumber?: number): Promise<string[]>;
     private resolveCoverUrl;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
