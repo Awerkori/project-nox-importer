@@ -715,7 +715,7 @@ export class ImporterLiteRuntime {
         const probe = this.lastSiteProbe;
         const checkedAt = Date.parse(probe.checkedAt);
         return this.sourceMetadataPool !== this.pool
-            && (this.sourceMetadataPool.waitingCount || 0) > 1
+            && (this.sourceMetadataPool.waitingCount || 0) > 0
             && (this.pool.waitingCount || 0) === 0
             && (this.pool.idleCount || 0) >= minimumIdle
             && probe.state === 'HEALTHY'
@@ -3956,11 +3956,9 @@ export class ImporterLiteRuntime {
                     AND COALESCE(m.bytes, 0) >= 1500
                 )
               ) AS has_presentation,
-              (SELECT count(*)::int
-               FROM unnest($4::text[]) AS req(scid)
-               WHERE EXISTS (
-                 SELECT 1 FROM matched_sources ms WHERE ms.source_chapter_id = req.scid
-               )) AS matched_chapters,
+              (SELECT count(DISTINCT ms.source_chapter_id)::int
+               FROM matched_sources ms
+               WHERE ms.source_chapter_id = ANY($4::text[])) AS matched_chapters,
               EXISTS (
                 SELECT 1 FROM importer_lite_tasks bt
                 WHERE bt.work_id = $1::uuid

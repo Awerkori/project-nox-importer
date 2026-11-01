@@ -205,7 +205,7 @@ export class MangoToonsAdapter {
     }
     async fetchChapters(sourceWorkId) {
         const data = await this.requestApi(`/obras/${sourceWorkId}/capitulos?pagina=1&limite=500`);
-        const chaptersList = Array.isArray(data) ? data : data.capitulos || data.items || data.dados || [];
+        const chaptersList = Array.isArray(data) ? data : data.capitulos || data.items || data.dados || data.obra?.capitulos || [];
         const summaries = chaptersList.map((ch) => {
             const num = typeof ch.numero === 'number' ? ch.numero : parseFloat(ch.numero);
             return {
@@ -221,6 +221,13 @@ export class MangoToonsAdapter {
         });
         // Return chapters sorted by chapter number ascending for clarity
         return summaries.sort((a, b) => a.number - b.number);
+    }
+    async fetchWorkSnapshot(sourceWorkId, _signal) {
+        const [details, chapters] = await Promise.all([
+            this.fetchWorkDetails(sourceWorkId),
+            this.fetchChapters(sourceWorkId),
+        ]);
+        return { details, chapters };
     }
     async fetchChapterPages(sourceChapterId, chapterNumber) {
         // sourceChapterId is formatted as "${sourceWorkId}:${chapterIdOrNumber}"

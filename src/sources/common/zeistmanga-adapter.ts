@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { Logger } from '../../core/logger.js';
 import { cleanAlternativeTitle } from '../../core/alternative-titles.js';
@@ -206,113 +206,95 @@ export class ZeistMangaAdapter implements SourceAdapter {
     }
   }
 
-  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
-    const [workUrl] = sourceWorkId.split('|');
-    const targetUrl = workUrl.startsWith('http') ? workUrl : `${this.baseUrl}/${workUrl}.html`;
+  private parseWorkDetailsFromHtml(sourceWorkId: string, html: string): SourceWorkDetails {
+    // Blogger templates frequently put the site name in their first <h1>.
+    // Prefer explicit document metadata/data attributes, which are stable
+    // across theme layout changes and represent the actual series title.
+    const dataTitleMatch = html.match(/data-title=["']([^"']+)["']/i);
+    const titleMatch = dataTitleMatch ||
+      html.match(/itemprop=["']name["'][^>]*>([\s\S]*?)<\/h1>/i) ||
+      html.match(/<h1[^>]*class=["'][^"']*entry-title[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i) ||
+      html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
+      html.match(/<title>([^<-]+)/i);
+    const title = (dataTitleMatch ? decodeHtmlEntities(dataTitleMatch[1]).trim() : undefined) ||
+      metaContent(html, ['og:title', 'twitter:title', 'title']) ||
+      decodeHtmlEntities(stripHtml(titleMatch ? titleMatch[1] : 'Sem Título')).trim();
 
-    try {
-      const html = await this.fetchHtml(targetUrl);
+    const descMatch = html.match(/id=["']synopsis["'][^>]*>([\s\S]*?)<\/div>/i) ||
+      html.match(/class=["'][^"']*synopsis[^"']*["'][^>]*>([\s\S]*?)<\/div>/i) ||
+      html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
+    const synopsis = descMatch ? decodeHtmlEntities(stripHtml(descMatch[1])).trim() : undefined;
 
-      // Blogger templates frequently put the site name in their first <h1>.
-      // Prefer explicit document metadata/data attributes, which are stable
-      // across theme layout changes and represent the actual series title.
-      const dataTitleMatch = html.match(/data-title=["']([^"']+)["']/i);
-      const titleMatch = dataTitleMatch ||
-        html.match(/itemprop=["']name["'][^>]*>([\s\S]*?)<\/h1>/i) ||
-        html.match(/<h1[^>]*class=["'][^"']*entry-title[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i) ||
-        html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
-        html.match(/<title>([^<-]+)/i);
-      const title = (dataTitleMatch ? decodeHtmlEntities(dataTitleMatch[1]).trim() : undefined) ||
-        metaContent(html, ['og:title', 'twitter:title', 'title']) ||
-        decodeHtmlEntities(stripHtml(titleMatch ? titleMatch[1] : 'Sem Título')).trim();
+    const isDecorativeImage = (u: string) => /(?:iconify\.design|ads\.png|embed|logo|banner|avatar|capa-oculta|doacao|recrutamento|discord|telegram)/i.test(u);
+    const dataOrigMatch = html.match(/<img[^>]+data-original-height=["']\d+["'][^>]+src=["']([^"']+)["']/i)
+      || html.match(/<img[^>]+src=["']([^"']+)["'][^>]+data-original-height=["']\d+["']/i);
+    const bgStyleMatch = [...html.matchAll(/background-image:\s*url\((?:&quot;|["'])?(https?:\/\/(?:blogger\.googleusercontent\.com|\d+\.bp\.blogspot\.com)[^"')\s&]+)(?:&quot;|["'])?\)/gi)]
+      .map((m) => decodeHtmlEntities(m[1]).trim())
+      .find((u) => !isDecorativeImage(u));
+    const coverMatch = html.match(/data-image=["']([^"']+)["']/i) ||
+      html.match(/class=["'][^"']*entry-content[^"']*["'][\s\S]*?<img[^>]+src=["']([^"']+)["']/i) ||
+      dataOrigMatch;
+    const rawCoverUrl = metaContent(html, ['og:image', 'twitter:image'])
+      || (coverMatch ? decodeHtmlEntities(coverMatch[1]).trim() : undefined)
+      || bgStyleMatch;
+    const coverUrl = rawCoverUrl && !isDecorativeImage(rawCoverUrl)
+      ? rawCoverUrl.replace(/\/s72(?:-c)?\//, '/s1600/')
+      : bgStyleMatch?.replace(/\/s72(?:-c)?\//, '/s1600/');
 
-      const descMatch = html.match(/id=["']synopsis["'][^>]*>([\s\S]*?)<\/div>/i) ||
-        html.match(/class=["'][^"']*synopsis[^"']*["'][^>]*>([\s\S]*?)<\/div>/i) ||
-        html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
-      const synopsis = descMatch ? decodeHtmlEntities(stripHtml(descMatch[1])).trim() : undefined;
-
-      const isDecorativeImage = (u: string) => /(?:iconify\.design|ads\.png|embed|logo|banner|avatar|capa-oculta|doacao|recrutamento|discord|telegram)/i.test(u);
-      const dataOrigMatch = html.match(/<img[^>]+data-original-height=["']\d+["'][^>]+src=["']([^"']+)["']/i)
-        || html.match(/<img[^>]+src=["']([^"']+)["'][^>]+data-original-height=["']\d+["']/i);
-      const bgStyleMatch = [...html.matchAll(/background-image:\s*url\((?:&quot;|["'])?(https?:\/\/(?:blogger\.googleusercontent\.com|\d+\.bp\.blogspot\.com)[^"')\s&]+)(?:&quot;|["'])?\)/gi)]
-        .map((m) => decodeHtmlEntities(m[1]).trim())
-        .find((u) => !isDecorativeImage(u));
-      const coverMatch = html.match(/data-image=["']([^"']+)["']/i) ||
-        html.match(/class=["'][^"']*entry-content[^"']*["'][\s\S]*?<img[^>]+src=["']([^"']+)["']/i) ||
-        dataOrigMatch;
-      const rawCoverUrl = metaContent(html, ['og:image', 'twitter:image'])
-        || (coverMatch ? decodeHtmlEntities(coverMatch[1]).trim() : undefined)
-        || bgStyleMatch;
-      const coverUrl = rawCoverUrl && !isDecorativeImage(rawCoverUrl)
-        ? rawCoverUrl.replace(/\/s72(?:-c)?\//, '/s1600/')
-        : bgStyleMatch?.replace(/\/s72(?:-c)?\//, '/s1600/');
-
-      const genres: string[] = [];
-      const genreMatches = html.matchAll(/rel=["']tag["'][^>]*>([^<]+)<\/a>/gi);
-      for (const m of genreMatches) {
-        const g = decodeHtmlEntities(m[1]).trim();
-        if (g && !genres.includes(g) && g.toLowerCase() !== 'series') {
-          genres.push(g);
-        }
+    const genres: string[] = [];
+    const genreMatches = html.matchAll(/rel=["']tag["'][^>]*>([^<]+)<\/a>/gi);
+    for (const m of genreMatches) {
+      const g = decodeHtmlEntities(m[1]).trim();
+      if (g && !genres.includes(g) && g.toLowerCase() !== 'series') {
+        genres.push(g);
       }
-
-      // Alternative Titles
-      let alternativeTitles: string[] = [];
-      const cleanHtml = html
-        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ');
-      const altMatch = cleanHtml.match(/(?:alter(?:native)?|outros?\s+nomes?|sin[oô]nimos?|t[ií]tulos?\s*alternativos?)[^<:]*[:<\/][^>]*>([\s\S]*?)<\/(?:span|div|p|dd|li)>/i)
-        || cleanHtml.match(/class=["'][^"']*(?:alter|alternative)[^"']*["'][^>]*>([\s\S]*?)<\//i);
-      if (altMatch) {
-        const rawAlt = stripHtml(altMatch[1]);
-        const normalizedRaw = rawAlt.replace(/<br\s*\/?>/gi, '\n');
-        const lines = normalizedRaw.includes('\n')
-          ? normalizedRaw.split(/[\r\n]+/)
-          : normalizedRaw.includes(';')
-            ? rawAlt.split(/;+/)
-            : normalizedRaw.includes(' / ')
-              ? rawAlt.split(/\s+\/\s+/)
-              : rawAlt.split(/[,;\/\n\r]+/);
-        alternativeTitles = lines
-          .map((s) => cleanAlternativeTitle(s))
-          .filter((s): s is string => typeof s === 'string' && s.length > 0 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
-      }
-
-      return {
-        sourceWorkId,
-        title,
-        slug: slugify(title),
-        coverUrl: coverUrl || null,
-        synopsis,
-        genres: genres.length > 0 ? genres : undefined,
-        alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
-        status: 'ONGOING',
-      };
-    } catch (err: any) {
-      this.logger.warn(`fetchWorkDetails fallback for ${sourceWorkId}: ${err.message}`);
-      // A placeholder is not source evidence for a legitimate empty tag or
-      // alias list. Preserve the distinction between parser output and a
-      // failed upstream read.
-      throw err;
     }
+
+    // Alternative Titles
+    let alternativeTitles: string[] = [];
+    const cleanHtml = html
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ');
+    const altMatch = cleanHtml.match(/(?:alter(?:native)?|outros?\s+nomes?|sin[oô]nimos?|t[ií]tulos?\s*alternativos?)[^<:]*[:<\/][^>]*>([\s\S]*?)<\/(?:span|div|p|dd|li)>/i)
+      || cleanHtml.match(/class=["'][^"']*(?:alter|alternative)[^"']*["'][^>]*>([\s\S]*?)<\//i);
+    if (altMatch) {
+      const rawAlt = stripHtml(altMatch[1]);
+      const normalizedRaw = rawAlt.replace(/<br\s*\/?>/gi, '\n');
+      const lines = normalizedRaw.includes('\n')
+        ? normalizedRaw.split(/[\r\n]+/)
+        : normalizedRaw.includes(';')
+          ? rawAlt.split(/;+/)
+          : normalizedRaw.includes(' / ')
+            ? rawAlt.split(/\s+\/\s+/)
+            : rawAlt.split(/[,;\/\n\r]+/);
+      alternativeTitles = lines
+        .map((s) => cleanAlternativeTitle(s))
+        .filter((s): s is string => typeof s === 'string' && s.length > 0 && !/^(?:n\/a|none|sem\s+t[ií]tulo|-)$/i.test(s));
+    }
+
+    return {
+      sourceWorkId,
+      title,
+      slug: slugify(title),
+      coverUrl: coverUrl || null,
+      synopsis,
+      genres: genres.length > 0 ? genres : undefined,
+      alternativeTitles: alternativeTitles.length > 0 ? alternativeTitles : undefined,
+      status: 'ONGOING',
+    };
   }
 
-  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
-    const [workUrl, labelHint] = sourceWorkId.split('|');
-    const targetUrl = workUrl.startsWith('http') ? workUrl : `${this.baseUrl}/${workUrl}.html`;
-
+  private async fetchChaptersFromHtmlAndFeed(
+    sourceWorkId: string,
+    targetUrl: string,
+    html: string,
+    labelHint?: string,
+  ): Promise<SourceChapterSummary[]> {
     try {
       let label = labelHint;
-
-      // 1. Try to get cleaner label from the work page if available
-      try {
-        const html = await this.fetchHtml(targetUrl);
-        const m = html.match(/data-labelchapter=["']([^"']+)["']/i);
-        if (m && m[1] && !m[1].toLowerCase().includes('pesquisar') && !m[1].toLowerCase().includes('search')) {
-          label = m[1].trim();
-        }
-      } catch (_) {
-        // use labelHint
+      const m = html.match(/data-labelchapter=["']([^"']+)["']/i);
+      if (m && m[1] && !m[1].toLowerCase().includes('pesquisar') && !m[1].toLowerCase().includes('search')) {
+        label = m[1].trim();
       }
 
       if (!label) {
@@ -354,6 +336,25 @@ export class ZeistMangaAdapter implements SourceAdapter {
       this.logger.error(`fetchChapters failed for ${sourceWorkId}: ${err.message}`);
       return [];
     }
+  }
+
+  async fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot> {
+    const [workUrl, labelHint] = sourceWorkId.split('|');
+    const targetUrl = workUrl.startsWith('http') ? workUrl : `${this.baseUrl}/${workUrl}.html`;
+    const html = await this.fetchHtml(targetUrl);
+    const details = this.parseWorkDetailsFromHtml(sourceWorkId, html);
+    const chapters = await this.fetchChaptersFromHtmlAndFeed(sourceWorkId, targetUrl, html, labelHint);
+    return { details, chapters };
+  }
+
+  async fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails> {
+    const [workUrl] = sourceWorkId.split('|');
+    const targetUrl = workUrl.startsWith('http') ? workUrl : `${this.baseUrl}/${workUrl}.html`;
+    return this.parseWorkDetailsFromHtml(sourceWorkId, await this.fetchHtml(targetUrl));
+  }
+
+  async fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]> {
+    return (await this.fetchWorkSnapshot(sourceWorkId)).chapters;
   }
 
   async fetchChapterPages(sourceChapterId: string): Promise<string[]> {

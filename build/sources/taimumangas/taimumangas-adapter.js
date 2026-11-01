@@ -163,6 +163,13 @@ export class TaimuMangasAdapter {
         chapters.sort((a, b) => a.number - b.number);
         return chapters;
     }
+    async fetchWorkSnapshot(sourceWorkId, _signal) {
+        const [details, chapters] = await Promise.all([
+            this.fetchWorkDetails(sourceWorkId),
+            this.fetchChapters(sourceWorkId),
+        ]);
+        return { details, chapters };
+    }
     async fetchChapterPages(sourceChapterId, _chapterNumber) {
         const url = `${this.apiUrl}/chapters/${sourceChapterId}?adult=true`;
         const data = await this.request(url);

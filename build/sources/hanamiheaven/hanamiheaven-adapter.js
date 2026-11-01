@@ -267,6 +267,13 @@ export class HanamiHeavenAdapter {
         chapters.sort((a, b) => a.number - b.number);
         return chapters;
     }
+    async fetchWorkSnapshot(sourceWorkId, _signal) {
+        const [details, chapters] = await Promise.all([
+            this.fetchWorkDetails(sourceWorkId),
+            this.fetchChapters(sourceWorkId),
+        ]);
+        return { details, chapters };
+    }
     async fetchChapterPages(sourceChapterId, _chapterNumber) {
         const chPath = sourceChapterId.replace(/^\//, '').replace(/\/$/, '');
         const url = `${this.baseUrl}/manga/${chPath}/?style=list`;

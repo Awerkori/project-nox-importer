@@ -1,4 +1,4 @@
-import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary } from '../types.js';
+import { SourceAdapter, SourceWorkSummary, SourceWorkDetails, SourceChapterSummary, SourceWorkSnapshot } from '../types.js';
 import { HostRateLimiter } from '../../core/rate-limiter.js';
 export declare class HanamiHeavenAdapter implements SourceAdapter {
     private rateLimiter;
@@ -21,6 +21,7 @@ export declare class HanamiHeavenAdapter implements SourceAdapter {
     }>;
     fetchWorkDetails(sourceWorkId: string): Promise<SourceWorkDetails>;
     fetchChapters(sourceWorkId: string): Promise<SourceChapterSummary[]>;
+    fetchWorkSnapshot(sourceWorkId: string, _signal?: AbortSignal): Promise<SourceWorkSnapshot>;
     fetchChapterPages(sourceChapterId: string, _chapterNumber?: number): Promise<string[]>;
     searchWorks(query: string): Promise<SourceWorkSummary[]>;
     getImageHeaders(_url: string): Record<string, string>;

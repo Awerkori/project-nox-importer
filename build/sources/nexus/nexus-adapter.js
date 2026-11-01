@@ -288,6 +288,13 @@ export class NexusAdapter {
             pageCount: ch.page_count ?? undefined,
         }));
     }
+    async fetchWorkSnapshot(sourceWorkId, _signal) {
+        const [details, chapters] = await Promise.all([
+            this.fetchWorkDetails(sourceWorkId),
+            this.fetchChapters(sourceWorkId),
+        ]);
+        return { details, chapters };
+    }
     async fetchChapterPages(sourceChapterId) {
         const url = `${this.functionsUrl}/read-chapter`;
         const res = await this.request(url, {

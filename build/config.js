@@ -54,7 +54,7 @@ const ConfigSchema = z.object({
     // leaving 4 seats for Reader Hyperdrive, Sentinel, and deploy overlap)
     // never saturates YugabyteDB Aeon connection slots while preventing single-connection head-of-line blocking.
     DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(3),
-    METADATA_DB_POOL_MAX: z.coerce.number().int().min(1).max(4).default(2),
+    METADATA_DB_POOL_MAX: z.coerce.number().int().min(1).max(4).default(3),
     // At the measured 52.75 MiB median chapter size, the former 4 MiB/s global
     // ceiling could never reach the 8/min acceptance floor (4.55/min before
     // network and publication overhead). Eight MiB/s is the first reversible
