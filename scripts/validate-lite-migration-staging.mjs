@@ -43,6 +43,7 @@ const migrationPaths = [
   'migrations/20261015230000_lite_admit_presentable_unpublished_work.sql',
   'migrations/20261101010000_lite_progress_unpublished_index.sql',
   'migrations/20261101020000_drop_redundant_done_tasks_index.sql',
+  'migrations/20261101030000_optimize_source_health_conflict_filter.sql',
 ];
 const migration = migrationPaths.map((migrationPath) => fs.readFileSync(path.resolve(migrationPath), 'utf8')).join('\n');
 const migrationSha256 = crypto.createHash('sha256').update(migration).digest('hex');

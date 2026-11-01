@@ -49,6 +49,7 @@ const extremeYsqlCpuAndIndexMigration = readFileSync(resolve(process.cwd(), 'mig
 const fixReadyWorkPublishPriorityMigration = readFileSync(resolve(process.cwd(), 'migrations/20261031210000_fix_ready_work_publish_priority.sql'), 'utf8');
 const progressUnpublishedIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261101010000_lite_progress_unpublished_index.sql'), 'utf8');
 const dropRedundantDoneTasksIndexMigration = readFileSync(resolve(process.cwd(), 'migrations/20261101020000_drop_redundant_done_tasks_index.sql'), 'utf8');
+const optimizeSourceHealthConflictFilterMigration = readFileSync(resolve(process.cwd(), 'migrations/20261101030000_optimize_source_health_conflict_filter.sql'), 'utf8');
 
 const ids = {
   staff: '00000000-0000-4000-8000-000000000001',
@@ -184,6 +185,7 @@ async function createSchema(db: PGlite, options: { optionalRoles?: boolean } = {
   await db.exec(fixReadyWorkPublishPriorityMigration);
   await db.exec(progressUnpublishedIndexMigration);
   await db.exec(dropRedundantDoneTasksIndexMigration);
+  await db.exec(optimizeSourceHealthConflictFilterMigration);
 }
 
 describe('LiteRepository against the additive Lite migration', () => {
