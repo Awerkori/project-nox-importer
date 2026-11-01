@@ -706,14 +706,14 @@ export class ImporterLiteRuntime {
         this.aliasOnlyRepo = new AliasOnlyRepository(sourceMetadataPool);
         this.coverVisionQueue = new CoverVisionQueue(sourceMetadataPool);
     }
-    /** Borrow only an already-idle connection, preserving a seat and a fast Reader. */
-    mayBorrowPrimaryForMonitor() {
+    /** Borrow only idle SQL capacity while a recent Reader probe is fast. */
+    mayBorrowPrimaryForMonitor(minimumIdle = 1) {
         const probe = this.lastSiteProbe;
         const checkedAt = Date.parse(probe.checkedAt);
         return this.sourceMetadataPool !== this.pool
             && (this.sourceMetadataPool.waitingCount || 0) > 1
             && (this.pool.waitingCount || 0) === 0
-            && (this.pool.idleCount || 0) >= 2
+            && (this.pool.idleCount || 0) >= minimumIdle
             && probe.state === 'HEALTHY'
             && Number.isFinite(checkedAt) && Date.now() - checkedAt <= 180_000
             && probe.latencyMs !== null && probe.latencyMs <= 2_000;
@@ -3867,7 +3867,7 @@ export class ImporterLiteRuntime {
                 && !task.checkpoint?.manifestFingerprint
                 && fpChapters.length > 0) {
                 try {
-                    const checkPool = this.mayBorrowPrimaryForMonitor() ? this.pool : (this.sourceMetadataPool || this.pool);
+                    const checkPool = this.mayBorrowPrimaryForMonitor(2) ? this.pool : (this.sourceMetadataPool || this.pool);
                     const dbManifest = await checkPool.query(`
             WITH work_known_chapters AS MATERIALIZED (
               SELECT lc.canonical_chapter_key
