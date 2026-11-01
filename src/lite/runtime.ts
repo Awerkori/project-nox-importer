@@ -1286,10 +1286,10 @@ export class ImporterLiteRuntime {
    */
   private async refillP0MonitorCoverage(): Promise<void> {
     if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active) return;
-    // Coverage enrollment runs dynamically: while works are being enrolled,
-    // progress rapidly in bounded batches. In steady-state with all sources covered,
-    // it relaxes to a two-minute cadence to preserve SQL headroom.
-    const minInterval = (this.p0CoverageZeroStreak >= 43) ? 120_000 : 5_000;
+    // Coverage enrollment runs dynamically: while works are being enrolled or sources
+    // are being checked during an active pass, progress rapidly in bounded batches.
+    // In steady-state with all 43 sources verified covered, it relaxes to a two-minute cadence.
+    const minInterval = (this.p0CoverageZeroStreak >= 43) ? 120_000 : 500;
     if (Date.now() - this.lastP0CoverageRefillAt < minInterval) return;
     if (!this.p0MonitorCoverageRefillGate.tryAcquire()) return;
     this.lastP0CoverageRefillAt = Date.now();
@@ -1307,11 +1307,15 @@ export class ImporterLiteRuntime {
         this.p0CoverageZeroStreak = 0;
         this.logger.info('Expanded durable P0 monitor coverage', refill);
         if (!this.stopped && this.isRuntimeLeader && !(process.env.NODE_ENV === 'test' || process.env.VITEST)) {
-          const nextRefill = setTimeout(() => void this.refillP0MonitorCoverage().catch(() => {}), 1_000);
+          const nextRefill = setTimeout(() => void this.refillP0MonitorCoverage().catch(() => {}), 500);
           nextRefill.unref();
         }
       } else if (refill.source) {
         this.p0CoverageZeroStreak += 1;
+        if (this.p0CoverageZeroStreak < 43 && !this.stopped && this.isRuntimeLeader && !(process.env.NODE_ENV === 'test' || process.env.VITEST)) {
+          const nextRefill = setTimeout(() => void this.refillP0MonitorCoverage().catch(() => {}), 500);
+          nextRefill.unref();
+        }
       }
     } catch (error: any) {
       this.p0MonitorCoverage = {

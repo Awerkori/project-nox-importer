@@ -256,4 +256,45 @@ describe('P0 Universal Monitoring & Status Integrity', () => {
     expect(passedBusySources).toContain('buffered-src');
     expect(passedBusySources).not.toContain('light-src');
   });
+
+  it('chains coverage refill turns rapidly while inspecting 43 sources and relaxes when streak reaches 43', async () => {
+    const runtime = Object.create(ImporterLiteRuntime.prototype) as any;
+    let callCount = 0;
+    const refill = vi.fn().mockImplementation(async () => {
+      callCount++;
+      return { source: `source-${callCount}`, admitted: 0, revived: 0 };
+    });
+    Object.assign(runtime, {
+      isRuntimeLeader: true,
+      stopped: false,
+      manualProtectiveStop: { active: false },
+      p0MonitorCoverageRefillGate: new AsyncSemaphore(1),
+      queue: { refillP0MonitorCoverage: refill },
+      p0CoverageZeroStreak: 0,
+      lastP0CoverageRefillAt: 0,
+    });
+
+    await runtime.refillP0MonitorCoverage();
+    expect(refill).toHaveBeenCalledTimes(1);
+    expect(runtime.p0CoverageZeroStreak).toBe(1);
+
+    // With zero streak < 43, interval is 500ms, so 600ms elapsed allows immediate next turn
+    runtime.lastP0CoverageRefillAt = Date.now() - 600;
+    await runtime.refillP0MonitorCoverage();
+    expect(refill).toHaveBeenCalledTimes(2);
+    expect(runtime.p0CoverageZeroStreak).toBe(2);
+
+    // When streak reaches 43, minInterval relaxes to 120s
+    runtime.p0CoverageZeroStreak = 43;
+    runtime.lastP0CoverageRefillAt = Date.now() - 600;
+    await runtime.refillP0MonitorCoverage();
+    // Still 2 calls because 120s has not elapsed
+    expect(refill).toHaveBeenCalledTimes(2);
+
+    // Once 120s elapses, it runs again
+    runtime.lastP0CoverageRefillAt = Date.now() - 120_001;
+    await runtime.refillP0MonitorCoverage();
+    expect(refill).toHaveBeenCalledTimes(3);
+  });
 });
+
