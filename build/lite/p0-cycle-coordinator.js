@@ -745,4 +745,15 @@ export class P0CycleCoordinator {
     getMatcher() {
         return this.matcher;
     }
+    setMatcher(matcher, eligibleCount) {
+        this.matcher = matcher;
+        this.canonicalWorkCount = matcher.canonicalWorks.length;
+        if (eligibleCount)
+            this.eligibleWorkCount = eligibleCount;
+        if (this.state?.metrics) {
+            this.state.metrics.canonicalWorks = matcher.canonicalWorks.length;
+            if (eligibleCount)
+                this.state.metrics.eligibleWorks = eligibleCount;
+        }
+    }
 }
