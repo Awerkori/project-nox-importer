@@ -622,6 +622,14 @@ export class P0CycleCoordinator {
     }
     for (const [key, entry] of Object.entries(this.state?.coverage || {})) this.coverage.set(key, entry);
     for (const workId of this.state?.verifiedWorkIds || []) this.verifiedWorkIds.add(workId);
+    if (this.state?.metrics) {
+      if (this.canonicalWorkCount > 0 && (!this.state.metrics.canonicalWorks || this.state.metrics.canonicalWorks === 0)) {
+        this.state.metrics.canonicalWorks = this.canonicalWorkCount;
+      }
+      if (this.eligibleWorkCount > 0 && (!this.state.metrics.eligibleWorks || this.state.metrics.eligibleWorks === 0)) {
+        this.state.metrics.eligibleWorks = this.eligibleWorkCount;
+      }
+    }
     this.loaded = true;
     return this.state ? structuredClone(this.state) : null;
   }
@@ -909,6 +917,10 @@ export class P0CycleCoordinator {
 
   getAccumulatedMetrics(): P0AccumulatedMetrics {
     return cloneAccumulatedMetrics(this.state?.accumulatedMetrics);
+  }
+
+  getSourceProgress(): Record<string, number> {
+    return structuredClone(this.state?.sourceProgress || {});
   }
 
   getCycleMetrics(): P0CycleMetrics {

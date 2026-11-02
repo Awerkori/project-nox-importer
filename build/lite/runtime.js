@@ -1443,7 +1443,12 @@ export class ImporterLiteRuntime {
             if (!enabledSources.length) {
                 enabledSources = ['mangaflix', 'nexus', 'manhastro', 'mangotoons', 'taimumangas', 'hipercool', 'hanamiheaven'];
             }
-            const source = enabledSources[this.p0CycleSourceIndex % enabledSources.length];
+            // Prioritize uninspected sources in the current active cycle to complete cycles efficiently
+            const processedSources = new Set(Object.keys(coordinator.getSourceProgress()));
+            const pendingSources = enabledSources.filter((s) => !processedSources.has(s));
+            const source = pendingSources.length > 0
+                ? pendingSources[0]
+                : enabledSources[this.p0CycleSourceIndex % enabledSources.length];
             this.p0CycleSourceIndex = (this.p0CycleSourceIndex + 1) % enabledSources.length;
             const checkCycleAdvancement = async () => {
                 const metrics = coordinator.getCycleMetrics();
