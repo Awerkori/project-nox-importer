@@ -572,10 +572,10 @@ function addCycleToAccumulated(
 
 /** Durable lifecycle coordinator for one bounded P0 catalog cycle. */
 export class P0CycleCoordinator {
-  private readonly matcher: SourceCatalogMatcher;
+  private matcher: SourceCatalogMatcher;
   private readonly persistence: P0CyclePersistence;
-  private readonly eligibleWorkCount: number;
-  private readonly canonicalWorkCount: number;
+  private eligibleWorkCount: number;
+  private canonicalWorkCount: number;
   private readonly now: () => Date;
   private readonly p2AdmissionPolicy?: P2AdmissionPolicy;
   private readonly onNewMappingDiscovered?: (mapping: P0MappingInput) => Promise<void>;
@@ -922,5 +922,15 @@ export class P0CycleCoordinator {
 
   getMatcher(): SourceCatalogMatcher {
     return this.matcher;
+  }
+
+  setMatcher(matcher: SourceCatalogMatcher, eligibleCount?: number): void {
+    this.matcher = matcher;
+    this.canonicalWorkCount = matcher.canonicalWorks.length;
+    if (eligibleCount) this.eligibleWorkCount = eligibleCount;
+    if (this.state?.metrics) {
+      this.state.metrics.canonicalWorks = matcher.canonicalWorks.length;
+      if (eligibleCount) this.state.metrics.eligibleWorks = eligibleCount;
+    }
   }
 }

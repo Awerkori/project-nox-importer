@@ -1305,19 +1305,24 @@ export class ImporterLiteRuntime {
     }
     async loadCanonicalWorksForMatcher() {
         try {
-            const result = await this.getAvailablePool().query(`
+            const pool = this.sourceMetadataPool || this.pool || this.getAvailablePool();
+            const result = await pool.query(`
         SELECT id::text, title, slug, aliases
         FROM works
         WHERE published = true
            OR EXISTS (SELECT 1 FROM importer_work_mappings m WHERE m.work_id = works.id)
         ORDER BY updated_at DESC
       `);
-            return (result.rows || []).map((row) => ({
+            const works = (result.rows || []).map((row) => ({
                 id: row.id,
                 title: row.title,
                 slug: row.slug,
                 aliases: row.aliases,
             }));
+            if (!works.length) {
+                this.logger.warn('loadCanonicalWorksForMatcher returned 0 works; retaining retryable state');
+            }
+            return works;
         }
         catch (error) {
             this.logger.warn('Failed to load canonical works for P0 matcher, using fallback', { error: error?.message });
@@ -1419,6 +1424,14 @@ export class ImporterLiteRuntime {
             return false;
         try {
             const coordinator = await this.initP0CycleCoordinator();
+            if (coordinator.canonicalWorks.length === 0) {
+                const freshWorks = await this.loadCanonicalWorksForMatcher();
+                if (freshWorks.length > 0) {
+                    coordinator.setMatcher(new SourceCatalogMatcher(freshWorks), freshWorks.length);
+                    this.p0CycleCoordinator = coordinator;
+                    this.logger.info('Refreshed P0 matcher canonical works in live turn', { count: freshWorks.length });
+                }
+            }
             const currentCycle = coordinator.getCycleMetrics();
             if (currentCycle.status !== 'RUNNING') {
                 await coordinator.resumeOrCreateCycle();

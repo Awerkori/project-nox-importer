@@ -177,10 +177,10 @@ export declare class ResilientP0CyclePersistence implements P0CyclePersistence {
 }
 /** Durable lifecycle coordinator for one bounded P0 catalog cycle. */
 export declare class P0CycleCoordinator {
-    private readonly matcher;
+    private matcher;
     private readonly persistence;
-    private readonly eligibleWorkCount;
-    private readonly canonicalWorkCount;
+    private eligibleWorkCount;
+    private canonicalWorkCount;
     private readonly now;
     private readonly p2AdmissionPolicy?;
     private readonly onNewMappingDiscovered?;
@@ -227,4 +227,5 @@ export declare class P0CycleCoordinator {
     getCycleMetrics(): P0CycleMetrics;
     get canonicalWorks(): readonly CanonicalWork[];
     getMatcher(): SourceCatalogMatcher;
+    setMatcher(matcher: SourceCatalogMatcher, eligibleCount?: number): void;
 }
