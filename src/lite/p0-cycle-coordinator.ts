@@ -316,54 +316,47 @@ export class SqlP0CyclePersistence implements P0CyclePersistence {
     if (this.schemaReady) return;
     await this.db.query(`
       CREATE TABLE IF NOT EXISTS public.importer_p0_cycles (
-        cycle_id uuid PRIMARY KEY,
-        status text NOT NULL CHECK (status IN ('IDLE','RUNNING','COMPLETED')),
+        id uuid PRIMARY KEY,
+        status text NOT NULL CHECK (status IN ('IDLE', 'RUNNING', 'COMPLETED')),
         started_at timestamptz NOT NULL,
-        finished_at timestamptz,
-        duration_seconds numeric,
-        total_eligible_works integer NOT NULL DEFAULT 10749,
-        unique_works_verified integer NOT NULL DEFAULT 0,
-        sources_inspected integer NOT NULL DEFAULT 0,
-        new_mappings_discovered integer NOT NULL DEFAULT 0,
-        metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+        completed_at timestamptz,
+        metrics jsonb NOT NULL DEFAULT '{}'::jsonb,
+        source_progress jsonb NOT NULL DEFAULT '{}'::jsonb,
+        updated_at timestamptz NOT NULL DEFAULT now()
       )`);
     this.schemaReady = true;
   }
 
   async loadLatestCycle(): Promise<PersistedP0Cycle | null> {
     await this.ensureSchema();
-    const result = await this.db.query<{
-      cycle_id: string;
-      status: P0CycleStatus;
-      started_at: string | Date;
-      finished_at: string | Date | null;
-      duration_seconds: number | string | null;
-      total_eligible_works: number;
-      unique_works_verified: number;
-      sources_inspected: number;
-      new_mappings_discovered: number;
-      metadata: any;
-    }>(`SELECT cycle_id, status, started_at, finished_at, duration_seconds, total_eligible_works, unique_works_verified, sources_inspected, new_mappings_discovered, metadata
-        FROM public.importer_p0_cycles ORDER BY started_at DESC LIMIT 1`);
+    const result = await this.db.query<any>(`
+      SELECT * FROM public.importer_p0_cycles ORDER BY started_at DESC LIMIT 1`);
     const row = result.rows[0];
     if (!row) return null;
-    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    const cycleId = String(row.id || row.cycle_id || '');
+    const completedAt = row.completed_at || row.finished_at;
+    const rawMetrics = typeof row.metrics === 'string' ? JSON.parse(row.metrics) : (row.metrics || {});
+    const rawMeta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    const meta = { ...rawMeta, ...rawMetrics };
+    const rawProgress = typeof row.source_progress === 'string' ? JSON.parse(row.source_progress) : (row.source_progress || {});
+    const progress = { ...rawProgress, ...(meta.sourceProgress || {}) };
     return {
-      id: row.cycle_id,
+      id: cycleId,
       status: row.status,
       startedAt: new Date(row.started_at).toISOString(),
-      completedAt: row.finished_at ? new Date(row.finished_at).toISOString() : null,
+      completedAt: completedAt ? new Date(completedAt).toISOString() : null,
       metrics: meta.metrics || {
         ...defaultMetrics(P2_FROZEN_CANONICAL_WORK_COUNT, Number(row.total_eligible_works || P0_ELIGIBLE_WORK_COUNT)),
+        cycleId,
         status: row.status,
         startedAt: new Date(row.started_at).toISOString(),
-        completedAt: row.finished_at ? new Date(row.finished_at).toISOString() : null,
+        completedAt: completedAt ? new Date(completedAt).toISOString() : null,
         durationMs: row.duration_seconds ? Math.round(Number(row.duration_seconds) * 1000) : 0,
         worksVerified: Number(row.unique_works_verified || 0),
         sourcesProcessed: Number(row.sources_inspected || 0),
         newMappingsDiscovered: Number(row.new_mappings_discovered || 0),
       },
-      sourceProgress: meta.sourceProgress || {},
+      sourceProgress: progress,
       sourceCatalogs: meta.sourceCatalogs || {},
       coverage: meta.coverage || {},
       verifiedWorkIds: meta.verifiedWorkIds || [],
@@ -374,8 +367,7 @@ export class SqlP0CyclePersistence implements P0CyclePersistence {
 
   async saveCycle(cycle: PersistedP0Cycle): Promise<void> {
     await this.ensureSchema();
-    const durationSeconds = cycle.metrics.durationMs ? (cycle.metrics.durationMs / 1000).toFixed(2) : null;
-    const meta = JSON.stringify({
+    const metaPayload = {
       metrics: cycle.metrics,
       sourceProgress: cycle.sourceProgress,
       sourceCatalogs: cycle.sourceCatalogs || {},
@@ -383,31 +375,37 @@ export class SqlP0CyclePersistence implements P0CyclePersistence {
       verifiedWorkIds: cycle.verifiedWorkIds || [],
       history: cycle.history || [],
       accumulatedMetrics: cycle.accumulatedMetrics,
-    });
-    await this.db.query(`
-      INSERT INTO public.importer_p0_cycles
-        (cycle_id, status, started_at, finished_at, duration_seconds, total_eligible_works, unique_works_verified, sources_inspected, new_mappings_discovered, metadata)
-      VALUES ($1::uuid, $2, $3::timestamptz, $4::timestamptz, $5::numeric, $6::int, $7::int, $8::int, $9::int, $10::jsonb)
-      ON CONFLICT (cycle_id) DO UPDATE SET
-        status = EXCLUDED.status,
-        finished_at = EXCLUDED.finished_at,
-        duration_seconds = EXCLUDED.duration_seconds,
-        unique_works_verified = EXCLUDED.unique_works_verified,
-        sources_inspected = EXCLUDED.sources_inspected,
-        new_mappings_discovered = EXCLUDED.new_mappings_discovered,
-        metadata = EXCLUDED.metadata`,
-    [
-      cycle.id,
-      cycle.status,
-      cycle.startedAt,
-      cycle.completedAt,
-      durationSeconds,
-      cycle.metrics.eligibleWorks,
-      cycle.metrics.worksVerified,
-      cycle.metrics.sourcesProcessed,
-      cycle.metrics.newMappingsDiscovered,
-      meta
-    ]);
+    };
+    try {
+      await this.db.query(`
+        INSERT INTO public.importer_p0_cycles
+          (id, status, started_at, completed_at, metrics, source_progress, updated_at)
+        VALUES ($1::uuid, $2, $3::timestamptz, $4::timestamptz, $5::jsonb, $6::jsonb, now())
+        ON CONFLICT (id) DO UPDATE SET
+          status = EXCLUDED.status,
+          completed_at = EXCLUDED.completed_at,
+          metrics = EXCLUDED.metrics,
+          source_progress = EXCLUDED.source_progress,
+          updated_at = now()`,
+      [cycle.id, cycle.status, cycle.startedAt, cycle.completedAt, JSON.stringify(metaPayload), JSON.stringify(cycle.sourceProgress)]);
+    } catch {
+      // Fallback for draft schema variant with cycle_id
+      const durationSeconds = cycle.metrics.durationMs ? (cycle.metrics.durationMs / 1000).toFixed(2) : null;
+      await this.db.query(`
+        INSERT INTO public.importer_p0_cycles
+          (cycle_id, status, started_at, finished_at, duration_seconds, total_eligible_works, unique_works_verified, sources_inspected, new_mappings_discovered, metadata)
+        VALUES ($1::uuid, $2, $3::timestamptz, $4::timestamptz, $5::numeric, $6::int, $7::int, $8::int, $9::int, $10::jsonb)
+        ON CONFLICT (cycle_id) DO UPDATE SET
+          status = EXCLUDED.status,
+          finished_at = EXCLUDED.finished_at,
+          duration_seconds = EXCLUDED.duration_seconds,
+          unique_works_verified = EXCLUDED.unique_works_verified,
+          sources_inspected = EXCLUDED.sources_inspected,
+          new_mappings_discovered = EXCLUDED.new_mappings_discovered,
+          metadata = EXCLUDED.metadata`,
+      [cycle.id, cycle.status, cycle.startedAt, cycle.completedAt, durationSeconds, cycle.metrics.eligibleWorks,
+       cycle.metrics.worksVerified, cycle.metrics.sourcesProcessed, cycle.metrics.newMappingsDiscovered, JSON.stringify(metaPayload)]);
+    }
   }
 
   async persistMapping(input: P0MappingInput): Promise<boolean> {
@@ -742,7 +740,11 @@ export class P0CycleCoordinator {
     }
   }
 
-  async recordSourceCatalog(source: string, items: readonly CatalogItem[]): Promise<P0CycleMetrics> {
+  async recordSourceCatalog(
+    source: string,
+    items: readonly CatalogItem[],
+    options?: { isFullCatalog?: boolean },
+  ): Promise<P0CycleMetrics> {
     await this.ensureLoaded();
     const state = this.requireRunning();
     const cleanSource = source.trim();
@@ -753,7 +755,9 @@ export class P0CycleCoordinator {
       bucket.set(item.sourceWorkId, { ...item, source: cleanSource });
     }
     this.sourceItems.set(cleanSource, bucket);
-    this.prepareSourceCoverage(cleanSource);
+    if (options?.isFullCatalog !== false) {
+      this.prepareSourceCoverage(cleanSource);
+    }
     state.sourceProgress[cleanSource] = bucket.size;
     state.metrics.sourcesProcessed = Object.keys(state.sourceProgress).length;
     state.metrics.catalogItemsSeen = Object.values(state.sourceProgress).reduce((sum, count) => sum + count, 0);
@@ -761,9 +765,31 @@ export class P0CycleCoordinator {
     return this.getCycleMetrics();
   }
 
-  async matchCandidateWorks(items?: readonly CatalogItem[]): Promise<SourceCatalogMatch[]> {
+  async recordSourceCoverage(
+    source: string,
+    coverageState: P0CoverageState,
+    error: string | null = null,
+  ): Promise<void> {
+    await this.ensureLoaded();
+    this.requireRunning();
+    const cleanSource = source.trim();
+    if (!cleanSource) throw new Error('source is required');
+    for (const work of this.matcher.canonicalWorks) {
+      const entry = this.coverageEntry(cleanSource, work.id);
+      if (!entry || entry.state === 'PENDING' || entry.state === 'STALE') {
+        this.setCoverageEntry(cleanSource, work.id, coverageState, error);
+      }
+    }
+    await this.persist();
+  }
+
+  async matchCandidateWorks(
+    items?: readonly CatalogItem[],
+    options?: { isFullCatalog?: boolean },
+  ): Promise<SourceCatalogMatch[]> {
     await this.ensureLoaded();
     const state = this.requireRunning();
+    const isFullCatalog = options?.isFullCatalog ?? true;
     const candidates = items
       ? [...items]
       : [...this.sourceItems.values()].flatMap((bucket) => [...bucket.values()]);
@@ -776,7 +802,7 @@ export class P0CycleCoordinator {
         matches.push(match);
         verifiedWorks.add(match.work.id);
         if (item.source && !this.sourceItems.has(item.source)) {
-          await this.recordSourceCatalog(item.source, [item]);
+          await this.recordSourceCatalog(item.source, [item], { isFullCatalog: false });
         }
         if (item.source) {
           const mapping: P0MappingInput = {
@@ -798,23 +824,21 @@ export class P0CycleCoordinator {
         const possible = this.matcher.canonicalWorks.filter((work) =>
           normalizeCatalogTitle(work.title) === normalizeCatalogTitle(item.title));
         if (possible.length > 1) ambiguous += 1;
-        if (item.source) {
-          for (const work of this.matcher.canonicalWorks) {
-            const existing = this.coverageEntry(item.source, work.id);
-            if (existing?.state === 'MAPPED') continue;
-            if (existing?.state === 'NOT_FOUND' && existing.nextRevalidationAt &&
-                this.now().getTime() < Date.parse(existing.nextRevalidationAt)) continue;
-            this.setCoverageEntry(item.source, work.id, 'NOT_FOUND');
-          }
-        }
       }
     }
-    const processedSources = new Set(candidates.map((item) => item.source).filter((source): source is string => Boolean(source)));
-    for (const source of processedSources) {
-      for (const work of this.matcher.canonicalWorks) {
-        const entry = this.coverageEntry(source, work.id);
-        if (entry?.state === 'PENDING' || entry?.state === 'STALE') {
-          this.setCoverageEntry(source, work.id, 'NOT_FOUND');
+    if (isFullCatalog) {
+      const processedSources = items
+        ? new Set(candidates.map((item) => item.source).filter((source): source is string => Boolean(source)))
+        : new Set(this.sourceItems.keys());
+      for (const source of processedSources) {
+        for (const work of this.matcher.canonicalWorks) {
+          const entry = this.coverageEntry(source, work.id);
+          if (entry?.state === 'MAPPED') continue;
+          if (entry?.state === 'NOT_FOUND' && entry.nextRevalidationAt &&
+              this.now().getTime() < Date.parse(entry.nextRevalidationAt)) continue;
+          if (!entry || entry.state === 'PENDING' || entry.state === 'STALE') {
+            this.setCoverageEntry(source, work.id, 'NOT_FOUND');
+          }
         }
       }
     }

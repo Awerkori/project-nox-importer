@@ -509,6 +509,7 @@ export class ImporterLiteRuntime {
     state: 'UNKNOWN', checkedAt: new Date(0).toISOString(), latencyMs: null,
   };
   private p0CycleCoordinator: P0CycleCoordinator | null = null;
+  private p0CycleCoordinatorPromise: Promise<P0CycleCoordinator> | null = null;
   private readonly p0CycleRunnerGate = new AsyncSemaphore(1, 'lite_p0_cycle_runner');
   private p0CycleSourceIndex = 0;
 
@@ -1387,68 +1388,80 @@ export class ImporterLiteRuntime {
   public async initP0CycleCoordinator(customCoordinator?: P0CycleCoordinator): Promise<P0CycleCoordinator> {
     if (customCoordinator) {
       this.p0CycleCoordinator = customCoordinator;
+      this.p0CycleCoordinatorPromise = Promise.resolve(customCoordinator);
       return this.p0CycleCoordinator;
     }
     if (this.p0CycleCoordinator) return this.p0CycleCoordinator;
+    if (this.p0CycleCoordinatorPromise) return this.p0CycleCoordinatorPromise;
 
-    const works = await this.loadCanonicalWorksForMatcher();
-    const matcher = new SourceCatalogMatcher(works);
-    const pool = this.sourceMetadataPool || this.pool;
-    const db: P0Database = {
-      query: (text: string, values?: readonly unknown[]) => pool.query(text, values as any[]),
-    };
-    const primary = new SqlP0CyclePersistence(db);
-    const fallback = new SettingsP0CyclePersistence(db, primary);
-    const persistence = new ResilientP0CyclePersistence(primary, fallback);
+    this.p0CycleCoordinatorPromise = (async () => {
+      try {
+        const works = await this.loadCanonicalWorksForMatcher();
+        const matcher = new SourceCatalogMatcher(works);
+        const pool = this.sourceMetadataPool || this.pool;
+        const db: P0Database = {
+          query: (text: string, values?: readonly unknown[]) => pool.query(text, values as any[]),
+        };
+        const primary = new SqlP0CyclePersistence(db);
+        const fallback = new SettingsP0CyclePersistence(db, primary);
+        const persistence = new ResilientP0CyclePersistence(primary, fallback);
 
-    this.p0CycleCoordinator = new P0CycleCoordinator({
-      matcher,
-      persistence,
-      eligibleWorkCount: works.length || P0_ELIGIBLE_WORK_COUNT,
-      canonicalWorkCount: works.length,
-      p2AdmissionPolicy: {
-        isSuspended: () => Boolean(this.p2SubordinationState.subordinated),
-      },
-      onNewMappingDiscovered: async (mapping: P0MappingInput) => {
-        try {
-          await this.queue.enrollConfirmedP0Mappings(mapping.work.id, [{
-            source: mapping.source,
-            sourceWorkId: mapping.item.sourceWorkId,
-          }]);
-        } catch (error: any) {
-          this.logger.warn('Immediate P0 monitor enrollment failed', {
-            workId: mapping.work.id,
-            source: mapping.source,
-            error: error?.message,
-          });
-        }
+        const coordinator = new P0CycleCoordinator({
+          matcher,
+          persistence,
+          eligibleWorkCount: works.length || P0_ELIGIBLE_WORK_COUNT,
+          canonicalWorkCount: works.length,
+          p2AdmissionPolicy: {
+            isSuspended: () => Boolean(this.p2SubordinationState.subordinated),
+          },
+          onNewMappingDiscovered: async (mapping: P0MappingInput) => {
+            try {
+              await this.queue.enrollConfirmedP0Mappings(mapping.work.id, [{
+                source: mapping.source,
+                sourceWorkId: mapping.item.sourceWorkId,
+              }]);
+            } catch (error: any) {
+              this.logger.warn('Immediate P0 monitor enrollment failed', {
+                workId: mapping.work.id,
+                source: mapping.source,
+                error: error?.message,
+              });
+            }
 
-        try {
-          await this.queue.enqueueMany([{
-            taskType: 'CATALOG',
-            workId: mapping.work.id,
-            workKey: `work:${mapping.work.id}`,
-            priority: 'P1',
-            idempotencyKey: `lite:catalog:${mapping.source}:${mapping.item.sourceWorkId}`,
-            payload: {
-              source: mapping.source,
-              sourceWorkId: mapping.item.sourceWorkId,
-              metadataCrossSourceP1Discovery: true,
-            },
-          }]);
-          await this.queue.wakeCatalogBlocked(mapping.work.id, `work:${mapping.work.id}`);
-        } catch (error: any) {
-          this.logger.warn('P1 discovery intake task enrollment failed', {
-            workId: mapping.work.id,
-            source: mapping.source,
-            error: error?.message,
-          });
-        }
-      },
-    });
+            try {
+              await this.queue.enqueueMany([{
+                taskType: 'CATALOG',
+                workId: mapping.work.id,
+                workKey: `work:${mapping.work.id}`,
+                priority: 'P1',
+                idempotencyKey: `lite:catalog:${mapping.source}:${mapping.item.sourceWorkId}`,
+                payload: {
+                  source: mapping.source,
+                  sourceWorkId: mapping.item.sourceWorkId,
+                  metadataCrossSourceP1Discovery: true,
+                },
+              }]);
+              await this.queue.wakeCatalogBlocked(mapping.work.id, `work:${mapping.work.id}`);
+            } catch (error: any) {
+              this.logger.warn('P1 discovery intake task enrollment failed', {
+                workId: mapping.work.id,
+                source: mapping.source,
+                error: error?.message,
+              });
+            }
+          },
+        });
 
-    await this.p0CycleCoordinator.resumeOrCreateCycle();
-    return this.p0CycleCoordinator;
+        await coordinator.resumeOrCreateCycle();
+        this.p0CycleCoordinator = coordinator;
+        return coordinator;
+      } catch (err) {
+        this.p0CycleCoordinatorPromise = null;
+        throw err;
+      }
+    })();
+
+    return this.p0CycleCoordinatorPromise;
   }
 
   public getP0CycleCoordinator(): P0CycleCoordinator | null {
@@ -1457,6 +1470,7 @@ export class ImporterLiteRuntime {
 
   public setP0CycleCoordinator(coordinator: P0CycleCoordinator): void {
     this.p0CycleCoordinator = coordinator;
+    this.p0CycleCoordinatorPromise = Promise.resolve(coordinator);
   }
 
   public async runP0CycleTurn(): Promise<boolean> {
@@ -1484,25 +1498,28 @@ export class ImporterLiteRuntime {
       const source = enabledSources[this.p0CycleSourceIndex % enabledSources.length];
       this.p0CycleSourceIndex = (this.p0CycleSourceIndex + 1) % enabledSources.length;
 
+      const checkCycleAdvancement = async (): Promise<void> => {
+        const metrics = coordinator.getCycleMetrics();
+        if (metrics.sourcesProcessed >= enabledSources.length) {
+          await coordinator.completeCycle();
+          this.logger.info('P0 universal cycle completed', coordinator.getCycleMetrics());
+          await coordinator.advanceToNextCycle();
+        }
+      };
+
       const policy = await this.queue.sourcePolicy(source);
       if (!policy?.runnable) {
-        for (const work of coordinator.canonicalWorks) {
-          const entry = coordinator.getCoverageMatrix(source).find((e) => e.workId === work.id);
-          if (!entry || entry.state === 'PENDING') {
-            await coordinator.setCoverageState(source, work.id, 'DEFERRED', `SOURCE_COOLDOWN:${policy?.status || 'MISSING'}`);
-          }
-        }
+        await coordinator.recordSourceCoverage(source, 'DEFERRED', `SOURCE_COOLDOWN:${policy?.status || 'MISSING'}`);
+        await coordinator.recordSourceCatalog(source, [], { isFullCatalog: false });
+        await checkCycleAdvancement();
         return false;
       }
 
       const adapter = this.registry.get(source);
       if (!adapter) {
-        for (const work of coordinator.canonicalWorks) {
-          const entry = coordinator.getCoverageMatrix(source).find((e) => e.workId === work.id);
-          if (!entry || entry.state === 'PENDING') {
-            await coordinator.setCoverageState(source, work.id, 'FAILED', 'ADAPTER_MISSING');
-          }
-        }
+        await coordinator.recordSourceCoverage(source, 'FAILED', 'ADAPTER_MISSING');
+        await coordinator.recordSourceCatalog(source, [], { isFullCatalog: false });
+        await checkCycleAdvancement();
         return false;
       }
 
@@ -1524,26 +1541,18 @@ export class ImporterLiteRuntime {
         }));
       } catch (fetchErr: any) {
         this.logger.warn('Source catalog feed fetch failed during cycle', { source, error: fetchErr?.message });
-        for (const work of coordinator.canonicalWorks) {
-          const entry = coordinator.getCoverageMatrix(source).find((e) => e.workId === work.id);
-          if (!entry || entry.state === 'PENDING') {
-            await coordinator.setCoverageState(source, work.id, 'FAILED', fetchErr?.message || 'FETCH_ERROR');
-          }
-        }
+        await coordinator.recordSourceCoverage(source, 'FAILED', fetchErr?.message || 'FETCH_ERROR');
+        await coordinator.recordSourceCatalog(source, [], { isFullCatalog: false });
+        await checkCycleAdvancement();
         return false;
       }
 
-      await coordinator.recordSourceCatalog(source, items);
+      await coordinator.recordSourceCatalog(source, items, { isFullCatalog: false });
       if (items.length > 0) {
-        await coordinator.matchCandidateWorks(items);
+        await coordinator.matchCandidateWorks(items, { isFullCatalog: false });
       }
 
-      const metrics = coordinator.getCycleMetrics();
-      if (metrics.sourcesProcessed >= enabledSources.length) {
-        await coordinator.completeCycle();
-        this.logger.info('P0 universal cycle completed', coordinator.getCycleMetrics());
-        await coordinator.advanceToNextCycle();
-      }
+      await checkCycleAdvancement();
       return true;
     } catch (err: any) {
       this.logger.warn('P0 cycle turn encountered non-fatal error', { error: err?.message });

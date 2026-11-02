@@ -3158,6 +3158,17 @@ export class LiteRepository {
         return map;
     }
     /**
+     * Returns all enabled sources from importer_sources ordered deterministically.
+     */
+    async enabledSources() {
+        const metaDb = this.sourceMetadataDb || this.db;
+        const result = await metaDb.query(`
+      SELECT id FROM importer_sources
+      WHERE enabled = true
+      ORDER BY id`);
+        return (result.rows || []).map((row) => String(row.id));
+    }
+    /**
      * Sources that can safely be queried while a newly-created work is still in
      * its initial catalog pass.  This is intentionally one indexed set query:
      * onboarding must not turn a complementary-alias lookup into an N+1 policy

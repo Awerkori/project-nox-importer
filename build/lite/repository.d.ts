@@ -453,6 +453,10 @@ export declare class LiteRepository {
      */
     sourcePolicies(sources: string[]): Promise<Map<string, LiteSourcePolicy>>;
     /**
+     * Returns all enabled sources from importer_sources ordered deterministically.
+     */
+    enabledSources(): Promise<string[]>;
+    /**
      * Sources that can safely be queried while a newly-created work is still in
      * its initial catalog pass.  This is intentionally one indexed set query:
      * onboarding must not turn a complementary-alias lookup into an N+1 policy
