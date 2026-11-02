@@ -6,6 +6,7 @@ export const P2_FROZEN_CANONICAL_WORK_COUNT = 24_945;
 
 export type P0CycleStatus = 'IDLE' | 'RUNNING' | 'COMPLETED';
 export type CatalogMatchMethod = 'title' | 'alias' | 'slug' | 'trigram';
+export type P0CoverageState = 'MAPPED' | 'NOT_FOUND' | 'PENDING' | 'FAILED' | 'DEFERRED' | 'STALE';
 
 export interface CatalogItem {
   sourceWorkId: string;
@@ -48,6 +49,29 @@ export interface P0CycleMetrics {
   newMappingsDiscovered: number;
 }
 
+export interface P0AccumulatedMetrics {
+  cyclesCompleted: number;
+  sourcesProcessed: number;
+  catalogItemsSeen: number;
+  worksVerified: number;
+  candidatesMatched: number;
+  ambiguousCandidates: number;
+  unmatchedCandidates: number;
+  newMappingsDiscovered: number;
+}
+
+export interface P0CoverageEntry {
+  source: string;
+  workId: string;
+  state: P0CoverageState;
+  firstSeenAt: string;
+  updatedAt: string;
+  lastCheckedAt: string | null;
+  nextRevalidationAt: string | null;
+  attempts: number;
+  error: string | null;
+}
+
 export interface PersistedP0Cycle {
   id: string;
   status: P0CycleStatus;
@@ -55,6 +79,12 @@ export interface PersistedP0Cycle {
   completedAt: string | null;
   metrics: P0CycleMetrics;
   sourceProgress: Record<string, number>;
+  /** Optional fields keep persisted cycles written by older deployments readable. */
+  sourceCatalogs?: Record<string, CatalogItem[]>;
+  coverage?: Record<string, P0CoverageEntry>;
+  verifiedWorkIds?: string[];
+  history?: P0CycleMetrics[];
+  accumulatedMetrics?: P0AccumulatedMetrics;
 }
 
 export interface P0MappingInput {
@@ -70,6 +100,10 @@ export interface P0CyclePersistence {
   saveCycle(cycle: PersistedP0Cycle): Promise<void>;
   /** Returns true only when a previously absent/unassigned mapping was created. */
   persistMapping(input: P0MappingInput): Promise<boolean>;
+}
+
+export interface P2AdmissionPolicy {
+  isSuspended: () => boolean;
 }
 
 export interface P0DatabaseResult<Row extends Record<string, unknown> = Record<string, unknown>> {
@@ -91,6 +125,9 @@ export interface P0CycleCoordinatorOptions {
   eligibleWorkCount?: number;
   canonicalWorkCount?: number;
   now?: () => Date;
+  p2AdmissionPolicy?: P2AdmissionPolicy;
+  onNewMappingDiscovered?: (mapping: P0MappingInput) => Promise<void>;
+  negativeCacheTtlMs?: number;
 }
 
 /**
@@ -250,7 +287,7 @@ export class InMemoryP0CyclePersistence implements P0CyclePersistence {
   async persistMapping(input: P0MappingInput): Promise<boolean> {
     // This store models the same safety boundary as SQL: no canonical work,
     // no mapping. It never has an operation that creates a work.
-    if (this.existingWorkIds.size > 0 && !this.existingWorkIds.has(input.work.id)) return false;
+    if (!this.existingWorkIds.has(input.work.id)) return false;
     const key = `${input.source}:${input.item.sourceWorkId}`;
     if (this.mappings.has(key)) return false;
     this.mappings.set(key, input);
@@ -316,13 +353,26 @@ export class SqlP0CyclePersistence implements P0CyclePersistence {
         newMappingsDiscovered: Number(row.new_mappings_discovered || 0),
       },
       sourceProgress: meta.sourceProgress || {},
+      sourceCatalogs: meta.sourceCatalogs || {},
+      coverage: meta.coverage || {},
+      verifiedWorkIds: meta.verifiedWorkIds || [],
+      history: meta.history || [],
+      accumulatedMetrics: meta.accumulatedMetrics,
     };
   }
 
   async saveCycle(cycle: PersistedP0Cycle): Promise<void> {
     await this.ensureSchema();
     const durationSeconds = cycle.metrics.durationMs ? (cycle.metrics.durationMs / 1000).toFixed(2) : null;
-    const meta = JSON.stringify({ metrics: cycle.metrics, sourceProgress: cycle.sourceProgress });
+    const meta = JSON.stringify({
+      metrics: cycle.metrics,
+      sourceProgress: cycle.sourceProgress,
+      sourceCatalogs: cycle.sourceCatalogs || {},
+      coverage: cycle.coverage || {},
+      verifiedWorkIds: cycle.verifiedWorkIds || [],
+      history: cycle.history || [],
+      accumulatedMetrics: cycle.accumulatedMetrics,
+    });
     await this.db.query(`
       INSERT INTO public.importer_p0_cycles
         (cycle_id, status, started_at, finished_at, duration_seconds, total_eligible_works, unique_works_verified, sources_inspected, new_mappings_discovered, metadata)
@@ -471,6 +521,43 @@ function defaultMetrics(canonicalWorks: number, eligibleWorks: number): P0CycleM
   };
 }
 
+function defaultAccumulatedMetrics(): P0AccumulatedMetrics {
+  return {
+    cyclesCompleted: 0,
+    sourcesProcessed: 0,
+    catalogItemsSeen: 0,
+    worksVerified: 0,
+    candidatesMatched: 0,
+    ambiguousCandidates: 0,
+    unmatchedCandidates: 0,
+    newMappingsDiscovered: 0,
+  };
+}
+
+function coverageKey(source: string, workId: string): string {
+  return JSON.stringify([source, workId]);
+}
+
+function cloneAccumulatedMetrics(value: P0AccumulatedMetrics | undefined): P0AccumulatedMetrics {
+  return structuredClone(value || defaultAccumulatedMetrics());
+}
+
+function addCycleToAccumulated(
+  accumulated: P0AccumulatedMetrics,
+  metrics: P0CycleMetrics,
+): P0AccumulatedMetrics {
+  return {
+    cyclesCompleted: accumulated.cyclesCompleted + 1,
+    sourcesProcessed: accumulated.sourcesProcessed + metrics.sourcesProcessed,
+    catalogItemsSeen: accumulated.catalogItemsSeen + metrics.catalogItemsSeen,
+    worksVerified: accumulated.worksVerified + metrics.worksVerified,
+    candidatesMatched: accumulated.candidatesMatched + metrics.candidatesMatched,
+    ambiguousCandidates: accumulated.ambiguousCandidates + metrics.ambiguousCandidates,
+    unmatchedCandidates: accumulated.unmatchedCandidates + metrics.unmatchedCandidates,
+    newMappingsDiscovered: accumulated.newMappingsDiscovered + metrics.newMappingsDiscovered,
+  };
+}
+
 /** Durable lifecycle coordinator for one bounded P0 catalog cycle. */
 export class P0CycleCoordinator {
   private readonly matcher: SourceCatalogMatcher;
@@ -478,9 +565,13 @@ export class P0CycleCoordinator {
   private readonly eligibleWorkCount: number;
   private readonly canonicalWorkCount: number;
   private readonly now: () => Date;
+  private readonly p2AdmissionPolicy?: P2AdmissionPolicy;
+  private readonly onNewMappingDiscovered?: (mapping: P0MappingInput) => Promise<void>;
+  private readonly negativeCacheTtlMs: number;
   private state: PersistedP0Cycle | null = null;
   private readonly sourceItems = new Map<string, Map<string, CatalogItem>>();
   private readonly verifiedWorkIds = new Set<string>();
+  private readonly coverage = new Map<string, P0CoverageEntry>();
   private loaded = false;
 
   constructor(options: P0CycleCoordinatorOptions) {
@@ -499,15 +590,28 @@ export class P0CycleCoordinator {
     this.eligibleWorkCount = options.eligibleWorkCount ?? P0_ELIGIBLE_WORK_COUNT;
     this.canonicalWorkCount = options.canonicalWorkCount ?? P2_FROZEN_CANONICAL_WORK_COUNT;
     this.now = options.now ?? (() => new Date());
-    if (this.canonicalWorkCount !== P2_FROZEN_CANONICAL_WORK_COUNT) {
-      throw new Error(`P2 canonical work count is frozen at ${P2_FROZEN_CANONICAL_WORK_COUNT}`);
-    }
+    this.p2AdmissionPolicy = options.p2AdmissionPolicy;
+    this.onNewMappingDiscovered = options.onNewMappingDiscovered;
+    this.negativeCacheTtlMs = Math.max(0, options.negativeCacheTtlMs ?? 24 * 60 * 60 * 1000);
   }
 
-  private async ensureLoaded(): Promise<void> {
-    if (this.loaded) return;
+  /**
+   * Rehydrates the last cycle, including its catalogs and audit matrix. A
+   * RUNNING cycle is intentionally resumed with the same id after a reboot.
+   */
+  async ensureLoaded(): Promise<PersistedP0Cycle | null> {
+    if (this.loaded) return this.state ? structuredClone(this.state) : null;
     this.state = await this.persistence.loadLatestCycle();
+    this.sourceItems.clear();
+    this.coverage.clear();
+    this.verifiedWorkIds.clear();
+    for (const [source, items] of Object.entries(this.state?.sourceCatalogs || {})) {
+      this.sourceItems.set(source, new Map(items.map((item) => [item.sourceWorkId, item])));
+    }
+    for (const [key, entry] of Object.entries(this.state?.coverage || {})) this.coverage.set(key, entry);
+    for (const workId of this.state?.verifiedWorkIds || []) this.verifiedWorkIds.add(workId);
     this.loaded = true;
+    return this.state ? structuredClone(this.state) : null;
   }
 
   private requireRunning(): PersistedP0Cycle {
@@ -516,23 +620,115 @@ export class P0CycleCoordinator {
   }
 
   private async persist(): Promise<void> {
-    if (this.state) await this.persistence.saveCycle(this.state);
+    if (!this.state) return;
+    this.state.sourceCatalogs = Object.fromEntries(
+      [...this.sourceItems.entries()].map(([source, items]) => [source, [...items.values()]]),
+    );
+    this.state.coverage = Object.fromEntries(this.coverage.entries());
+    this.state.verifiedWorkIds = [...this.verifiedWorkIds];
+    this.state.history = this.state.history || [];
+    this.state.accumulatedMetrics = cloneAccumulatedMetrics(this.state.accumulatedMetrics);
+    await this.persistence.saveCycle(this.state);
   }
 
-  async startCycle(): Promise<P0CycleMetrics> {
-    await this.ensureLoaded();
-    if (this.state?.status === 'RUNNING') return this.getCycleMetrics();
+  private createCycle(): P0CycleMetrics {
     const startedAt = this.now().toISOString();
     const cycleId = randomUUID();
     const metrics = defaultMetrics(this.canonicalWorkCount, this.eligibleWorkCount);
     metrics.cycleId = cycleId;
     metrics.status = 'RUNNING';
     metrics.startedAt = startedAt;
-    this.state = { id: cycleId, status: 'RUNNING', startedAt, completedAt: null, metrics, sourceProgress: {} };
+    const priorHistory = this.state?.history || [];
+    const priorAccumulated = cloneAccumulatedMetrics(this.state?.accumulatedMetrics);
+    this.state = {
+      id: cycleId,
+      status: 'RUNNING',
+      startedAt,
+      completedAt: null,
+      metrics,
+      sourceProgress: {},
+      history: priorHistory,
+      accumulatedMetrics: priorAccumulated,
+    };
     this.sourceItems.clear();
+    this.coverage.clear();
     this.verifiedWorkIds.clear();
-    await this.persist();
     return this.getCycleMetrics();
+  }
+
+  /** Starts the first cycle or advances a completed cycle to a new cycle id. */
+  async resumeOrCreateCycle(): Promise<P0CycleMetrics> {
+    await this.ensureLoaded();
+    if (this.state?.status === 'RUNNING') return this.getCycleMetrics();
+    const metrics = this.createCycle();
+    await this.persist();
+    return metrics;
+  }
+
+  async startCycle(): Promise<P0CycleMetrics> {
+    return this.resumeOrCreateCycle();
+  }
+
+  /** Explicit alias for callers that want to make the continuous transition visible. */
+  async advanceToNextCycle(): Promise<P0CycleMetrics> {
+    return this.resumeOrCreateCycle();
+  }
+
+  /** P2 suspension only blocks creating canonical works; mappings never do that. */
+  isP2Suspended(): boolean {
+    return this.p2AdmissionPolicy?.isSuspended() === true;
+  }
+
+  canCreateCanonicalWork(): boolean {
+    return !this.isP2Suspended();
+  }
+
+  assertCanonicalWorkCreationAllowed(): void {
+    if (!this.canCreateCanonicalWork()) {
+      throw new Error('P2 admission is suspended: canonical work creation is not allowed');
+    }
+  }
+
+  private coverageEntry(source: string, workId: string): P0CoverageEntry | undefined {
+    return this.coverage.get(coverageKey(source, workId));
+  }
+
+  private setCoverageEntry(
+    source: string,
+    workId: string,
+    state: P0CoverageState,
+    error: string | null = null,
+  ): P0CoverageEntry {
+    const now = this.now().toISOString();
+    const key = coverageKey(source, workId);
+    const previous = this.coverage.get(key);
+    const entry: P0CoverageEntry = {
+      source,
+      workId,
+      state,
+      firstSeenAt: previous?.firstSeenAt || now,
+      updatedAt: now,
+      lastCheckedAt: state === 'PENDING' ? previous?.lastCheckedAt || null : now,
+      nextRevalidationAt: state === 'NOT_FOUND'
+        ? new Date(this.now().getTime() + this.negativeCacheTtlMs).toISOString()
+        : null,
+      attempts: state === 'PENDING' && previous ? previous.attempts : (previous?.attempts || 0) + 1,
+      error,
+    };
+    this.coverage.set(key, entry);
+    return entry;
+  }
+
+  private prepareSourceCoverage(source: string): void {
+    const now = this.now().getTime();
+    for (const work of this.matcher.canonicalWorks) {
+      const entry = this.coverageEntry(source, work.id);
+      if (!entry) {
+        this.setCoverageEntry(source, work.id, 'PENDING');
+      } else if (entry.state === 'NOT_FOUND' && entry.nextRevalidationAt && now >= Date.parse(entry.nextRevalidationAt)) {
+        this.setCoverageEntry(source, work.id, 'STALE');
+      }
+    }
   }
 
   async recordSourceCatalog(source: string, items: readonly CatalogItem[]): Promise<P0CycleMetrics> {
@@ -546,6 +742,7 @@ export class P0CycleCoordinator {
       bucket.set(item.sourceWorkId, { ...item, source: cleanSource });
     }
     this.sourceItems.set(cleanSource, bucket);
+    this.prepareSourceCoverage(cleanSource);
     state.sourceProgress[cleanSource] = bucket.size;
     state.metrics.sourcesProcessed = Object.keys(state.sourceProgress).length;
     state.metrics.catalogItemsSeen = Object.values(state.sourceProgress).reduce((sum, count) => sum + count, 0);
@@ -571,20 +768,43 @@ export class P0CycleCoordinator {
           await this.recordSourceCatalog(item.source, [item]);
         }
         if (item.source) {
-          const created = await this.persistence.persistMapping({
+          const mapping: P0MappingInput = {
             source: item.source,
             item,
             work: match.work,
             method: match.method,
             score: match.score,
-          });
-          if (created) state.metrics.newMappingsDiscovered += 1;
+          };
+          const created = await this.persistence.persistMapping(mapping);
+          if (created) {
+            state.metrics.newMappingsDiscovered += 1;
+            if (this.onNewMappingDiscovered) await this.onNewMappingDiscovered(mapping);
+          }
+          this.setCoverageEntry(item.source, match.work.id, 'MAPPED');
         }
       } else if (normalizeCatalogTitle(item.title)) {
         // The matcher is fail-closed for both ambiguous and unknown titles.
         const possible = this.matcher.canonicalWorks.filter((work) =>
           normalizeCatalogTitle(work.title) === normalizeCatalogTitle(item.title));
         if (possible.length > 1) ambiguous += 1;
+        if (item.source) {
+          for (const work of this.matcher.canonicalWorks) {
+            const existing = this.coverageEntry(item.source, work.id);
+            if (existing?.state === 'MAPPED') continue;
+            if (existing?.state === 'NOT_FOUND' && existing.nextRevalidationAt &&
+                this.now().getTime() < Date.parse(existing.nextRevalidationAt)) continue;
+            this.setCoverageEntry(item.source, work.id, 'NOT_FOUND');
+          }
+        }
+      }
+    }
+    const processedSources = new Set(candidates.map((item) => item.source).filter((source): source is string => Boolean(source)));
+    for (const source of processedSources) {
+      for (const work of this.matcher.canonicalWorks) {
+        const entry = this.coverageEntry(source, work.id);
+        if (entry?.state === 'PENDING' || entry?.state === 'STALE') {
+          this.setCoverageEntry(source, work.id, 'NOT_FOUND');
+        }
       }
     }
     state.metrics.candidatesMatched += matches.length;
@@ -609,12 +829,60 @@ export class P0CycleCoordinator {
     state.metrics.status = 'COMPLETED';
     state.metrics.completedAt = state.completedAt;
     state.metrics.durationMs = completedAt.getTime() - new Date(state.startedAt).getTime();
+    state.history = [...(state.history || []), structuredClone(state.metrics)];
+    state.accumulatedMetrics = addCycleToAccumulated(
+      cloneAccumulatedMetrics(state.accumulatedMetrics),
+      state.metrics,
+    );
     await this.persist();
     return this.getCycleMetrics();
+  }
+
+  async setCoverageState(
+    source: string,
+    workId: string,
+    state: P0CoverageState,
+    error: string | null = null,
+  ): Promise<P0CoverageEntry> {
+    await this.ensureLoaded();
+    this.requireRunning();
+    if (!this.matcher.canonicalWorks.some((work) => work.id === workId)) {
+      throw new Error(`Cannot update coverage for unknown canonical work: ${workId}`);
+    }
+    const entry = this.setCoverageEntry(source.trim(), workId, state, error);
+    await this.persist();
+    return structuredClone(entry);
+  }
+
+  getCoverageMatrix(source?: string): P0CoverageEntry[] {
+    const entries = [...this.coverage.values()]
+      .filter((entry) => !source || entry.source === source)
+      .sort((left, right) => left.source.localeCompare(right.source) || left.workId.localeCompare(right.workId));
+    return structuredClone(entries);
+  }
+
+  getCoverageSnapshot(source?: string): P0CoverageEntry[] {
+    return this.getCoverageMatrix(source);
+  }
+
+  getCycleHistory(): P0CycleMetrics[] {
+    return structuredClone(this.state?.history || []);
+  }
+
+  getAccumulatedMetrics(): P0AccumulatedMetrics {
+    return cloneAccumulatedMetrics(this.state?.accumulatedMetrics);
   }
 
   getCycleMetrics(): P0CycleMetrics {
     if (!this.state) return defaultMetrics(this.canonicalWorkCount, this.eligibleWorkCount);
     return structuredClone(this.state.metrics);
+  }
+
+  get canonicalWorks(): readonly CanonicalWork[] {
+    return this.matcher.canonicalWorks;
+  }
+
+  getMatcher(): SourceCatalogMatcher {
+    return this.matcher;
   }
 }
