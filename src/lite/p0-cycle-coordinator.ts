@@ -72,6 +72,23 @@ export interface P0CoverageEntry {
   error: string | null;
 }
 
+export interface P0SourceFailure {
+  state: P0CoverageState;
+  error: string | null;
+  updatedAt: string;
+}
+
+export interface P0CoverageSummary {
+  totalEntries: number;
+  truncated: boolean;
+  sampleSize: number;
+}
+
+export interface P0CycleMetadata {
+  sourceFailures: Record<string, P0SourceFailure>;
+  coverageSummary?: P0CoverageSummary;
+}
+
 export interface PersistedP0Cycle {
   id: string;
   status: P0CycleStatus;
@@ -85,6 +102,7 @@ export interface PersistedP0Cycle {
   verifiedWorkIds?: string[];
   history?: P0CycleMetrics[];
   accumulatedMetrics?: P0AccumulatedMetrics;
+  metadata?: P0CycleMetadata;
 }
 
 export interface P0MappingInput {
@@ -366,19 +384,32 @@ export class SqlP0CyclePersistence implements P0CyclePersistence {
       verifiedWorkIds: meta.verifiedWorkIds || [],
       history: meta.history || [],
       accumulatedMetrics: meta.accumulatedMetrics,
+      metadata: {
+        sourceFailures: meta.sourceFailures || {},
+        ...(meta.coverageSummary ? { coverageSummary: meta.coverageSummary } : {}),
+      },
     };
   }
 
   async saveCycle(cycle: PersistedP0Cycle): Promise<void> {
     await this.ensureSchema();
+    const coverageEntries = Object.entries(cycle.coverage || {});
+    const sampleSize = Math.min(coverageEntries.length, 1000);
+    const coverageSample = Object.fromEntries(coverageEntries.slice(0, sampleSize));
     const metaPayload = {
       metrics: cycle.metrics,
       sourceProgress: cycle.sourceProgress,
       sourceCatalogs: cycle.sourceCatalogs || {},
-      coverage: Object.keys(cycle.coverage || {}).length > 1000 ? {} : (cycle.coverage || {}),
+      coverage: coverageSample,
       verifiedWorkIds: cycle.verifiedWorkIds || [],
       history: cycle.history || [],
       accumulatedMetrics: cycle.accumulatedMetrics,
+      ...(cycle.metadata || {}),
+      coverageSummary: {
+        totalEntries: coverageEntries.length,
+        truncated: coverageEntries.length > sampleSize,
+        sampleSize,
+      },
     };
     if (this.pkColumn === 'id') {
       await this.db.query(`
@@ -646,6 +677,10 @@ export class P0CycleCoordinator {
     );
     this.state.coverage = Object.fromEntries(this.coverage.entries());
     this.state.verifiedWorkIds = [...this.verifiedWorkIds];
+    this.state.metadata = {
+      ...(this.state.metadata || {}),
+      sourceFailures: this.state.metadata?.sourceFailures || {},
+    };
     this.state.history = this.state.history || [];
     this.state.accumulatedMetrics = cloneAccumulatedMetrics(this.state.accumulatedMetrics);
     await this.persistence.saveCycle(this.state);
@@ -669,6 +704,7 @@ export class P0CycleCoordinator {
       sourceProgress: {},
       history: priorHistory,
       accumulatedMetrics: priorAccumulated,
+      metadata: { sourceFailures: {} },
     };
     this.sourceItems.clear();
     this.coverage.clear();
@@ -794,9 +830,21 @@ export class P0CycleCoordinator {
         updatedAny = true;
       }
     }
-    if (updatedAny) {
+    const updatedAt = this.now().toISOString();
+    this.state!.metadata = {
+      ...(this.state!.metadata || {}),
+      sourceFailures: {
+        ...(this.state!.metadata?.sourceFailures || {}),
+        [cleanSource]: { state: coverageState, error, updatedAt },
+      },
+    };
+    // A non-full catalog turn has no PENDING/STALE entries to update, but its
+    // deferred/failed status still must be durable for the cycle audit.
+    if (!updatedAny) {
       await this.persist();
+      return;
     }
+    await this.persist();
   }
 
   async matchCandidateWorks(
