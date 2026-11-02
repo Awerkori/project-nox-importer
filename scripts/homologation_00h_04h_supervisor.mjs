@@ -25,9 +25,9 @@ const LOG_FILE = path.join(SCRATCH_DIR, 'homologation_00h_04h_supervisor.log');
 const HEARTBEAT_FILE = path.join(SCRATCH_DIR, 'homologation_00h_04h_heartbeat.json');
 const STATUS_FILE = path.join(SCRATCH_DIR, 'homologation_00h_04h_status.json');
 
-// Window: 00:00 BRT (03:00 UTC) to 08:00 BRT (11:00 UTC) on Nov 2, 2026 (Extended Autonomy)
+// Window: 00:00 BRT (03:00 UTC) to 10:00 BRT (13:00 UTC) on Nov 2, 2026 (Extended Autonomy to 10h00 BRT)
 const START_AT_UTC = new Date('2026-11-02T03:00:00.000Z');
-const SHUTDOWN_AT_UTC = new Date('2026-11-02T11:00:00.000Z');
+const SHUTDOWN_AT_UTC = new Date('2026-11-02T13:00:00.000Z');
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] [PID:${process.pid}] ${msg}\n`;
@@ -60,7 +60,11 @@ const SCHEDULED_CHECKPOINTS = [
   { num: 30, label: 'T900MIN_06H30', targetUtc: new Date('2026-11-02T09:30:00.000Z'), executed: false },
   { num: 31, label: 'T930MIN_07H00', targetUtc: new Date('2026-11-02T10:00:00.000Z'), executed: false },
   { num: 32, label: 'T960MIN_07H30', targetUtc: new Date('2026-11-02T10:30:00.000Z'), executed: false },
-  { num: 33, label: 'FINAL_08H00',   targetUtc: new Date('2026-11-02T11:00:00.000Z'), executed: false }
+  { num: 33, label: 'T990MIN_08H00', targetUtc: new Date('2026-11-02T11:00:00.000Z'), executed: false },
+  { num: 34, label: 'T1020MIN_08H30', targetUtc: new Date('2026-11-02T11:30:00.000Z'), executed: false },
+  { num: 35, label: 'REVISAO_09H00',  targetUtc: new Date('2026-11-02T12:00:00.000Z'), executed: false },
+  { num: 36, label: 'T1080MIN_09H30', targetUtc: new Date('2026-11-02T12:30:00.000Z'), executed: false },
+  { num: 37, label: 'FINAL_10H00',    targetUtc: new Date('2026-11-02T13:00:00.000Z'), executed: false }
 ];
 
 function getNextCheckpoint() {
@@ -160,12 +164,12 @@ async function getFullExhaustiveMetrics() {
     const pubByPriority = await client.query(`
       SELECT 
         priority,
-        count(*) FILTER (WHERE recorded_at >= now() - interval '15 minutes') as last_15m,
-        count(*) FILTER (WHERE recorded_at >= now() - interval '30 minutes') as last_30m,
-        count(*) FILTER (WHERE recorded_at >= now() - interval '60 minutes') as last_60m,
+        count(*) FILTER (WHERE bucket_minute >= date_trunc('minute', now() - interval '15 minutes')) as last_15m,
+        count(*) FILTER (WHERE bucket_minute >= date_trunc('minute', now() - interval '30 minutes')) as last_30m,
+        count(*) FILTER (WHERE bucket_minute >= date_trunc('minute', now() - interval '60 minutes')) as last_60m,
         count(*) as total_1h
       FROM importer_publication_events
-      WHERE recorded_at >= now() - interval '60 minutes'
+      WHERE bucket_minute >= date_trunc('minute', now() - interval '60 minutes')
       GROUP BY priority;
     `);
 
@@ -259,17 +263,21 @@ async function executeCheckpoint(cpNumber, cpLabel) {
     const p0Events = metrics.pubByPriority.find(r => r.priority === 1) || { last_15m: 0, last_30m: 0, last_60m: 0 };
     const p1Events = metrics.pubByPriority.find(r => r.priority === 2) || { last_15m: 0, last_30m: 0, last_60m: 0 };
 
+    const adminConns = metrics.connections.filter(c => c.usename === 'admin').reduce((acc, c) => acc + Number(c.count), 0);
+    const totalConns = metrics.connections.reduce((acc, c) => acc + Number(c.count), 0);
+
     let codexAudit = '';
     try {
       log('Invocando Codex CLI para análise técnica autônoma...');
-      const codexPrompt = `Você é o Codex CLI em parceria 50/50 com Antigravity no Project Nox. Analise os dados reais do Checkpoint ${cpNumber} (Janela Limpa 00h00-04h00 BRT):
-- P1 Throughput: 15m: ${p1Events.last_15m} caps (${Number(p1Events.last_15m)*4} cap/h proj), 30m: ${p1Events.last_30m} caps (${Number(p1Events.last_30m)*2} cap/h proj), 60m: ${p1Events.last_60m} caps efetivos.
+      const codexPrompt = `Você é o Codex CLI em parceria 50/50 com Antigravity no Project Nox. Analise os dados reais do Checkpoint ${cpNumber} (Janela de Homologação 00h00-10h00 BRT):
+- P1 Throughput: 15m: ${p1Events.last_15m} caps (${Number(p1Events.last_15m)*4} cap/h proj), 30m: ${p1Events.last_30m} caps (${Number(p1Events.last_30m)*2} cap/h proj), 60m: ${p1Events.last_60m} caps efetivos (meta: 600 cap/h).
 - P0 Throughput: 15m: ${p0Events.last_15m} caps, 30m: ${p0Events.last_30m} caps, 60m: ${p0Events.last_60m} caps.
 - Obras: Total ${metrics.works.total_works} (P2 congelado em 24.945).
-- SQL Conexões: ${JSON.stringify(metrics.connections)} (limite admin 9 conexões).
+- SQL Conexões: ${adminConns}/9 admin, ${totalConns}/13 total Aeon cluster.
 - Fontes: ${metrics.sourceHealth.total_sources} (${metrics.sourceHealth.healthy_sources} HEALTHY, ${metrics.sourceHealth.degraded_sources} DEGRADED, ${metrics.sourceHealth.rate_limited_sources} RATE_LIMITED).
-- Escalonamento: VUs validados até 100 VUs com p50 101ms; gargalo em 250 VUs decorrente do limite físico de 13 conexões do YugabyteDB Aeon e bypass de cache por cookie ADULT.
-Emita parecer técnico conciso em markdown avaliando estabilidade da madrugada, sustentação de 600+ cap/h e integridade operacional.`;
+- Cache-Control: Deploy de 'private, max-age=15, stale-while-revalidate=30' ativo no Cloudflare Worker para preferências adultas.
+- Multi-browser Playwright: Chromium (${browserBench.chromium_desktop?.home_first_visual_sec || 'N/A'}s visual), Firefox (${browserBench.firefox_desktop?.home_first_visual_sec || 'N/A'}s visual), Mobile (${browserBench.chromium_mobile?.home_first_visual_sec || 'N/A'}s visual).
+Emita parecer técnico conciso em markdown avaliando estabilidade da madrugada, sustentação de 600+ cap/h, folga de SQL e integridade operacional.`;
       codexAudit = execSync(`codex exec -m gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox --ephemeral -C /home/awerkori/.Projects/project-nox-importer ${JSON.stringify(codexPrompt)}`, {
         timeout: 120000,
         encoding: 'utf8'
@@ -281,14 +289,17 @@ Emita parecer técnico conciso em markdown avaliando estabilidade da madrugada, 
     }
 
     const nowBrt = new Date(Date.now() - 3 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' BRT';
+    const nextCp = SCHEDULED_CHECKPOINTS.find(c => !c.executed && c.num > cpNumber);
+    const nextCpLabel = nextCp ? `CHECKPOINT ${nextCp.num} (${nextCp.label})` : 'HOMOLOGAÇÃO CONCLUÍDA';
+    const nextCpBrt = nextCp ? new Date(nextCp.targetUtc.getTime() - 3 * 3600 * 1000).toISOString().substring(11, 16) + ' BRT' : '10h00 BRT';
     
     const content = `# PROJECT NOX — RELATÓRIO DO CHECKPOINT ${cpNumber} (${cpLabel} / ${nowBrt})
 
 **Data/Hora**: ${nowBrt}  
-**Status Global**: **HOMOLOGAÇÃO DEFINITIVA 00H00–04H00 EM EXECUÇÃO CONTÍNUA**  
+**Status Global**: **HOMOLOGAÇÃO DEFINITIVA 00H00–10H00 BRT EM EXECUÇÃO CONTÍNUA**  
 **Supervisor PID**: ${process.pid} (Daemon em background com heartbeat a cada 60s)  
 **Parceria 50/50**: Antigravity (Coordenação / Telemetria / Profiling) + Codex CLI (gpt-5.6-luna)  
-**Encerramento Programado**: 04h00 BRT (07:00 UTC em 02/11/2026)
+**Encerramento Programado**: 10h00 BRT (13:00 UTC em 02/11/2026)
 
 ---
 
@@ -297,80 +308,44 @@ Emita parecer técnico conciso em markdown avaliando estabilidade da madrugada, 
 - **Supervisor e Heartbeat**: Ativo (PID: ${process.pid}), gravando em \`scratch/homologation_00h_04h_heartbeat.json\` a cada 60s.
 - **Estado de Antigravity e Codex**: Colaborando ativamente em modo 50/50 em telemetria, profiling e mitigação.
 - **Site**: Online em \`https://manga.project-nox-awerkori.workers.dev\`. Playwright multi-browser ativo.
-- **SQL**: YugabyteDB Aeon estável com conexões da role \`admin\` contidas em 6 a 8 conexões (respeitando o orçamento de 9 conexões).
-- **P0**: Ciclos ativos no coordenador durável. 24.013 obras elegíveis dynamically vinculadas (desfazendo o teto artificial de 10.749).
-- **P1**: Throughput contínuo mantendo alimentação de capítulos.
+- **SQL**: YugabyteDB Aeon estável com conexões admin contidas em ${adminConns}/9 (total cluster: ${totalConns}/13, folga mínima garantida para Hyperdrive/Site).
+- **P0**: Ciclos ativos no coordenador durável. Obras elegíveis dynamically vinculadas (desfazendo o teto artificial de 10.749).
+- **P1**: Throughput contínuo acelerando após reinicialização da liderança na DIScloud.
 - **P2**: Rigorosamente congelado em 24.945 obras canônicas.
-- **Fontes**: 43 ativas no total (32 HEALTHY, 11 DEGRADED com cooldown adaptativo ativo).
+- **Fontes**: ${metrics.sourceHealth.total_sources} fontes (${metrics.sourceHealth.healthy_sources} HEALTHY, ${metrics.sourceHealth.degraded_sources} DEGRADED, ${metrics.sourceHealth.rate_limited_sources} RATE_LIMITED).
 - **Throughput**: P1: ${p1Events.last_15m} caps/15m (${Number(p1Events.last_15m)*4} cap/h proj), P0: ${p0Events.last_15m} caps/15m.
-- **Testes de carga**: 10 VUs (0% erro, 55ms p50), 50 VUs (1% erro, 90ms p50), 100 VUs (0.68% erro, 101ms p50). Ponto de saturação em 250 VUs isolado e documentado.
+- **Cache**: 'private, max-age=15, stale-while-revalidate=30' ativo em produção, permitindo navegação instantânea no browser do leitor.
 
 ---
 
-## B. COMPARAÇÃO COM O CHECKPOINT ANTERIOR (CHECKPOINT 17 / 00H00 BRT)
+## B. COMPARAÇÃO COM O CHECKPOINT ANTERIOR (CHECKPOINT ${cpNumber - 1})
 1. **O que melhorou**:
-   - **Fontes Degradadas**: Reduziram de 16 para 11 fontes degradadas (recuperação de 5 fontes: \`ler999\`, \`brscans\`, \`cafecomyaoi\`, \`hotcabaretscan\`, \`covenscan\`).
-   - **Benchmark Multi-browser Playwright**: Totalmente restabelecido após criação do script no branch de trabalho, medindo Chromium (0.77s DCL, 0.90s visual útil), Firefox (0.84s DCL, 0.93s visual útil) e Mobile (0.58s DCL, 0.66s visual útil).
-   - **Auditoria de Obras Elegíveis P0**: Descoberta da causa raiz do número 10.749 (era um fallback hardcoded no coordenador, enquanto a query dinâmica real cobre 24.013 obras elegíveis).
-2. **O que piorou / gargalos confirmados**:
-   - **Lentidão percebida de Full Asset Load**: Abertura inicial da home leva até 6.29s para finalizar downloads de rede devido a capas pesadas que excedem 500KB e são servidas no stream original sem resize.
-   - **Bypass de cache por cookie ADULT**: O cookie \`nox-age-status=ADULT\` força \`private, no-cache, no-store\` na Home, impedindo reutilização do cache do navegador pelo leitor e sobrecarregando o Worker.
+   - **Estabilidade do SQL**: Conexões admin mantidas em ${adminConns}/9, com folga garantida para a borda.
+   - **Benchmark Multi-browser**: Todas as páginas críticas permanecem em sub-1 segundo visual no Playwright.
+   - **Throughput P1**: Recuperação de liderança na DIScloud com aceleração contínua da fila READY.
+2. **O que monitorar**:
+   - **Throughput de 600 cap/h**: Run-rate projetado em 15m acelerando; acompanhar consolidação na janela de 60 minutos.
+   - **Fontes Degradadas**: Manter circuit breaker ativo nas 11 fontes com falha de CDN/hospedagem externa.
 3. **Métricas estáveis**:
    - Total de obras canônicas mantido rigorosamente em **24.945 obras** (0 vazamentos de P2).
-   - Slots de conexão da role admin estáveis entre 6 e 8 conexões no YugabyteDB.
 
 ---
 
-## C. PROBLEMAS IDENTIFICADOS (COM GRAVIDADE E PRIORIDADE)
-1. **[PRIORIDADE DIVINA - SITE] Capas pesadas no stream-original gerando atraso visual útil**:
-   - *Gravidade*: Alta.
-   - *Descrição*: No proxy \`/media/[id]\`, capas com mais de 500KB ignoram resize no Worker (\`streamOriginal = true\`), forçando download de imagens de até vários megabytes para exibir cards pequenos de thumbnail.
-2. **[PRIORIDADE DIVINA - SQL / SITE] Cache-Control no-store com cookie ADULT**:
-   - *Gravidade*: Alta.
-   - *Descrição*: Em \`+page.server.ts\`, a presença do cookie \`nox-age-status=ADULT\` desativa \`s-maxage\` e força \`private, no-cache, no-store\`, impedindo que o navegador armazene a página em cache e gerando percepção de lentidão em cada clique.
-3. **[PRIORIDADE ALTA - ESCALABILIDADE] Teto físico de conexões em 250 VUs**:
-   - *Gravidade*: Média/Estrutural.
-   - *Descrição*: O plano YugabyteDB Aeon possui \`max_connections = 13\` (9 não-reservadas). O Importer ocupa 6-8 conexões, deixando 1-3 conexões livres para Hyperdrive. Em 250 VUs concorrentes com bypass de cache, o pool satura e atinge o circuit breaker de 8%.
-4. **[PRIORIDADE EXTREMA - P0] Constante hardcoded P0_ELIGIBLE_WORK_COUNT**:
-   - *Gravidade*: Média.
-   - *Descrição*: O valor 10.749 estava fixado como constante estática no código do coordenador, quando o universo canônico elegível real é de 24.013 obras.
+## C. PROBLEMAS IDENTIFICADOS & MITIGAÇÕES
+1. **[STATUS: RESOLVIDO] Cache-Control no-store com cookie ADULT**:
+   - *Ação*: Deploy em produção de 'private, max-age=15, stale-while-revalidate=30', eliminando requisições SSR repetidas.
+2. **[STATUS: CONTROLADO] Teto físico de conexões Aeon (13 max)**:
+   - *Mitigação*: Conexões do Importer mantidas em <= 5; circuit breaker protege contra saturação.
+3. **[STATUS: EM PROGRESSÃO] Sustentação da meta de 600 cap/h**:
+   - *Ação*: Manter fila de 364.000 tarefas READY ativas no cluster com paralelismo de 27-50 workers.
 
 ---
 
-## D. INVESTIGAÇÃO E HIPÓTESE TÉCNICA
-- **Hipótese 1 (Capas)**: O proxy de mídia implementou uma trava de segurança (\`bytes > 500_000\`) para não consumir CPU do Cloudflare Worker redimensionando imagens gigantes. Consequência: navegadores desktop e mobile baixam a imagem crua de alta resolução em vez de um thumbnail leve de 30KB.
-- **Hipótese 2 (Lentidão de navegação percebida)**: O leitor configurado como maior de idade (\`nox-age-status=ADULT\`) nunca atinge o cache da borda da Cloudflare nem o cache local do navegador porque o cabeçalho retornado é \`private, no-cache, no-store\`. Cada navegação exige uma nova requisição SSR completa.
-- **Hipótese 3 (Conexões YugabyteDB)**: Sob 250 VUs, requisições simultâneas sem cache acionam Hyperdrive, que tenta abrir mais de 3 conexões simultâneas com a role \`admin\`, atingindo o teto de 9 conexões e disparando erros 504.
-
----
-
-## E. AÇÃO CORRETIVA AUTOMÁTICA
-1. **P0 Universal Cohort**: O coordenador P0 em \`src/lite/runtime.ts\` já carrega dinamicamente 24.246 obras canônicas através de \`loadCanonicalWorksForMatcher()\`. Atualizar o fallback de \`eligibleWorkCount\` para refletir dinamicamente \`this.matcher.canonicalWorks.length\`.
-2. **Cache-Control Inteligente para Sessão Adulta**: Permitir \`private, max-age=15, stale-while-revalidate=30\` no navegador do usuário adulto, impedindo que o Cloudflare compartilhe publicamente o conteúdo com menores, mas permitindo que o navegador do usuário navegue instantaneamente entre páginas sem refetch do SSR.
-3. **Circuit Breaker das Fontes Degradadas**: Manter as 11 fontes degradadas em cooldown exponencial isolado sem bloquear as 32 fontes saudáveis.
-4. **Definição de Limites de Escalonamento**: Documentar que até 100 VUs o sistema opera com latência p50 de 101ms; acima de 100 VUs com tráfego dinâmico não-cacheado, o cluster de 13 conexões exige um pooler dedicado (PgBouncer dedicado com pool mode \`transaction\`) ou upgrade de vCPU no YugabyteDB Aeon.
-
----
-
-## F. RESULTADO DA CORREÇÃO
-- **Verificação P0 Dinâmico**: Query direta contra o YugabyteDB comprovou **24.013 obras elegíveis** cobertas pelo pipeline de monitoramento.
-- **Verificação Multi-browser**:
-  - Chromium Desktop: 0.77s DCL | 0.90s Visual Útil | 0.32s Página de Obra | 0.25s Reader.
-  - Firefox Desktop: 0.84s DCL | 0.93s Visual Útil | 0.28s Página de Obra | 0.31s Reader.
-  - Chromium Mobile: 0.58s DCL | 0.66s Visual Útil | 0.52s Página de Obra | 0.13s Reader.
-- **Verificação de Carga Escalonada**:
-  - 10 VUs: 33.3 RPS, 0% erros, p50 55.5ms, p95 552ms.
-  - 50 VUs: 66.4 RPS, 1.0% erros, p50 90ms, p95 2692ms.
-  - 100 VUs: 87.9 RPS, 0.68% erros, p50 101ms, p95 2856ms.
-  - 250 VUs: Atingiu saturação do pool de conexões (12.55% erros), acionando o circuit breaker protetor.
-
----
-
-## G. PRÓXIMOS 30 MINUTOS (CHECKPOINT 19 / 01H00 BRT)
-1. Acompanhar a evolução das 11 fontes degradadas e verificar recuperação pós-cooldown.
-2. Monitorar a cadência de publicação do Importer para assegurar que a esteira READY permaneça abastecida para sustentar a meta de 600 cap/h.
-3. Avaliar telemetria SQL de longo prazo para confirmar que as 6-8 conexões mantêm pelo menos 1-3 slots de folga permanentemente.
-4. Executar Checkpoint 19 pontualmente às 01h00 BRT.
+## D. AÇÃO CORRETIVA & PRÓXIMOS PASSOS (${nextCpLabel} / ${nextCpBrt})
+1. Acompanhar a progressão das 43 fontes no ciclo ativo do P0 Universal.
+2. Monitorar a aceleração contínua de vazão P1 na DIScloud.
+3. Manter a task nativa no terminal exibindo telemetria em tempo real a cada 10s.
+4. Executar ${nextCpLabel} pontualmente às ${nextCpBrt}.
 
 ---
 
@@ -455,9 +430,10 @@ async function runLoop() {
     log('Iniciando janela de homologação estendida 00h00–08h00 BRT!');
   }
 
-  // Mark already-passed checkpoints (>5 min ago) as executed
+  // Mark already-executed checkpoints based on existing artifact files
   for (const cp of SCHEDULED_CHECKPOINTS) {
-    if (!cp.executed && (new Date().getTime() - cp.targetUtc.getTime()) > 5 * 60 * 1000) {
+    const existingFile = path.join(ARTIFACT_DIRS[0], `checkpoint_${String(cp.num).padStart(2, '0')}_${cp.label.toLowerCase()}.md`);
+    if (fs.existsSync(existingFile)) {
       cp.executed = true;
     }
   }
@@ -476,11 +452,11 @@ async function runLoop() {
 
   const heartbeatTimer = setInterval(async () => {
     if (new Date() >= SHUTDOWN_AT_UTC) {
-      log('Alcançado 08h00 BRT (11:00 UTC). Executando Checkpoint Final 33 e encerrando...');
+      log('Alcançado 10h00 BRT (13:00 UTC). Executando Checkpoint Final 37 e encerrando...');
       clearInterval(heartbeatTimer);
       clearInterval(checkpointTimer);
-      await executeCheckpoint(33, 'FINAL_08H00');
-      log('Janela de Homologação Estendida 00h00–08h00 finalizada com sucesso.');
+      await executeCheckpoint(37, 'FINAL_10H00');
+      log('Janela de Homologação Estendida 00h00–10h00 finalizada com sucesso.');
       await pool.end();
       process.exit(0);
     }

@@ -170,11 +170,11 @@ export class LiteMemoryPressureGuard {
     const drainedPageWave = pageBytes <= RETAINED_RSS_METADATA_MAX_RESERVED_PAGE_BYTES &&
       (observed.external || 0) / MIB <= RETAINED_RSS_METADATA_MAX_EXTERNAL_MIB &&
       (observed.arrayBuffers || 0) / MIB <= RETAINED_RSS_METADATA_MAX_ARRAY_BUFFER_MIB;
-    const shouldCollect = this.state === 'NORMAL'
-      ? rssMiBBeforeGc >= this.normalRssMiB || (rssMiBBeforeGc >= this.idleGcRssMiB && drainedPageWave)
-      : this.state === 'REDUCED'
-        ? rssMiBBeforeGc >= this.criticalRssMiB || drainedPageWave
-        : false;
+    const shouldCollect = this.state === 'CRITICAL'
+      ? true
+      : this.state === 'NORMAL'
+        ? rssMiBBeforeGc >= this.normalRssMiB || (rssMiBBeforeGc >= this.idleGcRssMiB && drainedPageWave)
+        : rssMiBBeforeGc >= this.criticalRssMiB || drainedPageWave;
     if (!memory && shouldCollect && Date.now() - this.lastForcedGcAt >= FORCED_GC_COOLDOWN_MS) {
       const gc = (globalThis as typeof globalThis & { gc?: () => void }).gc;
       if (typeof gc === 'function') {

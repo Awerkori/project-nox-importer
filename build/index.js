@@ -153,6 +153,9 @@ async function main() {
             }
             telemetryCollector.stop();
             await closeYugabytePool().catch(() => { });
+            if (sourceMetadataPool) {
+                await sourceMetadataPool.end().catch(() => { });
+            }
         }
         finally {
             clearTimeout(forceExitTimer);
