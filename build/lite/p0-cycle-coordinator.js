@@ -180,19 +180,24 @@ export class SqlP0CyclePersistence {
     constructor(db) {
         this.db = db;
     }
+    pkColumn = 'cycle_id';
     async ensureSchema() {
         if (this.schemaReady)
             return;
-        await this.db.query(`
-      CREATE TABLE IF NOT EXISTS public.importer_p0_cycles (
-        id uuid PRIMARY KEY,
-        status text NOT NULL CHECK (status IN ('IDLE', 'RUNNING', 'COMPLETED')),
-        started_at timestamptz NOT NULL,
-        completed_at timestamptz,
-        metrics jsonb NOT NULL DEFAULT '{}'::jsonb,
-        source_progress jsonb NOT NULL DEFAULT '{}'::jsonb,
-        updated_at timestamptz NOT NULL DEFAULT now()
-      )`);
+        try {
+            const res = await this.db.query(`
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'importer_p0_cycles' AND column_name IN ('id', 'cycle_id')`);
+            if (res.rows.some((r) => r.column_name === 'id')) {
+                this.pkColumn = 'id';
+            }
+            else {
+                this.pkColumn = 'cycle_id';
+            }
+        }
+        catch {
+            this.pkColumn = 'cycle_id';
+        }
         this.schemaReady = true;
     }
     async loadLatestCycle() {
@@ -244,7 +249,7 @@ export class SqlP0CyclePersistence {
             history: cycle.history || [],
             accumulatedMetrics: cycle.accumulatedMetrics,
         };
-        try {
+        if (this.pkColumn === 'id') {
             await this.db.query(`
         INSERT INTO public.importer_p0_cycles
           (id, status, started_at, completed_at, metrics, source_progress, updated_at)
@@ -256,8 +261,7 @@ export class SqlP0CyclePersistence {
           source_progress = EXCLUDED.source_progress,
           updated_at = now()`, [cycle.id, cycle.status, cycle.startedAt, cycle.completedAt, JSON.stringify(metaPayload), JSON.stringify(cycle.sourceProgress)]);
         }
-        catch {
-            // Fallback for draft schema variant with cycle_id
+        else {
             const durationSeconds = cycle.metrics.durationMs ? (cycle.metrics.durationMs / 1000).toFixed(2) : null;
             await this.db.query(`
         INSERT INTO public.importer_p0_cycles

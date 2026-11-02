@@ -145,6 +145,7 @@ export declare class SqlP0CyclePersistence implements P0CyclePersistence {
     private readonly db;
     private schemaReady;
     constructor(db: P0Database);
+    private pkColumn;
     ensureSchema(): Promise<void>;
     loadLatestCycle(): Promise<PersistedP0Cycle | null>;
     saveCycle(cycle: PersistedP0Cycle): Promise<void>;
