@@ -244,7 +244,7 @@ export class SqlP0CyclePersistence {
             metrics: cycle.metrics,
             sourceProgress: cycle.sourceProgress,
             sourceCatalogs: cycle.sourceCatalogs || {},
-            coverage: cycle.coverage || {},
+            coverage: Object.keys(cycle.coverage || {}).length > 1000 ? {} : (cycle.coverage || {}),
             verifiedWorkIds: cycle.verifiedWorkIds || [],
             history: cycle.history || [],
             accumulatedMetrics: cycle.accumulatedMetrics,
@@ -285,7 +285,7 @@ export class SqlP0CyclePersistence {
       INSERT INTO public.importer_work_mappings
         (source,source_work_id,work_id,source_slug,source_title,sync_status,metadata,last_synced_at,updated_at)
       SELECT $1,$2,w.id,$3,$4,'SYNCED',jsonb_build_object(
-        'discovery', 'p0-catalog', 'matchMethod', $5, 'matchScore', $6::numeric,
+        'discovery', 'p0-catalog', 'matchMethod', $5::text, 'matchScore', $6::numeric,
         'cycleVersion', 'p0-om-v1'),now(),now()
       FROM public.works w
       WHERE w.id=$7::uuid
@@ -623,13 +623,18 @@ export class P0CycleCoordinator {
         const cleanSource = source.trim();
         if (!cleanSource)
             throw new Error('source is required');
-        for (const work of this.matcher.canonicalWorks) {
-            const entry = this.coverageEntry(cleanSource, work.id);
-            if (!entry || entry.state === 'PENDING' || entry.state === 'STALE') {
-                this.setCoverageEntry(cleanSource, work.id, coverageState, error);
+        let updatedAny = false;
+        for (const entry of this.coverage.values()) {
+            if (entry.source === cleanSource && (entry.state === 'PENDING' || entry.state === 'STALE')) {
+                entry.state = coverageState;
+                entry.error = error;
+                entry.updatedAt = this.now().toISOString();
+                updatedAny = true;
             }
         }
-        await this.persist();
+        if (updatedAny) {
+            await this.persist();
+        }
     }
     async matchCandidateWorks(items, options) {
         await this.ensureLoaded();
