@@ -33,6 +33,19 @@ import {
   AliasOnlyEnrichmentService,
   AliasOnlyRepository,
 } from '../alias-sources/index.js';
+import {
+  P0CycleCoordinator,
+  SourceCatalogMatcher,
+  SqlP0CyclePersistence,
+  SettingsP0CyclePersistence,
+  ResilientP0CyclePersistence,
+  P0_ELIGIBLE_WORK_COUNT,
+  type P0MappingInput,
+  type CatalogItem,
+  type CanonicalWork,
+  type P0Database,
+  type P0CycleMetrics,
+} from './p0-cycle-coordinator.js';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const withTimeout = async <T>(operation: Promise<T>, timeoutMs: number, code: string): Promise<T> => {
@@ -152,9 +165,9 @@ const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // avoids spending one task turn per provider for a 43-source coverage pass.
 // Bound cross-source discovery independently of the 43-provider catalogue.
 // Durable checkedSources resumes the remaining providers in later turns.
-const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 2;
-const CROSS_SOURCE_DISCOVERY_TURN_DELAY_MS = 30_000;
-const CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS = 15_000;
+const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 8;
+const CROSS_SOURCE_DISCOVERY_TURN_DELAY_MS = 1_000;
+const CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS = 5_000;
 // The direct importer pool is intentionally tiny and short chapter commits
 // can produce two queued checkouts momentarily.  Treat only a persistent
 // queue as pressure; an instantaneous sample must not strand network-only
@@ -495,6 +508,10 @@ export class ImporterLiteRuntime {
   private lastSiteProbe: { state: 'UNKNOWN' | 'HEALTHY' | 'DEGRADED' | 'PAUSED'; checkedAt: string; latencyMs: number | null } = {
     state: 'UNKNOWN', checkedAt: new Date(0).toISOString(), latencyMs: null,
   };
+  private p0CycleCoordinator: P0CycleCoordinator | null = null;
+  private p0CycleCoordinatorPromise: Promise<P0CycleCoordinator> | null = null;
+  private readonly p0CycleRunnerGate = new AsyncSemaphore(1, 'lite_p0_cycle_runner');
+  private p0CycleSourceIndex = 0;
 
   /**
    * A queued checkout from the importer's two-connection pool is a local,
@@ -870,6 +887,12 @@ export class ImporterLiteRuntime {
       void this.runHistoricalP1CatalogTurn();
     }, 3_000);
     historicalP1CatalogTimer.unref(); this.timers.push(historicalP1CatalogTimer);
+    const p0CycleTimer = setInterval(() => {
+      if (this.isRuntimeLeader) void this.runP0CycleTurn().catch((err: any) => {
+        this.logger.warn('P0 cycle turn failed', { error: err?.message });
+      });
+    }, 15_000);
+    p0CycleTimer.unref(); this.timers.push(p0CycleTimer);
     const healthTimer = setInterval(() => void this.probeSharedResources(), 120_000);
     healthTimer.unref(); this.timers.push(healthTimer);
     const metricsTimer = setInterval(() => void this.emitOperationalSnapshot().catch(() => {}), 120_000);
@@ -947,6 +970,11 @@ export class ImporterLiteRuntime {
         await this.refillManifestProvenP1Imports();
       } catch (err: any) {
         this.logger.warn('Boot refillManifestProvenP1Imports failed non-fatally', { error: err?.message });
+      }
+      try {
+        await this.initP0CycleCoordinator();
+      } catch (err: any) {
+        this.logger.warn('Boot initP0CycleCoordinator failed non-fatally', { error: err?.message });
       }
       try {
         await this.refreshP1FocusGroupNow(true);
@@ -1328,6 +1356,209 @@ export class ImporterLiteRuntime {
       this.logger.warn('P0 monitor coverage refill deferred', { error: error?.message });
     } finally {
       this.p0MonitorCoverageRefillGate.release();
+    }
+  }
+
+  private async loadCanonicalWorksForMatcher(): Promise<CanonicalWork[]> {
+    try {
+      const result = await this.getAvailablePool().query<{
+        id: string;
+        title: string;
+        slug: string | null;
+        aliases: string[] | null;
+      }>(`
+        SELECT id::text, title, slug, aliases
+        FROM works
+        WHERE published = true
+           OR EXISTS (SELECT 1 FROM importer_work_mappings m WHERE m.work_id = works.id)
+        ORDER BY updated_at DESC
+      `);
+      return (result.rows || []).map((row) => ({
+        id: row.id,
+        title: row.title,
+        slug: row.slug,
+        aliases: row.aliases,
+      }));
+    } catch (error: any) {
+      this.logger.warn('Failed to load canonical works for P0 matcher, using fallback', { error: error?.message });
+      return [];
+    }
+  }
+
+  public async initP0CycleCoordinator(customCoordinator?: P0CycleCoordinator): Promise<P0CycleCoordinator> {
+    if (customCoordinator) {
+      this.p0CycleCoordinator = customCoordinator;
+      this.p0CycleCoordinatorPromise = Promise.resolve(customCoordinator);
+      return this.p0CycleCoordinator;
+    }
+    if (this.p0CycleCoordinator) return this.p0CycleCoordinator;
+    if (this.p0CycleCoordinatorPromise) return this.p0CycleCoordinatorPromise;
+
+    this.p0CycleCoordinatorPromise = (async () => {
+      try {
+        const works = await this.loadCanonicalWorksForMatcher();
+        const matcher = new SourceCatalogMatcher(works);
+        const pool = this.sourceMetadataPool || this.pool;
+        const db: P0Database = {
+          query: (text: string, values?: readonly unknown[]) => pool.query(text, values as any[]),
+        };
+        const primary = new SqlP0CyclePersistence(db);
+        const fallback = new SettingsP0CyclePersistence(db, primary);
+        const persistence = new ResilientP0CyclePersistence(primary, fallback);
+
+        const coordinator = new P0CycleCoordinator({
+          matcher,
+          persistence,
+          eligibleWorkCount: works.length || P0_ELIGIBLE_WORK_COUNT,
+          canonicalWorkCount: works.length,
+          p2AdmissionPolicy: {
+            isSuspended: () => Boolean(this.p2SubordinationState.subordinated),
+          },
+          onNewMappingDiscovered: async (mapping: P0MappingInput) => {
+            try {
+              await this.queue.enrollConfirmedP0Mappings(mapping.work.id, [{
+                source: mapping.source,
+                sourceWorkId: mapping.item.sourceWorkId,
+              }]);
+            } catch (error: any) {
+              this.logger.warn('Immediate P0 monitor enrollment failed', {
+                workId: mapping.work.id,
+                source: mapping.source,
+                error: error?.message,
+              });
+            }
+
+            try {
+              await this.queue.enqueueMany([{
+                taskType: 'CATALOG',
+                workId: mapping.work.id,
+                workKey: `work:${mapping.work.id}`,
+                priority: 'P1',
+                idempotencyKey: `lite:catalog:${mapping.source}:${mapping.item.sourceWorkId}`,
+                payload: {
+                  source: mapping.source,
+                  sourceWorkId: mapping.item.sourceWorkId,
+                  metadataCrossSourceP1Discovery: true,
+                },
+              }]);
+              await this.queue.wakeCatalogBlocked(mapping.work.id, `work:${mapping.work.id}`);
+            } catch (error: any) {
+              this.logger.warn('P1 discovery intake task enrollment failed', {
+                workId: mapping.work.id,
+                source: mapping.source,
+                error: error?.message,
+              });
+            }
+          },
+        });
+
+        await coordinator.resumeOrCreateCycle();
+        this.p0CycleCoordinator = coordinator;
+        return coordinator;
+      } catch (err) {
+        this.p0CycleCoordinatorPromise = null;
+        throw err;
+      }
+    })();
+
+    return this.p0CycleCoordinatorPromise;
+  }
+
+  public getP0CycleCoordinator(): P0CycleCoordinator | null {
+    return this.p0CycleCoordinator;
+  }
+
+  public setP0CycleCoordinator(coordinator: P0CycleCoordinator): void {
+    this.p0CycleCoordinator = coordinator;
+    this.p0CycleCoordinatorPromise = Promise.resolve(coordinator);
+  }
+
+  public async runP0CycleTurn(): Promise<boolean> {
+    if (this.stopped || !this.isRuntimeLeader || this.manualProtectiveStop.active
+      || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
+      || this.shouldPauseLowPriorityMetadata()) {
+      return false;
+    }
+    if (!this.p0CycleRunnerGate.tryAcquire()) return false;
+    try {
+      const coordinator = await this.initP0CycleCoordinator();
+      const currentCycle = coordinator.getCycleMetrics();
+      if (currentCycle.status !== 'RUNNING') {
+        await coordinator.resumeOrCreateCycle();
+      }
+
+      let enabledSources: string[] = [];
+      if (typeof (this.queue as any).enabledSources === 'function') {
+        enabledSources = await (this.queue as any).enabledSources();
+      }
+      if (!enabledSources.length) {
+        enabledSources = ['mangaflix', 'nexus', 'manhastro', 'mangotoons', 'taimumangas', 'hipercool', 'hanamiheaven'];
+      }
+
+      const source = enabledSources[this.p0CycleSourceIndex % enabledSources.length];
+      this.p0CycleSourceIndex = (this.p0CycleSourceIndex + 1) % enabledSources.length;
+
+      const checkCycleAdvancement = async (): Promise<void> => {
+        const metrics = coordinator.getCycleMetrics();
+        if (metrics.sourcesProcessed >= enabledSources.length) {
+          await coordinator.completeCycle();
+          this.logger.info('P0 universal cycle completed', coordinator.getCycleMetrics());
+          await coordinator.advanceToNextCycle();
+        }
+      };
+
+      const policy = await this.queue.sourcePolicy(source);
+      if (!policy?.runnable) {
+        await coordinator.recordSourceCoverage(source, 'DEFERRED', `SOURCE_COOLDOWN:${policy?.status || 'MISSING'}`);
+        await coordinator.recordSourceCatalog(source, [], { isFullCatalog: false });
+        await checkCycleAdvancement();
+        return false;
+      }
+
+      const adapter = this.registry.get(source);
+      if (!adapter) {
+        await coordinator.recordSourceCoverage(source, 'FAILED', 'ADAPTER_MISSING');
+        await coordinator.recordSourceCatalog(source, [], { isFullCatalog: false });
+        await checkCycleAdvancement();
+        return false;
+      }
+
+      let items: CatalogItem[] = [];
+      try {
+        let host = source;
+        try { host = new URL(adapter.baseUrl).host || source; } catch { /* test double */ }
+        await this.sourceRateLimiter.acquire(host, undefined, 15_000);
+        const updated = await withTimeout(
+          adapter.fetchUpdatedWorks(null, { mode: 'maintenance' }),
+          this.config.SOURCE_OPERATION_TIMEOUT_MS,
+          'CYCLE_FETCH_UPDATED_TIMEOUT'
+        );
+        items = (updated.works || []).map((w) => ({
+          sourceWorkId: w.sourceWorkId,
+          title: w.title,
+          slug: w.slug,
+          source,
+        }));
+      } catch (fetchErr: any) {
+        this.logger.warn('Source catalog feed fetch failed during cycle', { source, error: fetchErr?.message });
+        await coordinator.recordSourceCoverage(source, 'FAILED', fetchErr?.message || 'FETCH_ERROR');
+        await coordinator.recordSourceCatalog(source, [], { isFullCatalog: false });
+        await checkCycleAdvancement();
+        return false;
+      }
+
+      await coordinator.recordSourceCatalog(source, items, { isFullCatalog: false });
+      if (items.length > 0) {
+        await coordinator.matchCandidateWorks(items, { isFullCatalog: false });
+      }
+
+      await checkCycleAdvancement();
+      return true;
+    } catch (err: any) {
+      this.logger.warn('P0 cycle turn encountered non-fatal error', { error: err?.message });
+      return false;
+    } finally {
+      this.p0CycleRunnerGate.release();
     }
   }
 
@@ -3593,6 +3824,8 @@ export class ImporterLiteRuntime {
         sourceMetadataProducer: this.sourceMetadataProducer,
         p0MonitorCoverage: this.p0MonitorCoverage,
         p0BorrowedSqlOperations: this.monitorSqlBorrowedOperations,
+        p0CycleMetrics: this.p0CycleCoordinator?.getCycleMetrics() ?? null,
+        p0CycleAccumulated: this.p0CycleCoordinator?.getAccumulatedMetrics() ?? null,
         p1FocusGroup: typeof (this.queue as any).getP1FocusGroupSnapshot === 'function'
           ? this.queue.getP1FocusGroupSnapshot()
           : null,
@@ -4253,6 +4486,20 @@ export class ImporterLiteRuntime {
             // The discovered ID may already belong to a different canonical
             // work. Enrol only mappings whose persisted owner is this work.
             await this.queue.enrollConfirmedP0Mappings(resolved.workId, complementaryOutcome.attached);
+            const p1Tasks: EnqueueLiteTask[] = complementaryOutcome.attached.map((att) => ({
+              taskType: 'CATALOG',
+              workId: resolved.workId,
+              workKey: `work:${resolved.workId}`,
+              priority: 'P1',
+              idempotencyKey: `lite:catalog:${att.source}:${att.sourceWorkId}`,
+              payload: {
+                source: att.source,
+                sourceWorkId: att.sourceWorkId,
+                metadataCrossSourceP1Discovery: true,
+              },
+            }));
+            await this.queue.enqueueMany(p1Tasks);
+            await this.queue.wakeCatalogBlocked(resolved.workId, `work:${resolved.workId}`);
           } catch (error: any) {
             this.logger.warn('Immediate onboarding monitor enrollment deferred', { workId: resolved.workId, error: error?.message });
           }
@@ -4722,8 +4969,22 @@ export class ImporterLiteRuntime {
     if (outcome.attached.length) {
       try {
         await this.queue.enrollConfirmedP0Mappings(target.id, outcome.attached);
+        const p1Tasks: EnqueueLiteTask[] = outcome.attached.map((att) => ({
+          taskType: 'CATALOG',
+          workId: target.id,
+          workKey: `work:${target.id}`,
+          priority: 'P1',
+          idempotencyKey: `lite:catalog:${att.source}:${att.sourceWorkId}`,
+          payload: {
+            source: att.source,
+            sourceWorkId: att.sourceWorkId,
+            metadataCrossSourceP1Discovery: true,
+          },
+        }));
+        await this.queue.enqueueMany(p1Tasks);
+        await this.queue.wakeCatalogBlocked(target.id, `work:${target.id}`);
       } catch (error: any) {
-        this.logger.warn('Immediate cross-source monitor enrollment deferred', { workId: target.id, error: error?.message });
+        this.logger.warn('Immediate cross-source monitor/P1 enrollment deferred', { workId: target.id, error: error?.message });
       }
     }
     for (const source of sourceBatch) checked.add(source);

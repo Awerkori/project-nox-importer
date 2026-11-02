@@ -3,6 +3,7 @@ import type { Config } from '../config.js';
 import type { SourceRegistry } from '../sources/registry.js';
 import type { StorageProvider } from '../storage/provider.js';
 import { HostRateLimiter } from '../core/rate-limiter.js';
+import { P0CycleCoordinator } from './p0-cycle-coordinator.js';
 export type ComplementaryCoverCandidate = {
     source: string;
     sourceWorkId: string;
@@ -142,6 +143,10 @@ export declare class ImporterLiteRuntime {
     private readonly historicalP1CatalogClaimGate;
     private p2SubordinationState;
     private lastSiteProbe;
+    private p0CycleCoordinator;
+    private p0CycleCoordinatorPromise;
+    private readonly p0CycleRunnerGate;
+    private p0CycleSourceIndex;
     /**
      * A queued checkout from the importer's two-connection pool is a local,
      * transient condition, not proof that the Reader is unhealthy. Claims are
@@ -249,6 +254,11 @@ export declare class ImporterLiteRuntime {
      * consumes a chapter admission or page/download permit.
      */
     private refillP0MonitorCoverage;
+    private loadCanonicalWorksForMatcher;
+    initP0CycleCoordinator(customCoordinator?: P0CycleCoordinator): Promise<P0CycleCoordinator>;
+    getP0CycleCoordinator(): P0CycleCoordinator | null;
+    setP0CycleCoordinator(coordinator: P0CycleCoordinator): void;
+    runP0CycleTurn(): Promise<boolean>;
     private refreshP1FocusGroupNow;
     private runHistoricalP1CatalogTurn;
     private runRecoveryTurn;
