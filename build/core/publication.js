@@ -90,7 +90,7 @@ export class PublicationBarrier {
             try {
                 // NOX_MANGA_URL is the validated runtime endpoint used by the storage
                 // bridge and sentinel. Do not rely on an untracked legacy alias here.
-                const siteUrl = process.env.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev';
+                const siteUrl = process.env.NOX_MANGA_URL || 'https://projectnox.org';
                 const bridgeToken = process.env.NOX_STORAGE_BRIDGE_TOKEN;
                 const warmDirectVariant = async (variant) => {
                     const warmUrl = `${siteUrl.replace(/\/$/, '')}/media/${coverId}?size=${variant}&v=3`;
