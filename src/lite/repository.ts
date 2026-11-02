@@ -4050,6 +4050,8 @@ export class LiteRepository {
         ON CONFLICT(source) DO UPDATE SET health=excluded.health,
           cooldown_until=CASE
             WHEN $5::boolean AND importer_lite_source_health.consecutive_failures + 1 < 6 THEN importer_lite_source_health.cooldown_until
+            WHEN importer_lite_source_health.consecutive_failures + 1 >= 2000 THEN now() + interval '14400 seconds'
+            WHEN importer_lite_source_health.consecutive_failures + 1 >= 1000 THEN now() + interval '7200 seconds'
             WHEN importer_lite_source_health.consecutive_failures + 1 >= 500 THEN now() + interval '3600 seconds'
             WHEN importer_lite_source_health.consecutive_failures + 1 >= 100 THEN now() + interval '1800 seconds'
             WHEN importer_lite_source_health.consecutive_failures + 1 >= 50 THEN now() + interval '900 seconds'

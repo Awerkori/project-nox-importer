@@ -1168,6 +1168,9 @@ export class TelemetryCollector {
 
   // --- Persistence to DB ---
   public async flushTelemetryToDb(): Promise<void> {
+    if (!process.env.IMPORTER_RUNTIME_MODE && !process.env.DISCLOUD_APP_ID && process.env.ENABLE_TELEMETRY_FLUSH !== 'true') {
+      return;
+    }
     if (!this.poolRef || this.flushing) return;
     if (!this.activeSessionId && Date.now() < this.nextSessionCheck) return;
     this.flushing = true;

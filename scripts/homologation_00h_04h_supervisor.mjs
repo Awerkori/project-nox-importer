@@ -247,7 +247,7 @@ async function executeCheckpoint(cpNumber, cpLabel) {
     try {
       log('Executando benchmark multi-browser Playwright...');
       const benchOut = execSync('node /home/awerkori/.Projects/project-nox-manga/scripts/benchmark_checkpoint06.mjs', {
-        timeout: 90000,
+        timeout: 120000,
         encoding: 'utf8'
       });
       const jsonMatch = benchOut.match(/\{[\s\S]*"chromium_desktop"[\s\S]*\}/);
@@ -362,7 +362,7 @@ Emita parecer técnico conciso em markdown avaliando estabilidade da madrugada, 
 - **Total Acumulado de Capítulos**: **${metrics.publications.total_chapters}**
 - **Obras Status Editorial COMPLETED**: **${metrics.works.completed_status}**
 - **Total de Obras Canônicas (P2 Rigorosamente Bloqueado)**: **${metrics.works.total_works}**
-- **Obras Elegíveis ao P0 (Base Real Dinâmica)**: **24.013 obras**
+- **Obras Elegíveis ao P0 (Base Real Dinâmica)**: **${metrics.p0Cycles[0]?.total_eligible_works || 24246} obras** (${metrics.p0Cycles[0]?.unique_works_verified || 0} verificadas nesta rodada)
 
 ---
 
