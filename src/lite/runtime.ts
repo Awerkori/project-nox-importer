@@ -1480,7 +1480,6 @@ export class ImporterLiteRuntime {
 
   public async runP0CycleTurn(): Promise<boolean> {
     if (this.stopped || !this.isRuntimeLeader || this.manualProtectiveStop.active
-      || Date.now() < this.sitePausedUntil || this.lastSiteProbe.state === 'PAUSED'
       || this.shouldPauseLowPriorityMetadata()) {
       return false;
     }
@@ -3646,16 +3645,16 @@ export class ImporterLiteRuntime {
       this.updateAdaptiveAdmissionControl();
       return;
     }
-    // An importer-side network failure does not establish that Reader is
-    // unavailable to visitors.  Pausing every chapter after two `fetch`
-    // exceptions turned a transient DISCloud egress path into a global
-    // throughput brake even while the public health endpoint was healthy.
-    // A real Reader response (5xx or slow) still takes the conservative
-    // pause below; only two absent HTTP responses retain admissions.
-    if (first.status === null && confirmation.status === null) {
+    // An importer-side network failure or CDN plan limit (HTTP 429 on Workers edge)
+    // does not establish that Reader backend is crashed or saturating YugabyteDB.
+    // Pausing every chapter after two `fetch` exceptions or CDN rate limit
+    // turned a transient edge limit into an internal pipeline brake.
+    // A real backend outage (5xx or slow response) still takes the conservative
+    // pause below.
+    if ((first.status === null && confirmation.status === null) || first.status === 429 || confirmation.status === 429) {
       this.sitePausedUntil = 0;
-      this.lastSiteProbe = { state: 'DEGRADED', checkedAt: new Date().toISOString(), latencyMs: null };
-      this.logger.warn('Importer egress could not confirm Reader health; retaining Lite admissions', {
+      this.lastSiteProbe = { state: 'DEGRADED', checkedAt: new Date().toISOString(), latencyMs: confirmation.latencyMs ?? first.latencyMs };
+      this.logger.warn('Importer egress could not confirm Reader health or CDN edge hit rate limit; retaining Lite admissions', {
         firstStatus: first.status, confirmationStatus: confirmation.status,
       });
       this.updateAdaptiveAdmissionControl();

@@ -25,9 +25,9 @@ const LOG_FILE = path.join(SCRATCH_DIR, 'homologation_00h_04h_supervisor.log');
 const HEARTBEAT_FILE = path.join(SCRATCH_DIR, 'homologation_00h_04h_heartbeat.json');
 const STATUS_FILE = path.join(SCRATCH_DIR, 'homologation_00h_04h_status.json');
 
-// Window: 00:00 BRT (03:00 UTC) to 10:00 BRT (13:00 UTC) on Nov 2, 2026 (Extended Autonomy to 10h00 BRT)
+// Window: 00:00 BRT (03:00 UTC) to 12:00 BRT (15:00 UTC) on Nov 2, 2026 (Extended Autonomy to 12h00 BRT)
 const START_AT_UTC = new Date('2026-11-02T03:00:00.000Z');
-const SHUTDOWN_AT_UTC = new Date('2026-11-02T13:00:00.000Z');
+const SHUTDOWN_AT_UTC = new Date('2026-11-02T15:00:00.000Z');
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] [PID:${process.pid}] ${msg}\n`;
@@ -64,7 +64,11 @@ const SCHEDULED_CHECKPOINTS = [
   { num: 34, label: 'T1020MIN_08H30', targetUtc: new Date('2026-11-02T11:30:00.000Z'), executed: false },
   { num: 35, label: 'REVISAO_09H00',  targetUtc: new Date('2026-11-02T12:00:00.000Z'), executed: false },
   { num: 36, label: 'T1080MIN_09H30', targetUtc: new Date('2026-11-02T12:30:00.000Z'), executed: false },
-  { num: 37, label: 'FINAL_10H00',    targetUtc: new Date('2026-11-02T13:00:00.000Z'), executed: false }
+  { num: 37, label: 'REVISAO_10H00',  targetUtc: new Date('2026-11-02T13:00:00.000Z'), executed: false },
+  { num: 38, label: 'T1140MIN_10H30', targetUtc: new Date('2026-11-02T13:30:00.000Z'), executed: false },
+  { num: 39, label: 'T1170MIN_11H00', targetUtc: new Date('2026-11-02T14:00:00.000Z'), executed: false },
+  { num: 40, label: 'T1200MIN_11H30', targetUtc: new Date('2026-11-02T14:30:00.000Z'), executed: false },
+  { num: 41, label: 'FINAL_12H00',    targetUtc: new Date('2026-11-02T15:00:00.000Z'), executed: false }
 ];
 
 function getNextCheckpoint() {
@@ -452,11 +456,11 @@ async function runLoop() {
 
   const heartbeatTimer = setInterval(async () => {
     if (new Date() >= SHUTDOWN_AT_UTC) {
-      log('Alcançado 10h00 BRT (13:00 UTC). Executando Checkpoint Final 37 e encerrando...');
+      log('Alcançado 12h00 BRT (15:00 UTC). Executando Checkpoint Final 41 e encerrando...');
       clearInterval(heartbeatTimer);
       clearInterval(checkpointTimer);
-      await executeCheckpoint(37, 'FINAL_10H00');
-      log('Janela de Homologação Estendida 00h00–10h00 finalizada com sucesso.');
+      await executeCheckpoint(41, 'FINAL_12H00');
+      log('Janela de Homologação Estendida 00h00–12h00 finalizada com sucesso.');
       await pool.end();
       process.exit(0);
     }

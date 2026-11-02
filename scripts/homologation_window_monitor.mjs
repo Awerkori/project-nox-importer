@@ -39,8 +39,19 @@ console.log(`║ Atividades:            ${activities.padEnd(52)}║`);
 console.log('╚════════════════════════════════════════════════════════════════════════════╝');
 
 let iteration = 0;
+let isSampling = false;
 
 async function sampleAndLog() {
+  if (isSampling) return;
+  isSampling = true;
+  try {
+    await sampleAndLogInner();
+  } finally {
+    isSampling = false;
+  }
+}
+
+async function sampleAndLogInner() {
   iteration++;
   const now = new Date();
   const elapsedSec = Math.floor((Date.now() - startTime) / 1000);

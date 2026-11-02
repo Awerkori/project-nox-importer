@@ -63,6 +63,20 @@ export interface P0CoverageEntry {
     attempts: number;
     error: string | null;
 }
+export interface P0SourceFailure {
+    state: P0CoverageState;
+    error: string | null;
+    updatedAt: string;
+}
+export interface P0CoverageSummary {
+    totalEntries: number;
+    truncated: boolean;
+    sampleSize: number;
+}
+export interface P0CycleMetadata {
+    sourceFailures: Record<string, P0SourceFailure>;
+    coverageSummary?: P0CoverageSummary;
+}
 export interface PersistedP0Cycle {
     id: string;
     status: P0CycleStatus;
@@ -76,6 +90,7 @@ export interface PersistedP0Cycle {
     verifiedWorkIds?: string[];
     history?: P0CycleMetrics[];
     accumulatedMetrics?: P0AccumulatedMetrics;
+    metadata?: P0CycleMetadata;
 }
 export interface P0MappingInput {
     source: string;
