@@ -233,7 +233,7 @@ export class SourceHttpClient {
           res = await this.fetchFn(url, {
             method: 'GET',
             headers: {
-              'User-Agent': 'ProjectNoxAliasEnricher/1.0 (+https://manga.project-nox-awerkori.workers.dev)',
+              'User-Agent': 'ProjectNoxAliasEnricher/1.0 (+https://projectnox.org)',
               ...init.headers,
             },
             signal: controller.signal,

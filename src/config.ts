@@ -31,7 +31,7 @@ const ConfigSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).default('placeholder-service-role-key'),
   STORAGE_PROVIDER: z.enum(['worker', 'telegram', 'mock', 'direct_telegram']).default('direct_telegram'),
   NOX_STORAGE_BRIDGE_TOKEN: z.string().optional(),
-  NOX_MANGA_URL: z.string().url().default('https://manga.project-nox-awerkori.workers.dev'),
+  NOX_MANGA_URL: z.string().url().default('https://projectnox.org'),
   NOX_IMPORTER_GATEWAY_URL: z.string().url().default('https://project-nox-importer-gateway.project-nox-awerkori.workers.dev'),
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
