@@ -171,7 +171,9 @@ async function verify() {
       const text = await res.text();
       const hasErrorMarkup = /data-error="true"|Internal Server Error/.test(text);
       console.log(`  Route ${r}: HTTP ${res.status}, TTFB ${ttfb}ms, bytes: ${Buffer.byteLength(text)}, errorMarkup: ${hasErrorMarkup}`);
-      if (!res.ok || hasErrorMarkup) {
+      if (res.status === 429) {
+        console.warn(`  Route ${r}: Edge rate limited (HTTP 429), treating as DEGRADED edge rather than deploy failure`);
+      } else if (!res.ok || hasErrorMarkup) {
         siteSuccess = false;
       }
     } catch (err) {
