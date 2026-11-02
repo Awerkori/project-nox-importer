@@ -224,6 +224,7 @@ export declare class P0CycleCoordinator {
     getCoverageSnapshot(source?: string): P0CoverageEntry[];
     getCycleHistory(): P0CycleMetrics[];
     getAccumulatedMetrics(): P0AccumulatedMetrics;
+    getSourceProgress(): Record<string, number>;
     getCycleMetrics(): P0CycleMetrics;
     get canonicalWorks(): readonly CanonicalWork[];
     getMatcher(): SourceCatalogMatcher;
