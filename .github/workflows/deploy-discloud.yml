@@ -84,4 +84,5 @@ jobs:
           DISCLOUD_TOKEN: ${{ secrets.DISCLOUD_TOKEN }}
           DISCLOUD_APP_ID: ${{ steps.resolve_discloud_app.outputs.app_id }}
           DISCLOUD_IS_TEAM: ${{ steps.resolve_discloud_app.outputs.is_team }}
+          EXPECTED_COMMIT: ${{ github.sha }}
         run: node scripts/discloud-verify-deployment.mjs
