@@ -3784,15 +3784,16 @@ export class LiteRepository {
             WHERE id=$1::uuid AND state='RUNNING' AND lease_owner=$2 AND lease_until>now()
           RETURNING id
          ), source_success AS (
-           -- A completed upload which began before a later provider 429 must
-           -- not erase that newer cooldown. This is the established
-           -- recordSourceSuccess condition, now scoped to the completion CTE.
-           INSERT INTO importer_lite_source_health(source,health,cooldown_until,consecutive_failures,last_error)
-           SELECT $4,'HEALTHY',NULL,0,NULL FROM completed
-           ON CONFLICT(source) DO UPDATE SET health='HEALTHY',cooldown_until=NULL,
-             consecutive_failures=0,last_error=NULL,updated_at=now()
-           WHERE NOT (importer_lite_source_health.health='RATE_LIMITED'
-             AND importer_lite_source_health.cooldown_until>now())
+           -- Direct atomic conditional update without acquiring row lock on already-healthy sources
+           UPDATE importer_lite_source_health
+              SET health='HEALTHY', cooldown_until=NULL, consecutive_failures=0, last_error=NULL, updated_at=now()
+            WHERE source=$4
+              AND EXISTS (SELECT 1 FROM completed)
+              AND (importer_lite_source_health.health IS DISTINCT FROM 'HEALTHY'
+                OR importer_lite_source_health.consecutive_failures > 0
+                OR importer_lite_source_health.cooldown_until IS NOT NULL)
+              AND NOT (importer_lite_source_health.health='RATE_LIMITED'
+                AND importer_lite_source_health.cooldown_until>now())
          ), publish AS (
            INSERT INTO importer_lite_tasks
              (task_type,work_id,work_key,chapter_key,priority,base_priority,idempotency_key,payload)
