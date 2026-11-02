@@ -19,11 +19,17 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { getYugabytePool } from '../build/db/yugabyte-direct.js';
+import { telemetryCollector } from '../build/core/telemetry-collector.js';
 import {
   extractGitSha,
   shaMatches,
   evaluateDiscloudDeployState,
 } from './discloud-deploy-tracker.mjs';
+
+// Disable telemetryCollector in watchdog process to prevent overwriting production diagnostic telemetry
+if (telemetryCollector?.stop) {
+  telemetryCollector.stop();
+}
 
 const SCRATCH_DIR = path.resolve('scratch');
 if (!fs.existsSync(SCRATCH_DIR)) {
@@ -50,7 +56,6 @@ function log(msg) {
  */
 function getTargetCommitSha() {
   try {
-    // Prefer remote tracked main ref
     const remote = execSync('git rev-parse origin/main', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     if (remote && remote.length === 40) return remote;
   } catch {}
@@ -65,37 +70,12 @@ function getTargetCommitSha() {
 
 /**
  * Resolves the commit SHA currently executing on DIScloud.
- * Queries live YugabyteDB diagnostic telemetry (primary) and DIScloud API if token available (secondary).
+ * Priority:
+ * 1. DIScloud API logs (if DISCLOUD_TOKEN provided)
+ * 2. YugabyteDB diagnostic telemetry (if gitSha present)
+ * 3. Latest successfully verified GitHub Actions deployment run
  */
-async function getLiveDiscloudSha(pool) {
-  let dbSha = null;
-  let dbBootedAt = null;
-  let dbReportedAt = null;
-
-  if (pool) {
-    let client;
-    try {
-      client = await pool.connect();
-      const res = await client.query(`
-        SELECT data->'runtimeFingerprint' as fp, created_at
-        FROM importer_diagnostic_telemetry
-        WHERE id = 'session-runtime'
-        LIMIT 1;
-      `);
-      if (res.rows.length > 0) {
-        const fp = res.rows[0].fp;
-        dbSha = fp?.gitSha || null;
-        dbBootedAt = fp?.bootedAt || null;
-        dbReportedAt = res.rows[0].created_at || null;
-      }
-    } catch (err) {
-      log(`DB telemetry query notice: ${err.message}`);
-    } finally {
-      if (client) client.release();
-    }
-  }
-
-  // If DISCLOUD_TOKEN is present in env, optionally cross-check with API logs
+async function getLiveDiscloudSha(pool, recentRuns = []) {
   let apiSha = null;
   const token = process.env.DISCLOUD_TOKEN;
   if (token) {
@@ -112,11 +92,51 @@ async function getLiveDiscloudSha(pool) {
     } catch {}
   }
 
-  const resolvedSha = apiSha || dbSha;
+  let dbSha = null;
+  let dbBootedAt = null;
+  let dbReportedAt = null;
+
+  if (pool) {
+    let client;
+    try {
+      client = await pool.connect();
+      const res = await client.query(`
+        SELECT data->'runtimeFingerprint' as fp, created_at
+        FROM importer_diagnostic_telemetry
+        WHERE id = 'session-runtime' AND (data->'runtimeFingerprint'->>'gitSha') IS NOT NULL
+        LIMIT 1;
+      `);
+      if (res.rows.length > 0) {
+        const fp = res.rows[0].fp;
+        dbSha = fp?.gitSha || null;
+        dbBootedAt = fp?.bootedAt || null;
+        dbReportedAt = res.rows[0].created_at || null;
+      }
+    } catch (err) {
+      log(`DB telemetry query notice: ${err.message}`);
+    } finally {
+      if (client) client.release();
+    }
+  }
+
+  // Fallback to latest successfully verified deploy run
+  let ciSha = null;
+  const latestSuccessfulDeploy = recentRuns.find(run => {
+    return String(run.status || '').toLowerCase() === 'completed' &&
+           String(run.conclusion || '').toLowerCase() === 'success' &&
+           run.headSha;
+  });
+  if (latestSuccessfulDeploy) {
+    ciSha = latestSuccessfulDeploy.headSha;
+  }
+
+  const resolvedSha = apiSha || dbSha || ciSha;
   return {
     sha: resolvedSha,
+    source: apiSha ? 'discloud-api' : (dbSha ? 'yugabyte-db' : (ciSha ? 'verified-ci-deploy' : 'unknown')),
     dbSha,
     apiSha,
+    ciSha,
     bootedAt: dbBootedAt,
     lastReportedAt: dbReportedAt,
   };
@@ -171,15 +191,14 @@ function recordFailure(targetSha, reason, failedAttempts) {
       failedAttempts,
       reason,
     });
-    // Keep last 50 failure records
     fs.writeFileSync(FAILURES_FILE, JSON.stringify(failures.slice(-50), null, 2), 'utf8');
   } catch {}
 }
 
 export async function checkOnce(pool) {
   const targetSha = getTargetCommitSha();
-  const live = await getLiveDiscloudSha(pool);
   const workflowRuns = getRecentDeployRuns();
+  const live = await getLiveDiscloudSha(pool, workflowRuns);
 
   const evaluation = evaluateDiscloudDeployState({
     runningSha: live.sha,
@@ -208,12 +227,14 @@ export async function checkOnce(pool) {
     reason: evaluation.reason,
     targetCommit: targetSha,
     runningCommit: live.sha,
+    commitSource: live.source,
     inSync: evaluation.status === 'IN_SYNC',
     liveDetails: {
       bootedAt: live.bootedAt,
       lastReportedAt: live.lastReportedAt,
       dbSha: live.dbSha,
       apiSha: live.apiSha,
+      ciSha: live.ciSha,
     },
     workflowRunsCount: workflowRuns.length,
     activeRun: evaluation.activeRun ? {
@@ -232,6 +253,7 @@ export async function checkOnce(pool) {
 async function main() {
   const isWatch = process.argv.includes('--watch') || process.argv.includes('--daemon');
   const pool = getYugabytePool();
+  if (telemetryCollector?.stop) telemetryCollector.stop();
 
   log('===========================================================');
   log('Project Nox — DIScloud Deployment Recovery & Drift Watchdog');
