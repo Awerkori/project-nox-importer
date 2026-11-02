@@ -186,10 +186,20 @@ export class SourceCatalogMatcher {
       const title = normalizeCatalogTitle(work.title);
       if (title) {
         this.addExact(title, { work, method: 'title' });
-        for (const trigram of trigrams(title)) {
-          const bucket = this.trigramIndex.get(trigram) ?? [];
-          if (!bucket.some((entry) => entry.work.id === work.id && entry.key === title)) bucket.push({ key: title, work });
-          this.trigramIndex.set(trigram, bucket);
+        const ref = { key: title, work };
+        const padded = `  ${title}  `;
+        const seen = new Set<string>();
+        for (let i = 0; i <= padded.length - 3; i++) {
+          const tri = padded.slice(i, i + 3);
+          if (!seen.has(tri)) {
+            seen.add(tri);
+            let bucket = this.trigramIndex.get(tri);
+            if (!bucket) {
+              bucket = [];
+              this.trigramIndex.set(tri, bucket);
+            }
+            bucket.push(ref);
+          }
         }
       }
       for (const alias of uniqueNonEmpty(work.aliases ?? [])) {
@@ -201,11 +211,12 @@ export class SourceCatalogMatcher {
   }
 
   private addExact(key: string, value: IndexedTitle): void {
-    const bucket = this.exactIndex.get(key) ?? [];
-    if (!bucket.some((entry) => entry.work.id === value.work.id && entry.method === value.method)) {
-      bucket.push(value);
+    let bucket = this.exactIndex.get(key);
+    if (!bucket) {
+      bucket = [];
+      this.exactIndex.set(key, bucket);
     }
-    this.exactIndex.set(key, bucket);
+    bucket.push(value);
   }
 
   match(item: CatalogItem): SourceCatalogMatch | null {
