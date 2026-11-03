@@ -79,6 +79,8 @@ export class PublicationBarrier {
     warmPublishedCover(coverId, retryAttempt = 0) {
         if (!coverId || !/^[0-9a-f-]{36}$/i.test(coverId) || this.warmedCoverIds.has(coverId))
             return;
+        if (process.env.WARM_COVERS_VIA_WORKER !== 'true')
+            return;
         this.warmedCoverIds.add(coverId);
         if (this.warmedCoverIds.size > this.maxRememberedWarmCovers) {
             const oldest = this.warmedCoverIds.values().next().value;
