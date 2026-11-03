@@ -3366,16 +3366,25 @@ export class ImporterLiteRuntime {
                 ? this.executor.getSaturatedFairSources()
                 : [];
             const preferFocus = (this.p1ClaimCounter++ % 10) !== 9;
-            const task = (focusWorkKeys.length > 0 || excludedSources.length > 0)
-                ? await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, {
-                    focusWorkKeys,
-                    preferFocus,
-                    excludedSources,
-                    chaptersOnly: true,
-                })
-                : await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, {
-                    chaptersOnly: true,
-                });
+            const claimStartedAt = performance.now();
+            let task = null;
+            try {
+                task = (focusWorkKeys.length > 0 || excludedSources.length > 0)
+                    ? await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, {
+                        focusWorkKeys,
+                        preferFocus,
+                        excludedSources,
+                        chaptersOnly: true,
+                    })
+                    : await this.queue.claim(workerId, this.config.QUEUE_LEASE_DURATION_SECONDS, {
+                        chaptersOnly: true,
+                    });
+                telemetryCollector.recordSchedulerAcquireAttempt(performance.now() - claimStartedAt, task ? 'CLAIMED' : 'EMPTY');
+            }
+            catch (error) {
+                telemetryCollector.recordSchedulerAcquireAttempt(performance.now() - claimStartedAt, 'ERROR');
+                throw error;
+            }
             if (task?.taskType === 'IMPORT_CHAPTER' && task.priority !== this.fairDemandImportPriority) {
                 // The claim gate makes this a true priority-boundary refresh: no
                 // second worker can begin a stale P0-sized source wave while the
