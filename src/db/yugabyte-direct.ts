@@ -22,8 +22,13 @@ export function getSqlFingerprint(queryArg: unknown): string {
   const sql = String(typeof queryArg === 'string' ? queryArg : (queryArg as any)?.text || '')
     .replace(/\s+/g, ' ')
     .trim();
+  // A caller may attach a bounded, static operation name.  PostgreSQL strips
+  // comments before planning, so this improves only local telemetry and does
+  // not alter the statement, its parameters, or its execution plan.
+  const operation = sql.match(/^\/\*\s*nox-sql:([a-z0-9_-]{1,64})\s*\*\//i)?.[1];
+  if (operation) return `OP ${operation.toLowerCase()}`;
   const command = sql.match(/^([A-Z]+)/i)?.[1]?.toUpperCase() || 'UNKNOWN';
-  const rpc = sql.match(/^SELECT\s+([a-z_][a-z0-9_]*)\s*\(/i)?.[1];
+  const rpc = sql.match(/^SELECT\s+(?:\*\s+FROM\s+)?(?:public\.)?([a-z_][a-z0-9_]*)\s*\(/i)?.[1];
   if (rpc?.startsWith('importer_')) return `SELECT rpc:${rpc}`;
   // QueryBuilder quotes table names; direct SQL may use public.table. Keep
   // only the normalized table identifier, never the raw statement or values.
