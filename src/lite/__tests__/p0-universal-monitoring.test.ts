@@ -8,6 +8,14 @@ import { HostRateLimiter } from '../../core/rate-limiter.js';
 import { ImporterLiteRuntime } from '../runtime.js';
 
 describe('P0 Universal Monitoring & Status Integrity', () => {
+  it('uses the canonical Reader endpoint when a retired workers.dev probe is configured', () => {
+    const probeBase = (ImporterLiteRuntime.prototype as any).siteProbeBaseUrl;
+    expect(probeBase.call({ config: { NOX_MANGA_URL: 'https://manga.project-nox-awerkori.workers.dev' } }))
+      .toBe('https://projectnox.org');
+    expect(probeBase.call({ config: { NOX_MANGA_URL: 'https://reader.example.test/' } }))
+      .toBe('https://reader.example.test');
+  });
+
   it('starts durable workers without waiting for optional startup maintenance', async () => {
     let finishBootstrap!:()=>void;
     const pending=new Promise<void>((resolve)=>{finishBootstrap=resolve;});

@@ -426,6 +426,7 @@ export declare class ImporterLiteRuntime {
      * rather than the static Cloudflare Worker edge /api/health isolate, so real
      * YSQL or Reader latency degradation is immediately visible to protection.
      */
+    private siteProbeBaseUrl;
     private probeSiteHealth;
     private scheduleSiteRecoveryProbe;
     private probeSharedResources;

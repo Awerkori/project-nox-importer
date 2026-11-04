@@ -3501,10 +3501,27 @@ export class ImporterLiteRuntime {
      * rather than the static Cloudflare Worker edge /api/health isolate, so real
      * YSQL or Reader latency degradation is immediately visible to protection.
      */
+    siteProbeBaseUrl() {
+        const configured = this.config.NOX_MANGA_URL.replace(/\/$/, '');
+        // This retired alias still exists in an older protected DIScloud variable,
+        // but it no longer serves the Reader API.  Restrict the compatibility
+        // mapping to the health probe; storage and all other configured endpoints
+        // remain untouched until their own configuration is migrated.
+        try {
+            if (new URL(configured).hostname === 'manga.project-nox-awerkori.workers.dev') {
+                return 'https://projectnox.org';
+            }
+        }
+        catch {
+            // Config validation already guarantees a URL; retain the configured URL
+            // defensively should an injected test config be malformed.
+        }
+        return configured;
+    }
     async probeSiteHealth() {
         const started = Date.now();
         try {
-            const response = await fetch(`${this.config.NOX_MANGA_URL.replace(/\/$/, '')}/api/releases?limit=1`, {
+            const response = await fetch(`${this.siteProbeBaseUrl()}/api/releases?limit=1`, {
                 signal: AbortSignal.timeout(6_000),
             });
             await response.body?.cancel().catch(() => { });
