@@ -2507,6 +2507,7 @@ describe('LiteRepository against the additive Lite migration', () => {
       expect.stringContaining('IndexScan(task importer_lite_tasks_source_cooldown_due_idx)'),
       expect.any(Array),
     );
+    expect(query.mock.calls.some(([text]) => String(text).includes('Set(enable_nestloop off)'))).toBe(false);
   });
 
   it('keeps an import ready when a confirmed healthy alternative can satisfy the same chapter', async () => {

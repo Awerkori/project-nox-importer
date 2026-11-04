@@ -4289,7 +4289,12 @@ export class LiteRepository {
       // then a few routes per source. This runs only in the 30-second
       // reconciler and refreshes the normal ready-work projection.
       const sourceCooldownRecovery = recoverSourceCooldowns ? await client.query<Row>(
-        `/*+ Set(enable_nestloop off) IndexScan(task importer_lite_tasks_source_cooldown_due_idx) */ WITH due_window AS MATERIALIZED (
+        // Keep the indexed route lookup as a nested loop over the bounded
+        // due window. Disabling nested loops here makes YSQL hash/sequence
+        // scan the whole chapter-route table before it can recover even one
+        // expired cooldown, which turns a recovery turn into a pool-holding
+        // TableRead under production backlog.
+        `/*+ IndexScan(task importer_lite_tasks_source_cooldown_due_idx) */ WITH due_window AS MATERIALIZED (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,task.updated_at
            FROM importer_lite_tasks task
