@@ -10,6 +10,7 @@ import {
 const token = process.env.DISCLOUD_TOKEN;
 const appId = process.env.DISCLOUD_APP_ID || process.argv[2];
 const isTeam = (process.env.DISCLOUD_IS_TEAM || process.argv[3]) === 'true';
+const publicSiteUrl = (process.env.NOX_MANGA_URL || 'https://projectnox.org').replace(/\/$/, '');
 
 if (!token || !token.trim()) {
   console.error('::error::DISCLOUD_TOKEN is missing or empty.');
@@ -160,7 +161,7 @@ async function verify() {
   ];
   let siteSuccess = true;
   for (const r of routes) {
-    const url = `https://manga.project-nox-awerkori.workers.dev${r}`;
+    const url = `${publicSiteUrl}${r}`;
     const t0 = performance.now();
     try {
       const res = await fetch(url, {
