@@ -71,7 +71,7 @@ describe('YugabyteDB pool & query optimization invariants', () => {
     expect(receiptCalls).toEqual([24]);
   });
 
-  it('keeps P2 getAvailablePool isolated from the primary chapter pool outside turbo mode', () => {
+  it('borrows only a proven-idle primary seat when metadata is queued and the Reader is healthy', () => {
     const primaryPool = { waitingCount: 0, idleCount: 2, totalCount: 3, query: vi.fn(), end: vi.fn() } as unknown as Pool;
     const metadataPool = { waitingCount: 2, idleCount: 0, totalCount: 1, query: vi.fn(), end: vi.fn() } as unknown as Pool;
     const runtime = new ImporterLiteRuntime(
@@ -94,9 +94,15 @@ describe('YugabyteDB pool & query optimization invariants', () => {
       metadataPool,
     );
 
-    expect((runtime as any).getAvailablePool()).toBe(metadataPool);
-    (runtime as any).metadataTurboMode = { enabled: true };
+    (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 200 };
     expect((runtime as any).getAvailablePool()).toBe(primaryPool);
+
+    (runtime as any).lastSiteProbe = { state: 'PAUSED', checkedAt: new Date().toISOString(), latencyMs: null };
+    expect((runtime as any).getAvailablePool()).toBe(metadataPool);
+
+    (runtime as any).lastSiteProbe = { state: 'HEALTHY', checkedAt: new Date().toISOString(), latencyMs: 200 };
+    (primaryPool as any).waitingCount = 1;
+    expect((runtime as any).getAvailablePool()).toBe(metadataPool);
   });
 
   it('gracefully releases runtime leadership and closes isolated metadata pool on shutdown()', async () => {

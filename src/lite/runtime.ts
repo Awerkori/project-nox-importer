@@ -824,7 +824,13 @@ export class ImporterLiteRuntime {
 
   private getAvailablePool(): Pool {
     if (!this.sourceMetadataPool || this.sourceMetadataPool === this.pool) return this.pool;
-    if (this.metadataTurboMode.enabled && this.sourceMetadataPool.waitingCount > 0 && this.pool.idleCount > 0) {
+    // Normal P0/P2 work is intentionally isolated, but isolation must not
+    // turn an already-idle primary YSQL seat into wasted capacity while the
+    // two-seat metadata pool has a real queue.  Reuse the Reader-health and
+    // primary-waiter fence used by monitor completion: this is a borrow, not
+    // a pool expansion, and immediately stops when the site or a chapter
+    // claim needs that seat.
+    if (this.mayBorrowPrimaryForMonitor(1)) {
       return this.pool;
     }
     return this.sourceMetadataPool;
