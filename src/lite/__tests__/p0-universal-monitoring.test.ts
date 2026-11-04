@@ -77,6 +77,31 @@ describe('P0 Universal Monitoring & Status Integrity', () => {
     expect(refill).toHaveBeenCalledTimes(2);
   });
 
+  it('yields coverage enrolment after sustained metadata-pool pressure without pausing monitors', async () => {
+    const runtime = Object.create(ImporterLiteRuntime.prototype) as any;
+    const refill = vi.fn();
+    const metadataPool = { waitingCount: 2 };
+    Object.assign(runtime, {
+      isRuntimeLeader: true,
+      stopped: false,
+      manualProtectiveStop: { active: false },
+      pool: { waitingCount: 0 },
+      sourceMetadataPool: metadataPool,
+      sourceMetadataPoolWaitStartedAt: Date.now() - 15_001,
+      p0MonitorCoverageRefillGate: new AsyncSemaphore(1),
+      queue: { refillP0MonitorCoverage: refill },
+      p0CoverageZeroStreak: 0,
+      lastP0CoverageRefillAt: 0,
+    });
+
+    await runtime.refillP0MonitorCoverage();
+
+    expect(refill).not.toHaveBeenCalled();
+    expect(runtime.p0MonitorCoverage).toMatchObject({
+      outcome: 'DEFERRED_POOL_PRESSURE', admitted: 0, revived: 0,
+    });
+  });
+
   it('does not overlap a slow recovery turn on the primary SQL pool', async () => {
     const runtime = Object.create(ImporterLiteRuntime.prototype) as any;
     let releaseRefresh!: () => void;

@@ -1319,6 +1319,22 @@ export class ImporterLiteRuntime {
    */
   private async refillP0MonitorCoverage(): Promise<void> {
     if (!this.isRuntimeLeader || this.stopped || this.manualProtectiveStop.active) return;
+    // Coverage enrolment is a background producer, not the monitor executor.
+    // It used to keep taking one of the two isolated metadata connections
+    // every 500 ms while a coverage pass was still finding mappings.  When
+    // the pool is already persistently queued, that competes with the durable
+    // monitor claim/finish path without making an already-enrolled work any
+    // safer or fresher.  Yield only after the existing sustained-pressure
+    // threshold: the regular recovery turn will resume this cursor exactly
+    // where it stopped once the queue clears.  This does not pause P0 checks,
+    // change source coverage, or alter any lane priority.
+    if (this.sourceMetadataPool !== this.pool && this.hasSustainedSourceMetadataPoolPressure()) {
+      this.p0MonitorCoverage = {
+        observedAt: new Date().toISOString(), source: null, admitted: 0, revived: 0,
+        outcome: 'DEFERRED_POOL_PRESSURE', error: null,
+      };
+      return;
+    }
     // Coverage enrollment runs dynamically: while works are being enrolled or sources
     // are being checked during an active pass, progress rapidly in bounded batches.
     // In steady-state with all 43 sources verified covered, it relaxes to a two-minute cadence.
