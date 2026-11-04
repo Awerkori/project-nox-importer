@@ -5,7 +5,9 @@ import { extractGitSha, evaluateDiscloudDeployState } from './discloud-deploy-tr
 
 const token = process.env.DISCLOUD_TOKEN;
 const appId = process.env.DISCLOUD_APP_ID || '1788873398156';
-const readerBaseUrl = (process.env.NOX_MANGA_URL || 'https://manga.project-nox-awerkori.workers.dev').replace(/\/$/, '');
+// The former workers.dev alias no longer exposes the public Reader API.  Use
+// the canonical domain unless an explicit, verified endpoint is supplied.
+const readerBaseUrl = (process.env.NOX_MANGA_URL || 'https://projectnox.org').replace(/\/$/, '');
 
 if (!token) {
   console.error('DISCLOUD_TOKEN is missing');
