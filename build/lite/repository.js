@@ -4012,7 +4012,7 @@ export class LiteRepository {
             // scan the whole chapter-route table before it can recover even one
             // expired cooldown, which turns a recovery turn into a pool-holding
             // TableRead under production backlog.
-            `/*+ IndexScan(task importer_lite_tasks_source_cooldown_due_cover_idx) */ WITH due_window AS MATERIALIZED (
+            `/*+ IndexScan(task importer_lite_tasks_source_cooldown_due_idx) */ WITH due_window AS MATERIALIZED (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,task.updated_at
            FROM importer_lite_tasks task
