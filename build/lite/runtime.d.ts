@@ -53,6 +53,7 @@ export declare class ImporterLiteRuntime {
     private readonly historicalP1BackfillGate;
     private readonly p0MonitorCoverageRefillGate;
     private readonly metadataReplayGate;
+    private readonly recoveryTurnGate;
     private readonly metadataTurnGate;
     private readonly metadataReplayExclusiveGate;
     private readonly metadataReplayV4RefillGate;
@@ -262,6 +263,7 @@ export declare class ImporterLiteRuntime {
     private refreshP1FocusGroupNow;
     private runHistoricalP1CatalogTurn;
     private runRecoveryTurn;
+    private runRecoveryTurnSingleFlight;
     /**
      * Probe one expired source cooldown per recovery turn using the same
      * six-stage production admission gate as the legacy runtime. It never

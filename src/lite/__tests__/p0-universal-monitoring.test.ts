@@ -77,6 +77,30 @@ describe('P0 Universal Monitoring & Status Integrity', () => {
     expect(refill).toHaveBeenCalledTimes(2);
   });
 
+  it('does not overlap a slow recovery turn on the primary SQL pool', async () => {
+    const runtime = Object.create(ImporterLiteRuntime.prototype) as any;
+    let releaseRefresh!: () => void;
+    const pendingRefresh = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    const refresh = vi.fn(() => pendingRefresh);
+    Object.assign(runtime, {
+      recoveryTurnGate: new AsyncSemaphore(1),
+      refreshMetadataReplayV4ExclusiveMode: refresh,
+      refreshMetadataTurboMode: vi.fn().mockResolvedValue(undefined),
+      metadataTurboMode: { enabled: true },
+      refillP0MonitorCoverage: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const first = runtime.runRecoveryTurn();
+    await Promise.resolve();
+    await runtime.runRecoveryTurn();
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    releaseRefresh();
+    await first;
+    await runtime.runRecoveryTurn();
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
   it('correctly parses ONGOING status from HanamiHeaven Portuguese Lançando metadata', async () => {
     const adapter = new HanamiHeavenAdapter(new HostRateLimiter());
     const mockHtml = `

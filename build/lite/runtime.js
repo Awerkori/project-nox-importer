@@ -241,6 +241,10 @@ export class ImporterLiteRuntime {
     // that fetches a source snapshot and materialises a P0 chapter.
     p0MonitorCoverageRefillGate = new AsyncSemaphore(1, 'lite_p0_monitor_coverage_refill');
     metadataReplayGate = new AsyncSemaphore(1, 'lite_metadata_replay');
+    // A recovery turn can wait on YSQL longer than its fixed timer cadence.
+    // Without this gate, the next tick queues a duplicate control-plane sweep
+    // behind the same small pool and compounds the pressure it is meant to fix.
+    recoveryTurnGate = new AsyncSemaphore(1, 'lite_recovery_turn');
     // Metadata ticks are rearmed before a prior turn completes so recovery is
     // prompt after long external work. The tick itself must nevertheless stay
     // single-flight: otherwise each overlapping turn queues its settings and
@@ -775,8 +779,11 @@ export class ImporterLiteRuntime {
         for (let i = 0; i < workers; i++)
             void this.worker(`${this.runtimeInstanceId}:lite:${i + 1}`, i);
         const timer = setInterval(() => {
-            if (this.isRuntimeLeader)
-                void this.runRecoveryTurn();
+            if (this.isRuntimeLeader) {
+                void this.runRecoveryTurn().catch((error) => {
+                    this.logger.warn('Recovery turn failed', { error: error instanceof Error ? error.message : String(error) });
+                });
+            }
         }, 30_000);
         timer.unref();
         this.timers.push(timer);
@@ -1590,6 +1597,16 @@ export class ImporterLiteRuntime {
         return claimed;
     }
     async runRecoveryTurn() {
+        if (!this.recoveryTurnGate.tryAcquire())
+            return;
+        try {
+            await this.runRecoveryTurnSingleFlight();
+        }
+        finally {
+            this.recoveryTurnGate.release();
+        }
+    }
+    async runRecoveryTurnSingleFlight() {
         await this.refreshMetadataReplayV4ExclusiveMode();
         await this.refreshMetadataTurboMode();
         // P0 discovery is not P2 metadata work.  Even an operator-selected
