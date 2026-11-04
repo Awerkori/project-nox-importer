@@ -77,8 +77,14 @@ const rankForSource = (source: string) => source === 'mangaflix' ? 10 : source =
 // cutover: Lite must stand by while v1 owns the producer lease (and vice
 // versa), rather than merely avoiding duplicate Lite claims.
 const RUNTIME_LEADER_KEY = 'importer_runtime_leader';
-const RUNTIME_LEASE_SECONDS = 45;
-const RUNTIME_LEASE_RENEW_MS = 15_000;
+// A YSQL renewal can itself queue behind the chapter/recovery workload.  The
+// previous 45/15-second pair made a single multi-second queueing episode both
+// a frequent write to the shared `settings` row and uncomfortably close to
+// lease expiry.  Keep a bounded failover window, but renew one third as often
+// so the leader key is not a recurrent write hotspot while the importer is
+// busy.  This does not change task leases, workers, or lane priority.
+const RUNTIME_LEASE_SECONDS = 60;
+const RUNTIME_LEASE_RENEW_MS = 20_000;
 // This is the existing operator-controlled brake used by the legacy runtime.
 // Lite must honor the same durable setting during a rolling cutover: a manual
 // site-incident pause must never be bypassed simply because Lite owns the
