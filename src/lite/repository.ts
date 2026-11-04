@@ -236,6 +236,10 @@ export class LiteRepository {
   private p1BacklogCache: { at: number; pending: boolean; reason: string | null } | null = null;
   private p0MonitorCursorEnsured = false;
   private readonly sourcePolicyCache = new Map<string, { at: number; policy: LiteSourcePolicy }>();
+  // Several monitor turns can reach the same source together after a batch
+  // claim.  The TTL cache alone does not coalesce that initial cache miss,
+  // causing identical reads to queue on the two-seat metadata pool.
+  private readonly sourcePolicyInFlight = new Map<string, Promise<LiteSourcePolicy | null>>();
   private readonly lastHealthyRecordAt = new Map<string, number>();
 
   hasAbundantHistoricalP1Reserve(): boolean { return this.historicalP1ReserveAbundant; }
@@ -3303,8 +3307,15 @@ export class LiteRepository {
    * a catalog or discovery slot.
    */
   async sourcePolicy(source: string): Promise<LiteSourcePolicy | null> {
-    const map = await this.sourcePolicies([source]);
-    return map.get(source) || null;
+    const id = String(source || '').trim();
+    if (!id) return null;
+    const existing = this.sourcePolicyInFlight.get(id);
+    if (existing) return existing;
+    const pending = this.sourcePolicies([id])
+      .then((map) => map.get(id) || null)
+      .finally(() => this.sourcePolicyInFlight.delete(id));
+    this.sourcePolicyInFlight.set(id, pending);
+    return pending;
   }
 
   /**

@@ -123,6 +123,7 @@ export declare class LiteRepository {
     private p1BacklogCache;
     private p0MonitorCursorEnsured;
     private readonly sourcePolicyCache;
+    private readonly sourcePolicyInFlight;
     private readonly lastHealthyRecordAt;
     hasAbundantHistoricalP1Reserve(): boolean;
     invalidateP1BacklogCache(): void;

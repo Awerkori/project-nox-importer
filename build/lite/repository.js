@@ -126,6 +126,10 @@ export class LiteRepository {
     p1BacklogCache = null;
     p0MonitorCursorEnsured = false;
     sourcePolicyCache = new Map();
+    // Several monitor turns can reach the same source together after a batch
+    // claim.  The TTL cache alone does not coalesce that initial cache miss,
+    // causing identical reads to queue on the two-seat metadata pool.
+    sourcePolicyInFlight = new Map();
     lastHealthyRecordAt = new Map();
     hasAbundantHistoricalP1Reserve() { return this.historicalP1ReserveAbundant; }
     invalidateP1BacklogCache() { this.p1BacklogCache = null; }
@@ -3087,8 +3091,17 @@ export class LiteRepository {
      * a catalog or discovery slot.
      */
     async sourcePolicy(source) {
-        const map = await this.sourcePolicies([source]);
-        return map.get(source) || null;
+        const id = String(source || '').trim();
+        if (!id)
+            return null;
+        const existing = this.sourcePolicyInFlight.get(id);
+        if (existing)
+            return existing;
+        const pending = this.sourcePolicies([id])
+            .then((map) => map.get(id) || null)
+            .finally(() => this.sourcePolicyInFlight.delete(id));
+        this.sourcePolicyInFlight.set(id, pending);
+        return pending;
     }
     /**
      * Batch read operational policies for multiple sources in a single query.
