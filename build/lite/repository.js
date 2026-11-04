@@ -3970,7 +3970,13 @@ export class LiteRepository {
              THEN 'MAX_ATTEMPTS_EXHAUSTED' ELSE t.reason END,
            updated_at=now()
          FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state,picked.monitoring`, [limit]);
-            const dueMonitorLimit = limit >= 20 ? Math.max(limit, 512) : limit;
+            // A monitor claim turn consumes at most eight rows.  Reopening 512 due
+            // monitors inside the primary reconciler transaction creates a large
+            // write burst, then leaves nearly all of those rows waiting for the
+            // same source-rotated claimant.  Keep a bounded ready reserve instead:
+            // it preserves continuous monitoring and source rotation while avoiding
+            // a 512-row UPDATE competing with chapter claims, uploads and finishes.
+            const dueMonitorLimit = limit >= 20 ? Math.max(limit, 64) : limit;
             const dueMonitors = await client.query(`WITH picked AS (
            SELECT t.id
            FROM importer_lite_tasks t
