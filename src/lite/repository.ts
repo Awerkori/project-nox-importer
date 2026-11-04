@@ -552,7 +552,11 @@ export class LiteRepository {
       // only the key/value contract, whereas isolated test databases may add
       // an `updated_at` convenience column.  Coverage cursors must not turn
       // that optional test-only column into a P0 availability dependency.
-      await client.query(`UPDATE settings SET value=$2 WHERE key=$1`,
+      // A completed/empty scan can retain the same durable mapping cursor.
+      // Avoid turning that no-op into a row version and lock conflict with
+      // runtime leadership on the shared legacy settings table.
+      await client.query(`UPDATE settings SET value=$2
+        WHERE key=$1 AND value IS DISTINCT FROM $2`,
         [mappingCursorKey, nextMappingCursor]);
       await client.query('COMMIT');
       return { source, admitted, revived };
