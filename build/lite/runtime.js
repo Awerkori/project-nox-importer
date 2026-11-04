@@ -849,24 +849,13 @@ export class ImporterLiteRuntime {
             await this.refillStoredMetadataEnrichment();
         }
         else {
-            // V5 has its own pool and must not wait for restart-time chapter
-            // housekeeping on the saturated main pool. Start its bounded producer
-            // before those optional scans; leadership, provider limits, memory and
-            // its own pool gates remain authoritative.
-            void (async () => {
-                try {
-                    await this.refillSourceMetadataEnrichment();
-                    await Promise.all([this.runSourceMetadataRefresh(), this.runSourceMetadataRefresh()]);
-                    // Global discovery's admission uses the primary queue pool. It can
-                    // wait behind a rolling deploy's chapter claims; do not strand
-                    // already-durable V5 source tasks behind that unrelated refill.
-                    await this.refillCrossSourceMetadataDiscovery();
-                    await Promise.all([this.runCrossSourceMetadataDiscovery(), this.runCrossSourceMetadataDiscovery()]);
-                }
-                catch (error) {
-                    this.logger.warn('Early V5 metadata startup failed', { error: error?.message });
-                }
-            })();
+            // Do not launch V5 metadata work twice during boot.  The bounded
+            // source and cross-source refill/runner calls below start it once after
+            // the priority-critical seed and recovery work.  Previously this eager
+            // parallel block and the later bootstrap calls could queue several
+            // P2 control-plane transactions on the two-connection metadata pool at
+            // the same instant as P0 and chapter claims, creating timeouts without
+            // producing additional chapter throughput.
             await this.seedDiscovery();
             // A former runtime may have left every source observation due at once.
             // Stagger only discovery rows; executable catalog/chapter work remains
