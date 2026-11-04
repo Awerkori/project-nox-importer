@@ -297,7 +297,7 @@ export class LiteRepository {
   async enrollConfirmedP0Mappings(workId: string, mappings: Array<{ source: string; sourceWorkId: string }>): Promise<number> {
     if (!mappings.length) return 0;
     const result = await this.sourceMetadataDb.query(`
-      WITH input AS (
+      /* nox-sql:p0-monitor-enroll */ WITH input AS (
         SELECT DISTINCT * FROM unnest($2::text[], $3::text[]) AS v(source, source_work_id)
       ), eligible AS (
         SELECT m.source, m.source_work_id, m.work_id
@@ -493,7 +493,7 @@ export class LiteRepository {
 
         if (toRevive.length > 0) {
           const reopened = await client.query<Row>(`
-            WITH input AS (
+            /* nox-sql:p0-monitor-refill-revive */ WITH input AS (
               SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::jsonb[], $5::jsonb[], $6::int[])
                 AS v(task_id, work_id, work_key, payload_patch, checkpoint_patch, offset_sec)
             )
@@ -522,7 +522,7 @@ export class LiteRepository {
 
         if (toInsert.length > 0) {
           const inserted = await client.query<Row>(`
-            INSERT INTO importer_lite_tasks
+            /* nox-sql:p0-monitor-refill-insert */ INSERT INTO importer_lite_tasks
               (task_type,work_id,work_key,priority,base_priority,idempotency_key,next_run_at,max_attempts,payload,checkpoint,monitoring)
             SELECT 'CATALOG', v.work_id, v.work_key, 3, 3, v.idem_key, now() + make_interval(secs => v.offset_sec), 32, v.payload, v.checkpoint, true
             FROM unnest($1::uuid[], $2::text[], $3::text[], $4::jsonb[], $5::jsonb[], $6::int[])
@@ -1675,7 +1675,7 @@ export class LiteRepository {
       await this.refreshReadyWork(client, unique[0]!);
       return;
     }
-    await client.query('SELECT public.importer_lite_refresh_ready_work(wk) FROM unnest($1::text[]) AS wk', [unique]);
+    await client.query('/* nox-sql:ready-work-refresh-batch */ SELECT public.importer_lite_refresh_ready_work(wk) FROM unnest($1::text[]) AS wk', [unique]);
   }
 
   async enqueue(input: EnqueueLiteTask): Promise<{ inserted: boolean; task: LiteTask | null }> {
@@ -3909,7 +3909,7 @@ export class LiteRepository {
   async finishUnchangedMonitors(batch: import('./monitor-finish-batcher.js').MonitorFinish[]): Promise<Set<string>> {
     if (!batch.length) return new Set();
     const result = await this.sourceMetadataDb.query<{ id: string }>(`
-      WITH input AS (
+      /* nox-sql:monitor-finish-batch */ WITH input AS (
         SELECT * FROM unnest($1::uuid[], $2::text[], $3::timestamptz[], $4::jsonb[], $5::uuid[])
           AS v(id, owner, next_run_at, checkpoint, work_id)
       )
@@ -4751,7 +4751,7 @@ export class LiteRepository {
       const batch = inputs.slice(offset, offset + 48);
       const freshIds = batch.map(() => randomUUID());
       const result = await this.db.query<Row>(
-        `WITH input AS (
+        `/* nox-sql:upload-reservation-batch */ WITH input AS (
            SELECT * FROM unnest($1::uuid[],$2::int[],$3::text[],$4::uuid[])
              AS v(task_id,page_position,sha256,fresh_id)
          ), input_hashes AS (
@@ -4881,7 +4881,7 @@ export class LiteRepository {
     for (let offset = 0; offset < inputs.length; offset += 48) {
       const batch = inputs.slice(offset, offset + 48);
       await this.db.query(
-        `WITH input AS (
+        `/* nox-sql:upload-receipt-batch */ WITH input AS (
           SELECT * FROM unnest(
             $1::uuid[],$2::int[],$3::uuid[],$4::text[],$5::int[],$6::text[],$7::int[],$8::int[],
             $9::text[],$10::text[],$11::text[],$12::text[],$13::bigint[],$14::uuid[]
