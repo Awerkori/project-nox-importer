@@ -103,6 +103,8 @@ const asTask = (row) => ({
 export class LiteRepository {
     db;
     sourceMetadataDb;
+    operationalSnapshotCache = null;
+    operationalSnapshotInFlight = null;
     // This is only a local maintenance hint. Durable task state remains the
     // authority; the runtime uses the hint to avoid a second catalog turn when
     // the materialised P1 import reserve is already abundant.
@@ -4364,20 +4366,36 @@ export class LiteRepository {
         }
     }
     async operationalSnapshot() {
-        const client = await this.db.connect();
-        try {
-            await client.query("SET LOCAL statement_timeout = '2000ms'");
-            const result = await client.query(`SELECT priority,state,monitoring,count(*)::int AS count,
-        min(created_at) FILTER (WHERE state='READY' AND monitoring=false) AS oldest_ready_at
-        FROM importer_lite_tasks GROUP BY priority,state,monitoring ORDER BY priority,state,monitoring`);
-            return result.rows.map((row) => ({ priority: priorityName(row.priority), state: row.state,
-                monitoring: Boolean(row.monitoring), count: Number(row.count), oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null }));
+        const now = Date.now();
+        if (this.operationalSnapshotCache && now - this.operationalSnapshotCache.capturedAt < 60_000) {
+            return this.operationalSnapshotCache.rows;
         }
-        catch {
-            return [];
+        if (this.operationalSnapshotInFlight)
+            return this.operationalSnapshotInFlight;
+        this.operationalSnapshotInFlight = (async () => {
+            const client = await this.db.connect();
+            try {
+                await client.query("SET LOCAL statement_timeout = '2000ms'");
+                const result = await client.query(`SELECT priority,state,monitoring,count(*)::int AS count,
+          min(created_at) FILTER (WHERE state='READY' AND monitoring=false) AS oldest_ready_at
+          FROM importer_lite_tasks GROUP BY priority,state,monitoring ORDER BY priority,state,monitoring`);
+                const rows = result.rows.map((row) => ({ priority: priorityName(row.priority), state: row.state,
+                    monitoring: Boolean(row.monitoring), count: Number(row.count), oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null }));
+                this.operationalSnapshotCache = { capturedAt: Date.now(), rows };
+                return rows;
+            }
+            catch {
+                return [];
+            }
+            finally {
+                client.release();
+            }
+        })();
+        try {
+            return await this.operationalSnapshotInFlight;
         }
         finally {
-            client.release();
+            this.operationalSnapshotInFlight = null;
         }
     }
     /** Small, indexed progress probe used for a human-operable Lite heartbeat. */

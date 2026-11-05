@@ -13,6 +13,23 @@ import { performance } from 'node:perf_hooks';
 const logger = new Logger('YugabyteDirect');
 
 let pool: pg.Pool | null = null;
+let cachedDeployIdentity: string | null = null;
+
+function poolApplicationName(lane: 'direct' | 'metadata'): string {
+  // Aeon masks client_addr behind its managed proxy, so an application name
+  // must be enough to distinguish a rolling deployment from a second pool.
+  if (cachedDeployIdentity === null) {
+    try {
+      const buildId = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'build/BUILD_ID'), 'utf8'));
+      cachedDeployIdentity = typeof buildId?.gitSha === 'string' ? buildId.gitSha : '';
+    } catch { cachedDeployIdentity = ''; }
+  }
+  const deploy = String(process.env.IMPORTER_DEPLOY_SHA || process.env.GIT_SHA || cachedDeployIdentity || 'unknown')
+    .replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 12) || 'unknown';
+  const instance = String(process.env.WORKER_ID || `pid-${process.pid}`)
+    .replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 24) || `pid-${process.pid}`;
+  return `project-nox-importer-${lane}:${deploy}:${instance}`;
+}
 
 /**
  * A bounded, parameter-free SQL class for runtime telemetry. Do not return
@@ -183,10 +200,10 @@ export function createYugabyteMetadataPool(): pg.Pool {
   // work is deliberately serial at YSQL: it retains a durable progress lane
   // for aliases/tags/new works without reserving capacity needed by chapters
   // or Hyperdrive. Network work still happens outside a DB checkout.
-  const poolMax = cfg.METADATA_DB_POOL_MAX;
+  const poolMax = Math.max(1, Math.min(1, cfg.METADATA_DB_POOL_MAX));
   const metadataPool = new pg.Pool(yugabytePoolOptions(
-    cfg, poolMax, 'project-nox-importer-metadata', 30_000, 15_000,
-    metadataSessionOptions, false, 5_000,
+    cfg, poolMax, poolApplicationName('metadata'), 30_000, 15_000,
+    metadataSessionOptions, false, 3_000,
   ));
   metadataPool.on('error', (err) => {
     logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });
@@ -203,19 +220,17 @@ export function getYugabytePool(): pg.Pool {
   if (pool) return pool;
 
   const cfg = getConfig();
-  const configuredMax = cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '3', 10);
-  const directPoolMax = process.env.ALLOW_DIRECT_POOL_ABOVE_2 === 'true'
-    ? configuredMax
-    : Math.max(1, Math.min(3, configuredMax));
+  const configuredMax = cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '2', 10);
+  const directPoolMax = Math.max(1, Math.min(2, configuredMax));
   pool = new pg.Pool(yugabytePoolOptions(
     cfg,
     directPoolMax,
-    'project-nox-importer-direct',
+    poolApplicationName('direct'),
     25_000,
     25_000,
     '',
     true,
-    10_000,
+    5_000,
   ));
 
   pool.on('error', (err) => {

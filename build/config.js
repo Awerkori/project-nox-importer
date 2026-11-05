@@ -49,12 +49,12 @@ const ConfigSchema = z.object({
     // Raising this ceiling requires a measured production ramp. Legacy MAX=32 cannot override it.
     TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(32),
     BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(16),
-    // Keep direct pool at max=3 and metadata pool at max=2 in production so
-    // the shared 9-connection non-superuser budget (3 direct + 2 metadata = 5/9 = 55.5%,
-    // leaving 4 seats for Reader Hyperdrive, Sentinel, and deploy overlap)
-    // never saturates YugabyteDB Aeon connection slots while preventing single-connection head-of-line blocking.
-    DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(30).default(3),
-    METADATA_DB_POOL_MAX: z.coerce.number().int().min(1).max(4).default(2),
+    // Aeon has only 13 backend slots. These are hard per-process ceilings;
+    // deployment overlap must still be prevented by the runtime leader. Two
+    // primary seats sustain external I/O while a single low-priority metadata
+    // seat prevents a second importer process from exhausting the cluster.
+    DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(2).default(2),
+    METADATA_DB_POOL_MAX: z.coerce.number().int().min(1).max(1).default(1),
     // At the measured 52.75 MiB median chapter size, the former 4 MiB/s global
     // ceiling could never reach the 8/min acceptance floor (4.55/min before
     // network and publication overhead). Eight MiB/s is the first reversible
