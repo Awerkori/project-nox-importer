@@ -49,6 +49,8 @@ export declare class ImporterLiteRuntime {
     private readonly configuredPageBufferCapacity;
     private readonly memoryPressureEnabled;
     private readonly claimGate;
+    private monitorEmptyBackoffMs;
+    private monitorTurnScheduled;
     private readonly chapterAdmissionGate;
     private readonly historicalP1BackfillGate;
     private readonly p0MonitorCoverageRefillGate;
@@ -423,6 +425,7 @@ export declare class ImporterLiteRuntime {
      * network work and the single outstanding P0 database claim.
      */
     private runMonitorTurn;
+    private scheduleMonitorTurn;
     /**
      * Probe a lightweight DB-backed public Reader endpoint (/api/releases?limit=1)
      * rather than the static Cloudflare Worker edge /api/health isolate, so real

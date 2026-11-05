@@ -213,6 +213,8 @@ export interface P1FocusGroupSnapshot {
 
 /** Direct YSQL persistence. Network, adapters and Telegram are never invoked here. */
 export class LiteRepository {
+  private operationalSnapshotCache: { capturedAt: number; rows: Array<{ priority: LitePriority; state: LiteTaskState; monitoring: boolean; count: number; oldestReadyAt: Date | null }> } | null = null;
+  private operationalSnapshotInFlight: Promise<Array<{ priority: LitePriority; state: LiteTaskState; monitoring: boolean; count: number; oldestReadyAt: Date | null }>> | null = null;
   // This is only a local maintenance hint. Durable task state remains the
   // authority; the runtime uses the hint to avoid a second catalog turn when
   // the materialised P1 import reserve is already abundant.
@@ -4661,19 +4663,30 @@ export class LiteRepository {
   }
 
   async operationalSnapshot(): Promise<Array<{ priority: LitePriority; state: LiteTaskState; monitoring: boolean; count: number; oldestReadyAt: Date | null }>> {
-    const client = await this.db.connect();
-    try {
-      await client.query("SET LOCAL statement_timeout = '2000ms'");
-      const result = await client.query<Row>(`SELECT priority,state,monitoring,count(*)::int AS count,
-        min(created_at) FILTER (WHERE state='READY' AND monitoring=false) AS oldest_ready_at
-        FROM importer_lite_tasks GROUP BY priority,state,monitoring ORDER BY priority,state,monitoring`);
-      return result.rows.map((row) => ({ priority: priorityName(row.priority), state: row.state,
-        monitoring: Boolean(row.monitoring), count: Number(row.count), oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null }));
-    } catch {
-      return [];
-    } finally {
-      client.release();
+    const now = Date.now();
+    if (this.operationalSnapshotCache && now - this.operationalSnapshotCache.capturedAt < 60_000) {
+      return this.operationalSnapshotCache.rows;
     }
+    if (this.operationalSnapshotInFlight) return this.operationalSnapshotInFlight;
+    this.operationalSnapshotInFlight = (async () => {
+      const client = await this.db.connect();
+      try {
+        await client.query("SET LOCAL statement_timeout = '2000ms'");
+        const result = await client.query<Row>(`SELECT priority,state,monitoring,count(*)::int AS count,
+          min(created_at) FILTER (WHERE state='READY' AND monitoring=false) AS oldest_ready_at
+          FROM importer_lite_tasks GROUP BY priority,state,monitoring ORDER BY priority,state,monitoring`);
+        const rows = result.rows.map((row) => ({ priority: priorityName(row.priority), state: row.state,
+          monitoring: Boolean(row.monitoring), count: Number(row.count), oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null }));
+        this.operationalSnapshotCache = { capturedAt: Date.now(), rows };
+        return rows;
+      } catch {
+        return [];
+      } finally {
+        client.release();
+      }
+    })();
+    try { return await this.operationalSnapshotInFlight; }
+    finally { this.operationalSnapshotInFlight = null; }
   }
 
   /** Small, indexed progress probe used for a human-operable Lite heartbeat. */

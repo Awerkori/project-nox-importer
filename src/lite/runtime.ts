@@ -302,6 +302,8 @@ export class ImporterLiteRuntime {
   // it against the real process.
   private readonly memoryPressureEnabled = process.env.NODE_ENV !== 'test';
   private readonly claimGate = new AsyncSemaphore(1, 'lite_claim_gate');
+  private monitorEmptyBackoffMs = 2_000;
+  private monitorTurnScheduled = false;
   private readonly chapterAdmissionGate: AsyncSemaphore;
   private readonly historicalP1BackfillGate = new AsyncSemaphore(1, 'lite_historical_p1_backfill');
   // Coverage enrolment is a short, isolated producer transaction.  It is not
@@ -884,8 +886,11 @@ export class ImporterLiteRuntime {
       }
     }, 30_000);
     timer.unref(); this.timers.push(timer);
-    const monitorTimer = setInterval(() => void this.runMonitorTurn().catch(() => {}), 800);
-    monitorTimer.unref(); this.timers.push(monitorTimer);
+    // Empty P0 scans used to hit YSQL every 800ms. Re-arm only one turn and
+    // exponentially back off when the durable monitor queue is empty.
+    // Call through the prototype so the lightweight startup contract used by
+    // tests need not materialise every private helper on its fixture object.
+    (ImporterLiteRuntime.prototype as any).scheduleMonitorTurn.call(this, 2_000);
     // Sample RSS independently from the 60-second diagnostic heartbeat. The
     // fixed byte ceiling makes overshoot bounded; this one-second brake then
     // prevents the next page wave from rebuilding pressure.
@@ -3580,7 +3585,7 @@ export class ImporterLiteRuntime {
           if (!batch.length) break;
           this.monitorClaimBuffer.push(...batch);
         }
-        this.idleMonitorUntil = task || this.monitorClaimBuffer.length ? 0 : Date.now() + 2_000;
+        this.idleMonitorUntil = task || this.monitorClaimBuffer.length ? 0 : Date.now() + this.monitorEmptyBackoffMs;
       } finally {
         this.monitorClaimGate.release();
       }
@@ -3603,18 +3608,24 @@ export class ImporterLiteRuntime {
         else this.monitorActiveBySource.delete(activeSource);
       }
       this.monitorGate.release();
-      if (
-        hadTask
-        && !this.stopped
-        && this.isRuntimeLeader
-        && Date.now() >= this.idleMonitorUntil
-        && !(process.env.NODE_ENV === 'test' || process.env.VITEST)
-      ) {
-        const nextDelayMs = (this.sourceMetadataPool.waitingCount || 0) > 1 ? 120 : 25;
-        const nextTurn = setTimeout(() => void this.runMonitorTurn().catch(() => {}), nextDelayMs);
-        nextTurn.unref();
+      if (hadTask) this.monitorEmptyBackoffMs = 2_000;
+      else this.monitorEmptyBackoffMs = Math.min(10_000, this.monitorEmptyBackoffMs === 2_000 ? 5_000 : 10_000);
+      if (!this.stopped && this.isRuntimeLeader && !(process.env.NODE_ENV === 'test' || process.env.VITEST)) {
+        const nextDelayMs = hadTask ? ((this.sourceMetadataPool.waitingCount || 0) > 1 ? 120 : 25) : this.monitorEmptyBackoffMs;
+        this.scheduleMonitorTurn(nextDelayMs);
       }
     }
+  }
+
+  private scheduleMonitorTurn(delayMs: number): void {
+    if (this.stopped || this.monitorTurnScheduled) return;
+    this.monitorTurnScheduled = true;
+    const timer = setTimeout(() => {
+      this.monitorTurnScheduled = false;
+      void this.runMonitorTurn().catch(() => {});
+    }, Math.max(0, delayMs));
+    timer.unref();
+    this.timers.push(timer);
   }
 
   /**

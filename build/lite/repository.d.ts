@@ -108,6 +108,8 @@ export interface P1FocusGroupSnapshot {
 export declare class LiteRepository {
     private readonly db;
     private readonly sourceMetadataDb;
+    private operationalSnapshotCache;
+    private operationalSnapshotInFlight;
     private historicalP1ReserveAbundant;
     private manifestP1ReserveCache;
     private readonly coolingSources;
