@@ -380,7 +380,7 @@ export class ImporterLiteRuntime {
     // source watches current across 43 sources while chapters run. Only one
     // short SQL claim is ever in flight (monitorClaimGate); the remaining slots
     // run independent source network fetches in parallel without YSQL contention.
-    monitorGate = new AsyncSemaphore(18, 'lite_p0_monitor');
+    monitorGate = new AsyncSemaphore(3, 'lite_p0_monitor');
     monitorClaimGate = new AsyncSemaphore(1, 'lite_p0_monitor_claim');
     monitorClaimBuffer = [];
     monitorActiveBySource = new Map();
@@ -3535,7 +3535,7 @@ export class ImporterLiteRuntime {
             else
                 this.monitorEmptyBackoffMs = Math.min(10_000, this.monitorEmptyBackoffMs === 2_000 ? 5_000 : 10_000);
             if (!this.stopped && this.isRuntimeLeader && !(process.env.NODE_ENV === 'test' || process.env.VITEST)) {
-                const nextDelayMs = hadTask ? ((this.sourceMetadataPool.waitingCount || 0) > 1 ? 120 : 25) : this.monitorEmptyBackoffMs;
+                const nextDelayMs = hadTask ? ((this.sourceMetadataPool.waitingCount || 0) > 1 ? 2_000 : 1_000) : this.monitorEmptyBackoffMs;
                 this.scheduleMonitorTurn(nextDelayMs);
             }
         }
