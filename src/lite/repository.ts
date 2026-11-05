@@ -4269,13 +4269,9 @@ export class LiteRepository {
            updated_at=now()
          FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state,picked.monitoring`, [limit],
       );
-      // A monitor claim turn consumes at most eight rows.  Reopening 512 due
-      // monitors inside the primary reconciler transaction creates a large
-      // write burst, then leaves nearly all of those rows waiting for the
-      // same source-rotated claimant.  Keep a bounded ready reserve instead:
-      // it preserves continuous monitoring and source rotation while avoiding
-      // a 512-row UPDATE competing with chapter claims, uploads and finishes.
-      const dueMonitorLimit = limit >= 20 ? Math.max(limit, 64) : limit;
+      // A monitor claim turn consumes at most eight rows. Reopen at most eight due
+      // monitors per reconciler turn to keep queries sub-second.
+      const dueMonitorLimit = Math.min(limit, 8);
       const dueMonitors = await client.query<Row>(
         `/*+ IndexScan(t importer_lite_tasks_generic_retry_due_idx) */ WITH blocked_sources AS MATERIALIZED (
            SELECT s.id

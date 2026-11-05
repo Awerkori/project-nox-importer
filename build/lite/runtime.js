@@ -293,6 +293,7 @@ export class ImporterLiteRuntime {
     lastNewWorkPressureTurnAt = 0;
     lastNewWorkCatalogTurnAt = 0;
     pressureDiscoveryTurn = true;
+    emptyClaimCooldownUntil = 0;
     // Reserve 3 permits (2 for background V7 discovery + 1 for NEW_WORK onboarding)
     // so background V7 tasks can never starve a newly created work's onboarding pass.
     crossSourceMetadataGate = new AsyncSemaphore(3, 'lite_cross_source_metadata');
@@ -798,7 +799,7 @@ export class ImporterLiteRuntime {
                     this.logger.warn('Recovery turn failed', { error: error instanceof Error ? error.message : String(error) });
                 });
             }
-        }, 30_000);
+        }, 60_000);
         timer.unref();
         this.timers.push(timer);
         // Empty P0 scans used to hit YSQL every 800ms. Re-arm only one turn and
@@ -3271,12 +3272,17 @@ export class ImporterLiteRuntime {
                 // authoritative race-safe check after entering the lane.
                 if (this.chapterAdmissionGate.available <= 0) {
                     telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'operator-chapter-cap');
-                    await sleep(100);
+                    await sleep(500 + Math.floor(Math.random() * 500));
+                    continue;
+                }
+                if (Date.now() < this.emptyClaimCooldownUntil) {
+                    telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'empty-cooldown');
+                    await sleep(1000 + Math.floor(Math.random() * 500));
                     continue;
                 }
                 if (!this.claimGate.tryAcquire()) {
                     telemetryCollector.setSlotState(slotIndex, 'WAITING_CLAIM_DB', 'claim-serialization');
-                    await sleep(25);
+                    await sleep(100 + Math.floor(Math.random() * 100));
                     continue;
                 }
                 let task = null;
@@ -3284,7 +3290,7 @@ export class ImporterLiteRuntime {
                 try {
                     if (!this.chapterAdmissionGate.tryAcquire()) {
                         telemetryCollector.setSlotState(slotIndex, 'WAITING_BARRIER', 'operator-chapter-cap');
-                        await sleep(100);
+                        await sleep(500 + Math.floor(Math.random() * 500));
                         continue;
                     }
                     admissionAcquired = true;
@@ -3306,9 +3312,10 @@ export class ImporterLiteRuntime {
                 }
                 try {
                     if (!task) {
+                        this.emptyClaimCooldownUntil = Math.max(this.emptyClaimCooldownUntil, Date.now() + 3_000 + Math.floor(Math.random() * 1_500));
                         this.setWorkerLiveness(workerId, 'IDLE');
                         telemetryCollector.setSlotState(slotIndex, 'IDLE');
-                        await sleep(750);
+                        await sleep(3_500 + Math.floor(Math.random() * 1_500));
                         continue;
                     }
                     telemetryCollector.setSlotState(slotIndex, task.taskType === 'IMPORT_CHAPTER' ? 'ACTIVE_DOWNLOAD' : task.taskType === 'PUBLISH' ? 'ACTIVE_DB' : 'ACTIVE_SOURCE', task.taskType);
@@ -3326,7 +3333,7 @@ export class ImporterLiteRuntime {
             catch {
                 this.setWorkerLiveness(workerId, 'IDLE');
                 telemetryCollector.setSlotState(slotIndex, 'IDLE');
-                await sleep(1_000);
+                await sleep(1_500 + Math.floor(Math.random() * 1_000));
             }
         }
     }
