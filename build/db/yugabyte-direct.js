@@ -185,8 +185,8 @@ export function getYugabytePool() {
     if (pool)
         return pool;
     const cfg = getConfig();
-    const configuredMax = cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '2', 10);
-    const directPoolMax = Math.max(1, Math.min(2, configuredMax));
+    const configuredMax = cfg.DIRECT_DB_POOL_MAX || parseInt(process.env.DIRECT_DB_POOL_MAX || '1', 10);
+    const directPoolMax = Math.max(1, Math.min(1, configuredMax));
     pool = new pg.Pool(yugabytePoolOptions(cfg, directPoolMax, poolApplicationName('direct'), 25_000, 25_000, '', true, 5_000));
     pool.on('error', (err) => {
         logger.error('Unexpected error on idle direct Yugabyte client', { error: err.message });

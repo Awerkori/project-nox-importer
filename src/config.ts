@@ -52,7 +52,7 @@ const ConfigSchema = z.object({
   // deployment overlap must still be prevented by the runtime leader. Two
   // primary seats sustain external I/O while a single low-priority metadata
   // seat prevents a second importer process from exhausting the cluster.
-  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(2).default(2),
+  DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(2).default(1),
   METADATA_DB_POOL_MAX: z.coerce.number().int().min(1).max(1).default(1),
   // At the measured 52.75 MiB median chapter size, the former 4 MiB/s global
   // ceiling could never reach the 8/min acceptance floor (4.55/min before
