@@ -210,6 +210,23 @@ describe('YugabyteDB pool & query optimization invariants', () => {
     expect(queries.some((q) => q.includes('candidate_p0'))).toBe(true);
   });
 
+  it('parks unpublishable work through the existing work_key partial index', async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql);
+        return { rows: [], rowCount: 0 };
+      }),
+      release: vi.fn(),
+    };
+    const repo = new LiteRepository({ connect: vi.fn(async () => client) } as unknown as Pool);
+
+    await repo.parkUnpublishableWork('00000000-0000-4000-8000-000000000001', 'work:00000000-0000-4000-8000-000000000001');
+
+    expect(queries.find((sql) => sql.includes("reason='WORK_PRESENTATION_INCOMPLETE'")))
+      .toContain('WHERE work_key=$2::text');
+  });
+
   it('does not globally cool down a fast source when a single chapter has a content defect (PAGE_HTTP_404 / INVALID_PAGE_MANIFEST)', async () => {
     const capturedParams: unknown[][] = [];
     const mockDb = {

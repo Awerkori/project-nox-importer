@@ -3519,10 +3519,13 @@ export class LiteRepository {
               'presentationBlockedAt',clock_timestamp(),
               'presentationPreviousReason',reason
             ),updated_at=now()
-        WHERE work_id=$1::uuid
+        -- work_id has no matching open-task index. work_key is the
+        -- canonical equivalent and matches the existing partial work queues.
+        WHERE work_key=$2::text
+          AND work_id=$1::uuid
           AND task_type IN ('IMPORT_CHAPTER','PUBLISH')
           AND state IN ('READY','RETRY_WAIT')
-        RETURNING id`, [workId]);
+        RETURNING id`, [workId, workKey]);
             await this.refreshReadyWork(client, workKey);
             await client.query('COMMIT');
             return parked.rowCount || 0;
