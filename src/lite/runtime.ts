@@ -139,9 +139,8 @@ const SOURCE_METADATA_PREFERRED_SOURCE_BURST = 3;
 // through a few empty turns immediately; then return to the normal cadence so
 // an entirely exhausted catalog cannot poll YSQL continuously.
 const SOURCE_METADATA_EMPTY_PROBE_TURNS = 3;
-// Stage 2 metadata lane experiment: two dedicated slots, polled every five
-// seconds. Source adapter host limits and source cooldowns remain authoritative.
-const SOURCE_METADATA_LANE_INTERVAL_MS = 5_000;
+// Stage 2 metadata lane: throttled to 60s to preserve DB headroom.
+const SOURCE_METADATA_LANE_INTERVAL_MS = 60_000;
 // Historical P1 catalog production can hold a primary-pool client across a
 // bounded source cursor and several provider probes.  It is useful reserve
 // work, but never worth extending a live publication queue on every recovery
@@ -152,7 +151,7 @@ const HISTORICAL_P1_BUSY_MAX_GAP_MS = 120_000;
 // metadata.  It must not be stranded behind an indefinitely non-empty P1
 // chapter reserve, but one serial task is sufficient and remains below the
 // page/chapter admission path.
-const NEW_WORK_CATALOG_LANE_INTERVAL_MS = 5_000;
+const NEW_WORK_CATALOG_LANE_INTERVAL_MS = 60_000;
 // The first new-work catalog pass may include bounded cross-source metadata
 // collection. Keep its initial claim short for crash recovery, but renew it
 // while that legitimate external I/O is in flight rather than letting the
@@ -173,7 +172,7 @@ const CROSS_SOURCE_METADATA_MIN_CONFIDENCE = 0.95;
 // Durable checkedSources resumes the remaining providers in later turns.
 const CROSS_SOURCE_DISCOVERY_SOURCES_PER_TURN = 8;
 const CROSS_SOURCE_DISCOVERY_TURN_DELAY_MS = 1_000;
-const CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS = 5_000;
+const CROSS_SOURCE_DISCOVERY_REFILL_INTERVAL_MS = 60_000;
 // The direct importer pool is intentionally tiny and short chapter commits
 // can produce two queued checkouts momentarily.  Treat only a persistent
 // queue as pressure; an instantaneous sample must not strand network-only
@@ -885,13 +884,13 @@ export class ImporterLiteRuntime {
           this.logger.warn('Recovery turn failed', { error: error instanceof Error ? error.message : String(error) });
         });
       }
-    }, 60_000);
+    }, 120_000);
     timer.unref(); this.timers.push(timer);
     // Empty P0 scans used to hit YSQL every 800ms. Re-arm only one turn and
     // exponentially back off when the durable monitor queue is empty.
     // Call through the prototype so the lightweight startup contract used by
     // tests need not materialise every private helper on its fixture object.
-    (ImporterLiteRuntime.prototype as any).scheduleMonitorTurn.call(this, 2_000);
+    (ImporterLiteRuntime.prototype as any).scheduleMonitorTurn.call(this, 5_000);
     // Sample RSS independently from the 60-second diagnostic heartbeat. The
     // fixed byte ceiling makes overshoot bounded; this one-second brake then
     // prevents the next page wave from rebuilding pressure.
@@ -911,13 +910,13 @@ export class ImporterLiteRuntime {
     const historicalP1CatalogTimer = setInterval(() => {
       if (!this.isRuntimeLeader) return;
       void this.runHistoricalP1CatalogTurn();
-    }, 3_000);
+    }, 60_000);
     historicalP1CatalogTimer.unref(); this.timers.push(historicalP1CatalogTimer);
     const p0CycleTimer = setInterval(() => {
       if (this.isRuntimeLeader) void this.runP0CycleTurn().catch((err: any) => {
         this.logger.warn('P0 cycle turn failed', { error: err?.message });
       });
-    }, 15_000);
+    }, 60_000);
     p0CycleTimer.unref(); this.timers.push(p0CycleTimer);
     const healthTimer = setInterval(() => void this.probeSharedResources(), 120_000);
     healthTimer.unref(); this.timers.push(healthTimer);
@@ -3406,11 +3405,11 @@ export class ImporterLiteRuntime {
           if (!task) {
             this.emptyClaimCooldownUntil = Math.max(
               this.emptyClaimCooldownUntil,
-              Date.now() + 3_000 + Math.floor(Math.random() * 1_500)
+              Date.now() + 6_000 + Math.floor(Math.random() * 4_000)
             );
             this.setWorkerLiveness(workerId, 'IDLE');
             telemetryCollector.setSlotState(slotIndex, 'IDLE');
-            await sleep(3_500 + Math.floor(Math.random() * 1_500));
+            await sleep(6_000 + Math.floor(Math.random() * 4_000));
             continue;
           }
           telemetryCollector.setSlotState(slotIndex,

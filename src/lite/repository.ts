@@ -4375,7 +4375,7 @@ export class LiteRepository {
              SELECT 1 FROM window_routes wr WHERE wr.task_id=dw.id AND wr.is_runnable=true
            )
            ORDER BY dw.next_run_at ASC, dw.work_key ASC, dw.created_at ASC, dw.id ASC
-           LIMIT 512
+           LIMIT 64
          ), due_candidates AS MATERIALIZED (
            SELECT task.id,task.work_key,task.work_id,task.chapter_key,task.payload,task.next_run_at,
              task.created_at,
@@ -4679,7 +4679,9 @@ export class LiteRepository {
         await client.query("SET LOCAL statement_timeout = '2000ms'");
         const result = await client.query<Row>(`SELECT priority,state,monitoring,count(*)::int AS count,
           min(created_at) FILTER (WHERE state='READY' AND monitoring=false) AS oldest_ready_at
-          FROM importer_lite_tasks GROUP BY priority,state,monitoring ORDER BY priority,state,monitoring`);
+          FROM importer_lite_tasks
+          WHERE state IN ('READY', 'RUNNING', 'RETRY_WAIT')
+          GROUP BY priority,state,monitoring ORDER BY priority,state,monitoring`);
         const rows = result.rows.map((row) => ({ priority: priorityName(row.priority), state: row.state,
           monitoring: Boolean(row.monitoring), count: Number(row.count), oldestReadyAt: row.oldest_ready_at ? new Date(row.oldest_ready_at) : null }));
         this.operationalSnapshotCache = { capturedAt: Date.now(), rows };

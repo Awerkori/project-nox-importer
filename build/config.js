@@ -37,18 +37,17 @@ const ConfigSchema = z.object({
     POLL_INTERVAL_SECONDS: z.coerce.number().int().min(5).default(60),
     QUEUE_LEASE_DURATION_SECONDS: z.coerce.number().int().min(30).default(600),
     QUEUE_HEARTBEAT_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(60),
-    MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(128).default(4),
+    MAX_CONCURRENT_CHAPTERS: z.coerce.number().int().min(1).max(128).default(2),
     // Lite does not inherit the legacy chapter-worker setting. The controlled
-    // worker capacity remains strictly bounded to 4 to preserve YugabyteDB headroom.
-    LITE_CHAPTER_WORKERS: z.coerce.number().int().min(1).max(32).default(4),
-    ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(3),
+    // worker capacity remains strictly bounded to 2 to preserve YugabyteDB headroom.
+    LITE_CHAPTER_WORKERS: z.coerce.number().int().min(1).max(32).default(2),
+    ADAPTIVE_INITIAL_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(2),
     // Raising this ceiling requires a measured production ramp.
-    TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(4),
-    BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(16),
+    TESTED_CONCURRENCY_CEILING: z.coerce.number().int().min(1).max(128).default(2),
+    BATCH_PAGE_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(4),
     // Aeon has only 13 backend slots. These are hard per-process ceilings;
-    // deployment overlap must still be prevented by the runtime leader. Two
-    // primary seats sustain external I/O while a single low-priority metadata
-    // seat prevents a second importer process from exhausting the cluster.
+    // deployment overlap must still be prevented by the runtime leader. Direct
+    // pool is capped to 1 and metadata pool to 1 to reserve headroom for the site.
     DIRECT_DB_POOL_MAX: z.coerce.number().int().min(1).max(2).default(1),
     METADATA_DB_POOL_MAX: z.coerce.number().int().min(1).max(1).default(1),
     // At the measured 52.75 MiB median chapter size, the former 4 MiB/s global
@@ -56,18 +55,10 @@ const ConfigSchema = z.object({
     // network and publication overhead). Eight MiB/s is the first reversible
     // ramp; bot, shard, request and global-media limits still apply.
     UPLOAD_RATE_LIMIT_BYTES_PER_SEC: z.coerce.number().int().default(8 * 1024 * 1024),
-    // These are global pipeline ceilings, not per-chapter multipliers.  Keep
-    // them aligned with the small production container so a chapter ramp cannot
-    // create a hidden 24+ request/media burst behind five chapter slots.
-    TELEGRAM_MEDIA_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(24),
-    // Production ramp 2026-10-11: real P1 media flow sustained only 70–128
-    // pages/min at the former 16-page fence, while Telegram stayed below
-    // 1.6 MiB/s with no 429 and the 24-upload/storage fences remained unused.
-    // A 32-page production ramp regressed to 143 pages/min and increased RSS
-    // without Telegram 429. Keep the measured 24-page fence until a distinct
-    // bottleneck is proven; uploads remain bounded at 24 and buffers at 48.
-    DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(48).default(40),
-    BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(96).default(80),
+    // Bounded media concurrency to protect DB connection manager and CPU.
+    TELEGRAM_MEDIA_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(6),
+    DOWNLOAD_INFLIGHT_CONCURRENCY: z.coerce.number().int().min(1).max(48).default(12),
+    BUFFERED_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(96).default(24),
     // Upstream adapter calls are network work, not a reason to monopolize a
     // chapter slot. The timeout is deliberately independent from the durable
     // task lease and results in capped retry/cooldown handling.
