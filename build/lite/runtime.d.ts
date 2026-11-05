@@ -72,6 +72,7 @@ export declare class ImporterLiteRuntime {
     private lastNewWorkPressureTurnAt;
     private lastNewWorkCatalogTurnAt;
     private pressureDiscoveryTurn;
+    private emptyClaimCooldownUntil;
     private readonly crossSourceMetadataGate;
     private readonly crossSourceDiscoveryLaneGate;
     private sourceMetadataPoolWaitStartedAt;

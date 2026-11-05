@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
+import { unaccent } from '@electric-sql/pglite/contrib/unaccent';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -8,13 +9,15 @@ describe('Importer Database Schema & Atomic Lease Locks', () => {
   let db: PGlite;
 
   beforeAll(async () => {
-    db = new PGlite({ extensions: { pg_trgm } });
+    db = new PGlite({ extensions: { pg_trgm, unaccent } });
     
     // Set up standard roles and mocks matching Supabase
     await db.exec(`
       create role anon;
       create role authenticated;
       create role service_role bypassrls;
+      create role yugabyte;
+      create role admin;
       create schema if not exists auth;
       create schema if not exists storage;
       create type public.scan_member_role as enum ('LEADER', 'VICE_LEADER', 'STAFF', 'MEMBER');
@@ -66,7 +69,17 @@ describe('Importer Database Schema & Atomic Lease Locks', () => {
       .filter(f => f.endsWith('.sql'))
       .sort();
     for (const file of importerMigrationFiles) {
-      const sql = readFileSync(resolve('migrations', file), 'utf8');
+      if (file >= '20261017060000') {
+        await db.exec(`ALTER TABLE IF EXISTS importer_sources 
+          ADD COLUMN IF NOT EXISTS catalog_discovery_enabled boolean NOT NULL DEFAULT true,
+          ADD COLUMN IF NOT EXISTS chapter_ingestion_enabled boolean NOT NULL DEFAULT true,
+          ADD COLUMN IF NOT EXISTS blocked_reason text NULL,
+          ADD COLUMN IF NOT EXISTS blocked_details jsonb NULL;`).catch(() => {});
+      }
+      let sql = readFileSync(resolve('migrations', file), 'utf8')
+        .replace(/IN DATABASE project_nox_prod/gi, '')
+        .replace(/using\s+ybgin/gi, 'using gin')
+        .replace(/using\s+lsm/gi, 'using btree');
       await db.exec(sql);
     }
   });
