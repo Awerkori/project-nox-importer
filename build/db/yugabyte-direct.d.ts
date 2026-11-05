@@ -6,11 +6,8 @@ import type { GatewayJob, PublishBatchParams } from '../core/gateway-client.js';
  */
 export declare function getSqlFingerprint(queryArg: unknown): string;
 /**
- * Protected connections for low-priority historical metadata bookkeeping.
- * Normal operation admits one task; the explicit V4-exclusive campaign may
- * use four distinct-work merges without borrowing the public/chapter pool.
- * One additional connection is reserved for the serialized durable producer,
- * so refilling a successor never waits behind every active merge.
+ * Unified metadata pool with the primary Yugabyte pool to enforce a strict hard cap of
+ * at most 2 server connections on YugabyteDB Aeon (preventing Connection Manager 60% saturation).
  */
 export declare function createYugabyteMetadataPool(): pg.Pool;
 export declare function getYugabytePool(): pg.Pool;

@@ -184,36 +184,11 @@ function yugabytePoolOptions(cfg: ReturnType<typeof getConfig>, max: number, app
 }
 
 /**
- * Protected connections for low-priority historical metadata bookkeeping.
- * Normal operation admits one task; the explicit V4-exclusive campaign may
- * use four distinct-work merges without borrowing the public/chapter pool.
- * One additional connection is reserved for the serialized durable producer,
- * so refilling a successor never waits behind every active merge.
+ * Unified metadata pool with the primary Yugabyte pool to enforce a strict hard cap of
+ * at most 2 server connections on YugabyteDB Aeon (preventing Connection Manager 60% saturation).
  */
 export function createYugabyteMetadataPool(): pg.Pool {
-  // These protected P2 connections perform bounded cross-table probes.
-  // Yugabyte's default nested-loop plan issued one remote read per mapping;
-  // prefer its batched variant only here, never on the chapter pool.
-  const metadataSessionOptions = '-c enable_nestloop=off';
-  const cfg = getConfig();
-  // The cluster has 13 connections shared with the reader. Incremental P2
-  // work is deliberately serial at YSQL: it retains a durable progress lane
-  // for aliases/tags/new works without reserving capacity needed by chapters
-  // or Hyperdrive. Network work still happens outside a DB checkout.
-  const poolMax = Math.max(1, Math.min(1, cfg.METADATA_DB_POOL_MAX));
-  const metadataPool = new pg.Pool(yugabytePoolOptions(
-    cfg, poolMax, poolApplicationName('metadata'), 30_000, 15_000,
-    metadataSessionOptions, false, 3_000,
-  ));
-  metadataPool.on('error', (err) => {
-    logger.error('Unexpected error on idle metadata Yugabyte client', { error: err.message });
-  });
-  metadataPool.on('connect', (client) => {
-    client.on('error', (err) => {
-      logger.warn('Suppressed unexpected error on active metadata client', { error: err.message });
-    });
-  });
-  return metadataPool;
+  return getYugabytePool();
 }
 
 export function getYugabytePool(): pg.Pool {

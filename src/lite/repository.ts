@@ -215,6 +215,8 @@ export interface P1FocusGroupSnapshot {
 export class LiteRepository {
   private operationalSnapshotCache: { capturedAt: number; rows: Array<{ priority: LitePriority; state: LiteTaskState; monitoring: boolean; count: number; oldestReadyAt: Date | null }> } | null = null;
   private operationalSnapshotInFlight: Promise<Array<{ priority: LitePriority; state: LiteTaskState; monitoring: boolean; count: number; oldestReadyAt: Date | null }>> | null = null;
+  private blockedReasonSnapshotCache: { capturedAt: number; rows: Array<{ reason: string; count: number }> } | null = null;
+  private blockedReasonSnapshotInFlight: Promise<Array<{ reason: string; count: number }>> | null = null;
   // This is only a local maintenance hint. Durable task state remains the
   // authority; the runtime uses the hint to avoid a second catalog turn when
   // the materialised P1 import reserve is already abundant.
@@ -4667,7 +4669,7 @@ export class LiteRepository {
 
   async operationalSnapshot(): Promise<Array<{ priority: LitePriority; state: LiteTaskState; monitoring: boolean; count: number; oldestReadyAt: Date | null }>> {
     const now = Date.now();
-    if (this.operationalSnapshotCache && now - this.operationalSnapshotCache.capturedAt < 60_000) {
+    if (this.operationalSnapshotCache && now - this.operationalSnapshotCache.capturedAt < 15 * 60_000) {
       return this.operationalSnapshotCache.rows;
     }
     if (this.operationalSnapshotInFlight) return this.operationalSnapshotInFlight;
@@ -4683,7 +4685,9 @@ export class LiteRepository {
         this.operationalSnapshotCache = { capturedAt: Date.now(), rows };
         return rows;
       } catch {
-        return [];
+        // Fall back to prior cached rows and back off for 15 minutes to avoid slamming the DB on timeout
+        this.operationalSnapshotCache = { capturedAt: Date.now(), rows: this.operationalSnapshotCache?.rows || [] };
+        return this.operationalSnapshotCache.rows;
       } finally {
         client.release();
       }
@@ -4735,18 +4739,30 @@ export class LiteRepository {
   }
 
   async blockedReasonSnapshot(limit = 8): Promise<Array<{ reason: string; count: number }>> {
-    const client = await this.db.connect();
-    try {
-      await client.query("SET LOCAL statement_timeout = '2000ms'");
-      const result = await client.query<Row>(`SELECT COALESCE(reason,'UNSPECIFIED') AS reason,count(*)::int AS count
-        FROM importer_lite_tasks WHERE state='BLOCKED'
-        GROUP BY reason ORDER BY count DESC,reason LIMIT $1`, [Math.max(1, Math.min(limit, 20))]);
-      return result.rows.map((row) => ({ reason: String(row.reason), count: Number(row.count) }));
-    } catch {
-      return [];
-    } finally {
-      client.release();
+    const now = Date.now();
+    if (this.blockedReasonSnapshotCache && now - this.blockedReasonSnapshotCache.capturedAt < 15 * 60_000) {
+      return this.blockedReasonSnapshotCache.rows;
     }
+    if (this.blockedReasonSnapshotInFlight) return this.blockedReasonSnapshotInFlight;
+    this.blockedReasonSnapshotInFlight = (async () => {
+      const client = await this.db.connect();
+      try {
+        await client.query("SET LOCAL statement_timeout = '2000ms'");
+        const result = await client.query<Row>(`SELECT COALESCE(reason,'UNSPECIFIED') AS reason,count(*)::int AS count
+          FROM importer_lite_tasks WHERE state='BLOCKED'
+          GROUP BY reason ORDER BY count DESC,reason LIMIT $1`, [Math.max(1, Math.min(limit, 20))]);
+        const rows = result.rows.map((row) => ({ reason: String(row.reason), count: Number(row.count) }));
+        this.blockedReasonSnapshotCache = { capturedAt: Date.now(), rows };
+        return rows;
+      } catch {
+        this.blockedReasonSnapshotCache = { capturedAt: Date.now(), rows: this.blockedReasonSnapshotCache?.rows || [] };
+        return this.blockedReasonSnapshotCache.rows;
+      } finally {
+        client.release();
+      }
+    })();
+    try { return await this.blockedReasonSnapshotInFlight; }
+    finally { this.blockedReasonSnapshotInFlight = null; }
   }
 
   async sourceHealthSnapshot(): Promise<Array<{ health: string; count: number }>> {

@@ -3966,6 +3966,8 @@ export class ImporterLiteRuntime {
       this.heartbeatCompletedAt = new Date().toISOString();
       return;
     }
+    const fullSnapshotAt = new Date().toISOString();
+    this.lastFullOperationalSnapshotAt = fullSnapshotAt;
     const [tasks, progress, blocked, sourceHealth, metadataProduct] = await Promise.all([
       this.queue.operationalSnapshot(), this.queue.progressSnapshot(),
       this.queue.blockedReasonSnapshot(), this.queue.sourceHealthSnapshot(), this.queue.metadataProductSnapshot(),
@@ -3986,7 +3988,6 @@ export class ImporterLiteRuntime {
       active: (storageMetrics.bots || []).reduce((sum: number, bot: any) => sum + Number(bot.active || 0), 0),
       rateLimits429: (storageMetrics.bots || []).reduce((sum: number, bot: any) => sum + Number(bot.rateLimits429 || 0), 0),
     } : null;
-    const fullSnapshotAt = new Date().toISOString();
     const snapshot = {
       runtime: 'lite' as const,
       runtimeInstanceId: this.runtimeInstanceId,

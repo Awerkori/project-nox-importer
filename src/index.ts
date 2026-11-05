@@ -158,7 +158,7 @@ async function main() {
       }
       telemetryCollector.stop();
       await closeYugabytePool().catch(() => {});
-      if (sourceMetadataPool) {
+      if (sourceMetadataPool && sourceMetadataPool !== (supabase as DirectSupabaseClient).getPool()) {
         await sourceMetadataPool.end().catch(() => {});
       }
     } finally {

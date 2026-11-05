@@ -153,7 +153,7 @@ async function main() {
             }
             telemetryCollector.stop();
             await closeYugabytePool().catch(() => { });
-            if (sourceMetadataPool) {
+            if (sourceMetadataPool && sourceMetadataPool !== supabase.getPool()) {
                 await sourceMetadataPool.end().catch(() => { });
             }
         }
