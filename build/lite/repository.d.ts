@@ -110,6 +110,8 @@ export declare class LiteRepository {
     private readonly sourceMetadataDb;
     private operationalSnapshotCache;
     private operationalSnapshotInFlight;
+    private blockedReasonSnapshotCache;
+    private blockedReasonSnapshotInFlight;
     private historicalP1ReserveAbundant;
     private manifestP1ReserveCache;
     private readonly coolingSources;
