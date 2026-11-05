@@ -210,6 +210,32 @@ describe('YugabyteDB pool & query optimization invariants', () => {
     expect(queries.some((q) => q.includes('candidate_p0'))).toBe(true);
   });
 
+  it('uses the ordered generic retry index and materializes monitor source blocks before selecting tasks', async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql);
+        return { rows: [], rowCount: 0 };
+      }),
+      release: vi.fn(),
+    };
+    const repo = new LiteRepository({ connect: vi.fn(async () => client) } as unknown as Pool);
+
+    await repo.reconcile(20, {
+      recoverUploadOutcomes: false,
+      recoverSourceCooldowns: false,
+      recoverLegacyMaintenance: false,
+    });
+
+    const retries = queries.find((sql) => sql.includes("monitoring=false AND next_run_at<=now()"));
+    expect(retries).toContain('IndexScan(importer_lite_tasks importer_lite_tasks_generic_retry_due_idx)');
+
+    const dueMonitors = queries.find((sql) => sql.includes('WITH blocked_sources AS MATERIALIZED'));
+    expect(dueMonitors).toContain('IndexScan(t importer_lite_tasks_generic_retry_due_idx)');
+    expect(dueMonitors).toContain("NOT (COALESCE(t.payload->>'source','') = ANY(ARRAY(SELECT id FROM blocked_sources)))");
+    expect(dueMonitors).not.toContain("LEFT JOIN importer_sources s ON s.id = t.payload->>'source'");
+  });
+
   it('parks unpublishable work through the existing work_key partial index', async () => {
     const queries: string[] = [];
     const client = {

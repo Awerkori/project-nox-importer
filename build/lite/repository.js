@@ -3975,7 +3975,7 @@ export class LiteRepository {
              THEN 'LEASE_EXPIRED_MAX_ATTEMPTS' ELSE 'LEASE_EXPIRED' END,
            updated_at=now()
          FROM picked WHERE t.id=picked.id RETURNING picked.work_key,t.state,picked.monitoring`, [limit]);
-            const retries = await client.query(`WITH picked AS (
+            const retries = await client.query(`/*+ IndexScan(importer_lite_tasks importer_lite_tasks_generic_retry_due_idx) */ WITH picked AS (
            SELECT id,work_key,attempts,max_attempts,task_type,monitoring,payload FROM importer_lite_tasks
            WHERE state='RETRY_WAIT' AND monitoring=false AND next_run_at<=now()
              -- Explicit provider cooldown work is admitted only by the
@@ -3999,27 +3999,27 @@ export class LiteRepository {
             // it preserves continuous monitoring and source rotation while avoiding
             // a 512-row UPDATE competing with chapter claims, uploads and finishes.
             const dueMonitorLimit = limit >= 20 ? Math.max(limit, 64) : limit;
-            const dueMonitors = await client.query(`WITH picked AS (
+            const dueMonitors = await client.query(`/*+ IndexScan(t importer_lite_tasks_generic_retry_due_idx) */ WITH blocked_sources AS MATERIALIZED (
+           SELECT s.id
+           FROM importer_sources s
+           LEFT JOIN importer_lite_source_health h ON h.source = s.id
+           WHERE NOT (
+             s.enabled = true
+             AND s.id NOT IN ('mangaball','mangadex','mangafire')
+             AND ${sourceExecutionEligibilitySql('s')}
+             AND COALESCE(s.chapter_ingestion_enabled, true) = true
+             AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
+             AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
+           )
+         ), picked AS (
            SELECT t.id
            FROM importer_lite_tasks t
-           LEFT JOIN importer_sources s ON s.id = t.payload->>'source'
-           LEFT JOIN importer_lite_source_health h ON h.source = t.payload->>'source'
            WHERE t.state='RETRY_WAIT'
              AND t.monitoring=true
              AND t.task_type='CATALOG'
              AND t.next_run_at<=now()
              AND COALESCE(t.reason,'')<>'SOURCE_RATE_LIMITED'
-             AND (
-               s.id IS NULL
-               OR (
-                 s.enabled = true
-                 AND s.id NOT IN ('mangaball','mangadex','mangafire')
-                 AND ${sourceExecutionEligibilitySql('s')}
-                 AND COALESCE(s.chapter_ingestion_enabled, true) = true
-                 AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
-                 AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
-               )
-             )
+             AND NOT (COALESCE(t.payload->>'source','') = ANY(ARRAY(SELECT id FROM blocked_sources)))
            ORDER BY t.next_run_at LIMIT $1 FOR UPDATE OF t SKIP LOCKED
          ) UPDATE importer_lite_tasks t
             SET state='READY', updated_at=now()
