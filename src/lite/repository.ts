@@ -4285,16 +4285,20 @@ export class LiteRepository {
              AND COALESCE(h.health, 'HEALTHY') NOT IN ('BROKEN', 'DISABLED')
              AND (h.cooldown_until IS NULL OR h.cooldown_until <= now())
            )
-         ), picked AS (
-           SELECT t.id
+         ), raw_due AS MATERIALIZED (
+           SELECT t.id, t.payload, t.next_run_at
            FROM importer_lite_tasks t
            WHERE t.state='RETRY_WAIT'
              AND t.monitoring=true
              AND t.task_type='CATALOG'
              AND t.next_run_at<=now()
              AND COALESCE(t.reason,'')<>'SOURCE_RATE_LIMITED'
-             AND NOT (COALESCE(t.payload->>'source','') = ANY(ARRAY(SELECT id FROM blocked_sources)))
-           ORDER BY t.next_run_at LIMIT $1 FOR UPDATE OF t SKIP LOCKED
+           ORDER BY t.next_run_at LIMIT 64
+         ), picked AS (
+           SELECT t.id
+           FROM raw_due t
+           WHERE NOT (COALESCE(t.payload->>'source','') = ANY(ARRAY(SELECT id FROM blocked_sources)))
+           ORDER BY t.next_run_at LIMIT $1
          ) UPDATE importer_lite_tasks t
             SET state='READY', updated_at=now()
            FROM picked
