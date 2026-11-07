@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  inventory_and_backup:
+  sequential_replacement:
     runs-on: ubuntu-latest
     environment:
       name: discloud-production
@@ -21,14 +21,22 @@ jobs:
         with:
           node-version: 22
 
-      - name: Run Bot Inventory and Backup
+      - name: Decrypt Deployment Artifacts
+        run: |
+          mkdir -p /tmp/deploy_zips
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"ProjectNoxSecureDiscloudRecovery2026!" -in encrypted_deploy_payload.enc | tar -xzf - -C /tmp/deploy_zips
+          ls -la /tmp/deploy_zips
+
+      - name: Run Sequential Bot Replacement (G7-G10)
         env:
           DISCLOUD_TOKEN: ${{ secrets.DISCLOUD_TOKEN }}
-        run: node scripts/bot-inventory-backup.mjs
+          DEPLOY_ZIPS_DIR: /tmp/deploy_zips
+        run: node scripts/bot-sequential-replacement.mjs
 
-      - name: Upload Encrypted Bot Backups
+      - name: Upload Encrypted Migration Evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: encrypted-bot-backups
-          path: /tmp/encrypted_bot_backups.enc
-          retention-days: 1
+          name: encrypted-migration-summary
+          path: /tmp/migration_summary.enc
+          retention-days: 7
