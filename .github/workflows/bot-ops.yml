@@ -1,16 +1,43 @@
 name: Discloud Bot Operations
 
 on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Operation to perform (audit or deploy)'
+        required: true
+        default: 'audit'
+        type: choice
+        options:
+          - audit
+          - deploy
   push:
     branches:
       - bot-migration-ops
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  audit_live_infrastructure:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'audit')
+    runs-on: ubuntu-latest
+    environment:
+      name: discloud-production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run Live Discloud Audit (Read-Only)
+        env:
+          DISCLOUD_TOKEN: ${{ secrets.DISCLOUD_TOKEN }}
+        run: node scripts/bot-audit-live.mjs
+
   sequential_replacement:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'deploy'
     runs-on: ubuntu-latest
     environment:
       name: discloud-production
