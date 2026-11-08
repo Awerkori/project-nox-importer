@@ -60,17 +60,17 @@ async function main() {
   }
   console.log('');
 
-  // 3. Four Bots Audit
+  // 3. Four Bots Audit (New Production IDs)
   const bots = [
-    { name: 'Keiyoushi Monitor', id: '1794078615622' },
-    { name: 'Project Nox Mangá', id: '1794078662407' },
-    { name: 'Yuzono Monitor', id: '1794078707942' },
-    { name: 'Project Nox Anime', id: '1794078752240' },
+    { name: 'Project Nox Mangá', oldId: '1794078662407', id: '1794120431436' },
+    { name: 'Keiyoushi Monitor', oldId: '1794078615622', id: '1794120475569' },
+    { name: 'Yuzono Monitor', oldId: '1794078707942', id: '1794120537671' },
+    { name: 'Project Nox Anime', oldId: '1794078752240', id: '1794120637293' },
   ];
 
   for (let i = 0; i < bots.length; i++) {
     const b = bots[i];
-    console.log(`>>> [${i + 2}/5] ${b.name.toUpperCase()} (ID: ${b.id}) <<<`);
+    console.log(`>>> [${i + 2}/5] ${b.name.toUpperCase()} (ID: ${b.id} | Old: ${b.oldId}) <<<`);
     const statusRes = await apiRequest(`/app/${b.id}/status`);
     if (!statusRes.ok) {
       console.error(`  ❌ Status query failed: HTTP ${statusRes.status}`);
