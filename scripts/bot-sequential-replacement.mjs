@@ -10,8 +10,8 @@ if (!token || !token.trim()) {
 
 const PROTECTED_IMPORTER_ID = '1788873398156';
 const TARGET_BOTS = [
-  { name: 'Keiyoushi Monitor', oldId: '1794078615622', zipFile: 'deploy_1792100200744.zip' },
   { name: 'Project Nox Monitor', oldId: '1794078662407', zipFile: 'deploy_1792100161375.zip' },
+  { name: 'Keiyoushi Monitor', oldId: '1794078615622', zipFile: 'deploy_1792100200744.zip' },
   { name: 'Yuzono Monitor', oldId: '1794078707942', zipFile: 'deploy_1792100243462.zip' },
   { name: 'Project Nox Anime Monitor', oldId: '1794078752240', zipFile: 'deploy_1792100272677.zip' },
 ];
