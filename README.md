@@ -15,9 +15,10 @@ Este repositório é voltado para **engenheiros de backend, infraestrutura e man
 | Camada | Tecnologia / Serviço | Responsabilidade |
 | :--- | :--- | :--- |
 | **Execução 24/7** | DIScloud (Node.js daemon) | Ciclo autônomo contínuo, polling, rate limiting e controle de leases |
-| **Banco & Fila** | Supabase (PostgreSQL) | Fila atômica com `FOR UPDATE SKIP LOCKED`, mapeamentos e RLS restrito |
-| **Storage de Mídia** | `StorageProvider` (Telegram / Mock) | Armazenamento seguro de blobs e páginas de mídia sem custo |
+| **Banco Principal & Fila** | YugabyteDB / YSQL | Banco distribuído principal, persistência de catálogo, leases atômicos e integridade |
+| **Storage de Mídia** | Telegram (`StorageProvider`) | Armazenamento de mídia e entrega de blobs de páginas |
 | **Consumo & Leitura**| [Project Nox · Site](https://github.com/Awerkori/project-nox-manga) | Leitor web e plataforma de entrega ao usuário final |
+| **Legado / Transição** | Supabase (PostgreSQL) | Filas legadas e esquemas transitórios mantidos para compatibilidade |
 | **Adapters** | Modulares / TypeScript | Conectores para fontes de catálogo e normalização de dados |
 
 ---
@@ -49,7 +50,8 @@ Este repositório é voltado para **engenheiros de backend, infraestrutura e man
 
 ### Pré-requisitos
 - **Node.js** 22 ou posterior
-- Banco PostgreSQL / Supabase com as migrações aplicadas
+- Cluster **YugabyteDB / YSQL** (ou instância PostgreSQL compatível com certificados configurados)
+- Variáveis de ambiente configuradas (`.env` com `YUGABYTE_HOST`, `YUGABYTE_PASSWORD`, etc.)
 
 ### Passos
 ```bash
@@ -70,11 +72,10 @@ npm run dev
 
 ## 🗄️ Estrutura de Banco de Dados
 
-Para inicializar a estrutura do importador em uma instância Supabase:
+O motor opera primariamente sobre **YugabyteDB / YSQL**, garantindo resiliência distribuída, leases concorrentes seguros e integridade referencial:
 
-1. Acesse o arquivo de migração [`migrations/001_importer_schema.sql`](migrations/001_importer_schema.sql).
-2. Execute o script no SQL Editor com privilégios de administrador.
-3. O schema provisiona as tabelas de fila, fontes, mapeamentos, funções atômicas e políticas de segurança.
+1. As configurações de conexão YSQL utilizam certificados SSL e credenciais gerenciadas (`YUGABYTE_HOST`, `YUGABYTE_PORT`, `YUGABYTE_USER`, `YUGABYTE_PASSWORD`, `YUGABYTE_DATABASE`).
+2. O arquivo [`migrations/001_importer_schema.sql`](migrations/001_importer_schema.sql) documenta a estrutura histórica/legada de tabelas de fila, fontes e mapeamentos.
 
 ---
 
@@ -117,26 +118,26 @@ O deploy em produção pode ser disparado manualmente através do GitHub Actions
 
 ## ⚖️ Licença e Responsabilidade
 
-Este projeto é software livre licenciado sob os termos da **GNU General Public License versão 3.0** (\`GPL-3.0-only\`). Consulte o arquivo [LICENSE](LICENSE) para obter o texto integral inalterado da licença e o arquivo [NOTICE](NOTICE) para informações detalhadas de autoria, dependências e notas de governança.
+Este projeto é software livre licenciado sob os termos da **GNU Affero General Public License versão 3.0** (`AGPL-3.0-only`). Consulte o arquivo [LICENSE](LICENSE) para obter o texto integral inalterado da licença e o arquivo [NOTICE](NOTICE) para informações detalhadas de autoria, dependências e notas de governança.
 
-\`\`\`
+```
 Copyright (C) 2026 Project Nox Contributors & Awerkori
 
 This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
+it under the terms of the GNU Affero General Public License as published by
 the Free Software Foundation, version 3 of the License.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-\`\`\`
+GNU Affero General Public License for more details.
+```
 
-### 📌 Nota sobre GPL-3.0 e AGPL-3.0
-O Project Nox adota oficialmente a licença **GNU GPL versão 3.0**. Diferentemente da licença GNU AGPLv3, a GPLv3 não contém a cláusula de interação remota por rede (Seção 13 da AGPL). Consequentemente, o uso ou execução deste serviço em servidores ou nuvem sem distribuição de cópias executáveis a terceiros não impõe contratualmente a obrigação de compartilhamento do código-fonte modificado sob a GPL 3.0.
+### 📌 Interação Remota de Rede (GNU AGPLv3 Seção 13)
+O Project Nox adota oficialmente a licença **GNU AGPL versão 3.0**. Nos termos da Seção 13 da AGPLv3, qualquer versão modificada deste software operada em servidores ou instâncias acessíveis remotamente através de uma rede de computadores deve oferecer a todos os usuários remotos a oportunidade de obter o Código-Fonte Correspondente (Corresponding Source) da aplicação em execução, sem custos e através de meio padrão de distribuição de software.
 
-### 🛡️ Autenticidade e Marca
-A concessão da licença GPL 3.0 refere-se estritamente aos direitos autorais do software. Ela **não concede** autorização ou licença para uso de marcas, logotipos oficiais ou da denominação "Project Nox" para insinuar homologação, endosso ou representação oficial do projeto.
+### 🛡️ Proteção de Identidade e Marca (AGPLv3 Seção 7(e))
+A concessão da licença AGPLv3 refere-se estritamente aos direitos autorais do software. Os nomes "Project Nox" e "Awerkori", bem como logotipos associados, identificam a procedência e origem do projeto. A licença **não concede** autorização para uso de nomes, marcas ou logotipos para insinuar homologação, endosso ou representação oficial sem autorização prévia por escrito.
 
 ### ⚖️ Isenção de Responsabilidade
 O **Project Nox** desenvolve e disponibiliza ferramentas exclusivamente para estudo, interoperabilidade técnica e pesquisa de catalogação. O serviço atua estritamente de forma programática como indexador técnico, sem armazenar centralmente nem comercializar conteúdos protegidos de terceiros.
