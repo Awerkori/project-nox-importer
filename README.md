@@ -136,11 +136,16 @@ ID=projectnoximporter
 TYPE=bot
 MAIN=build/index.js
 NAME=Project Nox Importer
-RAM=512
+RAM=624
 AUTORESTART=true
-VERSION=latest
-APT=tools
+VERSION=22
+APT=tools,tesseract-ocr,tesseract-ocr-por,tesseract-ocr-eng
+START=env DISCLOUD_RAM_MB=624 UV_THREADPOOL_SIZE=8 MALLOC_ARENA_MAX=1 MALLOC_TRIM_THRESHOLD_=131072 MALLOC_MMAP_THRESHOLD_=1 node --expose-gc --max-old-space-size=352 build/index.js
 ```
+
+- **Topologia de Memória do Container:** Container dimensionado em 624 MiB de RAM (`RAM=624`) executando Node.js 22 com teto de heap V8 ajustado para 352 MiB (`--max-old-space-size=352`).
+- **Prevenção de Fragmentação Nativa:** Configuração de alocador de memória com arena única (`MALLOC_ARENA_MAX=1`, `MALLOC_TRIM_THRESHOLD_=131072`, `MALLOC_MMAP_THRESHOLD_=1`) e liberação periódica de memória para mitigar retenção residual de RSS após rajadas de download e validação de mídia.
+- **Suporte a OCR:** Instalação nativa via APT de pacotes do Tesseract OCR (`tesseract-ocr`, `tesseract-ocr-por`, `tesseract-ocr-eng`) para inspeção óptica e extração textual de capítulos quando necessário.
 
 ### Pipeline de Deploy Automatizado
 - O deploy em produção é gerenciado pelo workflow do GitHub Actions [`.github/workflows/deploy-discloud.yml`](.github/workflows/deploy-discloud.yml).
