@@ -1,0 +1,48 @@
+Project Nox · Importer Engine
+Copyright (C) 2026 Project Nox Contributors & Awerkori
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 3 of the License (GPL-3.0-only).
+
+SPDX-License-Identifier: GPL-3.0-only
+
+================================================================================
+1. ESCLARECIMENTO SOBRE LICENCIAMENTO (GPL-3.0 vs. AGPL-3.0)
+================================================================================
+Este repositório está oficialmente licenciado sob a GNU General Public
+License versão 3.0 (GPL-3.0-only).
+
+Sinalização expressa de escopo copyleft:
+A GNU GPL versão 3.0 não contém a cláusula de interação remota presente na
+Seção 13 da GNU Affero General Public License (AGPL-3.0). Em conformidade com
+os termos da GPLv3, a execução modificada deste serviço autônomo (daemon de
+ingestão e importação) em servidores remotos ou contêineres sem distribuição
+direta de cópias executáveis ou de código-fonte para terceiros não aciona a
+exigência de liberação obrigatória do código-fonte das modificações operacionais.
+A escolha da GPL 3.0 assegura transparência integral ao software livre,
+preservando as quatro liberdades essenciais de redistribuição e estudo.
+
+================================================================================
+2. COMPONENTES E DEPENDÊNCIAS DE TERCEIROS
+================================================================================
+Este software faz uso de bibliotecas de código aberto permissivas compatíveis
+com a GNU GPLv3:
+- Drizzle ORM (drizzle-orm) — Licença Apache 2.0 (Copyright (c) Drizzle Team)
+- LibSQL Client (@libsql/client) — Licença MIT (Copyright (c) ChiselStrike, Inc.)
+- Supabase JS Client (@supabase/supabase-js) — Licença MIT (Copyright (c) Supabase)
+- Puppeteer Core (puppeteer-core) — Licença Apache 2.0 (Copyright (c) Google Inc.)
+- Node Postgres (pg) — Licença MIT (Copyright (c) Brian Carlson)
+- Zod (zod) — Licença MIT (Copyright (c) Colin McDonnell)
+- Dotenv (dotenv) — Licença BSD-2-Clause (Copyright (c) Scott Motte)
+- ts-morph — Licença MIT (Copyright (c) David Sherret)
+- ws — Licença MIT (Copyright (c) Einar Otto Stangvik)
+
+================================================================================
+3. RESERVA DE MARCA E IDENTIDADE VISUAL
+================================================================================
+A concessão da licença de código-fonte aberto GPL 3.0 aplica-se exclusivamente
+aos direitos autorais de software. NENHUM direito sobre marcas comerciais,
+nomes, logotipos oficiais ou identidade do "Project Nox" ou de "Awerkori" é
+concedido por esta licença. É estritamente vedada a utilização de tais elementos
+para sugerir homologação oficial ou vínculo com o Project Nox.
